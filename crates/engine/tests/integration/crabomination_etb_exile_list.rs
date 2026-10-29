@@ -13,8 +13,10 @@
 
 use engine::game::players::linked_exile_cards_for_source;
 use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
+use engine::types::ability::EffectKind;
 use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{CastOfferKind, ExileLink, ExileLinkKind, WaitingFor};
 use engine::types::identifiers::{ObjectId, TrackedSetId};
 use engine::types::phase::Phase;
@@ -120,6 +122,36 @@ fn free_cast_window(waiting: &WaitingFor) -> (PlayerId, Vec<ObjectId>, Option<u8
     }
 }
 
+/// How many `EffectResolved { kind }` events `source`'s resolutions emitted.
+fn resolutions(outcome: &CastOutcome, source: ObjectId, kind: EffectKind) -> usize {
+    outcome
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved { kind: k, source_id, .. }
+                    if *k == kind && *source_id == source
+            )
+        })
+        .count()
+}
+
+/// Reach-guard: the enters trigger's exile instruction resolved — all three
+/// selection legs and the single `ChangeZoneAll` ran (at base the trigger was
+/// one `ExileTop` and none of these resolved).
+fn assert_exile_instruction_resolved(outcome: &CastOutcome, crab: ObjectId) {
+    assert_eq!(
+        resolutions(outcome, crab, EffectKind::ChooseFromZone),
+        3,
+        "the library, graveyard and hand legs each resolve"
+    );
+    assert!(
+        resolutions(outcome, crab, EffectKind::ChangeZoneAll) >= 1,
+        "the single exile action resolves"
+    );
+}
+
 fn assert_priority_with_empty_stack(runner: &GameRunner) {
     let state = runner.state();
     assert!(
@@ -221,8 +253,9 @@ fn crabomination_all_zones_empty_exiles_nothing() {
     let Fixture {
         mut runner, crab, ..
     } = fixture(0, 0, 0);
-    let _ = cast_crab(&mut runner, crab);
+    let outcome = cast_crab(&mut runner, crab);
     assert_eq!(runner.state().objects[&crab].zone, Zone::Battlefield);
+    assert_exile_instruction_resolved(&outcome, crab);
     assert!(runner.state().exile.is_empty());
     assert_priority_with_empty_stack(&runner);
 }
@@ -509,8 +542,12 @@ fn crabomination_exiles_only_the_library_top_card() {
     assert!(before.len() >= 2);
     assert_eq!(before.first(), library.last());
 
+    let draws_before = runner.state().rng.outcome_draws();
     let _ = cast_crab(&mut runner, crab);
     assert_eq!(in_exile(&runner, &library), vec![before[0]]);
+    // CR 401.2: the library leg takes the top card by order; with the
+    // graveyard and hand empty no leg makes a random draw.
+    assert_eq!(runner.state().rng.outcome_draws(), draws_before);
     let after: Vec<ObjectId> = runner.state().library_of(P1).iter().copied().collect();
     assert_eq!(after, before[1..].to_vec());
 }
@@ -535,9 +572,10 @@ fn crabomination_stale_tracked_set_is_not_exiled_when_zones_empty() {
             .insert(TrackedSetId(50), vec![bystander_gy, bystander_hand]);
         state.next_tracked_set_id = state.next_tracked_set_id.max(51);
     }
-    let _ = cast_crab(&mut runner, crab);
+    let outcome = cast_crab(&mut runner, crab);
 
     assert_eq!(runner.state().objects[&crab].zone, Zone::Battlefield);
+    assert_exile_instruction_resolved(&outcome, crab);
     assert_eq!(runner.state().objects[&bystander_gy].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&bystander_hand].zone, Zone::Hand);
     assert!(runner.state().exile.is_empty());

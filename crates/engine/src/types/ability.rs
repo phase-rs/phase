@@ -205,9 +205,11 @@ pub enum ZoneChoiceCandidateSource {
     /// since left the zone (cast from exile onto the stack) is not offered.
     ParentTargets,
     /// CR 401.2: read only the top `count` cards of the owner's library, top
-    /// first. The library's order identifies them, so no player looks at or
-    /// chooses them; the declared `zone` must be `Library`, with no
-    /// `additional_zones`, no `filter` and `selection: Random`.
+    /// first, and take them whole. The library's order identifies them, so no
+    /// player looks at or chooses them and no random draw selects among them;
+    /// the declared `zone` must be `Library`, with no `additional_zones`, no
+    /// `filter`, the default (non-random) `selection`, no `up_to`, no
+    /// `constraint` and no reciprocal role.
     LibraryTop,
 }
 

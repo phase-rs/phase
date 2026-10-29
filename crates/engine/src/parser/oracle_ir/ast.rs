@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use crate::parser::oracle_nom::enters_under::ControlClausePossessor;
-use crate::parser::oracle_nom::target::{ControllerSubject, PlayerAnaphor};
+use crate::parser::oracle_nom::target::PlayerAnaphor;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, AttachSelection,
@@ -2205,19 +2205,16 @@ pub(crate) enum ZoneCounterImperativeAst {
 }
 
 /// CR 701.13a + CR 608.2f: one object of a "<player> exiles A, B, and C" instruction.
-///
-/// Not `Serialize` (unlike its neighbours): the typed possessive reuses
-/// [`ControllerSubject`], which is parser-internal and never serialized.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum SubjectExileObjectAst {
-    /// CR 401.2 + CR 701.13a: the top N cards of `possessive`'s library.
-    /// `possessive` is "their" (`Anaphoric(PlayerAnaphor::They)`) or "your"
-    /// (`Direct(ControllerRef::You)`, CR 109.5); `None` when a fractional
-    /// count ("half of their library") reads the possessive itself.
+    /// CR 401.2 + CR 701.13a: the top N cards of `owner`'s library. `owner` is
+    /// the filter the shared library-owner authority (`parse_library_owner_phrase`)
+    /// maps the printed possessive to; the lowering decides whether it names the
+    /// exiling subject.
     LibraryTop {
         count: QuantityExpr,
         face_down: bool,
-        possessive: Option<ControllerSubject>,
+        owner: TargetFilter,
     },
     /// CR 701.13a: one card selected at random from the subject's graveyard or hand.
     AtRandomFromZone { zone: Zone },

@@ -5,7 +5,8 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until, take_while1};
 use nom::character::complete::{anychar, one_of, satisfy, space0, space1, u8 as parse_u8};
 use nom::combinator::{
-    all_consuming, eof, map, map_opt, map_res, not, opt, peek, recognize, rest, value, verify,
+    all_consuming, eof, map, map_opt, map_res, not, opt, peek, recognize, rest, success, value,
+    verify,
 };
 use nom::error::ParseError;
 use nom::multi::{many0, many1, many_till, separated_list0};
@@ -43,9 +44,7 @@ use crate::parser::oracle_nom::prevention::{
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_nom::target as nom_target;
-use crate::parser::oracle_nom::target::{
-    controller_phrase_among, ControllerPhrase, ControllerSubject, PlayerAnaphor,
-};
+use crate::parser::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
 use crate::parser::oracle_static::{parse_activated_ability_cost_head, ActivatedAbilityCostHead};
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_may_look_at_face_down_filter,
@@ -6131,104 +6130,87 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
     Some(clause)
 }
 
-/// The library possessive of a subject-exile object: "their " names the
-/// subject player (`Anaphoric(PlayerAnaphor::They)`), "your " the controller
-/// (`Direct(ControllerRef::You)`, CR 109.5). Same mapping as
-/// `oracle_nom::quantity::controller_you_or_they`.
-fn parse_subject_exile_library_possessive(input: &str) -> OracleResult<'_, ControllerSubject> {
-    alt((
-        value(
-            ControllerSubject::Anaphoric(PlayerAnaphor::They),
-            tag::<_, _, OracleError<'_>>("their "),
-        ),
-        value(ControllerSubject::Direct(ControllerRef::You), tag("your ")),
-    ))
-    .parse(input)
-}
-
-/// The count and possessive of a subject-exile library object: "the top card
-/// of <poss> library", "the top N|X cards of <poss> library", "the top half of
-/// <poss> library, rounded up|down" (whose count reads the possessive itself,
-/// so the possessive is `None`), or "<that many> cards from the top of <poss>
-/// library" (fail-closed via `resolve_dynamic_exile_count`).
-fn parse_subject_exile_library_count(
-    input: &str,
-) -> OracleResult<'_, (QuantityExpr, Option<ControllerSubject>)> {
-    let poss_library = || {
-        terminated(
-            parse_subject_exile_library_possessive,
-            tag::<_, _, OracleError<'_>>("library"),
-        )
+/// CR 701.13a + CR 401.1: the count, post-library tail and library owner of one
+/// library object of a third-person "<player> exile[s] …" instruction, composed
+/// from the shared grammars rather than re-parsed here:
+///   * "the top half of <owner> library, rounded up|down" — the fraction
+///     combinator `parse_half_rounded` reads the count (CR 107.1a), and the
+///     "<owner> library" it counts names the library;
+///   * "the top N|X card(s) of <owner> library" — the shared count head
+///     [`parse_exile_top_count`] plus the "card[s] of <owner> library" suffix
+///     [`parse_library_player_suffix`];
+///   * "that many cards from the top of <owner> library" and the other
+///     dynamic-count forms — [`parse_dynamic_exile_from_top`].
+///
+/// Every owner comes from `parse_library_owner_phrase`, the single authority
+/// for whose library a possessive names; the caller maps it against the
+/// subject. FAIL-CLOSED: an owner that table does not name returns `None`.
+fn parse_subject_exile_library_source<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, QuantityExpr, TargetFilter)> {
+    let Ok((after_top, _)) = tag::<_, _, OracleError<'_>>("the top ").parse(input) else {
+        let (after_lib, owner, count) = parse_dynamic_exile_from_top(input, ctx)?;
+        return Some((after_lib, count, owner));
     };
-    alt((
-        preceded(
-            tag::<_, _, OracleError<'_>>("the top "),
-            alt((
-                // CR 107.1a: "half of their library, rounded up".
-                map(nom_quantity::parse_half_rounded, |q| (q, None)),
-                map(preceded(tag("card of "), poss_library()), |p| {
-                    (QuantityExpr::Fixed { value: 1 }, Some(p))
-                }),
-                // CR 107.3: an X placeholder stays `Variable("X")`; the
-                // sentence-level where-X binder or the spell's chosen X
-                // supplies its value.
-                map(
-                    (
-                        nom_quantity::parse_quantity_expr_number,
-                        preceded(tag(" cards of "), poss_library()),
-                    ),
-                    |(q, p)| (q, Some(p)),
-                ),
-            )),
-        ),
-        map_opt(
-            (
-                take_until(" from the top of "),
-                preceded(tag(" from the top of "), poss_library()),
-            ),
-            |(n, p)| resolve_dynamic_exile_count(n).map(|q| (q, Some(p))),
-        ),
-    ))
-    .parse(input)
+    if let Ok((after_fraction, count)) = nom_quantity::parse_half_rounded(after_top) {
+        let (owner_phrase, _) = (
+            nom_quantity::parse_fraction_divisor,
+            opt(tag::<_, _, OracleError<'_>>("of ")),
+        )
+            .parse(after_top)
+            .ok()?;
+        let (_, owner) = parse_library_owner_phrase(owner_phrase, ctx)?;
+        return Some((after_fraction, count, owner));
+    }
+    let (remainder, count) = parse_exile_top_count(after_top).ok()?;
+    let (after_lib, owner) = parse_library_player_suffix(remainder, ctx)?;
+    Some((after_lib, count, owner))
 }
 
 /// CR 701.13a: To exile an object, move it to the exile zone.
 ///
-/// One library object of a "<player> exiles …" instruction (see
-/// [`parse_subject_exile_library_count`]), optionally "face down" (CR 406.3,
+/// One library object of a "<player> exile[s] …" instruction (see
+/// [`parse_subject_exile_library_source`]), optionally "face down" (CR 406.3,
 /// via the shared `strip_exile_top_face_down` suffix).
-pub(super) fn parse_subject_exile_library_top(
-    input: &str,
-) -> OracleResult<'_, SubjectExileObjectAst> {
-    let (rest, (count, possessive)) = parse_subject_exile_library_count(input)?;
-    let (rest, face_down) = strip_exile_top_face_down(rest);
+fn parse_subject_exile_library_top<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, SubjectExileObjectAst> {
+    let (after_lib, count, owner) =
+        parse_subject_exile_library_source(input, ctx).ok_or_else(|| oracle_err(input))?;
+    let (rest, face_down) = strip_exile_top_face_down(after_lib);
     Ok((
         rest,
         SubjectExileObjectAst::LibraryTop {
             count,
             face_down,
-            possessive,
+            owner,
         },
     ))
 }
 
 /// CR 701.13a: "a card at random from their graveyard|hand" — one object of a
-/// "<player> exiles …" instruction. No CR rule governs random selection; the
-/// selection follows the printed instruction (CR 608.2c).
-pub(super) fn parse_subject_exile_random_zone_object(
-    input: &str,
-) -> OracleResult<'_, SubjectExileObjectAst> {
-    map(
+/// "<player> exile[s] …" instruction, read from the zone of the player "their"
+/// names (the subject). The zone is read by `parse_choose_zone_list`, the zone
+/// axis of the choose-from-zone connector; a union of zones is not an object
+/// this list models. No CR rule governs random selection; the selection
+/// follows the printed instruction (CR 608.2c).
+fn parse_subject_exile_random_zone_object(input: &str) -> OracleResult<'_, SubjectExileObjectAst> {
+    map_opt(
         preceded(
             (
                 alt((tag::<_, _, OracleError<'_>>("a "), tag("one "))),
                 tag("card at random from their "),
             ),
-            verify(parse_zone_word, |zone| {
-                matches!(zone, Zone::Graveyard | Zone::Hand)
-            }),
+            parse_choose_zone_list,
         ),
-        |zone| SubjectExileObjectAst::AtRandomFromZone { zone },
+        |zones| match zones.as_slice() {
+            [zone @ (Zone::Graveyard | Zone::Hand)] => {
+                Some(SubjectExileObjectAst::AtRandomFromZone { zone: *zone })
+            }
+            _ => None,
+        },
     )
     .parse(input)
 }
@@ -6239,18 +6221,17 @@ pub(super) fn parse_subject_exile_random_zone_object(
 /// multiple objects is processed simultaneously (CR 608.2f), so the caller
 /// lowers a list of two or more objects as one exile action. The remainder is
 /// returned unconsumed; the caller decides whether it is terminal.
-pub(super) fn parse_subject_exile_object_list(
-    input: &str,
-) -> OracleResult<'_, Vec<SubjectExileObjectAst>> {
+pub(super) fn parse_subject_exile_object_list<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, Vec<SubjectExileObjectAst>> {
+    let library_top = |i: &'a str| parse_subject_exile_library_top(i, ctx);
     let (rest, (_, first, more)) = (
         alt((tag::<_, _, OracleError<'_>>("exiles "), tag("exile "))),
-        parse_subject_exile_library_top,
+        library_top,
         many0(preceded(
             alt((tag(", and "), tag(", "), tag(" and "))),
-            alt((
-                parse_subject_exile_random_zone_object,
-                parse_subject_exile_library_top,
-            )),
+            alt((parse_subject_exile_random_zone_object, library_top)),
         )),
     )
         .parse(input)?;
@@ -11363,6 +11344,30 @@ fn parse_dynamic_exile_from_top<'a>(
     None
 }
 
+/// CR 107.3 + CR 701.13a: the count head of "the top N|X card(s) of …" — a
+/// number word (`Fixed`), an X placeholder (`Variable("X")`, bound by the
+/// spell's chosen X or a where-X definition), or no count at all ("the top
+/// card") for one card. The single count grammar of the positional top-of-library
+/// exile, shared by the imperative form (`parse_exile_ast`) and the
+/// third-person subject form (`parse_subject_exile_library_top`). Never fails.
+fn parse_exile_top_count(input: &str) -> OracleResult<'_, QuantityExpr> {
+    alt((
+        map(terminated(nom_primitives::parse_number, space0), |n| {
+            QuantityExpr::Fixed { value: n as i32 }
+        }),
+        value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            terminated(tag("x"), space0),
+        ),
+        success(QuantityExpr::Fixed { value: 1 }),
+    ))
+    .parse(input)
+}
+
 /// Parse the two library edges that a positional exile instruction currently
 /// supports. Keeping the edge separate from its surrounding sentence lets a
 /// caller preserve `LibraryPosition` rather than degrading a bottom instruction
@@ -11562,21 +11567,7 @@ pub(super) fn parse_exile_ast(
     }
 
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exile the top ").parse(lower) {
-        let (initial_count, remainder) =
-            if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest) {
-                (QuantityExpr::Fixed { value: n as i32 }, rem.trim_start())
-            } else if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("x").parse(rest) {
-                (
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::Variable {
-                            name: "X".to_string(),
-                        },
-                    },
-                    rem.trim_start(),
-                )
-            } else {
-                (QuantityExpr::Fixed { value: 1 }, rest)
-            };
+        let (remainder, initial_count) = parse_exile_top_count(rest).ok()?;
         // CR 608.2 + CR 400.12 + CR 115.1: Match the "[card|cards] of [a player]'s
         // library" suffix and resolve the library owner via the shared
         // `parse_library_player_suffix` helper (also used by the manifest

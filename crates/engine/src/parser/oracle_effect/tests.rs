@@ -33084,9 +33084,16 @@ fn assert_subject_exile_top(text: &str) -> AbilityDefinition {
     def
 }
 
-/// A random, unfiltered, single-zone `ChooseFromZone` over the targeted
-/// subject player's `zone`, from `source`.
+/// An unfiltered, single-zone, one-card `ChooseFromZone` over the targeted
+/// subject player's `zone`, from `source`. A `LibraryTop` leg takes the top
+/// card by order with the default selection (CR 401.2); an at-random leg is
+/// `Random`.
 fn is_subject_exile_leg(effect: &Effect, zone: Zone, source: ZoneChoiceCandidateSource) -> bool {
+    let selection = if source == ZoneChoiceCandidateSource::LibraryTop {
+        CardSelectionMode::default()
+    } else {
+        CardSelectionMode::Random
+    };
     matches!(
         effect,
         Effect::ChooseFromZone {
@@ -33096,10 +33103,13 @@ fn is_subject_exile_leg(effect: &Effect, zone: Zone, source: ZoneChoiceCandidate
             zone_owner: ZoneOwner::TargetedPlayer,
             filter: None,
             candidate_source,
-            selection: CardSelectionMode::Random,
+            selection: leg_selection,
             up_to: false,
             ..
-        } if *leg_zone == zone && additional_zones.is_empty() && *candidate_source == source
+        } if *leg_zone == zone
+            && additional_zones.is_empty()
+            && *candidate_source == source
+            && *leg_selection == selection
     )
 }
 
@@ -33274,6 +33284,43 @@ fn subject_exile_top_x_where_x_is_exile_top() {
         ),
         "{:?}",
         def.effect
+    );
+    // The count is bound to the where-X expression, exactly as at base:
+    // the total mana value of the cards you own in exile.
+    let Effect::ExileTop { count, .. } = &*def.effect else {
+        unreachable!("asserted ExileTop above");
+    };
+    let total_mana_value_you_own_in_exile = PropertyAggregate::new(
+        AggregateFunction::Sum,
+        ObjectProperty::ManaValue,
+        CardTypeSetSource::Objects {
+            filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+                FilterProp::InZone { zone: Zone::Exile },
+            ])),
+        },
+    )
+    .expect("a flat object source");
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(total_mana_value_you_own_in_exile),
+        }
+    );
+}
+
+/// Pre-existing (CR 109.5): a single object read from a library other than
+/// the subject's own ("your library" with an opponent subject) is a gap, not
+/// an exile from the subject's library.
+#[test]
+fn subject_exile_single_object_other_players_library_is_unimplemented() {
+    // Reach-guard: the subject's own library is the base ExileTop.
+    assert_subject_exile_top("target opponent exiles the top card of their library");
+    assert_subject_exile_gap(
+        "target opponent exiles the top card of your library",
+        "subject_exile_object_list",
     );
 }
 

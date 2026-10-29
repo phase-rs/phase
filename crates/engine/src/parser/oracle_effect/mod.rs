@@ -29192,7 +29192,8 @@ fn lower_subject_predicate_ast_body(
                 let pred_tp = TextPair::new(text.as_str(), pred_lower.as_str());
                 // The sentence-level where-X binder owns X.
                 let head = strip_terminal_where_x(pred_tp).map_or(pred_tp, |(head, _)| head);
-                if let Ok((rem, objects)) = imperative::parse_subject_exile_object_list(head.lower)
+                if let Ok((rem, objects)) =
+                    imperative::parse_subject_exile_object_list(head.lower, ctx)
                 {
                     if !imperative::terminal_punctuation_only(rem) {
                         return parsed_clause(Effect::unimplemented(
@@ -29200,7 +29201,7 @@ fn lower_subject_predicate_ast_body(
                             &text,
                         ));
                     }
-                    return lower_subject_exile_objects(objects, &affected, &subject, &text);
+                    return lower_subject_exile_objects(objects, &affected, &subject, ctx, &text);
                 }
             }
             // CR 701.40a + CR 608.2c: "<player> manifests the top [N] card(s) of
@@ -31082,18 +31083,39 @@ fn wrap_target_subject_damage(
     })
 }
 
+/// CR 608.2c + CR 109.5: does `owner` — the library owner the shared authority
+/// `parse_library_owner_phrase` mapped the printed possessive to — name the
+/// exiling subject? "their" / "that player's" is the anaphor for the player
+/// named earlier in the instruction, which in a subject-predicate clause is the
+/// subject; "your" names the subject only when the subject is "you" (CR 109.5).
+/// Any other owner ("target opponent's", "each player's") names a different
+/// player or scope.
+fn library_owner_names_subject(
+    owner: &TargetFilter,
+    affected: &TargetFilter,
+    ctx: &ParseContext,
+) -> bool {
+    *owner == imperative::that_player_library_filter(ctx)
+        || matches!(
+            (owner, affected),
+            (TargetFilter::Controller, TargetFilter::Controller)
+        )
+}
+
 /// CR 701.13a + CR 608.2f: lower the objects of a third-person "<player>
 /// exiles …" instruction.
 ///
-/// A single library object is the base `Effect::ExileTop`. Two or more objects
-/// are one simultaneous exile action (CR 608.2f): non-moving selection legs
-/// gather each object into the chain's tracked set, then one `ChangeZoneAll`
-/// exiles them all, under a `TargetOnly` root that carries the subject player
-/// target. A form this lowering can't express is a recorded gap.
+/// A single library object of the subject's own library is the base
+/// `Effect::ExileTop`. Two or more objects are one simultaneous exile action
+/// (CR 608.2f): non-moving selection legs gather each object into the chain's
+/// tracked set, then one `ChangeZoneAll` exiles them all, under a `TargetOnly`
+/// root that carries the subject player target. A form this lowering can't
+/// express is a recorded gap.
 fn lower_subject_exile_objects(
     objects: Vec<SubjectExileObjectAst>,
     affected: &TargetFilter,
     subject: &SubjectPhraseAst,
+    ctx: &ParseContext,
     text: &str,
 ) -> ParsedEffectClause {
     match objects.as_slice() {
@@ -31101,24 +31123,32 @@ fn lower_subject_exile_objects(
         [SubjectExileObjectAst::LibraryTop {
             count,
             face_down,
-            possessive: _,
-        }] => parsed_clause(Effect::ExileTop {
-            player: affected.clone(),
-            count: count.clone(),
-            position: crate::types::ability::LibraryPosition::Top,
-            // CR 406.3: a trailing "face down" marks a hidden-information
-            // exile (Outrageous Robbery: "exiles the top X cards of their
-            // library face down"). The resolver propagates this to the
-            // moved object's `face_down` flag so `visibility.rs` redacts it.
-            face_down: *face_down,
-            // CR 608.2c: the subject exiles from their own library.
-            actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
-        }),
+            owner,
+        }] => {
+            // CR 109.5: "target opponent exiles the top card of your library"
+            // reads the controller's library, not the subject's; exiling from
+            // the subject's own library would act on the wrong library.
+            if !library_owner_names_subject(owner, affected, ctx) {
+                return parsed_clause(Effect::unimplemented("subject_exile_object_list", text));
+            }
+            parsed_clause(Effect::ExileTop {
+                player: affected.clone(),
+                count: count.clone(),
+                position: crate::types::ability::LibraryPosition::Top,
+                // CR 406.3: a trailing "face down" marks a hidden-information
+                // exile (Outrageous Robbery: "exiles the top X cards of their
+                // library face down"). The resolver propagates this to the
+                // moved object's `face_down` flag so `visibility.rs` redacts it.
+                face_down: *face_down,
+                // CR 608.2c: the subject exiles from their own library.
+                actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
+            })
+        }
         [SubjectExileObjectAst::AtRandomFromZone { .. }] => {
             parsed_clause(Effect::unimplemented("subject_exile_object_list", text))
         }
         [_, _, ..] => {
-            // CR 115.1d + CR 608.2c: "their" names the targeted subject player.
+            // CR 115.1 + CR 608.2c: "their" names the targeted subject player.
             let Some(owner_target) = subject
                 .target
                 .as_ref()
@@ -31130,51 +31160,51 @@ fn lower_subject_exile_objects(
                 ));
             };
             let zone_owner = ZoneOwner::TargetedPlayer;
-            let choose = |count: u32, zone: Zone, candidate_source: ZoneChoiceCandidateSource| {
-                Effect::ChooseFromZone {
-                    count,
-                    zone,
-                    additional_zones: vec![],
-                    zone_owner,
-                    filter: None,
-                    chooser: Chooser::Controller.into(),
-                    candidate_source,
-                    reciprocal_role: None,
-                    up_to: false,
-                    selection: crate::types::ability::CardSelectionMode::Random,
-                    constraint: None,
-                }
-            };
+            let choose =
+                |count: u32,
+                 zone: Zone,
+                 candidate_source: ZoneChoiceCandidateSource,
+                 selection: crate::types::ability::CardSelectionMode| {
+                    Effect::ChooseFromZone {
+                        count,
+                        zone,
+                        additional_zones: vec![],
+                        zone_owner,
+                        filter: None,
+                        chooser: Chooser::Controller.into(),
+                        candidate_source,
+                        reciprocal_role: None,
+                        up_to: false,
+                        selection,
+                        constraint: None,
+                    }
+                };
             let mut legs = Vec::with_capacity(objects.len());
             for object in &objects {
                 let leg = match object {
                     SubjectExileObjectAst::LibraryTop {
                         count,
                         face_down,
-                        possessive,
+                        owner,
                     } => {
-                        match possessive {
-                            Some(ControllerSubject::Anaphoric(nom_target::PlayerAnaphor::They)) => {
-                            }
-                            // CR 109.5: "your" names the controller, not the
-                            // subject whose zones the list reads.
-                            Some(ControllerSubject::Anaphoric(
-                                nom_target::PlayerAnaphor::ThatPlayer
-                                | nom_target::PlayerAnaphor::ItsController,
-                            ))
-                            | Some(ControllerSubject::Direct(_))
-                            | None => {
-                                return parsed_clause(Effect::unimplemented(
-                                    "subject_exile_object_list",
-                                    text,
-                                ));
-                            }
+                        // CR 109.5: every leg reads the targeted subject's zones,
+                        // so a library object must be the subject's own library
+                        // through the anaphor; "your" names the controller.
+                        if *owner != imperative::that_player_library_filter(ctx) {
+                            return parsed_clause(Effect::unimplemented(
+                                "subject_exile_object_list",
+                                text,
+                            ));
                         }
                         match (count, face_down) {
+                            // CR 401.2: the top cards are identified by the
+                            // library's order, so the leg takes the default
+                            // selection; `LibraryTop` takes its pool whole.
                             (QuantityExpr::Fixed { value: n }, false) if *n >= 1 => choose(
                                 *n as u32,
                                 Zone::Library,
                                 ZoneChoiceCandidateSource::LibraryTop,
+                                crate::types::ability::CardSelectionMode::default(),
                             ),
                             _ => {
                                 return parsed_clause(Effect::unimplemented(
@@ -31184,9 +31214,12 @@ fn lower_subject_exile_objects(
                             }
                         }
                     }
-                    SubjectExileObjectAst::AtRandomFromZone { zone } => {
-                        choose(1, *zone, ZoneChoiceCandidateSource::Direct)
-                    }
+                    SubjectExileObjectAst::AtRandomFromZone { zone } => choose(
+                        1,
+                        *zone,
+                        ZoneChoiceCandidateSource::Direct,
+                        crate::types::ability::CardSelectionMode::Random,
+                    ),
                 };
                 legs.push(leg);
             }
