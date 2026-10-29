@@ -4151,13 +4151,13 @@ mod tests {
         let role = TargetFilter::PlayerMatching {
             player: Box::new(PlayerFilter::PlayerAttribute {
                 relation: PlayerRelation::Opponent,
-                attr: QuantityRef::HandSize {
+                attr: Box::new(QuantityRef::HandSize {
                     player: PlayerScope::ScopedPlayer,
-                },
+                }),
                 comparator: Comparator::LE,
-                value: QuantityExpr::Ref {
+                value: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::Variable { name: "X".into() },
-                },
+                }),
             }),
         };
         assert!(super::target_ref_matches_resolved_filter_with_context(

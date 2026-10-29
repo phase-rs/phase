@@ -3283,7 +3283,9 @@ mod tests {
         );
         assert_eq!(
             parse_router_keyword_fragment("ward {2}"),
-            Some(Keyword::Ward(crate::types::mana::ManaCost::generic(2)))
+            Some(Keyword::Ward(crate::types::keywords::WardCost::Mana(
+                crate::types::mana::ManaCost::generic(2)
+            )))
         );
         assert!(parse_router_keyword_fragment("protection from red").is_some());
         assert_eq!(

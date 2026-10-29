@@ -27775,19 +27775,19 @@ mod departure_source_boundary_tests {
         });
         let predicate = PlayerFilter::PlayerAttribute {
             relation: PlayerRelation::Opponent,
-            attr: QuantityRef::HandSize {
+            attr: Box::new(QuantityRef::HandSize {
                 player: PlayerScope::ScopedPlayer,
-            },
+            }),
             comparator: Comparator::GT,
-            value: addressed,
+            value: Box::new(addressed),
         };
         let ordinary = PlayerFilter::PlayerAttribute {
             relation: PlayerRelation::Opponent,
-            attr: QuantityRef::HandSize {
+            attr: Box::new(QuantityRef::HandSize {
                 player: PlayerScope::ScopedPlayer,
-            },
+            }),
             comparator: Comparator::EQ,
-            value: QuantityExpr::Fixed { value: 0 },
+            value: Box::new(QuantityExpr::Fixed { value: 0 }),
         };
         assert_eq!(
             player_count_matching_ids(&state, &ordinary, P0, QuantityContext::new(source)),
@@ -27857,10 +27857,10 @@ mod departure_source_boundary_tests {
                 }],
             )),
             comparator: Comparator::EQ,
-            count: QuantityExpr::Offset {
+            count: Box::new(QuantityExpr::Offset {
                 inner: Box::new(addressed.clone()),
                 offset: 1,
-            },
+            }),
         };
         let opponent = controls(ControllerRef::Opponent);
         assert_eq!(
@@ -27871,11 +27871,11 @@ mod departure_source_boundary_tests {
             filter: Box::new(TargetFilter::PlayerMatching {
                 player: Box::new(PlayerFilter::PlayerAttribute {
                     relation: PlayerRelation::Opponent,
-                    attr: QuantityRef::HandSize {
+                    attr: Box::new(QuantityRef::HandSize {
                         player: PlayerScope::ScopedPlayer,
-                    },
+                    }),
                     comparator: Comparator::GT,
-                    value: addressed.clone(),
+                    value: Box::new(addressed.clone()),
                 }),
             }),
         };

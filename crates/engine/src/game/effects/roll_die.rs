@@ -961,6 +961,7 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
 /// that rolled. The shared dice/coin policy transfers an activated carrier's
 /// post-cost stamp or a matching triggered carrier's full source provenance;
 /// missing or foreign authority leaves the branch unchanged.
+#[cfg(test)]
 pub(crate) fn resume_after_ignore(
     state: &mut GameState,
     pending: PendingDieRoll,

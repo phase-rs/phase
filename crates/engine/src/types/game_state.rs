@@ -65604,13 +65604,13 @@ mod damage_source_canonical_admission_tests {
             let definition = spell
                 .abilities
                 .iter_mut()
-                .find(|definition| matches!(definition.effect, Effect::ChooseDamageSource { .. }))
+                .find(|definition| matches!(*definition.effect, Effect::ChooseDamageSource { .. }))
                 .expect("the real parsed Gambit has one source-choice instruction");
             let first = definition
                 .sub_ability
                 .as_mut()
                 .expect("Gambit's parsed flip");
-            assert!(matches!(first.effect, Effect::FlipCoins { .. }));
+            assert!(matches!(*first.effect, Effect::FlipCoins { .. }));
             assert!(first.sub_ability.is_none());
             first.sub_ability = Some(Box::new((**first).clone()));
         }

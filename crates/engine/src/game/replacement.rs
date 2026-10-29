@@ -30134,6 +30134,7 @@ mod auto_choice_identity_tests {
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
                 prevention_duration: None,
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
             },
             vec![TargetRef::Object(bear)],
             src,

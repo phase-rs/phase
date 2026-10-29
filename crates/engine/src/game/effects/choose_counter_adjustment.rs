@@ -481,7 +481,7 @@ mod tests {
             scenario.at_phase(Phase::PreCombatMain);
             scenario.with_cards_in_hand(P0, &["First input", "Second input", "Third input"]);
             let recipient = scenario.add_creature(P0, "Counter recipient", 2, 2).id();
-            scenario.with_counter(recipient, CounterType::Charge, 5);
+            scenario.with_counter(recipient, CounterType::Generic("charge".into()), 5);
             if replacement {
                 scenario
                     .add_artifact_from_oracle(P0, "Supplemental counter replacement", "")
@@ -494,7 +494,7 @@ mod tests {
                 AbilityKind::Activated,
                 Effect::ChooseCounterAdjustment {
                     adjustment: CounterAdjustment::AddOrRemove,
-                    counters: CounterMatch::OfType(CounterType::Charge),
+                    counters: CounterMatch::OfType(CounterType::Generic("charge".into())),
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::HandSize {
                             player: PlayerScope::Controller,
@@ -637,7 +637,7 @@ mod tests {
                 assert_eq!(
                     resumed.state().objects[&recipient]
                         .counters
-                        .get(&CounterType::Charge),
+                        .get(&CounterType::Generic("charge".into())),
                     Some(&if index == 0 { 2 } else { 8 })
                 );
                 assert_eq!(resumed.state().players[0].life, 21);

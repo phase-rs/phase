@@ -21,11 +21,11 @@ mod addressed_player_predicate_tests {
         let state = GameState::new_two_player(42);
         let scope = PlayerFilter::PlayerAttribute {
             relation: PlayerRelation::Opponent,
-            attr: QuantityRef::HandSize {
+            attr: Box::new(QuantityRef::HandSize {
                 player: PlayerScope::ScopedPlayer,
-            },
+            }),
             comparator: Comparator::GT,
-            value: QuantityExpr::Ref {
+            value: Box::new(QuantityExpr::Ref {
                 qty: QuantityRef::ZoneChangeAggregate {
                     source: ZoneChangeRecordSource::InstructionResult {
                         result: ReturnResultId(7),
@@ -36,7 +36,7 @@ mod addressed_player_predicate_tests {
                     function: AggregateFunction::Sum,
                     property: ObjectProperty::Power,
                 },
-            },
+            }),
         };
         let direct = TargetFilter::PlayerMatching {
             player: Box::new(scope.clone()),
@@ -82,11 +82,11 @@ mod addressed_player_predicate_tests {
         let ordinary = TargetFilter::PlayerMatching {
             player: Box::new(PlayerFilter::PlayerAttribute {
                 relation: PlayerRelation::Opponent,
-                attr: QuantityRef::HandSize {
+                attr: Box::new(QuantityRef::HandSize {
                     player: PlayerScope::ScopedPlayer,
-                },
+                }),
                 comparator: Comparator::EQ,
-                value: QuantityExpr::Fixed { value: 0 },
+                value: Box::new(QuantityExpr::Fixed { value: 0 }),
             }),
         };
         assert!(

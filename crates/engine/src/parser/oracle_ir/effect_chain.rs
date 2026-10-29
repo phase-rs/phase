@@ -3668,7 +3668,24 @@ mod departure_result_tests {
                 let mut replacement = ReplacementDefinition::new(
                     crate::types::replacements::ReplacementEvent::DamageDone,
                 );
-                replacement.runtime_execute = Some(Box::new(snapshot.clone()));
+                let mut state = crate::types::game_state::GameState::new_two_player(42);
+                let arena_before = state.replacement_continuations.clone();
+                let installed = state.install_replacement_continuation(snapshot.clone());
+                let handle = if local {
+                    Some(
+                        installed
+                            .expect("the runtime body owns its complete independent namespace"),
+                    )
+                } else {
+                    assert!(
+                        installed.is_err(),
+                        "the outer R0 cannot authorize a registered reader"
+                    );
+                    assert_eq!(state.replacement_continuations, arena_before);
+                    None
+                };
+                replacement.runtime_execute = handle;
+                let arena = state.replacement_continuations.clone();
                 let effect = Effect::AddTargetReplacement {
                     replacement: Box::new(replacement),
                     target: TargetFilter::None,
@@ -3695,18 +3712,22 @@ mod departure_result_tests {
                 let Effect::AddTargetReplacement { replacement, .. } = effect else {
                     unreachable!()
                 };
-                assert_eq!(
-                    replacement.runtime_execute.as_deref().unwrap(),
-                    &snapshot,
-                    "raw independent namespace is never relocated by disposition {disposition}"
-                );
-                assert_eq!(
+                assert_eq!(replacement.runtime_execute, handle);
+                if let Some(handle) = handle {
+                    assert_eq!(
+                        state.replacement_continuation(handle),
+                        Some(&snapshot),
+                        "raw independent namespace is never relocated by disposition {disposition}"
+                    );
+                }
+                assert_eq!(state.replacement_continuations, arena);
+                assert!(
                     validate_instruction_result_definition(&AbilityDefinition::new(
                         AbilityKind::Spell,
                         effect.clone()
                     ))
                     .is_ok(),
-                    local
+                    "the board-free AST validates the opaque handle, not its state-owned body"
                 );
             }
         }

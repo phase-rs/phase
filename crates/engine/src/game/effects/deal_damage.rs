@@ -9468,10 +9468,9 @@ mod damage_opportunity_public_remainder_tests {
                     )],
                 );
                 let mut runner = scenario.build();
-                let mut shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
-                    .prevention_oneshot_shield()
-                    .damage_source_filter(TargetFilter::SpecificObject { id: last })
-                    .runtime_execute(ResolvedAbility::new(
+                let rider = runner
+                    .state_mut()
+                    .install_replacement_continuation(ResolvedAbility::new(
                         Effect::GainLife {
                             amount: QuantityExpr::Ref {
                                 qty: QuantityRef::EventContextAmount,
@@ -9481,7 +9480,12 @@ mod damage_opportunity_public_remainder_tests {
                         vec![],
                         driver,
                         P1,
-                    ));
+                    ))
+                    .expect("the independent damage rider has no foreign result reads");
+                let mut shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                    .prevention_oneshot_shield()
+                    .damage_source_filter(TargetFilter::SpecificObject { id: last })
+                    .runtime_execute(rider);
                 shield.consume_on_apply = true;
                 runner.state_mut().pending_damage_replacements.push(shield);
                 runner.state_mut().pending_damage_replacements.push(

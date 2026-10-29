@@ -2362,9 +2362,9 @@ pub(crate) fn visit_resolved_replacements(
 mod replacement_program_tests {
     use super::*;
     use crate::types::ability::{
-        AbilityKind, AdditionalCost, Comparator, Duration, FilterProp, ParsedCondition,
-        QuantityExpr, QuantityRef, ResolvedAbility, SpellCastingOption, StaticCondition,
-        TypedFilter, UnlessPayModifier,
+        AbilityKind, AdditionalCost, Comparator, FilterProp, ParsedCondition, QuantityExpr,
+        QuantityRef, ResolvedAbility, SpellCastingOption, StaticCondition, TypedFilter,
+        UnlessPayModifier,
     };
     use crate::types::format::FormatConfig;
     use crate::types::game_state::GameState;

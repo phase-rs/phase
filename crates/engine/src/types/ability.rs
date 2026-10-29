@@ -59482,10 +59482,13 @@ mod departure_raw_runtime_replacement_tests {
 
     // Typed canonical custody fixtures; public production paths are exercised
     // by the perpetual install/activation and continuous/mana integration tests.
-    fn installed_carriers(body: &AbilityDefinition) -> Vec<Effect> {
+    fn installed_carriers(
+        body: &AbilityDefinition,
+        state: &mut crate::types::game_state::GameState,
+    ) -> Vec<Effect> {
         let cost = AbilityCost::EffectCost {
             effect: Box::new(Effect::AddTargetReplacement {
-                replacement: Box::new(replacement(body.clone())),
+                replacement: Box::new(replacement(body.clone(), state)),
                 target: TargetFilter::None,
             }),
         };
@@ -59595,7 +59598,11 @@ mod departure_raw_runtime_replacement_tests {
                 }
                 _ => unreachable!(),
             };
-            for (slot, mut effect) in installed_carriers(&body).into_iter().enumerate() {
+            let mut state = crate::types::game_state::GameState::new_two_player(42);
+            for (slot, mut effect) in installed_carriers(&body, &mut state)
+                .into_iter()
+                .enumerate()
+            {
                 let before = effect.clone();
                 let mut shared = vec![];
                 effect.for_each_selected_import_quantity_ref(&mut |q| shared.push(q.clone()));
@@ -59606,8 +59613,14 @@ mod departure_raw_runtime_replacement_tests {
                 );
                 assert_eq!(effect, before);
                 let root = producer(7, AbilityDefinition::new(AbilityKind::Spell, effect));
+                let resolved = crate::game::ability_utils::build_resolved_from_def(
+                    &root,
+                    ObjectId(1),
+                    PlayerId(0),
+                );
                 assert_eq!(
-                    validate_instruction_result_definition(&root).is_ok(),
+                    validate_instruction_result_definition(&root).is_ok()
+                        && state.validate_replacement_program(&resolved).is_ok(),
                     mode != 0,
                     "typed installed carrier {slot}, body mode {mode}"
                 );
@@ -59661,18 +59674,54 @@ mod departure_raw_runtime_replacement_tests {
         .is_ok());
     }
 
-    fn private_keyword() -> Keyword {
+    fn private_keyword(state: &mut crate::types::game_state::GameState) -> Keyword {
         Keyword::CumulativeUpkeep(AbilityCost::EffectCost {
             effect: Box::new(Effect::AddTargetReplacement {
-                replacement: Box::new(replacement(producer(11, read(11)))),
+                replacement: Box::new(replacement(producer(11, read(11)), state)),
                 target: TargetFilter::None,
             }),
         })
     }
-    fn assert_redacted(original: &serde_json::Value, public: &serde_json::Value) {
-        assert!(original
+    fn assert_redacted(
+        state: &crate::types::game_state::GameState,
+        original: &serde_json::Value,
+        public: &serde_json::Value,
+    ) {
+        let arena = state.replacement_continuations.clone();
+        let authoritative = serde_json::to_value((original, &arena)).unwrap();
+        assert!(authoritative
             .to_string()
             .contains("\"return_result_process\":901"));
+        assert_eq!(
+            public, original,
+            "board-free payloads retain their opaque arena handles"
+        );
+        for projected in [
+            crate::game::visibility::filter_state_for_viewer(state, PlayerId(0)),
+            crate::game::visibility::filter_state_for_viewer(state, PlayerId(1)),
+            crate::game::visibility::filter_state_for_unseated_viewer(state),
+        ] {
+            let projected_value =
+                serde_json::to_value((public, &projected.replacement_continuations)).unwrap();
+            assert!(!projected_value
+                .to_string()
+                .contains("return_result_process"));
+            assert_eq!(projected.replacement_continuations.len(), arena.len());
+            for (original_rider, projected_rider) in
+                arena.iter().zip(projected.replacement_continuations.iter())
+            {
+                let mut cleared = original_rider.clone();
+                cleared.clear_return_result_process_recursive();
+                assert_eq!(
+                    &cleared, projected_rider,
+                    "projection preserves the complete rider body"
+                );
+            }
+        }
+        assert_eq!(
+            state.replacement_continuations, arena,
+            "the canonical arena is unchanged"
+        );
         assert!(!public.to_string().contains("return_result_process"));
         assert_eq!(
             public.to_string().matches("AddTargetReplacement").count(),
@@ -59682,7 +59731,8 @@ mod departure_raw_runtime_replacement_tests {
     #[test]
     fn departure_typed_payload_privacy_reaches_all_installed_leaves_static_costs_filters_and_conditions(
     ) {
-        let keyword = private_keyword();
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let keyword = private_keyword(&mut state);
         let body = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
@@ -59694,10 +59744,10 @@ mod departure_raw_runtime_replacement_tests {
                 selection: Default::default(),
             },
         );
-        for mut effect in installed_carriers(&body) {
+        for mut effect in installed_carriers(&body, &mut state) {
             let original = serde_json::to_value(&effect).unwrap();
             effect.clear_embedded_return_result_processes();
-            assert_redacted(&original, &serde_json::to_value(&effect).unwrap());
+            assert_redacted(&state, &original, &serde_json::to_value(&effect).unwrap());
         }
         let Keyword::CumulativeUpkeep(cost) = &keyword else {
             unreachable!()
@@ -59710,7 +59760,7 @@ mod departure_raw_runtime_replacement_tests {
         .unwrap();
         let original = serde_json::to_value(&token).unwrap();
         token.clear_embedded_return_result_processes();
-        assert_redacted(&original, &serde_json::to_value(&token).unwrap());
+        assert_redacted(&state, &original, &serde_json::to_value(&token).unwrap());
         for value in [
             serde_json::json!({"CastWithAlternativeCost":{"cost":cost}}),
             serde_json::json!({"AlternativeKeywordCost":{"keyword":"Cycling","cost":cost}}),
@@ -59724,7 +59774,7 @@ mod departure_raw_runtime_replacement_tests {
             let mut mode: StaticMode = serde_json::from_value(value).unwrap();
             let original = serde_json::to_value(&mode).unwrap();
             mode.clear_embedded_return_result_processes();
-            assert_redacted(&original, &serde_json::to_value(&mode).unwrap());
+            assert_redacted(&state, &original, &serde_json::to_value(&mode).unwrap());
         }
         for absent in [false, true] {
             let mut filter = TargetFilter::Not {
@@ -59748,7 +59798,7 @@ mod departure_raw_runtime_replacement_tests {
             };
             let original = serde_json::to_value(&filter).unwrap();
             filter.clear_typed_return_result_processes(&mut |_| {});
-            assert_redacted(&original, &serde_json::to_value(&filter).unwrap());
+            assert_redacted(&state, &original, &serde_json::to_value(&filter).unwrap());
         }
         for mut condition in [
             ParsedCondition::SourceLacksKeyword {
@@ -59761,7 +59811,11 @@ mod departure_raw_runtime_replacement_tests {
         ] {
             let original = serde_json::to_value(&condition).unwrap();
             condition.clear_embedded_return_result_processes();
-            assert_redacted(&original, &serde_json::to_value(&condition).unwrap());
+            assert_redacted(
+                &state,
+                &original,
+                &serde_json::to_value(&condition).unwrap(),
+            );
         }
         for mut condition in [
             AbilityCondition::TargetHasKeywordInstead {
@@ -59771,7 +59825,11 @@ mod departure_raw_runtime_replacement_tests {
         ] {
             let original = serde_json::to_value(&condition).unwrap();
             condition.clear_typed_return_result_processes(&mut |_| {});
-            assert_redacted(&original, &serde_json::to_value(&condition).unwrap());
+            assert_redacted(
+                &state,
+                &original,
+                &serde_json::to_value(&condition).unwrap(),
+            );
         }
     }
 }

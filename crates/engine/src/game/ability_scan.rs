@@ -12099,7 +12099,7 @@ mod selected_damage_capture_axis_tests {
             .clone();
         let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone);
         def.selected_damage_source = Some(capture);
-        let axes = replacement_definition_axes(&def, ScanMode::LoopFirewall);
+        let axes = replacement_definition_axes(&def, None, ScanMode::LoopFirewall);
         assert!(!axes.event && !axes.sibling && !axes.projected);
         assert_eq!(axes.history, HistoryReads::NONE);
         def.damage_modification = Some(DamageModification::Plus {
@@ -12109,7 +12109,7 @@ mod selected_damage_capture_axis_tests {
                 },
             },
         });
-        let axes = replacement_definition_axes(&def, ScanMode::LoopFirewall);
+        let axes = replacement_definition_axes(&def, None, ScanMode::LoopFirewall);
         assert!(
             axes.projected,
             "independently live sink formula still reads its resource"
@@ -12125,7 +12125,7 @@ mod selected_damage_capture_axis_tests {
         }]));
         def.damage_source_filter = Some(live.clone());
         assert!(
-            replacement_definition_axes(&def, ScanMode::LoopFirewall).projected,
+            replacement_definition_axes(&def, None, ScanMode::LoopFirewall).projected,
             "a sink qualifier remains live independently of its frozen capture"
         );
         def.damage_source_filter = None;
@@ -12136,7 +12136,7 @@ mod selected_damage_capture_axis_tests {
             decline: None,
         };
         assert!(
-            replacement_definition_axes(&def, ScanMode::LoopFirewall).projected,
+            replacement_definition_axes(&def, None, ScanMode::LoopFirewall).projected,
             "an independently evaluated payment filter keeps its live operand"
         );
         def.mode = crate::types::ability::ReplacementMode::Mandatory;
@@ -12151,7 +12151,7 @@ mod selected_damage_capture_axis_tests {
                 },
             },
         )));
-        let axes = replacement_definition_axes(&def, ScanMode::LoopFirewall);
+        let axes = replacement_definition_axes(&def, None, ScanMode::LoopFirewall);
         assert!(axes.projected);
         assert_eq!(
             axes.history,
@@ -12166,7 +12166,7 @@ mod selected_damage_capture_axis_tests {
                 },
             },
         });
-        let axes = replacement_definition_axes(&def, ScanMode::LoopFirewall);
+        let axes = replacement_definition_axes(&def, None, ScanMode::LoopFirewall);
         assert!(axes.projected);
         assert_eq!(
             axes.history,

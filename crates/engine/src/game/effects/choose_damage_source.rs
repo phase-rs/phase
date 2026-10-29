@@ -298,22 +298,6 @@ pub(crate) fn damage_source_options(
 }
 
 /// One prompt and its private candidate set are installed atomically on their continuation.
-pub(crate) fn open_source_choice(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    source_filter: &crate::types::ability::TargetFilter,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
-    super::with_instruction_result_entry(
-        state,
-        ability,
-        crate::types::ability::InstructionResultEntry::Independent,
-        |state, executable, owner| {
-            open_source_choice_owned(state, executable, source_filter, events, owner)
-        },
-    )
-}
-
 pub(crate) fn open_source_choice_owned(
     state: &mut GameState,
     ability: &ResolvedAbility,

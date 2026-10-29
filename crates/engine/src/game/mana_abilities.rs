@@ -4433,24 +4433,6 @@ fn resume_mana_ability_root_payment(
 /// completed. This path must not call the mana-payment authority again: the
 /// selected mana units were already spent before the replacement choice
 /// opened.
-pub(crate) fn finish_mana_root_after_deferred_life_payment(
-    state: &mut GameState,
-    player: PlayerId,
-    resume: ManaAbilityResume,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    let admitted = admitted_payment_resume(state, &resume)?;
-    finish_mana_root_after_deferred_life_payment_owned(
-        state,
-        player,
-        resume,
-        events,
-        admitted
-            .as_ref()
-            .map(|(program, declarations)| (program, declarations)),
-    )
-}
-
 pub(crate) fn finish_mana_root_after_deferred_life_payment_owned(
     state: &mut GameState,
     player: PlayerId,

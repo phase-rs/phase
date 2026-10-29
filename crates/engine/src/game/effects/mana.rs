@@ -1682,6 +1682,7 @@ mod tests {
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::{ManaCost, ManaUnit};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -5934,7 +5935,9 @@ mod tests {
                                 let Effect::Mana { target, .. } = &mut body.effect else {
                                     unreachable!()
                                 };
-                                *target = Some(TargetFilter::Controller);
+                                *target = Some(crate::types::ability::ManaTargetRole::Recipient {
+                                    recipient: TargetFilter::Controller,
+                                });
                             }
                             7 => {
                                 let ManaChoicePrompt::AnyCombination { options, .. } = choice

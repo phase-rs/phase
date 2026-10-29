@@ -4494,7 +4494,7 @@ mod revealed_instruction_authority_tests {
         with_iteration_return_result_occurrence(
             state,
             &reader,
-            |child, executable, declarations| {
+            |child, executable, _declarations| {
                 assert_eq!(child.active_return_result_occurrence, enclosing);
                 assert_eq!(named_revealed_members(child, executable)?.len(), 1);
                 Ok(())
@@ -4509,7 +4509,7 @@ mod revealed_instruction_authority_tests {
         with_iteration_return_result_occurrence(
             state,
             &local,
-            |child, executable, declarations| {
+            |child, executable, _declarations| {
                 assert_ne!(child.active_return_result_occurrence, enclosing);
                 publish_reveal_result_for_ability(child, executable, Vec::new())?;
                 assert_eq!(
@@ -6136,21 +6136,6 @@ fn park_player_scope_queue_end(state: &mut GameState, placeholder: ResolvedAbili
 /// `Effect::PayCost` only after its typed cost root has settled. The root owns
 /// the parent effect while a mana-source cost move is paused, so this replays
 /// the same child hand-off the ordinary chain walker would have performed.
-pub(crate) fn resolve_effect_pay_cost_rider(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
-    with_instruction_result_entry(
-        state,
-        ability,
-        crate::types::ability::InstructionResultEntry::Independent,
-        |state, executable, declarations| {
-            resolve_effect_pay_cost_rider_owned(state, executable, events, declarations)
-        },
-    )
-}
-
 pub(crate) fn resolve_effect_pay_cost_rider_owned(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -23881,40 +23866,6 @@ pub(crate) fn resolve_carrier_owned_ability_chain_with_payment_choice(
     .map(|_| ())
 }
 
-pub(crate) fn resolve_resume_owned_ability_chain_with_payment_choice(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-    depth: u32,
-    payment_choice: Option<AutoMayChoice>,
-) -> Result<(), EffectError> {
-    with_instruction_result_entry(
-        state,
-        ability,
-        crate::types::ability::InstructionResultEntry::ResumeOwned,
-        |state, executable, declarations| match payment_choice {
-            Some(AutoMayChoice::Decline) => resolve_ability_chain_with_payment_choice(
-                state,
-                executable,
-                events,
-                depth,
-                Some(AutoMayChoice::Decline),
-                declarations,
-            )
-            .map(|_| ()),
-            None | Some(AutoMayChoice::Accept) => resolve_ability_chain_with_payment_choice(
-                state,
-                executable,
-                events,
-                depth,
-                payment_choice,
-                declarations,
-            )
-            .map(|_| ()),
-        },
-    )
-}
-
 pub(crate) fn resolve_ability_chain_step(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -23988,23 +23939,6 @@ pub fn unless_payment_countered_stack_ids(
     let mut board = state.clone();
     board.current_trigger_event = trigger_event.cloned();
     countered_ids(&board)
-}
-
-/// CR 118.12a + CR 608.2c: the unpaid root still reads its predecessor's
-/// context at admission. Its known payment choice owns only its outgoing result.
-pub(crate) fn resolve_unpaid_unless_ability_chain(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-    depth: u32,
-) -> Result<(), EffectError> {
-    resolve_resume_owned_ability_chain_with_payment_choice(
-        state,
-        ability,
-        events,
-        depth,
-        Some(AutoMayChoice::Decline),
-    )
 }
 
 /// What a depth-0 chain entry does with the root's `forwarded_result_context`.
@@ -68068,15 +68002,24 @@ mod resolution_progress_contract_tests {
             P0,
         )
         .sub_ability(independent);
+        let root = life(0).sub_ability(dependent);
         let mut events = Vec::new();
         assert_eq!(
-            resolve_sub_with_missing_forward_result(
+            with_instruction_result_entry(
                 &mut state,
-                &life(0),
-                &dependent,
-                None,
-                &mut events,
-                1
+                &root,
+                crate::types::ability::InstructionResultEntry::Independent,
+                |state, executable, declarations| {
+                    resolve_sub_with_missing_forward_result(
+                        state,
+                        executable,
+                        executable.sub_ability.as_deref().unwrap(),
+                        None,
+                        &mut events,
+                        1,
+                        declarations,
+                    )
+                },
             )
             .unwrap(),
             ResolutionProgress::Queued
@@ -68144,7 +68087,15 @@ mod resolution_progress_contract_tests {
             ResolvedAbility::new(Effect::Clash, vec![], source, P0).sub_ability(life(3)),
         ));
         assert_eq!(
-            drive_empty_reciprocal_producer(runner.state_mut(), &ability, &mut events, 1).unwrap(),
+            with_instruction_result_entry(
+                runner.state_mut(),
+                &ability,
+                crate::types::ability::InstructionResultEntry::Independent,
+                |state, executable, declarations| {
+                    drive_empty_reciprocal_producer(state, executable, &mut events, 1, declarations)
+                },
+            )
+            .unwrap(),
             Some(ResolutionProgress::Queued)
         );
         assert_eq!(runner.state().players[0].life, 20);
@@ -68593,6 +68544,7 @@ mod departure_process_entry_tests {
         AggregateFunction, InstructionResultEntry, ObjectProperty, ReturnResultId,
         ZoneChangeRecordSource,
     };
+    use crate::types::actions::GameAction;
     use crate::types::game_state::{ReturnResultFrame, ReturnResultProcessId};
 
     fn addressed(result: u32) -> QuantityExpr {
@@ -68677,7 +68629,7 @@ mod departure_process_entry_tests {
             source,
             P0,
         )));
-        with_instruction_result_entry(&mut state, &root, InstructionResultEntry::Independent, |state, executable, declarations| {
+        with_instruction_result_entry(&mut state, &root, InstructionResultEntry::Independent, |state, executable, _declarations| {
             let mut events = vec![];
             change_zone::resolve(state, executable, &mut events)?;
             assert_eq!(state.objects[&four].zone, Zone::Exile);
@@ -68781,8 +68733,9 @@ mod departure_process_entry_tests {
 
     #[test]
     fn public_resolution_preflights_independent_arena_programs_before_outer_departures() {
+        use crate::types::ability::ReplacementDefinition;
         use crate::types::identifiers::ReplacementContinuationId;
-        use crate::types::replacements::{ReplacementDefinition, ReplacementEvent};
+        use crate::types::replacements::ReplacementEvent;
         for fault in 0..4 {
             let mut scenario = GameScenario::new();
             scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
@@ -68969,7 +68922,7 @@ mod departure_process_entry_tests {
             &mut state,
             &root,
             InstructionResultEntry::SelectedBody,
-            |state, executable, declarations| {
+            |state, executable, _declarations| {
                 assert_eq!(root.return_result_process, None);
                 let inner_p = executable.return_result_process.unwrap();
                 assert_ne!(inner_p, outer_p);

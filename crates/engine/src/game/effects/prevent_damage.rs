@@ -3415,6 +3415,7 @@ mod tests {
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
                 prevention_duration: None,
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
             },
             vec![TargetRef::Object(a), TargetRef::Object(b)],
             source,
