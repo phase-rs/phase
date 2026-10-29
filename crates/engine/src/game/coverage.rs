@@ -308,6 +308,29 @@ pub struct ParsedItem {
     /// Typed reasons this item is a gap. Omitted from the JSON when empty.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub diagnoses: Vec<GapDiagnosis>,
+    /// The gap this unsupported item reports when its handler isn't its own
+    /// label: set from `ability_node_gaps`. `None` (omitted from the JSON) for
+    /// every item whose gap is its label.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub gap: Option<ItemGap>,
+}
+
+/// A typed gap an unsupported parse item reports in place of its own label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemGap {
+    /// CR 608.2e + CR 603.10d: the node's effect is handled, but its fan-out
+    /// control boundary is unobservable (`PLAYER_SCOPE_CONTROL_BOUNDARY_GAP`).
+    FanOutControlBoundary,
+}
+
+impl ItemGap {
+    /// The handler key `extract_gap_details` reports for this gap.
+    fn handler(self) -> &'static str {
+        match self {
+            ItemGap::FanOutControlBoundary => PLAYER_SCOPE_CONTROL_BOUNDARY_GAP,
+        }
+    }
 }
 
 /// The category of a parsed item in the coverage tree.
@@ -5726,6 +5749,7 @@ pub fn build_parse_details(
             details: vec![],
             children: vec![],
             diagnoses: Vec::new(),
+            gap: None,
         });
     }
 
@@ -5783,6 +5807,7 @@ pub fn build_parse_details(
             details: replacement_details(repl),
             children,
             diagnoses: Vec::new(),
+            gap: None,
         });
     }
 
@@ -5844,6 +5869,7 @@ fn build_trigger_item(
         details: trigger_details(trig),
         children,
         diagnoses: Vec::new(),
+        gap: None,
     }
 }
 
@@ -5923,18 +5949,30 @@ fn build_ability_item(
         }
         _ => effect_type_name(&def.effect),
     };
-    let mut unobservable_fan_out = false;
-    let supported = ability_node_gaps(def).all(|gap| match gap {
-        AbilityNodeGap::UnimplementedEffect(_) => false,
-        // Projected on the node's own cost child (`build_cost_item`).
-        AbilityNodeGap::UnimplementedCost(_) => true,
-        // Projected as its own unsupported child below, as a delayed trigger's
-        // event is: the node's effect is handled, its boundary isn't.
-        AbilityNodeGap::UnobservableFanOutControl => {
-            unobservable_fan_out = true;
-            true
+    // The node's own verdict and, when it isn't its label, the gap it reports.
+    // An unimplemented effect is labelled by its own name; an unobservable
+    // fan-out boundary on a handled effect reports the boundary, never the
+    // effect's handler.
+    let mut supported = true;
+    let mut gap = None;
+    let mut unimplemented_effect = false;
+    for node_gap in ability_node_gaps(def) {
+        match node_gap {
+            AbilityNodeGap::UnimplementedEffect(_) => {
+                supported = false;
+                unimplemented_effect = true;
+            }
+            // Projected on the node's own cost child (`build_cost_item`).
+            AbilityNodeGap::UnimplementedCost(_) => {}
+            AbilityNodeGap::UnobservableFanOutControl => {
+                supported = false;
+                gap = Some(ItemGap::FanOutControlBoundary);
+            }
         }
-    });
+    }
+    if unimplemented_effect {
+        gap = None;
+    }
     let source_text = def.description.clone().or_else(|| match &*def.effect {
         Effect::Unimplemented { description, .. } => description.clone(),
         _ => None,
@@ -6028,20 +6066,6 @@ fn build_ability_item(
         children.push(child);
     }
 
-    // CR 608.2e + CR 603.10d: the unobservable fan-out boundary, as the gap
-    // `collect_ability_missing_parts` reports (`PLAYER_SCOPE_CONTROL_BOUNDARY_GAP`).
-    if unobservable_fan_out {
-        children.push(ParsedItem {
-            category: ParseCategory::Ability,
-            label: FAN_OUT_CONTROL_BOUNDARY_ITEM.to_string(),
-            source_text: def.description.clone(),
-            supported: false,
-            details: vec![],
-            children: vec![],
-            diagnoses: Vec::new(),
-        });
-    }
-
     visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
         children.push(build_ability_item(
             payload,
@@ -6059,6 +6083,7 @@ fn build_ability_item(
         details,
         children,
         diagnoses,
+        gap,
     }
 }
 
@@ -6091,6 +6116,7 @@ fn build_static_item(
         details: static_details(stat),
         children,
         diagnoses: Vec::new(),
+        gap: None,
     }
 }
 
@@ -6245,6 +6271,7 @@ fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
                 details: vec![],
                 children: vec![],
                 diagnoses: Vec::new(),
+                gap: None,
             });
         }
         AbilityCost::EffectCost { effect } => {
@@ -6257,6 +6284,7 @@ fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
                     details: vec![],
                     children: vec![],
                     diagnoses: Vec::new(),
+                    gap: None,
                 });
             }
         }
@@ -6327,6 +6355,7 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
         details: vec![],
         children: vec![],
         diagnoses: Vec::new(),
+        gap: None,
     });
 }
 
@@ -6377,6 +6406,7 @@ fn build_casting_option_item(option: &SpellCastingOption, items: &mut Vec<Parsed
         details: vec![],
         children: vec![],
         diagnoses: Vec::new(),
+        gap: None,
     });
 }
 
@@ -6625,13 +6655,14 @@ fn extract_gap_details_inner(
         }
 
         if !item.supported {
-            let handler = match item.category {
-                ParseCategory::Keyword => format!("Keyword:{}", item.label),
-                ParseCategory::Ability => format!("Effect:{}", item.label),
-                ParseCategory::Trigger => format!("Trigger:{}", item.label),
-                ParseCategory::Static => format!("Static:{}", item.label),
-                ParseCategory::Cost => format!("Cost:{}", item.label),
-                ParseCategory::Replacement => unreachable!(),
+            let handler = match (item.gap, &item.category) {
+                (Some(gap), _) => gap.handler().to_string(),
+                (None, ParseCategory::Keyword) => format!("Keyword:{}", item.label),
+                (None, ParseCategory::Ability) => format!("Effect:{}", item.label),
+                (None, ParseCategory::Trigger) => format!("Trigger:{}", item.label),
+                (None, ParseCategory::Static) => format!("Static:{}", item.label),
+                (None, ParseCategory::Cost) => format!("Cost:{}", item.label),
+                (None, ParseCategory::Replacement) => unreachable!(),
             };
             if let Some(&index) = seen.get(&handler) {
                 details[index]
@@ -7630,10 +7661,6 @@ pub fn card_face_gaps(face: &CardFace) -> Vec<String> {
 /// `multi_target_player_control_boundary`, on the exact template the driver
 /// resolves.
 pub const PLAYER_SCOPE_CONTROL_BOUNDARY_GAP: &str = "Effect:fan_out_control_boundary";
-
-/// The parse-tree item projecting that gap; `extract_gap_details` reports it as
-/// `PLAYER_SCOPE_CONTROL_BOUNDARY_GAP`.
-const FAN_OUT_CONTROL_BOUNDARY_ITEM: &str = "fan_out_control_boundary";
 
 fn fan_out_control_boundary_is_unobservable(def: &AbilityDefinition) -> bool {
     if def.player_scope.is_none() && def.multi_target.is_none() {
@@ -14594,12 +14621,8 @@ mod tests {
                     super::TokenStaticTraversal::Include,
                 );
                 assert!(
-                    item.supported
-                        && !item
-                            .children
-                            .iter()
-                            .any(|child| child.label == super::FAN_OUT_CONTROL_BOUNDARY_ITEM),
-                    "{name}: its scoped node is supported, with no boundary child"
+                    item.supported && item.gap.is_none(),
+                    "{name}: its scoped node's parse item stays supported, with no gap"
                 );
             }
         }
@@ -14764,10 +14787,6 @@ mod tests {
                         ),
                         "{name}: is_ability_supported rejects the scoped node"
                     );
-                    // The boundary is projected as the node's own unsupported
-                    // child (as a delayed trigger's event is), so the node's
-                    // subtree is unsupported and its gap is the boundary, never
-                    // the node's handled effect.
                     let item = super::build_ability_item(
                         def,
                         &trigger_registry,
@@ -14775,24 +14794,23 @@ mod tests {
                         super::TokenStaticTraversal::Include,
                     );
                     assert!(
-                        !item.is_fully_supported()
-                            && item.children.iter().any(|child| {
-                                child.label == super::FAN_OUT_CONTROL_BOUNDARY_ITEM
-                                    && !child.supported
-                            }),
-                        "{name}: the scoped node carries the unsupported boundary child"
+                        !item.supported,
+                        "{name}: the scoped node's parse item is unsupported"
                     );
+                    // Its gap is labelled by its typed reason (`ItemGap`, from
+                    // `ability_node_gaps`), never by its handled effect.
                     let handlers: Vec<String> =
                         super::extract_gap_details(std::slice::from_ref(&item))
                             .into_iter()
                             .map(|gap| gap.handler)
                             .collect();
                     assert!(
-                        handlers
-                            .iter()
-                            .any(|h| h == super::PLAYER_SCOPE_CONTROL_BOUNDARY_GAP)
+                        item.gap == Some(super::ItemGap::FanOutControlBoundary)
+                            && handlers
+                                .iter()
+                                .any(|h| h == super::PLAYER_SCOPE_CONTROL_BOUNDARY_GAP)
                             && !handlers.contains(&format!("Effect:{}", item.label)),
-                        "{name}: the parse-tree gap is the boundary, not {}: {handlers:?}",
+                        "{name}: the gap is the boundary, not {}: {handlers:?}",
                         item.label
                     );
                 }
@@ -21340,6 +21358,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             details: vec![],
             children: vec![],
             diagnoses: vec![],
+            gap: None,
         }];
         let gaps = extract_gap_details(&items);
         assert_eq!(gaps.len(), 1);
@@ -21361,6 +21380,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             },
             ParsedItem {
                 category: ParseCategory::Ability,
@@ -21370,6 +21390,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             },
         ];
         let gaps = extract_gap_details(&items);
@@ -21393,8 +21414,10 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             }],
             diagnoses: vec![],
+            gap: None,
         }];
         let gaps = extract_gap_details(&items);
         assert_eq!(gaps.len(), 1);
@@ -21417,8 +21440,10 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             }],
             diagnoses: vec![],
+            gap: None,
         }];
         let gaps = extract_gap_details(&items);
         assert_eq!(gaps.len(), 1);
@@ -21435,6 +21460,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             details: vec![],
             children: vec![],
             diagnoses: vec![],
+            gap: None,
         }];
         let gaps = extract_gap_details(&items);
         assert!(gaps.is_empty());
@@ -21451,6 +21477,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             },
             ParsedItem {
                 category: ParseCategory::Trigger,
@@ -21460,6 +21487,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             },
             ParsedItem {
                 category: ParseCategory::Static,
@@ -21469,6 +21497,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             },
             ParsedItem {
                 category: ParseCategory::Cost,
@@ -21478,6 +21507,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             },
         ];
         let gaps = extract_gap_details(&items);
@@ -21600,6 +21630,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             details: vec![],
             children: vec![],
             diagnoses: vec![],
+            gap: None,
         };
         assert_eq!(
             serde_json::to_string(&item).expect("serialize parsed item"),
@@ -21820,6 +21851,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             details: vec![],
             children,
             diagnoses: vec![diagnosis],
+            gap: None,
         };
 
         let nested = [node(
