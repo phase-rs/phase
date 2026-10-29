@@ -3480,7 +3480,7 @@ fn complete_quoted_modifications(text: &str) -> Option<Vec<ContinuousModificatio
     let modifications =
         classify_quoted_inner_using(inner, super::grammar::parse_complete_quoted_ability);
     let unsupported = |definition: &AbilityDefinition| {
-        crate::game::coverage::ability_tree_any(definition, &|node| {
+        crate::types::ability_visit::ability_tree_any(definition, &|node| {
             node.effect.unimplemented_description().is_some()
                 || node
                     .cost

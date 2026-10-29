@@ -1,4 +1,5 @@
 use crate::game::filter;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::layers::evaluate_condition;
 use crate::game::quantity::{quantity_expr_uses_recipient, resolve_quantity_with_targets};
 use crate::types::ability::{
