@@ -2381,7 +2381,7 @@ mod tests {
         }
         let mut seats = legacy.clone();
         seats[0].1.instruction_actor =
-            (Some(crate::types::ability::ControllerRef::ScopedPlayer)).map(Into::into);
+            Some(crate::types::ability::ControllerRef::ScopedPlayer.into());
         seats[0].1.scoped_player = None;
         assert!(
             plan_simultaneous_draw(&state, &seats).is_none(),

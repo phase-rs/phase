@@ -23700,7 +23700,7 @@ mod tests {
                     player: TargetFilter::Controller,
                 },
             );
-            root.instruction_actor = (Some(ControllerRef::You)).map(Into::into);
+            root.instruction_actor = Some(ControllerRef::You.into());
             let mut replacement = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::GainLife {
@@ -23830,7 +23830,7 @@ mod tests {
                 selection: TargetSelectionMode::Random,
             },
         );
-        random.instruction_actor = (Some(ControllerRef::ChosenPlayer { index: 0 })).map(Into::into);
+        random.instruction_actor = Some(ControllerRef::ChosenPlayer { index: 0 }.into());
         let mut second = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
@@ -23896,7 +23896,7 @@ mod tests {
                 selection: TargetSelectionMode::Random,
             },
         );
-        random.instruction_actor = (Some(ControllerRef::SpecificPlayer { id: P1 })).map(Into::into);
+        random.instruction_actor = Some(ControllerRef::SpecificPlayer { id: P1 }.into());
         let mut tail = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::GainLife {
@@ -24036,7 +24036,7 @@ mod tests {
                     selection: TargetSelectionMode::Random,
                 },
             );
-            random.instruction_actor = (Some(actor)).map(Into::into);
+            random.instruction_actor = Some(actor.into());
             let mut dependent = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::GainLife {
@@ -24093,7 +24093,7 @@ mod tests {
             },
         );
         random.player_scope = Some(PlayerFilter::Opponent);
-        random.instruction_actor = (Some(ControllerRef::ScopedPlayer)).map(Into::into);
+        random.instruction_actor = Some(ControllerRef::ScopedPlayer.into());
         random.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
         let spell = scenario
             .add_spell_to_hand(P0, "Synthetic Repeated Scoped Random", false)
@@ -24107,7 +24107,7 @@ mod tests {
         assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::Choose, source_id, .. } if *source_id == spell)).count(), 4);
         assert_eq!(
             outcome.state().objects[&spell].abilities[0].instruction_actor,
-            Some(ControllerRef::ScopedPlayer).map(Into::into)
+            Some(ControllerRef::ScopedPlayer.into())
         );
         assert!(matches!(
             outcome.final_waiting_for(),
@@ -24299,8 +24299,7 @@ mod tests {
                 },
             );
             instruction.player_scope = Some(PlayerFilter::Opponent);
-            instruction.instruction_actor =
-                (Some(ControllerRef::SpecificPlayer { id: P1 })).map(Into::into);
+            instruction.instruction_actor = Some(ControllerRef::SpecificPlayer { id: P1 }.into());
             let mut tail = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::GainLife {
@@ -24384,7 +24383,7 @@ mod tests {
             if let WaitingFor::ChooseFromZoneOpponentChooser { ability, .. } =
                 &mut wrong_template.waiting_for
             {
-                ability.instruction_actor = (Some(ControllerRef::You)).map(Into::into);
+                ability.instruction_actor = Some(ControllerRef::You.into());
             }
             assert!(matches!(
                 crate::types::game_state::PersistedGameState::capture(wrong_template)
@@ -25584,7 +25583,7 @@ mod tests {
             spell,
             P0,
         );
-        dormant_ability.instruction_actor = (Some(ControllerRef::You)).map(Into::into);
+        dormant_ability.instruction_actor = Some(ControllerRef::You.into());
         let dormant = PendingPlayerScopeSacrificeChoice {
             ability: Box::new(dormant_ability),
             admitted_actors: Some([(P1, P0)].into_iter().collect()),
@@ -26154,7 +26153,7 @@ mod tests {
         assert!(survives(DRAW, life), "legacy None survival positive");
         for actor in crate::types::ability::instruction_actor_test_refs() {
             let mut later = sentence(life);
-            later.instruction_actor = (Some(actor.clone())).map(Into::into);
+            later.instruction_actor = Some(actor.clone());
             assert_eq!(
                 !declined_gate_surviving_instructions(&gated(DRAW, vec![later])).is_empty(),
                 matches!(
@@ -26576,7 +26575,7 @@ mod tests {
                 tail.sub_link = SubAbilityLink::SequentialSibling;
                 let mut referential = gain(4);
                 referential.instruction_actor =
-                    (Some(ControllerRef::ChosenPlayer { index: 0 })).map(Into::into);
+                    Some(ControllerRef::ChosenPlayer { index: 0 }.into());
                 referential.sub_link = SubAbilityLink::SequentialSibling;
                 referential.sub_ability = Some(Box::new(tail));
                 let mut fixed = gain(2);
@@ -49754,7 +49753,7 @@ mod tests {
         let parsed = build_resolved_from_def(&definition, ObjectId(100), P0);
         assert_eq!(
             parsed.instruction_actor,
-            Some(ControllerRef::ScopedPlayer).map(Into::into)
+            Some(ControllerRef::ScopedPlayer.into())
         );
         assert!(shared_library_wheel_split(
             &dandan_state(),

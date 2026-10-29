@@ -162,15 +162,15 @@ fn instruction_actor_defaults_preserve_explicit_scoped_and_controller_subjects()
     );
     assert_eq!(
         counters[0].instruction_actor,
-        Some(ControllerRef::You).map(Into::into)
+        Some(ControllerRef::You.into())
     );
     assert_eq!(
         counters[1].instruction_actor,
-        Some(ControllerRef::You).map(Into::into)
+        Some(ControllerRef::You.into())
     );
     assert_eq!(
         counters[2].instruction_actor,
-        Some(ControllerRef::ScopedPlayer).map(Into::into)
+        Some(ControllerRef::ScopedPlayer.into())
     );
 
     let subject_only = parse_effect_chain(
@@ -184,7 +184,7 @@ fn instruction_actor_defaults_preserve_explicit_scoped_and_controller_subjects()
         .expect("subject-only consequence");
     assert_eq!(
         tail.instruction_actor,
-        Some(ControllerRef::You).map(Into::into),
+        Some(ControllerRef::You.into()),
         "explicit you overrides the omitted-subject ScopedPlayer default"
     );
 
@@ -288,13 +288,10 @@ fn decline_actor_defaults_do_not_rewrite_independent_explicit_references() {
             lower::rebind_decline_body_recipient,
             ControllerRef::ScopedPlayer,
         );
-        assert_eq!(
-            clause.instruction_actor,
-            Some(actor.clone()).map(Into::into)
-        );
+        assert_eq!(clause.instruction_actor, Some(actor.clone().into()));
         assert_eq!(
             clause.sub_ability.as_ref().unwrap().instruction_actor,
-            Some(actor).map(Into::into)
+            Some(actor.into())
         );
     }
 }

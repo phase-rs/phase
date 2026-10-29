@@ -38302,13 +38302,12 @@ mod tests {
             None
         );
         let mut present = old.clone();
-        present.instruction_actor = (Some(ControllerRef::You)).map(Into::into);
+        present.instruction_actor = Some(ControllerRef::You.into());
         let mut child = old.clone();
-        child.instruction_actor = (Some(ControllerRef::ScopedPlayer)).map(Into::into);
+        child.instruction_actor = Some(ControllerRef::ScopedPlayer.into());
         present.sub_ability = Some(Box::new(child));
         let mut otherwise = old.clone();
-        otherwise.instruction_actor =
-            (Some(ControllerRef::ChosenPlayer { index: 1 })).map(Into::into);
+        otherwise.instruction_actor = Some(ControllerRef::ChosenPlayer { index: 1 }.into());
         present.else_ability = Some(Box::new(otherwise));
         assert_ne!(present, old);
         let roundtrip: AbilityDefinition =
@@ -38316,11 +38315,11 @@ mod tests {
         assert_eq!(roundtrip, present);
         assert_eq!(
             roundtrip.sub_ability.as_ref().unwrap().instruction_actor,
-            Some(ControllerRef::ScopedPlayer).map(Into::into)
+            Some(ControllerRef::ScopedPlayer.into())
         );
         assert_eq!(
             roundtrip.else_ability.as_ref().unwrap().instruction_actor,
-            Some(ControllerRef::ChosenPlayer { index: 1 }).map(Into::into)
+            Some(ControllerRef::ChosenPlayer { index: 1 }.into())
         );
 
         let legacy = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
@@ -38339,14 +38338,13 @@ mod tests {
         assert_eq!(resolved.original_controller, Some(PlayerId(0)));
         assert_eq!(
             resolved.sub_ability.as_ref().unwrap().instruction_actor,
-            Some(ControllerRef::ScopedPlayer).map(Into::into)
+            Some(ControllerRef::ScopedPlayer.into())
         );
         let restored: ResolvedAbility =
             serde_json::from_value(serde_json::to_value(&resolved).unwrap()).unwrap();
         assert_eq!(restored, resolved);
         let mut different = restored.clone();
-        different.sub_ability.as_mut().unwrap().instruction_actor =
-            (Some(ControllerRef::You)).map(Into::into);
+        different.sub_ability.as_mut().unwrap().instruction_actor = Some(ControllerRef::You.into());
         assert_ne!(restored, different);
     }
 

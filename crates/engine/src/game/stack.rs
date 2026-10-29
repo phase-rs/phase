@@ -10375,11 +10375,12 @@ mod tests {
                             else {
                                 unreachable!()
                             };
-                            ability.instruction_actor =
-                                (Some(crate::types::ability::ControllerRef::SpecificPlayer {
+                            ability.instruction_actor = Some(
+                                crate::types::ability::ControllerRef::SpecificPlayer {
                                     id: PlayerId(1),
-                                }))
-                                .map(Into::into);
+                                }
+                                .into(),
+                            );
                         }
                     }
                     let life_before = [state.players[0].life, state.players[1].life];

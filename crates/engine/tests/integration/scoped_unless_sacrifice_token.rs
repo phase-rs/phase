@@ -122,7 +122,7 @@ fn payment_fixture(
             player: TargetFilter::OriginalController,
         },
     );
-    tail.instruction_actor = (Some(ControllerRef::You)).map(Into::into);
+    tail.instruction_actor = Some(ControllerRef::You.into());
     tail.sub_link = SubAbilityLink::SequentialSibling;
     definition.sub_ability = Some(Box::new(tail));
     std::sync::Arc::make_mut(&mut object.base_abilities)[0] = definition.clone();
@@ -793,7 +793,7 @@ fn instruction_actor_aggregate_latches_enchanted_player_before_first_payer_sacri
         SCOPED_UNLESS_ZOMBIE,
         AbilityKind::Activated,
     );
-    definition.instruction_actor = (Some(ControllerRef::EnchantedPlayer)).map(Into::into);
+    definition.instruction_actor = Some(ControllerRef::EnchantedPlayer.into());
     definition.player_scope = Some(PlayerFilter::All);
     definition.cost = Some(AbilityCost::Tap);
     let AbilityCost::Sacrifice(cost) = &mut definition.unless_pay.as_mut().unwrap().cost else {
@@ -982,7 +982,7 @@ fn instruction_actor_aggregate_terminal_departure_clears_the_poll_without_resumi
     scenario.at_phase(Phase::PreCombatMain);
     let mut definition =
         engine::parser::oracle_effect::parse_effect_chain(SCOPED_UNLESS_ZOMBIE, AbilityKind::Spell);
-    definition.instruction_actor = (Some(ControllerRef::You)).map(Into::into);
+    definition.instruction_actor = Some(ControllerRef::You.into());
     let mut tail = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::GainLife {
