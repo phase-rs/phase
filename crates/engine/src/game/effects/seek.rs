@@ -256,10 +256,20 @@ pub(crate) mod tests {
         cards: &[ObjectId],
     ) {
         use crate::types::actions::GameAction;
-        use crate::types::game_state::WaitingFor;
+        use crate::types::game_state::{StackEntryKind, WaitingFor};
+        use crate::types::proposed_event::ProposedEvent;
         let life = runner.state().players[0].life;
         assert_eq!(cards.len(), 2);
-        let mut prompts = 0;
+        let source = runner
+            .state()
+            .resolving_stack_entry
+            .as_ref()
+            .expect("the public cast retains its resolving spell carrier");
+        assert!(matches!(source.kind, StackEntryKind::Spell { .. }));
+        assert_eq!(source.id, source.source_id);
+        let source = source.id;
+        let mut member_prompts = 0;
+        let mut cleanup_prompts = 0;
         let mut pending_prefixes = [false; 2];
         let mut completion_events = Vec::new();
         let mut completed = false;
@@ -278,12 +288,55 @@ pub(crate) mod tests {
             }
             let action = match runner.state().waiting_for {
                 WaitingFor::ReplacementChoice { .. } => {
-                    prompts += 1;
-                    assert!(delivered < cards.len(), "a real sought member remains pending");
-                    pending_prefixes[delivered] = true;
-                    assert_eq!(runner.state().players[0].life, life);
-                    for card in cards {
-                        assert!(runner.state().objects[card].perpetual_mods.is_empty());
+                    let pending = runner
+                        .state()
+                        .pending_replacement
+                        .as_ref()
+                        .expect("the public replacement prompt retains its actual event");
+                    match pending.delivery_boundary_event() {
+                        ProposedEvent::ZoneChange {
+                            object_id,
+                            from: Zone::Library,
+                            to: Zone::Graveyard,
+                            cause: Some(cause),
+                            ..
+                        } if cards.contains(object_id) && *cause == source => {
+                            member_prompts += 1;
+                            assert!(delivered < cards.len(), "a real sought member remains pending");
+                            assert_eq!(runner.state().objects[object_id].zone, Zone::Library);
+                            pending_prefixes[delivered] = true;
+                            assert_eq!(runner.state().players[0].life, life);
+                            for card in cards {
+                                assert!(runner.state().objects[card].perpetual_mods.is_empty());
+                            }
+                        }
+                        ProposedEvent::ZoneChange {
+                            object_id,
+                            from: Zone::Stack,
+                            to: Zone::Graveyard,
+                            cause: None,
+                            ..
+                        } if *object_id == source => {
+                            // CR 608.2n + CR 614.6 + CR 616.1: the same redirects
+                            // can pause the spell's final move after its instructions.
+                            cleanup_prompts += 1;
+                            assert_eq!(delivered, cards.len());
+                            assert_eq!(pending_prefixes, [true, true]);
+                            assert_eq!(runner.state().objects[&source].zone, Zone::Stack);
+                            assert!(runner.state().resolving_stack_entry.as_ref().is_some_and(
+                                |entry| entry.id == source
+                                    && entry.source_id == source
+                                    && matches!(entry.kind, StackEntryKind::Spell { .. })
+                            ));
+                            assert_eq!(runner.state().players[0].life, life + 7);
+                            for card in cards {
+                                assert_eq!(runner.state().objects[card].perpetual_mods.len(), 1);
+                            }
+                        }
+                        other => panic!(
+                            "unexpected sought replacement step={step}; boundary={other:?}; pending={pending:?}; source={source:?}; resolving={:?}",
+                            runner.state().resolving_stack_entry
+                        ),
                     }
                     crate::ai_support::legal_actions(runner.state())
                         .into_iter()
@@ -316,7 +369,8 @@ pub(crate) mod tests {
             [true, true],
             "first and final member each pause"
         );
-        assert!(prompts >= 2);
+        assert!(member_prompts >= 2);
+        assert_eq!(cleanup_prompts, 1, "the spell's own final move pauses once");
         let mut deliveries = Vec::new();
         for card in cards {
             let positions = completion_events.iter().enumerate().filter_map(|(index, event)| {
@@ -374,6 +428,19 @@ pub(crate) mod tests {
             gains[0] < grants[0],
             "gain 7 precedes the second sought grant"
         );
+        let cleanup_deliveries = completion_events.iter().enumerate().filter_map(|(index, event)| {
+            matches!(event, GameEvent::ZoneChanged { object_id, from: Some(Zone::Stack), to: Zone::Exile, .. } if *object_id == source).then_some(index)
+        }).collect::<Vec<_>>();
+        assert_eq!(
+            cleanup_deliveries.len(),
+            1,
+            "the spell is publicly delivered once"
+        );
+        assert!(
+            grants[0] < cleanup_deliveries[0],
+            "the grant precedes spell cleanup"
+        );
+        assert_eq!(runner.state().objects[&source].zone, Zone::Exile);
         assert_eq!(runner.state().players[0].life, life + 7);
         for card in cards {
             assert_eq!(runner.state().objects[card].zone, Zone::Exile);
