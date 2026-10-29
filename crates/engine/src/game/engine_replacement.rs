@@ -4304,6 +4304,23 @@ pub(crate) fn apply_pending_post_replacement_effect(
         Some(resolved)
     });
 
+    // CR 614.12a + CR 616.1c: an entry caller deliberately clears the
+    // replacement host's SelfRef before dispatch. The selected complete copy
+    // instruction has now bound that SelfRef to the actual entrant; retain the
+    // same binding on this still-Ready resident before nested work can run.
+    // Non-copy riders retain their existing source/context semantics.
+    if let Some(source) = source.filter(|_| {
+        prepared
+            .as_ref()
+            .is_some_and(|resolved| matches!(resolved.effect, Effect::BecomeCopy { .. }))
+    }) {
+        state
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+            .expect("the selected Ready copy continuation is still resident")
+            .source = Some(source);
+    }
+
     let recipients = state
         .resolution_stack
         .independent_departure_dispatch_seed(source);
@@ -9083,7 +9100,17 @@ mod tests {
 
         // The mid-entry copy target choice must now be pending, with the Aura as
         // the only legal copy source (a creature host is not an enchantment).
-        let WaitingFor::CopyTargetChoice { valid_targets, .. } = state.waiting_for.clone() else {
+        let WaitingFor::CopyTargetChoice {
+            player,
+            source_id,
+            valid_targets,
+            purpose:
+                CopyTargetPurpose::BecomeCopy {
+                    continuation: Some(selected),
+                },
+            ..
+        } = state.waiting_for.clone()
+        else {
             panic!(
                 "expected CopyTargetChoice after accepting the copy, got {:?}",
                 state.waiting_for
@@ -9093,6 +9120,26 @@ mod tests {
             valid_targets.contains(&aura),
             "the Level Up Aura must be a legal copy source"
         );
+        let resident = state
+            .active_post_replacement_drains()
+            .unwrap()
+            .resident()
+            .unwrap();
+        assert_eq!(source_id, copy_ench);
+        assert_eq!(selected.source_id, source_id);
+        assert_eq!(selected.controller, player);
+        assert_eq!(
+            resident.source,
+            Some(source_id),
+            "the selected entrant must survive the deliberate host-source clear"
+        );
+        assert_eq!(resident.controller.unwrap_or(player), player);
+        assert_eq!(resident.applied, selected.replacement_applied);
+        assert!(matches!(
+            resident.status,
+            crate::types::game_state::DrainStatus::Paused
+        ));
+        state.resolution_stack.validate(&state.waiting_for).unwrap();
 
         (state, copy_ench, aura, hosts)
     }
@@ -9288,46 +9335,211 @@ mod tests {
                 .mode(crate::types::ability::ReplacementMode::Optional { decline: None })
                 .quantity_modification(crate::types::ability::QuantityModification::DOUBLE),
         );
-        apply_as_current(
-            &mut state,
-            GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(aura)),
-            },
-        )
-        .unwrap();
-        assert!(matches!(
-            state.waiting_for,
-            WaitingFor::ReplacementChoice {
-                player: PlayerId(0),
+        let selected = match &state.waiting_for {
+            WaitingFor::CopyTargetChoice {
+                purpose:
+                    CopyTargetPurpose::BecomeCopy {
+                        continuation: Some(selected),
+                    },
                 ..
+            } => selected.clone(),
+            other => {
+                panic!("the public entry must retain the complete selected instruction: {other:?}")
             }
-        ));
-        assert_eq!(
-            state.objects[&copy_ench]
-                .counters
-                .get(&crate::types::counter::CounterType::Time),
-            None
-        );
-        assert!(state.resolution_stack.iter().any(|frame| matches!(
-            frame,
-            crate::types::resolution::ResolutionFrame::CounterAdditions(_)
-        )));
-        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
-        assert_eq!(
-            state.objects[&copy_ench]
-                .counters
-                .get(&crate::types::counter::CounterType::Time),
-            Some(&2),
-            "the copied entry counter applies its replacement once; wait={:?}; pending={:?}; frames={:?}; entry={:?}",
-            state.waiting_for, state.pending_replacement, state.resolution_stack, state.objects[&copy_ench]
+        };
+        assert!(
+            !selected.replacement_applied.is_empty(),
+            "the applied-set hostile must remove an actual selected occurrence"
         );
         assert_eq!(
-            state.objects[&copy_ench].attached_to,
-            Some(crate::game::game_object::AttachTarget::Object(hosts[0]))
+            selected.source_incarnation,
+            Some(state.objects[&copy_ench].incarnation)
         );
-        assert!(state.deferred_entry_events.is_empty());
-        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
-        assert!(state.resolution_stack.is_empty());
+        for corruption in 0..8 {
+            let mut hostile = state.clone();
+            match corruption {
+                0 => {
+                    hostile
+                        .active_post_replacement_drains_mut()
+                        .unwrap()
+                        .resident_mut()
+                        .unwrap()
+                        .source = Some(aura)
+                }
+                1 => {
+                    hostile
+                        .active_post_replacement_drains_mut()
+                        .unwrap()
+                        .resident_mut()
+                        .unwrap()
+                        .controller = Some(PlayerId(1))
+                }
+                2 => {
+                    let WaitingFor::CopyTargetChoice {
+                        purpose:
+                            CopyTargetPurpose::BecomeCopy {
+                                continuation: Some(selected),
+                            },
+                        ..
+                    } = &mut hostile.waiting_for
+                    else {
+                        unreachable!()
+                    };
+                    selected.source_incarnation = Some(state.objects[&copy_ench].incarnation + 1);
+                }
+                3 => hostile
+                    .active_post_replacement_drains_mut()
+                    .unwrap()
+                    .resident_mut()
+                    .unwrap()
+                    .applied
+                    .clear(),
+                4 => {
+                    let WaitingFor::CopyTargetChoice {
+                        purpose:
+                            CopyTargetPurpose::BecomeCopy {
+                                continuation: Some(selected),
+                            },
+                        ..
+                    } = &mut hostile.waiting_for
+                    else {
+                        unreachable!()
+                    };
+                    selected.effect = Effect::Draw {
+                        target: TargetFilter::Controller,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    };
+                }
+                5 => {
+                    hostile
+                        .active_post_replacement_drains_mut()
+                        .unwrap()
+                        .resident_mut()
+                        .unwrap()
+                        .status = crate::types::game_state::DrainStatus::Dispatching
+                }
+                6 | 7 => {
+                    let WaitingFor::CopyTargetChoice {
+                        purpose:
+                            CopyTargetPurpose::BecomeCopy {
+                                continuation: Some(selected),
+                            },
+                        ..
+                    } = &mut hostile.waiting_for
+                    else {
+                        unreachable!()
+                    };
+                    if corruption == 6 {
+                        selected.source_id = aura;
+                    } else {
+                        selected.controller = PlayerId(1);
+                    }
+                }
+                _ => unreachable!(),
+            }
+            let before = serde_json::to_value(&hostile).unwrap();
+            if corruption != 2 {
+                let frames =
+                    crate::types::resolution::canonicalize_legacy_resolution_state(&hostile)
+                        .unwrap();
+                assert!(
+                    frames.validate(&hostile.waiting_for).is_err(),
+                    "corruption {corruption} must not become canonical authority"
+                );
+                assert_eq!(serde_json::to_value(&hostile).unwrap(), before);
+            } else {
+                assert!(serde_json::from_value::<GameState>(before.clone()).is_err());
+                assert_eq!(serde_json::to_value(&hostile).unwrap(), before);
+            }
+            // Dispatching is separately rejected by canonical restoration above;
+            // the public boundary's existing orphan recovery precedes rollback.
+            if corruption != 5 {
+                assert!(apply_as_current(
+                    &mut hostile,
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(aura))
+                    }
+                )
+                .is_err());
+                assert_eq!(
+                    serde_json::to_value(&hostile).unwrap(),
+                    before,
+                    "hostile answer {corruption} must refuse before mutation"
+                );
+            }
+        }
+        use crate::types::game_state::{PersistedGameState, TrustedGameStateEnvelope};
+        use crate::types::resolution::ResolutionStateWire;
+        let readers = vec![
+            state.clone(),
+            serde_json::from_value::<GameState>(serde_json::to_value(&state).unwrap()).unwrap(),
+            serde_json::from_value::<TrustedGameStateEnvelope>(
+                serde_json::to_value(TrustedGameStateEnvelope::capture(state.clone())).unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+            PersistedGameState::capture(state.clone())
+                .into_game_state()
+                .unwrap(),
+            serde_json::from_value::<ResolutionStateWire>(
+                serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+        ];
+        for mut state in readers {
+            let WaitingFor::CopyTargetChoice {
+                purpose:
+                    CopyTargetPurpose::BecomeCopy {
+                        continuation: Some(restored),
+                    },
+                ..
+            } = &state.waiting_for
+            else {
+                panic!("each reader retains its complete selected copy instruction")
+            };
+            assert_eq!(restored, &selected);
+            apply_as_current(
+                &mut state,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(aura)),
+                },
+            )
+            .unwrap();
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player: PlayerId(0),
+                    ..
+                }
+            ));
+            assert_eq!(
+                state.objects[&copy_ench]
+                    .counters
+                    .get(&crate::types::counter::CounterType::Time),
+                None
+            );
+            assert!(state.resolution_stack.iter().any(|frame| matches!(
+                frame,
+                crate::types::resolution::ResolutionFrame::CounterAdditions(_)
+            )));
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
+            assert_eq!(
+                state.objects[&copy_ench]
+                    .counters
+                    .get(&crate::types::counter::CounterType::Time),
+                Some(&2),
+                "the copied entry counter applies its replacement once; wait={:?}; pending={:?}; frames={:?}; entry={:?}",
+                state.waiting_for, state.pending_replacement, state.resolution_stack, state.objects[&copy_ench]
+            );
+            assert_eq!(
+                state.objects[&copy_ench].attached_to,
+                Some(crate::game::game_object::AttachTarget::Object(hosts[0]))
+            );
+            assert!(state.deferred_entry_events.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(state.resolution_stack.is_empty());
+        }
     }
 
     /// CR 303.4g + CR 704.5m: With NO legal host on the battlefield, the copied

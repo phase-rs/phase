@@ -8938,7 +8938,7 @@ pub(crate) mod tests {
             } else {
                 scenario
                     .add_creature_from_oracle(P1, "Silver Myr", 1, 1, "{T}: Add {U}.")
-                    .as_artifact()
+                    .as_artifact_creature()
                     .id()
             };
             if extra_static {
@@ -8958,6 +8958,16 @@ pub(crate) mod tests {
                     .id();
             }
             let mut runner = scenario.build();
+            assert!(runner.state().objects[&donor]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature));
+            if !ghave {
+                assert!(runner.state().objects[&donor]
+                    .card_types
+                    .core_types
+                    .contains(&CoreType::Artifact));
+            }
             runner.cast(mirror).commit();
             for _ in 0..8 {
                 if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
