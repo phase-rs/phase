@@ -5923,7 +5923,10 @@ fn build_ability_item(
         }
         _ => effect_type_name(&def.effect),
     };
-    let supported = !matches!(&*def.effect, Effect::Unimplemented { .. });
+    // CR 608.2e + CR 603.10d: an unobservable fan-out control boundary is the
+    // same gap `collect_ability_missing_parts` reports, so the node agrees.
+    let supported = !matches!(&*def.effect, Effect::Unimplemented { .. })
+        && !fan_out_control_boundary_is_unobservable(def);
     let source_text = def.description.clone().or_else(|| match &*def.effect {
         Effect::Unimplemented { description, .. } => description.clone(),
         _ => None,
@@ -9466,6 +9469,10 @@ fn is_ability_supported(
     token_static_traversal: TokenStaticTraversal,
 ) -> bool {
     if matches!(&*def.effect, Effect::Unimplemented { .. }) {
+        return false;
+    }
+    // CR 608.2e + CR 603.10d: same predicate as `collect_ability_missing_parts`.
+    if fan_out_control_boundary_is_unobservable(def) {
         return false;
     }
     if delayed_trigger_modes(&def.effect)
@@ -14470,6 +14477,16 @@ mod tests {
                     !super::fan_out_control_boundary_is_unobservable(&def),
                     "{name}: not marked unsupported"
                 );
+                assert!(
+                    super::build_ability_item(
+                        &def,
+                        &super::build_trigger_registry(),
+                        &super::build_static_registry(),
+                        super::TokenStaticTraversal::Include,
+                    )
+                    .supported,
+                    "{name}: its scoped node's parse item stays supported"
+                );
             }
         }
         for population in crate::game::effects::allowlisted_fan_out_control_populations() {
@@ -14554,6 +14571,110 @@ mod tests {
                     .iter()
                     .any(|label| label == super::PLAYER_SCOPE_CONTROL_BOUNDARY_GAP),
                 "{name}: the production coverage walk marks it: {missing:?}"
+            );
+
+            // All three coverage consumers agree on the scoped node's verdict:
+            // the card's gaps, the support check, and the parse tree's flag.
+            let face = CardFace {
+                name: name.to_string(),
+                abilities: parsed.abilities.clone(),
+                triggers: parsed.triggers.clone(),
+                ..Default::default()
+            };
+            assert!(
+                super::card_face_gaps(&face)
+                    .iter()
+                    .any(|gap| gap == super::PLAYER_SCOPE_CONTROL_BOUNDARY_GAP),
+                "{name}: card_face_gaps reports the boundary gap"
+            );
+            let trigger_registry = super::build_trigger_registry();
+            let static_registry = super::build_static_registry();
+            let roots: Vec<&crate::types::ability::AbilityDefinition> = parsed
+                .abilities
+                .iter()
+                .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+                .collect();
+            // Every node the production walk visits: sub, else and mode
+            // abilities, and the effect's ability payloads.
+            fn all_nodes(
+                def: &crate::types::ability::AbilityDefinition,
+                out: &mut Vec<crate::types::ability::AbilityDefinition>,
+            ) {
+                out.push(def.clone());
+                for child in def
+                    .sub_ability
+                    .as_deref()
+                    .into_iter()
+                    .chain(def.else_ability.as_deref())
+                    .chain(def.mode_abilities.iter())
+                {
+                    all_nodes(child, out);
+                }
+                super::visit_effect_replacement_ability_payloads(&def.effect, |_, payload| {
+                    all_nodes(payload, out)
+                });
+                super::visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+                    all_nodes(payload, out)
+                });
+            }
+            let mut unobservable_nodes = 0;
+            for root in roots {
+                let mut scoped = Vec::new();
+                all_nodes(root, &mut scoped);
+                let unobservable: Vec<_> = scoped
+                    .iter()
+                    .filter(|def| super::fan_out_control_boundary_is_unobservable(def))
+                    .collect();
+                if unobservable.is_empty() {
+                    continue;
+                }
+                for def in unobservable {
+                    unobservable_nodes += 1;
+                    assert!(
+                        !super::is_ability_supported(
+                            def,
+                            &trigger_registry,
+                            &static_registry,
+                            super::TokenStaticTraversal::Include,
+                        ),
+                        "{name}: is_ability_supported rejects the scoped node"
+                    );
+                    assert!(
+                        !super::build_ability_item(
+                            def,
+                            &trigger_registry,
+                            &static_registry,
+                            super::TokenStaticTraversal::Include,
+                        )
+                        .supported,
+                        "{name}: the scoped node's parse item is unsupported"
+                    );
+                }
+                assert!(
+                    !super::is_ability_supported(
+                        root,
+                        &trigger_registry,
+                        &static_registry,
+                        super::TokenStaticTraversal::Include,
+                    ),
+                    "{name}: the ability holding the scoped node is unsupported"
+                );
+                fn any_unsupported(item: &super::ParsedItem) -> bool {
+                    !item.supported || item.children.iter().any(any_unsupported)
+                }
+                assert!(
+                    any_unsupported(&super::build_ability_item(
+                        root,
+                        &trigger_registry,
+                        &static_registry,
+                        super::TokenStaticTraversal::Include,
+                    )),
+                    "{name}: the parse tree shows an unsupported node beside the gap"
+                );
+            }
+            assert!(
+                unobservable_nodes > 0,
+                "REACH: {name} has an unobservable scoped node"
             );
         }
     }
