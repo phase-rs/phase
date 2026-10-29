@@ -3172,21 +3172,44 @@ fn complete_keyword_list_parts(text: &str) -> Option<Vec<Cow<'_, str>>> {
     fn separator(input: &str) -> OracleResult<'_, &str> {
         alt((tag(", and/or "), tag(", and "), tag(" and "), tag(", "))).parse(input)
     }
-    fn part(input: &str) -> OracleResult<'_, &str> {
-        recognize(nom::multi::many1(preceded(
-            not(separator),
-            nom::character::complete::anychar,
-        )))
-        .parse(input)
+    let text = text.trim();
+    if !nom_primitives::ends_outside_double_quotes(text) {
+        return None;
     }
-    let (_, parts) = all_consuming(separated_list1(separator, part))
-        .parse(text.trim())
-        .ok()?;
-    let parts: Vec<_> = parts.into_iter().map(str::trim).collect();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    // Exhaustion (including no separator) is normal: collect every boundary
+    // from the original input, then retain its complete final suffix.
+    let _ = nom_primitives::scan_outside_quotes_with_offset(text, separator, |offset, _, after| {
+        parts.push(text[start..offset].trim());
+        start = text.len() - after.len();
+        None::<()>
+    });
+    parts.push(text[start..].trim());
     if parts.iter().any(|part| part.is_empty()) {
         return None;
     }
-    Some(super::oracle_keyword::expand_protection_parts(&parts))
+    let mut expanded = Vec::new();
+    let mut unquoted = Vec::new();
+    for part in parts {
+        let lower = part.to_lowercase();
+        let body = nom_tag_lower(part, &lower, "has ")
+            .or_else(|| nom_tag_lower(part, &lower, "have "))
+            .or_else(|| nom_tag_lower(part, &lower, "gains "))
+            .or_else(|| nom_tag_lower(part, &lower, "gain "))
+            .unwrap_or(part);
+        if tag::<_, _, OracleError<'_>>("\"").parse(body).is_ok() {
+            // A quote owns its bytes and ends protection shorthand inheritance.
+            // Its complete cost/body admission remains with the strict owner.
+            expanded.extend(super::oracle_keyword::expand_protection_parts(&unquoted));
+            unquoted.clear();
+            expanded.push(Cow::Borrowed(part));
+        } else {
+            unquoted.push(part);
+        }
+    }
+    expanded.extend(super::oracle_keyword::expand_protection_parts(&unquoted));
+    Some(expanded)
 }
 
 /// CR 613.4c + CR 702: In a granted-keyword "where X is its `<P/T/mana value>`"
@@ -3911,6 +3934,81 @@ mod quote_authority_tests {
 
     #[test]
     fn complete_sequence_keeps_quoted_mana_body_and_refuses_unowned_tails() {
+        // SHAPE: synthetic grammar compositions pin exact original-source
+        // tokens; the existing public acquired-activation tests cover runtime.
+        for (text, expected) in [
+            ("\"{1}, {T}: Add {G}.\"", vec!["\"{1}, {T}: Add {G}.\""]),
+            (
+                "flying and \"Whenever this creature attacks, draw a card.\"",
+                vec!["flying", "\"Whenever this creature attacks, draw a card.\""],
+            ),
+            (
+                "\"{1}, {T}: Add {G}.\", and \"{T}: Add {U}.\"",
+                vec!["\"{1}, {T}: Add {G}.\"", "\"{T}: Add {U}.\""],
+            ),
+            (
+                "\"{T}: Draw a card and discard a card.\" and vigilance",
+                vec!["\"{T}: Draw a card and discard a card.\"", "vigilance"],
+            ),
+            (
+                "\"{T}: This creature gains '{T}: Add {G}.'\", flying",
+                vec!["\"{T}: This creature gains '{T}: Add {G}.'\"", "flying"],
+            ),
+            ("  flying  ", vec!["flying"]),
+        ] {
+            let parts = complete_keyword_list_parts(text).expect("balanced outer members");
+            assert_eq!(parts.len(), expected.len(), "{text}");
+            for (part, expected) in parts.iter().zip(expected) {
+                assert!(
+                    matches!(part, Cow::Borrowed(token) if *token == expected),
+                    "{text}: {part:?}"
+                );
+            }
+        }
+        for text in [
+            "protection from Red and from Blue",
+            "protection from Red, Blue",
+        ] {
+            assert_eq!(
+                complete_keyword_list_parts(text).unwrap(),
+                vec!["protection from red", "protection from blue"],
+                "{text}"
+            );
+        }
+        for quote in ["\"Flying\"", "\"{T}: Proliferate.\""] {
+            assert!(!complete_quoted_modifications(quote)
+                .expect("a complete short quote has a typed semantic owner")
+                .is_empty());
+            for prefix in ["", "has ", "have ", "gains ", "gain "] {
+                let member = format!("{prefix}{quote}");
+                let text = format!("protection from Red and {member} and from Blue");
+                let parts = complete_keyword_list_parts(&text).unwrap();
+                assert_eq!(parts.len(), 3, "{text}");
+                assert!(
+                    matches!(&parts[0], Cow::Borrowed(token) if *token == "protection from Red")
+                );
+                assert!(matches!(&parts[1], Cow::Borrowed(token) if *token == member));
+                assert!(matches!(&parts[2], Cow::Borrowed(token) if *token == "from Blue"));
+                assert!(complete_modification_clause(
+                    &format!("has protection from Red and {member}"),
+                    None,
+                    ContinuousVerb::Unbound,
+                )
+                .is_some());
+                assert!(
+                    complete_modification_clause(
+                        &format!("has {text}"),
+                        None,
+                        ContinuousVerb::Unbound,
+                    )
+                    .is_none(),
+                    "a quoted member ends protection inheritance: {text}"
+                );
+            }
+        }
+        for text in ["", ", \"Flying\"", "\"Flying\", , vigilance", "\"Flying"] {
+            assert!(complete_keyword_list_parts(text).is_none(), "{text}");
+        }
         let quoted = "{1}, {T}: Add {G}.";
         let (mods, _) = complete_modification_sequence(
             &format!("has \"{quoted}\" and gets +1/+1"),
@@ -3922,9 +4020,41 @@ mod quote_authority_tests {
         assert!(!expected.is_empty());
         assert_eq!(&mods[..expected.len()], expected.as_slice());
         assert_eq!(mods.len(), expected.len() + 2);
+        // CR 113.3b + CR 602.1a: the whole pre-colon cost belongs to one
+        // activated ability, independently of the classifier parity assertion.
+        let [ContinuousModification::GrantAbility { definition }] = &mods[..expected.len()] else {
+            panic!("the complete quote grants one activated ability");
+        };
+        assert_eq!(definition.kind, AbilityKind::Activated);
+        let Some(AbilityCost::Composite { costs }) = &definition.cost else {
+            panic!("the activation costs both one mana and tapping");
+        };
+        assert_eq!(costs.len(), 2);
+        assert!(costs.contains(&AbilityCost::Mana {
+            cost: ManaCost::generic(1)
+        }));
+        assert!(costs.contains(&AbilityCost::Tap));
+        assert!(
+            matches!(definition.effect.as_ref(), crate::types::ability::Effect::Mana {
+            produced: crate::types::ability::ManaProduction::Fixed { colors, .. }, ..
+        } if colors == &[ManaColor::Green])
+        );
+        assert_eq!(
+            &mods[expected.len()..],
+            &[
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ]
+        );
         for tail in [
             "has \"{T}: Add {G} and gets +1/+1",
             "has flying and unsupported tail",
+            "has \"\"",
+            "has \"{T}: Add {G}.\",",
+            "has \"{T}: Add {G}.\" and",
+            "has \"{T}: Add {G}.\" unread tail",
+            "has protection from Red and \"{T}: Proliferate.\" unread tail",
+            "has protection from Red and \"{T}: Proliferate.\" and from Blue",
         ] {
             assert!(complete_modification_sequence(tail, None, ContinuousVerb::Unbound).is_none());
             assert!(complete_continuous_members(tail, None, ContinuousVerb::Unbound).is_none());
