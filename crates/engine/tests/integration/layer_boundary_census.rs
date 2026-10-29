@@ -55,11 +55,13 @@
 //!   * **5b.** No AST unit names a game-side item or module or a T item, no AST path passes
 //!     through a game-side module, a state module or the parser (even when it lands on an AST
 //!     item; a bare head bound by a `use` or imported by a glob is canonicalized through
-//!     it), no `use` in a non-state `types/` file names an AST item or globs through one,
-//!     every `serde` path string resolves (or is a unit-local `fn` or an `EXTERN_HEADS`
-//!     path), and `types/game_state.rs`, `types/events.rs` and `types/proposed_event.rs`
-//!     define no AST item. It subsumes the retired clauses 4a and 4c (no `ResolvedAbility` in
-//!     `Effect` or `ReplacementDefinition`): such a field puts the item in T.
+//!     it), no `use` in a non-state `types/` file names an AST item or globs through one, and
+//!     none in a non-root `types/` file that defines no state-layer item names a game-side or
+//!     state-layer item, every `serde` path string resolves (or is a unit-local `fn` or an
+//!     `EXTERN_HEADS` path), and `types/game_state.rs`, `types/events.rs` and
+//!     `types/proposed_event.rs` define no AST item. It subsumes the retired clauses 4a and 4c
+//!     (no `ResolvedAbility` in `Effect` or `ReplacementDefinition`): such a field puts the
+//!     item in T.
 //!   * **5c.** No impl outside `types/` on an AST item is inherent, and a trait impl there names
 //!     a game-side item in its trait path, so it stays orphan-legal once the AST is its own
 //!     crate.
@@ -67,10 +69,14 @@
 //! Fail-closed limits: a `#[cfg(test)]` on a statement inside a library function is not
 //! honoured (the statement is scanned as library code), and a `#[path]` inside an inline
 //! module panics instead of being guessed at. Clause 5's fail-open limits: a re-export chain
-//! deeper than `RESOLVE_DEPTH` resolves to nothing, a struct a macro declares through a
-//! metavariable name is not indexed, and a statement-level `use` inside a function binds
+//! deeper than `RESOLVE_DEPTH` resolves to nothing; a struct a macro declares through a
+//! metavariable name is not indexed; a statement-level `use` inside a function binds
 //! nothing: its own paths are checked, but a path through a module it imports
-//! (`use crate::types::game_state as gs; gs::GameState`) is not resolved.
+//! (`use crate::types::game_state as gs; gs::GameState`, or one through `{self}`) is not
+//! resolved, and in parser code such a `use` of a state module is not itself reported, as a
+//! module-level one is; and a game-side trait a mixed `types/` file imports, called by method
+//! syntax from an AST item there, is not seen: method resolution needs types, and Phase 6's
+//! split compiles it.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -2914,6 +2920,14 @@ impl LayerCensus {
         }
     }
 
+    /// Why no AST unit may make a reference: it names a T item, or a game-side item or module.
+    fn layer_crossing(&self, r: &Ref) -> Option<String> {
+        match r.item().filter(|k| self.state.contains_key(*k)) {
+            Some(k) => Some(format!("is a state-layer item ({})", self.state_chain(k))),
+            None => r.is_game_side().then(|| "is game-side".to_string()),
+        }
+    }
+
     fn collect_violations(&self, anchors: &[&str]) -> Vec<Violation> {
         let index = &self.index;
         let state_files = self.state_files(&self.ast);
@@ -2931,10 +2945,8 @@ impl LayerCensus {
             for u in self.node_units(node) {
                 let unit = &index.units[u];
                 for r in &index.refs[u].refs {
-                    let detail = match r.item().filter(|k| self.state.contains_key(*k)) {
-                        Some(k) => format!("is a state-layer item ({})", self.state_chain(k)),
-                        None if r.is_game_side() => "is game-side".to_string(),
-                        None => continue,
+                    let Some(detail) = self.layer_crossing(r) else {
+                        continue;
                     };
                     out.push(self.violation(
                         ViolationKind::Reference,
@@ -2965,43 +2977,75 @@ impl LayerCensus {
             }
         }
 
-        // 5a / 5b: `use` entries of non-state `types/` files (an AST target, or a glob) and of
-        // parser library code (state-module passages only; clause 1 owns game-side ones).
+        // 5a / 5b: `use` entries of non-state `types/` files (a passage to an AST target or
+        // through a glob, and in a file with no T item any game-side or T target) and of parser
+        // library code (state-module passages only; clause 1 owns game-side ones).
+        let use_subject = |full: &[String]| format!("crate::{}", full[..full.len() - 1].join("::"));
         for use_item in &index.use_items {
             let parser = use_item.file.starts_with("parser/");
             if !parser && state_files.contains(&use_item.file) {
                 continue;
             }
+            // The root is left out, as from the state modules: its re-exports are crate API.
+            let t_free = !parser
+                && use_item.file != "types/mod.rs"
+                && !self.state.keys().any(|k| k.file == use_item.file);
             for entry in &use_item.entries {
                 let mut probe = entry.segs.clone();
                 probe.push("_".into());
-                let Some(full) = index.canonical(&probe, &use_item.module, 0) else {
-                    continue;
+                let crossing = index
+                    .canonical(&probe, &use_item.module, 0)
+                    .and_then(|full| Some((passage(&full, &state_modules)?, full)));
+                let written = format!("(written `{}`)", entry.segs.join("::"));
+                let (kind, subject, detail) = if parser {
+                    match crossing {
+                        Some((kind @ ViolationKind::StatePassage, full)) => {
+                            (kind, use_subject(&full), written)
+                        }
+                        _ => continue,
+                    }
+                } else {
+                    let target = match entry.kind {
+                        UseKind::Glob => None,
+                        UseKind::Name => index.resolve(&entry.segs, &use_item.module),
+                    };
+                    // A glob can supply any name of its base, so a passage through one is a
+                    // hit. In a file that defines no T item, a name for a game-side or T item
+                    // is a hit, through a passage or not: no state-layer consumer there
+                    // sanctions it, and a method call through an imported trait is no path a
+                    // unit's scan sees.
+                    let names_ast = entry.kind == UseKind::Glob
+                        || matches!(
+                            &target,
+                            Some(Target::Items(keys)) if keys.iter().any(|k| self.is_ast(k))
+                        );
+                    let named = if t_free && !names_ast {
+                        target
+                            .into_iter()
+                            .flat_map(Target::into_refs)
+                            .find_map(|r| Some((self.layer_crossing(&r)?, r)))
+                    } else {
+                        None
+                    };
+                    match (crossing, named) {
+                        (Some((kind, full)), named) if names_ast || named.is_some() => {
+                            (kind, use_subject(&full), written)
+                        }
+                        (None, Some((why, r))) => (
+                            ViolationKind::Reference,
+                            r.to_string(),
+                            format!("{why} {written}"),
+                        ),
+                        _ => continue,
+                    }
                 };
-                let Some(kind) = passage(&full, &state_modules) else {
-                    continue;
-                };
-                if parser && kind != ViolationKind::StatePassage {
-                    continue;
-                }
-                // A glob can supply any name of its base, so a passage through one is a hit.
-                let names_ast = match entry.kind {
-                    UseKind::Glob => true,
-                    UseKind::Name => matches!(
-                        index.resolve(&entry.segs, &use_item.module),
-                        Some(Target::Items(keys)) if keys.iter().any(|k| self.is_ast(k))
-                    ),
-                };
-                if !parser && !names_ast {
-                    continue;
-                }
                 out.push(Violation {
                     kind,
                     file: use_item.file.clone(),
                     item: "<use>".into(),
                     label: "use".into(),
-                    subject: format!("crate::{}", full[..full.len() - 1].join("::")),
-                    detail: format!("(written `{}`)", entry.segs.join("::")),
+                    subject,
+                    detail,
                     witness: String::new(),
                 });
             }
@@ -3182,18 +3226,30 @@ const PLANTED_CRATE: &[(&str, &str)] = &[
     ("game/obj.rs", "pub struct Obj; pub fn touch() {}"),
     (
         "types/mod.rs",
-        "pub mod ast; pub mod deep; pub mod game_state; pub mod state; pub use state::Runtime;",
+        "pub mod ast; pub mod deep; pub mod game_state; pub mod pure; pub mod state;
+         pub use state::Runtime;",
     ),
     (
         "types/state.rs",
         "pub use super::deep::Mode;
-         pub struct Runtime { pub obj: crate::game::obj::Obj }",
+         pub struct Runtime { pub obj: crate::game::obj::Obj }
+         pub trait RuntimeExt { fn obj(&self) -> crate::game::obj::Obj; }",
     ),
     (
         "types/deep.rs",
         "pub enum Mode { A, B }
          pub struct Handle { pub obj: crate::game::obj::Obj }
          pub fn make_handle() -> Handle { Handle { obj: crate::game::obj::Obj } }",
+    ),
+    (
+        "types/pure.rs",
+        "// A file with no T item imports a game-side trait and a T trait (through a state
+         // module) for method calls, which are no paths, and a T item with no passage.
+         use crate::game::LocalExt;
+         use crate::types::state::RuntimeExt;
+         use super::deep::Handle;
+         pub fn pure_ext(c: &super::ast::Clean) { c.ext(); }
+         pub fn pure_state_ext(c: &super::ast::Clean) { c.obj(); }",
     ),
     (
         "types/game_state.rs",
@@ -3229,7 +3285,9 @@ const PLANTED_CRATE: &[(&str, &str)] = &[
         // A path through a state module, landing on an AST item.
         pub struct ThroughState { pub m: super::state::Mode }
         // An AST item on which the game side implements a local trait, and one it extends
-        // inherently.
+        // inherently. This mixed file's imports of that trait and of a T trait are sanctioned.
+        use crate::game::LocalExt;
+        use crate::types::state::RuntimeExt;
         pub struct Clean { pub m: super::deep::Mode }
         pub struct GameInherent;
         // A `types/` item named through a game-side `pub use`, by a `use` binding.
@@ -3284,6 +3342,7 @@ const PLANTED_CRATE: &[(&str, &str)] = &[
                  crate::types::ast::self_path, crate::types::ast::helper_mod::helper,
                  crate::types::ast::stmt_grouped, crate::types::ast::exported_bare,
                  crate::types::ast::exported_crate, crate::types::ast::stmt_glob,
+                 crate::types::pure::pure_ext, crate::types::pure::pure_state_ext,
              );
              let _: Option<(
                  crate::types::ast::WithInherent, crate::types::ast::WithTrait,
@@ -3460,6 +3519,16 @@ fn the_layer_census_resolves_every_reference_shape() {
             "crate::types::state::Mode",
         ),
         (ViolationKind::StatePassage, "<use>", "crate::types::state"),
+        // A game-side trait, a T trait through a state module, and a T item with no passage,
+        // imported by a file with no T item. The root's `pub use state::Runtime` is crate API,
+        // so it has no row.
+        (ViolationKind::GamePassage, "<use>", "crate::game::LocalExt"),
+        (
+            ViolationKind::StatePassage,
+            "<use>",
+            "crate::types::state::RuntimeExt",
+        ),
+        (ViolationKind::Reference, "<use>", handle),
     ];
     expected.sort();
     let mut actual: Vec<(ViolationKind, &str, &str)> = census
@@ -3517,6 +3586,38 @@ fn the_layer_census_resolves_every_reference_shape() {
         "a reference witness reads seed -> item: {}",
         witness(ViolationKind::Reference, "globbed")
     );
+    for subject in ["crate::game::LocalExt", "crate::types::state::RuntimeExt"] {
+        let files: Vec<&str> = census
+            .violations
+            .iter()
+            .filter(|v| v.subject == subject)
+            .map(|v| v.file.as_str())
+            .collect();
+        assert_eq!(
+            files,
+            ["types/pure.rs"],
+            "only the file with no T item reports its `{subject}` import"
+        );
+    }
+    assert!(
+        !census
+            .violations
+            .iter()
+            .any(|v| v.file == "types/mod.rs" && v.subject == "crate::types::state::Runtime"),
+        "the root's re-export of a state-layer item is crate API, not reported:\n{}",
+        listed.join("\n")
+    );
+    for name in ["pure_ext", "pure_state_ext"] {
+        let chain = census
+            .ast_items()
+            .find(|k| k.file == "types/pure.rs" && k.name == name)
+            .map(|k| census.ast_chain(&Node::Item(k.clone())))
+            .unwrap_or_default();
+        assert!(
+            chain.contains(&format!("parser parser/mod.rs:seeds -> {name}")),
+            "the trait's method caller is reached seed -> item: {chain}"
+        );
+    }
     for (kind, item) in [
         (ViolationKind::Reference, "stmt_grouped"),
         (ViolationKind::StatePassage, "stmt_grouped"),
