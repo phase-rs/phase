@@ -49775,7 +49775,7 @@ fn parse_effect_chain_ir_body(
                 break 'source_clause;
             }
             let nearest_followup = match effective_prev_effect.as_ref() {
-                Some(effect) => (|| {
+                Some(effect) => (|| -> Result<Option<ContinuationAst>, OracleError<'_>> {
                     let ordinary =
                         sequence::parse_followup_continuation_ast_with_search_destination(
                             normalized_text,

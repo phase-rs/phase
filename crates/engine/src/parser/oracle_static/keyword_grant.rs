@@ -2220,7 +2220,7 @@ pub(crate) fn parse_complete_continuous_members(
 /// cannot change that grammatical role.
 fn complete_predicate_is_keyword_choice(text: &str) -> bool {
     let lower = text.to_lowercase();
-    (
+    let mut parser = (
         alt((
             tag::<_, _, OracleError<'_>>("gains "),
             tag("gain "),
@@ -2228,9 +2228,8 @@ fn complete_predicate_is_keyword_choice(text: &str) -> bool {
             tag("have "),
         )),
         tag("your choice of "),
-    )
-        .parse(lower.trim())
-        .is_ok()
+    );
+    parser.parse(lower.trim()).is_ok()
 }
 
 fn complete_continuous_members(

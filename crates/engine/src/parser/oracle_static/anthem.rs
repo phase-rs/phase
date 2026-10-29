@@ -477,6 +477,7 @@ pub(crate) fn parse_complete_continuous_predicate(
         }
     }
     let (body, condition) = strip_suffix_turn_condition(predicate);
+    let body_lower = body.to_lowercase();
     if let Ok((_, (rule, defended))) = all_consuming(terminated(
         alt((
             parse_combat_rule_static_predicate_with_defended_nom,
@@ -484,7 +485,7 @@ pub(crate) fn parse_complete_continuous_predicate(
         )),
         opt(tag(".")),
     ))
-    .parse(body.to_lowercase().as_str())
+    .parse(body_lower.as_str())
     {
         let mut definition =
             lower_rule_static(rule, None, affected, description).attack_defended(defended);
