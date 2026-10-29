@@ -2,8 +2,8 @@ use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
     graveyard_destination_rider, is_graveyard_exile_rider_subability, AbilityCondition,
     AbilityCost, CastPermissionConstraint, CastingPermission, Duration, Effect, EffectError,
-    EffectKind, QuantityExpr, ResolvedAbility, SpellStackToGraveyardReplacement, TargetFilter,
-    TargetRef,
+    EffectKind, QuantityExpr, QuantityRef, ResolvedAbility, SpellStackToGraveyardReplacement,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
