@@ -12145,15 +12145,26 @@ fn grant_cap_rider_never_folds_onto_loyalty_grant() {
 #[test]
 fn grant_cap_rider_after_loyalty_grant_does_not_cap_older_sibling() {
     let grants = "Grant Recipient has all activated abilities of all lands on the battlefield. Grant Recipient has all loyalty abilities of all other planeswalkers on the battlefield.";
-    // The loyalty sentence refuses at emission, so the whole line declines —
-    // the same observable as the rider-refusal leg below (documents that a
-    // loyalty sentence sharing a line with an admitted grant takes the line
-    // down with it; only Bolas prints the leaf).
+    // Independent complete sentences recover separately at the document layer.
+    // The supported grant has no rider; the refused loyalty leaf owns one gap.
+    // Strict static-only APIs still refuse this mixed supported/unsupported unit.
     let loyalty_line = parse_card(grants, "Grant Recipient", &[], &["Artifact"], &[]);
-    assert!(
-        loyalty_line.statics.is_empty(),
-        "{:?}",
-        loyalty_line.statics
+    assert_eq!(
+        loyalty_line.statics,
+        vec![StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                source: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    }
+                ])),
+                cap: None,
+                kind: None,
+            }])
+            .description(
+                "~ has all activated abilities of all lands on the battlefield.".to_owned()
+            )]
     );
     assert_eq!(
         loyalty_line.abilities.len(),
@@ -12165,6 +12176,32 @@ fn grant_cap_rider_after_loyalty_grant_does_not_cap_older_sibling() {
         matches!(&*loyalty_line.abilities[0].effect, Effect::Unimplemented { name, .. } if name == "static_structure"),
         "{:?}",
         loyalty_line.abilities,
+    );
+    let loyalty_source =
+        "~ has all loyalty abilities of all other planeswalkers on the battlefield.";
+    assert_eq!(
+        loyalty_line.abilities[0].description.as_deref(),
+        Some(loyalty_source)
+    );
+    assert_eq!(
+        loyalty_line.abilities[0].effect.unimplemented_description(),
+        Some(loyalty_source)
+    );
+    assert!(loyalty_line.abilities[0].sub_ability.is_none());
+    let normalized =
+        crate::parser::oracle_util::normalize_card_name_refs(grants, "Grant Recipient");
+    assert!(parse_static_line(&normalized).is_none());
+    assert!(parse_static_line_multi(&normalized).is_empty());
+    let face = crate::types::card::CardFace {
+        abilities: loyalty_line.abilities,
+        static_abilities: loyalty_line.statics,
+        ..Default::default()
+    };
+    let gaps = crate::game::coverage::card_face_gaps(&face);
+    assert_eq!(
+        gaps.len(),
+        1,
+        "one loyalty residual, no duplicate gap: {gaps:?}"
     );
 
     let refused = parse_card(
@@ -34229,9 +34266,8 @@ fn compound_static_foreign_keyword_grant_splits_angelic_field_marshal() {
 ///     AddToughness(2), AddKeyword(Trample)]
 #[test]
 fn compound_static_foreign_pt_grant_splits_thunderfoot_baloth() {
-    let defs = parse_static_line_multi(
-        "Lieutenant — As long as you control your commander, this creature gets +2/+2 and other creatures you control get +2/+2 and have trample.",
-    );
+    let source = "Lieutenant — As long as you control your commander, this creature gets +2/+2 and other creatures you control get +2/+2 and have trample.";
+    let defs = parse_static_line_multi(source);
     assert_eq!(
         defs.len(),
         2,
@@ -34302,6 +34338,222 @@ fn compound_static_foreign_pt_grant_splits_thunderfoot_baloth() {
             ownership: CommanderOwnership::Own
         })
     );
+    assert_eq!(parse_static_line(source), Some(defs[0].clone()));
+    let single_ir = super::parse_static_line_ir(source).unwrap();
+    assert_eq!(single_ir.source_text, source);
+    assert_eq!(single_ir.definition, defs[0]);
+    let multi_ir = super::shared::parse_static_line_multi_ir(source);
+    assert_eq!(multi_ir.len(), 2);
+    for (ir, definition) in multi_ir.iter().zip(&defs) {
+        assert_eq!(ir.source_text, source);
+        assert_eq!(ir.definition.description.as_deref(), Some(source));
+        assert_eq!(super::lower_static_ir(ir), *definition);
+    }
+
+    // SHAPE: the complete printed card keeps its independent keyword and both
+    // subjects through source-addressed document production and lowering.
+    let text = format!("Trample\n{source}");
+    let normalized =
+        crate::parser::oracle_util::normalize_card_name_refs(&text, "Thunderfoot Baloth");
+    let normalized_source = normalized.lines().nth(1).unwrap();
+    let mut doc = crate::parser::oracle::parse_oracle_ir(
+        &text,
+        "Thunderfoot Baloth",
+        &["Trample".into()],
+        &["Creature".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, text);
+    assert_eq!(doc.items.len(), 3);
+    assert_eq!(doc.items[0].source.fragment(), Some("Trample"));
+    for (index, item) in doc.items[1..].iter().enumerate() {
+        assert_eq!(item.source.fragment(), Some(normalized_source));
+        assert_eq!(
+            item.source.span(),
+            &crate::parser::oracle_ir::doc::OracleSourceSpan::exact(
+                1,
+                1,
+                "Trample\n".len(),
+                normalized.len(),
+                index as u32,
+            )
+        );
+        let crate::parser::oracle_ir::doc::OracleNodeIr::Static(ir) = &item.node else {
+            panic!("both Lieutenant subjects must remain static IR: {item:?}");
+        };
+        assert_eq!(ir.source_text, normalized_source);
+    }
+    let parsed = crate::parser::oracle::lower_oracle_ir(&mut doc);
+    let expected = defs
+        .into_iter()
+        .map(|mut definition| {
+            definition.description = Some(normalized_source.to_owned());
+            definition
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(parsed.statics, expected);
+    assert_eq!(parsed.extracted_keywords, vec![Keyword::Trample]);
+    assert!(parsed.abilities.is_empty());
+    assert!(parsed.triggers.is_empty());
+    assert!(parsed.replacements.is_empty());
+}
+
+/// CR 611.3a + CR 903.3d: the framed production must reach the layer system
+/// through an actual cast, and "your commander" retains its ownership scope.
+#[test]
+fn recognized_static_framing_thunderfoot_public_cast_keeps_both_subjects() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::game_state::WaitingFor;
+
+    for commander_owner in [None, Some(P0), Some(P1)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        if let Some(owner) = commander_owner {
+            scenario
+                .add_creature(owner, "Commander", 2, 2)
+                .commander()
+                .controlled_by(P0);
+        }
+        let ally = scenario.add_creature(P0, "Ally", 2, 3).id();
+        let opponent = scenario.add_creature(P1, "Opponent", 3, 4).id();
+        let source = scenario.add_creature_to_hand_from_oracle(P0, "Thunderfoot Baloth", 5, 5,
+            "Trample\nLieutenant — As long as you control your commander, this creature gets +2/+2 and other creatures you control get +2/+2 and have trample.")
+            .with_mana_cost(ManaCost::generic(0)).id();
+        let mut runner = scenario.build();
+        let outcome = runner.cast(source).resolve();
+        outcome.assert_zone(&[source], Zone::Battlefield);
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert!(outcome.state().stack.is_empty());
+        let active = commander_owner == Some(P0);
+        let bonus = if active { 2 } else { 0 };
+        for (id, power, toughness) in [
+            (source, 5 + bonus, 5 + bonus),
+            (ally, 2 + bonus, 3 + bonus),
+            (opponent, 3, 4),
+        ] {
+            let object = &outcome.state().objects[&id];
+            assert_eq!(
+                (object.power, object.toughness),
+                (Some(power), Some(toughness)),
+                "owner={commander_owner:?}, id={id:?}"
+            );
+        }
+        assert!(outcome.state().objects[&source].has_keyword(&Keyword::Trample));
+        assert_eq!(
+            outcome.state().objects[&ally].has_keyword(&Keyword::Trample),
+            active
+        );
+        assert!(!outcome.state().objects[&opponent].has_keyword(&Keyword::Trample));
+    }
+}
+
+// SHAPE: both Descend tiers and every Descend 8 companion retain typed gates,
+// full labeled descriptions, and their normalized source geometry.
+#[test]
+fn recognized_static_framing_akawalli_complete_document() {
+    let text = "Descend 4 — As long as there are four or more permanent cards in your graveyard, Akawalli gets +2/+2 and has trample.\nDescend 8 — As long as there are eight or more permanent cards in your graveyard, Akawalli gets an additional +2/+2 and can't be blocked by more than one creature.";
+    let name = "Akawalli, the Seething Tower";
+    let normalized = crate::parser::oracle_util::normalize_card_name_refs(text, name);
+    let mut expected = Vec::new();
+    for (source, threshold) in normalized.lines().zip([4, 8]) {
+        let condition = StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![TypeFilter::Permanent],
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: threshold },
+        };
+        let mut modifications = vec![
+            ContinuousModification::AddPower { value: 2 },
+            ContinuousModification::AddToughness { value: 2 },
+        ];
+        if threshold == 4 {
+            modifications.push(ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            });
+        }
+        let mut definitions = vec![StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(modifications)
+            .condition(condition.clone())
+            .description(source.to_owned())];
+        if threshold == 8 {
+            definitions.push(
+                StaticDefinition::new(StaticMode::CantBeBlockedByMoreThan { max: 1 })
+                    .affected(TargetFilter::SelfRef)
+                    .condition(condition)
+                    .description(source.to_owned()),
+            );
+        }
+        assert_eq!(parse_static_line(source), Some(definitions[0].clone()));
+        assert_eq!(parse_static_line_multi(source), definitions);
+        let ir = super::parse_static_line_ir(source).unwrap();
+        assert_eq!(ir.source_text, source);
+        assert_eq!(super::lower_static_ir(&ir), definitions[0]);
+        expected.extend(definitions);
+    }
+    let mut doc =
+        crate::parser::oracle::parse_oracle_ir(text, name, &[], &["Creature".into()], &[]);
+    assert_eq!(doc.source_text, text);
+    assert_eq!(doc.items.len(), 3);
+    let first_end = normalized.lines().next().unwrap().len();
+    for ((item, definition), (line, start, end, ordinal)) in doc.items.iter().zip(&expected).zip([
+        (0, 0, first_end, 0),
+        (1, first_end + 1, normalized.len(), 0),
+        (1, first_end + 1, normalized.len(), 1),
+    ]) {
+        let source = definition.description.as_deref().unwrap();
+        assert_eq!(item.source.fragment(), Some(source));
+        assert_eq!(
+            item.source.span(),
+            &crate::parser::oracle_ir::doc::OracleSourceSpan::exact(
+                line, line, start, end, ordinal
+            )
+        );
+        let crate::parser::oracle_ir::doc::OracleNodeIr::Static(ir) = &item.node else {
+            panic!("every Descend companion must remain static IR: {item:?}");
+        };
+        assert_eq!(ir.source_text, source);
+        assert_eq!(super::lower_static_ir(ir), *definition);
+    }
+    let parsed = crate::parser::oracle::lower_oracle_ir(&mut doc);
+    assert_eq!(parsed.statics, expected);
+    assert!(parsed.abilities.is_empty());
+    assert!(parsed.triggers.is_empty());
+    assert!(parsed.replacements.is_empty());
+}
+
+#[test]
+fn recognized_static_framing_keeps_unknown_labels_gates_and_tails_refused() {
+    let positive = "Metalcraft — Creatures you control can't be blocked if you control a Forest.";
+    let definitions = parse_static_line_multi(positive);
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(definitions[0].description.as_deref(), Some(positive));
+    assert!(definitions[0]
+        .condition
+        .as_ref()
+        .is_some_and(|condition| !condition.contains_unrecognized()));
+    assert_eq!(parse_static_line(positive), Some(definitions[0].clone()));
+    let parsed = parse_card(positive, "Conditional refusal", &[], &["Creature"], &[]);
+    assert_eq!(parsed.statics, definitions);
+    assert!(parsed.abilities.is_empty());
+    for source in [
+        "Vigilant Sentry — Other creatures you control have vigilance.",
+        "Metalcraft — As long as you cast this spell from exile, enchanted creature gets +1/+1.",
+        "Metalcraft — Creatures you control can't be blocked if you control a Forest unexplained.",
+    ] {
+        assert!(parse_static_line(source).is_none(), "{source}");
+        assert!(parse_static_line_multi(source).is_empty(), "{source}");
+        assert_whole_conditional_refusal(source);
+    }
 }
 
 /// A compound subject ("artifacts and creatures you control") must parse to
