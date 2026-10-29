@@ -214,8 +214,9 @@ pub enum ZoneChoiceCandidateSource {
     /// (`library_top_shape`): the declared `zone` must be `Library`, with no
     /// `additional_zones`, no `filter`, the default `selection` and `chooser`,
     /// no `up_to`, no `constraint` and no reciprocal role. A per-player
-    /// `zone_owner` is refused. The pick opens a fresh tracked set for the text
-    /// that gathers it.
+    /// `zone_owner` is refused. It exists only inside a gathering instruction,
+    /// so a `gather_role` is required: the pick publishes into the instruction's
+    /// tracked set as that role says ([`ZoneChoiceGatherRole`]).
     LibraryTop,
 }
 
@@ -230,6 +231,22 @@ impl ZoneChoiceCandidateSource {
 pub enum ReciprocalZoneChoiceRole {
     Produce,
     Consume,
+}
+
+/// CR 608.2c + CR 608.2f: how one object pick of a gathering instruction
+/// ("<player> exiles A, B, and C") joins the tracked set the instruction's
+/// single action then moves. The objects of one instruction are gathered and
+/// moved in one action, so the set must hold exactly that instruction's picks.
+/// The lowering assigns the role by position: the first object opens the set,
+/// every later object joins it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ZoneChoiceGatherRole {
+    /// The instruction's first object: publish a FRESH tracked set holding this
+    /// pick, even when the pick is empty, so a set an earlier instruction of the
+    /// same resolution published is never gathered.
+    Opens,
+    /// A later object: add this pick to the set the instruction's opener opened.
+    Joins,
 }
 
 /// CR 608.2d: Resolution-time choice cardinality.
@@ -24412,6 +24429,13 @@ pub enum Effect {
         /// zone choices omit this field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reciprocal_role: Option<ReciprocalZoneChoiceRole>,
+        /// CR 608.2c + CR 608.2f: the pick's role in the gathering instruction
+        /// whose single action moves its tracked set. `None` (every ordinary
+        /// zone choice) publishes as the resolver always has; `Some` is honored
+        /// only by a `LibraryTop` pick and a random single-owner `Direct` pick,
+        /// and refused on every other path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gather_role: Option<ZoneChoiceGatherRole>,
         /// CR 107.1c: When true, the chooser may select any number from 0..=count.
         #[serde(default)]
         up_to: bool,
@@ -50897,6 +50921,7 @@ mod tests {
                 chooser: Default::default(),
                 candidate_source: Default::default(),
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: Default::default(),
                 constraint: None,

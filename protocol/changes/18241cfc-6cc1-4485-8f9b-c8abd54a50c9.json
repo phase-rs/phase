@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "ZoneChoiceCandidateSource gains LibraryTop (CR 401.2), serialized in card definitions inside GameState; an older peer cannot decode the variant, so it must be refused before it receives the new state"
+  "reason": "Effect::ChooseFromZone gains the LibraryTop candidate source (CR 401.2) and an optional gather_role (Opens/Joins, CR 608.2c + CR 608.2f), serialized in card definitions inside GameState; an older peer cannot decode the variant or honor the role, so it must be refused before it receives the new state"
 }

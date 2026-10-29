@@ -5458,6 +5458,10 @@ fn rw_effect(
             filter,
             candidate_source,
             reciprocal_role,
+            // Names only the tracked set the pick is published into (a
+            // `SetMembership` write, below); the pool is read via
+            // `candidate_source`, and neither role reads the set's members.
+            gather_role: _,
             ..
         } => {
             let mut p = ext_write(StateKind::SetMembership);
@@ -8014,6 +8018,7 @@ mod tests {
             chooser: ZoneChoiceChooser::Controller,
             candidate_source,
             reciprocal_role,
+            gather_role: None,
             up_to: false,
             selection: Default::default(),
             constraint: None,

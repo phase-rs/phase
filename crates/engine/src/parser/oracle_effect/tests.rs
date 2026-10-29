@@ -33085,10 +33085,15 @@ fn assert_subject_exile_top(text: &str) -> AbilityDefinition {
 }
 
 /// An unfiltered, single-zone, one-card `ChooseFromZone` over the targeted
-/// subject player's `zone`, from `source`. A `LibraryTop` leg takes the top
-/// card by order with the default selection (CR 401.2); an at-random leg is
-/// `Random`.
-fn is_subject_exile_leg(effect: &Effect, zone: Zone, source: ZoneChoiceCandidateSource) -> bool {
+/// subject player's `zone`, from `source`, joining its instruction's tracked
+/// set as `role`. A `LibraryTop` leg takes the top card by order with the
+/// default selection (CR 401.2); an at-random leg is `Random`.
+fn is_subject_exile_leg(
+    effect: &Effect,
+    zone: Zone,
+    source: ZoneChoiceCandidateSource,
+    role: ZoneChoiceGatherRole,
+) -> bool {
     let selection = if source == ZoneChoiceCandidateSource::LibraryTop {
         CardSelectionMode::default()
     } else {
@@ -33105,11 +33110,14 @@ fn is_subject_exile_leg(effect: &Effect, zone: Zone, source: ZoneChoiceCandidate
             candidate_source,
             selection: leg_selection,
             up_to: false,
+            reciprocal_role: None,
+            gather_role: Some(leg_role),
             ..
         } if *leg_zone == zone
             && additional_zones.is_empty()
             && *candidate_source == source
             && *leg_selection == selection
+            && *leg_role == role
     )
 }
 
@@ -33132,20 +33140,25 @@ fn subject_exile_object_list_lowers_crabomination_chain() {
         "root: {:?}",
         chain[0]
     );
+    // CR 608.2c + CR 608.2f: the first object opens the instruction's tracked
+    // set; the later objects join it.
     assert!(is_subject_exile_leg(
         chain[1],
         Zone::Library,
-        ZoneChoiceCandidateSource::LibraryTop
+        ZoneChoiceCandidateSource::LibraryTop,
+        ZoneChoiceGatherRole::Opens
     ));
     assert!(is_subject_exile_leg(
         chain[2],
         Zone::Graveyard,
-        ZoneChoiceCandidateSource::Direct
+        ZoneChoiceCandidateSource::Direct,
+        ZoneChoiceGatherRole::Joins
     ));
     assert!(is_subject_exile_leg(
         chain[3],
         Zone::Hand,
-        ZoneChoiceCandidateSource::Direct
+        ZoneChoiceCandidateSource::Direct,
+        ZoneChoiceGatherRole::Joins
     ));
     assert!(
         matches!(
@@ -33190,6 +33203,90 @@ fn subject_exile_object_list_lowers_crabomination_chain() {
         .map(|(i, _)| i)
         .collect();
     assert_eq!(readers, vec![1, 2, 3]);
+}
+
+/// MED-2 (d). CR 608.2c + CR 608.2f: the objects may come in any order. With
+/// the at-random object first, it opens the instruction's tracked set and the
+/// library object joins it; both legs read the subject's group.
+#[test]
+fn subject_exile_object_list_at_random_first_opens_with_the_random_leg() {
+    let def = parse_effect_chain(
+        "Target opponent exiles a card at random from their hand and the top card of their library. You may cast a spell from among cards exiled this way without paying its mana cost.",
+        AbilityKind::Spell,
+    );
+    assert!(subject_exile_has_no_gap(&def), "{def:?}");
+    let chain = subject_exile_chain(&def);
+    assert_eq!(chain.len(), 5, "{chain:?}");
+    assert!(matches!(chain[0], Effect::TargetOnly { .. }), "{chain:?}");
+    assert!(is_subject_exile_leg(
+        chain[1],
+        Zone::Hand,
+        ZoneChoiceCandidateSource::Direct,
+        ZoneChoiceGatherRole::Opens
+    ));
+    assert!(is_subject_exile_leg(
+        chain[2],
+        Zone::Library,
+        ZoneChoiceCandidateSource::LibraryTop,
+        ZoneChoiceGatherRole::Joins
+    ));
+    assert!(
+        matches!(
+            chain[3],
+            Effect::ChangeZoneAll {
+                destination: Zone::Exile,
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        chain[3]
+    );
+    let defs: Vec<&AbilityDefinition> =
+        std::iter::successors(Some(&def), |d| d.sub_ability.as_deref()).collect();
+    let group = defs[0].declares_chosen_group.expect("root group");
+    assert_eq!(defs[1].reads_chosen_group, Some(group));
+    assert_eq!(defs[2].reads_chosen_group, Some(group));
+}
+
+/// A lone at-random object is not the object-list form (Elkin Lair: "that
+/// player exiles a card at random from their hand"): the list grammar leaves it
+/// to the random-target exile it lowered to at base.
+#[test]
+fn subject_exile_lone_at_random_object_is_not_claimed_by_the_list() {
+    let def = parse_effect_chain(
+        "that player exiles a card at random from their hand",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Exile,
+                ..
+            }
+        ),
+        "{:?}",
+        def.effect
+    );
+    assert_eq!(def.target_selection_mode, TargetSelectionMode::Random);
+}
+
+/// A list naming two library objects would read the same top cards twice
+/// before its single exile; it is an honest gap.
+#[test]
+fn subject_exile_object_list_two_library_objects_is_unimplemented() {
+    // Reach-guard: one library object plus an at-random one lowers.
+    let def = parse_effect_chain(
+        "target opponent exiles the top card of their library and a card at random from their hand",
+        AbilityKind::Spell,
+    );
+    assert!(subject_exile_has_no_gap(&def), "{def:?}");
+    assert_subject_exile_gap(
+        "target opponent exiles the top card of their library and the top two cards of their library",
+        "subject_exile_object_list",
+    );
 }
 
 /// R-MED (SHAPE). CR 608.2c + CR 115.1: after an earlier instruction that
@@ -33258,12 +33355,14 @@ fn subject_exile_object_list_non_their_library_possessive_is_unimplemented() {
     assert!(is_subject_exile_leg(
         chain[1],
         Zone::Library,
-        ZoneChoiceCandidateSource::LibraryTop
+        ZoneChoiceCandidateSource::LibraryTop,
+        ZoneChoiceGatherRole::Opens
     ));
     assert!(is_subject_exile_leg(
         chain[2],
         Zone::Hand,
-        ZoneChoiceCandidateSource::Direct
+        ZoneChoiceCandidateSource::Direct,
+        ZoneChoiceGatherRole::Joins
     ));
     assert_subject_exile_gap(
         "target opponent exiles the top card of your library and a card at random from their hand",

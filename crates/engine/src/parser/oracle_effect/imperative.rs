@@ -5965,6 +5965,7 @@ pub(super) fn parse_for_each_player_exile_controlled(
         chooser: Chooser::Controller.into(),
         candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
         reciprocal_role: None,
+        gather_role: None,
         up_to,
         selection: CardSelectionMode::Chosen,
         constraint: None,
@@ -6097,6 +6098,7 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
         chooser: Chooser::Controller.into(),
         candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Direct,
         reciprocal_role: None,
+        gather_role: None,
         up_to: false,
         selection: if random.is_some() {
             CardSelectionMode::Random
@@ -6227,12 +6229,32 @@ fn parse_subject_exile_random_zone_object(input: &str) -> OracleResult<'_, Zone>
     .parse(input)
 }
 
+/// CR 701.13a: one object of a "<player> exile[s] …" instruction — the top
+/// cards of a library, or a card at random from the subject's graveyard or
+/// hand.
+fn parse_subject_exile_object<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, SubjectExileObjectAst> {
+    alt((
+        map(
+            |i| parse_subject_exile_library_top(i, ctx),
+            SubjectExileObjectAst::LibraryTop,
+        ),
+        map(
+            parse_subject_exile_random_zone_object,
+            SubjectExileObjectAst::AtRandomFrom,
+        ),
+    ))
+    .parse(input)
+}
+
 /// CR 701.13a + CR 608.2f: the objects of a third-person "<player> exile[s]
-/// A[, B][, and C]" instruction — a library object first, then any number of
-/// at-random objects. An action taken on multiple objects is processed
-/// simultaneously (CR 608.2f), so the caller lowers two or more objects as one
-/// exile action. The remainder is returned unconsumed; the caller decides
-/// whether it is terminal.
+/// A[, B][, and C]" instruction, in printed order and in any order of kinds.
+/// An action taken on multiple objects is processed simultaneously (CR
+/// 608.2f), so the caller lowers two or more objects as one exile action. The
+/// remainder is returned unconsumed; the caller decides whether it is
+/// terminal.
 pub(super) fn parse_subject_exile_object_list<'a>(
     input: &'a str,
     ctx: &ParseContext,
@@ -6241,17 +6263,14 @@ pub(super) fn parse_subject_exile_object_list<'a>(
         preceded(
             alt((tag::<_, _, OracleError<'_>>("exiles "), tag("exile "))),
             (
-                |i| parse_subject_exile_library_top(i, ctx),
+                |i| parse_subject_exile_object(i, ctx),
                 many0(preceded(
                     alt((tag(", and "), tag(", "), tag(" and "))),
-                    parse_subject_exile_random_zone_object,
+                    |i| parse_subject_exile_object(i, ctx),
                 )),
             ),
         ),
-        |(library_top, at_random_from)| SubjectExileObjectsAst {
-            library_top,
-            at_random_from,
-        },
+        |(first, rest)| SubjectExileObjectsAst { first, rest },
     )
     .parse(input)
 }
@@ -6302,6 +6321,7 @@ pub(super) fn parse_for_each_opponent_choose_controlled(
         chooser: Chooser::Controller.into(),
         candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
         reciprocal_role: None,
+        gather_role: None,
         up_to,
         selection: CardSelectionMode::Chosen,
         constraint: None,
@@ -6924,6 +6944,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             chooser: chooser.into(),
             candidate_source,
             reciprocal_role: None,
+            gather_role: None,
             up_to: false,
             selection,
             constraint: None,
@@ -6952,6 +6973,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
                 chooser: chooser.into(),
                 candidate_source,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to,
                 selection,
                 constraint: None,
@@ -17259,6 +17281,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 constraint: None,
@@ -17298,6 +17321,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 constraint: None,
@@ -17382,6 +17406,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 chooser: Chooser::Controller.into(),
                 candidate_source: ZoneChoiceCandidateSource::Direct,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: true,
                 selection: CardSelectionMode::Chosen,
                 constraint,

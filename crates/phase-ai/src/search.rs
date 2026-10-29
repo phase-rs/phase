@@ -17767,6 +17767,7 @@ mod tests {
                     chooser: engine::types::ability::Chooser::Controller.into(),
                     candidate_source: engine::types::ability::ZoneChoiceCandidateSource::Legacy,
                     reciprocal_role: None,
+                    gather_role: None,
                     up_to: true,
                     constraint: Some(
                         engine::types::ability::ChooseFromZoneConstraint::DistinctCardTypes {

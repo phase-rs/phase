@@ -2205,14 +2205,21 @@ pub(crate) enum ZoneCounterImperativeAst {
 }
 
 /// CR 701.13a + CR 608.2f: the objects of a "<player> exiles A[, B][, and C]"
-/// instruction — a library object first, then any number of at-random objects.
+/// instruction, in printed order. The list is non-empty by construction: a
+/// first object, then any further ones.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct SubjectExileObjectsAst {
-    /// The first object: the top cards of a library.
-    pub(crate) library_top: SubjectExileLibraryTopAst,
-    /// CR 701.13a: each further object is one card selected at random from the
-    /// subject's graveyard or hand, in printed order.
-    pub(crate) at_random_from: Vec<Zone>,
+    pub(crate) first: SubjectExileObjectAst,
+    pub(crate) rest: Vec<SubjectExileObjectAst>,
+}
+
+/// CR 701.13a: one object of a "<player> exiles …" instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum SubjectExileObjectAst {
+    /// The top cards of a library.
+    LibraryTop(SubjectExileLibraryTopAst),
+    /// One card selected at random from the subject's graveyard or hand.
+    AtRandomFrom(Zone),
 }
 
 /// CR 401.2 + CR 701.13a: the top N cards of `owner`'s library. `owner` is the

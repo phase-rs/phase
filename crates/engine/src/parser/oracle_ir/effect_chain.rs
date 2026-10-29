@@ -1565,7 +1565,13 @@ impl ClauseDraft<'_> {
             }
         }
         let id = ClauseId(self.builder.next_clause_id);
-        let declares_chosen_clause = if matches!(&self.parsed.effect, Effect::TargetOnly { .. }) {
+        // CR 608.2c + CR 115.1: a `TargetOnly` clause whose lowering minted a
+        // group for the player it announces (`declared_player_group`) bound its
+        // own continuations to that group, so it declares that group in place of
+        // the clause-id group every other `TargetOnly` producer carries.
+        let declares_chosen_clause = if self.declared_player_group.is_some() {
+            None
+        } else if matches!(&self.parsed.effect, Effect::TargetOnly { .. }) {
             if matches!(
                 self.condition,
                 Some(AbilityCondition::AdditionalCostPaidInstead)

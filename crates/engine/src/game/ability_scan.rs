@@ -511,8 +511,8 @@ fn scan_zone_choice_candidate_source(
     zone: crate::types::zones::Zone,
 ) -> Axes {
     match candidate_source {
-        // `LibraryTop` is `Direct` narrowed to the library's top edge (CR 401.2):
-        // a read of a non-battlefield zone.
+        // `LibraryTop` is `Direct` narrowed to the library's top edge: a read of
+        // a non-battlefield zone.
         ZoneChoiceCandidateSource::Direct | ZoneChoiceCandidateSource::LibraryTop => {
             if zone == crate::types::zones::Zone::Battlefield {
                 Axes {
@@ -1827,6 +1827,9 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             filter,
             candidate_source,
             reciprocal_role,
+            // Names only the tracked set the pick is published into; the pool
+            // is read via `candidate_source`, and neither role reads the set.
+            gather_role: _,
             ..
         } => {
             let mut acc = Axes::NONE;
@@ -7760,6 +7763,7 @@ mod tests {
             chooser: ZoneChoiceChooser::Controller,
             candidate_source,
             reciprocal_role,
+            gather_role: None,
             up_to: false,
             selection: Default::default(),
             constraint: None,

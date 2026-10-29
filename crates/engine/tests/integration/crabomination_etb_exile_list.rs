@@ -399,7 +399,7 @@ fn crabomination_three_player_touches_only_target() {
     assert_eq!(state.objects[&p0_hand].zone, Zone::Hand);
 }
 
-/// R7 (multi-authority). CR 607.2a + CR 608.2c: "cards exiled this way" is this
+/// R7 (multi-authority). CR 608.2c: "cards exiled this way" is this
 /// resolution's batch, not every card linked to Crabomination. A castable card
 /// already linked to the same source is not offered.
 #[test]
@@ -706,6 +706,165 @@ fn subject_exile_list_gathers_only_its_own_objects_after_an_earlier_exile() {
     );
     assert_eq!(runner.state().objects[&p1_lib].zone, Zone::Exile);
     assert_eq!(runner.state().objects[&p1_hand].zone, Zone::Exile);
+    let creature_moves = outcome
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, .. } if *object_id == creature
+            )
+        })
+        .count();
+    assert_eq!(
+        creature_moves, 1,
+        "the earlier card is exiled once, not again"
+    );
+    let (player, candidates, remaining) = free_cast_window(outcome.final_waiting_for());
+    assert_eq!(player, P0);
+    assert_eq!(remaining, Some(1));
+    assert_eq!(sorted(candidates), sorted(vec![p1_lib, p1_hand]));
+}
+
+/// Hostile (illegal subject, MED-1). CR 608.2b: when the list's subject is no
+/// longer a legal target at resolution, the part of the effect that needs that
+/// player doesn't happen, so the list exiles nothing — and its single exile
+/// action still reads only the list's own (empty) gathered set, never the set
+/// the earlier instruction published. The earlier card is moved once and is
+/// not offered among the cards "exiled this way".
+#[test]
+fn subject_exile_list_with_an_illegal_subject_gathers_nothing_from_an_earlier_exile() {
+    const ORACLE: &str = "Exile target creature an opponent controls. Target opponent exiles the top card of their library and a card at random from their hand. You may cast a spell from among cards exiled this way without paying its mana cost.";
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Illegal Subject Probe", false, ORACLE)
+        .id();
+    let creature = scenario.add_creature(P2, "P2 Creature", 2, 2).id();
+    scenario.add_spell_to_library_top(P1, "P1 Filler", false);
+    scenario.add_spell_to_library_top(P1, "P1 Library", false);
+    scenario.add_spell_to_hand(P1, "P1 Hand", true);
+    let mut runner = scenario.build();
+    drop(
+        runner
+            .cast(spell)
+            .target_object(creature)
+            .target_player(P1)
+            .commit(),
+    );
+    assert_eq!(runner.state().stack.len(), 1, "the spell is on the stack");
+    // The subject leaves the game before the spell resolves (CR 800.4a: its
+    // cards leave with it), so it is no longer a legal target (CR 608.2b); the
+    // creature target stays legal.
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("a player may concede");
+
+    let mut events = Vec::new();
+    for _ in 0..12 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority is legal")
+                .events,
+        );
+    }
+
+    // Reach-guard: the first instruction exiled the creature.
+    let state = runner.state();
+    assert_eq!(state.objects[&creature].zone, Zone::Exile);
+
+    let creature_moves = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, .. } if *object_id == creature
+            )
+        })
+        .count();
+    assert_eq!(
+        creature_moves, 1,
+        "the earlier card is exiled once, not again"
+    );
+    if let WaitingFor::CastOffer {
+        kind: CastOfferKind::FreeCastWindow { candidates, .. },
+        ..
+    } = &state.waiting_for
+    {
+        assert!(
+            !candidates.contains(&creature),
+            "the earlier card is not one of the cards exiled this way: {candidates:?}"
+        );
+    }
+
+    // Reach-guard: both legs of the list ran, and the spell finished resolving.
+    let list_legs = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved { kind: EffectKind::ChooseFromZone, source_id, .. }
+                    if *source_id == spell
+            )
+        })
+        .count();
+    assert_eq!(list_legs, 2, "the library and hand legs each resolve");
+    assert!(state.stack.is_empty(), "the spell finished resolving");
+    assert_ne!(state.objects[&spell].zone, Zone::Stack);
+}
+
+/// Hostile (at-random object first, MED-2a). CR 608.2c + CR 608.2f: the
+/// objects may be listed in any order. With the at-random object first, both
+/// objects are still exiled by the list's one action, and the card an earlier
+/// instruction of the same resolution exiled is neither moved again nor
+/// offered among the cards "exiled this way".
+#[test]
+fn subject_exile_list_at_random_first_gathers_only_its_own_objects() {
+    const ORACLE: &str = "Exile target creature an opponent controls. Target opponent exiles a card at random from their hand and the top card of their library. You may cast a spell from among cards exiled this way without paying its mana cost.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "At Random First Probe", false, ORACLE)
+        .id();
+    let creature = scenario.add_creature(P1, "Earlier Creature", 2, 2).id();
+    scenario.add_spell_to_library_top(P1, "P1 Filler", false);
+    let p1_lib = scenario
+        .add_spell_to_library_top(P1, "P1 Library", false)
+        .from_oracle_text("Draw a card.")
+        .id();
+    let p1_hand = scenario
+        .add_spell_to_hand(P1, "P1 Hand", true)
+        .from_oracle_text("Draw a card.")
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner
+        .cast(spell)
+        .target_object(creature)
+        .target_player(P1)
+        .resolve();
+
+    // Reach-guard: the earlier instruction exiled the creature, and both legs
+    // of the list ran.
+    assert_eq!(runner.state().objects[&creature].zone, Zone::Exile);
+    assert_eq!(
+        resolutions(&outcome, spell, EffectKind::ChooseFromZone),
+        2,
+        "the hand and library legs each resolve"
+    );
+    // CR 608.2f: the legs only select; the list's single exile action moves
+    // both objects.
+    assert_eq!(runner.state().objects[&p1_hand].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&p1_lib].zone, Zone::Exile);
+    assert_eq!(
+        resolutions(&outcome, spell, EffectKind::ChangeZoneAll),
+        1,
+        "one exile action moves the list's objects"
+    );
     let creature_moves = outcome
         .events()
         .iter()
