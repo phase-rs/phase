@@ -61664,7 +61664,7 @@ mod restored_exact_attack_authority_tests {
                     return_result_occurrence: None,
                     player: P0,
                     choice: ManaChoicePrompt::SingleColor {
-                        options: vec![ManaColor::Red, ManaColor::Blue],
+                        options: vec![ManaType::Red, ManaType::Blue],
                     },
                     context: ManaChoiceContext::ResolvingEffect(mana_node.clone()),
                 },
@@ -61757,7 +61757,7 @@ mod restored_exact_attack_authority_tests {
                             ManaColorChoiceResume {
                                 player: P0,
                                 choice: ManaChoicePrompt::SingleColor {
-                                    options: vec![ManaColor::Red, ManaColor::Blue],
+                                    options: vec![ManaType::Red, ManaType::Blue],
                                 },
                                 context: ManaChoiceContext::ResolvingEffect(mana_node.clone()),
                             },

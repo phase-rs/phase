@@ -8523,6 +8523,7 @@ fn damage_to_itself_equal_to_power_low_level() {
 #[test]
 fn damage_to_itself_equal_to_power_full_pipeline() {
     use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::TargetRef;
     use crate::types::events::GameEvent;
     use crate::types::phase::Phase;
     // Full pipeline: subject stripping + imperative → should produce DealDamage

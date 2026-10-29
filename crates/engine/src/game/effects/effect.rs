@@ -1868,8 +1868,16 @@ mod tests {
                 replay_departure_start + 1
             );
             assert_eq!(
-                state.zone_changes_this_turn[departure_start..],
-                replay.zone_changes_this_turn[replay_departure_start..]
+                state
+                    .zone_changes_this_turn
+                    .iter()
+                    .skip(departure_start)
+                    .collect::<Vec<_>>(),
+                replay
+                    .zone_changes_this_turn
+                    .iter()
+                    .skip(replay_departure_start)
+                    .collect::<Vec<_>>()
             );
             assert_eq!(
                 state.transient_continuous_effects,

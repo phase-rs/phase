@@ -5745,7 +5745,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
     #[test]
     fn sauron_dino_devotee_mode_body_animation_binds_parent_target() {
         use crate::types::ability::{ContinuousModification, FilterProp, TypeFilter};
-        use crate::types::card_type::{CoreType, SubtypeSet};
+        use crate::types::card_type::SubtypeSet;
         use crate::types::counter::{CounterMatch, CounterType};
         use crate::types::mana::ManaColor;
         use crate::types::Duration;
