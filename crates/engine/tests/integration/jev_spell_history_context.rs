@@ -161,7 +161,75 @@ fn quantity_preservation_complete_faces_survive_both_normal_loaders() {
                 );
             }
             match name {
-                "Lifestream's Blessing" | "Busted!" => {
+                "Lifestream's Blessing" => {
+                    use engine::types::ability::{
+                        AbilityCondition, AggregateFunction, CardTypeSetSource, ControllerRef,
+                        ObjectProperty, PropertyAggregate, QuantityExpr, TargetFilter, TypeFilter,
+                        TypedFilter,
+                    };
+                    assert!(gaps.is_empty(), "{name}: {gaps:?}");
+                    assert_eq!(face.abilities.len(), 1);
+                    assert!(face.triggers.is_empty());
+                    assert!(face.static_abilities.is_empty());
+                    assert!(face.replacements.is_empty());
+                    let definition = &face.abilities[0];
+                    assert_eq!(
+                        definition.announced_x,
+                        Some(QuantityExpr::Ref {
+                            qty: QuantityRef::PropertyAggregate(
+                                PropertyAggregate::new(
+                                    AggregateFunction::Max,
+                                    ObjectProperty::Power,
+                                    CardTypeSetSource::Objects {
+                                        filter: TargetFilter::Typed(TypedFilter {
+                                            type_filters: vec![TypeFilter::Creature],
+                                            controller: Some(ControllerRef::You),
+                                            properties: vec![],
+                                        })
+                                    },
+                                )
+                                .unwrap()
+                            ),
+                        })
+                    );
+                    let x = QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name: "X".into() },
+                    };
+                    assert_eq!(
+                        definition.effect.as_ref(),
+                        &Effect::Draw {
+                            count: x.clone(),
+                            target: TargetFilter::Controller
+                        }
+                    );
+                    assert!(definition.condition.is_none());
+                    let rider = definition
+                        .sub_ability
+                        .as_deref()
+                        .expect("complete exile rider");
+                    assert_eq!(
+                        rider.condition,
+                        Some(AbilityCondition::WasCast {
+                            zone: Some(Zone::Exile)
+                        })
+                    );
+                    assert_eq!(
+                        rider.effect.as_ref(),
+                        &Effect::GainLife {
+                            amount: QuantityExpr::Multiply {
+                                inner: Box::new(x),
+                                factor: 2
+                            },
+                            player: TargetFilter::Controller,
+                        }
+                    );
+                    assert!(rider.sub_ability.is_none());
+                    assert!(bare_x, "the announced X leaves must stay intact");
+                    assert!(face.keywords.iter().any(|keyword| matches!(keyword,
+                        Keyword::Foretell(cost) if *cost == ManaCost::Cost { generic: 4, shards: vec![ManaCostShard::Green] }
+                    )));
+                }
+                "Busted!" => {
                     assert!(
                         !gaps.is_empty(),
                         "{name} must retain its honest unsupported definition"
@@ -191,6 +259,64 @@ fn quantity_preservation_complete_faces_survive_both_normal_loaders() {
             }
         }
     }
+}
+
+#[test]
+fn slime_owned_zone_union_counts_each_matching_card_once() {
+    // CR 108.3 + CR 109.2a + CR 201.2: the printed union counts owned cards
+    // in these zones, with either predicate sufficient and both counted once.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_to_exile(P0, "Owned exile Ooze", 1, 1)
+        .with_subtypes(vec!["Ooze"]);
+    scenario.add_spell_to_graveyard(P0, "Slime Against Humanity", false);
+    scenario
+        .add_creature_to_exile(P0, "Slime Against Humanity", 1, 1)
+        .with_subtypes(vec!["Ooze"]);
+    scenario.add_spell_to_exile(P0, "Nonmatching owned exile card", true);
+    scenario.add_spell_to_graveyard(P0, "Nonmatching owned graveyard card", false);
+    scenario
+        .add_creature_to_exile(P1, "Slime Against Humanity", 1, 1)
+        .with_subtypes(vec!["Ooze"]);
+    scenario
+        .add_creature_to_graveyard(P1, "Slime Against Humanity", 1, 1)
+        .with_subtypes(vec!["Ooze"]);
+    scenario
+        .add_creature(P0, "Slime Against Humanity", 1, 1)
+        .with_subtypes(vec!["Ooze"]);
+    let spell = scenario.add_spell_to_hand_from_oracle(P0, "Slime Against Humanity", false,
+        "Create a 0/0 green Ooze creature token with trample. Put X +1/+1 counters on it, where X is two plus the total number of cards you own in exile and in your graveyard that are Oozes or are named Slime Against Humanity.\nA deck can have any number of cards named Slime Against Humanity.")
+        .with_mana_cost(ManaCost::Cost { generic: 2, shards: vec![ManaCostShard::Green] }).id();
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    let tokens: Vec<_> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| {
+            object.is_token && object.zone == Zone::Battlefield && object.name == "Ooze"
+        })
+        .collect();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(
+        tokens[0]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        5
+    );
+    assert!(tokens[0].keywords.contains(&Keyword::Trample));
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    settled(&runner);
 }
 
 #[test]

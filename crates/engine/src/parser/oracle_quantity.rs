@@ -20,7 +20,9 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
-use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value};
+use nom::combinator::{
+    all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
+};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -90,16 +92,40 @@ mod retained_spell_history_tests {
                 qty: expected.clone()
             })
         );
+        let each_expected = QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Fungus".into()), TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }),
+        };
         assert_eq!(
-            parse_for_each_clause("for each creature you control that is a Fungus"),
-            Some(QuantityRef::ObjectCount {
-                filter: TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![TypeFilter::Subtype("Fungus".into()), TypeFilter::Creature],
-                    controller: Some(ControllerRef::You),
-                    properties: vec![],
-                })
-            })
+            parse_for_each_clause("creature you control that is a Fungus"),
+            Some(each_expected.clone())
         );
+        assert_eq!(
+            all_consuming(nom_quantity::parse_for_each)
+                .parse("for each creature you control that is a Fungus"),
+            Ok(("", each_expected))
+        );
+        assert!(parse_for_each_clause("for each creature you control that is a Fungus").is_none());
+        for inner in [
+            "",
+            "you control",
+            "creature you control that is",
+            "creature you control that is a Fungus inexplicably",
+        ] {
+            let mut context = ParseContext::default();
+            let before = format!("{context:?}");
+            assert!(
+                parse_for_each_clause_with_context(inner, &mut context).is_none(),
+                "{inner}"
+            );
+            assert_eq!(format!("{context:?}"), before);
+            assert!(all_consuming(nom_quantity::parse_for_each)
+                .parse(&format!("for each {inner}"))
+                .is_err());
+        }
         for source in [
             "the number of creatures you control that are Fungi or mysterious",
             "the number of creatures you control that are Fungi or have",
@@ -1199,6 +1225,12 @@ pub(crate) fn parse_cda_quantity_with_context(
         return parse_quantity_ref_with_context(text, ctx).map(|qty| QuantityExpr::Ref { qty });
     }
 
+    // The complete owned-zone type/name adapter owns its entire operand before
+    // the generic relative-card grammar can commit to a narrower predicate.
+    if let Ok((_, expr)) = parse_owned_cards_in_zones_with_property_filter(text) {
+        return Some(expr);
+    }
+
     match nom_quantity::parse_quantity_ref.parse(text) {
         Ok((rest, qty)) if rest.is_empty() => {
             return Some(QuantityExpr::Ref {
@@ -1211,12 +1243,6 @@ pub(crate) fn parse_cda_quantity_with_context(
 
     if let Some(qty) = parse_milled_this_way_count(text) {
         return Some(QuantityExpr::Ref { qty });
-    }
-
-    if let Ok((rest, expr)) = parse_owned_cards_in_zones_with_property_filter(text) {
-        if rest.is_empty() {
-            return Some(expr);
-        }
     }
 
     if let Ok((rest, expr)) = parse_owned_cards_in_zones_quantity(text) {
@@ -1435,11 +1461,14 @@ fn parse_greatest_among_conjunction(text: &str, ctx: &mut ParseContext) -> Optio
 fn parse_zone_card_that_are_filter_list(input: &str) -> OracleResult<'_, TargetFilter> {
     fn parse_named_card_filter(input: &str) -> OracleResult<'_, TargetFilter> {
         let (rest, _) = tag("named ").parse(input)?;
-        let (rest, name) = alt((
-            terminated(take_until(" or are "), peek(tag(" or are "))),
-            terminated(take_until(" or "), peek(tag(" or "))),
-            take_till1(|c| c == '.' || c == ','),
-        ))
+        let (rest, name) = verify(
+            alt((
+                terminated(take_until(" or are "), peek(tag(" or are "))),
+                terminated(take_until(" or "), peek(tag(" or "))),
+                take_till1(|c| c == '.' || c == ','),
+            )),
+            |name: &str| !name.trim().is_empty(),
+        )
         .parse(rest)?;
         Ok((
             rest,
@@ -8084,7 +8113,7 @@ mod tests {
             panic!("expected summed exile+graveyard counts");
         };
         assert_eq!(zones.len(), 2);
-        for expr in zones.iter() {
+        for (expr, expected_zone) in zones.iter().zip([ZoneRef::Exile, ZoneRef::Graveyard]) {
             match expr {
                 QuantityExpr::Ref {
                     qty:
@@ -8092,10 +8121,11 @@ mod tests {
                             card_types,
                             filter: Some(filter),
                             scope,
-                            ..
+                            zone,
                         },
                 } => {
                     assert_eq!(scope, &CountScope::Owner);
+                    assert_eq!(zone, &expected_zone);
                     assert!(card_types.is_empty());
                     assert_slime_against_humanity_filter(filter);
                 }
@@ -8128,10 +8158,80 @@ mod tests {
         assert_slime_against_humanity_filter(&filter);
     }
 
+    #[test]
+    fn owned_zone_type_name_union_is_complete_and_transactional() {
+        // SHAPE: CR 108.3 + CR 109.2a + CR 201.2: both zones use ownership
+        // and the same exact disjunction, independently of predicate order.
+        for subtype in ["Oozes", "oozes"] {
+            for name in ["Slime Against Humanity", "Other Literal Name"] {
+                let ooze =
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Ooze".into())));
+                let named = TargetFilter::Typed(
+                    TypedFilter::default()
+                        .properties(vec![FilterProp::Named { name: name.into() }]),
+                );
+                for (predicate, filters) in [
+                    (
+                        format!("{subtype} or are named {name}"),
+                        vec![ooze.clone(), named.clone()],
+                    ),
+                    (
+                        format!("named {name} or are {subtype}"),
+                        vec![named.clone(), ooze.clone()],
+                    ),
+                ] {
+                    let filter = TargetFilter::Or { filters };
+                    let expected = QuantityExpr::Offset {
+                        offset: 2,
+                        inner: Box::new(QuantityExpr::Sum {
+                            exprs: [ZoneRef::Exile, ZoneRef::Graveyard]
+                                .into_iter()
+                                .map(|zone| QuantityExpr::Ref {
+                                    qty: QuantityRef::ZoneCardCount {
+                                        zone,
+                                        scope: CountScope::Owner,
+                                        card_types: vec![],
+                                        filter: Some(filter.clone()),
+                                    },
+                                })
+                                .collect(),
+                        }),
+                    };
+                    let source = format!("two plus the total number of cards you own in exile and in your graveyard that are {predicate}");
+                    let mut context = ParseContext::default();
+                    let before = format!("{context:?}");
+                    assert_eq!(
+                        parse_cda_quantity_with_context(&source, &mut context),
+                        Some(expected),
+                        "{source}"
+                    );
+                    assert_eq!(format!("{context:?}"), before);
+                }
+            }
+        }
+        for source in [
+            "the number of cards you own in exile and in your graveyard that are Oozes or are named",
+            "the number of cards you own in exile and in your graveyard that are Oozes or are named   ",
+            "the number of cards you own in exile and in your graveyard that are Oozes or are named   .",
+            "the number of cards you own in exile and in your graveyard that are or are named Other Name",
+            "the number of cards you own in exile and in your graveyard that are nonsuchnoun or are named Other Name",
+            "the number of cards you own in exile and in your graveyard that are named Other Name or are",
+            "the number of cards you own in exile and in your graveyard that are named Other Name or are nonsuchnoun",
+            "the number of cards you own in exile and in your nonsuchzone that are named Other Name or are Oozes",
+            "the number of cards you own in exile and in your graveyard that are named Other Name or are Oozes inexplicably",
+        ] {
+            let mut context = ParseContext::default();
+            let before = format!("{context:?}");
+            assert!(parse_cda_quantity_with_context(source, &mut context).is_none(), "{source}");
+            assert_eq!(format!("{context:?}"), before);
+        }
+    }
+
     fn assert_slime_against_humanity_filter(filter: &TargetFilter) {
         let TargetFilter::Or { filters } = filter else {
             panic!("expected Or filter, got {filter:?}");
         };
+        assert_eq!(filters.len(), 2);
         assert!(filters.iter().any(|filter| {
             matches!(
                 filter,
@@ -8578,28 +8678,74 @@ mod tests {
         assert_eq!(aggregate_filter_controller(&qty), Some(ControllerRef::You));
     }
 
-    /// CR 608.2i: past-tense look-back — "the greatest power among creatures you
-    /// controlled as you cast this spell" (Lifestream's Blessing). The
-    /// discriminating ordering test: `take_until(" you controlled ")` must run
-    /// BEFORE parse_type_phrase_folding so the controller is still resolved to You and
-    /// the head filter is "creatures" (not corrupted by "you control"
-    /// prefix-matching "you controlled").
+    /// SHAPE: CR 608.2i + CR 107.3i: the full announce owner captures X;
+    /// an ordinary quantity must not replace historical meaning with a live scan.
     #[test]
     fn cda_quantity_greatest_power_snapshot_past_tense() {
-        let qty = parse_cda_quantity(
+        assert!(parse_cda_quantity(
             "the greatest power among creatures you controlled as you cast this spell",
         )
-        .unwrap();
-        assert!(is_property_aggregate(
-            &qty,
-            AggregateFunction::Max,
-            ObjectProperty::Power
-        ));
-        assert_eq!(
-            aggregate_filter_controller(&qty),
-            Some(ControllerRef::You),
-            "past-tense look-back must re-inject controller You via inject_controller_you"
+        .is_none());
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Draw X cards, where X is the greatest power among creatures you controlled as you cast this spell. If this spell was cast from exile, you gain twice X life.\nForetell {4}{G} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)",
+            "Lifestream's Blessing", &["Foretell".into()], &["Instant".into()], &[],
         );
+        assert_eq!(parsed.abilities.len(), 1);
+        let definition = &parsed.abilities[0];
+        let expected = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Max,
+                    ObjectProperty::Power,
+                    crate::types::ability::CardTypeSetSource::Objects {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: Some(ControllerRef::You),
+                            properties: vec![],
+                        }),
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+        assert_eq!(definition.announced_x, Some(expected));
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name: "X".into() },
+        };
+        assert_eq!(
+            definition.effect.as_ref(),
+            &crate::types::ability::Effect::Draw {
+                count: x.clone(),
+                target: TargetFilter::Controller
+            }
+        );
+        assert!(definition.condition.is_none());
+        let rider = definition
+            .sub_ability
+            .as_deref()
+            .expect("printed exile life rider");
+        assert_eq!(
+            rider.condition,
+            Some(crate::types::ability::AbilityCondition::WasCast {
+                zone: Some(Zone::Exile)
+            })
+        );
+        assert_eq!(
+            rider.effect.as_ref(),
+            &crate::types::ability::Effect::GainLife {
+                amount: QuantityExpr::Multiply {
+                    inner: Box::new(x),
+                    factor: 2
+                },
+                player: TargetFilter::Controller,
+            }
+        );
+        assert!(rider.sub_ability.is_none());
+        assert!(parsed.extracted_keywords.iter().any(|keyword| matches!(keyword,
+            crate::types::keywords::Keyword::Foretell(cost) if *cost == crate::types::mana::ManaCost::Cost {
+                generic: 4, shards: vec![crate::types::mana::ManaCostShard::Green],
+            }
+        )));
     }
 
     /// Regression: the existing no-snapshot present-tense aggregate must still

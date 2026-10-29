@@ -13540,7 +13540,13 @@ pub(super) fn apply_where_x_ability_expression(
     // happens to be read (resolution, for a damage amount or a draw count), which is
     // precisely the behaviour the printed qualifier exists to forbid.
     if let Some(locked) = where_x_expression.and_then(strip_announce_lock) {
-        match parse_where_x_quantity_expression(locked) {
+        let lower = locked.to_lowercase();
+        let announced =
+            super::super::oracle_nom::quantity::parse_announce_locked_past_aggregate(&lower)
+                .ok()
+                .map(|(_, qty)| QuantityExpr::Ref { qty })
+                .or_else(|| parse_where_x_quantity_expression(locked));
+        match announced {
             Some(expr) => {
                 def.announced_x = Some(expr);
                 return;
@@ -16282,8 +16288,9 @@ mod tests {
 mod where_x_tests {
     use super::{parse_where_x_quantity_expression, strip_trailing_duration};
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
-        DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtValue, QuantityExpr,
+        AbilityDefinition, AbilityKind, AggregateFunction, CardTypeSetSource, Comparator,
+        ContinuousModification, ControllerRef, DigSource, Duration, Effect, FilterProp,
+        ObjectProperty, ObjectScope, PlayerScope, PropertyAggregate, PtValue, QuantityExpr,
         QuantityRef, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::counter::CounterType;
@@ -16739,6 +16746,81 @@ mod where_x_tests {
             super::strip_announce_lock("X as you cast this spell plus the number of Islands"),
             None
         );
+    }
+
+    #[test]
+    fn past_aggregate_requires_the_complete_announce_owner() {
+        // SHAPE: CR 608.2i + CR 107.3i: only an explicit announcement boundary
+        // licenses measuring this population into the existing single-X channel.
+        for (head, function, property) in [
+            (
+                "the greatest power among ",
+                AggregateFunction::Max,
+                ObjectProperty::Power,
+            ),
+            (
+                "the total toughness of ",
+                AggregateFunction::Sum,
+                ObjectProperty::Toughness,
+            ),
+        ] {
+            for suffix in [" as you cast this spell", " as you activate this ability"] {
+                let mut definition = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::Variable { name: "X".into() },
+                        },
+                        target: TargetFilter::Controller,
+                    },
+                );
+                let expression = format!("{head}creatures you controlled{suffix}");
+                super::apply_where_x_ability_expression(&mut definition, Some(&expression));
+                assert_eq!(
+                    definition.announced_x,
+                    Some(QuantityExpr::Ref {
+                        qty: QuantityRef::PropertyAggregate(
+                            PropertyAggregate::new(
+                                function,
+                                property,
+                                CardTypeSetSource::Objects {
+                                    filter: TargetFilter::Typed(TypedFilter {
+                                        type_filters: vec![TypeFilter::Creature],
+                                        controller: Some(ControllerRef::You),
+                                        properties: vec![],
+                                    })
+                                }
+                            )
+                            .unwrap()
+                        ),
+                    })
+                );
+                assert!(
+                    matches!(definition.effect.as_ref(), Effect::Draw { count: QuantityExpr::Ref { qty: QuantityRef::Variable { name } }, .. } if name == "X")
+                );
+            }
+        }
+        for expression in [
+            "the greatest power among creatures you controlled",
+            "the greatest power among creatures you controlled as you cast your last spell",
+            "the greatest power among creatures you controlled as you cast this spell inexplicably",
+            "the greatest power among you controlled as you cast this spell",
+            "the greatest power among legendary you controlled as you cast this spell",
+            "the greatest power among nonsuchnoun you controlled as you cast this spell",
+            "the greatest power among creatures an opponent controlled as you cast this spell",
+            "the greatest power among creatures they controlled as you cast this spell",
+            "the greatest power among creatures that player controlled as you cast this spell",
+            "the greatest power among creatures its controller controlled as you cast this spell",
+            "the greatest power among creatures you controlled that were exiled this way as you cast this spell",
+        ] {
+            let mut definition = AbilityDefinition::new(AbilityKind::Spell, Effect::Draw {
+                count: QuantityExpr::Ref { qty: QuantityRef::Variable { name: "X".into() } },
+                target: TargetFilter::Controller,
+            });
+            super::apply_where_x_ability_expression(&mut definition, Some(expression));
+            assert!(definition.announced_x.is_none(), "{expression}");
+            assert!(matches!(definition.effect.as_ref(), Effect::Unimplemented { .. }), "{expression}: {definition:?}");
+        }
     }
 
     #[test]

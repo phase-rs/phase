@@ -2411,6 +2411,39 @@ pub(crate) fn parse_historical_zone_aggregate(
     ))
 }
 
+/// CR 608.2i + CR 107.3i: only the proven announce-lock owner may measure this
+/// past-controller population now and publish its single captured X value.
+/// This operand parser deliberately does not participate in ordinary quantities.
+pub(crate) fn parse_announce_locked_past_aggregate(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (population, (function, property)) = parse_object_property_aggregate_head(input)?;
+    let antecedents = PlayerAntecedents::default();
+    let (noun, controller, rest) = scan_preceded(population, |i| {
+        map_opt(
+            verify(parse_controller_phrase, |phrase| {
+                phrase.tense == ControllerTense::Past
+            }),
+            |phrase| {
+                let controller = bind_controller_phrase(&phrase, &antecedents)?;
+                admits_quantity_controller(&controller, phrase.form).then_some(controller)
+            },
+        )
+        .parse(i)
+    })
+    .ok_or_else(|| oracle_err(input))?;
+    let (rest, _) = eof(rest)?;
+    let (mut filter, remaining) = parse_type_phrase_folding(noun.trim());
+    if !remaining.is_empty()
+        || !matches!(&filter, TargetFilter::Typed(typed) if !typed.type_filters.is_empty())
+    {
+        return Err(oracle_err(input));
+    }
+    attach_controller_to_quantity_filter(&mut filter, controller);
+    let aggregate =
+        PropertyAggregate::new(function, property, CardTypeSetSource::Objects { filter })
+            .map_err(|_| oracle_err(input))?;
+    Ok((rest, QuantityRef::PropertyAggregate(aggregate)))
+}
+
 /// A historical source cannot fall through to the current-object population grammar.
 pub(crate) fn is_historical_zone_aggregate(input: &str) -> bool {
     let Ok((population, _)) = parse_object_property_aggregate_head(input) else {
@@ -15766,24 +15799,59 @@ mod tests {
         );
     }
 
-    /// A non-type "that are" clause (e.g. "that are tapped") must NOT be
-    /// consumed by the optional type-list clause — the `opt` returns `None` and
-    /// the count keeps the head type, leaving the clause for a later parser.
+    /// SHAPE: the complete qualified noun owns state predicates as well as types.
     #[test]
     fn parse_quantity_ref_controlled_type_non_type_clause_falls_through() {
         let (rest, q) =
             parse_number_of_controlled_type("creatures you control that are tapped").unwrap();
-        assert_eq!(rest, " that are tapped");
+        assert_eq!(rest, "");
         assert_eq!(
             q,
             QuantityRef::ObjectCount {
                 filter: TargetFilter::Typed(TypedFilter {
                     type_filters: vec![TypeFilter::Creature],
                     controller: Some(ControllerRef::You),
-                    properties: Vec::new(),
+                    properties: vec![FilterProp::Tapped],
                 }),
             }
         );
+        for (tail, properties) in [
+            ("", vec![]),
+            (" that are untapped", vec![FilterProp::Untapped]),
+        ] {
+            assert_eq!(
+                parse_number_of_controlled_type(&format!("creatures you control{tail}")),
+                Ok((
+                    "",
+                    QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: Some(ControllerRef::You),
+                            properties,
+                        })
+                    }
+                ))
+            );
+        }
+        for tail in [
+            " that are",
+            " that are mysterious",
+            " that are tapped inexplicably",
+        ] {
+            let source = format!("the number of creatures you control{tail}");
+            assert!(parse_quantity_ref_complete(&source).is_err(), "{source}");
+            let mut context = ParseContext::default();
+            let before = format!("{context:?}");
+            assert!(
+                crate::parser::oracle_quantity::parse_cda_quantity_with_context(
+                    &source,
+                    &mut context
+                )
+                .is_none()
+            );
+            assert_eq!(format!("{context:?}"), before);
+            assert!(crate::parser::oracle_quantity::parse_quantity_ref(&source).is_none());
+        }
     }
 
     /// CR 120.9 + CR 115.1: "(the) damage dealt to target opponent this turn"
