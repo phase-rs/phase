@@ -41427,7 +41427,7 @@ fn unparsed_as_long_as_gate_policy_has_one_authority() {
                 type_filters: vec![],
                 controller: None,
                 properties: vec![FilterProp::WithKeyword {
-                    keyword: Keyword::Defender,
+                    value: Keyword::Defender,
                 }],
             }),
         })
