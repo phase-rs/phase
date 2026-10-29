@@ -15298,11 +15298,13 @@ pub(crate) fn is_retained_instruction_result_carrier(
     })
 }
 
-fn retained_instruction_result_projection(
+fn retained_instruction_result_origin_projection(
     state: &GameState,
-    occurrence: Option<ReturnResultOccurrenceId>,
+    occurrence: ReturnResultOccurrenceId,
     program: &ResolvedAbility,
     body: &ResolvedAbility,
+    frame: &ReturnResultFrame,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
 ) -> bool {
     if let Some(choice) = retained_result_waits(state)
         .into_iter()
@@ -15312,29 +15314,33 @@ fn retained_instruction_result_projection(
                 choice,
                 context: ManaChoiceContext::ResolvingEffect(pending),
                 ..
-            } if *return_result_occurrence == occurrence && pending.as_ref() == body => {
+            } if *return_result_occurrence == Some(occurrence) && pending.as_ref() == body => {
                 Some(choice)
             }
             _ => None,
         })
     {
         return crate::game::effects::mana::admitted_mana_response_matches_program(
-            state, occurrence, program, body, choice,
+            state,
+            Some(occurrence),
+            program,
+            body,
+            choice,
         );
     }
-    crate::game::effects::instruction_result_owned_program_projects_to(
-        state, occurrence, program, body,
+    crate::game::effects::instruction_result_origin_program_projects_to(
+        state,
+        occurrence,
+        program,
+        body,
+        frame,
+        declarations,
     )
 }
 
-/// Recover missing metadata from the exact invocation's retained executable
-/// authorities. A declaration map or an equal integer on another source is
-/// never a program origin. All edits remain on the decoder-owned state.
-pub(crate) fn recover_return_result_programs(state: &mut GameState) -> Result<(), String> {
-    use crate::types::ability::{classify_instruction_result_invocation, InstructionResultEntry};
-    if state.viewer_projection.is_some() {
-        return Ok(());
-    }
+fn retained_instruction_result_definition_carriers(
+    state: &GameState,
+) -> Result<Vec<(Option<ReturnResultOccurrenceId>, ResolvedAbility)>, String> {
     let mut definition_carriers = Vec::new();
     for frame in state.resolution_stack.iter() {
         if let ResolutionFrame::CoinFlip(pending) = frame {
@@ -15370,194 +15376,280 @@ pub(crate) fn recover_return_result_programs(state: &mut GameState) -> Result<()
             }
         }
     }
+    Ok(definition_carriers)
+}
+
+fn occurrence_instruction_result_carriers<'a>(
+    state: &'a GameState,
+    occurrence: ReturnResultOccurrenceId,
+    frame: &ReturnResultFrame,
+    definition_carriers: &'a [(Option<ReturnResultOccurrenceId>, ResolvedAbility)],
+) -> Result<Vec<&'a ResolvedAbility>, String> {
+    let carriers: Vec<_> = retained_instruction_result_carriers(state)?
+        .into_iter()
+        .chain(
+            definition_carriers
+                .iter()
+                .map(|(owner, body)| (*owner, body)),
+        )
+        .filter(|(owner, body)| {
+            *owner == Some(occurrence) && body.return_result_process == frame.process
+        })
+        .map(|(_, body)| body)
+        .collect();
+    Ok(carriers)
+}
+
+/// Complete retained origins are selected without consulting admitted_program.
+/// Read-only children cannot independently declare the invocation's namespace.
+fn independent_instruction_result_origins(
+    state: &GameState,
+    occurrence: ReturnResultOccurrenceId,
+    frame: &ReturnResultFrame,
+    carriers: &[&ResolvedAbility],
+) -> Vec<(
+    ResolvedAbility,
+    crate::types::ability::ResultProducerEnvironment,
+)> {
+    use crate::types::ability::{classify_instruction_result_invocation, InstructionResultEntry};
+    let mut candidates: Vec<ResolvedAbility> =
+        carriers.iter().map(|body| (*body).clone()).collect();
+    if let Some(root) = state
+        .resolving_stack_entry
+        .as_ref()
+        .and_then(|entry| entry.ability())
+    {
+        let mut bound = root.clone();
+        crate::game::effects::prepare_fresh_die_source_input(state, &mut bound);
+        bound.bind_return_result_process(frame.process);
+        let counter_prompt = retained_result_waits(state).into_iter().any(|waiting| {
+            let WaitingFor::ChooseOneOfBranch {
+                return_result_occurrence,
+                expected_return_result_process,
+                context,
+                branches,
+                parent_occurrences,
+                source_id,
+                controller,
+                continuation,
+                replacement_applied,
+                ..
+            } = waiting
+            else {
+                return false;
+            };
+            let Some(ticket) = &context.counter_removal_result else {
+                return false;
+            };
+            if *return_result_occurrence != Some(occurrence)
+                || ticket.occurrence != occurrence
+                || *expected_return_result_process != frame.process
+                || ticket.process != frame.process
+                || !crate::game::effects::counter_removal_binding_is_valid(state, ticket)
+            {
+                return false;
+            }
+            let mut cursor = bound.clone();
+            cursor.effect = crate::types::ability::Effect::ChooseOneOf {
+                kind: crate::types::ability::ChooseOneOfKind::Ordinary,
+                chooser: crate::types::ability::PlayerFilter::Controller,
+                branches: branches.clone(),
+            };
+            cursor.declares_return_result = None;
+            cursor.else_ability = None;
+            cursor.sub_ability = continuation.clone();
+            cursor.context = context.clone();
+            cursor.source_id = *source_id;
+            cursor.controller = *controller;
+            cursor.replace_target_occurrences(parent_occurrences.occurrences());
+            cursor.replacement_applied = replacement_applied.clone();
+            crate::game::effects::instruction_result_program_projects_to(&bound, &cursor)
+        });
+        if counter_prompt || !carriers.is_empty() {
+            candidates.push(bound);
+        }
+    }
+    for body in carriers {
+        if let Some((source, reference)) = body
+            .trigger_source
+            .as_ref()
+            .zip(body.trigger_definition_ref.as_ref())
+        {
+            for entry in &source.trigger_entries {
+                if source.definition_ref(entry) != *reference {
+                    continue;
+                }
+                if let Some(definition) = entry.definition.execute.as_deref() {
+                    let mut root = crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
+                        definition, body.source_id, body.original_controller.unwrap_or(body.controller),
+                        body.context.chain_root_targets.clone(), body.context.chain_root_targets.clone(),
+                    );
+                    root.inherit_coin_target_inputs(&body.coin_target_input_projection());
+                    root.bind_return_result_process(frame.process);
+                    candidates.push(root);
+                }
+            }
+        }
+        if let Some((object, definition)) = body.ability_index.and_then(|index| {
+            let object = state.objects.get(&body.source_id)?;
+            let birth = body.source_incarnation.or_else(|| {
+                body.trigger_source
+                    .as_ref()
+                    .map(|source| source.identity.reference.incarnation)
+            })?;
+            (object.incarnation == birth).then_some((object, object.abilities.get(index)?))
+        }) {
+            let mut root =
+                crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
+                    definition,
+                    object.id,
+                    body.original_controller.unwrap_or(body.controller),
+                    body.context.chain_root_targets.clone(),
+                    body.context.chain_root_targets.clone(),
+                );
+            root.inherit_coin_target_inputs(&body.coin_target_input_projection());
+            root.bind_return_result_process(frame.process);
+            candidates.push(root);
+        }
+    }
+    let mut meanings = Vec::new();
+    for mut candidate in candidates {
+        crate::game::effects::prepare_fresh_die_source_input(state, &mut candidate);
+        let Ok((_, declarations)) = classify_instruction_result_invocation(
+            &candidate,
+            InstructionResultEntry::Independent,
+            None,
+        ) else {
+            continue;
+        };
+        if declarations.is_empty()
+            || frame
+                .declarations
+                .as_ref()
+                .is_some_and(|saved| saved != &declarations)
+            || frame
+                .results
+                .keys()
+                .any(|id| !declarations.contains_key(id))
+            || !carriers.iter().all(|body| {
+                retained_instruction_result_origin_projection(
+                    state,
+                    occurrence,
+                    &candidate,
+                    body,
+                    frame,
+                    &declarations,
+                )
+            })
+        {
+            continue;
+        }
+        if !meanings.iter().any(|(program, namespace)| {
+            namespace == &declarations
+                && same_instruction_result_invocation_inputs(program, &candidate)
+                && carriers.iter().all(|body| {
+                    retained_instruction_result_origin_projection(
+                        state, occurrence, program, body, frame, namespace,
+                    )
+                })
+        }) {
+            meanings.push((candidate, declarations));
+        }
+    }
+    meanings
+}
+
+fn validate_present_instruction_result_program(
+    state: &GameState,
+    occurrence: ReturnResultOccurrenceId,
+    frame: &ReturnResultFrame,
+    program: &ResolvedAbility,
+    definition_carriers: &[(Option<ReturnResultOccurrenceId>, ResolvedAbility)],
+) -> Result<crate::types::ability::ResultProducerEnvironment, String> {
+    use crate::types::ability::{classify_instruction_result_invocation, InstructionResultEntry};
+    let (_, declarations) =
+        classify_instruction_result_invocation(program, InstructionResultEntry::Independent, None)
+            .map_err(|error| error.to_string())?;
+    if program.return_result_process != frame.process
+        || frame
+            .declarations
+            .as_ref()
+            .is_some_and(|saved| saved != &declarations)
+        || frame
+            .results
+            .keys()
+            .any(|id| !declarations.contains_key(id))
+    {
+        return Err("instruction-result admitted program declaration mismatch".into());
+    }
+    let carriers =
+        occurrence_instruction_result_carriers(state, occurrence, frame, definition_carriers)?;
+    let origins = independent_instruction_result_origins(state, occurrence, frame, &carriers);
+    if !origins.is_empty()
+        && !origins.iter().any(|(origin, _)| {
+            crate::game::effects::instruction_result_program_projects_to(origin, program)
+        })
+    {
+        return Err(
+            "instruction-result admitted program contradicts retained full program origin".into(),
+        );
+    }
+    Ok(declarations)
+}
+
+fn validate_present_instruction_result_programs(state: &GameState) -> Result<(), String> {
+    if state.viewer_projection.is_some() {
+        return Ok(());
+    }
+    let definitions = retained_instruction_result_definition_carriers(state)?;
+    for (occurrence, frame) in &state.return_result_frames {
+        if let Some(program) = frame.admitted_program.as_deref() {
+            validate_present_instruction_result_program(
+                state,
+                *occurrence,
+                frame,
+                program,
+                &definitions,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Recover missing metadata from the exact invocation's retained executable
+/// authorities. A declaration map or an equal integer on another source is
+/// never a program origin. All edits remain on the decoder-owned state.
+pub(crate) fn recover_return_result_programs(state: &mut GameState) -> Result<(), String> {
+    if state.viewer_projection.is_some() {
+        return Ok(());
+    }
+    let definition_carriers = retained_instruction_result_definition_carriers(state)?;
     let mut recovered = Vec::new();
     for (occurrence, frame) in state.return_result_frames.iter() {
         if let Some(program) = frame.admitted_program.as_deref() {
-            let (_, declarations) = classify_instruction_result_invocation(
+            let declarations = validate_present_instruction_result_program(
+                state,
+                *occurrence,
+                frame,
                 program,
-                InstructionResultEntry::Independent,
-                None,
-            )
-            .map_err(|error| error.to_string())?;
-            if program.return_result_process != frame.process
-                || frame
-                    .declarations
-                    .as_ref()
-                    .is_some_and(|saved| saved != &declarations)
-                || frame
-                    .results
-                    .keys()
-                    .any(|id| !declarations.contains_key(id))
-            {
-                return Err("instruction-result admitted program declaration mismatch".into());
-            }
+                &definition_carriers,
+            )?;
             if frame.declarations.is_none() {
                 recovered.push((*occurrence, program.clone(), declarations));
             }
             continue;
         }
-        let carriers: Vec<_> = retained_instruction_result_carriers(state)?
-            .into_iter()
-            .chain(
-                definition_carriers
-                    .iter()
-                    .map(|(owner, body)| (*owner, body)),
-            )
-            .filter(|(owner, body)| {
-                *owner == Some(*occurrence) && body.return_result_process == frame.process
-            })
-            .map(|(_, body)| body)
-            .collect();
+        let carriers = occurrence_instruction_result_carriers(
+            state,
+            *occurrence,
+            frame,
+            &definition_carriers,
+        )?;
         if carriers.is_empty() && frame.results.is_empty() {
             continue;
         }
-        let mut candidates: Vec<ResolvedAbility> =
-            carriers.iter().map(|body| (*body).clone()).collect();
-        if let Some(root) = state
-            .resolving_stack_entry
-            .as_ref()
-            .and_then(|entry| entry.ability())
-        {
-            let mut bound = root.clone();
-            bound.bind_return_result_process(frame.process);
-            let counter_prompt = retained_result_waits(state).into_iter().any(|waiting| {
-                let WaitingFor::ChooseOneOfBranch {
-                    return_result_occurrence,
-                    expected_return_result_process,
-                    context,
-                    branches,
-                    parent_occurrences,
-                    source_id,
-                    controller,
-                    continuation,
-                    replacement_applied,
-                    ..
-                } = waiting
-                else {
-                    return false;
-                };
-                let Some(ticket) = &context.counter_removal_result else {
-                    return false;
-                };
-                if *return_result_occurrence != Some(*occurrence)
-                    || ticket.occurrence != *occurrence
-                    || *expected_return_result_process != frame.process
-                    || ticket.process != frame.process
-                    || !crate::game::effects::counter_removal_binding_is_valid(state, ticket)
-                {
-                    return false;
-                }
-                let mut cursor = bound.clone();
-                cursor.effect = crate::types::ability::Effect::ChooseOneOf {
-                    kind: crate::types::ability::ChooseOneOfKind::Ordinary,
-                    chooser: crate::types::ability::PlayerFilter::Controller,
-                    branches: branches.clone(),
-                };
-                cursor.declares_return_result = None;
-                cursor.else_ability = None;
-                cursor.sub_ability = continuation.clone();
-                cursor.context = context.clone();
-                cursor.source_id = *source_id;
-                cursor.controller = *controller;
-                cursor.replace_target_occurrences(parent_occurrences.occurrences());
-                cursor.replacement_applied = replacement_applied.clone();
-                crate::game::effects::instruction_result_program_projects_to(&bound, &cursor)
-            });
-            if counter_prompt
-                || carriers
-                    .iter()
-                    .any(|body| same_instruction_result_invocation_inputs(root, body))
-            {
-                candidates.push(bound);
-            }
-        }
-        for body in &carriers {
-            if let Some((source, reference)) = body
-                .trigger_source
-                .as_ref()
-                .zip(body.trigger_definition_ref.as_ref())
-            {
-                for entry in &source.trigger_entries {
-                    if source.definition_ref(entry) != *reference {
-                        continue;
-                    }
-                    if let Some(definition) = entry.definition.execute.as_deref() {
-                        let mut root = crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
-                            definition, body.source_id, body.original_controller.unwrap_or(body.controller),
-                            body.context.chain_root_targets.clone(), body.context.chain_root_targets.clone(),
-                        );
-                        root.inherit_coin_target_inputs(&body.coin_target_input_projection());
-                        root.bind_return_result_process(frame.process);
-                        candidates.push(root);
-                    }
-                }
-            }
-            if let Some((object, definition)) = body.ability_index.and_then(|index| {
-                let object = state.objects.get(&body.source_id)?;
-                let birth = body.source_incarnation.or_else(|| {
-                    body.trigger_source
-                        .as_ref()
-                        .map(|source| source.identity.reference.incarnation)
-                })?;
-                (object.incarnation == birth).then_some((object, object.abilities.get(index)?))
-            }) {
-                let mut root =
-                    crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
-                        definition,
-                        object.id,
-                        body.original_controller.unwrap_or(body.controller),
-                        body.context.chain_root_targets.clone(),
-                        body.context.chain_root_targets.clone(),
-                    );
-                root.inherit_coin_target_inputs(&body.coin_target_input_projection());
-                root.bind_return_result_process(frame.process);
-                candidates.push(root);
-            }
-        }
-        let mut meanings = Vec::new();
-        for candidate in candidates {
-            let Ok((_, declarations)) = classify_instruction_result_invocation(
-                &candidate,
-                InstructionResultEntry::Independent,
-                None,
-            ) else {
-                continue;
-            };
-            if declarations.is_empty()
-                || frame
-                    .declarations
-                    .as_ref()
-                    .is_some_and(|saved| saved != &declarations)
-                || frame
-                    .results
-                    .keys()
-                    .any(|id| !declarations.contains_key(id))
-                || !carriers.iter().all(|body| {
-                    retained_instruction_result_projection(
-                        state,
-                        Some(*occurrence),
-                        &candidate,
-                        body,
-                    )
-                })
-            {
-                continue;
-            }
-            if !meanings.iter().any(|(program, namespace)| {
-                namespace == &declarations
-                    && same_instruction_result_invocation_inputs(program, &candidate)
-                    && carriers.iter().all(|body| {
-                        retained_instruction_result_projection(
-                            state,
-                            Some(*occurrence),
-                            program,
-                            body,
-                        )
-                    })
-            }) {
-                meanings.push((candidate, declarations));
-            }
-        }
+        let mut meanings =
+            independent_instruction_result_origins(state, *occurrence, frame, &carriers);
         let Some((program, declarations)) = meanings.pop() else {
             return Err(format!("instruction-result occurrence {:?} has unrecoverable full program origin after retained authority recovery", occurrence));
         };
@@ -16898,6 +16990,7 @@ fn validate_retained_counter_result_owners(state: &GameState) -> Result<(), Stri
 
 pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<(), String> {
     validate_retained_counter_result_owners(state)?;
+    validate_present_instruction_result_programs(state)?;
     state
         .resolution_stack
         .validate_independent_departure_scopes()?;

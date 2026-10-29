@@ -1510,6 +1510,29 @@ mod admitted_branch_public_tests {
             let frame = &runner.state().return_result_frames[&occurrence];
             assert_eq!(frame.process, pending.expected_return_result_process);
             assert!(frame.admitted_program.is_some());
+            let mut retained_root = runner
+                .state()
+                .resolving_stack_entry
+                .as_ref()
+                .expect("the public producer retains its actual complete resolving entry")
+                .ability()
+                .unwrap()
+                .clone();
+            assert_eq!(retained_root.source_id, source);
+            assert_eq!(
+                retained_root.declares_return_result,
+                Some(ReturnResultId(7))
+            );
+            crate::game::effects::prepare_fresh_die_source_input(
+                runner.state(),
+                &mut retained_root,
+            );
+            retained_root.bind_return_result_process(frame.process);
+            assert!(crate::game::effects::instruction_result_projection_eq(
+                &retained_root,
+                frame.admitted_program.as_deref().unwrap()
+            ));
+            assert_eq!(pending.return_result_occurrence, Some(occurrence));
             assert!(
                 matches!(&frame.results[&ReturnResultId(7)], InstructionResult::ZoneChanges(records) if records.len() == if empty { 0 } else { 2 })
             );
@@ -1582,6 +1605,69 @@ mod admitted_branch_public_tests {
                     rng_before,
                     "owner fault {fault}"
                 );
+                if fault == 0 {
+                    assert_eq!(hostile.resolving_stack_entry, paused.resolving_stack_entry);
+                    assert_eq!(
+                        hostile.active_coin_flip_frame(),
+                        paused.active_coin_flip_frame()
+                    );
+                    let (_, declarations) = classify_instruction_result_invocation(
+                        &retained_root,
+                        InstructionResultEntry::Independent,
+                        None,
+                    )
+                    .unwrap();
+                    let actual_frame = &hostile.return_result_frames[&occurrence];
+                    assert_eq!(actual_frame.declarations.as_ref(), Some(&declarations));
+                    let pending = hostile.active_coin_flip_frame().unwrap();
+                    for (outcome, definition) in [
+                        (CoinFlipResult::Won, pending.win_effect.as_deref()),
+                        (CoinFlipResult::Lost, pending.lose_effect.as_deref()),
+                    ] {
+                        let body = build_flip_branch(
+                            &hostile,
+                            definition,
+                            outcome,
+                            pending.source_id,
+                            pending.controller,
+                            &pending.targets,
+                            &pending.chain_root_targets,
+                            &pending.branch_context,
+                            pending.expected_return_result_process,
+                        )
+                        .unwrap()
+                        .expect("both actual retained branches are present");
+                        assert!(
+                            crate::game::effects::instruction_result_origin_program_projects_to(
+                                &hostile,
+                                occurrence,
+                                &retained_root,
+                                &body,
+                                actual_frame,
+                                &declarations,
+                            ),
+                            "corrupting only the cache cannot erase the independent public origin"
+                        );
+                    }
+                    assert!(serde_json::from_value::<GameState>(before.clone()).is_err());
+                    assert!(serde_json::from_value::<TrustedGameStateEnvelope>(
+                        serde_json::to_value(TrustedGameStateEnvelope::capture(hostile.clone()))
+                            .unwrap()
+                    )
+                    .is_err());
+                    assert!(
+                        serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                            serde_json::to_value(
+                                crate::types::resolution::ResolutionStateWire::from_game_state(
+                                    hostile.clone()
+                                )
+                            )
+                            .unwrap()
+                        )
+                        .is_err()
+                    );
+                    assert_eq!(serde_json::to_value(&hostile).unwrap(), before);
+                }
             }
             for (actor, keep_indices) in
                 [(P1, vec![1]), (P0, vec![]), (P0, vec![2]), (P0, vec![0, 0])]

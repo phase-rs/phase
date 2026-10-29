@@ -5866,6 +5866,33 @@ mod tests {
             assert!(matches!(admitted.effect, Effect::ChangeZoneAll { .. }));
             assert_eq!(admitted.source_id, source);
             assert_eq!(admitted.return_result_process, body.return_result_process);
+            if public {
+                let mut retained_root = runner
+                    .state()
+                    .resolving_stack_entry
+                    .as_ref()
+                    .expect("the public paid producer retains its complete resolving entry")
+                    .ability()
+                    .unwrap()
+                    .clone();
+                assert_eq!(retained_root.source_id, source);
+                assert_eq!(
+                    retained_root.declares_return_result,
+                    Some(ReturnResultId(7))
+                );
+                super::super::prepare_fresh_die_source_input(runner.state(), &mut retained_root);
+                retained_root.bind_return_result_process(body.return_result_process);
+                assert!(super::super::instruction_result_projection_eq(
+                    &retained_root,
+                    admitted
+                ));
+                assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            } else {
+                assert!(runner.state().resolving_stack_entry.is_none());
+                assert!(runner.state().objects[&source].abilities.is_empty());
+                assert!(runner.state().stack.is_empty());
+                assert!(runner.state().resolution_stack.is_empty());
+            }
             let (_, namespace) = crate::types::ability::classify_instruction_result_invocation(
                 admitted,
                 crate::types::ability::InstructionResultEntry::Independent,
@@ -5998,7 +6025,7 @@ mod tests {
                 }
                 assert_eq!(serde_json::to_value(bad.state()).unwrap(), before, "fail before role revalidation, count, recipient deposit, events or choice mutation");
             }
-            for fault in 0..10 {
+            for fault in 0..11 {
                 let mut hostile = runner.state().clone();
                 match fault {
                     0 => {
@@ -6087,11 +6114,220 @@ mod tests {
                             .unwrap()
                             .declares_return_result = None
                     }
+                    10 => {
+                        let WaitingFor::ChooseManaColor {
+                            context: ManaChoiceContext::ResolvingEffect(body),
+                            ..
+                        } = &mut hostile.waiting_for
+                        else {
+                            unreachable!()
+                        };
+                        body.source_id = ObjectId(u64::MAX);
+                        assert_eq!(
+                            hostile.return_result_frames,
+                            runner.state().return_result_frames
+                        );
+                    }
                     _ => unreachable!(),
                 }
                 let before = serde_json::to_value(&hostile).unwrap();
+                let rng_before = hostile.rng.get_word_pos();
+                if fault == 2 && public {
+                    assert_eq!(
+                        hostile.resolving_stack_entry,
+                        runner.state().resolving_stack_entry
+                    );
+                    assert_eq!(hostile.waiting_for, runner.state().waiting_for);
+                    let frame = &hostile.return_result_frames[&occurrence];
+                    let mut root = hostile
+                        .resolving_stack_entry
+                        .as_ref()
+                        .unwrap()
+                        .ability()
+                        .unwrap()
+                        .clone();
+                    super::super::prepare_fresh_die_source_input(&hostile, &mut root);
+                    root.bind_return_result_process(frame.process);
+                    assert!(super::super::instruction_result_projection_eq(
+                        &root,
+                        runner.state().return_result_frames[&occurrence]
+                            .admitted_program
+                            .as_deref()
+                            .unwrap()
+                    ));
+                    let WaitingFor::ChooseManaColor {
+                        return_result_occurrence,
+                        choice,
+                        context: ManaChoiceContext::ResolvingEffect(body),
+                        ..
+                    } = &hostile.waiting_for
+                    else {
+                        unreachable!()
+                    };
+                    assert_eq!(*return_result_occurrence, Some(occurrence));
+                    assert_eq!(body.return_result_process, frame.process);
+                    let (_, declarations) =
+                        crate::types::ability::classify_instruction_result_invocation(
+                            &root,
+                            crate::types::ability::InstructionResultEntry::Independent,
+                            None,
+                        )
+                        .unwrap();
+                    assert_eq!(frame.declarations.as_ref(), Some(&declarations));
+                    assert!(
+                        admitted_mana_response_matches_program(
+                            &hostile,
+                            Some(occurrence),
+                            &root,
+                            body,
+                            choice,
+                        ),
+                        "corrupting only the cache cannot erase the independent public origin"
+                    );
+                }
+                if fault == 10 {
+                    let WaitingFor::ChooseManaColor {
+                        choice,
+                        context: ManaChoiceContext::ResolvingEffect(body),
+                        ..
+                    } = &hostile.waiting_for
+                    else {
+                        unreachable!()
+                    };
+                    let error =
+                        validate_mana_choice_response(&hostile, body, choice, Some(occurrence))
+                            .unwrap_err();
+                    assert!(
+                        error.to_string().contains(
+                            "mana response is not the admitted operation and latched prompt"
+                        ),
+                        "{error}"
+                    );
+                }
+                if fault == 2 && !public {
+                    // This private producer has no independent historical root.
+                    // Heterogeneous own chains are valid: its unchanged actual
+                    // child, rather than the unused root source, owns deposit.
+                    assert!(hostile.resolving_stack_entry.is_none());
+                    assert!(hostile.objects[&source].abilities.is_empty());
+                    assert_eq!(hostile.waiting_for, runner.state().waiting_for);
+                    assert_eq!(hostile.resolution_stack, runner.state().resolution_stack);
+                    let actual = &hostile.return_result_frames[&occurrence];
+                    let original = &runner.state().return_result_frames[&occurrence];
+                    assert_eq!(actual.process, original.process);
+                    assert_eq!(actual.declarations, original.declarations);
+                    assert_eq!(actual.results, original.results);
+                    let mut expected = original.admitted_program.as_deref().unwrap().clone();
+                    expected.source_id = ObjectId(u64::MAX);
+                    assert!(super::super::instruction_result_projection_eq(
+                        &expected,
+                        actual.admitted_program.as_deref().unwrap()
+                    ));
+                    for restore_kind in 0..3 {
+                        let restored = match restore_kind {
+                            0 => serde_json::from_value::<GameState>(before.clone()).unwrap(),
+                            1 => serde_json::from_value::<
+                                crate::types::game_state::TrustedGameStateEnvelope,
+                            >(
+                                serde_json::to_value(
+                                    crate::types::game_state::TrustedGameStateEnvelope::capture(
+                                        hostile.clone(),
+                                    ),
+                                )
+                                .unwrap(),
+                            )
+                            .unwrap()
+                            .into_game_state(),
+                            _ => serde_json::from_value::<
+                                crate::types::resolution::ResolutionStateWire,
+                            >(
+                                serde_json::to_value(
+                                    crate::types::resolution::ResolutionStateWire::from_game_state(
+                                        hostile.clone(),
+                                    ),
+                                )
+                                .unwrap(),
+                            )
+                            .unwrap()
+                            .into_game_state(),
+                        };
+                        assert_eq!(restored.return_result_frames, hostile.return_result_frames);
+                        assert_eq!(restored.waiting_for, hostile.waiting_for);
+                        assert!(super::super::instruction_result_projection_eq(
+                            restored.return_result_frames[&occurrence]
+                                .admitted_program
+                                .as_deref()
+                                .unwrap(),
+                            actual.admitted_program.as_deref().unwrap(),
+                        ));
+                        let WaitingFor::ChooseManaColor {
+                            context: ManaChoiceContext::ResolvingEffect(restored_body),
+                            ..
+                        } = &restored.waiting_for
+                        else {
+                            unreachable!()
+                        };
+                        let WaitingFor::ChooseManaColor {
+                            context: ManaChoiceContext::ResolvingEffect(original_body),
+                            ..
+                        } = &runner.state().waiting_for
+                        else {
+                            unreachable!()
+                        };
+                        assert!(super::super::instruction_result_projection_eq(
+                            restored_body,
+                            original_body
+                        ));
+                        let mut resumed = GameRunner::from_state(restored);
+                        resumed
+                            .act(GameAction::ChooseManaColor {
+                                choice: ManaChoice::Combination(vec![ManaType::Green]),
+                                count: 1,
+                            })
+                            .unwrap();
+                        assert_eq!(resumed.state().players[0].mana_pool.total(), 0);
+                        let units: Vec<_> = resumed.state().players[1].mana_pool.units().collect();
+                        assert_eq!(units.len(), 1);
+                        assert_eq!(units[0].color, ManaType::Green);
+                        assert_eq!(units[0].source_id, source);
+                        assert!(matches!(
+                            resumed.state().waiting_for,
+                            WaitingFor::Priority { .. }
+                        ));
+                        assert!(resumed.state().stack.is_empty());
+                        assert!(resumed.state().resolution_stack.is_empty());
+                        assert!(resumed.state().return_result_frames.is_empty());
+                    }
+                    assert_eq!(serde_json::to_value(&hostile).unwrap(), before);
+                    assert_eq!(hostile.rng.get_word_pos(), rng_before);
+                    continue;
+                }
                 assert!(
                     serde_json::from_value::<GameState>(before.clone()).is_err(),
+                    "program/input fault {fault}"
+                );
+                assert!(
+                    serde_json::from_value::<crate::types::game_state::TrustedGameStateEnvelope>(
+                        serde_json::to_value(
+                            crate::types::game_state::TrustedGameStateEnvelope::capture(
+                                hostile.clone()
+                            )
+                        )
+                        .unwrap()
+                    )
+                    .is_err(),
+                    "program/input fault {fault}"
+                );
+                assert!(
+                    serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                        serde_json::to_value(
+                            crate::types::resolution::ResolutionStateWire::from_game_state(
+                                hostile.clone()
+                            )
+                        )
+                        .unwrap()
+                    )
+                    .is_err(),
                     "program/input fault {fault}"
                 );
                 let mut bad = GameRunner::from_state(hostile);
@@ -6102,6 +6338,7 @@ mod tests {
                     before,
                     "program/input fault {fault} is transactional"
                 );
+                assert_eq!(bad.state().rng.get_word_pos(), rng_before);
             }
             let mut missing_map = runner.state().clone();
             missing_map
