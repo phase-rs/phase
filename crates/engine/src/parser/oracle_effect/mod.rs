@@ -47114,8 +47114,18 @@ fn parse_effect_chain_ir_body(
                         last.boundary = chunk.boundary_after;
                     }
                 }
-                for clause in &mut body_ir.clauses {
-                    apply_outer_condition_to_clause(outer_condition, clause);
+                let complete_continuous_consequent =
+                    sequence::complete_where_x_continuous_member(&body_chunks[0].text);
+                for (index, clause) in body_ir.clauses.iter_mut().enumerate() {
+                    if !complete_continuous_consequent || index == 0 {
+                        apply_outer_condition_to_clause(outer_condition, clause);
+                        if complete_continuous_consequent {
+                            // CR 608.2c + CR 608.2h: one resolving gate owns
+                            // the complete consequent. Later dependent actions
+                            // do not re-read it after the continuous operation.
+                            clause.parsed.condition = clause.condition.clone();
+                        }
+                    }
                     // CR 115.1 + CR 608.2c: the outer gate governs every body
                     // clause, so each one that announces its own target is
                     // refused exactly as the single-clause guard below refuses it.
@@ -47245,9 +47255,29 @@ fn parse_effect_chain_ir_body(
             };
         let (text_without_where_x, local_where_x_expression) = {
             let text_where_x_lower = text.to_lowercase();
-            let (without_where_x, where_x_expression) =
-                strip_trailing_where_x(TextPair::new(&text, &text_where_x_lower));
-            (without_where_x.original.to_string(), where_x_expression)
+            let pair = TextPair::new(&text, &text_where_x_lower);
+            match lower::split_where_x_definition(pair) {
+                Some((head, operand, remainder)) => {
+                    // CR 608.2c: the prefix owner must receive its entire
+                    // consequent before reducing terminal members to head + X.
+                    let retained = if remainder
+                        .trim_start()
+                        .trim_end()
+                        .trim_end_matches('.')
+                        .trim_end()
+                        .is_empty()
+                    {
+                        head
+                    } else {
+                        pair
+                    };
+                    (
+                        retained.original.to_string(),
+                        Some(operand.original.to_string()),
+                    )
+                }
+                None => (text.to_string(), None),
+            }
         };
         // CR 107.3c: a stripped definition still belongs to the complete
         // action. Do not turn an unknown earthbend count or unless-cost into

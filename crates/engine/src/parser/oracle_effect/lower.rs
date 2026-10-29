@@ -11342,12 +11342,23 @@ mod coordinated_duration_tests {
 }
 
 pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Option<String>) {
+    match split_where_x_definition(tp) {
+        Some((before, operand, _)) => (before, Some(operand.original.to_string())),
+        None => (tp, None),
+    }
+}
+
+/// Borrow the complete definition and every byte following it from the same
+/// source. Prefix owners must retain the remainder until their body is parsed.
+pub(super) fn split_where_x_definition<'a>(
+    tp: TextPair<'a>,
+) -> Option<(TextPair<'a>, TextPair<'a>, TextPair<'a>)> {
     // CR 205.1b + CR 107.3: the complete animation owns both the quantity
     // definition and the following retention sentence. Returning only `before`
     // here would discard the retention policy before type modification emission.
     let unquoted = nom_primitives::mask_double_quoted_spans_preserving_len(tp.lower);
     if crate::parser::oracle_static::split_type_retention_clause(&unquoted).is_some() {
-        return (tp, None);
+        return None;
     }
     // CR 106.6 + CR 603.7a: a spend-trigger body's X belongs to the
     // registered later ability. Keep its entire defining clause together so
@@ -11359,7 +11370,7 @@ pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Opt
     .parse(tp.lower.trim_start())
     .is_ok()
     {
-        return (tp, None);
+        return None;
     }
     for needle in [", where x is ", " where x is "] {
         if let Some((before, after)) = tp.split_around_outside_quotes(needle) {
@@ -11371,19 +11382,24 @@ pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Opt
                 after_clause = clause;
             }
             after_clause = structurally_bound_where_x_clause(after_clause);
-            let expression = after_clause
-                .original
-                .trim()
+            let operand = after_clause
+                .trim_start()
+                .trim_end()
                 .trim_end_matches('.')
-                .trim()
-                .to_string();
-            if expression.is_empty() {
-                return (tp, None);
+                .trim_end();
+            if operand.is_empty() {
+                return None;
             }
-            return (before.trim_end_matches(',').trim_end(), Some(expression));
+            let operand_end = after.len() - after.trim_start().len() + operand.len();
+            let (_, continuation) = after.split_at(operand_end);
+            return Some((
+                before.trim_end_matches(',').trim_end(),
+                operand,
+                continuation,
+            ));
         }
     }
-    (tp, None)
+    None
 }
 
 /// Terminal-only form of [`strip_trailing_where_x`] for callers that lower only
@@ -15601,6 +15617,36 @@ mod tests {
     }
 
     #[test]
+    fn where_x_definition_retains_original_operand_and_remainder() {
+        let head =
+            "If you control a creature, creatures you control have base power and toughness X/X";
+        let operand = "the number of creatures you control";
+        for tail in [
+            ", Draw a card.",
+            ", and Draw a card.",
+            ", then Draw a card.",
+            ". Draw a card.",
+        ] {
+            let text = format!("{head}, where X is {operand}{tail}");
+            let lower = text.to_ascii_lowercase();
+            let (actual_head, actual_operand, remainder) =
+                super::split_where_x_definition(TextPair::new(&text, &lower)).unwrap();
+            assert_eq!(actual_head.original, head);
+            assert_eq!(actual_operand.original, operand);
+            assert_eq!(remainder.original, tail);
+            assert_eq!(remainder.lower, tail.to_ascii_lowercase());
+            assert_eq!(
+                actual_operand.original.as_ptr(),
+                text[head.len() + ", where X is ".len()..].as_ptr()
+            );
+            assert_eq!(
+                remainder.original.as_ptr(),
+                text[text.len() - tail.len()..].as_ptr()
+            );
+        }
+    }
+
+    #[test]
     fn strip_trailing_where_x_stops_at_next_sentence() {
         let text = "put x +1/+1 counters on another target creature you control, where x is halana and alena's power. that creature gains haste until end of turn.";
         let lower = text.to_ascii_lowercase();
@@ -15686,6 +15732,9 @@ mod tests {
                 let text = format!("draw X cards, where X is {operand}.");
                 let lower = text.to_lowercase();
                 assert_eq!(strip_trailing_where_x(TextPair::new(&text, &lower)).1.as_deref(), Some(operand.as_str()), "{text}");
+                let (_, full_operand, remainder) = super::split_where_x_definition(TextPair::new(&text, &lower)).unwrap();
+                assert_eq!(full_operand.original, operand);
+                assert_eq!(remainder.original, ".");
             }
                 let operand = format!(
                     "{head} that are instant cards, are sorcery cards, and/or have an Adventure"
