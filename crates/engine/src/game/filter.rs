@@ -10041,12 +10041,22 @@ fn source_chosen_player(source: &SourceContext<'_>) -> Option<PlayerId> {
 /// copy's copied name reverts once it leaves the battlefield, so the live read
 /// would report the printed name instead.
 ///
-/// Returns `None` when no ability is in scope, when the ability has no object
-/// targets, or when the referenced object has no record in either `state.objects`
-/// or `state.lki_cache`.
+/// CR 400.7j: An untargeted parent instruction can instead pass its singular
+/// moved referent through a current effect-context snapshot. An explicit
+/// parent-announcement read never substitutes that snapshot for a missing target.
+/// Returns `None` when neither selected authority supplies a readable name.
 fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> Option<String> {
     let ability = ability?;
-    let id = first_object_target(ability)?;
+    let Some(id) = first_object_target(ability) else {
+        if ability.target_reads == crate::types::ability::TargetReadOrigin::ParentAnnouncement {
+            return None;
+        }
+        return ability
+            .effect_context_object
+            .as_ref()
+            .filter(|snapshot| snapshot.is_current(state))
+            .map(|snapshot| snapshot.lki.name.clone());
+    };
     if let Some(snapshot) = ability
         .effect_context_object
         .as_ref()
@@ -25045,6 +25055,71 @@ mod tests {
         let none = ability_with(None);
         assert!(matches(&none, clone_named), "no snapshot: live name");
         assert!(!matches(&none, bears), "no snapshot: not the copied name");
+    }
+
+    /// CR 400.7j + CR 608.2h: An untargeted resolution pick carries its
+    /// departing name through the singular snapshot, without inventing a target.
+    #[test]
+    fn same_name_as_parent_target_untargeted_pick_requires_current_snapshot() {
+        let mut state = setup();
+        let seed = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Exile,
+        );
+        let bears = add_creature(&mut state, PlayerId(1), "Grizzly Bears");
+        let printed_name = add_creature(&mut state, PlayerId(1), "Clone");
+        let snapshot = CostPaidObjectSnapshot::capture_departed(
+            &state,
+            seed,
+            state.objects[&seed].snapshot_public_characteristics(),
+        );
+        // A copy's printed name after departure differs from its captured name.
+        state.objects.get_mut(&seed).unwrap().name = "Clone".to_string();
+        let filter = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::SameNameAsParentTarget]),
+        );
+        let matches = |ability: &ResolvedAbility, candidate| {
+            super::matches_target_filter(
+                &state,
+                candidate,
+                &filter,
+                &FilterContext::from_ability(ability),
+            )
+        };
+
+        for targets in [vec![], vec![TargetRef::Player(PlayerId(1))]] {
+            let mut ability = ResolvedAbility::new(Effect::NoOp, targets, bears, PlayerId(0));
+            ability.effect_context_object = Some(snapshot.clone());
+            assert!(matches(&ability, bears), "current untargeted captured name");
+            assert!(
+                !matches(&ability, printed_name),
+                "the live printed name must not replace the captured name"
+            );
+
+            let mut stale = ability.clone();
+            stale.effect_context_object.as_mut().unwrap().incarnation += 1;
+            assert!(!matches(&stale, bears), "stale snapshot has no authority");
+            assert!(
+                !matches(&stale, printed_name),
+                "stale untargeted snapshots must not fall back to a live name"
+            );
+
+            let mut missing = ability.clone();
+            missing.effect_context_object = None;
+            assert!(
+                !matches(&missing, bears),
+                "missing snapshot has no authority"
+            );
+
+            ability.target_reads = crate::types::ability::TargetReadOrigin::ParentAnnouncement;
+            assert!(
+                !matches(&ability, bears),
+                "a current snapshot cannot replace a missing announced object target"
+            );
+        }
     }
 
     /// CR 608.2h + CR 400.7: A `Typed{controller: ScopedPlayer}` filter
