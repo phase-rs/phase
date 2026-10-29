@@ -3868,3 +3868,211 @@ fn parser_owner_bedlam_complete_rule_reaches_public_block_validation() {
         settled(&branch);
     }
 }
+
+#[test]
+fn parser_owner_adventure_relative_graveyard_cost_filters_public_payment_and_draws_once() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::game_state::{CastPaymentMode, PayCostKind};
+    use engine::types::zones::ExileCostSourceZone;
+
+    let db = super::support::shared_card_db().expect("the committed real-card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // This is an explicitly synthetic grammar composition, not a real card's
+    // Oracle. Its payment objects use complete real Adventure definitions.
+    let source = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Synthetic rooted Adventure cost",
+            "{1}, Exile a creature card in your graveyard that has an Adventure: Draw a card.",
+        )
+        .id();
+    let hearth = scenario.add_real_card(P0, "Hearth Elemental", Zone::Graveyard, db);
+    let borrower = scenario.add_real_card(P0, "Brazen Borrower", Zone::Graveyard, db);
+    let ordinary = scenario
+        .add_creature_to_graveyard(P0, "Ordinary creature exclusion", 2, 2)
+        .id();
+    let noncreature = scenario
+        .add_spell_to_graveyard(P0, "Noncreature exclusion", true)
+        .id();
+    let foreign = scenario.add_real_card(P1, "Hearth Elemental", Zone::Graveyard, db);
+    let hand = scenario.add_real_card(P0, "Hearth Elemental", Zone::Hand, db);
+    let drawn = scenario.add_card_to_library_top(P0, "One actual activation draw");
+    let mut runner = scenario.build();
+    fund(&mut runner, 1, &[]);
+    let initial_hand = runner.state().players[0].hand.len();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    // CR 602.2b + CR 601.2h: the actual activation owns a cost-selection
+    // prompt, and nothing is exiled or drawn before that cost is answered.
+    let WaitingFor::PayCost {
+        player,
+        kind,
+        choices,
+        count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("the parsed activation must request its real exile payment");
+    };
+    assert_eq!(*player, P0);
+    assert!(matches!(
+        kind,
+        PayCostKind::ExileFromZone {
+            zone: ExileCostSourceZone::Graveyard
+        }
+    ));
+    assert_eq!(*count, 1);
+    assert_eq!(choices.len(), 2);
+    assert!(choices.contains(&hearth) && choices.contains(&borrower));
+    // CR 715.2a: an actual alternate Adventure face qualifies each creature
+    // card; merely being an ordinary creature in the right graveyard does not.
+    for id in [ordinary, noncreature, foreign, hand] {
+        assert!(!choices.contains(&id));
+    }
+    let selected = choices[1];
+    let retained = if selected == hearth { borrower } else { hearth };
+    let pending = serde_json::to_value(runner.state()).unwrap();
+    for cards in [
+        vec![],
+        vec![ordinary],
+        vec![noncreature],
+        vec![foreign],
+        vec![hand],
+        vec![hearth, borrower],
+    ] {
+        assert!(runner.act(GameAction::SelectCards { cards }).is_err());
+        assert_eq!(serde_json::to_value(runner.state()).unwrap(), pending);
+    }
+    assert_eq!(runner.state().objects[&selected].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&drawn].zone, Zone::Library);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 1);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![selected],
+        })
+        .unwrap();
+    assert_eq!(runner.state().objects[&selected].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&retained].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_eq!(runner.state().players[0].hand.len(), initial_hand);
+    assert_eq!(runner.state().stack.len(), 1);
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().players[0].hand.len(), initial_hand + 1);
+    assert_eq!(runner.state().objects[&drawn].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+    for id in [ordinary, noncreature, foreign] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
+    }
+    assert_eq!(runner.state().objects[&hand].zone, Zone::Hand);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    settled(&runner);
+}
+
+#[test]
+fn parser_owner_life_and_limb_retains_types_but_replaces_colors_until_source_leaves() {
+    // Complete pinned MTGJSON Oracle, including its reminder. CR 105.3:
+    // retaining other types does not retain an object's previous colors.
+    const ORACLE: &str = "All Forests and all Saprolings are 1/1 green Saproling creatures and Forest lands in addition to their other types. (They're affected by summoning sickness.)";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let red = scenario
+        .add_creature(P0, "Red artifact Saproling member", 2, 3)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Saproling"])
+        .with_color(vec![ManaColor::Red])
+        .flying()
+        .id();
+    let white = scenario
+        .add_creature(P1, "Foreign white Saproling member", 4, 5)
+        .with_subtypes(vec!["Saproling"])
+        .with_color(vec![ManaColor::White])
+        .with_keyword(Keyword::Vigilance)
+        .id();
+    let unrelated = scenario
+        .add_creature(P1, "Red Goblin nonmember", 6, 7)
+        .with_subtypes(vec!["Goblin"])
+        .with_color(vec![ManaColor::Red])
+        .id();
+    let source = scenario
+        .add_spell_to_hand_from_oracle(P0, "Life and Limb", false, ORACLE)
+        .as_enchantment()
+        .with_mana_cost(cost("{3}{G}"))
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disperse",
+            true,
+            "Return target nonland permanent to its owner's hand.",
+        )
+        .with_mana_cost(cost("{1}{U}"))
+        .id();
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().objects[&red].color, vec![ManaColor::Red]);
+    assert_eq!(runner.state().objects[&white].color, vec![ManaColor::White]);
+    assert_eq!(pt(&mut runner, red), (2, 3));
+    assert_eq!(pt(&mut runner, white), (4, 5));
+    fund(&mut runner, 3, &[ManaType::Green]);
+    runner.cast(source).resolve();
+    assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    // CR 205.1b + CR 611.3a: the complete live subject reaches both players'
+    // Saprolings, adds Forest/land, and preserves printed types and abilities.
+    for (id, controller, keyword) in [(red, P0, Keyword::Flying), (white, P1, Keyword::Vigilance)] {
+        assert_eq!(pt(&mut runner, id), (1, 1));
+        let object = &runner.state().objects[&id];
+        assert_eq!(object.controller, controller);
+        assert_eq!(object.color, vec![ManaColor::Green]);
+        assert!(object.card_types.core_types.contains(&CoreType::Creature));
+        assert!(object.card_types.core_types.contains(&CoreType::Land));
+        assert!(object.card_types.subtypes.contains(&"Saproling".to_owned()));
+        assert!(object.card_types.subtypes.contains(&"Forest".to_owned()));
+        assert!(object.keywords.contains(&keyword));
+    }
+    assert!(runner.state().objects[&red]
+        .card_types
+        .core_types
+        .contains(&CoreType::Artifact));
+    assert_eq!(pt(&mut runner, unrelated), (6, 7));
+    assert_eq!(
+        runner.state().objects[&unrelated].color,
+        vec![ManaColor::Red]
+    );
+    assert_eq!(
+        runner.state().objects[&unrelated].card_types.core_types,
+        vec![CoreType::Creature]
+    );
+    assert_eq!(
+        runner.state().objects[&unrelated].card_types.subtypes,
+        vec!["Goblin".to_owned()]
+    );
+    settled(&runner);
+    fund(&mut runner, 1, &[ManaType::Blue]);
+    runner.cast(bounce).target_object(source).resolve();
+    assert_eq!(runner.state().objects[&source].zone, Zone::Hand);
+    // CR 611.3b: leaving the battlefield ends the static effect, restoring
+    // each member's original color, types and base power/toughness.
+    for (id, color, expected_pt, keyword) in [
+        (red, ManaColor::Red, (2, 3), Keyword::Flying),
+        (white, ManaColor::White, (4, 5), Keyword::Vigilance),
+    ] {
+        assert_eq!(pt(&mut runner, id), expected_pt);
+        let object = &runner.state().objects[&id];
+        assert_eq!(object.color, vec![color]);
+        assert!(!object.card_types.core_types.contains(&CoreType::Land));
+        assert_eq!(object.card_types.subtypes, vec!["Saproling".to_owned()]);
+        assert!(object.keywords.contains(&keyword));
+    }
+    assert!(runner.state().objects[&red]
+        .card_types
+        .core_types
+        .contains(&CoreType::Artifact));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    settled(&runner);
+}
