@@ -668,6 +668,1118 @@ mod tests {
         }
     }
 
+    // Supplemental typed compositions: these fixtures make no printed-card claim.
+    fn complete_counter_definition() -> AbilityDefinition {
+        use crate::types::ability::{
+            AbilityCost, PlayerScope, QuantityRef, ReturnResultId, SubAbilityLink,
+        };
+        let mut tail = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        tail.sub_link = SubAbilityLink::SequentialSibling;
+        let mut definition = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::ChooseCounterAdjustment {
+                adjustment: CounterAdjustment::AddOrRemove,
+                counters: CounterMatch::OfType(CounterType::Generic("charge".into())),
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            },
+        )
+        .cost(AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::generic(1),
+        })
+        .sub_ability(tail);
+        definition.declares_return_result = Some(ReturnResultId(7));
+        definition
+    }
+
+    fn paid_counter_fixture(
+        definition: AbilityDefinition,
+    ) -> (
+        crate::game::scenario::GameRunner,
+        crate::types::identifiers::ObjectId,
+        crate::types::identifiers::ObjectId,
+    ) {
+        paid_counter_fixture_with_replacement(definition, false)
+    }
+
+    fn paid_counter_fixture_with_replacement(
+        definition: AbilityDefinition,
+        replacement: bool,
+    ) -> (
+        crate::game::scenario::GameRunner,
+        crate::types::identifiers::ObjectId,
+        crate::types::identifiers::ObjectId,
+    ) {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::{ManaType, ManaUnit};
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        for player in [P0, P1] {
+            scenario.with_cards_in_hand(player, &["First input", "Second input", "Third input"]);
+        }
+        let recipient = scenario.add_creature(P0, "Counter recipient", 2, 2).id();
+        scenario.with_counter(recipient, CounterType::Generic("charge".into()), 5);
+        if replacement {
+            scenario
+                .add_artifact_from_oracle(P0, "Supplemental removal replacement", "")
+                .with_replacement_definition(
+                    crate::types::ability::ReplacementDefinition::new(
+                        crate::types::replacements::ReplacementEvent::RemoveCounter,
+                    )
+                    .mode(crate::types::ability::ReplacementMode::Optional { decline: None }),
+                );
+        }
+        let source = scenario
+            .add_artifact_from_oracle(P0, "Supplemental complete counter input", "")
+            .with_ability_definition(definition)
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Black, source, false, vec![])],
+        );
+        let mut runner = scenario.build();
+        runner
+            .activate(source, 0)
+            .target_object(recipient)
+            .stop_at_optional()
+            .resolve();
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        (runner, source, recipient)
+    }
+
+    fn restore_counter_input(state: &GameState, ingress: usize) -> GameState {
+        use crate::types::game_state::TrustedGameStateEnvelope;
+        match ingress {
+            0 => serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap(),
+            1 => serde_json::from_value::<TrustedGameStateEnvelope>(
+                serde_json::to_value(TrustedGameStateEnvelope::capture(state.clone())).unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+            _ => serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                serde_json::to_value(
+                    crate::types::resolution::ResolutionStateWire::from_game_state(state.clone()),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+        }
+    }
+
+    fn counter_prompt_root(state: &GameState) -> &ResolvedAbility {
+        let WaitingFor::ChooseOneOfBranch { context, .. } = &state.waiting_for else {
+            panic!(
+                "required real generated counter prompt: {:?}",
+                state.waiting_for
+            );
+        };
+        let ticket = context
+            .counter_removal_result
+            .as_ref()
+            .expect("real result ticket");
+        state.return_result_frames[&ticket.occurrence]
+            .admitted_program
+            .as_deref()
+            .unwrap()
+    }
+
+    fn counter_prompt_parent(state: &GameState) -> ResolvedAbility {
+        use crate::game::effects::choose_one_of::{selection_program_owner, BranchSelection};
+        let WaitingFor::ChooseOneOfBranch {
+            return_result_occurrence,
+            expected_return_result_process,
+            player,
+            controller,
+            source_id,
+            branches,
+            parent_occurrences,
+            context,
+            continuation,
+            replacement_applied,
+            remaining_players,
+            trigger_context,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("required generated counter prompt")
+        };
+        selection_program_owner(
+            state,
+            &BranchSelection {
+                return_result_occurrence: *return_result_occurrence,
+                expected_return_result_process: *expected_return_result_process,
+                player: *player,
+                controller: *controller,
+                source_id: *source_id,
+                branches: branches.clone(),
+                parent_occurrences: parent_occurrences.clone(),
+                context: context.clone(),
+                continuation: continuation.clone(),
+                replacement_applied: replacement_applied.clone(),
+                remaining_players: remaining_players.clone(),
+                trigger_context: trigger_context.clone(),
+                index: 0,
+            },
+        )
+        .unwrap()
+        .unwrap()
+        .2
+    }
+
+    fn assert_complete_counter_prompt(
+        state: &GameState,
+        actor: PlayerId,
+        source: crate::types::identifiers::ObjectId,
+        recipient: crate::types::identifiers::ObjectId,
+    ) {
+        let WaitingFor::ChooseOneOfBranch {
+            player,
+            controller,
+            source_id,
+            branches,
+            context,
+            parent_occurrences,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "required real generated counter prompt: {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!((*player, *controller, *source_id), (actor, actor, source));
+        assert_eq!(branches.len(), 2);
+        assert!(matches!(
+            branches[0].effect.as_ref(),
+            Effect::RemoveCounter {
+                count: QuantityExpr::Fixed { value: 3 },
+                ..
+            }
+        ));
+        assert!(matches!(
+            branches[1].effect.as_ref(),
+            Effect::PutCounter {
+                count: QuantityExpr::Fixed { value: 3 },
+                ..
+            }
+        ));
+        let ticket = context.counter_removal_result.as_ref().unwrap();
+        assert_eq!(ticket.result, crate::types::ability::ReturnResultId(7));
+        assert_eq!(ticket.source.reference.object_id, source);
+        assert!(
+            matches!(parent_occurrences.occurrences().as_slice(), [(TargetRef::Object(id), Some(pin))]
+            if *id == recipient && pin.object_id == recipient && Some(*pin) == ticket.recipient)
+        );
+        assert_eq!(counter_prompt_root(state).ability_index, Some(0));
+        let parent = counter_prompt_parent(state);
+        assert_eq!(parent.ability_index, Some(0));
+        assert!(
+            !parent.optional
+                && parent.optional_for.is_none()
+                && parent.unless_pay.is_none()
+                && parent.player_scope.is_none()
+        );
+        super::super::choose_one_of::validate_waiting_result_owner(state, &state.waiting_for)
+            .unwrap();
+    }
+
+    fn assert_counter_complete(
+        state: &GameState,
+        recipient: crate::types::identifiers::ObjectId,
+        counters: u32,
+        p1_life: i32,
+    ) {
+        assert_eq!(
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Generic("charge".into())),
+            Some(&counters)
+        );
+        assert_eq!(state.players[0].life, 21);
+        assert_eq!(state.players[1].life, p1_life);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.stack.is_empty());
+        assert!(state.resolution_stack.is_empty());
+        assert!(state.return_result_frames.is_empty());
+    }
+
+    fn settle_latched_three(
+        mut runner: crate::game::scenario::GameRunner,
+        actor: PlayerId,
+        hand_player: PlayerId,
+        source: crate::types::identifiers::ObjectId,
+        recipient: crate::types::identifiers::ObjectId,
+        p1_life: i32,
+    ) {
+        assert_complete_counter_prompt(runner.state(), actor, source, recipient);
+        assert_eq!(runner.state().players[hand_player.0 as usize].hand.len(), 3);
+        for n in 0..4 {
+            create_object(
+                runner.state_mut(),
+                CardId(95_000 + n),
+                hand_player,
+                format!("Later input {n}"),
+                Zone::Hand,
+            );
+        }
+        assert_eq!(runner.state().players[hand_player.0 as usize].hand.len(), 7);
+        for ingress in 0..3 {
+            let mut resumed = crate::game::scenario::GameRunner::from_state(restore_counter_input(
+                runner.state(),
+                ingress,
+            ));
+            apply(
+                resumed.state_mut(),
+                actor,
+                GameAction::ChooseBranch { index: 1 },
+            )
+            .unwrap();
+            resumed.advance_until_stack_empty();
+            // CR 608.2h + CR 122.1: the original three, not the later seven.
+            assert_counter_complete(resumed.state(), recipient, 8, p1_life);
+        }
+    }
+
+    fn assert_counter_refuses_intact(mut hostile: GameState, actor: PlayerId, action: GameAction) {
+        assert!(
+            serde_json::from_value::<GameState>(serde_json::to_value(&hostile).unwrap()).is_err()
+        );
+        let before = hostile.clone();
+        assert!(apply(&mut hostile, actor, action).is_err());
+        assert_eq!(hostile, before);
+    }
+
+    #[test]
+    fn public_optional_counter_choice_preserves_complete_parent_and_latched_three() {
+        use crate::game::scenario::{GameRunner, P0, P1};
+        let mut definition = complete_counter_definition();
+        definition.optional = true;
+        let (mut runner, source, recipient) = paid_counter_fixture(definition);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ));
+        let gate = restore_counter_input(runner.state(), 0);
+        let before = runner.state().clone();
+        assert!(apply(
+            runner.state_mut(),
+            P1,
+            GameAction::DecideOptionalEffect { accept: true }
+        )
+        .is_err());
+        assert_eq!(runner.state(), &before);
+        *runner.state_mut() = gate.clone();
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        assert!(counter_prompt_root(runner.state()).optional);
+        assert_complete_counter_prompt(runner.state(), P0, source, recipient);
+        let mut hostile = runner.state().clone();
+        let WaitingFor::ChooseOneOfBranch { context, .. } = &mut hostile.waiting_for else {
+            unreachable!()
+        };
+        assert!(context.optional_effect_performed);
+        context.optional_effect_performed = false;
+        assert_counter_refuses_intact(hostile, P0, GameAction::ChooseBranch { index: 1 });
+        settle_latched_three(runner, P0, P0, source, recipient, 20);
+        let mut declined = GameRunner::from_state(gate);
+        declined
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .unwrap();
+        declined.advance_until_stack_empty();
+        assert_counter_complete(declined.state(), recipient, 5, 20);
+    }
+
+    #[test]
+    fn public_opponent_accepted_counter_choice_keeps_accepting_scope() {
+        use crate::game::scenario::{GameRunner, P0, P1};
+        let mut definition = complete_counter_definition();
+        definition.optional = true;
+        definition.optional_for = Some(crate::types::ability::OpponentMayScope::AnyOpponent);
+        let (mut runner, source, recipient) = paid_counter_fixture(definition);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::OpponentMayChoice { player: P1, .. }
+        ));
+        let gate = restore_counter_input(runner.state(), 0);
+        let before = runner.state().clone();
+        assert!(apply(
+            runner.state_mut(),
+            P0,
+            GameAction::DecideOptionalEffect { accept: true }
+        )
+        .is_err());
+        assert_eq!(runner.state(), &before);
+        *runner.state_mut() = gate.clone();
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        assert_eq!(
+            counter_prompt_root(runner.state()).optional_for,
+            Some(crate::types::ability::OpponentMayScope::AnyOpponent)
+        );
+        assert_complete_counter_prompt(runner.state(), P0, source, recipient);
+        let WaitingFor::ChooseOneOfBranch { context, .. } = &runner.state().waiting_for else {
+            unreachable!()
+        };
+        assert_eq!(context.accepting_player, Some(P1));
+        let parent = counter_prompt_parent(runner.state());
+        assert_eq!((parent.controller, parent.scoped_player), (P0, Some(P1)));
+        let mut hostile = runner.state().clone();
+        let WaitingFor::ChooseOneOfBranch { context, .. } = &mut hostile.waiting_for else {
+            unreachable!()
+        };
+        context.accepting_player = Some(P0);
+        assert_counter_refuses_intact(hostile, P0, GameAction::ChooseBranch { index: 1 });
+        settle_latched_three(runner, P0, P0, source, recipient, 20);
+        let mut declined = GameRunner::from_state(gate);
+        declined
+            .act(GameAction::DecideOptionalEffect { accept: false })
+            .unwrap();
+        declined.advance_until_stack_empty();
+        assert_counter_complete(declined.state(), recipient, 5, 20);
+    }
+
+    #[test]
+    fn public_any_player_counter_choice_allows_controller_acceptance() {
+        use crate::game::scenario::P0;
+        let mut definition = complete_counter_definition();
+        definition.optional = true;
+        definition.optional_for = Some(crate::types::ability::OpponentMayScope::AnyPlayer);
+        let (mut runner, source, recipient) = paid_counter_fixture(definition);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::OpponentMayChoice { player: P0, .. }
+        ));
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        let WaitingFor::ChooseOneOfBranch { context, .. } = &runner.state().waiting_for else {
+            unreachable!()
+        };
+        assert_eq!(context.accepting_player, Some(P0));
+        settle_latched_three(runner, P0, P0, source, recipient, 20);
+    }
+
+    #[test]
+    fn public_nested_counter_gate_does_not_bypass_owner() {
+        use crate::game::scenario::{P0, P1};
+        use crate::types::ability::OpponentMayScope;
+        for scoped in [false, true] {
+            let mut child = complete_counter_definition();
+            let cost = child.cost.take();
+            child.kind = AbilityKind::Spell;
+            let mut definition =
+                AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp).sub_ability(child);
+            definition.cost = cost;
+            let actor = if scoped {
+                definition.player_scope = Some(PlayerFilter::Opponent);
+                definition.sub_ability.as_mut().unwrap().optional = true;
+                definition.sub_ability.as_mut().unwrap().optional_for =
+                    Some(OpponentMayScope::AnyOpponent);
+                P1
+            } else {
+                definition.optional = true;
+                let mut unrelated = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+                unrelated.optional_for = Some(OpponentMayScope::AnyPlayer);
+                definition.else_ability = Some(Box::new(unrelated));
+                P0
+            };
+            let (mut runner, source, recipient) = paid_counter_fixture(definition);
+            if scoped {
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::OpponentMayChoice { player: P0, .. }
+                ));
+            } else {
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::OptionalEffectChoice { player: P0, .. }
+                ));
+            }
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+            assert_complete_counter_prompt(runner.state(), actor, source, recipient);
+            let mut hostile = runner.state().clone();
+            let WaitingFor::ChooseOneOfBranch { context, .. } = &mut hostile.waiting_for else {
+                unreachable!()
+            };
+            if scoped {
+                context.accepting_player = Some(P1);
+            } else {
+                context.optional_effect_performed = false;
+            }
+            assert_counter_refuses_intact(hostile, actor, GameAction::ChooseBranch { index: 1 });
+            settle_latched_three(runner, actor, P0, source, recipient, 20);
+        }
+    }
+
+    #[test]
+    fn public_unless_counter_choice_preserves_unpaid_and_paid_successor_inputs() {
+        use crate::game::scenario::{GameRunner, P0, P1};
+        use crate::types::ability::{AbilityCost, SubAbilityLink, UnlessPayModifier};
+        for sibling in [false, true] {
+            let mut definition = complete_counter_definition();
+            let modifier = UnlessPayModifier {
+                payer: TargetFilter::SpecificPlayer { id: P1 },
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+            };
+            if sibling {
+                let cost = definition.cost.take();
+                definition.kind = AbilityKind::Spell;
+                definition.sub_link = SubAbilityLink::SequentialSibling;
+                definition = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp)
+                    .sub_ability(definition);
+                definition.cost = cost;
+            }
+            definition.unless_pay = Some(modifier);
+            let (mut runner, source, recipient) = paid_counter_fixture(definition);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::UnlessPayment { player: P1, .. }
+            ));
+            let gate = restore_counter_input(runner.state(), 0);
+            let before = runner.state().clone();
+            assert!(apply(
+                runner.state_mut(),
+                P0,
+                GameAction::PayUnlessCost { pay: !sibling }
+            )
+            .is_err());
+            assert_eq!(runner.state(), &before);
+            *runner.state_mut() = gate.clone();
+            runner
+                .act(GameAction::PayUnlessCost { pay: sibling })
+                .unwrap();
+            assert!(counter_prompt_root(runner.state()).unless_pay.is_some());
+            assert_complete_counter_prompt(runner.state(), P0, source, recipient);
+            let mut missing_owner = runner.state().clone();
+            let WaitingFor::ChooseOneOfBranch { context, .. } = &missing_owner.waiting_for else {
+                unreachable!()
+            };
+            let occurrence = context.counter_removal_result.as_ref().unwrap().occurrence;
+            missing_owner
+                .return_result_frames
+                .get_mut(&occurrence)
+                .unwrap()
+                .admitted_program = None;
+            assert_counter_refuses_intact(missing_owner, P0, GameAction::ChooseBranch { index: 1 });
+            let mut hostile = runner.state().clone();
+            let WaitingFor::ChooseOneOfBranch { context, .. } = &mut hostile.waiting_for else {
+                unreachable!()
+            };
+            context.optional_effect_performed = !context.optional_effect_performed;
+            assert_counter_refuses_intact(hostile, P0, GameAction::ChooseBranch { index: 1 });
+            settle_latched_three(
+                runner,
+                P0,
+                P0,
+                source,
+                recipient,
+                if sibling { 19 } else { 20 },
+            );
+            let mut opposite = GameRunner::from_state(gate);
+            opposite
+                .act(GameAction::PayUnlessCost { pay: !sibling })
+                .unwrap();
+            if sibling {
+                settle_latched_three(opposite, P0, P0, source, recipient, 20);
+            } else {
+                opposite.advance_until_stack_empty();
+                assert_counter_complete(opposite.state(), recipient, 5, 19);
+            }
+        }
+    }
+
+    #[test]
+    fn public_unless_counter_no_payer_and_unpayable_fallthrough_preserve_parent() {
+        use crate::game::scenario::{P0, P1};
+        use crate::types::ability::{AbilityCost, UnlessPayModifier};
+        for no_payer in [false, true] {
+            let mut definition = complete_counter_definition();
+            definition.unless_pay = Some(UnlessPayModifier {
+                payer: if no_payer {
+                    TargetFilter::TriggeringPlayer
+                } else {
+                    TargetFilter::SpecificPlayer { id: P1 }
+                },
+                cost: if no_payer {
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    }
+                } else {
+                    AbilityCost::Mana {
+                        cost: crate::types::mana::ManaCost::NoCost,
+                    }
+                },
+            });
+            let (runner, source, recipient) = paid_counter_fixture(definition);
+            let modifier = counter_prompt_root(runner.state())
+                .unless_pay
+                .as_ref()
+                .unwrap();
+            if no_payer {
+                assert_eq!(modifier.payer, TargetFilter::TriggeringPlayer);
+                assert!(runner.state().current_trigger_event.is_none());
+            } else {
+                assert!(matches!(
+                    modifier.cost,
+                    AbilityCost::Mana {
+                        cost: crate::types::mana::ManaCost::NoCost
+                    }
+                ));
+            }
+            settle_latched_three(runner, P0, P0, source, recipient, 20);
+        }
+    }
+
+    #[test]
+    fn public_scoped_counter_choice_preserves_bound_controller_and_outside_tail() {
+        use crate::game::scenario::{P0, P1};
+        use crate::types::ability::{PlayerScope, QuantityRef};
+        let mut definition = complete_counter_definition();
+        definition.player_scope = Some(PlayerFilter::Opponent);
+        let Effect::ChooseCounterAdjustment { count, .. } = definition.effect.as_mut() else {
+            unreachable!()
+        };
+        *count = QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::ScopedPlayer,
+            },
+        };
+        let (mut runner, source, recipient) = paid_counter_fixture(definition);
+        assert_eq!(
+            counter_prompt_root(runner.state()).player_scope,
+            Some(PlayerFilter::Opponent)
+        );
+        assert_complete_counter_prompt(runner.state(), P1, source, recipient);
+        let parent = counter_prompt_parent(runner.state());
+        assert_eq!(
+            (parent.original_controller, parent.scoped_player),
+            (Some(P0), Some(P1))
+        );
+        let before = runner.state().clone();
+        assert!(apply(
+            runner.state_mut(),
+            P0,
+            GameAction::ChooseBranch { index: 1 }
+        )
+        .is_err());
+        assert_eq!(runner.state(), &before);
+        for corruption in 0..4 {
+            let mut hostile = runner.state().clone();
+            let WaitingFor::ChooseOneOfBranch {
+                controller,
+                source_id,
+                context,
+                ..
+            } = &mut hostile.waiting_for
+            else {
+                unreachable!()
+            };
+            match corruption {
+                0 => context.optional_effect_performed = true,
+                1 => *controller = P0,
+                2 => *source_id = recipient,
+                _ => context.counter_removal_result.as_mut().unwrap().recipient = None,
+            }
+            assert_counter_refuses_intact(hostile, P1, GameAction::ChooseBranch { index: 1 });
+        }
+        settle_latched_three(runner, P1, P1, source, recipient, 20);
+    }
+
+    #[test]
+    fn public_readerless_counter_producer_authenticates_wait_queue_and_proposal() {
+        use crate::game::scenario::{GameRunner, P0};
+        use crate::types::ability::ReturnResultId;
+        let (mut runner, source, recipient) =
+            paid_counter_fixture_with_replacement(complete_counter_definition(), true);
+        assert_complete_counter_prompt(runner.state(), P0, source, recipient);
+        let WaitingFor::ChooseOneOfBranch { context, .. } = &runner.state().waiting_for else {
+            unreachable!()
+        };
+        let ticket = context.counter_removal_result.clone().unwrap();
+        let producer = super::super::readerless_generated_counter_producer(runner.state(), &ticket)
+            .unwrap()
+            .unwrap();
+        assert_eq!(producer.declares_return_result, Some(ReturnResultId(7)));
+        assert!(!crate::types::game_state::reads_return_result_id(
+            &producer,
+            ReturnResultId(7)
+        ));
+        for ingress in 0..3 {
+            restore_counter_input(runner.state(), ingress);
+        }
+        for corruption in 0..6 {
+            let mut hostile = runner.state().clone();
+            let frame = hostile
+                .return_result_frames
+                .get_mut(&ticket.occurrence)
+                .unwrap();
+            match corruption {
+                0 => frame.admitted_program = None,
+                1 => frame.declarations.as_mut().unwrap().clear(),
+                2 => frame.admitted_program.as_mut().unwrap().source_id = recipient,
+                3 => {
+                    let Effect::ChooseCounterAdjustment { counters, .. } =
+                        &mut frame.admitted_program.as_mut().unwrap().effect
+                    else {
+                        unreachable!()
+                    };
+                    *counters = CounterMatch::OfType(CounterType::Time);
+                }
+                4 => {
+                    frame
+                        .admitted_program
+                        .as_mut()
+                        .unwrap()
+                        .declares_return_result = Some(ReturnResultId(99))
+                }
+                _ => frame
+                    .admitted_program
+                    .as_mut()
+                    .unwrap()
+                    .bind_return_result_process(None),
+            }
+            assert_counter_refuses_intact(hostile, P0, GameAction::ChooseBranch { index: 0 });
+        }
+        runner.act(GameAction::ChooseBranch { index: 0 }).unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let queue = runner
+            .state()
+            .active_counter_removals()
+            .expect("actual removal queue");
+        assert_eq!(queue.source_ability_id, source);
+        assert_eq!(queue.result_binding.as_ref(), Some(&ticket));
+        assert!(queue.in_flight.is_some());
+        assert!(
+            matches!(runner.state().pending_replacement.as_ref().map(|pending| &pending.proposed),
+            Some(crate::types::proposed_event::ProposedEvent::RemoveCounter { result_binding: Some(binding), .. }) if binding == &ticket)
+        );
+        let mut foreign = runner.state().clone();
+        foreign
+            .active_counter_removals_mut()
+            .unwrap()
+            .source_ability_id = recipient;
+        assert_counter_refuses_intact(foreign, P0, GameAction::ChooseReplacement { index: 1 });
+        for ingress in 0..3 {
+            let mut resumed =
+                GameRunner::from_state(restore_counter_input(runner.state(), ingress));
+            resumed
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .unwrap();
+            resumed.advance_until_stack_empty();
+            assert_counter_complete(resumed.state(), recipient, 2, 20);
+        }
+    }
+
+    #[test]
+    fn public_counter_true_reader_removal_cannot_become_readerless_by_erasure() {
+        use crate::game::scenario::{GameRunner, P0};
+        use crate::types::ability::{AbilityCondition, ReturnResultId};
+        for generated in [false, true] {
+            let mut definition = complete_counter_definition();
+            definition.sub_ability.as_mut().unwrap().condition =
+                Some(AbilityCondition::CounterRemovedThisWay {
+                    result: ReturnResultId(7),
+                    counters: CounterMatch::OfType(CounterType::Generic("charge".into())),
+                });
+            if !generated {
+                definition.effect = Box::new(Effect::RemoveCounter {
+                    counter_type: Some(CounterType::Generic("charge".into())),
+                    count: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                });
+            }
+            let (mut runner, source, recipient) =
+                paid_counter_fixture_with_replacement(definition, true);
+            if generated {
+                assert_complete_counter_prompt(runner.state(), P0, source, recipient);
+                let WaitingFor::ChooseOneOfBranch { context, .. } = &runner.state().waiting_for
+                else {
+                    unreachable!()
+                };
+                assert!(super::super::readerless_generated_counter_producer(
+                    runner.state(),
+                    context.counter_removal_result.as_ref().unwrap()
+                )
+                .unwrap()
+                .is_none());
+                for ingress in 0..3 {
+                    restore_counter_input(runner.state(), ingress);
+                }
+                let mut hostile = runner.state().clone();
+                assert!(hostile
+                    .take_active_ability_continuation()
+                    .unwrap()
+                    .is_some());
+                let WaitingFor::ChooseOneOfBranch { continuation, .. } = &mut hostile.waiting_for
+                else {
+                    unreachable!()
+                };
+                *continuation = None;
+                assert_counter_refuses_intact(hostile, P0, GameAction::ChooseBranch { index: 0 });
+                runner.act(GameAction::ChooseBranch { index: 0 }).unwrap();
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            let mut erased = runner.state().clone();
+            let queue = erased.take_active_counter_removals().unwrap().unwrap();
+            assert!(erased.take_active_ability_continuation().unwrap().is_some());
+            erased.push_counter_removals(queue);
+            assert_counter_refuses_intact(erased, P0, GameAction::ChooseReplacement { index: 1 });
+            for ingress in 0..3 {
+                let mut resumed =
+                    GameRunner::from_state(restore_counter_input(runner.state(), ingress));
+                resumed
+                    .act(GameAction::ChooseReplacement { index: 1 })
+                    .unwrap();
+                resumed.advance_until_stack_empty();
+                assert_counter_complete(resumed.state(), recipient, 2, 20);
+            }
+        }
+    }
+
+    #[test]
+    fn public_terminal_counter_legacy_none_process_remains_compatible() {
+        use crate::game::scenario::P0;
+        use crate::types::game_state::ReturnResultProcessId;
+        let (runner, source, recipient) = paid_counter_fixture(complete_counter_definition());
+        let mut state = GameState::new_two_player(42);
+        // This supplemental representation row enters through the real resolver,
+        // without a stack entry, resolving entry or independent tail.
+        state.objects = runner.state().objects.clone();
+        state.players = runner.state().players.clone();
+        let mut definition = complete_counter_definition();
+        definition.cost = None;
+        definition.kind = AbilityKind::Spell;
+        definition.sub_ability = None;
+        let mut original =
+            crate::game::ability_utils::build_resolved_from_def(&definition, source, P0);
+        original.replace_target_occurrences(vec![(
+            TargetRef::Object(recipient),
+            Some(ObjectIncarnationRef::from_object(
+                &state.objects[&recipient],
+            )),
+        )]);
+        super::resolve(&mut state, &original, &mut Vec::new()).unwrap();
+        let WaitingFor::ChooseOneOfBranch { context, .. } = &state.waiting_for else {
+            panic!("real terminal resolver prompt")
+        };
+        let occurrence = context.counter_removal_result.as_ref().unwrap().occurrence;
+        assert!(state.return_result_frames[&occurrence].process.is_some());
+        super::super::choose_one_of::validate_waiting_result_owner(&state, &state.waiting_for)
+            .unwrap();
+        let frame = state.return_result_frames.get_mut(&occurrence).unwrap();
+        frame.process = None;
+        frame
+            .admitted_program
+            .as_mut()
+            .unwrap()
+            .bind_return_result_process(None);
+        let WaitingFor::ChooseOneOfBranch {
+            expected_return_result_process,
+            context,
+            ..
+        } = &mut state.waiting_for
+        else {
+            unreachable!()
+        };
+        *expected_return_result_process = None;
+        context.counter_removal_result.as_mut().unwrap().process = None;
+        assert!(state.stack.is_empty());
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(state.resolution_stack.is_empty());
+        super::super::choose_one_of::validate_waiting_result_owner(&state, &state.waiting_for)
+            .unwrap();
+        let parent = counter_prompt_parent(&state);
+        assert_eq!(parent.return_result_process, None);
+        assert_eq!(parent.source_id, source);
+        assert!(parent.sub_ability.is_none());
+        let mut wrong_process = state.clone();
+        let WaitingFor::ChooseOneOfBranch {
+            expected_return_result_process,
+            ..
+        } = &mut wrong_process.waiting_for
+        else {
+            unreachable!()
+        };
+        *expected_return_result_process = Some(ReturnResultProcessId(99));
+        assert_counter_refuses_intact(wrong_process, P0, GameAction::ChooseBranch { index: 1 });
+        for ingress in 0..3 {
+            let mut resumed = restore_counter_input(&state, ingress);
+            apply(&mut resumed, P0, GameAction::ChooseBranch { index: 1 }).unwrap();
+            assert_eq!(
+                resumed.objects[&recipient]
+                    .counters
+                    .get(&CounterType::Generic("charge".into())),
+                Some(&8)
+            );
+            assert!(matches!(resumed.waiting_for, WaitingFor::Priority { .. }));
+            assert!(resumed.stack.is_empty());
+            assert!(resumed.resolution_stack.is_empty());
+            assert!(resumed.return_result_frames.is_empty());
+        }
+    }
+
+    #[test]
+    fn public_selected_local_counter_choice_preserves_fresh_process_and_present_empty_outer_result()
+    {
+        use crate::game::scenario::{P0, P1};
+        use crate::types::ability::{ChooseOneOfKind, ReturnResultId};
+        let mut counter = complete_counter_definition();
+        let cost = counter.cost.take();
+        counter.kind = AbilityKind::Spell;
+        let choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                kind: ChooseOneOfKind::Ordinary,
+                chooser: PlayerFilter::Opponent,
+                branches: vec![
+                    AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+                    counter,
+                ],
+            },
+        );
+        let choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            },
+        )
+        .sub_ability(choice);
+        let mut root = AbilityDefinition::new(AbilityKind::Activated, serde_json::from_value(serde_json::json!({
+            "type": "ChangeZoneAll", "origin": "Battlefield", "destination": "Exile",
+            "target": TargetFilter::SpecificObject { id: crate::types::identifiers::ObjectId(0) }
+        })).unwrap()).sub_ability(choice);
+        root.cost = cost;
+        root.declares_return_result = Some(ReturnResultId(6));
+        let (mut runner, source, recipient) = paid_counter_fixture(root);
+        let WaitingFor::ChooseOneOfBranch {
+            player: P1,
+            return_result_occurrence: Some(outer),
+            expected_return_result_process: Some(outer_process),
+            context,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("actual P1 local body choice")
+        };
+        assert!(context.counter_removal_result.is_none());
+        let (outer, outer_process) = (*outer, *outer_process);
+        assert!(
+            matches!(runner.state().return_result_frames[&outer].results.get(&ReturnResultId(6)),
+            Some(crate::types::game_state::InstructionResult::ZoneChanges(records)) if records.is_empty())
+        );
+        *runner.state_mut() = restore_counter_input(runner.state(), 0);
+        runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+        let WaitingFor::ChooseOneOfBranch {
+            expected_return_result_process: Some(child_process),
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("actual generated child prompt")
+        };
+        assert_ne!(*child_process, outer_process);
+        let child_root = counter_prompt_root(runner.state());
+        assert_eq!(child_root.scoped_player, Some(P1));
+        assert_eq!(child_root.controller, P0);
+        assert_eq!(child_root.declares_return_result, Some(ReturnResultId(7)));
+        settle_latched_three(runner, P0, P0, source, recipient, 20);
+    }
+
+    #[test]
+    fn public_any_other_counter_projection_preserves_real_accepted_path() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::{OpponentMayScope, ReplacementDefinition, SubAbilityLink};
+        use crate::types::actions::DebugAction;
+        let p2 = PlayerId(2);
+        for local in [false, true] {
+            for acceptor in [Some(P0), Some(p2), None] {
+                let mut scenario = GameScenario::new_n_player(3, 42);
+                scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+                scenario.with_cards_in_hand(P0, &["First input", "Second input", "Third input"]);
+                scenario.with_library_top(P1, &["Replaced draw"]);
+                let mut execute = complete_counter_definition();
+                execute.kind = AbilityKind::Spell;
+                execute.cost = None;
+                execute.optional = true;
+                execute.optional_for = Some(OpponentMayScope::AnyOtherPlayer);
+                let Effect::ChooseCounterAdjustment { target, .. } = execute.effect.as_mut() else {
+                    unreachable!()
+                };
+                *target = TargetFilter::SelfRef;
+                if local {
+                    let mut tail = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+                    tail.sub_link = SubAbilityLink::SequentialSibling;
+                    execute = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChooseOneOf {
+                            kind: ChooseOneOfKind::Ordinary,
+                            chooser: PlayerFilter::Controller,
+                            branches: vec![
+                                AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+                                execute,
+                            ],
+                        },
+                    )
+                    .sub_ability(tail);
+                    execute.sub_ability.as_mut().unwrap().sub_link =
+                        SubAbilityLink::SequentialSibling;
+                }
+                let source = scenario
+                    .add_artifact_from_oracle(P0, "Supplemental draw counter replacement", "")
+                    .with_replacement_definition(
+                        ReplacementDefinition::new(
+                            crate::types::replacements::ReplacementEvent::Draw,
+                        )
+                        .execute(execute),
+                    )
+                    .id();
+                let recipient = source;
+                scenario.with_counter(recipient, CounterType::Generic("charge".into()), 5);
+                let mut runner = scenario.build();
+                runner.state_mut().debug_mode = true;
+                runner
+                    .act(GameAction::Debug(DebugAction::DrawCards {
+                        player_id: P1,
+                        count: 1,
+                    }))
+                    .unwrap();
+                if local {
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::ChooseOneOfBranch { player: P0, .. }
+                    ));
+                    runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::OpponentMayChoice { player: P0, .. }
+                ));
+                let before = runner.state().clone();
+                assert!(apply(
+                    runner.state_mut(),
+                    P1,
+                    GameAction::DecideOptionalEffect { accept: true }
+                )
+                .is_err());
+                assert_eq!(runner.state(), &before);
+                for _ in 0..3 {
+                    let WaitingFor::OpponentMayChoice {
+                        player, remaining, ..
+                    } = &runner.state().waiting_for
+                    else {
+                        break;
+                    };
+                    assert_ne!(*player, P1);
+                    assert!(!remaining.contains(&P1));
+                    let accept = acceptor == Some(*player);
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept })
+                        .unwrap();
+                    if accept {
+                        break;
+                    }
+                }
+                if let Some(acceptor) = acceptor {
+                    let WaitingFor::ChooseOneOfBranch { context, .. } = &runner.state().waiting_for
+                    else {
+                        panic!("real accepted AnyOther counter prompt")
+                    };
+                    assert_eq!(context.accepting_player, Some(acceptor));
+                    let WaitingFor::ChooseOneOfBranch {
+                        player,
+                        controller,
+                        branches,
+                        context,
+                        ..
+                    } = &runner.state().waiting_for
+                    else {
+                        unreachable!()
+                    };
+                    assert_eq!((*player, *controller), (P0, P0));
+                    assert_eq!(branches.len(), 2);
+                    assert!(matches!(
+                        branches[0].effect.as_ref(),
+                        Effect::RemoveCounter {
+                            count: QuantityExpr::Fixed { value: 3 },
+                            ..
+                        }
+                    ));
+                    assert!(matches!(
+                        branches[1].effect.as_ref(),
+                        Effect::PutCounter {
+                            count: QuantityExpr::Fixed { value: 3 },
+                            ..
+                        }
+                    ));
+                    assert_eq!(
+                        context
+                            .counter_removal_result
+                            .as_ref()
+                            .unwrap()
+                            .recipient
+                            .unwrap()
+                            .object_id,
+                        recipient
+                    );
+                    let parent = counter_prompt_parent(runner.state());
+                    assert_eq!(parent.scoped_player, Some(acceptor));
+                    assert!(!parent.optional && parent.optional_for.is_none());
+                    assert_eq!(runner.state().players[0].hand.len(), 3);
+                    // Replacements have no activation index, but must retain
+                    // their complete admitted replacement-owned input.
+                    assert!(counter_prompt_root(runner.state())
+                        .declares_return_result
+                        .is_some());
+                    for n in 0..4 {
+                        create_object(
+                            runner.state_mut(),
+                            CardId(97_000 + n),
+                            P0,
+                            format!("Later {n}"),
+                            Zone::Hand,
+                        );
+                    }
+                    for ingress in 0..3 {
+                        let mut resumed = crate::game::scenario::GameRunner::from_state(
+                            restore_counter_input(runner.state(), ingress),
+                        );
+                        resumed.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+                        resumed.advance_until_stack_empty();
+                        assert_counter_complete(resumed.state(), recipient, 8, 20);
+                        assert!(resumed.state().pending_replacement.is_none());
+                    }
+                } else {
+                    runner.advance_until_stack_empty();
+                    assert_counter_complete(runner.state(), recipient, 5, 20);
+                    assert!(runner.state().pending_replacement.is_none());
+                }
+                assert_eq!(source, runner.state().objects[&source].id);
+            }
+        }
+    }
+
     fn adjust_ability(
         target: crate::types::identifiers::ObjectId,
         source: crate::types::identifiers::ObjectId,

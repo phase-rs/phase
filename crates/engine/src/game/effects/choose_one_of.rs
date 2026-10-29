@@ -464,51 +464,78 @@ pub(crate) fn selection_program_owner(
         }
         false
     };
+    let mut cursor = ResolvedAbility::new(
+        Effect::ChooseOneOf {
+            kind: ChooseOneOfKind::Ordinary,
+            chooser: crate::types::ability::PlayerFilter::Controller,
+            branches: selection.branches.clone(),
+        },
+        Vec::new(),
+        selection.source_id,
+        selection.controller,
+    );
+    cursor.bind_return_result_process(selection.expected_return_result_process);
+    cursor.context = selection.context.clone();
+    cursor.replace_target_occurrences(selection.parent_occurrences.occurrences());
+    cursor.sub_ability = selection.continuation.clone();
+    cursor.replacement_applied = selection.replacement_applied.clone();
     if let Some(ticket) = &selection.context.counter_removal_result {
         let occurrences = selection.parent_occurrences.occurrences();
         if let [(TargetRef::Object(id), Some(pin))] = occurrences.as_slice() {
             if *id == pin.object_id {
-                // CR 608.2h: the held branches carry the already-applied amount.
-                // Derive every complete candidate from its admitted original;
-                // a partial search cursor cannot supply the original's inputs.
-                super::visit_instruction_result_program_projections(
-                    program,
-                    None,
-                    &mut |original| {
-                        let delegated = super::choose_counter_adjustment::delegated_choice(
-                            original,
-                            *pin,
-                            Some(ticket.clone()),
-                            selection.branches.clone(),
-                        );
-                        if let Some(candidate) =
-                            super::choose_counter_adjustment::project_latched_choice(
-                                original, &delegated,
-                            )
-                        {
-                            admit_parent(&candidate);
-                        }
-                        false
-                    },
-                );
+                let mut scopes = vec![None];
+                super::visit_instruction_result_program_projections(program, None, &mut |node| {
+                    if !scopes.contains(&node.scoped_player) {
+                        scopes.push(node.scoped_player);
+                    }
+                    false
+                });
+                for scope in [
+                    selection.context.accepting_player,
+                    Some(selection.controller),
+                ] {
+                    if !scopes.contains(&scope) {
+                        scopes.push(scope);
+                    }
+                }
+                // The hint supplies traversal axes; only complete admitted
+                // inputs and the held instruction-time latch supply authority.
+                for scope in scopes {
+                    let mut hint = cursor.clone();
+                    hint.scoped_player = scope;
+                    super::visit_generated_counter_program_projections(
+                        program,
+                        &hint,
+                        state,
+                        &mut |original| {
+                            if !matches!(original.effect, Effect::ChooseCounterAdjustment { .. })
+                                || original.optional
+                                || original.optional_for.is_some()
+                                || original.unless_pay.is_some()
+                                || original.player_scope.is_some()
+                            {
+                                return false;
+                            }
+                            let delegated = super::choose_counter_adjustment::delegated_choice(
+                                original,
+                                *pin,
+                                Some(ticket.clone()),
+                                selection.branches.clone(),
+                            );
+                            if let Some(candidate) =
+                                super::choose_counter_adjustment::project_latched_choice(
+                                    original, &delegated,
+                                )
+                            {
+                                admit_parent(&candidate);
+                            }
+                            false
+                        },
+                    );
+                }
             }
         }
     } else {
-        let mut cursor = ResolvedAbility::new(
-            Effect::ChooseOneOf {
-                kind: ChooseOneOfKind::Ordinary,
-                chooser: crate::types::ability::PlayerFilter::Controller,
-                branches: selection.branches.clone(),
-            },
-            Vec::new(),
-            selection.source_id,
-            selection.controller,
-        );
-        cursor.bind_return_result_process(selection.expected_return_result_process);
-        cursor.context = selection.context.clone();
-        cursor.replace_target_occurrences(selection.parent_occurrences.occurrences());
-        cursor.sub_ability = selection.continuation.clone();
-        cursor.replacement_applied = selection.replacement_applied.clone();
         super::visit_instruction_result_program_projections_for_cursor(
             program,
             &cursor,

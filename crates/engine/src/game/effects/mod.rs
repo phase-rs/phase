@@ -2809,7 +2809,7 @@ pub(crate) fn visit_instruction_result_program_projections(
     scoped_player: Option<PlayerId>,
     visit: &mut impl FnMut(&ResolvedAbility) -> bool,
 ) -> bool {
-    visit_instruction_result_program_projections_inner(program, scoped_player, None, visit)
+    visit_instruction_result_program_projections_inner(program, scoped_player, None, None, visit)
 }
 
 pub(crate) fn visit_instruction_result_program_projections_for_cursor(
@@ -2821,6 +2821,23 @@ pub(crate) fn visit_instruction_result_program_projections_for_cursor(
         program,
         current.scoped_player,
         Some(current),
+        None,
+        visit,
+    )
+}
+
+/// Search a generated counter latch through complete executable control inputs.
+pub(crate) fn visit_generated_counter_program_projections(
+    program: &ResolvedAbility,
+    current: &ResolvedAbility,
+    state: &GameState,
+    visit: &mut impl FnMut(&ResolvedAbility) -> bool,
+) -> bool {
+    visit_instruction_result_program_projections_inner(
+        program,
+        current.scoped_player,
+        Some(current),
+        Some(state),
         visit,
     )
 }
@@ -2829,10 +2846,107 @@ fn visit_instruction_result_program_projections_inner(
     program: &ResolvedAbility,
     scoped_player: Option<PlayerId>,
     current: Option<&ResolvedAbility>,
+    generated_state: Option<&GameState>,
     visit: &mut impl FnMut(&ResolvedAbility) -> bool,
 ) -> bool {
     use crate::types::ability_visit::{direct_nodes, DefinitionNode, ResolutionScope};
     use std::ops::ControlFlow;
+    if let Some(state) = generated_state {
+        // Discharge the enclosing control before exposing any dependent child.
+        if let Some(scope) = &program.player_scope {
+            let (template, after_scope) = split_player_scope_chain(program, scope);
+            if let Some(seat) = scoped_player {
+                let bound = bind_scoped_seat(&template, program.controller, seat);
+                if visit_instruction_result_program_projections_inner(
+                    &bound,
+                    scoped_player,
+                    current,
+                    generated_state,
+                    visit,
+                ) {
+                    return true;
+                }
+            }
+            return after_scope.as_ref().is_some_and(|tail| {
+                visit_instruction_result_program_projections_inner(
+                    tail,
+                    scoped_player,
+                    current,
+                    generated_state,
+                    visit,
+                )
+            });
+        }
+        if program.optional || program.optional_for.is_some() {
+            let accepted = if let Some(scope) = program.optional_for {
+                current.and_then(|hint| hint.context.accepting_player).and_then(|player| {
+                    let eligible = state.players.iter().any(|seat| seat.id == player)
+                        && match scope {
+                            crate::types::ability::OpponentMayScope::AnyOpponent => player != program.controller,
+                            crate::types::ability::OpponentMayScope::AnyPlayer
+                            | crate::types::ability::OpponentMayScope::AnyOtherPlayer => true,
+                        };
+                    eligible.then(|| {
+                        let mut accepted = crate::game::engine_payment_choices::project_opponent_may_accepted_ability(program, player);
+                        accepted.context.optional_effect_performed = true;
+                        accepted
+                    })
+                })
+            } else {
+                Some(project_optional_decision_ability(
+                    program,
+                    AutoMayChoice::Accept,
+                ))
+            };
+            if accepted.as_ref().is_some_and(|accepted| {
+                visit_instruction_result_program_projections_inner(
+                    accepted,
+                    scoped_player,
+                    current,
+                    generated_state,
+                    visit,
+                )
+            }) {
+                return true;
+            }
+            let declined = project_optional_decision_ability(program, AutoMayChoice::Decline);
+            return project_optional_decline_ability(state, &declined)
+                .as_ref()
+                .is_some_and(|tail| {
+                    visit_instruction_result_program_projections_inner(
+                        tail,
+                        scoped_player,
+                        current,
+                        generated_state,
+                        visit,
+                    )
+                });
+        }
+        if program.unless_pay.is_some() {
+            let pending =
+                crate::game::engine_payment_choices::project_unless_payment_effect(program);
+            if visit_instruction_result_program_projections_inner(
+                &pending,
+                scoped_player,
+                current,
+                generated_state,
+                visit,
+            ) {
+                return true;
+            }
+            return crate::game::engine_payment_choices::project_unless_paid_successor(&pending)
+                .as_ref()
+                .is_some_and(|paid| {
+                    visit_instruction_result_program_projections_inner(
+                        paid,
+                        scoped_player,
+                        current,
+                        generated_state,
+                        visit,
+                    )
+                });
+        }
+    }
     if visit(program) {
         return true;
     }
@@ -2858,6 +2972,7 @@ fn visit_instruction_result_program_projections_inner(
             &accepted,
             scoped_player,
             current,
+            generated_state,
             visit,
         ) {
             return true;
@@ -2871,6 +2986,7 @@ fn visit_instruction_result_program_projections_inner(
                 &pending,
                 scoped_player,
                 Some(current),
+                generated_state,
                 visit,
             ) {
                 return true;
@@ -2882,6 +2998,7 @@ fn visit_instruction_result_program_projections_inner(
                     &paid,
                     scoped_player,
                     Some(current),
+                    generated_state,
                     visit,
                 ) {
                     return true;
@@ -2905,6 +3022,7 @@ fn visit_instruction_result_program_projections_inner(
                 &selected,
                 scoped_player,
                 Some(current),
+                generated_state,
                 visit,
             ) {
                 return true;
@@ -2928,6 +3046,7 @@ fn visit_instruction_result_program_projections_inner(
                 &projected,
                 scoped_player,
                 Some(current),
+                generated_state,
                 visit,
             ) {
                 return true;
@@ -2961,6 +3080,7 @@ fn visit_instruction_result_program_projections_inner(
                         &projected,
                         scoped_player,
                         Some(current),
+                        generated_state,
                         visit,
                     ) {
                         return true;
@@ -3044,6 +3164,7 @@ fn visit_instruction_result_program_projections_inner(
                     &selected,
                     scoped_player,
                     Some(current),
+                    generated_state,
                     visit,
                 ) {
                     return true;
@@ -3057,6 +3178,7 @@ fn visit_instruction_result_program_projections_inner(
                 &bound,
                 scoped_player,
                 Some(current),
+                generated_state,
                 visit,
             ) {
                 return true;
@@ -3066,6 +3188,7 @@ fn visit_instruction_result_program_projections_inner(
                     &tail,
                     scoped_player,
                     Some(current),
+                    generated_state,
                     visit,
                 ) {
                     return true;
@@ -3074,7 +3197,13 @@ fn visit_instruction_result_program_projections_inner(
         }
     }
     if visit_instruction_result_child_projections(program, &mut |child| {
-        visit_instruction_result_program_projections_inner(child, scoped_player, current, visit)
+        visit_instruction_result_program_projections_inner(
+            child,
+            scoped_player,
+            current,
+            generated_state,
+            visit,
+        )
     }) {
         return true;
     }
@@ -3083,6 +3212,7 @@ fn visit_instruction_result_program_projections_inner(
             &investigate::project_token_ability(program),
             scoped_player,
             current,
+            generated_state,
             visit,
         )
     {
@@ -3097,13 +3227,20 @@ fn visit_instruction_result_program_projections_inner(
             &reveal_from_hand::project_decline_branch(program, definition),
             scoped_player,
             current,
+            generated_state,
             visit,
         ) {
             return true;
         }
     }
     for (_, body) in &program.coin_branch_target_abilities {
-        if visit_instruction_result_program_projections_inner(body, scoped_player, current, visit) {
+        if visit_instruction_result_program_projections_inner(
+            body,
+            scoped_player,
+            current,
+            generated_state,
+            visit,
+        ) {
             return true;
         }
     }
@@ -3146,6 +3283,7 @@ fn visit_instruction_result_program_projections_inner(
                     &selected,
                     scoped_player,
                     Some(current),
+                    generated_state,
                     visit,
                 ) {
                     return true;
@@ -3159,6 +3297,7 @@ fn visit_instruction_result_program_projections_inner(
                     &selected,
                     scoped_player,
                     Some(current),
+                    generated_state,
                     visit,
                 ) {
                     return true;
@@ -3195,6 +3334,7 @@ fn visit_instruction_result_program_projections_inner(
                 &selected,
                 scoped_player,
                 current,
+                generated_state,
                 visit,
             );
             if !found {
@@ -3208,6 +3348,7 @@ fn visit_instruction_result_program_projections_inner(
                         &with_tail,
                         scoped_player,
                         current,
+                        generated_state,
                         visit,
                     );
                 }
@@ -4409,6 +4550,59 @@ pub(crate) fn counter_removal_binding_is_valid(
         .ok().and_then(|frame| frame.results.get(&binding.result)),
         Some(crate::types::game_state::InstructionResult::CounterRemovals(result))
             if result.source == binding.source && result.recipient == binding.recipient && result.counters == binding.counters)
+}
+
+/// Recover a readerless generated producer from its independent admission.
+/// Actual waiting/queue custody is authenticated separately by the caller.
+pub(crate) fn readerless_generated_counter_producer(
+    state: &GameState,
+    binding: &crate::types::game_state::CounterRemovalResultBinding,
+) -> Result<Option<ResolvedAbility>, EffectError> {
+    let frame = crate::types::game_state::checked_return_result_frame(
+        state,
+        Some(binding.occurrence),
+        crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(binding.process),
+    )
+    .map_err(EffectError::InvalidParam)?;
+    let program = frame.admitted_program.as_deref().ok_or_else(|| {
+        EffectError::InvalidParam("counter producer has no admitted program".into())
+    })?;
+    let (_, declarations) = crate::types::ability::classify_instruction_result_invocation(
+        program,
+        crate::types::ability::InstructionResultEntry::Independent,
+        None,
+    )?;
+    if frame.declarations.as_ref() != Some(&declarations)
+        || program.return_result_process != frame.process
+        || declarations.get(&binding.result) != Some(&None)
+    {
+        return Err(EffectError::InvalidParam(
+            "counter producer declaration owner mismatch".into(),
+        ));
+    }
+    state.validate_replacement_program(program)?;
+    let mut producers = Vec::new();
+    let mut has_reader = false;
+    visit_instruction_result_program_projections(program, None, &mut |candidate| {
+        has_reader |= crate::types::game_state::reads_return_result_id(candidate, binding.result);
+        if let Effect::ChooseCounterAdjustment { counters, .. } = &candidate.effect {
+            if candidate.declares_return_result == Some(binding.result)
+                && candidate.source_id == binding.source.reference.object_id
+                && candidate.return_result_process == binding.process
+                && *counters == binding.counters
+                && !producers
+                    .iter()
+                    .any(|known| instruction_result_projection_eq(known, candidate))
+            {
+                producers.push(candidate.clone());
+            }
+        }
+        false
+    });
+    if has_reader || producers.len() != 1 {
+        return Ok(None);
+    }
+    Ok(producers.pop())
 }
 
 /// CR 603.12: only the exact creating occurrence may supply this event.
@@ -26761,7 +26955,7 @@ fn resolve_owned_chain_body(
     // unless payment once for each bound member, not once against the full
     // parent target collection. Defer interception until the loop below
     // re-enters this chain with its singleton iteration ability.
-    if let Some(unless_pay) = ability
+    let ability = if let Some(unless_pay) = ability
         .unless_pay
         .as_ref()
         .filter(|_| !has_member_driven_repeat_after_hydration(state, ability))
@@ -26870,7 +27064,13 @@ fn resolve_owned_chain_body(
                 return Ok(ResolutionProgress::Waiting);
             }
         }
-    }
+        std::borrow::Cow::Owned(
+            crate::game::engine_payment_choices::project_unless_payment_effect(ability),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(ability)
+    };
+    let ability = ability.as_ref();
 
     // CR 608.2d + CR 115.10a: An untargeted `PutCounter` recipient ("any
     // creature you control", no literal "target") or the object whose counter
