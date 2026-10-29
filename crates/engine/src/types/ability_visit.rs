@@ -1178,6 +1178,1620 @@ pub(crate) mod direct_nodes_mut {
     define_walk!([mut]; [FnMut(DefinitionNodeMut<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node; exclusive_iter; false);
 }
 
+/// State-owned programs keep arena handles in definitions, including definitions
+/// embedded in costs and frozen executable input. The callback deliberately has
+/// no access to GameState; the caller owns lookup and graph validation.
+pub(crate) fn visit_resolved_replacements(
+    root: &crate::types::ability::ResolvedAbility,
+    visit: &mut impl FnMut(&ReplacementDefinition),
+) {
+    use crate::types::ability::{
+        AdditionalCost, CostPaidObjectRecord, ParsedCondition, QuantityRef,
+    };
+    use crate::types::keywords::*;
+
+    fn keyword(value: &Keyword, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        let cost = match value {
+            Keyword::CumulativeUpkeep(cost)
+            | Keyword::Escalate(cost)
+            | Keyword::Bestow(BestowCost::NonMana(cost))
+            | Keyword::Embalm(EmbalmCost::NonMana(cost))
+            | Keyword::Eternalize(EternalizeCost::NonMana(cost))
+            | Keyword::Cycling(CyclingCost::NonMana(cost))
+            | Keyword::Flashback(FlashbackCost::NonMana(cost))
+            | Keyword::Escape(EscapeCost::NonMana(cost))
+            | Keyword::Evoke(EvokeCost::NonMana(cost))
+            | Keyword::Blitz(BlitzCost::NonMana(cost))
+            | Keyword::Buyback(BuybackCost::NonMana(cost))
+            | Keyword::Echo(EchoCost::NonMana(cost))
+            | Keyword::Morph(MorphCost::NonMana(cost))
+            | Keyword::Entwine(EntwineCost::NonMana(cost)) => Some(cost),
+            _ => None,
+        };
+        if let Some(cost) = cost {
+            walk_cost(cost, visit);
+        }
+        match value {
+            Keyword::Enchant(value)
+            | Keyword::Craft {
+                materials: value, ..
+            }
+            | Keyword::Protection(ProtectionTarget::Filter(value)) => filter(value, visit),
+            Keyword::Affinity(value) => {
+                for property in &value.properties {
+                    property.for_each_nested_keyword_payload(&mut |value| keyword(value, visit));
+                }
+            }
+            Keyword::Emerge(value) => filter(&value.sacrifice_filter, visit),
+            Keyword::Mobilize(value) | Keyword::Firebending(value) => quantity(value, visit),
+            Keyword::Crew {
+                once_per_turn: Some(value),
+                ..
+            } => activation(value, visit),
+            Keyword::Disguise(DisguiseCost::Reduced { reduction, .. }) => {
+                quantity(&reduction.count, visit);
+                if let Some(value) = &reduction.condition {
+                    parsed_condition(value, visit);
+                }
+            }
+            Keyword::Ward(value) => ward(value, visit),
+            _ => {}
+        }
+    }
+    fn ward(value: &WardCost, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        match value {
+            WardCost::Sacrifice { filter: value, .. }
+            | WardCost::Discard {
+                filter: Some(value),
+                ..
+            } => filter(value, visit),
+            WardCost::Compound(values) => {
+                for value in values {
+                    ward(value, visit);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn activation(
+        value: &crate::types::ability::ActivationRestriction,
+        visit: &mut impl FnMut(&ReplacementDefinition),
+    ) {
+        if let crate::types::ability::ActivationRestriction::RequiresCondition {
+            condition: Some(value),
+        } = value
+        {
+            parsed_condition(value, visit);
+        }
+    }
+    fn parsed_condition(value: &ParsedCondition, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        match value {
+            ParsedCondition::QuantityComparison { lhs, rhs, .. } => {
+                quantity(lhs, visit);
+                quantity(rhs, visit);
+            }
+            ParsedCondition::QuantityVsEachOpponent { lhs, rhs, .. } => {
+                reference(lhs, visit);
+                reference(rhs, visit);
+            }
+            ParsedCondition::SourceLacksKeyword { keyword: value }
+            | ParsedCondition::ControlsCreatureWithKeyword { keyword: value, .. } => {
+                keyword(value, visit)
+            }
+            ParsedCondition::YouAttackedWithAtLeast {
+                filter: Some(value),
+                ..
+            }
+            | ParsedCondition::YouCastSpellThisTurn {
+                filter: Some(value),
+            }
+            | ParsedCondition::BattlefieldEntriesThisTurn { filter: value, .. }
+            | ParsedCondition::SpellTargetsFilter { filter: value } => filter(value, visit),
+            ParsedCondition::PlayerCountAtLeast { filter: value, .. } => {
+                value.for_each_nested_keyword_payload(&mut |value| keyword(value, visit))
+            }
+            ParsedCondition::Not { condition } => parsed_condition(condition, visit),
+            ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => {
+                for value in conditions {
+                    parsed_condition(value, visit);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn reference(reference: &QuantityRef, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        reference.for_each_nested_keyword_payload(&mut |value| keyword(value, visit));
+    }
+    fn filter(value: &TargetFilter, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        value.for_each_nested_keyword_payload(&mut |value| keyword(value, visit));
+    }
+    fn quantity(
+        value: &crate::types::ability::QuantityExpr,
+        visit: &mut impl FnMut(&ReplacementDefinition),
+    ) {
+        value.for_each_ref(&mut |value| reference(value, visit));
+    }
+    fn cost_leaves(value: &AbilityCost, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        value.for_each_predicate_keyword_payload(&mut |value| keyword(value, visit));
+        value.for_each_resolution_quantity_expr(&mut |value| quantity(value, visit));
+    }
+    // Keep both axes of the existing shared walk: node callbacks expose the
+    // definitions, and effect callbacks expose its deliberately opaque leaves.
+    fn walk_cost(value: &AbilityCost, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        cost_leaves(value, visit);
+        let _ = nodes::visit_cost(value, &mut |node| replacement_node(node, visit));
+        let _ = visit_cost(value, &mut |value| {
+            effect_leaves(value, visit);
+            ControlFlow::Continue(())
+        });
+    }
+    fn walk_ability(value: &AbilityDefinition, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        let _ = nodes::visit_ability_def(value, &mut |node| replacement_node(node, visit));
+        let _ = visit_ability_def(value, &mut |value| {
+            effect_leaves(value, visit);
+            ControlFlow::Continue(())
+        });
+    }
+    fn walk_trigger(value: &TriggerDefinition, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        let _ = nodes::visit_trigger(value, &mut |node| replacement_node(node, visit));
+        let _ = visit_trigger(value, &mut |value| {
+            effect_leaves(value, visit);
+            ControlFlow::Continue(())
+        });
+    }
+    fn walk_static(value: &StaticDefinition, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        let _ = nodes::visit_static(value, &mut |node| replacement_node(node, visit));
+        let _ = visit_static(value, &mut |value| {
+            effect_leaves(value, visit);
+            ControlFlow::Continue(())
+        });
+    }
+    fn walk_replacement(
+        value: &ReplacementDefinition,
+        visit: &mut impl FnMut(&ReplacementDefinition),
+    ) {
+        let _ = nodes::visit_replacement(value, &mut |node| replacement_node(node, visit));
+        let _ = visit_replacement(value, &mut |value| {
+            effect_leaves(value, visit);
+            ControlFlow::Continue(())
+        });
+    }
+    fn walk_modification(
+        value: &ContinuousModification,
+        visit: &mut impl FnMut(&ReplacementDefinition),
+    ) {
+        let _ = nodes::visit_continuous_mod(value, &mut |node| replacement_node(node, visit));
+        let _ = visit_continuous_mod(value, &mut |value| {
+            effect_leaves(value, visit);
+            ControlFlow::Continue(())
+        });
+        modification_leaves(value, visit);
+    }
+    fn trigger_source(
+        value: &crate::types::game_state::TriggerSourceContext,
+        visit: &mut impl FnMut(&ReplacementDefinition),
+    ) {
+        for value in value.lki.keywords.iter().chain(&value.cast_spell_keywords) {
+            keyword(value, visit);
+        }
+        for entry in &value.trigger_entries {
+            walk_trigger(&entry.definition, visit);
+        }
+        if let Some(value) = &value.cast_cost_paid_object {
+            for value in &value.lki.keywords {
+                keyword(value, visit);
+            }
+        }
+        for value in &value.mana_spent_source_snapshots {
+            for value in &value.lki.keywords {
+                keyword(value, visit);
+            }
+        }
+    }
+    fn event(
+        value: &crate::types::events::GameEvent,
+        visit: &mut impl FnMut(&ReplacementDefinition),
+    ) {
+        use crate::types::events::{BoundActivationCost, GameEvent};
+        match value {
+            GameEvent::AbilityActivated {
+                departed_source_lki,
+                activation_cost,
+                ..
+            } => {
+                if let Some(value) = departed_source_lki {
+                    for value in &value.keywords {
+                        keyword(value, visit);
+                    }
+                }
+                if let BoundActivationCost::Cost(value) = activation_cost {
+                    walk_cost(value, visit);
+                }
+            }
+            GameEvent::ZoneChanged { record, .. } => {
+                for value in &record.keywords {
+                    keyword(value, visit);
+                }
+                for value in &record.trigger_definitions {
+                    walk_trigger(&value.definition, visit);
+                }
+                if let Some(value) = &record.trigger_source_context {
+                    trigger_source(value, visit);
+                }
+            }
+            GameEvent::CreatureEnlisted {
+                tapped_snapshot, ..
+            } => {
+                for value in &tapped_snapshot.lki.keywords {
+                    keyword(value, visit);
+                }
+            }
+            GameEvent::SagaChapterAbilityResolved { saga, .. } => trigger_source(saga, visit),
+            GameEvent::EffectResolved {
+                subject: Some(value),
+                ..
+            } => {
+                for value in &value.keywords {
+                    keyword(value, visit);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn delayed_condition(
+        value: &crate::types::ability::DelayedTriggerCondition,
+        visit: &mut impl FnMut(&ReplacementDefinition),
+    ) {
+        use crate::types::ability::DelayedTriggerCondition;
+        match value {
+            DelayedTriggerCondition::WhenDies { filter: value }
+            | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter: value }
+            | DelayedTriggerCondition::WhenEntersBattlefield { filter: value }
+            | DelayedTriggerCondition::WhenDiesOrExiled { filter: value } => filter(value, visit),
+            DelayedTriggerCondition::WheneverEvent { trigger, .. } => walk_trigger(trigger, visit),
+            DelayedTriggerCondition::WhenNextEvent {
+                trigger,
+                or_trigger,
+                ..
+            } => {
+                walk_trigger(trigger, visit);
+                if let Some(trigger) = or_trigger {
+                    walk_trigger(trigger, visit);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn trigger_condition(
+        value: &crate::types::ability::TriggerCondition,
+        visit: &mut impl FnMut(&ReplacementDefinition),
+    ) {
+        use crate::types::ability::TriggerCondition;
+        match value {
+            TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
+                quantity(lhs, visit);
+                quantity(rhs, visit);
+            }
+            TriggerCondition::QuantityQuality {
+                quantity: value, ..
+            } => quantity(value, visit),
+            TriggerCondition::ControlsType { filter: value }
+            | TriggerCondition::ControlCount { filter: value, .. }
+            | TriggerCondition::ControlsNone { filter: value }
+            | TriggerCondition::DefendingPlayerControlsNone { filter: value }
+            | TriggerCondition::ZoneChangeObjectMatchesFilter { filter: value, .. }
+            | TriggerCondition::SourceMatchesFilter { filter: value }
+            | TriggerCondition::EventDamageSourceMatchesFilter { filter: value }
+            | TriggerCondition::EventObjectMatchesFilter { filter: value }
+            | TriggerCondition::TriggeringSpellTargetsFilter { filter: value }
+            | TriggerCondition::TriggeringSpellMatchesFilter { filter: value }
+            | TriggerCondition::DealtDamageThisTurnBySource { source: value }
+            | TriggerCondition::MinCoAttackers {
+                filter: Some(value),
+                ..
+            }
+            | TriggerCondition::CastSpellThisTurn {
+                filter: Some(value),
+            } => filter(value, visit),
+            TriggerCondition::DuringPlayersTurn { player } => {
+                player.for_each_nested_keyword_payload(&mut |value| keyword(value, visit))
+            }
+            TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+                for value in conditions {
+                    trigger_condition(value, visit);
+                }
+            }
+            TriggerCondition::Not { condition } | TriggerCondition::EventTime { condition } => {
+                trigger_condition(condition, visit)
+            }
+            _ => {}
+        }
+    }
+    fn static_condition(
+        value: &crate::types::ability::StaticCondition,
+        visit: &mut impl FnMut(&ReplacementDefinition),
+    ) {
+        use crate::types::ability::StaticCondition;
+        match value {
+            StaticCondition::QuantityComparison { lhs, rhs, .. } => {
+                quantity(lhs, visit);
+                quantity(rhs, visit);
+            }
+            StaticCondition::QuantityQuality {
+                quantity: value, ..
+            } => quantity(value, visit),
+            StaticCondition::IsPresent {
+                filter: Some(value),
+            }
+            | StaticCondition::DefendingPlayerControls { filter: value }
+            | StaticCondition::SourceMatchesFilter { filter: value }
+            | StaticCondition::TopOfLibraryMatches { filter: value }
+            | StaticCondition::RecipientMatchesFilter { filter: value } => filter(value, visit),
+            StaticCondition::Not { condition } => static_condition(condition, visit),
+            StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+                for value in conditions {
+                    static_condition(value, visit);
+                }
+            }
+            StaticCondition::UnlessPay {
+                scaling:
+                    crate::types::ability::UnlessPayScaling::PerQuantityRef { quantity: value }
+                    | crate::types::ability::UnlessPayScaling::PerAffectedAndQuantityRef {
+                        quantity: value,
+                    }
+                    | crate::types::ability::UnlessPayScaling::PerAffectedWithRef { quantity: value },
+                ..
+            } => reference(value, visit),
+            _ => {}
+        }
+    }
+    fn replacement_condition(
+        value: &crate::types::ability::ReplacementCondition,
+        visit: &mut impl FnMut(&ReplacementDefinition),
+    ) {
+        use crate::types::ability::ReplacementCondition;
+        match value {
+            ReplacementCondition::OnlyIfQuantity { lhs, rhs, .. }
+            | ReplacementCondition::UnlessQuantity { lhs, rhs, .. } => {
+                quantity(lhs, visit);
+                quantity(rhs, visit);
+            }
+            ReplacementCondition::UnlessControlsOtherLeq { filter: value, .. } => {
+                filter(&TargetFilter::Typed(value.clone()), visit)
+            }
+            ReplacementCondition::UnlessControlsMatching { filter: value }
+            | ReplacementCondition::UnlessControlsCountMatching { filter: value, .. }
+            | ReplacementCondition::IfControlsMatching { filter: value, .. }
+            | ReplacementCondition::DealtDamageThisTurnBySource { source: value } => {
+                filter(value, visit)
+            }
+            ReplacementCondition::And { conditions } => {
+                for value in conditions {
+                    replacement_condition(value, visit);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn replacement_node(
+        node: DefinitionNode<'_>,
+        visit: &mut impl FnMut(&ReplacementDefinition),
+    ) -> ControlFlow<()> {
+        match node {
+            DefinitionNode::Replacement(definition) => {
+                visit(definition);
+                if let Some(value) = &definition.selected_damage_source {
+                    trigger_source(value, visit);
+                }
+                if let Some(value) = &definition.entry_payment_max {
+                    quantity(value, visit);
+                }
+                match &definition.damage_modification {
+                    Some(crate::types::ability::DamageModification::Plus { value })
+                    | Some(crate::types::ability::DamageModification::PreventionMinus {
+                        value:
+                            crate::types::ability::PreventionFormula::Quantity { quantity: value },
+                    }) => quantity(value, visit),
+                    _ => {}
+                }
+                for value in [
+                    &definition.valid_card,
+                    &definition.damage_source_filter,
+                    &definition.redirect_target,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    filter(value, visit);
+                }
+                if let Some(value) = &definition.condition {
+                    replacement_condition(value, visit);
+                }
+                if let ReplacementMode::MayCost { cost, .. } = &definition.mode {
+                    cost_leaves(cost, visit);
+                }
+                for spec in definition
+                    .additional_token_spec
+                    .iter()
+                    .chain(definition.ensure_token_specs.iter().flatten())
+                {
+                    for value in &spec.characteristics.keywords {
+                        keyword(value, visit);
+                    }
+                    for definition in &spec.static_abilities {
+                        walk_static(definition, visit);
+                    }
+                    if let Some(window) = &spec.sacrifice_at {
+                        duration(window, visit);
+                    }
+                }
+            }
+            DefinitionNode::Ability(definition) => {
+                definition.for_each_direct_quantity_ref(&mut |value| reference(value, visit));
+                if let Some(condition) = &definition.condition {
+                    condition.for_each_nested_keyword_payload(&mut |value| keyword(value, visit));
+                }
+                if let Some(window) = &definition.duration {
+                    duration(window, visit);
+                }
+                if let Some(value) = &definition.cost {
+                    cost_leaves(value, visit);
+                }
+                if let Some(value) = &definition.unless_pay {
+                    cost_leaves(&value.cost, visit);
+                    filter(&value.payer, visit);
+                }
+                for value in [&definition.player_scope].into_iter().flatten() {
+                    value.for_each_nested_keyword_payload(&mut |value| keyword(value, visit));
+                }
+                for value in [&definition.target_chooser, &definition.optional_player]
+                    .into_iter()
+                    .flatten()
+                {
+                    filter(value, visit);
+                }
+                for value in &definition.activation_restrictions {
+                    activation(value, visit);
+                }
+                if let Some(value) = &definition.activator_filter {
+                    value.for_each_nested_keyword_payload(&mut |value| keyword(value, visit));
+                }
+                if let Some(value) = &definition.cost_reduction {
+                    quantity(&value.count, visit);
+                    if let Some(value) = &value.condition {
+                        parsed_condition(value, visit);
+                    }
+                }
+                if let Some(value) = &definition.multi_target {
+                    quantity(&value.min, visit);
+                    if let Some(value) = &value.max {
+                        quantity(value, visit);
+                    }
+                }
+                if let Some(value) = &definition.announced_x {
+                    quantity(value, visit);
+                }
+                for value in &definition.target_constraints {
+                    if let crate::types::game_state::TargetSelectionConstraint::TotalManaValue {
+                        value,
+                        ..
+                    } = value
+                    {
+                        quantity(value, visit);
+                    }
+                }
+                if let Some((_, value)) = &definition.reads_return_result {
+                    filter(&value.noun, visit);
+                }
+                if let Some(crate::types::ability::RepeatContinuation::WhileCondition {
+                    condition,
+                    ..
+                }) = &definition.repeat_until
+                {
+                    condition.for_each_nested_keyword_payload(&mut |value| keyword(value, visit));
+                }
+            }
+            DefinitionNode::Static(definition) => {
+                mode(&definition.mode, visit);
+                if let Some(value) = &definition.affected {
+                    filter(value, visit);
+                }
+                if let Some(value) = &definition.condition {
+                    static_condition(value, visit);
+                }
+                if let Some(value) = &definition.per_player_condition {
+                    parsed_condition(value, visit);
+                }
+                for modification in &definition.modifications {
+                    modification_leaves(modification, visit);
+                }
+            }
+            DefinitionNode::Trigger(definition) => {
+                for value in [
+                    &definition.valid_card,
+                    &definition.valid_target,
+                    &definition.valid_subject_player,
+                    &definition.valid_source,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    filter(value, visit);
+                }
+                for clause in &definition.zone_change_clauses {
+                    if let Some(value) = &clause.valid_card {
+                        filter(value, visit);
+                    }
+                }
+                if let Some(value) = &definition.condition {
+                    trigger_condition(value, visit);
+                }
+                if let Some(value) = &definition.attack_cost_condition {
+                    static_condition(value, visit);
+                }
+                if let Some(crate::types::ability::TriggerConstraint::NthSpellThisTurn {
+                    filter: Some(value),
+                    ..
+                }) = &definition.constraint
+                {
+                    filter(value, visit);
+                }
+                if let Some(value) = &definition.unless_pay {
+                    filter(&value.payer, visit);
+                    cost_leaves(&value.cost, visit);
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    }
+    fn duration(
+        value: &crate::types::ability::Duration,
+        visit: &mut impl FnMut(&ReplacementDefinition),
+    ) {
+        match value {
+            crate::types::ability::Duration::UntilEvent { event } => walk_trigger(event, visit),
+            crate::types::ability::Duration::ForAsLongAs { condition } => {
+                static_condition(condition, visit)
+            }
+            crate::types::ability::Duration::UntilNextStepOf { player, .. } => {
+                player.for_each_nested_keyword_payload(&mut |value| keyword(value, visit))
+            }
+            _ => {}
+        }
+    }
+    fn mode(
+        value: &crate::types::statics::StaticMode,
+        visit: &mut impl FnMut(&ReplacementDefinition),
+    ) {
+        use crate::types::statics::{
+            BlockExceptionKind, CostPaymentProhibition, HandSizeModification, RequiredDefender,
+            StaticMode,
+        };
+        let cost = match value {
+            StaticMode::CastWithAlternativeCost { cost, .. }
+            | StaticMode::AlternativeKeywordCost { cost, .. }
+            | StaticMode::TopOfLibraryCastPermission {
+                alt_cost: Some(cost),
+                ..
+            }
+            | StaticMode::ImposeAdditionalCost { cost, .. } => Some(cost),
+            StaticMode::GraveyardCastPermission {
+                extra_cost: Some(cost),
+                ..
+            }
+            | StaticMode::ExileCastPermission {
+                extra_cost: Some(cost),
+                ..
+            } => Some(&cost.cost),
+            _ => None,
+        };
+        if let Some(cost) = cost {
+            walk_cost(cost, visit);
+        }
+        match value {
+            StaticMode::CastWithKeyword { keyword: value }
+            | StaticMode::CantHaveKeyword { keyword: value } => keyword(value, visit),
+            StaticMode::CantBeActivated {
+                source_filter: value,
+                ..
+            }
+            | StaticMode::CantBeBlockedBy { filter: value }
+            | StaticMode::AttachmentRestriction { filter: value }
+            | StaticMode::BlockRestriction { filter: value }
+            | StaticMode::MaxUntapPerType { filter: value, .. }
+            | StaticMode::CantBeBlockedExceptBy {
+                kind: BlockExceptionKind::Quality(value),
+            }
+            | StaticMode::PlayerProtection(ProtectionTarget::Filter(value))
+            | StaticMode::CantPayCost {
+                cost: CostPaymentProhibition::Sacrifice { filter: value },
+                ..
+            }
+            | StaticMode::MustBeBlocked { by: Some(value) }
+            | StaticMode::MustBeBlockedByAll {
+                blockers: Some(value),
+            }
+            | StaticMode::PerTurnCastLimit {
+                spell_filter: Some(value),
+                ..
+            } => filter(value, visit),
+            StaticMode::MustAttackDefender {
+                defender: RequiredDefender::Matching { filter: value },
+            } => value.for_each_nested_keyword_payload(&mut |value| keyword(value, visit)),
+            StaticMode::ModifyCost {
+                spell_filter,
+                dynamic_count,
+                ..
+            } => {
+                if let Some(value) = spell_filter {
+                    filter(value, visit);
+                }
+                if let Some(value) = dynamic_count {
+                    reference(value, visit);
+                }
+            }
+            StaticMode::ReduceAbilityCost {
+                dynamic_count,
+                targets,
+                activator,
+                ..
+            } => {
+                if let Some(value) = targets {
+                    filter(value, visit);
+                }
+                if let Some(value) = dynamic_count {
+                    reference(value, visit);
+                }
+                if let Some(value) = activator {
+                    value.for_each_nested_keyword_payload(&mut |value| keyword(value, visit));
+                }
+            }
+            StaticMode::ImposeAdditionalCost {
+                spell_filter: Some(value),
+                ..
+            } => filter(value, visit),
+            StaticMode::SuppressTriggers {
+                source_filter,
+                trigger_source_filter,
+                ..
+            } => {
+                filter(source_filter, visit);
+                if let Some(value) = trigger_source_filter {
+                    filter(value, visit);
+                }
+            }
+            StaticMode::SpendManaAsAnyColor {
+                spell_filter,
+                activation_source_filter,
+                ..
+            } => {
+                for value in [spell_filter, activation_source_filter]
+                    .into_iter()
+                    .flatten()
+                {
+                    filter(value, visit);
+                }
+            }
+            StaticMode::MaximumHandSize {
+                modification: HandSizeModification::EqualTo(value),
+            } => quantity(value, visit),
+            _ => {}
+        }
+    }
+    fn modification_leaves(
+        value: &ContinuousModification,
+        visit: &mut impl FnMut(&ReplacementDefinition),
+    ) {
+        match value {
+            ContinuousModification::AddKeyword { keyword: value }
+            | ContinuousModification::RemoveKeyword { keyword: value } => keyword(value, visit),
+            ContinuousModification::AddStaticMode { mode: value } => mode(value, visit),
+            ContinuousModification::SetDynamicPower { value }
+            | ContinuousModification::SetDynamicToughness { value }
+            | ContinuousModification::SetPowerDynamic { value }
+            | ContinuousModification::SetToughnessDynamic { value }
+            | ContinuousModification::AddDynamicPower { value }
+            | ContinuousModification::AddDynamicToughness { value }
+            | ContinuousModification::AddDynamicKeyword { value, .. }
+            | ContinuousModification::AddCounterOnEnter { count: value, .. } => {
+                quantity(value, visit)
+            }
+            ContinuousModification::GrantAllActivatedAbilitiesOf { source, cap, .. } => {
+                filter(source, visit);
+                if let Some(value) = cap {
+                    activation(value, visit);
+                }
+            }
+            ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
+                filter(source, visit)
+            }
+            ContinuousModification::CopyValues { values, .. } => {
+                for value in &values.keywords {
+                    keyword(value, visit);
+                }
+                if let Some(face) = &values.prepare_face {
+                    for replacement in face.replacement_definitions.iter_all() {
+                        walk_replacement(replacement, visit);
+                    }
+                    for definition in &face.abilities {
+                        walk_ability(definition, visit);
+                    }
+                    for definition in face.static_definitions.iter_all() {
+                        walk_static(definition, visit);
+                    }
+                    for definition in face.trigger_definitions.iter_all() {
+                        walk_trigger(definition, visit);
+                    }
+                    for value in &face.keywords {
+                        keyword(value, visit);
+                    }
+                    if let Some(value) = &face.additional_cost {
+                        match value {
+                            AdditionalCost::Optional { cost, .. }
+                            | AdditionalCost::Required(cost) => walk_cost(cost, visit),
+                            AdditionalCost::Kicker { costs, .. } => {
+                                for value in costs {
+                                    walk_cost(value, visit);
+                                }
+                            }
+                            AdditionalCost::Choice(first, second) => {
+                                walk_cost(first, visit);
+                                walk_cost(second, visit);
+                            }
+                        }
+                    }
+                    for option in &face.casting_options {
+                        if let Some(value) = &option.cost {
+                            walk_cost(value, visit);
+                        }
+                        if let Some(value) = &option.condition {
+                            parsed_condition(value, visit);
+                        }
+                    }
+                    for value in &face.casting_restrictions {
+                        if let crate::types::ability::CastingRestriction::RequiresCondition {
+                            condition: Some(value),
+                        } = value
+                        {
+                            parsed_condition(value, visit);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // These are the existing typed leaves of the shared effect walk, rather
+    // than a second list of its ordinary ability/trigger/cost carriers.
+    fn effect_leaves(effect: &Effect, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        use crate::types::ability::{PerpetualGrantModification, PerpetualModification};
+        match effect {
+            Effect::CopySpell {
+                additional_modifications,
+                ..
+            }
+            | Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            }
+            | Effect::CopyTokenOf {
+                additional_modifications,
+                ..
+            }
+            | Effect::EachPlayerCopyChosen {
+                copy_modifications: additional_modifications,
+                ..
+            } => {
+                for modification in additional_modifications {
+                    walk_modification(modification, visit);
+                }
+            }
+            Effect::ApplyPerpetual {
+                modification: PerpetualModification::GrantAbility { modifications },
+                ..
+            } => {
+                for modification in modifications {
+                    match modification {
+                        PerpetualGrantModification::GrantAbility { definition } => {
+                            walk_ability(definition, visit)
+                        }
+                        PerpetualGrantModification::GrantTrigger { trigger } => {
+                            walk_trigger(trigger, visit)
+                        }
+                        PerpetualGrantModification::AddStaticMode { mode: value } => {
+                            mode(value, visit)
+                        }
+                        PerpetualGrantModification::AddKeyword { keyword: value } => {
+                            keyword(value, visit)
+                        }
+                    }
+                }
+            }
+            Effect::Mana { grants, .. } => {
+                for grant in grants {
+                    match grant {
+                        crate::types::mana::ManaSpellGrant::TriggerOnSpend {
+                            filter: value,
+                            ability,
+                        } => {
+                            filter(value, visit);
+                            walk_ability(ability, visit);
+                        }
+                        crate::types::mana::ManaSpellGrant::AddKeywordUntilEndOfTurn {
+                            keyword: value,
+                            duration: window,
+                            ..
+                        } => {
+                            keyword(value, visit);
+                            duration(window, visit);
+                        }
+                        crate::types::mana::ManaSpellGrant::CantBeCountered { filter: value } => {
+                            filter(value, visit)
+                        }
+                        crate::types::mana::ManaSpellGrant::EntersWithCounters {
+                            filter: value,
+                            count,
+                            ..
+                        } => {
+                            filter(value, visit);
+                            quantity(count, visit);
+                        }
+                    }
+                }
+            }
+            Effect::ApplyPerpetual {
+                modification:
+                    PerpetualModification::ModifyPowerToughness { keywords, .. }
+                    | PerpetualModification::GrantKeywords { keywords }
+                    | PerpetualModification::Become { keywords, .. },
+                ..
+            } => {
+                for value in keywords {
+                    keyword(value, visit);
+                }
+            }
+            Effect::AddPendingEntersModifications { rider } => {
+                for modification in &rider.modifications {
+                    walk_modification(modification, visit);
+                }
+                if let Some(value) = &rider.cast_filter {
+                    filter(value, visit);
+                }
+            }
+            Effect::GrantNextSpellAbility {
+                modifier: crate::types::game_state::NextSpellModifier::HasKeyword { keyword: value },
+                ..
+            } => keyword(value, visit),
+            Effect::ReturnAsAura {
+                grants,
+                enchant_filter,
+            } => {
+                filter(enchant_filter, visit);
+                for value in grants {
+                    modification_leaves(value, visit);
+                }
+            }
+            Effect::CreateDelayedTrigger { condition, .. }
+            | Effect::ExileResolvingSpellInsteadOfGraveyard {
+                on_exile:
+                    Some(crate::types::ability::ExiledSpellRider::ReturnTo {
+                        timing: condition, ..
+                    }),
+            } => delayed_condition(condition, visit),
+            Effect::PayCost { cost, .. } => walk_cost(cost, visit),
+            Effect::CastFromZone {
+                alt_ability_cost,
+                constraint,
+                ..
+            } => {
+                if let Some(value) = alt_ability_cost {
+                    walk_cost(value, visit);
+                }
+                if let Some(crate::types::ability::CastPermissionConstraint::ManaValue {
+                    value,
+                    ..
+                }) = constraint
+                {
+                    quantity(value, visit);
+                }
+            }
+            Effect::Choose {
+                choice_type: crate::types::ability::ChoiceType::Keyword { options, .. },
+                ..
+            } => {
+                for value in options {
+                    keyword(value, visit);
+                }
+            }
+            Effect::AddRestriction { restriction } => {
+                use crate::types::ability::{GameRestriction, ProhibitedActivity};
+                match restriction {
+                    GameRestriction::CantEnterBattlefieldFrom { filter: value, .. }
+                    | GameRestriction::ProhibitActivity {
+                        activity:
+                            ProhibitedActivity::CastSpells {
+                                spell_filter: Some(value),
+                            },
+                        ..
+                    }
+                    | GameRestriction::ProhibitActivity {
+                        activity:
+                            ProhibitedActivity::PlayLands {
+                                land_filter: Some(value),
+                            },
+                        ..
+                    } => filter(value, visit),
+                    _ => {}
+                }
+            }
+            Effect::GrantCastingPermission { permission, .. } => {
+                use crate::types::ability::CastingPermission;
+                if let Some(value) = permission.lifetime().duration {
+                    duration(value, visit);
+                }
+                match permission {
+                    CastingPermission::ExileWithAltAbilityCost {
+                        cost, constraint, ..
+                    } => {
+                        walk_cost(cost, visit);
+                        if let Some(crate::types::ability::CastPermissionConstraint::ManaValue {
+                            value,
+                            ..
+                        }) = constraint
+                        {
+                            quantity(value, visit);
+                        }
+                    }
+                    CastingPermission::ExileWithAltCost {
+                        constraint,
+                        enters_with_modifications,
+                        ..
+                    } => {
+                        if let Some(crate::types::ability::CastPermissionConstraint::ManaValue {
+                            value,
+                            ..
+                        }) = constraint
+                        {
+                            quantity(value, visit);
+                        }
+                        for value in &enters_with_modifications.modifications {
+                            walk_modification(value, visit);
+                        }
+                        if let Some(value) = &enters_with_modifications.cast_filter {
+                            filter(value, visit);
+                        }
+                    }
+                    CastingPermission::PlayFromExile {
+                        card_filter,
+                        alt_ability_cost,
+                        ..
+                    } => {
+                        if let Some(value) = card_filter {
+                            filter(value, visit);
+                        }
+                        if let Some(value) = alt_ability_cost {
+                            walk_cost(value, visit);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        if let Effect::Token { keywords, .. }
+        | Effect::Animate { keywords, .. }
+        | Effect::CopyTokenOf {
+            extra_keywords: keywords,
+            ..
+        } = effect
+        {
+            for value in keywords {
+                keyword(value, visit);
+            }
+        }
+        match effect {
+            Effect::GenericEffect {
+                duration: Some(window),
+                ..
+            }
+            | Effect::BecomeCopy {
+                duration: Some(window),
+                ..
+            }
+            | Effect::GainActivatedAbilitiesOfTarget {
+                duration: Some(window),
+                ..
+            }
+            | Effect::CastFromZone {
+                duration: Some(window),
+                ..
+            }
+            | Effect::PreventDamage {
+                prevention_duration: Some(window),
+                ..
+            }
+            | Effect::ForceBlock {
+                duration: window, ..
+            }
+            | Effect::ForceAttack {
+                duration: window, ..
+            } => duration(window, visit),
+            _ => {}
+        }
+        effect.for_each_quantity_ref(&mut |value| reference(value, visit));
+        effect.for_each_predicate_keyword_payload(&mut |value| keyword(value, visit));
+    }
+    let _ = nodes::visit_effect(&root.effect, &mut |node| replacement_node(node, visit));
+    let _ = visit_effect(&root.effect, &mut |effect| {
+        effect_leaves(effect, visit);
+        ControlFlow::Continue(())
+    });
+    if let Some(payment) = &root.unless_pay {
+        walk_cost(&payment.cost, visit);
+        filter(&payment.payer, visit);
+    }
+    for definition in &root.mode_abilities {
+        walk_ability(definition, visit);
+    }
+    root.for_each_direct_quantity_ref(&mut |value| reference(value, visit));
+    if let Some(condition) = &root.condition {
+        condition.for_each_nested_keyword_payload(&mut |value| keyword(value, visit));
+    }
+    if let Some(window) = &root.duration {
+        duration(window, visit);
+    }
+    for value in [&root.optional_player, &root.target_chooser]
+        .into_iter()
+        .flatten()
+    {
+        filter(value, visit);
+    }
+    if let Some(value) = &root.player_scope {
+        value.for_each_nested_keyword_payload(&mut |value| keyword(value, visit));
+    }
+    if let Some(value) = &root.activation_cost_reduction {
+        quantity(&value.count, visit);
+        if let Some(value) = &value.condition {
+            parsed_condition(value, visit);
+        }
+    }
+    if let Some(value) = &root.multi_target {
+        quantity(&value.min, visit);
+        if let Some(value) = &value.max {
+            quantity(value, visit);
+        }
+    }
+    if let Some(value) = &root.announced_x {
+        quantity(value, visit);
+    }
+    for value in &root.target_constraints {
+        if let crate::types::game_state::TargetSelectionConstraint::TotalManaValue {
+            value, ..
+        } = value
+        {
+            quantity(value, visit);
+        }
+    }
+    if let Some(crate::types::ability::RepeatContinuation::WhileCondition { condition, .. }) =
+        &root.repeat_until
+    {
+        condition.for_each_nested_keyword_payload(&mut |value| keyword(value, visit));
+    }
+    if let Some(source) = &root.trigger_source {
+        trigger_source(source, visit);
+    }
+    if let Some(value) = &root.delayed_origin {
+        delayed_condition(&value.condition, visit);
+        let _ = nodes::visit_effect(&value.effect, &mut |node| replacement_node(node, visit));
+        let _ = visit_effect(&value.effect, &mut |effect| {
+            effect_leaves(effect, visit);
+            ControlFlow::Continue(())
+        });
+    }
+    if let Some(value) = &root.activation_record {
+        for value in &value.source_lki.keywords {
+            keyword(value, visit);
+        }
+        if let crate::types::events::BoundActivationCost::Cost(value) = &value.activation_cost {
+            walk_cost(value, visit);
+        }
+    }
+    if let Some((_, value)) = &root.reads_return_result {
+        filter(&value.noun, visit);
+    }
+    for value in &root.context.controller_controlled_as_cast {
+        filter(value, visit);
+    }
+    if let Some(value) = &root.context.graveyard_permission_latch {
+        if let Some(value) = &value.extra_cost {
+            walk_cost(&value.cost, visit);
+        }
+    }
+    if let Some(value) = &root.context.creation_lookback_event {
+        event(value, visit);
+    }
+    if let Some(value) = &root.context.damage_opportunity {
+        for (_, value) in value
+            .definitions
+            .iter()
+            .chain(&value.prevention_definitions)
+        {
+            walk_replacement(value, visit);
+        }
+    }
+    if let Some(value) = &root.context.damage_source_choice {
+        filter(&value.candidate_filter, visit);
+        if let Some(value) = &value.source {
+            trigger_source(value, visit);
+        }
+    }
+    for snapshot in [
+        &root.cost_paid_object,
+        &root.effect_context_object,
+        &root.amassed_army_object,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for value in &snapshot.lki.keywords {
+            keyword(value, visit);
+        }
+    }
+    for record in &root.cost_paid_objects {
+        if let CostPaidObjectRecord::Captured(snapshot) = record {
+            for value in &snapshot.lki.keywords {
+                keyword(value, visit);
+            }
+        }
+    }
+    if let Some(result) = &root.context.direct_discard_result {
+        for value in &result.lki.keywords {
+            keyword(value, visit);
+        }
+    }
+    for child in root.sub_ability.iter().chain(&root.else_ability) {
+        visit_resolved_replacements(child, visit);
+    }
+    for (_, child) in &root.coin_branch_target_abilities {
+        visit_resolved_replacements(child, visit);
+    }
+}
+
+#[cfg(test)]
+mod replacement_program_tests {
+    use super::*;
+    use crate::types::ability::{
+        AbilityKind, AdditionalCost, Comparator, Duration, FilterProp, ParsedCondition,
+        QuantityExpr, QuantityRef, ResolvedAbility, SpellCastingOption, StaticCondition,
+        TypedFilter, UnlessPayModifier,
+    };
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::{CardId, ObjectId, ReplacementContinuationId};
+    use crate::types::keywords::Keyword;
+    use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::StaticMode;
+    use crate::types::zones::Zone;
+    use std::sync::Arc;
+
+    fn root(effect: Effect) -> ResolvedAbility {
+        ResolvedAbility::new(effect, vec![], ObjectId(41), PlayerId(0))
+    }
+    fn marker(id: ReplacementContinuationId) -> ReplacementDefinition {
+        let mut definition = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+        definition.runtime_execute = Some(id);
+        definition
+    }
+    fn payment(id: ReplacementContinuationId) -> AbilityCost {
+        AbilityCost::EffectCost {
+            effect: Box::new(Effect::AddTargetReplacement {
+                replacement: Box::new(marker(id)),
+                target: TargetFilter::None,
+            }),
+        }
+    }
+    fn keyword(id: ReplacementContinuationId) -> Keyword {
+        Keyword::CumulativeUpkeep(payment(id))
+    }
+    fn predicate(id: ReplacementContinuationId) -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .properties(vec![FilterProp::WithKeyword { value: keyword(id) }]),
+        )
+    }
+    fn quantity(id: ReplacementContinuationId) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: predicate(id),
+            },
+        }
+    }
+    fn static_root(definition: StaticDefinition) -> ResolvedAbility {
+        root(Effect::GenericEffect {
+            static_abilities: vec![definition],
+            duration: None,
+            target: None,
+            end_cost: None,
+        })
+    }
+    fn carriers(id: ReplacementContinuationId) -> Vec<(&'static str, ResolvedAbility)> {
+        let mut unless = root(Effect::NoOp);
+        unless.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::Composite {
+                costs: vec![AbilityCost::Tap, payment(id)],
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut payer = root(Effect::NoOp);
+        payer.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::Tap,
+            payer: predicate(id),
+        });
+        let mut mode = root(Effect::NoOp);
+        mode.mode_abilities.push(
+            AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp).cost(
+                AbilityCost::PerCounter {
+                    counter: crate::types::counter::CounterType::Plus1Plus1,
+                    target: TargetFilter::SelfRef,
+                    base: Box::new(AbilityCost::OneOf {
+                        costs: vec![AbilityCost::Tap, payment(id)],
+                    }),
+                },
+            ),
+        );
+        let mut per_player = StaticDefinition::continuous();
+        per_player.per_player_condition = Some(ParsedCondition::SourceLacksKeyword {
+            keyword: keyword(id),
+        });
+        let mut condition = StaticDefinition::continuous();
+        condition.condition = Some(StaticCondition::QuantityComparison {
+            lhs: quantity(id),
+            rhs: QuantityExpr::Fixed { value: 1 },
+            comparator: Comparator::GE,
+        });
+        let mut copy_values = CopiableValues {
+            name: "Supplemental visitor copy".into(),
+            mana_cost: Default::default(),
+            color: vec![],
+            card_types: Default::default(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            printed_loyalty: None,
+            keywords: vec![],
+            abilities: Arc::new(vec![]),
+            trigger_definitions: Arc::new(vec![]),
+            trigger_printed_origins: Arc::new(vec![]),
+            replacement_definitions: Arc::new(vec![]),
+            static_definitions: Arc::new(vec![]),
+            room_halves: None,
+            prepare_face: None,
+            name_origin: Default::default(),
+        };
+        copy_values.prepare_face = Some(Arc::new(crate::game::game_object::BackFaceData {
+            name: "Supplemental prepared visitor face".into(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            printed_loyalty: None,
+            defense: None,
+            card_types: Default::default(),
+            mana_cost: Default::default(),
+            keywords: vec![],
+            abilities: vec![],
+            trigger_definitions: Default::default(),
+            trigger_printed_origins: vec![],
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+            color: vec![],
+            printed_ref: None,
+            modal: None,
+            additional_cost: Some(AdditionalCost::Choice(AbilityCost::Tap, payment(id))),
+            strive_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![SpellCastingOption::alternative_cost(payment(id))],
+            parse_warnings: vec![],
+            layout_kind: None,
+            is_swap_snapshot: false,
+        }));
+        let mut alternative_values = copy_values.clone();
+        Arc::make_mut(alternative_values.prepare_face.as_mut().unwrap()).additional_cost = None;
+        Arc::make_mut(copy_values.prepare_face.as_mut().unwrap())
+            .casting_options
+            .clear();
+        let alternative_copy = static_root(StaticDefinition::continuous().modifications(vec![
+            ContinuousModification::CopyValues {
+                values: Box::new(alternative_values),
+                display: crate::game::game_object::DisplayIdentity {
+                    display_source: Default::default(),
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                },
+            },
+        ]));
+        let copy = static_root(StaticDefinition::continuous().modifications(vec![
+            ContinuousModification::CopyValues {
+                values: Box::new(copy_values),
+                display: crate::game::game_object::DisplayIdentity {
+                    display_source: Default::default(),
+                    printed_ref: None,
+                    token_image_ref: None,
+                    token_art: None,
+                },
+            },
+        ]));
+        let mut snapshot = crate::game::game_object::GameObject::new(
+            ObjectId(41),
+            CardId(1),
+            PlayerId(0),
+            "Supplemental visitor LKI".into(),
+            Zone::Battlefield,
+        )
+        .snapshot_public_characteristics();
+        snapshot.keywords.push(keyword(id));
+        let mut envelope = root(Effect::NoOp);
+        envelope.effect_context_object = Some(crate::types::ability::CostPaidObjectSnapshot {
+            object_id: ObjectId(41),
+            lki: snapshot,
+            incarnation: 1,
+            binding: None,
+        });
+        let mut else_root = root(Effect::NoOp);
+        else_root.else_ability = Some(Box::new(root(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: predicate(id),
+        })));
+        vec![
+            ("unless composite cost", unless),
+            ("unless payer", payer),
+            ("nested mode cost containers", mode),
+            (
+                "effect filter keyword cost",
+                root(Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: predicate(id),
+                }),
+            ),
+            (
+                "static mode filter",
+                static_root(StaticDefinition::new(StaticMode::CantBeBlockedBy {
+                    filter: predicate(id),
+                })),
+            ),
+            (
+                "static alternative cost",
+                static_root(StaticDefinition::new(StaticMode::AlternativeKeywordCost {
+                    keyword: crate::types::keywords::KeywordKind::Cycling,
+                    cost: payment(id),
+                    frequency: None,
+                })),
+            ),
+            (
+                "static per-player parsed condition",
+                static_root(per_player),
+            ),
+            ("static quantity condition", static_root(condition)),
+            (
+                "continuous modification quantity",
+                static_root(StaticDefinition::continuous().modifications(vec![
+                    ContinuousModification::SetDynamicPower {
+                        value: quantity(id),
+                    },
+                ])),
+            ),
+            ("prepare face additional cost", copy),
+            ("prepare face alternative cost", alternative_copy),
+            ("frozen effect-context LKI keyword", envelope),
+            ("resolved else payload", else_root),
+        ]
+    }
+
+    #[test]
+    fn arena_visitor_reaches_typed_leaf_carriers_and_keeps_definitions_intact() {
+        let id = ReplacementContinuationId(37);
+        for (label, program) in carriers(id) {
+            let before = program.clone();
+            let mut handles = vec![];
+            visit_resolved_replacements(&program, &mut |definition| {
+                if let Some(handle) = definition.runtime_execute {
+                    handles.push(handle);
+                }
+            });
+            assert!(
+                !handles.is_empty(),
+                "the marker is reachable through {label}"
+            );
+            assert!(
+                handles.iter().all(|handle| *handle == id),
+                "{label}: {handles:?}"
+            );
+            assert_eq!(
+                program, before,
+                "visitation must preserve the full {label} definition"
+            );
+        }
+    }
+
+    #[test]
+    fn arena_visitor_reaches_all_nonmana_keyword_costs_and_registered_boundaries() {
+        use crate::types::keywords::*;
+        let id = ReplacementContinuationId(19);
+        let keywords = [
+            Keyword::CumulativeUpkeep(payment(id)),
+            Keyword::Escalate(payment(id)),
+            Keyword::Bestow(BestowCost::NonMana(payment(id))),
+            Keyword::Embalm(EmbalmCost::NonMana(payment(id))),
+            Keyword::Eternalize(EternalizeCost::NonMana(payment(id))),
+            Keyword::Cycling(CyclingCost::NonMana(payment(id))),
+            Keyword::Flashback(FlashbackCost::NonMana(payment(id))),
+            Keyword::Escape(EscapeCost::NonMana(payment(id))),
+            Keyword::Evoke(EvokeCost::NonMana(payment(id))),
+            Keyword::Blitz(BlitzCost::NonMana(payment(id))),
+            Keyword::Buyback(BuybackCost::NonMana(payment(id))),
+            Keyword::Echo(EchoCost::NonMana(payment(id))),
+            Keyword::Morph(MorphCost::NonMana(payment(id))),
+            Keyword::Entwine(EntwineCost::NonMana(payment(id))),
+        ];
+        for value in keywords {
+            let program = static_root(StaticDefinition::continuous().modifications(vec![
+                ContinuousModification::AddKeyword {
+                    keyword: value.clone(),
+                },
+            ]));
+            let mut found = false;
+            visit_resolved_replacements(&program, &mut |definition| {
+                found |= definition.runtime_execute == Some(id);
+            });
+            assert!(found, "nested non-mana keyword cost: {value:?}");
+        }
+        let program = root(Effect::CreateBoon {
+            recipient: TargetFilter::Controller,
+            trigger: Box::new(
+                TriggerDefinition::new(crate::types::triggers::TriggerMode::SpellCast).execute(
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::AddTargetReplacement {
+                            replacement: Box::new(marker(id)),
+                            target: TargetFilter::None,
+                        },
+                    ),
+                ),
+            ),
+        });
+        let mut direct_count = 0;
+        let _ = nodes::visit_effect_scoped(
+            &program.effect,
+            ResolutionScope::OwnResolutionOnly,
+            &mut |_| {
+                direct_count += 1;
+                ControlFlow::Continue(())
+            },
+        );
+        assert_eq!(
+            direct_count, 0,
+            "registered definitions stay outside the installing process"
+        );
+        let mut handles = vec![];
+        visit_resolved_replacements(&program, &mut |definition| {
+            handles.push(definition.runtime_execute);
+        });
+        assert_eq!(
+            handles,
+            vec![Some(id)],
+            "state admission still sees the separate registered body"
+        );
+        let mut count = 0;
+        visit_resolved_replacements(&root(Effect::NoOp), &mut |_| count += 1);
+        assert_eq!(count, 0, "a plain leaf invents no replacement");
+    }
+
+    #[test]
+    fn arena_visitor_drives_state_admission_for_valid_foreign_and_dangling_leaf_programs() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 7);
+        let valid = state
+            .install_replacement_continuation(root(Effect::NoOp))
+            .unwrap();
+        for (label, program) in carriers(valid) {
+            assert!(
+                state.validate_replacement_program(&program).is_ok(),
+                "valid independent rider through {label}"
+            );
+        }
+        let before = state.clone();
+        for (label, program) in carriers(ReplacementContinuationId(999)) {
+            assert!(
+                state.validate_replacement_program(&program).is_err(),
+                "dangling rider through {label} must refuse"
+            );
+        }
+        assert_eq!(
+            state, before,
+            "rejected graph validation cannot mutate its owner"
+        );
+        let read = Effect::GainLife {
+            player: TargetFilter::Controller,
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeAggregate {
+                    source: crate::types::ability::ZoneChangeRecordSource::InstructionResult {
+                        result: crate::types::ability::ReturnResultId(7),
+                    },
+                    from: Some(Zone::Battlefield),
+                    to: Some(Zone::Exile),
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                    function: crate::types::ability::AggregateFunction::Sum,
+                    property: crate::types::ability::ObjectProperty::Power,
+                },
+            },
+        };
+        assert!(
+            state
+                .install_replacement_continuation(root(read.clone()))
+                .is_err(),
+            "a new registered reader cannot import its installer's result"
+        );
+        assert_eq!(
+            state, before,
+            "failed install must not append an invalid body"
+        );
+        assert_eq!(
+            state.replacement_continuations.len(),
+            before.replacement_continuations.len(),
+            "failed installation leaves append-only storage unchanged"
+        );
+        let mut local = AbilityDefinition::new(AbilityKind::Spell, serde_json::from_value(
+            serde_json::json!({"type":"ChangeZoneAll","origin":"Battlefield","destination":"Exile"})
+        ).unwrap());
+        local.declares_return_result = Some(crate::types::ability::ReturnResultId(7));
+        local.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            read.clone(),
+        )));
+        let local =
+            crate::game::ability_utils::build_resolved_from_def(&local, ObjectId(41), PlayerId(0));
+        let local_handle = state
+            .install_replacement_continuation(local.clone())
+            .unwrap();
+        for (label, program) in carriers(local_handle) {
+            assert!(
+                state.validate_replacement_program(&program).is_ok(),
+                "a complete local producer/reader remains independent through {label}"
+            );
+        }
+        let mut cyclic = state.clone();
+        let cycle = ReplacementContinuationId(cyclic.replacement_continuations.len() as u64);
+        cyclic
+            .replacement_continuations
+            .push_back(root(Effect::AddTargetReplacement {
+                replacement: Box::new(marker(cycle)),
+                target: TargetFilter::None,
+            }));
+        let cycle_root = root(Effect::AddTargetReplacement {
+            replacement: Box::new(marker(cycle)),
+            target: TargetFilter::None,
+        });
+        assert!(
+            cyclic.validate_replacement_program(&cycle_root).is_err(),
+            "a saved self-reference must refuse without an unchecked arena lookup"
+        );
+        assert!(
+            cyclic.validate_replacement_continuation_arena().is_err(),
+            "whole-arena validation sees the same invalid graph"
+        );
+        let foreign = ReplacementContinuationId(state.replacement_continuations.len() as u64);
+        state.replacement_continuations.push_back(root(read));
+        for (label, program) in carriers(foreign) {
+            let mut outer = local.clone();
+            outer.sub_ability = Some(Box::new(program));
+            assert!(
+                state.validate_replacement_program(&outer).is_err(),
+                "foreign independent rider through {label} must refuse despite the outer local R7 producer"
+            );
+        }
+    }
+}
+
 /// CR 201.5a: the positions in one definition node where a granter symbol is bound.
 ///
 /// The parser can place a symbol elsewhere; every entry that parses masked text then refuses
