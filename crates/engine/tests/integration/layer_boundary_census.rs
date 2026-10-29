@@ -1694,6 +1694,8 @@ fn use_group(
             None => return k,
             Some("g>") => return k + 1,
             Some("<g") => use_group(toks, k + 1, prefix, out),
+            // `{self}` names `prefix` itself, which the enclosing `path_run` pushes.
+            Some("self") => k + 1,
             Some("*") => {
                 out.push(prefix.iter().cloned().chain(["*".to_string()]).collect());
                 k + 1
@@ -3106,6 +3108,18 @@ fn ast_and_parser_library_code_name_no_state_layer_item() {
         STATE_MODULE_ANCHORS,
     );
 
+    // Violations report first, so a crossing that also moves a reach-guard anchor (an AST item
+    // into the state layer) prints its witness before any guard runs.
+    let listed: Vec<String> = census.violations.iter().map(ToString::to_string).collect();
+    assert!(
+        listed.is_empty(),
+        "AST or parser library code names the state layer. Move the AST-shaped item out of the \
+         state module (`types/game_state_kinds.rs`, `types/event_kinds.rs` and \
+         `types/token_spec.rs` hold Phase 4's), re-point the path to the item's AST-layer home, \
+         or turn a state-reading method into an extension trait in the owning game module:\n{}",
+        listed.join("\n")
+    );
+
     let in_state = |file: &str, name: &str| {
         census
             .state
@@ -3148,16 +3162,6 @@ fn ast_and_parser_library_code_name_no_state_layer_item() {
         "reach-guard: seeds {}, AST items {ast_items}, state-layer items {}",
         census.seeds.len(),
         census.state.len()
-    );
-
-    let listed: Vec<String> = census.violations.iter().map(ToString::to_string).collect();
-    assert!(
-        listed.is_empty(),
-        "AST or parser library code names the state layer. Move the AST-shaped item out of the \
-         state module (`types/game_state_kinds.rs`, `types/event_kinds.rs` and \
-         `types/token_spec.rs` hold Phase 4's), re-point the path to the item's AST-layer home, \
-         or turn a state-reading method into an extension trait in the owning game module:\n{}",
-        listed.join("\n")
     );
 }
 
@@ -3253,9 +3257,9 @@ const PLANTED_CRATE: &[(&str, &str)] = &[
         // AST items embedding a state-layer struct.
         pub enum VariantEmbeds { V(super::deep::Handle) }
         pub struct FieldEmbeds { pub h: crate::types::deep::Handle }
-        // Statement-level `use` trees in bodies: a nested crate-root group with a glob entry,
-        // and a glob.
-        pub fn stmt_grouped() { use crate::{types::{deep::make_handle, state::{Mode, *}}}; }
+        // Statement-level `use` trees in bodies: a nested crate-root group with `self` and glob
+        // entries, and a glob.
+        pub fn stmt_grouped() { use crate::{types::{deep::make_handle, state::{self, Mode, *}}}; }
         pub fn stmt_glob() { use crate::types::state::*; }
         // A game-side `#[macro_export]` macro, by its bare name and through the crate root.
         pub fn exported_bare() { planted_assert!(1); }
@@ -3426,7 +3430,8 @@ fn the_layer_census_resolves_every_reference_shape() {
         // for `Leaf`; its local-trait impl on `Clean` is legal.
         (ViolationKind::InherentImpl, "GameInherent", "inherent"),
         (ViolationKind::ForeignTraitImpl, "Leaf", "Default"),
-        // A statement-level `use` group's entries and a glob are full paths.
+        // A statement-level `use` group's entries and a glob are full paths; its `self` entry
+        // names the module `state` itself, which is no passage.
         (ViolationKind::Reference, "stmt_grouped", make_handle),
         (
             ViolationKind::StatePassage,
