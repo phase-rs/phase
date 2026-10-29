@@ -921,8 +921,15 @@ fn definition_is_componentwise_known_zero(
     root: bool,
     parent_target_bound: bool,
 ) -> bool {
-    if definition.instruction_actor.is_some()
-        || definition.kind != AbilityKind::Spell
+    // CR 109.5 + CR 608.2c: on the candidate's ordinary printed spell tree,
+    // "you" is its original caster, already supplied as `controller` here.
+    // A foreign or contextual actor needs a separate binding proof and fails open.
+    if definition.instruction_actor.as_ref().is_some_and(|actor| {
+        !matches!(
+            actor.as_controller(),
+            Some(engine::types::ability::ControllerRef::You)
+        )
+    }) || definition.kind != AbilityKind::Spell
         || definition.cost.is_some()
         || definition.else_ability.is_some()
         || definition.duration.is_some()
@@ -6182,8 +6189,8 @@ mod tests {
                     &mut definition
                 };
                 node.instruction_actor = Some(actor.clone());
-                assert!(
-                    !definition_is_componentwise_known_zero(
+                assert_eq!(
+                    definition_is_componentwise_known_zero(
                         state,
                         &definition,
                         P0,
@@ -6191,6 +6198,7 @@ mod tests {
                         true,
                         false
                     ),
+                    actor.as_controller() == Some(&ControllerRef::You),
                     "child_only={child_only}, {actor:?}"
                 );
                 let node = if child_only {
@@ -6209,6 +6217,29 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn instruction_actor_parsed_original_caster_keeps_known_zero_rejection() {
+        let (state, harvest) = funded_zero_harvest_state();
+        let definition = &state.objects[&harvest].abilities[0];
+        assert_eq!(
+            definition
+                .instruction_actor
+                .as_ref()
+                .and_then(|actor| actor.as_controller()),
+            Some(&ControllerRef::You),
+            "the actual Oracle parser must retain the printed instruction actor"
+        );
+        assert_eq!(harvest_amount(&state, harvest), Some(0));
+        assert!(!ability_definition_is_cast_stable_for_pre_cast(definition));
+        assert!(definition_is_componentwise_known_zero(
+            &state, definition, P0, harvest, true, false
+        ));
+        assert!(
+            !zero_cast_is_retained(&state, harvest),
+            "the real issued Auto cast is rejected for the proven original caster"
+        );
     }
 
     #[test]
@@ -6232,8 +6263,10 @@ mod tests {
             control.priority_player = P0;
             control.waiting_for = WaitingFor::Priority { player: P0 };
             if with_child {
-                Arc::make_mut(&mut control.objects.get_mut(&spell).unwrap().abilities)[0]
-                    .sub_ability = Some(Box::new(zero_controller_gain_definition()));
+                let definition =
+                    &mut Arc::make_mut(&mut control.objects.get_mut(&spell).unwrap().abilities)[0];
+                definition.instruction_actor = Some(ControllerRef::You.into());
+                definition.sub_ability = Some(Box::new(zero_controller_gain_definition()));
             }
             let object = &control.objects[&spell];
             assert_eq!(
@@ -6264,7 +6297,10 @@ mod tests {
                             .as_deref_mut()
                             .unwrap()
                             .instruction_actor = marker.clone();
-                        assert_eq!(definition.instruction_actor, None);
+                        assert_eq!(
+                            definition.instruction_actor,
+                            Some(ControllerRef::You.into())
+                        );
                     } else {
                         definition.instruction_actor = marker.clone();
                         assert!(definition.sub_ability.is_none());
@@ -6301,10 +6337,13 @@ mod tests {
                         ));
                         assert!(SubAbilityLink::is_continuation(&child.sub_link));
                     }
-                    let unproved = marker.is_some();
+                    let unproved = marker
+                        .as_ref()
+                        .is_some_and(|actor| actor.as_controller() != Some(&ControllerRef::You));
                     assert_eq!(
                         ability_definition_is_cast_stable_for_pre_cast(definition),
-                        !unproved
+                        marker.is_none() && !with_child,
+                        "the broad visitor remains conservative even for canonical You"
                     );
                     assert_eq!(
                         definition_is_componentwise_known_zero(
@@ -6320,7 +6359,7 @@ mod tests {
                             Some(spell)
                         ),
                         unproved,
-                        "candidate-self census must not suppress the new authority"
+                        "candidate-self census excludes only the proven original caster"
                     );
                     assert_eq!(cast_has_relevant_payoff(&state, P0, Some(spell)), unproved);
                     assert_eq!(zero_cast_is_retained(&state, spell), unproved, "with_child={with_child}, marker={marker:?}: real issued Auto candidate remains available only for unproved authority");
