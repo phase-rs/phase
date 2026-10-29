@@ -5351,21 +5351,19 @@ fn create_token_applier(
                 }
                 extra.source_id = rid.source;
                 extra.controller = source_controller;
+                extra.tapped = seed.tapped.resolve(false);
+                extra.enters_attacking = seed.attack_destination.is_some();
+                extra.attack_request = attack_request.clone();
                 push_appended_token_batch(
                     &mut appended,
                     &applied,
                     TokenBatch {
                         creation_frame,
-                        instructions: Some(
-                            crate::types::proposed_event::TokenCreationInstructions::from_legacy(
-                                EtbTapState::from_seeded_tapped(extra.tapped),
-                                extra.enters_attacking,
-                            ),
-                        ),
+                        instructions: Some(seed),
                         owner,
                         spec: Box::new(extra),
                         copy: None,
-                        enter_tapped: EtbTapState::Unspecified,
+                        enter_tapped: seed.tapped,
                         count: new_count,
                     },
                 );
@@ -11199,6 +11197,22 @@ fn apply_single_replacement_with_definition(
             && !matches!(proposed, ProposedEvent::Discard { .. })
         {
             ApplyResult::Modified(proposed)
+        } else if matches!(
+            event_key,
+            ReplacementEvent::Moved | ReplacementEvent::ChangeZone
+        ) && matches!(
+            proposed,
+            ProposedEvent::TokenEntry { .. }
+                | ProposedEvent::ZoneChange {
+                    to: Zone::Battlefield,
+                    ..
+                }
+        ) && repl_def_ref.is_some_and(|definition| {
+            definition.quantity_modification == Some(QuantityModification::Prevent)
+        }) {
+            // CR 614.6: an accepted direct entry prevention replaces the entry
+            // with nothing; the shared outcome path owns consumption and riders.
+            ApplyResult::Prevented
         } else {
             if event_key == ReplacementEvent::DamageDone && captured_definition.is_some() {
                 damage_done_applier_with_definition(

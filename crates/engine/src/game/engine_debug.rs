@@ -3159,68 +3159,67 @@ mod tests {
             ] {
                 let mut state = sandbox_state();
                 install_creation_fixture_replacements(&mut state, pause);
-                let mut events = if copy {
-                    create_debug_cards(
-                        &mut state,
-                        DebugCardCreateRequest {
-                            actor: PlayerId(0),
-                            source: DebugCardEntrySource {
-                                face: CardFace {
-                                    name: "Debug complete body".into(),
-                                    power: Some(crate::types::ability::PtValue::Fixed(2)),
-                                    toughness: Some(crate::types::ability::PtValue::Fixed(3)),
-                                    card_type: crate::types::card_type::CardType {
-                                        core_types: vec![CoreType::Creature],
-                                        ..Default::default()
-                                    },
+                let (request, result) = if copy {
+                    let request = DebugCardCreateRequest {
+                        actor: PlayerId(0),
+                        source: DebugCardEntrySource {
+                            face: CardFace {
+                                name: "Debug complete body".into(),
+                                power: Some(crate::types::ability::PtValue::Fixed(2)),
+                                toughness: Some(crate::types::ability::PtValue::Fixed(3)),
+                                card_type: crate::types::card_type::CardType {
+                                    core_types: vec![CoreType::Creature],
                                     ..Default::default()
                                 },
-                                back_face: None,
-                                outside_game_faces: Default::default(),
+                                ..Default::default()
                             },
-                            owner: PlayerId(0),
-                            zone: Zone::Battlefield,
-                            count: 1,
-                            attach_to: None,
-                            run_etb: true,
-                            nonlegendary: false,
-                            creation_kind: DebugCardCreationKind::Token,
+                            back_face: None,
+                            outside_game_faces: Default::default(),
                         },
-                    )
-                    .unwrap()
-                    .events
+                        owner: PlayerId(0),
+                        zone: Zone::Battlefield,
+                        count: 1,
+                        attach_to: None,
+                        run_etb: true,
+                        nonlegendary: false,
+                        creation_kind: DebugCardCreationKind::Token,
+                    };
+                    let diagnostic = format!("{request:?}");
+                    (diagnostic, create_debug_cards(&mut state, request).unwrap())
                 } else {
-                    crate::game::engine::apply_as_current(
-                        &mut state,
-                        GameAction::Debug(DebugAction::CreateToken {
-                            request: DebugTokenRequest::Custom {
-                                owner: PlayerId(0),
-                                characteristics: TokenCharacteristics {
-                                    display_name: "Debug complete body".into(),
-                                    power: Some(2),
-                                    toughness: Some(3),
-                                    loyalty: None,
-                                    core_types: vec![CoreType::Creature],
-                                    subtypes: vec![],
-                                    supertypes: vec![],
-                                    colors: vec![ManaColor::Blue],
-                                    keywords: vec![],
-                                },
-                                enter_with_counters: vec![],
+                    let request = GameAction::Debug(DebugAction::CreateToken {
+                        request: DebugTokenRequest::Custom {
+                            owner: PlayerId(0),
+                            characteristics: TokenCharacteristics {
+                                display_name: "Debug complete body".into(),
+                                power: Some(2),
+                                toughness: Some(3),
+                                loyalty: None,
+                                core_types: vec![CoreType::Creature],
+                                subtypes: vec![],
+                                supertypes: vec![],
+                                colors: vec![ManaColor::Blue],
+                                keywords: vec![],
                             },
-                            count: 1,
-                            run_etb: true,
-                        }),
+                            enter_with_counters: vec![],
+                        },
+                        count: 1,
+                        run_etb: true,
+                    });
+                    let diagnostic = format!("{request:?}");
+                    (
+                        diagnostic,
+                        crate::game::engine::apply_as_current(&mut state, request).unwrap(),
                     )
-                    .unwrap()
-                    .events
                 };
+                let mut events = result.events.clone();
                 let paused = !matches!(pause, CreationPauseCase::Synchronous);
                 assert_eq!(
                     matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                     paused,
-                    "debug materialization copy={copy}, row={pause:?}; wait={:?}; pending={:?}; frames={:?}; events={events:?}",
-                    state.waiting_for, state.pending_replacement, state.resolution_stack
+                    "debug materialization copy={copy}, row={pause:?}; request={request}; result={result:?}; wait={:?}; pending={:?}; work={:?}; parent={:?}; frames={:?}; events={events:?}",
+                    state.waiting_for, state.pending_replacement, state.active_copy_token(),
+                    state.resolution_stack.active_debug_card_entries(), state.resolution_stack
                 );
                 if matches!(
                     pause,

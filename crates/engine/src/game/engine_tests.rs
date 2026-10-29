@@ -1366,6 +1366,7 @@ fn walking_ballista_enters_with_counters_survives_with_two_material_replacements
 /// missing.
 #[test]
 fn dragonstorm_globe_counters_created_dragon_token() {
+    let globe_oracle = "Each Dragon you control enters with an additional +1/+1 counter on it.\n{T}: Add one mana of any color.";
     let mut state = setup_game_at_main_phase();
     let globe = create_object(
         &mut state,
@@ -1378,12 +1379,18 @@ fn dragonstorm_globe_counters_created_dragon_token() {
         let obj = state.objects.get_mut(&globe).unwrap();
         obj.card_types.core_types.push(CoreType::Artifact);
     }
-    apply_oracle_to_object(
-        &mut state,
-        globe,
+    apply_oracle_to_object(&mut state, globe, "Dragonstorm Globe", globe_oracle);
+    let parsed = parse_oracle_text(
+        globe_oracle,
         "Dragonstorm Globe",
-        "Each Dragon you control enters with an additional +1/+1 counter on it.",
+        &[],
+        &["Artifact".into()],
+        &[],
     );
+    eprintln!("Globe full parse before cast: {parsed:?}; installed live statics={:?}; base statics={:?}; live abilities={:?}; base abilities={:?}; replacements={:?}; base replacements={:?}",
+        state.objects[&globe].static_definitions, state.objects[&globe].base_static_definitions,
+        state.objects[&globe].abilities, state.objects[&globe].base_abilities,
+        state.objects[&globe].replacement_definitions, state.objects[&globe].base_replacement_definitions);
 
     let token_spell = create_object(
         &mut state,

@@ -1580,6 +1580,11 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 entry_timestamp,
                 enter_tapped.resolve(tapped),
             );
+            // CR 508.4: remove earlier actual births only. The commit seam
+            // consumes this entrant's destination if it is actually created.
+            let mut resume_copy = copy_spec.clone();
+            resume_copy.attack_request =
+                attack_request.after_entrants(created_ids.len() - prefix_len);
             state.liminal_entries.insert(
                 token_id,
                 LiminalEntry {
@@ -1602,7 +1607,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                     sacrifice_at: sacrifice_at.clone(),
                     remaining_count: final_count.saturating_sub(index + 1),
                     created_ids: created_ids.clone(),
-                    copy_resume: Some(copy_spec),
+                    copy_resume: Some(resume_copy),
                     spec_resume: None,
                     enter_tapped,
                     enter_with_counters: Vec::new(),
@@ -3635,6 +3640,8 @@ pub(crate) mod tests {
             Arc::make_mut(&mut target.base_replacement_definitions).push(enters_with_counter);
         }
         let copy = named_attack_copy_spec(&state, source_id, Vec::new());
+        let mut denied_state = state.clone();
+        let denied_copy = copy.clone();
 
         let mut events = Vec::new();
         let status = apply_copy_token_after_replacement_with_created_ids(
@@ -3687,6 +3694,175 @@ pub(crate) mod tests {
                 Some(AttackTarget::Player(PlayerId(2))),
             ]
         );
+
+        // CR 614.6: the first selected entry is prevented through the public
+        // response. Its denied attempt must leave P1 for the remaining birth.
+        let mut denied_events = Vec::new();
+        let status = apply_copy_token_after_replacement_with_created_ids(
+            &mut denied_state,
+            None,
+            None,
+            PlayerId(0),
+            denied_copy,
+            EtbTapState::Tapped,
+            Vec::new(),
+            2,
+            Vec::new(),
+            &mut denied_events,
+        );
+        assert!(matches!(
+            status.completion,
+            CopyTokenApplyCompletion::Paused
+        ));
+        assert!(matches!(
+            denied_state.waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        denied_events.extend(
+            apply_as_current(
+                &mut denied_state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .unwrap()
+            .events,
+        );
+        let WaitingFor::CopyTargetChoice {
+            source_id: denied_entrant,
+            player: PlayerId(0),
+            ref valid_targets,
+            ..
+        } = denied_state.waiting_for
+        else {
+            panic!("first copy entry must reach its public target choice");
+        };
+        assert!(valid_targets.contains(&target_id));
+        let prevention_source = ObjectId(denied_state.next_object_id);
+        install_test_replacement(
+            &mut denied_state,
+            "Ordinal entry prevention",
+            ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+                .valid_card(TargetFilter::Any)
+                .quantity_modification(QuantityModification::Prevent)
+                .mode(ReplacementMode::Optional { decline: None }),
+        );
+        denied_events.extend(
+            apply_as_current(
+                &mut denied_state,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target_id)),
+                },
+            )
+            .unwrap()
+            .events,
+        );
+        assert!(matches!(
+            denied_state.waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        let pending = denied_state.pending_replacement.as_ref().unwrap();
+        assert!(pending.is_optional);
+        assert_eq!(pending.candidates.len(), 1);
+        assert_eq!(pending.candidates[0].source, prevention_source);
+        let opportunity = Default::default();
+        let definition = crate::game::replacement::replacement_definition_for_key(
+            &denied_state,
+            pending.candidate_keys[0],
+            &opportunity,
+        )
+        .unwrap();
+        assert_eq!(definition.event, ReplacementEvent::ChangeZone);
+        assert_eq!(
+            definition.quantity_modification,
+            Some(QuantityModification::Prevent)
+        );
+        let entry = &denied_state.liminal_entries[&denied_entrant];
+        assert_eq!(entry.installed_copy_effects.len(), 1);
+        let pin = ObjectIncarnationRef::from_object(entry.object.projected());
+        assert!(denied_state
+            .transient_continuous_effects
+            .iter()
+            .any(
+                |effect| effect.id == entry.installed_copy_effects[0].continuous_effect_id
+                    && effect.affected_recipient == Some(pin)
+            ));
+        denied_events.extend(
+            apply_as_current(
+                &mut denied_state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .unwrap()
+            .events,
+        );
+        assert!(!denied_state.objects.contains_key(&denied_entrant));
+        for _ in 0..20 {
+            let action = match &denied_state.waiting_for {
+                WaitingFor::ReplacementChoice {
+                    player: PlayerId(0),
+                    ..
+                } => {
+                    let pending = denied_state.pending_replacement.as_ref().unwrap();
+                    GameAction::ChooseReplacement {
+                        index: usize::from(
+                            pending.is_optional
+                                && pending.candidates[0].source == prevention_source,
+                        ),
+                    }
+                }
+                WaitingFor::CopyTargetChoice {
+                    player: PlayerId(0),
+                    valid_targets,
+                    ..
+                } => {
+                    assert!(valid_targets.contains(&target_id));
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target_id)),
+                    }
+                }
+                WaitingFor::Priority { .. } if denied_state.resolution_stack.is_empty() => break,
+                other => panic!("remaining ordinal entry: {other:?}"),
+            };
+            denied_events.extend(apply_as_current(&mut denied_state, action).unwrap().events);
+        }
+        assert_eq!(
+            seats_of_battlefield_tokens(&denied_state),
+            vec![Some(AttackTarget::Player(PlayerId(1)))]
+        );
+        assert_eq!(
+            denied_events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::TokenCreated { .. }))
+                .count(),
+            1
+        );
+        assert!(denied_events.iter().all(|event| !matches!(event,
+            GameEvent::TokenCreated { object_id, .. } | GameEvent::ZoneChanged { object_id, .. }
+                if *object_id == denied_entrant)));
+        assert!(denied_state.liminal_entries.is_empty());
+        assert!(denied_state.resolution_stack.is_empty());
+        assert!(denied_state.pending_replacement.is_none());
+        assert!(denied_state.pending_liminal_entry_resume.is_none());
+        assert!(matches!(
+            denied_state.waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        for completed in [&state, &denied_state] {
+            assert!(completed.stack.is_empty());
+            assert!(completed.resolution_stack.is_empty());
+            assert!(completed.return_result_frames.is_empty());
+            assert!(completed.active_return_result_occurrence.is_none());
+            assert!(completed.resolving_stack_entry.is_none());
+            assert!(completed.pending_resolution_completion.is_none());
+            assert!(completed.pending_liminal_entry_resume.is_none());
+            assert!(completed.liminal_entries.is_empty());
+            assert!(completed.pending_replacement.is_none());
+            assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+        }
     }
 
     /// CR 707.9b + CR 707.9d: a copy token whose exception sets P/T, replaces
@@ -4247,10 +4423,17 @@ pub(crate) mod tests {
             PlayerId(0),
         );
 
+        eprintln!(
+            "name-only source before resolution: identity={:?}; source={:?}",
+            state.objects[&source_id].display_identity(),
+            state.objects[&source_id]
+        );
         resolve(&mut state, &ability, &mut events).unwrap();
 
         let token_id = ObjectId(state.next_object_id - 1);
         let token = state.objects.get(&token_id).unwrap();
+        eprintln!("name-only copy after resolution: identity={:?}; printed={:?}; art={:?}; body={token:?}; events={events:?}",
+            token.display_identity(), token.base_printed_ref, token.token_image_ref);
         assert!(token.is_token);
         assert_eq!(token.name, "Fanatic of Rhonas");
         assert_eq!(token.power, Some(4));
@@ -8986,12 +9169,19 @@ pub(crate) mod tests {
             assert!(
                 matches!(&runner.state().waiting_for, WaitingFor::CopyTargetChoice { valid_targets, .. } if valid_targets.contains(&donor))
             );
+            eprintln!("Mirror before public target answer: ghave={ghave}; external={extra_static}; pending={:?}; liminal={:?}; frames={:?}; body={:?}; statics={:?}",
+                runner.state().pending_liminal_entry_resume, runner.state().liminal_entries,
+                runner.state().resolution_stack, runner.state().objects[&mirror],
+                runner.state().battlefield.iter().map(|id| (*id, &runner.state().objects[id].static_definitions)).collect::<Vec<_>>());
             runner
                 .act(GameAction::ChooseTarget {
                     target: Some(TargetRef::Object(donor)),
                 })
                 .unwrap();
             crate::game::layers::flush_layers(runner.state_mut());
+            eprintln!("Mirror after public target answer: ghave={ghave}; external={extra_static}; body={:?}; wait={:?}; frames={:?}; pending={:?}",
+                runner.state().objects[&mirror], runner.state().waiting_for,
+                runner.state().resolution_stack, runner.state().pending_replacement);
             assert_eq!(runner.state().objects[&mirror].zone, Zone::Battlefield);
             assert_eq!(
                 runner.state().objects[&mirror]
@@ -10488,27 +10678,76 @@ pub(crate) mod tests {
                 .to_vec(),
             "the delayed exile retains every exact created birth: {delayed:?}"
         );
+        let births = delayed.ability.target_incarnations.clone();
+        let registered = delayed.clone();
 
         // CR 603.7c: the delayed "Exile it" affects both tokens.
-        runner.advance_to_end_step();
-        if matches!(
-            runner.state().waiting_for,
-            WaitingFor::DeclareAttackers { .. }
-        ) {
-            runner.declare_attackers(&[]).unwrap();
-            runner.advance_to_end_step();
+        let mut events = Vec::new();
+        for _ in 0..160 {
+            if runner.state().stack.iter().any(|entry| {
+                entry.source_id == assembler
+                    && entry
+                        .ability()
+                        .is_some_and(|ability| ability.target_incarnations == births)
+            }) {
+                break;
+            }
+            let action = match runner.state().waiting_for {
+                WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                    attacks: vec![],
+                    bands: vec![],
+                },
+                WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                    assignments: vec![],
+                },
+                _ => GameAction::PassPriority,
+            };
+            events.extend(runner.act(action).unwrap().events);
         }
-        assert_eq!(runner.state().phase, Phase::End);
-        assert!(runner.state().stack.iter().any(|entry| entry.source_id == assembler),
-            "the registered Cogwork delayed trigger reached the stack: stack={:?}; delayed={:?}; wait={:?}",
+        assert_eq!(runner.state().phase, Phase::End,
+            "Cogwork observation: registered={registered:?}; births={births:?}; stack={:?}; delayed={:?}; wait={:?}; events={events:?}",
             runner.state().stack, runner.state().delayed_triggers, runner.state().waiting_for);
-        runner.advance_until_stack_empty();
+        assert!(runner.state().stack.iter().any(|entry| entry.source_id == assembler
+            && entry.ability().is_some_and(|ability| ability.target_incarnations == births)),
+            "the registered Cogwork delayed trigger reached the stack: phase={:?}; stack={:?}; registered={registered:?}; births={births:?}; delayed={:?}; wait={:?}; events={events:?}",
+            runner.state().phase, runner.state().stack, runner.state().delayed_triggers, runner.state().waiting_for);
+        for _ in 0..40 {
+            if runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty() {
+                break;
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
         let state = runner.state();
         assert!(!state.battlefield.contains(&copy), "the copy is exiled");
         assert!(
             !state.battlefield.contains(&squirrel),
             "the Squirrel is exiled"
         );
+        for member in &births {
+            assert_eq!(events.iter().filter(|event| matches!(event,
+                GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Exile, record }
+                if *object_id == member.object_id && record.trigger_source_context.as_ref().is_some_and(|context| context.identity.reference == *member)
+            )).count(), 1);
+        }
+        // CR 603.7b: both exact births left once and the one-shot is consumed.
+        assert!(state
+            .delayed_triggers
+            .iter()
+            .all(|trigger| trigger.source_id != assembler));
+        assert!(state.stack.is_empty());
+        assert!(state.resolution_stack.is_empty());
+        assert!(state.return_result_frames.is_empty());
+        assert!(state.active_return_result_occurrence.is_none());
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(state.pending_resolution_completion.is_none());
+        assert!(state.pending_liminal_entry_resume.is_none());
+        assert!(state.liminal_entries.is_empty());
+        assert!(state.pending_replacement.is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 
     /// Negative sibling (Chatterfang ruling: the Squirrels "won't have any

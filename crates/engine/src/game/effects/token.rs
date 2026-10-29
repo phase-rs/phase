@@ -2217,19 +2217,16 @@ pub(crate) fn commit_liminal_copy_token_entry(
 fn commit_liminal_copy_token_entry_with_continuation(
     state: &mut GameState,
     event: ProposedEvent,
-    continuation: Option<LiminalCopyTokenContinuation>,
+    continuation: &mut Option<LiminalCopyTokenContinuation>,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    let post_actions = continuation
-        .map(liminal_copy_token_continuation_post_action)
-        .into_iter()
-        .collect();
-    commit_liminal_token_entry_with_post_actions(
+    commit_liminal_token_entry_with_continuation(
         state,
         event,
         events,
         TokenEntryEventEmission::Emit,
-        post_actions,
+        Vec::new(),
+        continuation,
     )
 }
 
@@ -2277,7 +2274,7 @@ fn consult_liminal_token_entry(
     events: &mut Vec<GameEvent>,
     continue_batch: bool,
 ) -> bool {
-    let continuation = liminal_copy_token_continuation_for_event(state, &event);
+    let mut continuation = liminal_copy_token_continuation_for_event(state, &event);
     let ProposedEvent::TokenEntry { entry_ref, .. } = &event else {
         return true;
     };
@@ -2329,7 +2326,7 @@ fn consult_liminal_token_entry(
         let done = commit_liminal_copy_token_entry_with_continuation(
             state,
             event,
-            continuation.clone(),
+            &mut continuation,
             events,
         );
         return done
@@ -2512,6 +2509,25 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
     events: &mut Vec<GameEvent>,
     entry_events: TokenEntryEventEmission,
     post_actions_after_finalize: Vec<PendingCounterPostAction>,
+) -> bool {
+    let mut continuation = None;
+    commit_liminal_token_entry_with_continuation(
+        state,
+        event,
+        events,
+        entry_events,
+        post_actions_after_finalize,
+        &mut continuation,
+    )
+}
+
+fn commit_liminal_token_entry_with_continuation(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+    entry_events: TokenEntryEventEmission,
+    mut post_actions_after_finalize: Vec<PendingCounterPostAction>,
+    continuation: &mut Option<LiminalCopyTokenContinuation>,
 ) -> bool {
     let ProposedEvent::TokenEntry {
         entry_ref,
@@ -2737,6 +2753,16 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
             .resolved_rules_journal
             .record_token_creation(command)
             .expect("resolved copy-token creation must have a live journal cause");
+    }
+
+    // CR 508.4 + CR 303.4g + CR 614.6: only an actual birth consumes a named
+    // destination. Capture its advanced batch tail before attachment or counters
+    // can pause, leaving the original entry body and denied attempts untouched.
+    if let Some(continuation) = continuation.as_mut() {
+        continuation.copy.attack_request = continuation.copy.attack_request.after_entrants(1);
+        post_actions_after_finalize.push(liminal_copy_token_continuation_post_action(
+            continuation.clone(),
+        ));
     }
 
     match crate::game::zone_pipeline::apply_entering_aura_hosts(state, entry_ref, hosts) {
