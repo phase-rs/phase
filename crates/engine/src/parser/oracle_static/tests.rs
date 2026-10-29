@@ -37876,18 +37876,14 @@ fn inverted_bare_self_declines_combined_two_mode_form() {
 /// yield an UNGATED requirement. Pins the ? on parse_static_condition.
 #[test]
 fn inverted_bare_self_fails_closed_on_untypeable_condition() {
-    let defs = parse_static_line_multi(
-        "As long as the moon is in the seventh house, it must be blocked if able.",
-    );
-    // Anti-vacuous reach-guard: the negative below is a `!any` shape that is
-    // trivially true on an empty `defs`. The fail-closed `?` on
-    // parse_static_condition must suppress the UNGATED requirement while the
-    // line is still claimed downstream, so a zero-def regression fails here
-    // instead of making the CR 611.3a assertion a no-op.
+    use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir};
+    use crate::parser::oracle_ir::doc::{OracleNodeIr, OracleSourceSpan};
+
+    let source = "As long as the moon is in the seventh house, it must be blocked if able.";
+    let defs = parse_static_line_multi(source);
     assert!(
-        !defs.is_empty(),
-        "line must still produce defs via the pre-existing fallback; zero defs \
-         would make the fail-closed negative below vacuous"
+        defs.is_empty(),
+        "an unknown gate cannot publish a phantom static: {defs:#?}"
     );
     assert!(
         !defs
@@ -37895,6 +37891,75 @@ fn inverted_bare_self_fails_closed_on_untypeable_condition() {
             .any(|d| matches!(d.mode, StaticMode::MustBeBlocked { .. }) && d.condition.is_none()),
         "an untypeable condition must not produce an unconditional requirement: {defs:#?}"
     );
+
+    // Exercise the complete router: refusing a static must retain the whole
+    // instruction as an explicit gap and preserve the independent next line.
+    let complete = format!("{source}\nFlying");
+    let mut doc = parse_oracle_ir(
+        &complete,
+        "Conditional refusal",
+        &["Flying".into()],
+        &["Creature".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, complete);
+    assert_eq!(doc.items.len(), 2);
+    let refused = &doc.items[0];
+    assert_eq!(refused.source.fragment(), Some(source));
+    assert_eq!(
+        refused.source.span(),
+        &OracleSourceSpan::exact(0, 0, 0, source.len(), 0)
+    );
+    assert!(matches!(
+        refused.node,
+        OracleNodeIr::Unsupported { .. } | OracleNodeIr::Spell(_)
+    ));
+    let flying = &doc.items[1];
+    assert_ne!(refused.id, flying.id);
+    assert_eq!(flying.source.fragment(), Some("Flying"));
+    assert_eq!(
+        flying.source.span(),
+        &OracleSourceSpan::exact(1, 1, source.len() + 1, complete.len(), 0)
+    );
+    let parsed = lower_oracle_ir(&mut doc);
+    assert!(parsed.statics.is_empty());
+    assert_eq!(parsed.extracted_keywords, vec![Keyword::Flying]);
+    assert_eq!(parsed.abilities.len(), 1);
+    let refused = &parsed.abilities[0];
+    assert!(matches!(*refused.effect, Effect::Unimplemented { .. }));
+    assert_eq!(refused.description.as_deref(), Some(source));
+    assert_eq!(
+        refused
+            .effect
+            .unimplemented_description()
+            .map(|text| text.trim_end_matches('.')),
+        Some(source.trim_end_matches('.'))
+    );
+    assert!(refused.sub_ability.is_none());
+
+    // Positive reach guard: the same requirement with a represented live gate
+    // reaches the normal static owner instead of passing only on empty output.
+    let known = "As long as ~ is your Ring-bearer, it must be blocked if able.\nFlying";
+    let mut doc = parse_oracle_ir(
+        known,
+        "Conditional control",
+        &["Flying".into()],
+        &["Creature".into()],
+        &[],
+    );
+    let parsed = lower_oracle_ir(&mut doc);
+    assert!(parsed.abilities.is_empty());
+    assert_eq!(parsed.extracted_keywords, vec![Keyword::Flying]);
+    assert_eq!(parsed.statics.len(), 1);
+    assert_eq!(
+        parsed.statics[0].mode,
+        StaticMode::MustBeBlocked { by: None }
+    );
+    assert_eq!(
+        parsed.statics[0].condition,
+        Some(StaticCondition::IsRingBearer)
+    );
+    assert_eq!(parsed.statics[0].affected, Some(TargetFilter::SelfRef));
 }
 
 /// 5.3d — Fix B revert-failing test. CR 604.1 + CR 611.3a.

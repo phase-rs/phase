@@ -11054,6 +11054,10 @@ pub(super) fn parse_destroy_target_core<'a>(
     let phrase = &rest[..rest.len() - rem.len()];
     if phrase.trim().is_empty()
         || matches!(&target, TargetFilter::Typed(typed) if !typed.has_meaningful_type_constraint())
+        || matches!(target, TargetFilter::Any)
+            && all_consuming(terminated(tag::<_, _, OracleError<'_>>("target"), space0))
+                .parse(phrase.to_lowercase().as_str())
+                .is_ok()
     {
         return None;
     }

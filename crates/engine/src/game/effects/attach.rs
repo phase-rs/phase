@@ -6408,12 +6408,10 @@ mod player_enchant_legality_tests {
                         player: TargetFilter::Controller,
                     },
                 ));
-            runner
-                .state_mut()
-                .objects
-                .get_mut(&aura)
-                .unwrap()
-                .replacement_definitions = vec![rider].into();
+            let aura_object = runner.state_mut().objects.get_mut(&aura).unwrap();
+            aura_object.base_replacement_definitions = std::sync::Arc::new(vec![rider]);
+            aura_object.replacement_definitions =
+                std::sync::Arc::clone(&aura_object.base_replacement_definitions).into();
             attach_to_player(runner.state_mut(), aura, P1);
             let ability = ResolvedAbility::new(
                 Effect::Attach {
@@ -6654,8 +6652,11 @@ mod player_enchant_legality_tests {
 
     #[test]
     fn opponent_enchant_restriction_survives_public_activated_attachment() {
-        use crate::types::ability::{AbilityDefinition, AbilityKind, AttachSelection};
-        let mut scenario = GameScenario::new();
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, AttachSelection, ControllerRef,
+        };
+        use crate::types::resolved_commands::ResolvedRulesCommand;
+        let mut scenario = GameScenario::new_n_player(3, 42);
         scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
         let aura = scenario
             .add_enchantment_from_oracle(P0, "Typed opponent Aura", "")
@@ -6665,17 +6666,47 @@ mod player_enchant_legality_tests {
                 AbilityKind::Activated,
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
-                    target: TargetFilter::Opponent,
+                    target: TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent),
+                    ),
                     selection: AttachSelection::Targeted,
                 },
             ))
             .id();
         let mut runner = scenario.build();
         assert!(!can_attach_to_player(runner.state(), aura, P0));
-        runner.activate(aura, 0).target_player(P1).resolve();
+        assert!(can_attach_to_player(runner.state(), aura, P1));
+        assert!(can_attach_to_player(runner.state(), aura, PlayerId(2)));
+        // CR 704.5m: start with a lawful host so the Aura survives activation.
+        attach_to_player(runner.state_mut(), aura, P1);
         assert_eq!(
             runner.state().objects[&aura].attached_to,
             Some(AttachTarget::Player(P1))
+        );
+        runner
+            .activate(aura, 0)
+            .target_player(PlayerId(2))
+            .resolve();
+        assert_eq!(
+            runner.state().objects[&aura].attached_to,
+            Some(AttachTarget::Player(PlayerId(2)))
+        );
+        assert_eq!(
+            runner
+                .state()
+                .resolved_rules_journal
+                .entries()
+                .iter()
+                .filter(|entry| matches!(
+                    entry.command.as_ref(),
+                    Some(ResolvedRulesCommand::Attachment(command))
+                        if command.attachment.object_id == aura
+                            && command.expected_old_host == Some(AttachTarget::Player(P1))
+                            && command.resulting_host
+                                == Some(AttachTarget::Player(PlayerId(2)))
+                ))
+                .count(),
+            1
         );
         assert!(runner.state().stack.is_empty());
         assert!(runner.state().resolution_stack.is_empty());

@@ -2843,7 +2843,15 @@ fn parse_filtered_revealed_this_way(lower: &str) -> Option<QuantityRef> {
             if !remainder.trim().is_empty() {
                 continue;
             }
-            if filter_is_nontrivial_for_tracked_set(&filter) {
+            // CR 701.20a: a reveal set contains cards; its complete unqualified
+            // Card domain therefore denotes the whole set. Other producers
+            // retain their potentially meaningful Card restriction.
+            if filter_is_nontrivial_for_tracked_set(&filter)
+                && filter
+                    != crate::types::ability::TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::card(),
+                    )
+            {
                 return Some(QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(filter),
                     caused_by: None,

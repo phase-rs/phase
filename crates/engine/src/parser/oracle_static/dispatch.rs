@@ -1009,6 +1009,13 @@ pub(crate) fn parse_static_line_inner(
             if let Some(def) = try_parse_persistent_exile_play_permission(&text, &lower) {
                 return Some(def);
             }
+            // CR 611.3a: the printed gate must remain live and fully represented.
+            // The attached-subject and linked-permission owners above bind their
+            // own gates. Isolated effect parsers use this shared condition
+            // authority; an unknown gate must reach the router as a whole refusal,
+            // since runtime Unrecognized conditions otherwise evaluate as true.
+            let condition = parse_static_condition(&split.condition_text)
+                .filter(|condition| !condition.contains_unrecognized());
             // CR 400.2 + CR 701.20a: "As long as <condition>, all players
             // play with their hands revealed." The generic continuous fallback
             // can otherwise accept the canonical rewrite before this data-
@@ -1017,12 +1024,7 @@ pub(crate) fn parse_static_line_inner(
                 let effect_lower = split.effect_text.to_lowercase();
                 let tp_effect = TextPair::new(&split.effect_text, &effect_lower);
                 if let Some(mut def) = parse_reveal_hand_static(&tp_effect, &split.effect_text) {
-                    let condition = parse_static_condition(&split.condition_text).unwrap_or(
-                        StaticCondition::Unrecognized {
-                            text: split.condition_text.clone(),
-                        },
-                    );
-                    def.condition = Some(condition);
+                    def.condition = Some(condition.clone()?);
                     def.description = Some(text.to_string());
                     return Some(def);
                 }
@@ -1041,12 +1043,7 @@ pub(crate) fn parse_static_line_inner(
                 if let Some(mut def) =
                     parse_untaps_during_each_other_players_untap_step(&tp_effect, &text)
                 {
-                    let condition = parse_static_condition(&split.condition_text).unwrap_or(
-                        StaticCondition::Unrecognized {
-                            text: split.condition_text.clone(),
-                        },
-                    );
-                    def.condition = Some(condition);
+                    def.condition = Some(condition.clone()?);
                     def.description = Some(text.to_string());
                     return Some(def);
                 }
@@ -1060,9 +1057,15 @@ pub(crate) fn parse_static_line_inner(
                 // didn't derive one itself — this restores the gate for the whole
                 // class of split inverted-as-long-as statics, not just Cloud.
                 if def.condition.is_none() {
-                    if let Some(condition) = parse_static_condition(&split.condition_text) {
-                        def.condition = Some(condition);
-                    }
+                    def.condition = Some(condition.clone()?);
+                }
+                if def
+                    .condition
+                    .as_ref()
+                    .is_some_and(StaticCondition::contains_unrecognized)
+                    || matches!(def.mode, StaticMode::Continuous) && def.modifications.is_empty()
+                {
+                    return None;
                 }
                 return Some(def.description(text.to_string()));
             }
@@ -1078,59 +1081,14 @@ pub(crate) fn parse_static_line_inner(
                 if let Some(mut def) =
                     parse_cast_as_though_flash_static(&tp_effect, &split.effect_text)
                 {
-                    let condition = parse_static_condition(&split.condition_text).unwrap_or(
-                        StaticCondition::Unrecognized {
-                            text: split.condition_text.clone(),
-                        },
-                    );
-                    def.condition = Some(condition);
+                    def.condition = Some(condition.clone()?);
                     def.description = Some(text.to_string());
                     return Some(def);
                 }
             }
-            // CR 509.1b + CR 604.1 (#7454): the symmetric conjunction "<subject>
-            // can't block or be blocked by <object>" under a LEADING gate. ONE
-            // printed object serves TWO opposite-direction restrictions, which one
-            // `StaticDefinition` cannot carry, so the shape is owned by
-            // `parse_symmetric_block_conjunction_static` on the multi-static path
-            // (it binds one condition-gated definition per direction) and this
-            // single-return path must DECLINE. Reaching the generic fallback below
-            // instead produced mode `Continuous`, `modifications: []`, `affected:
-            // SelfRef` and only the gate — every printed semantic dropped, yet
-            // indistinguishable from a supported line to any consumer that counts
-            // statics, so a card in this class could allow illegal blocks while
-            // reading as parsed.
-            //
-            // Scoped to the SPLIT EFFECT CLAUSE via the shared marker, never to the
-            // whole line: the other printed lines that legitimately reach this
-            // fallback do not carry the marker in their effect clause, so their
-            // exact prior lowering is untouched.
-            if nom_primitives::scan_preceded(
-                &split.effect_text.to_lowercase(),
-                parse_cant_block_or_be_blocked_by_marker,
-            )
-            .is_some()
-            {
-                return None;
-            }
-            // Rewrite succeeded (we cleanly separated condition from effect), but the
-            // recursed parser could not model the effect clause. Produce a generic
-            // Continuous static whose condition is typed via `parse_static_condition`
-            // (the same helper `parse_continuous_gets_has` uses at the " as long as "
-            // splitter). Fall back to `Unrecognized` only when that helper cannot type
-            // the text. Recursion safety: `parse_static_condition` delegates to
-            // `nom_condition::parse_inner_condition` which never re-enters this parser.
-            let condition = parse_static_condition(&split.condition_text).unwrap_or(
-                StaticCondition::Unrecognized {
-                    text: split.condition_text,
-                },
-            );
-            return Some(
-                StaticDefinition::continuous()
-                    .affected(TargetFilter::SelfRef)
-                    .condition(condition)
-                    .description(text.to_string()),
-            );
+            // A typed gate alone does not implement the printed effect. Preserve
+            // the whole source for the router rather than publish an empty static.
+            return None;
         }
     }
 

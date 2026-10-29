@@ -216,7 +216,27 @@ pub(crate) mod tests {
         let mut runner = scenario.build();
         runner.cast(source).resolve();
         assert_eq!(runner.state().objects[&prior].zone, Zone::Hand);
-        assert_eq!(runner.state().objects[&prior].perpetual_mods.len(), 1);
+        assert_eq!(
+            runner.state().objects[&prior].perpetual_mods.len(),
+            1,
+            "prior sought grant missing: first_producer={:?}; readers={:?}; parsed_chain={:#?}; frames={:#?}; active_occurrence={:?}; waiting_for={:#?}; resolution_stack={:#?}; stack={:#?}; source={source:?}; source_controller={:?}; stack_processes={:?}",
+            parsed.abilities[0].declares_return_result,
+            std::iter::successors(Some(&parsed.abilities[0]), |node| node.sub_ability.as_deref())
+                .filter_map(|node| node.reads_return_result.as_ref())
+                .collect::<Vec<_>>(),
+            parsed.abilities,
+            runner.state().return_result_frames,
+            runner.state().active_return_result_occurrence,
+            runner.state().waiting_for,
+            runner.state().resolution_stack,
+            runner.state().stack,
+            runner.state().objects[&source].controller,
+            runner.state().stack.iter().map(|entry| (
+                entry.source_id,
+                entry.controller,
+                entry.ability().and_then(|ability| ability.return_result_process),
+            )).collect::<Vec<_>>()
+        );
         assert!(matches!(
             runner.state().waiting_for,
             crate::types::game_state::WaitingFor::ReplacementChoice { .. }

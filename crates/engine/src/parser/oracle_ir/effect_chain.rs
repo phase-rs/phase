@@ -1631,6 +1631,75 @@ impl ClauseDisposition {
 
 /// Validate a stored address against its immutable source chain; never select a
 /// replacement producer during assembly or relocation.
+fn zone_result_address_is_valid(
+    clauses: &[ClauseIr],
+    reader_index: usize,
+    owner: ClauseId,
+    from: Option<Zone>,
+    to: Option<Zone>,
+) -> bool {
+    let owners: Vec<_> = clauses
+        .iter()
+        .enumerate()
+        .filter(|(_, clause)| clause.id == owner)
+        .collect();
+    let [(producer_index, producer)] = owners.as_slice() else {
+        return false;
+    };
+    if *producer_index >= reader_index
+        || !producer
+            .zone_result_producer()
+            .is_some_and(|(origin, destination)| from == Some(origin) && to == Some(destination))
+    {
+        return false;
+    }
+    let corridor_end = if matches!(
+        clauses[reader_index].disposition,
+        ClauseDisposition::Continue {
+            continuation: Some(
+                ContinuationAst::PutCountersOnLastCreated { .. }
+                    | ContinuationAst::TokenEntersWithCounters { .. }
+            )
+        }
+    ) {
+        let token_index = reader_index - 1;
+        let token = &clauses[token_index];
+        let mut shell = token.clone();
+        shell.player_scope = None;
+        let sealed: Vec<_> = clauses[..token_index]
+            .iter()
+            .rev()
+            .take_while(|clause| {
+                clause.zone_result_producer().is_some()
+                    || clause.is_transparent_zone_result_corridor()
+            })
+            .filter_map(|clause| {
+                clause
+                    .zone_result_producer()
+                    .map(|zones| (clause.id, zones))
+            })
+            .collect();
+        if matches!(token.parsed.effect, Effect::Token { .. })
+            && shell.sought_result_shell_is_empty()
+            && token.repeat_for.is_none()
+            && token.where_x_expression.is_none()
+            && token.reads_return_result.is_none()
+            && matches!(sealed.as_slice(), [(id, (origin, destination))] if *id == owner && from == Some(*origin) && to == Some(*destination))
+        {
+            token_index
+        } else {
+            reader_index
+        }
+    } else {
+        reader_index
+    };
+    clauses[*producer_index + 1..corridor_end]
+        .iter()
+        .all(|clause| {
+            clause.zone_result_producer().is_some() || clause.is_transparent_zone_result_corridor()
+        })
+}
+
 pub(crate) fn zone_result_reads_are_valid(clauses: &[ClauseIr], reader: &ClauseIr) -> bool {
     let reader_index = clauses
         .iter()
@@ -1638,14 +1707,18 @@ pub(crate) fn zone_result_reads_are_valid(clauses: &[ClauseIr], reader: &ClauseI
     let mut valid = true;
     reader.for_each_quantity_ref(&mut |reference| {
         if let QuantityRef::ZoneChangeAggregate {
-            source: crate::types::ability::ZoneChangeRecordSource::InstructionResult { result }, from, to, ..
-        } = reference {
-            let owners: Vec<_> = clauses.iter().enumerate().filter(|(_, producer)| producer.id.0 == result.0).collect();
-            valid &= matches!((owners.as_slice(), reader_index), ([(index, producer)], Some(reader_index))
-                if *index < reader_index
-                    && producer.declares_instruction_result == Some(producer.id)
-                    && producer.zone_result_producer().is_some_and(|(origin, destination)| *from == Some(origin) && *to == Some(destination))
-                    && clauses[*index+1..reader_index].iter().all(|clause| clause.zone_result_producer().is_some() || clause.is_transparent_zone_result_corridor()));
+            source: crate::types::ability::ZoneChangeRecordSource::InstructionResult { result },
+            from,
+            to,
+            ..
+        } = reference
+        {
+            let owner = ClauseId(result.0);
+            valid &= reader_index.is_some_and(|index| {
+                zone_result_address_is_valid(clauses, index, owner, *from, *to)
+            }) && clauses.iter().any(|producer| {
+                producer.id == owner && producer.declares_instruction_result == Some(owner)
+            });
         }
     });
     valid
@@ -2004,23 +2077,8 @@ impl ClauseIrBuilder {
             return;
         }
         let index = self.clauses.len() - 1;
-        let counter_followup_owner = matches!(
-            self.clauses[index].disposition,
-            ClauseDisposition::Continue {
-                continuation: Some(
-                    ContinuationAst::PutCountersOnLastCreated { .. }
-                        | ContinuationAst::TokenEntersWithCounters { .. }
-                )
-            }
-        )
-        .then(|| self.token_counter_zone_result_antecedent_before(index))
-        .flatten();
         let valid = selected.iter().all(|(owner, from, to)| {
-            let producers: Vec<_> = self.clauses.iter().enumerate().filter(|(_, clause)| clause.id == *owner).collect();
-            matches!(producers.as_slice(), [(producer_index, producer)] if *producer_index < index
-                && producer.zone_result_producer().is_some_and(|(origin, destination)| *from == Some(origin) && *to == Some(destination))
-                && self.clauses[*producer_index+1..if counter_followup_owner.is_some_and(|(id, origin, destination)| id == *owner && *from == Some(origin) && *to == Some(destination)) { index - 1 } else { index }].iter().all(|clause|
-                    clause.zone_result_producer().is_some() || clause.is_transparent_zone_result_corridor()))
+            zone_result_address_is_valid(&self.clauses, index, *owner, *from, *to)
         });
         if !valid {
             self.clauses[index].replace_with_gap("departure_result_antecedent");
@@ -2983,7 +3041,10 @@ mod departure_result_tests {
             match fault {
                 0 => malformed[0].id = ClauseId(999),
                 1 => malformed.push(malformed[0].clone()),
-                2 => malformed.swap(0, 1),
+                2 => {
+                    let reader = malformed.len() - 1;
+                    malformed.swap(0, reader);
+                }
                 3 => {
                     if let Effect::ChangeZoneAll { destination, .. } =
                         &mut malformed[0].parsed.effect
@@ -3311,10 +3372,19 @@ mod departure_result_tests {
                     builder.absorb_clauses(prefix);
                     builder.absorb_clauses(imported.clone());
                     let relocated = builder.finish();
-                    let expected = relocated[2].id.0;
-                    assert_eq!(expected, 2);
+                    let source_owner_index = base
+                        .clauses
+                        .iter()
+                        .position(|clause| clause.zone_result_producer().is_some())
+                        .expect("the source batch owns its departure producer");
+                    let imported_owner_index = base.clauses.len() + source_owner_index;
+                    let expected = imported_owner_index as u32;
+                    assert_eq!(relocated[imported_owner_index].id, ClauseId(expected));
                     assert_eq!(relocated[0].declares_instruction_result, Some(ClauseId(0)));
-                    assert_eq!(relocated[2].declares_instruction_result, Some(ClauseId(2)));
+                    assert_eq!(
+                        relocated[imported_owner_index].declares_instruction_result,
+                        Some(ClauseId(expected))
+                    );
                     let clause = relocated.last().unwrap();
                     assert_eq!(clause.player_scope, Some(player(expected)));
                     assert_eq!(clause.target_chooser, Some(payer(expected)));
@@ -3527,7 +3597,16 @@ mod departure_result_tests {
             builder.absorb_clauses(base.clauses.clone());
             builder.absorb_clauses(imported);
             let relocated = builder.finish();
-            assert_eq!(relocated[2].declares_instruction_result, Some(ClauseId(2)));
+            let source_owner_index = base
+                .clauses
+                .iter()
+                .position(|clause| clause.zone_result_producer().is_some())
+                .expect("the source batch owns its departure producer");
+            let imported_owner_index = base.clauses.len() + source_owner_index;
+            assert_eq!(
+                relocated[imported_owner_index].declares_instruction_result,
+                Some(ClauseId(imported_owner_index as u32))
+            );
             let effect = raw_disposition_payload(&relocated.last().unwrap().disposition);
             assert_eq!(
                 effect, &original,
@@ -3602,7 +3681,16 @@ mod departure_result_tests {
                 builder.absorb_clauses(base.clauses.clone());
                 builder.absorb_clauses(imported);
                 let relocated = builder.finish();
-                assert_eq!(relocated[2].declares_instruction_result, Some(ClauseId(2)));
+                let source_owner_index = base
+                    .clauses
+                    .iter()
+                    .position(|clause| clause.zone_result_producer().is_some())
+                    .expect("the source batch owns its departure producer");
+                let imported_owner_index = base.clauses.len() + source_owner_index;
+                assert_eq!(
+                    relocated[imported_owner_index].declares_instruction_result,
+                    Some(ClauseId(imported_owner_index as u32))
+                );
                 let effect = raw_disposition_payload(&relocated.last().unwrap().disposition);
                 let Effect::AddTargetReplacement { replacement, .. } = effect else {
                     unreachable!()
@@ -3671,8 +3759,17 @@ mod departure_result_tests {
             } else {
                 reader
             };
+            // This tests a selected body's import, not a token continuation.
+            // Give the synthetic reader its own emitted clause immediately
+            // after its selected producer; an unrelated Token is a barrier.
             let mut ir = base.clone();
-            ir.clauses.last_mut().unwrap().parsed.effect = Effect::ChooseOneOf {
+            ir.clauses = vec![producer.clone(), base.clauses.last().unwrap().clone()];
+            let reader_clause = ir.clauses.last_mut().unwrap();
+            reader_clause.disposition = ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            };
+            reader_clause.parsed.effect = Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![branch],
                 kind: ChooseOneOfKind::Ordinary,

@@ -23,6 +23,66 @@ fn parse_search_library_details(
 }
 
 #[test]
+fn temporary_spell_cost_subject_duration_keeps_complete_prefix_and_predicate() {
+    let source = "Instant and sorcery spells you cast this turn cost {3} less to cast.";
+    let definition = parse_effect_chain(source, AbilityKind::Spell);
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = definition.effect.as_ref()
+    else {
+        panic!("temporary cost grant: {definition:#?}");
+    };
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    let [ContinuousModification::GrantStaticAbility {
+        definition: granted,
+    }] = static_abilities[0].modifications.as_slice()
+    else {
+        panic!("one complete cost grant: {static_abilities:#?}");
+    };
+    let expected = crate::parser::oracle_static::parse_static_line(
+        "Instant and sorcery spells you cast cost {3} less to cast.",
+    )
+    .expect("existing complete static cost authority");
+    assert_eq!(granted.as_ref(), &expected);
+    // Independent subject/cost expectations: the room's runtime adapter also
+    // patches its filter, so delegation equality and room outcomes alone do
+    // not establish that this parser retained the printed prefix.
+    assert_eq!(
+        granted.mode,
+        StaticMode::ModifyCost {
+            mode: crate::types::statics::CostModifyMode::Reduce,
+            amount: ManaCost::generic(3),
+            spell_filter: Some(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                ],
+            }),
+            dynamic_count: None,
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+        }
+    );
+    assert_eq!(
+        granted.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You)
+        ))
+    );
+    for source in [
+        "Instant and sorcery mysteriously spells you cast this turn cost {3} less to cast.",
+        "Instant and sorcery spells you cast this turn cost {3} less to cast mysteriously.",
+    ] {
+        let lower = source.to_lowercase();
+        assert!(
+            try_parse_temporary_spell_cost_modification(TextPair::new(source, &lower)).is_none(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn defining_destroy_core_and_definition_keep_strict_tail_boundaries() {
     // SHAPE companion to the paid Lorwyn and source-sacrifice public tests.
     let source = "Destroy target non-Elf creature an opponent controls with power X or less, where X is the number of lands you control.";
@@ -34349,6 +34409,14 @@ fn parse_optional_exile_from_revealed_hand_preserves_nonland_filter() {
         }
     ));
     assert!(!exile.optional);
+    assert_eq!(exile.duration, Some(Duration::UntilHostLeavesPlay));
+    for source in [
+        "Look at target opponent's hand. You may exile a nonland card from it until this creature leaves the battlefield mysteriously.",
+        "Look at target opponent's hand. You may exile a nonland from it until this creature leaves the battlefield.",
+    ] {
+        let refused = parse_effect_chain(source, AbilityKind::Spell);
+        assert!(has_unimplemented_ability(&refused), "{refused:#?}");
+    }
 }
 
 #[test]
@@ -84851,7 +84919,7 @@ fn per_player_own_reveal_choice_declines_to_a_gap() {
     assert!(parks_reveal_choice(reveal));
     assert_json_eq(
         &*reveal.effect,
-        r#"{"type":"RevealHand","target":{"type":"TriggeringPlayer"},"card_filter":{"type":"Typed","type_filters":[{"Non":"Land"}],"controller":null,"properties":[]},"count":null,"reveal":true}"#,
+        r#"{"type":"RevealHand","target":{"type":"TriggeringPlayer"},"card_filter":{"type":"Typed","type_filters":[{"Non":"Land"},"Card"],"controller":null,"properties":[]},"count":null,"reveal":true}"#,
         "Biting-Palm Ninja's reveal",
     );
     assert!(non_controller_gaps(execute).is_empty());

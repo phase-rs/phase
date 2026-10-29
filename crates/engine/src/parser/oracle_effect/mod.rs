@@ -5730,7 +5730,38 @@ fn try_parse_temporary_spell_cost_modification(tp: TextPair<'_>) -> Option<Parse
         let (input, descriptor) = terminated(take_until(" cost"), tag(" cost")).parse(input)?;
         Ok((input, descriptor.to_owned()))
     })
-    .map(|(descriptor, predicate)| format!("{descriptor} spells you cast cost{predicate}"));
+    .map(|(descriptor, predicate)| format!("{descriptor} spells you cast cost{predicate}"))
+    .or_else(|| {
+        // Preserve the entire prefix-filter subject and predicate for the
+        // existing static cost owner; only its embedded duration is removed.
+        let (prefix_len, predicate) = nom_on_lower(tp.original, tp.lower, |input| {
+            map(
+                terminated(
+                    take_until("spells you cast this turn cost"),
+                    tag::<_, _, OracleError<'_>>("spells you cast this turn cost"),
+                ),
+                str::len,
+            )
+            .parse(input)
+        })?;
+        let (tail, _) = preceded(space1, nom_primitives::parse_mana_cost)
+            .parse(predicate)
+            .ok()?;
+        let tail_lower = tail.to_lowercase();
+        all_consuming((
+            space1,
+            alt((tag::<_, _, OracleError<'_>>("less"), tag("more"))),
+            tag(" to cast"),
+            opt(tag(".")),
+            space0,
+        ))
+        .parse(tail_lower.as_str())
+        .ok()?;
+        Some(format!(
+            "{}spells you cast cost{predicate}",
+            &tp.original[..prefix_len]
+        ))
+    });
     let static_def =
         super::oracle_static::parse_static_line(normalized.as_deref().unwrap_or(tp.original))?;
     if !matches!(static_def.mode, StaticMode::ModifyCost { .. }) {
@@ -37405,6 +37436,8 @@ fn parse_hand_choice_sentence_command(input: &str) -> OracleResult<'_, ()> {
             ))),
             opt(tag("may ")),
             alt((
+                tag("chooses "),
+                tag("choose "),
                 tag("exiles "),
                 tag("exile "),
                 tag("discards "),
@@ -46413,6 +46446,11 @@ fn parse_effect_chain_ir_body(
             instead_parent_target_available,
         ) {
             conditions::InsteadLowering::Branch(instead_def) if !builder.is_empty() => {
+                let source_lower = normalized_text.to_lowercase();
+                let where_x_expression =
+                    strip_trailing_where_x(TextPair::new(normalized_text, &source_lower))
+                        .1
+                        .or_else(|| sentence_where_x.get(chunk_idx).and_then(Clone::clone));
                 builder
                     .clause(
                         normalized_text,
@@ -46422,6 +46460,7 @@ fn parse_effect_chain_ir_body(
                             kind: ReplaceMeaningKind::Instead(instead_def),
                         },
                     )
+                    .where_x_expression(where_x_expression)
                     .push();
                 continue;
             }
@@ -47013,6 +47052,11 @@ fn parse_effect_chain_ir_body(
                         lower_effect_chain_ir(&body_ir),
                         outer_condition.clone(),
                     );
+                    let source_lower = normalized_text.to_lowercase();
+                    let where_x_expression =
+                        strip_trailing_where_x(TextPair::new(normalized_text, &source_lower))
+                            .1
+                            .or_else(|| sentence_where_x.get(chunk_idx).and_then(Clone::clone));
                     builder
                         .clause(
                             normalized_text,
@@ -47022,6 +47066,7 @@ fn parse_effect_chain_ir_body(
                                 kind: ReplaceMeaningKind::Instead(Box::new(def)),
                             },
                         )
+                        .where_x_expression(where_x_expression)
                         .push();
                     continue;
                 }
@@ -49776,9 +49821,25 @@ fn parse_effect_chain_ir_body(
             }
             let nearest_followup = match effective_prev_effect.as_ref() {
                 Some(effect) => (|| -> Result<Option<ContinuationAst>, OracleError<'_>> {
+                    // CR 610.3: the already parsed exile owns its event-bound
+                    // lifetime; the hand descriptor owns only the card noun.
+                    let (without_duration, duration) = strip_trailing_duration(normalized_text);
+                    let followup_text = if matches!(
+                        clause.effect,
+                        Effect::ChangeZone {
+                            destination: Zone::Exile,
+                            ..
+                        }
+                    ) && duration == Some(Duration::UntilHostLeavesPlay)
+                        && clause.duration == duration
+                    {
+                        without_duration
+                    } else {
+                        normalized_text
+                    };
                     let ordinary =
                         sequence::parse_followup_continuation_ast_with_search_destination(
-                            normalized_text,
+                            followup_text,
                             effect,
                             ctx,
                             effective_prev_is_search_destination_exile,
@@ -50189,6 +50250,21 @@ fn parse_effect_chain_ir_body(
                 }
             }
 
+            if let Some(ContinuationAst::RevealHandFilter {
+                choice_optional, ..
+            }) = &mut followup_continuation
+            {
+                *choice_optional |= is_optional;
+            }
+            let is_optional = is_optional
+                && !matches!(
+                    followup_continuation,
+                    Some(ContinuationAst::RevealHandFilter {
+                        choice_optional: true,
+                        ..
+                    })
+                );
+
             // If this clause is absorbed by a followup continuation from the previous
             // clause, mark it and store the continuation on the PREVIOUS clause.
             if absorb_followup {
@@ -50230,13 +50306,6 @@ fn parse_effect_chain_ir_body(
             } else {
                 None
             };
-            if let Some(ContinuationAst::RevealHandFilter {
-                choice_optional, ..
-            }) = &mut followup_for_this
-            {
-                *choice_optional |= is_optional;
-            }
-
             if let Some(ContinuationAst::RevealHandFilter {
                 card_filter,
                 choice_optional: true,

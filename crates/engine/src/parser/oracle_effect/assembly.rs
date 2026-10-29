@@ -2940,6 +2940,12 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                     instead_override_body_mut(&mut instead),
                                     continuation,
                                 );
+                                // Bind the concretized override before borrowing
+                                // the independent base tail into its else branch.
+                                apply_where_x_ability_expression(
+                                    &mut instead,
+                                    clause_ir.where_x_expression.as_deref(),
+                                );
                                 if has_explicit_player_target(continuation.effect.as_ref()) {
                                     rewrite_player_anaphor_targets_in_definition(&mut instead);
                                 }
@@ -2952,6 +2958,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                 bind_instead_body_to_antecedent(
                                     instead_override_body_mut(&mut instead),
                                     &root,
+                                );
+                                apply_where_x_ability_expression(
+                                    &mut instead,
+                                    clause_ir.where_x_expression.as_deref(),
                                 );
                                 if has_explicit_player_target(root.effect.as_ref()) {
                                     rewrite_player_anaphor_targets_in_definition(&mut instead);
@@ -3231,19 +3241,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         let universal_source =
             super::is_all_revealed_result_consumer(clause_ir.source.fragment().unwrap_or_default());
         let invalid_revealed_reader = universal_source && !valid_all_revealed_reader(ir, clause_ir);
-        let mut invalid_departure_reader = false;
-        clause_ir.for_each_quantity_ref(&mut |reference| {
-            if let QuantityRef::ZoneChangeAggregate { source: crate::types::ability::ZoneChangeRecordSource::InstructionResult { result }, from, to, .. } = reference {
-                let owners: Vec<_> = ir.clauses.iter().enumerate().filter(|(_, producer)| producer.id.0 == result.0).collect();
-                let reader = ir.clauses.iter().position(|clause| std::ptr::eq(clause, clause_ir));
-                let valid = matches!((owners.as_slice(), reader), ([(index, producer)], Some(reader))
-                    if *index < reader && producer.declares_instruction_result == Some(producer.id)
-                        && producer.zone_result_producer().is_some_and(|(origin, destination)| *from == Some(origin) && *to == Some(destination))
-                        && ir.clauses[*index+1..reader].iter().all(|clause|
-                            clause.zone_result_producer().is_some() || clause.is_transparent_zone_result_corridor()));
-                invalid_departure_reader |= !valid;
-            }
-        });
+        let invalid_departure_reader =
+            !crate::parser::oracle_ir::effect_chain::zone_result_reads_are_valid(
+                &ir.clauses,
+                clause_ir,
+            );
 
         let clause_effect = if invalid_departure_reader {
             Effect::unimplemented(
@@ -4467,7 +4469,26 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // CR 603.7: a continuation of an open delayed payload resolves when the
         // payload resolves, not with the enclosing ability. Record its complete
         // emitted range now, but do not mutate `defs` until the clause loop ends.
-        if clause_ir.placement == ClausePlacement::NestedInDelayedPayload {
+        // Refusing a malformed sought relation also refuses its forged delayed
+        // placement; a genuine delayed body retains the relocation invariant.
+        if clause_ir.placement == ClausePlacement::NestedInDelayedPayload
+            && !invalid_sought_reader
+            && !ir.clauses.iter().any(|reader| {
+                reader
+                    .reads_return_result
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == clause_ir.id)
+                    && matches!(
+                        reader.parsed.effect,
+                        Effect::ApplyPerpetual {
+                            modification:
+                                crate::types::ability::PerpetualModification::ModifyCost { .. },
+                            ..
+                        }
+                    )
+                    && !valid_sought_cost_reader(ir, reader)
+            })
+        {
             pending_relocations.push(PendingRelocation {
                 base: nest_base,
                 end: defs.len(),

@@ -578,7 +578,7 @@ mod contextual_hand_publication {
             false,
         )
         .description(dread_body.into());
-        let cleave = hand_body(TargetFilter::Player, nonland(), false, false).description("Target player reveals their hand. You choose a nonland card from it . That player discards that card.".into());
+        let cleave = hand_body(TargetFilter::Player, nonland(), false, false).description("Target player reveals their hand. You choose a nonland card from it. That player discards that card.".into());
         let mut freebooter = TriggerDefinition::new(TriggerMode::ChangesZone).valid_card(TargetFilter::SelfRef).trigger_zones(vec![Zone::Battlefield]).execute(hand_body(opponent(), restrictive(), true, false)).description("When ~ enters, target opponent reveals their hand. You choose a noncreature, nonland card from it. Exile that card until ~ leaves the battlefield.".into());
         freebooter.destination = Some(Zone::Battlefield);
         let chapter_one = ability(Effect::Destroy {
@@ -2175,7 +2175,7 @@ mod retained_spell_publication {
                 // these shape contracts do not claim their deferred execution.
                 let (mode, description, child) = match name {
                     "Human Torch" => (TriggerMode::Attacks,"Whenever ~ attacks, you may pay {R}{G}{W}{U}. If you do, until end of turn, whenever he deals combat damage to an opponent, he deals that much damage to each other opponent.",json!({"kind":"Spell","effect":{"type":"CreateDelayedTrigger","condition":{"type":"WheneverEvent","trigger":{"mode":"DamageDone","trigger_zones":["Battlefield"],"damage_kind":"CombatOnly","valid_target":{"type":"Typed","type_filters":[],"controller":"Opponent","properties":[]},"valid_source":{"type":"SelfRef"}}},"effect":{"kind":"Spell","effect":{"type":"DamageEachPlayer","amount":{"type":"Ref","qty":{"type":"EventContextAmount"}},"player_filter":{"type":"OpponentOtherThanTriggering"}}},"uses_tracked_set":false},"duration":"UntilEndOfTurn","condition":{"type":"EffectOutcome","signal":"OptionalEffectPerformed"},"sub_link":"SequentialSibling"})),
-                    "Invisible Woman" => (TriggerMode::YouAttack,"Whenever you attack, you may pay {R}{G}{W}{U}. When you do, target creature gets +1/+0 until end of turn for each creature you control and can't be blocked this turn.",json!({"kind":"Spell","effect":{"type":"Pump","power":{"type":"Quantity","value":{"type":"Ref","qty":{"type":"ObjectCount","filter":{"type":"Typed","type_filters":["Creature"],"controller":"You","properties":[]}}}},"toughness":{"type":"Fixed","value":0},"target":{"type":"Typed","type_filters":["Creature"],"controller":null,"properties":[]}},"duration":"UntilEndOfTurn","condition":{"type":"WhenYouDo"},"sub_link":"SequentialSibling","sub_ability":{"kind":"Spell","effect":{"type":"GenericEffect","static_abilities":[{"mode":"CantBeBlocked","modifications":[{"type":"AddStaticMode","mode":"CantBeBlocked"}]}],"duration":"UntilEndOfTurn"}}})),
+                    "Invisible Woman" => (TriggerMode::YouAttack,"Whenever you attack, you may pay {R}{G}{W}{U}. When you do, target creature gets +1/+0 until end of turn for each creature you control and can't be blocked this turn.",json!({"kind":"Spell","effect":{"type":"Pump","power":{"type":"Quantity","value":{"type":"Ref","qty":{"type":"ObjectCount","filter":{"type":"Typed","type_filters":["Creature"],"controller":"You","properties":[]}}}},"toughness":{"type":"Fixed","value":0},"target":{"type":"Typed","type_filters":["Creature"],"controller":null,"properties":[]}},"duration":"UntilEndOfTurn","condition":{"type":"WhenYouDo"},"sub_link":"SequentialSibling","sub_ability":{"kind":"Spell","duration":"UntilEndOfTurn","effect":{"type":"GenericEffect","static_abilities":[{"mode":"CantBeBlocked","modifications":[{"type":"AddStaticMode","mode":"CantBeBlocked"}]}],"duration":"UntilEndOfTurn"}}})),
                     "The Thing" => (TriggerMode::Attacks,"Whenever ~ attacks, you may pay {R}{G}{W}{U}. When you do, double the number of each kind of counter on any number of target permanents you control.",json!({"kind":"Spell","effect":{"type":"Double","target_kind":{"type":"Counters","data":{"counter_type":null}},"target":{"type":"Typed","type_filters":["Permanent"],"controller":"You","properties":[]}},"condition":{"type":"WhenYouDo"},"multi_target":{"min":0,"max":null},"sub_link":"SequentialSibling"})),
                     _ => unreachable!(),
                 };
@@ -2941,6 +2941,7 @@ mod retained_spell_publication {
             assert_eq!(flying.source.span().start_byte, normalized.len() + 1);
             let parsed = lower_oracle_ir(&mut doc);
             assert!(parsed.extracted_keywords.contains(&Keyword::Flying));
+            assert!(parsed.statics.is_empty(), "an unknown operation cannot publish executable statics: {source}");
             let unsupported = parsed.abilities.iter().find(|ability| super::has_unimplemented(ability)).expect("whole refused operation");
             assert_eq!(unsupported.description.as_deref(), Some(normalized));
         }
@@ -4301,18 +4302,89 @@ fn ordinary_destroy_prismatic_whole_source_native_and_loaders_remain_honest() {
     );
     let combined = format!("{source}\nDraw a card.");
     let mut good_sibling = parse_oracle_ir(&combined, "Synthetic strict sibling", &[], &types, &[]);
-    assert_eq!(good_sibling.items.len(), 2);
-    assert_ne!(good_sibling.items[0].id, good_sibling.items[1].id);
+    // The document owns one spell-resolution body across both physical lines.
+    // Its item anchors the head; each sentence retains its own clause identity.
+    use crate::parser::oracle_ir::ast::ClauseBoundary;
+    use crate::parser::oracle_ir::doc::{
+        OracleItemId, OracleNodeIr, OracleSourceSpan, OracleUnitId,
+    };
+    use crate::parser::oracle_ir::effect_chain::ClauseId;
+    assert_eq!(good_sibling.source_text, combined);
+    assert_eq!(good_sibling.items.len(), 1);
+    let item = &good_sibling.items[0];
+    assert_eq!(item.id, OracleItemId(0));
+    assert_eq!(item.source.fragment(), Some(source));
     assert_eq!(
-        good_sibling.items[1].source.fragment(),
-        Some("Draw a card.")
+        item.source.span(),
+        &OracleSourceSpan::exact(0, 0, 0, source.len(), 0)
     );
+    let OracleNodeIr::Spell(spell) = &item.node else {
+        panic!("complete spell body retains both independent instructions");
+    };
+    assert_eq!(spell.source_text, format!("{source} Draw a card."));
+    assert_eq!(spell.body.clauses.len(), 2);
+    let fragments = [source.trim_end_matches('.'), "Draw a card"];
+    let mut start = 0;
+    for (index, (clause, fragment)) in spell.body.clauses.iter().zip(fragments).enumerate() {
+        assert_eq!(clause.id, ClauseId(index as u32));
+        assert_eq!(
+            clause.source.id(),
+            OracleUnitId {
+                item: OracleItemId(0),
+                ordinal: index as u32 + 1
+            }
+        );
+        assert_eq!(clause.source.fragment(), Some(fragment));
+        assert_eq!(
+            clause.source.span(),
+            &OracleSourceSpan::chain_relative(0, 0, start, start + fragment.len(), index as u32)
+        );
+        assert_eq!(clause.condition, None);
+        start += fragment.len() + 2;
+    }
+    assert_ne!(spell.body.clauses[0].id, spell.body.clauses[1].id);
+    assert_eq!(
+        spell.body.clauses[0].boundary,
+        Some(ClauseBoundary::Sentence)
+    );
+    assert_eq!(
+        spell.body.clauses[1].boundary,
+        Some(ClauseBoundary::Sentence)
+    );
+    let gap = Effect::unimplemented("destroy_target_tail", fragments[0]);
+    let draw_effect = Effect::Draw {
+        count: QuantityExpr::Fixed { value: 1 },
+        target: TargetFilter::Controller,
+    };
+    assert_eq!(spell.body.clauses[0].parsed.effect, gap);
+    assert_eq!(spell.body.clauses[1].parsed.effect, draw_effect);
+    let mut draw = AbilityDefinition::new(AbilityKind::Spell, draw_effect);
+    draw.sub_link = crate::types::ability::SubAbilityLink::SequentialSibling;
+    let expected = AbilityDefinition::new(AbilityKind::Spell, gap)
+        .description(combined.clone())
+        .sub_ability(draw);
     let parsed = lower_oracle_ir(&mut good_sibling);
-    assert_eq!(parsed.abilities.len(), 2);
-    assert!(matches!(*parsed.abilities[1].effect, Effect::Draw { .. }));
+    assert_eq!(parsed.abilities, vec![expected]);
+    assert!(parsed.statics.is_empty());
     let mut own = Vec::new();
-    complete_publication_gap_payloads(&serde_json::to_value(parsed).unwrap(), &mut own);
+    complete_publication_gap_payloads(&serde_json::to_value(&parsed).unwrap(), &mut own);
     assert_eq!(own, payloads);
+    let mut sibling_face = face.clone();
+    sibling_face.oracle_text = Some(combined);
+    sibling_face.abilities = parsed.abilities.clone();
+    let whole =
+        serde_json::to_string(&serde_json::json!({"prismatic wardrobe": sibling_face})).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &whole).unwrap();
+    for database in [
+        crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+        crate::database::CardDatabase::from_export(file.path()).unwrap(),
+    ] {
+        assert_eq!(
+            database.get_face_by_name("Prismatic Wardrobe"),
+            Some(&sibling_face)
+        );
+    }
     for (name, source, mana, instant) in [
         ("Murder", "Destroy target creature.", "{1}{B}{B}", true),
         (
