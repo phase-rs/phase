@@ -191,7 +191,7 @@ fn flip_through_replacement(
     }
 }
 
-/// CR 705.2: Execute a flip's win/lose branch, preserving its
+/// CR 705.2: Build a flip's win/lose branch, preserving its
 /// `optional`/`sub_ability`/`condition`/`duration` via the canonical converter.
 ///
 /// CR 608.2c: the branch is part of the same resolution as the flip, so it
@@ -200,8 +200,8 @@ fn flip_through_replacement(
 /// asked to choose when none existed (CR 609.3). This is the single place both
 /// the inline and the resumed (Krark's Thumb) paths build a branch.
 #[allow(clippy::too_many_arguments)]
-fn run_flip_branch(
-    state: &mut GameState,
+pub(crate) fn build_flip_branch(
+    state: &GameState,
     branch: Option<&AbilityDefinition>,
     outcome: CoinFlipResult,
     source_id: ObjectId,
@@ -210,8 +210,7 @@ fn run_flip_branch(
     chain_root_targets: &[TargetRef],
     branch_context: &FlipBranchContext,
     expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
+) -> Result<Option<ResolvedAbility>, EffectError> {
     if let Some(def) = branch {
         // The complete outcome set was validated before the flip started or resumed.
         // CR 608.2h: propagate so a counter-gated "that many" nested in the
@@ -342,7 +341,7 @@ fn run_flip_branch(
                 .is_some_and(|context| context.targets.is_empty());
         if named_nothing {
             let Some(pruned) = super::without_missing_forward_result_dependencies(&sub) else {
-                return Ok(());
+                return Ok(None);
             };
             sub = pruned;
             // CR 608.2c + CR 609.3: the surviving instructions are still part of
@@ -360,9 +359,9 @@ fn run_flip_branch(
         // branch root that repeats ("repeat this process") behaves the same
         // either way. Children receive the fact through the parent-to-child
         // context hand-off.
-        super::resolve_flip_branch_chain(state, &sub, events)?;
+        return Ok(Some(sub));
     }
-    Ok(())
+    Ok(None)
 }
 
 type TargetOccurrences = Vec<(
@@ -429,6 +428,7 @@ struct FlipRun<'a> {
     expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
     trigger_context: &'a Option<ResolvingTriggerContext>,
+    admitted: Option<super::AdmittedInstructionResult<'a>>,
 }
 
 impl FlipRun<'_> {
@@ -492,7 +492,7 @@ impl FlipRun<'_> {
         } else {
             self.lose_effect
         };
-        run_flip_branch(
+        let selected = build_flip_branch(
             state,
             branch,
             CoinFlipResult::from_won(won),
@@ -502,8 +502,18 @@ impl FlipRun<'_> {
             self.chain_root_targets,
             self.branch_context,
             self.expected_return_result_process,
-            events,
-        )
+        )?;
+        if let Some(selected) = selected {
+            match self.admitted {
+                Some(parent) => {
+                    super::resolve_parent_flip_branch_chain(state, &selected, events, parent)?;
+                }
+                None => {
+                    super::resolve_flip_branch_chain(state, &selected, events)?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -713,6 +723,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, admitted| resolve_owned(state, executable, events, admitted),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    admitted: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     crate::game::ability_utils::validate_coin_target_authority(ability)
         .map_err(EffectError::InvalidParam)?;
     let Effect::FlipCoins {
@@ -776,16 +800,11 @@ pub fn resolve(
         lose_effect: lose_effect.as_deref(),
         branch_context: &branch_context,
         expected_return_result_process: ability.return_result_process,
-        return_result_occurrence: retained_flip_occurrence(
-            state,
-            win_effect.as_deref(),
-            lose_effect.as_deref(),
-            ability.source_id,
-            ability.controller,
-            ability.return_result_process,
-            state.active_return_result_occurrence,
+        return_result_occurrence: super::retained_return_result_occurrence(
+            state, ability, admitted,
         )?,
         trigger_context: &None,
+        admitted: Some(admitted),
     };
     drive_flip_run(state, &run, FlipRunStart::Fresh(kind), test, events)?;
     Ok(())
@@ -870,8 +889,70 @@ pub(crate) fn validate_pending_coin_flip(
         pending.controller,
         pending.expected_return_result_process,
         pending.return_result_occurrence,
-    )
-    .map(|_| ())
+    )?;
+    pending_flip_result_owner(state, pending).map(|_| ())
+}
+
+/// Rebuild only the actual retained outcomes, after their custody was checked.
+/// The selected program is compared with the admitted parent before its map is used.
+fn pending_flip_result_owner(
+    state: &GameState,
+    pending: &PendingCoinFlip,
+) -> Result<
+    Option<(
+        ResolvedAbility,
+        crate::types::ability::ResultProducerEnvironment,
+    )>,
+    EffectError,
+> {
+    use crate::types::ability::{
+        classify_instruction_result_invocation, InstructionResultEntry, InstructionResultProcess,
+    };
+    let mut owner = None;
+    for (outcome, definition) in [
+        (CoinFlipResult::Won, pending.win_effect.as_deref()),
+        (CoinFlipResult::Lost, pending.lose_effect.as_deref()),
+    ] {
+        let Some(selected) = build_flip_branch(
+            state,
+            definition,
+            outcome,
+            pending.source_id,
+            pending.controller,
+            &pending.targets,
+            &pending.chain_root_targets,
+            &pending.branch_context,
+            pending.expected_return_result_process,
+        )?
+        else {
+            continue;
+        };
+        if matches!(
+            classify_instruction_result_invocation(
+                &selected,
+                InstructionResultEntry::SelectedBody,
+                None
+            )?
+            .0,
+            InstructionResultProcess::Imported { .. }
+        ) {
+            let candidate = super::owned_cursor_declarations(
+                state,
+                pending.return_result_occurrence,
+                &selected,
+            )?;
+            if owner
+                .as_ref()
+                .is_some_and(|previous| previous != &candidate)
+            {
+                return Err(EffectError::InvalidParam(
+                    "coin outcomes have different admitted owners".into(),
+                ));
+            }
+            owner = Some(candidate);
+        }
+    }
+    Ok(owner)
 }
 
 fn matches_direct_die_branch_owner(
@@ -988,6 +1069,7 @@ pub fn resume_after_keep(
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EffectError> {
     validate_pending_coin_flip(state, &pending)?;
+    let owner = pending_flip_result_owner(state, &pending)?;
     let occurrence = pending.return_result_occurrence;
     super::with_inherited_return_result_occurrence(state, occurrence, |state| {
         retained_flip_occurrence(
@@ -999,7 +1081,15 @@ pub fn resume_after_keep(
             pending.expected_return_result_process,
             pending.return_result_occurrence,
         )?;
-        resume_after_keep_in_occurrence(state, pending, kept, events)
+        resume_after_keep_in_occurrence(
+            state,
+            pending,
+            kept,
+            events,
+            owner
+                .as_ref()
+                .map(|(program, declarations)| (program, declarations)),
+        )
     })
 }
 
@@ -1008,6 +1098,7 @@ fn resume_after_keep_in_occurrence(
     pending: PendingCoinFlip,
     kept: Vec<bool>,
     events: &mut Vec<GameEvent>,
+    admitted: Option<super::AdmittedInstructionResult<'_>>,
 ) -> Result<Option<WaitingFor>, EffectError> {
     let PendingCoinFlip {
         return_result_occurrence,
@@ -1054,6 +1145,7 @@ fn resume_after_keep_in_occurrence(
         expected_return_result_process,
         return_result_occurrence,
         trigger_context: &trigger_context,
+        admitted,
     };
     // CR 608.2c: every resumed path completes once no interactive resolution choice is pending.
     match drive_flip_run(
@@ -1065,6 +1157,147 @@ fn resume_after_keep_in_occurrence(
     )? {
         FlipRunOutcome::Suspended => Ok(Some(state.waiting_for.clone())),
         FlipRunOutcome::Complete => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod admitted_branch_public_tests {
+    use super::*;
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use crate::types::ability::*;
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::{InstructionResult, TrustedGameStateEnvelope};
+    use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+    use crate::types::phase::Phase;
+    use crate::types::zones::Zone;
+
+    #[test]
+    fn departure_public_coin_branch_reloads_and_reads_its_parent_program() {
+        // Supplemental typed composition: the real paid producer precedes the
+        // selected read-only outcome. Thumb supplies the public keep boundary.
+        for empty in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            if !empty {
+                scenario.add_creature(P0, "First departure", 2, 2);
+                scenario.add_creature(P0, "Second departure", 3, 3);
+            }
+            scenario.add_creature(P1, "Unrelated departure decoy", 7, 7);
+            scenario.add_artifact_from_oracle(
+                P0,
+                "Krark's Thumb",
+                "If you would flip a coin, instead flip two coins and ignore one.",
+            );
+            let gain = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    player: TargetFilter::Controller,
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneChangeAggregate {
+                            source: ZoneChangeRecordSource::InstructionResult {
+                                result: ReturnResultId(7),
+                            },
+                            from: Some(Zone::Battlefield),
+                            to: Some(Zone::Exile),
+                            filter: TargetFilter::Any,
+                            function: AggregateFunction::Sum,
+                            property: ObjectProperty::Power,
+                        },
+                    },
+                },
+            );
+            let producer = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile", "target":TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))})).unwrap();
+            let mut definition = AbilityDefinition::new(AbilityKind::Activated, producer)
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                })
+                .sub_ability(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::FlipCoins {
+                        flips: CoinFlipRun::Exactly {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        win_effect: Some(Box::new(gain.clone())),
+                        lose_effect: Some(Box::new(gain)),
+                        flipper: TargetFilter::Controller,
+                    },
+                ));
+            definition.declares_return_result = Some(ReturnResultId(7));
+            let source = scenario
+                .add_artifact_from_oracle(P0, "Supplemental admitted coin", "")
+                .with_ability_definition(definition)
+                .id();
+            scenario.with_mana_pool(
+                P0,
+                vec![ManaUnit::new(ManaType::Black, source, false, vec![])],
+            );
+            let mut runner = scenario.build();
+            runner.activate(source, 0).resolve();
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::CoinFlipKeepChoice { player: P0, keep_count: 1, ref results } if results.len() == 2)
+            );
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            let pending = runner.state().active_coin_flip_frame().unwrap();
+            let occurrence = pending.return_result_occurrence.unwrap();
+            let frame = &runner.state().return_result_frames[&occurrence];
+            assert_eq!(frame.process, pending.expected_return_result_process);
+            assert!(frame.admitted_program.is_some());
+            assert!(
+                matches!(&frame.results[&ReturnResultId(7)], InstructionResult::ZoneChanges(records) if records.len() == if empty { 0 } else { 2 })
+            );
+            let paused = runner.state().clone();
+            let action = GameAction::SelectCoinFlips {
+                keep_indices: vec![1],
+            };
+            let mut hostile = paused.clone();
+            hostile.active_coin_flip_frame_mut().unwrap().source_id = ObjectId(999_999);
+            let before = hostile.clone();
+            assert!(crate::game::engine::apply(&mut hostile, P0, action.clone()).is_err());
+            assert_eq!(
+                hostile, before,
+                "foreign source refuses before consuming the keep"
+            );
+            for restore_kind in 0..3 {
+                let restored = if restore_kind == 1 {
+                    serde_json::from_value::<TrustedGameStateEnvelope>(
+                        serde_json::to_value(TrustedGameStateEnvelope::capture(paused.clone()))
+                            .unwrap(),
+                    )
+                    .unwrap()
+                    .into_game_state()
+                } else if restore_kind == 2 {
+                    serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                        serde_json::to_value(
+                            crate::types::resolution::ResolutionStateWire::from_game_state(
+                                paused.clone(),
+                            ),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap()
+                    .into_game_state()
+                } else {
+                    serde_json::from_value(serde_json::to_value(&paused).unwrap()).unwrap()
+                };
+                let mut resumed = GameRunner::from_state(restored);
+                resumed.act(action.clone()).unwrap();
+                resumed.advance_until_stack_empty();
+                assert_eq!(
+                    resumed.life(P0),
+                    20 + if empty { 0 } else { 5 },
+                    "the selected outcome reads the exact completed parent cohort once"
+                );
+                assert_eq!(resumed.life(P1), 20);
+                assert!(matches!(
+                    resumed.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(
+                    resumed.state().stack.is_empty() && resumed.state().resolution_stack.is_empty()
+                );
+                assert!(resumed.state().return_result_frames.is_empty());
+            }
+        }
     }
 }
 
