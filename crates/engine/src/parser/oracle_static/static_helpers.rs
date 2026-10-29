@@ -251,7 +251,12 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
     };
 
     let base_part = strip_cost_mod_cast_scope_suffix(base_part);
-    let typed_filter = {
+    let typed_filter = if all_consuming(alt((tag::<_, _, OracleError<'_>>("spells"), tag("spell"))))
+        .parse(base_part)
+        .is_ok()
+    {
+        Some(TargetFilter::Typed(TypedFilter::card()))
+    } else {
         let (filter, remainder) = parse_type_phrase_folding(base_part);
         let remainder = remainder.trim();
         match &filter {
@@ -399,10 +404,20 @@ fn strip_cost_mod_cast_scope_suffix(input: &str) -> &str {
     let (_, stripped) = all_consuming(alt((
         terminated(
             take_until(" your opponents cast"),
-            (tag::<_, _, OracleError<'_>>(" your opponents cast"), eof),
+            (
+                tag::<_, _, OracleError<'_>>(" your opponents cast"),
+                opt(tag(" this turn")),
+                eof,
+            ),
         ),
-        terminated(take_until(" opponents cast"), (tag(" opponents cast"), eof)),
-        terminated(take_until(" you cast"), (tag(" you cast"), eof)),
+        terminated(
+            take_until(" opponents cast"),
+            (tag(" opponents cast"), opt(tag(" this turn")), eof),
+        ),
+        terminated(
+            take_until(" you cast"),
+            (tag(" you cast"), opt(tag(" this turn")), eof),
+        ),
         rest,
     )))
     .parse(input)

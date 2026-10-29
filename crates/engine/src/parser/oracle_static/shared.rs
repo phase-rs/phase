@@ -3144,6 +3144,27 @@ fn parse_static_line_multi_special_owners(text: &str) -> Option<Vec<StaticDefini
         return Some(vec![definition]);
     }
 
+    // Give the existing all-members transaction precedence over atomic refusal
+    // in either sentence order. Quoted grants are not top-level tax members.
+    let sentences = split_static_sentences(&stripped);
+    if sentences.len() >= 2
+        && sentences.iter().any(|sentence| {
+            if super::evasion::parse_combat_tax_body(sentence.trim_end_matches('.')).is_ok() {
+                return true;
+            }
+            let sentence_lower = sentence.to_lowercase();
+            let sentence_tp = TextPair::new(sentence, &sentence_lower);
+            try_split_inverted_as_long_as(&sentence_tp).is_some_and(|split| {
+                super::evasion::parse_combat_tax_body(&split.effect_text).is_ok()
+            })
+        })
+    {
+        return Some(parse_multi_sentence_statics(&stripped).unwrap_or_default());
+    }
+    if super::evasion::parse_combat_tax_body(tp.original.trim_end_matches('.')).is_ok() {
+        return Some(Vec::new());
+    }
+
     // Preserve the complete class owners' canonical affected filters and
     // top-level combat modes before publishing generic hosted members.
     if let Some(definitions) = parse_color_conditional_keyword_grants(&stripped) {

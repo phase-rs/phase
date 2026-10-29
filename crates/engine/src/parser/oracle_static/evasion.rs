@@ -2566,9 +2566,20 @@ pub(crate) fn parse_combat_tax_static(tp: &TextPair<'_>, text: &str) -> Option<S
     // capitalization at the start of the line.
     let original = tp.original.trim_end_matches('.');
     let (rest, outcome) = parse_combat_tax_body(original).ok()?;
-    if !rest.is_empty() {
-        return None;
-    }
+    let (outcome, gate) = if rest.is_empty() {
+        (outcome, None)
+    } else {
+        // Keep the prefix body's contract: only the incumbent state wrapper can
+        // explain a remainder, and its isolated core must itself be complete.
+        let (body, condition_text) = split_trailing_gate_condition_with_body(tp)?;
+        let (rest, outcome) = parse_combat_tax_body(body).ok()?;
+        if !rest.is_empty() {
+            return None;
+        }
+        let gate = parse_affected_scoped_static_condition(condition_text, Some(&outcome.affected))
+            .filter(|condition| !condition.contains_unrecognized())?;
+        (outcome, Some(gate))
+    };
     let CombatTaxParse {
         mode,
         affected,
@@ -2589,11 +2600,15 @@ pub(crate) fn parse_combat_tax_static(tp: &TextPair<'_>, text: &str) -> Option<S
     // prompt does not walk — which is the moment the gap must be reported.
     attach_gated_condition(
         &mut def,
-        StaticCondition::UnlessPay {
-            cost: base_cost,
-            scaling,
-            defended,
-        },
+        combine_conditions(
+            Some(StaticCondition::UnlessPay {
+                cost: base_cost,
+                scaling,
+                defended,
+            }),
+            gate,
+        )
+        .expect("the canonical tax always supplies its payment condition"),
         original,
     );
     Some(def)
@@ -3764,17 +3779,40 @@ mod structural_marker_tests {
                 ),
             },
         };
-        for declined in [
-            "you control",
-            "that player controls",
-            "controlled by that player",
-            "the chosen player controls",
-        ] {
+        for declined in ["that player controls", "controlled by that player"] {
             let tail = format!(" for each creature {declined} that's attacking you");
             assert_eq!(
                 parse(&tail),
                 (tail.clone(), UnlessPayScaling::Flat),
                 "{tail:?}"
+            );
+        }
+        for (controller_text, controller) in [
+            ("you control", ControllerRef::You),
+            (
+                "the chosen player controls",
+                ControllerRef::SourceChosenPlayer,
+            ),
+        ] {
+            assert_eq!(
+                parse(&format!(
+                    " for each creature {controller_text} that's attacking you"
+                )),
+                (
+                    String::new(),
+                    UnlessPayScaling::PerQuantityRef {
+                        quantity: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::creature()
+                                    .controller(controller)
+                                    .properties(vec![FilterProp::Attacking {
+                                        defender: Some(ControllerRef::You)
+                                    }])
+                            ),
+                        },
+                    }
+                ),
+                "{controller_text:?}"
             );
         }
         for (declined, expected) in [
@@ -3804,6 +3842,11 @@ mod structural_marker_tests {
                 "{tail:?}"
             );
         }
+        let unknown = " for each creature you control that's unexplained";
+        assert_eq!(
+            parse(unknown),
+            (unknown.to_string(), UnlessPayScaling::Flat)
+        );
     }
 
     /// The combat-tax body reads original-case text, so a capitalized controller

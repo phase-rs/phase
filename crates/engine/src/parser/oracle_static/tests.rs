@@ -1,6 +1,1124 @@
 use super::anthem::*;
 use crate::types::keywords::{EmbalmCost, EscapeCost, FlashbackCost, ProtectionTarget};
 
+#[test]
+fn qualified_cost_public_activation_snapshot_colors_and_cleanup() {
+    use crate::game::casting::effective_spell_cost;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::game_state::WaitingFor;
+    use crate::types::mana::{parse_mtgjson_mana_cost, ManaUnit};
+    // CR 105.2 + CR 118.7a + CR 601.2f: printed generic components exceed
+    // X, including both-color witnesses, so a duplicate reduction cannot hide.
+    for (will, name, source_text, life_name, life_text, life_mana, x) in [
+        (false, "Rowan, Scion of War", "Menace\n{T}: Spells you cast this turn that are black and/or red cost {X} less to cast, where X is the amount of life you lost this turn. Activate only as a sorcery.", "Sign in Blood", "Target player draws two cards and loses 2 life.", "{B}{B}", 2),
+        (true, "Will, Scion of Peace", "Vigilance\n{T}: Spells you cast this turn that are white and/or blue cost {X} less to cast, where X is the amount of life you gained this turn. Activate only as a sorcery.", "Revitalize", "You gain 3 life.\nDraw a card.", "{1}{W}", 3),
+    ] {
+        let cards = if will {
+            vec![
+                ("Siege Mastodon", "", "{4}{W}", "{1}{W}", vec![ManaColor::White]),
+                ("Mahamoti Djinn", "Flying (This creature can't be blocked except by creatures with flying or reach.)", "{4}{U}{U}", "{1}{U}{U}", vec![ManaColor::Blue]),
+                ("Azorius Skyguard", "Flying, first strike\nCreatures your opponents control get -1/-0.", "{4}{W}{U}", "{1}{W}{U}", vec![ManaColor::White, ManaColor::Blue]),
+            ]
+        } else {
+            vec![
+                ("Bog Wraith", "Swampwalk (This creature can't be blocked as long as defending player controls a Swamp.)", "{3}{B}", "{1}{B}", vec![ManaColor::Black]),
+                ("Hill Giant", "", "{3}{R}", "{1}{R}", vec![ManaColor::Red]),
+                ("Monstrous Carabid", "This creature attacks each combat if able.\nCycling {B/R} ({B/R}, Discard this card: Draw a card.)", "{3}{B}{R}", "{1}{B}{R}", vec![ManaColor::Black, ManaColor::Red]),
+            ]
+        };
+        for (spell_name, spell_text, printed, reduced, colors) in cards.into_iter().chain([
+            ("Craw Wurm", "", "{4}{G}{G}", "{4}{G}{G}", vec![ManaColor::Green]),
+            ("Juggernaut", "This creature attacks each combat if able.\nThis creature can't be blocked by Walls.", "{4}", "{4}", vec![]),
+        ]) {
+            for zero_at_resolution in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                scenario.with_library_top(P0, &["Island", "Island", "Island", "Island", "Island", "Island"]);
+                scenario.with_library_top(P1, &["Island", "Island", "Island"]);
+                let source = scenario.add_creature(P0, name, 2, 4).from_oracle_text(source_text).id();
+                scenario.add_creature(P1, name, 2, 4).from_oracle_text(source_text);
+                let spell = scenario.add_creature_to_hand_from_oracle(P0, spell_name, 3, 5, spell_text).with_mana_cost(parse_mtgjson_mana_cost(printed)).with_color(colors).id();
+                let life = (0..2).map(|_| scenario.add_spell_to_hand_from_oracle(P0, life_name, will, life_text).with_mana_cost(parse_mtgjson_mana_cost(life_mana)).id()).collect::<Vec<_>>();
+                scenario.with_mana_pool(P0, [ManaType::White, ManaType::Blue, ManaType::Black, ManaType::Red, ManaType::Green].into_iter().flat_map(|color| (0..12).map(move |_| ManaUnit::new(color, source, false, vec![]))).collect());
+                let mut runner = scenario.build();
+                if !zero_at_resolution {
+                    if will { runner.cast(life[0]).resolve().assert_life_delta(P0, x); }
+                    else { runner.cast(life[0]).target_player(P0).resolve().assert_life_delta(P0, -x); }
+                }
+                let journal = if will { runner.state().players[0].life_gained_this_turn } else { runner.state().players[0].life_lost_this_turn };
+                assert_eq!(journal, if zero_at_resolution { 0 } else { x as u32 });
+                let ability = runner.state().objects[&source].abilities.iter().position(|ability| matches!(*ability.effect, Effect::GenericEffect { .. })).unwrap();
+                runner.activate(source, ability).resolve();
+                assert!(runner.state().objects[&source].tapped, "public activation pays the tap cost");
+                assert!(runner.state().stack.is_empty());
+                assert!(runner.state().resolution_stack.is_empty());
+                assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player: P0 }));
+                let expected = parse_mtgjson_mana_cost(if zero_at_resolution { printed } else { reduced });
+                assert_eq!(effective_spell_cost(runner.state(), P0, spell), Some(expected.clone()));
+                // CR 608.2h + CR 611.2d: a later public life event cannot resample X.
+                if will { runner.cast(life[1]).resolve().assert_life_delta(P0, x); }
+                else { runner.cast(life[1]).target_player(P0).resolve().assert_life_delta(P0, -x); }
+                let journal = if will { runner.state().players[0].life_gained_this_turn } else { runner.state().players[0].life_lost_this_turn };
+                assert_eq!(journal, if zero_at_resolution { x as u32 } else { 2 * x as u32 });
+                assert_eq!(effective_spell_cost(runner.state(), P0, spell), Some(expected.clone()));
+                let mut cast = crate::game::scenario::GameRunner::from_state(runner.state().clone());
+                let before = cast.state().players[0].mana_pool.total();
+                let committed = cast.cast(spell).commit();
+                assert_eq!(committed.state().objects[&spell].zone, Zone::Stack);
+                assert!(!committed.state().stack.is_empty());
+                assert_eq!(before - committed.state().players[0].mana_pool.total(), expected.mana_value() as usize);
+                committed.resolve().assert_zone(&[spell], Zone::Battlefield);
+                assert!(cast.state().stack.is_empty());
+                assert!(cast.state().resolution_stack.is_empty());
+                assert!(matches!(cast.state().waiting_for, WaitingFor::Priority { .. }));
+                // CR 611.2a: expire via public turn progression, retaining the uncast witness.
+                runner.advance_to_combat();
+                runner.declare_attackers(&[]).unwrap();
+                runner.advance_to_phase(Phase::PreCombatMain);
+                if runner.state().active_player != P0 {
+                    runner.advance_to_combat();
+                    runner.declare_attackers(&[]).unwrap();
+                    runner.advance_to_phase(Phase::PreCombatMain);
+                }
+                assert_eq!(runner.state().active_player, P0);
+                assert!(runner.state().turn_number > 2);
+                assert_eq!(effective_spell_cost(runner.state(), P0, spell), Some(parse_mtgjson_mana_cost(printed)));
+            }
+        }
+    }
+}
+
+#[test]
+fn qualified_cost_public_opposing_sources_keep_activator_journal() {
+    use crate::game::casting::effective_spell_cost;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::WaitingFor;
+    use crate::types::mana::{parse_mtgjson_mana_cost, ManaUnit};
+    // CR 109.5 + CR 608.2h: two lookalike sources and unequal public journals
+    // distinguish the activating controller from the other source's controller.
+    for will in [false, true] {
+        let (name, source_text) = if will {
+            ("Will, Scion of Peace", "Vigilance\n{T}: Spells you cast this turn that are white and/or blue cost {X} less to cast, where X is the amount of life you gained this turn. Activate only as a sorcery.")
+        } else {
+            ("Rowan, Scion of War", "Menace\n{T}: Spells you cast this turn that are black and/or red cost {X} less to cast, where X is the amount of life you lost this turn. Activate only as a sorcery.")
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for player in [P0, P1] {
+            scenario.with_library_top(player, &["Island"; 12]);
+        }
+        let source = scenario
+            .add_creature(P0, name, 2, 4)
+            .from_oracle_text(source_text)
+            .id();
+        let other = scenario
+            .add_creature(P1, name, 2, 4)
+            .from_oracle_text(source_text)
+            .id();
+        let target = scenario.add_creature(P0, "Target", 1, 10).id();
+        let (life_name, life_text, life_mana) = if will {
+            ("Healing Salve", "Choose one —\n• Target player gains 3 life.\n• Prevent the next 3 damage that would be dealt to any target this turn.", "{W}")
+        } else {
+            (
+                "Sign in Blood",
+                "Target player draws two cards and loses 2 life.",
+                "{B}{B}",
+            )
+        };
+        let events = (0..3)
+            .map(|_| {
+                scenario
+                    .add_spell_to_hand_from_oracle(P0, life_name, will, life_text)
+                    .with_mana_cost(parse_mtgjson_mana_cost(life_mana))
+                    .id()
+            })
+            .collect::<Vec<_>>();
+        let (spell_name, spell_text, printed, reduced, colors) = if will {
+            (
+                "Opportunity",
+                "Target player draws four cards.",
+                "{4}{U}{U}",
+                "{1}{U}{U}",
+                vec![ManaColor::Blue],
+            )
+        } else {
+            ("Unholy Hunger", "Destroy target creature.\nSpell mastery — If there are two or more instant and/or sorcery cards in your graveyard, you gain 2 life.", "{3}{B}{B}", "{1}{B}{B}", vec![ManaColor::Black])
+        };
+        let witnesses = [P0, P1].map(|player| {
+            scenario
+                .add_spell_to_hand_from_oracle(player, spell_name, true, spell_text)
+                .with_mana_cost(parse_mtgjson_mana_cost(printed))
+                .with_color(colors.clone())
+                .id()
+        });
+        for player in [P0, P1] {
+            scenario.with_mana_pool(
+                player,
+                [ManaType::White, ManaType::Blue, ManaType::Black]
+                    .into_iter()
+                    .flat_map(|color| {
+                        (0..12).map(move |_| ManaUnit::new(color, source, false, vec![]))
+                    })
+                    .collect(),
+            );
+        }
+        let mut runner = scenario.build();
+        for (spell, player) in events.into_iter().zip([P0, P1, P1]) {
+            if will {
+                runner
+                    .cast(spell)
+                    .modes(&[0])
+                    .target_player(player)
+                    .resolve()
+                    .assert_life_delta(player, 3);
+            } else {
+                runner
+                    .cast(spell)
+                    .target_player(player)
+                    .resolve()
+                    .assert_life_delta(player, -2);
+            }
+        }
+        assert_eq!(
+            if will {
+                runner.state().players[0].life_gained_this_turn
+            } else {
+                runner.state().players[0].life_lost_this_turn
+            },
+            if will { 3 } else { 2 }
+        );
+        assert_eq!(
+            if will {
+                runner.state().players[1].life_gained_this_turn
+            } else {
+                runner.state().players[1].life_lost_this_turn
+            },
+            if will { 6 } else { 4 }
+        );
+        let ability = runner.state().objects[&source]
+            .abilities
+            .iter()
+            .position(|ability| matches!(*ability.effect, Effect::GenericEffect { .. }))
+            .unwrap();
+        runner.activate(source, ability).resolve();
+        assert!(runner.state().objects[&source].tapped);
+        assert!(!runner.state().objects[&other].tapped);
+        assert_eq!(
+            effective_spell_cost(runner.state(), P0, witnesses[0]),
+            Some(parse_mtgjson_mana_cost(reduced))
+        );
+        runner.act(GameAction::PassPriority).unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        ));
+        assert_eq!(
+            effective_spell_cost(runner.state(), P1, witnesses[1]),
+            Some(parse_mtgjson_mana_cost(printed))
+        );
+        let before = runner.state().players[1].mana_pool.total();
+        let committed = if will {
+            runner.cast(witnesses[1]).target_player(P0).commit()
+        } else {
+            runner.cast(witnesses[1]).target_object(target).commit()
+        };
+        assert_eq!(committed.state().objects[&witnesses[1]].zone, Zone::Stack);
+        assert_eq!(
+            before - committed.state().players[1].mana_pool.total(),
+            parse_mtgjson_mana_cost(printed).mana_value() as usize
+        );
+        committed.resolve();
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+#[test]
+fn qualified_cost_whole_documents_retain_keyword_activation_and_source() {
+    use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir};
+    use crate::parser::oracle_ir::doc::{OracleNodeIr, OracleSourceSpan};
+    for (name, keyword, text, gained) in [
+        ("Rowan, Scion of War", Keyword::Menace, "Menace\n{T}: Spells you cast this turn that are black and/or red cost {X} less to cast, where X is the amount of life you lost this turn. Activate only as a sorcery.", false),
+        ("Will, Scion of Peace", Keyword::Vigilance, "Vigilance\n{T}: Spells you cast this turn that are white and/or blue cost {X} less to cast, where X is the amount of life you gained this turn. Activate only as a sorcery.", true),
+    ] {
+        let (keyword_text, activation) = text.split_once('\n').unwrap();
+        let mut doc = parse_oracle_ir(text, name, &[keyword_text.into()], &["Creature".into()], &["Human".into()]);
+        assert_eq!(doc.source_text, text);
+        assert_eq!(doc.items.len(), 2);
+        assert_ne!(doc.items[0].id, doc.items[1].id);
+        assert_eq!(doc.items[0].source.fragment(), Some(keyword_text));
+        assert_eq!(doc.items[0].source.span(), &OracleSourceSpan::exact(0, 0, 0, keyword_text.len(), 0));
+        assert!(matches!(&doc.items[0].node, OracleNodeIr::Keyword(actual) if actual == &keyword));
+        assert_eq!(doc.items[1].source.fragment(), Some(activation));
+        assert_eq!(doc.items[1].source.span(), &OracleSourceSpan::exact(1, 1, keyword_text.len()+1, text.len(), 0));
+        assert!(matches!(doc.items[1].node, OracleNodeIr::Spell(_)));
+        let lowered = lower_oracle_ir(&mut doc);
+        let direct = parse_card(text, name, &[keyword_text], &["Creature"], &["Human"]);
+        assert_eq!(lowered.abilities, direct.abilities);
+        assert_eq!(lowered.statics, direct.statics);
+        assert_eq!(lowered.extracted_keywords, vec![keyword]);
+        assert_eq!(lowered.abilities.len(), 1);
+        let activation = &lowered.abilities[0];
+        assert_eq!(activation.cost, Some(AbilityCost::Tap));
+        assert!(activation.activation_restrictions.contains(&ActivationRestriction::AsSorcery));
+        assert_eq!(activation.duration, Some(Duration::UntilEndOfTurn));
+        assert!(!crate::parser::oracle::has_unimplemented(activation));
+        let Effect::GenericEffect { static_abilities, .. } = activation.effect.as_ref() else { panic!("complete granted program") };
+        let [grant] = static_abilities.as_slice() else { panic!("one grant") };
+        let [ContinuousModification::GrantStaticAbility { definition }] = grant.modifications.as_slice() else { panic!("one cost modifier") };
+        let StaticMode::ModifyCost { dynamic_count, .. } = &definition.mode else { panic!("cost modifier") };
+        assert_eq!(dynamic_count, &Some(if gained { QuantityRef::LifeGainedThisTurn { player: PlayerScope::Controller } } else { QuantityRef::LifeLostThisTurn { player: PlayerScope::Controller } }));
+        assert!(lowered.parse_warnings.is_empty());
+    }
+    let archangel = "Flying\nAs long as this creature is untapped, creatures can't attack you or planeswalkers you control unless their controller pays {1} for each of those creatures.\nAs long as this creature is attacking, creatures can't block unless their controller pays {1} for each of those creatures.";
+    let mut doc = parse_oracle_ir(
+        archangel,
+        "Archangel of Tithes",
+        &["Flying".into()],
+        &["Creature".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, archangel);
+    assert_eq!(doc.items.len(), 3);
+    let normalized =
+        crate::parser::oracle_util::normalize_card_name_refs(archangel, "Archangel of Tithes");
+    let mut offset = "Flying\n".len();
+    for (index, source) in normalized.lines().skip(1).enumerate() {
+        let item = &doc.items[index + 1];
+        assert_eq!(item.source.fragment(), Some(source));
+        assert_eq!(
+            item.source.span(),
+            &OracleSourceSpan::exact(index + 1, index + 1, offset, offset + source.len(), 0)
+        );
+        let OracleNodeIr::Static(ir) = &item.node else {
+            panic!("complete conditional tax")
+        };
+        assert_eq!(ir.source_text, source);
+        assert_eq!(
+            super::lower_static_ir(ir),
+            parse_static_line(source).unwrap()
+        );
+        offset += source.len() + 1;
+    }
+    let parsed = lower_oracle_ir(&mut doc);
+    assert_eq!(parsed.extracted_keywords, vec![Keyword::Flying]);
+    assert_eq!(parsed.statics.len(), 2);
+    assert!(parsed.abilities.is_empty());
+    assert!(parsed.parse_warnings.is_empty());
+}
+
+#[test]
+fn cowed_public_aura_attack_block_payment_and_live_hand() {
+    use crate::game::combat::AttackTarget;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::{CombatTaxContext, CombatTaxPending, WaitingFor};
+    use crate::types::mana::{parse_mtgjson_mana_cost, ManaUnit};
+    const COWED: &str = "Enchant creature\nEnchanted creature can't attack or block unless its controller pays {1} for each card in your hand.";
+    const SALVE: &str = "Choose one —\n• Target player gains 3 life.\n• Prevent the next 3 damage that would be dealt to any target this turn.";
+    // CR 303.4a/b/e + CR 109.5: cast and attach publicly, with independent
+    // source/host controllers and hands. Both declaration modes use this source.
+    for attacking in [false, true] {
+        for case in [
+            "pay",
+            "decline",
+            "zero",
+            "departure",
+            "reattach",
+            "insufficient",
+        ] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(P0, &["Island", "Island", "Island"]);
+            scenario.with_library_top(P1, &["Island", "Island", "Island"]);
+            scenario.with_cards_in_hand(P1, &["A", "B", "C", "D", "E"]);
+            let host = scenario.add_creature(P1, "Enchanted host", 2, 10).id();
+            let sibling = scenario.add_creature(P1, "Untaxed sibling", 2, 10).id();
+            let attacker = scenario.add_creature(P0, "Blockable attacker", 4, 10).id();
+            let aura = scenario
+                .add_spell_to_hand(P0, "Cowed by Wisdom", false)
+                .as_enchantment()
+                .with_subtypes(vec!["Aura"])
+                .from_oracle_text(COWED)
+                .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+                .id();
+            let salves = (0..3)
+                .map(|_| {
+                    scenario
+                        .add_spell_to_hand_from_oracle(P0, "Healing Salve", true, SALVE)
+                        .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+                        .id()
+                })
+                .collect::<Vec<_>>();
+            let departure = match case {
+                "departure" => Some(
+                    scenario
+                        .add_spell_to_hand_from_oracle(
+                            P0,
+                            "Disenchant",
+                            true,
+                            "Destroy target artifact or enchantment.",
+                        )
+                        .with_mana_cost(parse_mtgjson_mana_cost("{1}{W}"))
+                        .id(),
+                ),
+                "reattach" => Some(
+                    scenario
+                        .add_spell_to_hand_from_oracle(
+                            P0,
+                            "Boomerang",
+                            true,
+                            "Return target permanent to its owner's hand.",
+                        )
+                        .with_mana_cost(parse_mtgjson_mana_cost("{U}{U}"))
+                        .id(),
+                ),
+                _ => None,
+            };
+            let lands = (0..if case == "insufficient" { 1 } else { 6 })
+                .map(|_| scenario.add_basic_land(P1, ManaColor::White))
+                .collect::<Vec<_>>();
+            scenario.with_mana_pool(
+                P0,
+                [ManaType::White, ManaType::Blue]
+                    .into_iter()
+                    .flat_map(|color| {
+                        (0..8).map(move |_| ManaUnit::new(color, attacker, false, vec![]))
+                    })
+                    .collect(),
+            );
+            let mut runner = scenario.build();
+            runner
+                .cast(aura)
+                .target_object(host)
+                .resolve()
+                .assert_zone(&[aura], Zone::Battlefield);
+            assert_eq!(
+                runner.state().objects[&aura].attached_to,
+                Some(crate::game::game_object::AttachTarget::Object(host))
+            );
+            assert_eq!(runner.state().objects[&aura].controller, P0);
+            assert_eq!(runner.state().objects[&host].controller, P1);
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            if let Some(departure) = departure {
+                runner
+                    .cast(departure)
+                    .target_object(aura)
+                    .resolve()
+                    .assert_zone(
+                        &[aura],
+                        if case == "reattach" {
+                            Zone::Hand
+                        } else {
+                            Zone::Graveyard
+                        },
+                    );
+                if case == "reattach" {
+                    runner
+                        .cast(aura)
+                        .target_object(sibling)
+                        .resolve()
+                        .assert_zone(&[aura], Zone::Battlefield);
+                    assert_eq!(
+                        runner.state().objects[&aura].attached_to,
+                        Some(crate::game::game_object::AttachTarget::Object(sibling))
+                    );
+                }
+                assert_eq!(runner.state().players[0].hand.len(), 3);
+            } else {
+                runner
+                    .cast(salves[0])
+                    .modes(&[0])
+                    .target_player(P0)
+                    .resolve()
+                    .assert_life_delta(P0, 3);
+                assert_eq!(
+                    runner.state().players[0].hand.len(),
+                    2,
+                    "public hand change changes the live quote"
+                );
+                if case == "zero" {
+                    for salve in &salves[1..] {
+                        runner.cast(*salve).modes(&[0]).target_player(P0).resolve();
+                    }
+                    assert!(runner.state().players[0].hand.is_empty());
+                    assert_eq!(runner.state().objects[&aura].zone, Zone::Battlefield);
+                }
+            }
+            if attacking {
+                runner.advance_to_combat();
+                runner.declare_attackers(&[]).unwrap();
+                runner.advance_to_phase(Phase::PreCombatMain);
+                assert_eq!(runner.state().active_player, P1);
+            }
+            runner.advance_to_combat();
+            if attacking {
+                runner
+                    .declare_attackers(&[
+                        (host, AttackTarget::Player(P0)),
+                        (sibling, AttackTarget::Player(P0)),
+                    ])
+                    .unwrap();
+            } else {
+                runner
+                    .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+                    .unwrap();
+                runner.advance_to_phase(Phase::DeclareBlockers);
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::DeclareBlockers { .. }
+                ));
+                runner
+                    .declare_blockers(&[(host, attacker), (sibling, attacker)])
+                    .unwrap();
+            }
+            let taxed = matches!(case, "pay" | "decline" | "reattach" | "insufficient");
+            if taxed {
+                let price = if case == "reattach" { 3 } else { 2 };
+                let taxed_host = if case == "reattach" { sibling } else { host };
+                let WaitingFor::CombatTaxPayment {
+                    player,
+                    context,
+                    total_cost,
+                    per_creature,
+                    pending,
+                } = &runner.state().waiting_for
+                else {
+                    panic!("required Aura tax prompt: {:?}", runner.state().waiting_for)
+                };
+                assert_eq!(*player, P1);
+                assert_eq!(
+                    *context,
+                    if attacking {
+                        CombatTaxContext::Attacking
+                    } else {
+                        CombatTaxContext::Blocking
+                    }
+                );
+                assert_eq!(*total_cost, ManaCost::generic(price));
+                assert_eq!(per_creature, &vec![(taxed_host, ManaCost::generic(price))]);
+                assert_ne!(runner.state().players[1].hand.len(), price as usize);
+                match pending {
+                    CombatTaxPending::Attack { attacks, bands } => {
+                        assert!(attacking);
+                        assert_eq!(
+                            attacks
+                                .iter()
+                                .map(|(r, t)| (r.object_id, *t))
+                                .collect::<Vec<_>>(),
+                            vec![
+                                (host, AttackTarget::Player(P0)),
+                                (sibling, AttackTarget::Player(P0))
+                            ]
+                        );
+                        assert!(bands.is_empty());
+                    }
+                    CombatTaxPending::Block { assignments } => {
+                        assert!(!attacking);
+                        assert_eq!(
+                            assignments
+                                .iter()
+                                .map(|(b, a)| (b.object_id, a.object_id))
+                                .collect::<Vec<_>>(),
+                            vec![(host, attacker), (sibling, attacker)]
+                        );
+                    }
+                }
+                let combat = runner.state().combat.as_ref().unwrap();
+                if attacking {
+                    assert!(combat.attackers.is_empty());
+                } else {
+                    assert_eq!(
+                        combat
+                            .attackers
+                            .iter()
+                            .map(|a| a.object_id)
+                            .collect::<Vec<_>>(),
+                        vec![attacker]
+                    );
+                    assert!(combat.blocker_to_attacker.is_empty());
+                    assert!(combat.blocker_assignments.is_empty());
+                    assert!(!combat.blockers_declared_by.contains(&P1));
+                }
+                if case == "insufficient" {
+                    let prompt = runner.state().waiting_for.clone();
+                    assert!(runner
+                        .act(GameAction::PayCombatTax { accept: true })
+                        .is_err());
+                    assert_eq!(runner.state().waiting_for, prompt);
+                    assert!(lands
+                        .iter()
+                        .all(|land| !runner.state().objects[land].tapped));
+                    assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+                }
+                if matches!(case, "decline" | "insufficient") {
+                    // CR 508.1 + CR 509.1 + CR 733.1: the entire proposal
+                    // restarts; the sibling participates only after redeclaration.
+                    let declined = runner
+                        .act(GameAction::PayCombatTax { accept: false })
+                        .unwrap();
+                    assert!(declined.events.iter().all(|event| !matches!(
+                        event,
+                        crate::types::events::GameEvent::CombatTaxPaid { .. }
+                            | crate::types::events::GameEvent::AttackersDeclared { .. }
+                            | crate::types::events::GameEvent::BlockersDeclared { .. }
+                    )));
+                    assert!(lands
+                        .iter()
+                        .all(|land| !runner.state().objects[land].tapped));
+                    assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+                    if attacking {
+                        assert_eq!(runner.state().phase, Phase::DeclareAttackers);
+                        assert!(matches!(
+                            runner.state().waiting_for,
+                            WaitingFor::DeclareAttackers { player: P1, .. }
+                        ));
+                        assert!(runner.state().combat.as_ref().unwrap().attackers.is_empty());
+                        assert!(!runner.state().objects[&host].tapped);
+                        assert!(!runner.state().objects[&sibling].tapped);
+                        runner
+                            .declare_attackers(&[(sibling, AttackTarget::Player(P0))])
+                            .unwrap();
+                        assert!(runner.state().objects[&sibling].tapped);
+                        assert!(!runner.state().objects[&host].tapped);
+                    } else {
+                        assert_eq!(runner.state().phase, Phase::DeclareBlockers);
+                        assert!(matches!(
+                            runner.state().waiting_for,
+                            WaitingFor::DeclareBlockers { player: P1, .. }
+                        ));
+                        let combat = runner.state().combat.as_ref().unwrap();
+                        assert_eq!(
+                            combat
+                                .attackers
+                                .iter()
+                                .map(|a| a.object_id)
+                                .collect::<Vec<_>>(),
+                            vec![attacker]
+                        );
+                        assert!(combat.blocker_to_attacker.is_empty());
+                        assert!(combat.blocker_assignments.is_empty());
+                        assert!(!combat.blockers_declared_by.contains(&P1));
+                        runner.declare_blockers(&[(sibling, attacker)]).unwrap();
+                    }
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(runner.state().stack.is_empty());
+                    assert!(runner.state().resolution_stack.is_empty());
+                } else {
+                    runner
+                        .act(GameAction::PayCombatTax { accept: true })
+                        .unwrap();
+                    assert_eq!(
+                        lands
+                            .iter()
+                            .filter(|land| runner.state().objects[land].tapped)
+                            .count(),
+                        price as usize
+                    );
+                    assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+                }
+            } else {
+                assert!(
+                    matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                    "the complete zero/departure declaration commits without a tax"
+                );
+            }
+            let combat = runner.state().combat.as_ref().unwrap();
+            if attacking {
+                assert_eq!(
+                    combat.attackers.iter().any(|a| a.object_id == host),
+                    !matches!(case, "decline" | "insufficient")
+                );
+                assert!(combat.attackers.iter().any(|a| a.object_id == sibling));
+                runner.advance_to_phase(Phase::DeclareBlockers);
+                runner.declare_blockers(&[]).unwrap();
+            } else {
+                assert_eq!(
+                    combat.blocker_to_attacker.contains_key(&host),
+                    !matches!(case, "decline" | "insufficient")
+                );
+                assert!(combat.blocker_to_attacker.contains_key(&sibling));
+                assert_eq!(combat.blocker_to_attacker[&sibling], vec![attacker]);
+                assert!(combat.blockers_declared_by.contains(&P1));
+            }
+            runner.combat_damage();
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
+    }
+}
+
+#[test]
+fn cowed_public_source_host_control_and_independent_aura_sources() {
+    use crate::game::combat::AttackTarget;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::WaitingFor;
+    use crate::types::mana::{parse_mtgjson_mana_cost, ManaUnit};
+    const COWED: &str = "Enchant creature\nEnchanted creature can't attack or block unless its controller pays {1} for each card in your hand.";
+    // CR 109.5 + CR 303.4e: control changes use public Aura spells. Each
+    // tax retains its own source; changing the host never changes that source.
+    for (case, blocking) in ["host_control", "source_control", "two_sources"]
+        .into_iter()
+        .flat_map(|case| [false, true].map(|blocking| (case, blocking)))
+    {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Island", "Island"]);
+        scenario.with_library_top(P1, &["Island", "Island"]);
+        scenario.with_cards_in_hand(
+            P0,
+            if case == "host_control" {
+                &["A", "B", "C"]
+            } else {
+                &["A"]
+            },
+        );
+        scenario.with_cards_in_hand(P1, &["D", "E"]);
+        let host = scenario.add_creature(P1, "Host", 2, 10).haste().id();
+        let attacker = scenario
+            .add_creature(
+                if case == "host_control" { P1 } else { P0 },
+                "Other attacker",
+                2,
+                10,
+            )
+            .id();
+        let aura = scenario
+            .add_spell_to_hand(P0, "Cowed by Wisdom", false)
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"])
+            .from_oracle_text(COWED)
+            .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+            .id();
+        let extra = if case == "two_sources" {
+            scenario
+                .add_spell_to_hand(P1, "Cowed by Wisdom", false)
+                .as_enchantment()
+                .with_subtypes(vec!["Aura"])
+                .from_oracle_text(COWED)
+                .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+                .id()
+        } else {
+            let (player, name, oracle, cost) = if case == "host_control" {
+                (
+                    P0,
+                    "Control Magic",
+                    "Enchant creature\nYou control enchanted creature.",
+                    "{2}{U}{U}",
+                )
+            } else {
+                (
+                    P1,
+                    "Confiscate",
+                    "Enchant permanent\nYou control enchanted permanent.",
+                    "{4}{U}{U}",
+                )
+            };
+            scenario
+                .add_spell_to_hand(player, name, false)
+                .as_enchantment()
+                .with_subtypes(vec!["Aura"])
+                .from_oracle_text(oracle)
+                .with_mana_cost(parse_mtgjson_mana_cost(cost))
+                .id()
+        };
+        let payer = if case == "host_control" { P0 } else { P1 };
+        let lands = [ManaColor::White, ManaColor::Blue]
+            .into_iter()
+            .flat_map(|color| (0..6).map(move |_| color))
+            .map(|color| scenario.add_basic_land(payer, color))
+            .collect::<Vec<_>>();
+        scenario.with_mana_pool(
+            P0,
+            [ManaType::White, ManaType::Blue]
+                .into_iter()
+                .flat_map(|color| (0..6).map(move |_| ManaUnit::new(color, host, false, vec![])))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner
+            .cast(aura)
+            .target_object(host)
+            .resolve()
+            .assert_zone(&[aura], Zone::Battlefield);
+        if case == "host_control" {
+            runner
+                .cast(extra)
+                .target_object(host)
+                .resolve()
+                .assert_zone(&[extra], Zone::Battlefield);
+            assert_eq!(runner.state().objects[&host].controller, P0);
+            assert_eq!(runner.state().objects[&aura].controller, P0);
+            assert_eq!(runner.state().players[0].hand.len(), 3);
+        } else {
+            runner.advance_to_combat();
+            runner.declare_attackers(&[]).unwrap();
+            runner.advance_to_phase(Phase::PreCombatMain);
+            assert_eq!(runner.state().active_player, P1);
+            runner
+                .cast(extra)
+                .target_object(if case == "source_control" { aura } else { host })
+                .resolve()
+                .assert_zone(&[extra], Zone::Battlefield);
+            assert_eq!(runner.state().players[0].hand.len(), 1);
+            assert_eq!(runner.state().players[1].hand.len(), 3);
+            assert_eq!(runner.state().objects[&host].controller, P1);
+            assert_eq!(
+                runner.state().objects[&aura].controller,
+                if case == "source_control" { P1 } else { P0 }
+            );
+        }
+        assert_eq!(
+            runner.state().objects[&aura].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(host))
+        );
+        if case == "two_sources" {
+            assert_eq!(
+                runner.state().objects[&extra].attached_to,
+                Some(crate::game::game_object::AttachTarget::Object(host))
+            );
+            assert_eq!(runner.state().objects[&extra].controller, P1);
+        }
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        if blocking {
+            runner.advance_to_combat();
+            runner.declare_attackers(&[]).unwrap();
+            runner.advance_to_phase(Phase::PreCombatMain);
+            assert_ne!(runner.state().active_player, payer);
+            if case != "host_control" {
+                assert_eq!(runner.state().players[0].hand.len(), 2);
+                assert_eq!(runner.state().players[1].hand.len(), 3);
+            }
+        }
+        let tapped_before = lands
+            .iter()
+            .filter(|land| runner.state().objects[land].tapped)
+            .count();
+        runner.advance_to_combat();
+        if blocking {
+            runner
+                .declare_attackers(&[(attacker, AttackTarget::Player(payer))])
+                .unwrap();
+            runner.advance_to_phase(Phase::DeclareBlockers);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::DeclareBlockers { .. }
+            ));
+            runner.declare_blockers(&[(host, attacker)]).unwrap();
+        } else {
+            runner
+                .declare_attackers(&[(
+                    host,
+                    AttackTarget::Player(if payer == P0 { P1 } else { P0 }),
+                )])
+                .unwrap();
+        }
+        let price = if case == "two_sources" {
+            if blocking {
+                5
+            } else {
+                4
+            }
+        } else {
+            3
+        };
+        let WaitingFor::CombatTaxPayment {
+            player,
+            total_cost,
+            per_creature,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("source-specific live price required")
+        };
+        assert_eq!(*player, payer);
+        assert_eq!(*total_cost, ManaCost::generic(price));
+        assert_eq!(per_creature, &vec![(host, ManaCost::generic(price))]);
+        runner
+            .act(GameAction::PayCombatTax { accept: true })
+            .unwrap();
+        assert_eq!(
+            lands
+                .iter()
+                .filter(|land| runner.state().objects[land].tapped)
+                .count()
+                - tapped_before,
+            price as usize
+        );
+        assert_eq!(
+            runner.state().players[payer.0 as usize].mana_pool.total(),
+            0
+        );
+        if blocking {
+            assert_eq!(
+                runner
+                    .state()
+                    .combat
+                    .as_ref()
+                    .unwrap()
+                    .blocker_to_attacker
+                    .get(&host),
+                Some(&vec![attacker])
+            );
+        } else {
+            assert!(runner
+                .state()
+                .combat
+                .as_ref()
+                .unwrap()
+                .attackers
+                .iter()
+                .any(|attacker| attacker.object_id == host));
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        if !blocking {
+            runner.advance_to_phase(Phase::DeclareBlockers);
+            runner.declare_blockers(&[]).unwrap();
+        }
+        runner.combat_damage();
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+#[test]
+fn archangel_public_block_gate_inactive_when_another_creature_attacks() {
+    use crate::game::combat::AttackTarget;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::game_state::WaitingFor;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let archangel = scenario.add_creature(P0, "Archangel of Tithes", 3, 5).from_oracle_text_with_keywords(&["Flying"], "Flying\nAs long as this creature is untapped, creatures can't attack you or planeswalkers you control unless their controller pays {1} for each of those creatures.\nAs long as this creature is attacking, creatures can't block unless their controller pays {1} for each of those creatures.").id();
+    let attacker = scenario.add_creature(P0, "Other attacker", 2, 10).id();
+    let blocker = scenario.add_creature(P1, "Legal blocker", 2, 10).id();
+    let mut runner = scenario.build();
+    assert_eq!(
+        runner.state().objects[&archangel].static_definitions.len(),
+        2
+    );
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .unwrap();
+    runner.advance_to_phase(Phase::DeclareBlockers);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareBlockers { .. }
+    ));
+    runner.declare_blockers(&[(blocker, attacker)]).unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .unwrap()
+            .blocker_to_attacker
+            .get(&blocker),
+        Some(&vec![attacker])
+    );
+    assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+    runner.combat_damage();
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn combat_tax_complete_atomic_wrapper_and_sentence_publication() {
+    use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir};
+    use crate::parser::oracle_ir::doc::{OracleNodeIr, OracleSourceSpan};
+    // SHAPE: every public static route keeps the canonical body unchanged.
+    let cowed = "Enchanted creature can't attack or block unless its controller pays {1} for each card in your hand.";
+    let brainwash = "Enchanted creature can't attack unless its controller pays {3}.";
+    let prison = "Creatures can't attack you unless their controller pays {2} for each creature they control that's attacking you.";
+    for source in [cowed, brainwash, prison] {
+        let definition = parse_static_line(source).unwrap();
+        let (rest, body) =
+            super::evasion::parse_combat_tax_body(source.trim_end_matches('.')).unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(body.affected, definition.affected.clone().unwrap());
+        assert_eq!(parse_static_line_multi(source), vec![definition.clone()]);
+        let ir = super::parse_static_line_ir(source).unwrap();
+        assert_eq!(ir.source_text, source);
+        assert_eq!(super::lower_static_ir(&ir), definition);
+        let multi = super::shared::parse_static_line_multi_ir(source);
+        assert_eq!(multi.len(), 1);
+        assert_eq!(multi[0].source_text, source);
+        assert_eq!(super::lower_static_ir(&multi[0]), definition);
+        let text = format!("Enchant creature\n{source}");
+        let mut doc = parse_oracle_ir(
+            &text,
+            "Tax source",
+            &[],
+            &["Enchantment".into()],
+            &["Aura".into()],
+        );
+        assert_eq!(doc.source_text, text);
+        let item = doc
+            .items
+            .iter()
+            .find(|item| matches!(item.node, OracleNodeIr::Static(_)))
+            .unwrap();
+        assert_eq!(item.source.fragment(), Some(source));
+        assert_eq!(
+            item.source.span(),
+            &OracleSourceSpan::exact(1, 1, "Enchant creature\n".len(), text.len(), 0)
+        );
+        let OracleNodeIr::Static(ir) = &item.node else {
+            unreachable!()
+        };
+        assert_eq!(ir.source_text, source);
+        assert_eq!(super::lower_static_ir(ir), definition);
+        let parsed = lower_oracle_ir(&mut doc);
+        assert_eq!(parsed.statics, vec![definition]);
+        assert!(parsed
+            .abilities
+            .iter()
+            .all(|a| !crate::parser::oracle::has_unimplemented(a)));
+        assert!(parsed
+            .extracted_keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Enchant(_))));
+    }
+    // Both orientations must reach the canonical full-core/live-gate owner.
+    for (core, state) in [
+        ("creatures can't attack you or planeswalkers you control unless their controller pays {1} for each of those creatures", "this creature is untapped"),
+        ("creatures can't block unless their controller pays {1} for each of those creatures", "this creature is attacking"),
+    ] {
+        let leading = format!("As long as {state}, {core}.");
+        let trailing = format!("{core} as long as {state}.");
+        let expected = parse_static_line(&leading).unwrap();
+        assert!(matches!(&expected.condition, Some(StaticCondition::And { conditions }) if conditions.len() == 2 && conditions.iter().any(|c| matches!(c, StaticCondition::UnlessPay { cost, scaling: UnlessPayScaling::PerAffectedCreature, .. } if cost == &ManaCost::generic(1)))));
+        for source in [&leading, &trailing] {
+            let definition = parse_static_line(source).unwrap();
+            assert_eq!(definition.mode, expected.mode);
+            assert_eq!(definition.affected, expected.affected);
+            assert_eq!(definition.condition, expected.condition);
+            assert_eq!(parse_static_line_multi(source), vec![definition.clone()]);
+            let ir = super::parse_static_line_ir(source).unwrap();
+            assert_eq!(ir.source_text, *source);
+            assert_eq!(super::lower_static_ir(&ir), definition);
+            let normalized = crate::parser::oracle_util::normalize_card_name_refs(source, "Tax gate");
+            let mut doc = parse_oracle_ir(source, "Tax gate", &[], &["Creature".into()], &[]);
+            assert_eq!(doc.items.len(), 1);
+            assert_eq!(doc.items[0].source.fragment(), Some(normalized.as_str()));
+            assert_eq!(doc.items[0].source.span(), &OracleSourceSpan::exact(0, 0, 0, normalized.len(), 0));
+            assert_eq!(lower_oracle_ir(&mut doc).statics, vec![parse_static_line(&normalized).unwrap()]);
+        }
+        for source in [
+            format!("{core} as long as this creature is unexplained."),
+            format!("{core} unexplained as long as {state}."),
+            format!("{core} for as long as {state}."),
+        ] {
+            assert!(parse_static_line(&source).is_none(), "{source}");
+            assert!(parse_static_line_multi(&source).is_empty(), "{source}");
+            assert_whole_conditional_refusal(&source);
+        }
+    }
+    let pump = "Enchanted creature gets +1/+1.";
+    for (first, second) in [(brainwash, pump), (pump, brainwash)] {
+        let source = format!("{first} {second}");
+        let definitions = parse_static_line_multi(&source);
+        assert_eq!(definitions.len(), 2, "{source}: {definitions:#?}");
+        assert!(definitions.iter().all(|d| d.affected
+            == Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
+            ))));
+        assert_eq!(definitions[0].mode, parse_static_line(first).unwrap().mode);
+        assert_eq!(definitions[1].mode, parse_static_line(second).unwrap().mode);
+        let ir = super::shared::parse_static_line_multi_ir(&source);
+        assert_eq!(ir.len(), 2);
+        for (ir, definition) in ir.iter().zip(&definitions) {
+            assert_eq!(ir.source_text, source);
+            assert_eq!(super::lower_static_ir(ir), *definition);
+        }
+        let mut doc = parse_oracle_ir(
+            &source,
+            "Two complete members",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert_eq!(doc.items.len(), 2);
+        assert_ne!(doc.items[0].id, doc.items[1].id);
+        for (ordinal, item) in doc.items.iter().enumerate() {
+            assert_eq!(item.source.fragment(), Some(source.as_str()));
+            assert_eq!(
+                item.source.span(),
+                &OracleSourceSpan::exact(0, 0, 0, source.len(), ordinal as u32)
+            );
+        }
+        assert_eq!(lower_oracle_ir(&mut doc).statics, definitions);
+        for (bad_tax, bad_pump) in [(true, false), (false, true), (true, true)] {
+            let bad_first = if (first == brainwash && bad_tax) || (first == pump && bad_pump) {
+                format!("{} unexplained.", first.trim_end_matches('.'))
+            } else {
+                first.to_string()
+            };
+            let bad_second = if (second == brainwash && bad_tax) || (second == pump && bad_pump) {
+                format!("{} unexplained.", second.trim_end_matches('.'))
+            } else {
+                second.to_string()
+            };
+            let bad = format!("{bad_first} {bad_second}");
+            assert!(parse_static_line_multi(&bad).is_empty(), "{bad}");
+            assert!(super::shared::parse_static_line_multi_ir(&bad).is_empty());
+            assert_whole_conditional_refusal(&bad);
+        }
+    }
+    for source in [
+        "Enchanted creature can't attack or block unless its controller pays {1} for each card in your hand unexplained.",
+        "Enchanted creature can't attack or block unless its controller pays {1} for each mystery in your hand.",
+        "Enchanted creature can't attack or block unless its controller pays {1} for each creature you control that's unexplained.",
+    ] {
+        let (rest, body) = super::evasion::parse_combat_tax_body(source.trim_end_matches('.')).unwrap();
+        assert!(!rest.is_empty());
+        assert_eq!(body.scaling, UnlessPayScaling::Flat);
+        assert!(parse_static_line(source).is_none());
+        assert!(parse_static_line_multi(source).is_empty());
+        assert!(super::parse_static_line_ir(source).is_none());
+        assert!(super::shared::parse_static_line_multi_ir(source).is_empty());
+        assert_whole_conditional_refusal(source);
+    }
+    // A tax inside a quoted grant belongs to its quote owner.
+    let quoted =
+        "Creatures you control have \"This creature can't attack unless its controller pays {3}.\"";
+    assert!(!parse_static_line_multi(quoted).is_empty());
+}
+
 fn assert_whole_conditional_refusal(source: &str) {
     let text = format!("{source}\nFlying");
     let normalized =
@@ -8226,7 +9344,7 @@ fn static_spells_cost_less_for_each_card_type_shared_with_exiled() {
 // CR 118.7b/c/d: "This effect reduces only the amount of colored mana you pay"
 // is a card-level override of the default spillover, so it must survive parsing
 // as a `CostReductionReach` on the emitted reducer. Covers all seven printed
-// cards in the class that lower to `ModifyCost` (the Defiler cycle carries the
+// modeled cards in the class that lower to `ModifyCost` (the Defiler cycle carries the
 // same rider but lowers to `DefilerCostReduction`, tested in `oracle_tests`),
 // plus the counterexample that established the default (Aang, Master of
 // Elements #6405).
@@ -8259,9 +9377,6 @@ fn colored_only_rider_sets_the_cost_reduction_reach() {
         "Creature spells you cast cost {B} less to cast. This effect reduces only the amount of colored mana you pay.",
         // Ragemonger (reminder text: {2}{R} → {2}).
         "Minotaur spells you cast cost {B}{R} less to cast. This effect reduces only the amount of colored mana you pay.",
-        // Vorthos, Steward of Myth — the "name, flavor text, or art" subject is
-        // the odd one out in this class, so it gets its own row.
-        "Each spell you cast with the chosen character in its name, flavor text, or art costs {W}{U}{B}{R}{G} less to cast. This effect reduces only the amount of colored mana you pay.",
     ] {
         assert_eq!(
             reach(line),
@@ -8269,6 +9384,39 @@ fn colored_only_rider_sets_the_cost_reduction_reach() {
             "the colored-only rider must suppress CR 118.7b spillover: {line}"
         );
     }
+
+    // The rider is recognized independently of Vorthos's unsupported linked
+    // character/name/flavor/art subject; it must never become a name-only or
+    // unrestricted reducer.
+    let vorthos = "Each spell you cast with the chosen character in its name, flavor text, or art costs {W}{U}{B}{R}{G} less to cast. This effect reduces only the amount of colored mana you pay.";
+    assert!(line_reduces_colored_mana_only(&vorthos.to_lowercase()));
+    assert!(parse_static_line(vorthos).is_none());
+    let full =
+        format!("As Vorthos, Steward of Myth enters, choose a named Magic character.\n{vorthos}");
+    let parsed = parse_card(&full, "Vorthos, Steward of Myth", &[], &["Creature"], &[]);
+    assert!(parsed
+        .statics
+        .iter()
+        .all(|d| !matches!(d.mode, StaticMode::ModifyCost { .. })));
+    assert!(parsed.abilities.iter().any(|ability| ability
+        .effect
+        .unimplemented_description()
+        .is_some_and(|gap| gap.contains("chosen character in its name, flavor text, or art"))));
+    let mut doc = crate::parser::oracle::parse_oracle_ir(
+        &full,
+        "Vorthos, Steward of Myth",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, full);
+    assert!(doc
+        .items
+        .iter()
+        .any(|item| item.source.fragment() == Some(vorthos)));
+    let lowered = crate::parser::oracle::lower_oracle_ir(&mut doc);
+    assert_eq!(lowered.abilities, parsed.abilities);
+    assert_eq!(lowered.statics, parsed.statics);
 
     // CR 118.7b default — no rider. Aang, Master of Elements spells it out with
     // "(This can reduce generic costs.)"; the reminder is stripped before this
@@ -8278,6 +9426,7 @@ fn colored_only_rider_sets_the_cost_reduction_reach() {
         "Spells you cast cost {1} less to cast.",
         "Creature spells you cast cost {B} less to cast.",
     ] {
+        assert!(!line_reduces_colored_mana_only(&line.to_lowercase()));
         assert_eq!(
             reach(line),
             CostReductionReach::SpillsToGeneric,
@@ -8293,12 +9442,17 @@ fn colored_only_rider_sets_the_cost_reduction_reach() {
         "Creature spells you cast cost {B} less to cast. This effect reduces only the amount of colored mana you pay for that spell's kicker.",
         "Creature spells you cast cost {B} less to cast. This effect reduces only the amount of colored mana you pay during your turn.",
     ] {
+        assert!(!line_reduces_colored_mana_only(&line.to_lowercase()));
         assert_eq!(
             reach(line),
             CostReductionReach::SpillsToGeneric,
             "an unsupported continuation of the rider wording must not be \
              classified as the rider: {line}"
         );
+        let parsed = parse_card(line, "Extended rider", &[], &["Creature"], &[]);
+        assert!(parsed.statics.iter().any(|definition| matches!(definition.mode, StaticMode::ModifyCost { reach: CostReductionReach::SpillsToGeneric, .. })));
+        let rider = line.split_once(". ").unwrap().1;
+        assert!(parsed.abilities.iter().any(|ability| ability.effect.unimplemented_description().is_some_and(|text| text.contains(rider))));
     }
 }
 
@@ -31300,6 +32454,27 @@ fn combat_tax_enchanted_creature_for_each_quantity_ref() {
     let (cost, scaling) = extract_unless_pay(&def);
     assert_eq!(cost.mana_value(), 1);
     assert!(matches!(scaling, UnlessPayScaling::PerQuantityRef { .. }));
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
+        ))
+    );
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::UnlessPay {
+            cost: ManaCost::generic(1),
+            scaling: UnlessPayScaling::PerQuantityRef {
+                quantity: QuantityRef::ZoneCardCount {
+                    zone: crate::types::ability::ZoneRef::Hand,
+                    card_types: vec![],
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+            },
+            defended: None,
+        })
+    );
 }
 
 /// CR 118.12a + CR 202.3e: Nils, Discipline Enforcer — counter-gated subject
@@ -36183,6 +37358,71 @@ fn cost_mod_color_and_or_disjunction_builds_anyof_filter() {
         "spell_filter must carry AnyOf(HasColor Black, HasColor Red), got {:?}",
         tf.properties
     );
+
+    // SHAPE: bare singular/plural nouns retain the existing relative-color
+    // authority, including Will's gained-life axis (CR 105.2 + CR 109.5).
+    for noun in ["Spell", "Spells", "Each spell", "Each spells"] {
+        for (colors, quantity, expected) in [
+            (
+                "black and/or red",
+                "lost",
+                vec![ManaColor::Black, ManaColor::Red],
+            ),
+            (
+                "white and/or blue",
+                "gained",
+                vec![ManaColor::White, ManaColor::Blue],
+            ),
+        ] {
+            let line = format!("{noun} you cast this turn that are {colors} cost {{X}} less to cast, where X is the amount of life you {quantity} this turn.");
+            let definition = parse_static_line(&line).expect("complete qualified spell subject");
+            let StaticMode::ModifyCost {
+                mode,
+                amount,
+                spell_filter: Some(TF::Typed(typed)),
+                dynamic_count,
+                ..
+            } = definition.mode
+            else {
+                panic!("{line}")
+            };
+            assert_eq!(mode, CostModifyMode::Reduce);
+            assert_eq!(amount, ManaCost::generic(1));
+            assert_eq!(
+                dynamic_count,
+                Some(if quantity == "lost" {
+                    QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Controller,
+                    }
+                } else {
+                    QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    }
+                })
+            );
+            assert_eq!(
+                typed,
+                TypedFilter::card().properties(vec![FilterProp::AnyOf {
+                    props: expected
+                        .into_iter()
+                        .map(|color| FilterProp::HasColor { color })
+                        .collect()
+                }])
+            );
+        }
+    }
+    for subject in [
+        "Spells you cast this game that are black and/or red",
+        "Mysteries you cast this turn that are black and/or red",
+        "Spells you cast this turn that are black and/or",
+        "Spells you cast this turn that are black and/or chartreuse",
+        "Spells you cast this turn that are black and/or red unexplained",
+    ] {
+        let source = format!("{subject} cost {{1}} less to cast.");
+        assert!(parse_static_line(&source).is_none(), "{source}");
+        assert!(parse_static_line_multi(&source).is_empty(), "{source}");
+        assert_whole_conditional_refusal(&source);
+    }
 }
 
 /// CR 601.2f + CR 611.2c + CR 119.3: Rowan, Scion of War's activated ability

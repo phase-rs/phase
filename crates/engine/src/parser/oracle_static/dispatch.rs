@@ -1448,6 +1448,15 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // Prefer complete canonical taxes, including typed state wrappers, before
+    // generic attached predicates can lower only the mana prefix as Flat.
+    if let Some(def) = parse_combat_tax_static(&tp, &text) {
+        return Some(def);
+    }
+    if parse_combat_tax_body(tp.original.trim_end_matches('.')).is_ok() {
+        return None;
+    }
+
     // --- "Enchanted creature gets +N/+M" or "has {keyword}" ---
     if let Some(rest) = nom_tag_tp(&tp, "enchanted creature ") {
         let filter =
@@ -2479,10 +2488,6 @@ pub(crate) fn parse_static_line_inner(
     // below — the aura variant already yields `TargetFilter::SelfRef` and
     // `StaticMode::CantAttack`, so only the unless-scaling needs to flow
     // through.
-    if let Some(def) = parse_combat_tax_static(&tp, &text) {
-        return Some(def);
-    }
-
     if let Some(def) = parse_subject_combat_rule_static(&text) {
         return Some(def);
     }
