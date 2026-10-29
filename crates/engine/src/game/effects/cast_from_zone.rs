@@ -5622,7 +5622,7 @@ mod tests {
                     without_paying_mana_cost,
                     driver,
                     ..
-                } = &mut cast.effect
+                } = cast.effect.as_mut()
                 else {
                     unreachable!()
                 };

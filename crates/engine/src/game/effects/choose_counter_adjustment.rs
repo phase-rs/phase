@@ -1487,11 +1487,14 @@ mod tests {
         assert!(lost.resolving_stack_entry.take().is_some());
         let continuation = lost.take_active_ability_continuation().unwrap().unwrap();
         assert_eq!(
-            continuation.return_result_occurrence,
+            continuation.pending.return_result_occurrence,
             Some(ticket.occurrence)
         );
-        assert_eq!(continuation.chain.return_result_process, ticket.process);
-        assert_eq!(continuation.chain.source_id, source);
+        assert_eq!(
+            continuation.pending.chain.return_result_process,
+            ticket.process
+        );
+        assert_eq!(continuation.pending.chain.source_id, source);
         let WaitingFor::ChooseOneOfBranch { continuation, .. } = &mut lost.waiting_for else {
             unreachable!()
         };

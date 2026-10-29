@@ -12337,7 +12337,7 @@ mod tests {
             (Some(8), Some(9))
         );
         assert_eq!(runner.state().objects[&reward].zone, Zone::Hand);
-        assert_eq!(runner.state().players[0].hand, vec![reward]);
+        assert_eq!(runner.state().players[0].hand, vec![reward].into());
         assert!(runner.state().players[1].hand.is_empty());
         assert!(runner.state().delayed_triggers.is_empty());
         assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
@@ -12351,7 +12351,7 @@ mod tests {
         runner.declare_attackers(&[]).unwrap();
         runner.advance_to_end_step();
         assert_eq!(runner.state().phase, Phase::End);
-        assert_eq!(runner.state().players[0].hand, vec![reward]);
+        assert_eq!(runner.state().players[0].hand, vec![reward].into());
         assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
         assert!(matches!(
             runner.state().waiting_for,
