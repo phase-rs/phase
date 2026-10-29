@@ -2828,13 +2828,20 @@ pub(crate) fn visit_instruction_result_program_projections_for_cursor(
     current: &ResolvedAbility,
     visit: &mut impl FnMut(&ResolvedAbility) -> bool,
 ) -> bool {
-    visit_instruction_result_program_projections_inner(
-        program,
-        current.scoped_player,
-        Some(current),
-        None,
-        visit,
-    )
+    // These are distinct traversal roles, not selected-authority witnesses.
+    let controller_scope =
+        (current.scoped_player != Some(current.controller)).then_some(Some(current.controller));
+    std::iter::once(current.scoped_player)
+        .chain(controller_scope)
+        .any(|scope| {
+            visit_instruction_result_program_projections_inner(
+                program,
+                scope,
+                Some(current),
+                None,
+                visit,
+            )
+        })
 }
 
 /// Search a generated counter latch through complete executable control inputs.
@@ -2978,7 +2985,7 @@ fn visit_instruction_result_program_projections_inner(
         && current.is_some_and(|current| !current.optional && current.optional_for.is_none())
     {
         let accepted = if let Some(player) = current
-            .and_then(|current| current.scoped_player)
+            .and_then(|current| current.context.accepting_player.or(current.scoped_player))
             .filter(|_| program.optional_for.is_some())
         {
             let mut accepted =
@@ -3195,17 +3202,19 @@ fn visit_instruction_result_program_projections_inner(
                 }
             }
         }
-        if let (Some(scope), Some(seat)) = (&program.player_scope, scoped_player) {
+        if let Some(scope) = &program.player_scope {
             let (template, after_scope) = split_player_scope_chain(program, scope);
-            let bound = bind_scoped_seat(&template, program.controller, seat);
-            if visit_instruction_result_program_projections_inner(
-                &bound,
-                scoped_player,
-                Some(current),
-                generated_state,
-                visit,
-            ) {
-                return true;
+            if let Some(seat) = scoped_player {
+                let bound = bind_scoped_seat(&template, program.controller, seat);
+                if visit_instruction_result_program_projections_inner(
+                    &bound,
+                    scoped_player,
+                    Some(current),
+                    generated_state,
+                    visit,
+                ) {
+                    return true;
+                }
             }
             if let Some(tail) = after_scope {
                 if visit_instruction_result_program_projections_inner(
@@ -8624,7 +8633,7 @@ fn change_zone_forwards_chosen_attach_host(sub: &ResolvedAbility) -> bool {
         )
 }
 
-fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
+pub(super) fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
         WaitingFor::MeldPairChoice { .. }
@@ -9482,7 +9491,7 @@ fn resolve_optional_effect_decision_step(
     Ok(ResolutionProgress::Complete)
 }
 
-fn project_optional_decline_ability(
+pub(super) fn project_optional_decline_ability(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Option<ResolvedAbility> {
