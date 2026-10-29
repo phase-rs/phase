@@ -18480,6 +18480,8 @@ mod tests {
                 owner: TargetFilter::Player,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -19130,6 +19132,8 @@ mod tests {
                 ),
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -19174,6 +19178,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -19213,6 +19219,8 @@ mod tests {
                 ),
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -24323,6 +24331,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],

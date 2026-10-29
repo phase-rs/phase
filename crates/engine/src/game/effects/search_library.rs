@@ -786,7 +786,7 @@ pub(crate) fn prepare_effective_search(
         })
         .transpose()
         .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
-    let hidden_event = has_hidden_view.then(|| GameEvent::HiddenSearchViewed {
+    let hidden_event = has_hidden_view.then_some(GameEvent::HiddenSearchViewed {
         searcher,
         cards: viewed_cards,
         audience: learned_audience,

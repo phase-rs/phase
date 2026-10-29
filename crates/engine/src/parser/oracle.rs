@@ -10901,21 +10901,23 @@ fn demote_sweeps_in_ability(def: &mut AbilityDefinition) {
 ///    weaker rule is what previously missed four carriers. The regenerating
 ///    closure script lives in the plan's carrier-enumeration section and is
 ///    named again in the census's failure message.
-/// 4. Two carriers are deliberately NOT descended because they are
-///    PARSE-UNREACHABLE, not because they are description-free:
-///    `Effect::EpicCopy` (`ResolvedAbility.description`; synthesized at
-///    resolution by `game::triggers`) and `ContinuousModification::CopyValues`
+/// 4. One carrier is deliberately NOT descended because it is
+///    PARSE-UNREACHABLE, not because it is description-free:
+///    `ContinuousModification::CopyValues`
 ///    (`CopiableValues.abilities`/`trigger_definitions`/`replacement_definitions`
 ///    /`static_definitions`; constructed only at runtime by `types::layers`,
 ///    `game::derived_views`, `game::merge`). This is the one place the
 ///    superset claim in point 1 breaks (`ability_visit` DOES descend
 ///    `CopyValues`).
 /// 5. `AbilityCost` is an EXCLUDED AXIS, and structurally must be: blocking it
-///    is what keeps the closure at 27 carriers — unblocked, `TargetFilter` ->
-///    `TypedFilter` -> `FilterProp` -> `Keyword` -> `AbilityCost` makes 184 of
-///    `Effect`'s 232 variants "carriers", i.e. the cost axis is reachable from
-///    nearly every `TargetFilter` in the tree rather than being a sidecar on
-///    `def.cost`. Precedent: `ability_visit`'s module doc keeps the cost walk
+///    is what keeps the closure equal to the net's descend set (`RENDER_DESCEND`
+///    in `parser::oracle_tests::render_net_effect_carrier_census`) — unblocked,
+///    `TargetFilter` -> `TypedFilter` -> `FilterProp` -> `Keyword` ->
+///    `AbilityCost` makes most of `Effect`'s variants "carriers" (184 of the 232
+///    it had when measured; `Effect` has 237 at base, pinned by
+///    `EFFECT_VARIANT_PIN` in the same census), i.e. the cost axis is
+///    reachable from nearly every `TargetFilter` in the tree rather than being
+///    a sidecar on `def.cost`. Precedent: `ability_visit`'s module doc keeps the cost walk
 ///    separate for the same type-level reason. MEASURED: a marker planted in
 ///    `AbilityCost::Unimplemented.description` survives this net; no production
 ///    parse path plants one.

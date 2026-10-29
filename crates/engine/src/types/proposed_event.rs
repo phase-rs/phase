@@ -2,13 +2,14 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::game::combat::AttackTarget;
 use crate::game::game_object::{AttachTarget, DisplayIdentity};
 
 use super::counter::CounterType;
 
 use super::ability::{
-    ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile,
-    StaticDefinition, TargetRef,
+    ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, EntryAttackDestination,
+    FaceDownProfile, StaticDefinition, TargetRef,
 };
 use super::card_type::{CoreType, Supertype};
 use super::events::EventObjectSnapshot;
@@ -380,6 +381,9 @@ pub struct TokenSpec {
     /// CR 508.4: Token enters the battlefield attacking (not declared as
     /// attacker).
     pub enters_attacking: bool,
+    /// CR 508.4: the batch's resolved destination.
+    #[serde(default, skip_serializing_if = "TokenAttackRequest::is_unspecified")]
+    pub attack_request: TokenAttackRequest,
     /// CR 603.7: When set, the token is sacrificed at the end of the given
     /// duration (e.g., Mobilize tokens sacrificed at end of combat).
     pub sacrifice_at: Option<Duration>,
@@ -397,6 +401,74 @@ pub struct TokenSpec {
     /// re-reading `ability.targets`.
     #[serde(default, skip_serializing_if = "TokenHostRequest::is_not_requested")]
     pub attach_to: TokenHostRequest,
+}
+
+/// CR 508.4 + CR 608.2h: a token instruction's named destination, resolved
+/// once, when the instruction resolves.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenAttackRequest {
+    /// No named destination.
+    #[default]
+    Unspecified,
+    /// The named players, in the order the batch's tokens are created.
+    Named {
+        first: PlayerId,
+        rest: Vec<PlayerId>,
+    },
+}
+
+impl TokenAttackRequest {
+    /// Keeping this default omitted preserves the wire shape of every token
+    /// event that names no destination.
+    pub fn is_unspecified(&self) -> bool {
+        matches!(self, Self::Unspecified)
+    }
+
+    /// `None` when `players` is empty.
+    pub fn named(players: impl IntoIterator<Item = PlayerId>) -> Option<Self> {
+        let mut players = players.into_iter();
+        let first = players.next()?;
+        Some(Self::Named {
+            first,
+            rest: players.collect(),
+        })
+    }
+
+    /// CR 508.4: the destination of the batch's `ordinal`-th created token.
+    pub fn for_entrant(&self, ordinal: usize) -> EntryAttackDestination {
+        match self {
+            Self::Unspecified => EntryAttackDestination::AnyDefender,
+            Self::Named { first, rest } => {
+                let player = match ordinal % (1 + rest.len()) {
+                    0 => *first,
+                    n => rest[n - 1],
+                };
+                EntryAttackDestination::Exact {
+                    target: AttackTarget::Player(player),
+                }
+            }
+        }
+    }
+
+    /// The request for the batch's remaining tokens once `consumed` of its tokens
+    /// have been created, for a resume that counts its own tokens from zero:
+    /// `after_entrants(n).for_entrant(k) == self.for_entrant(n + k)`.
+    pub fn after_entrants(&self, consumed: usize) -> Self {
+        match self {
+            Self::Unspecified => Self::Unspecified,
+            Self::Named { first, rest } => {
+                let mut players: Vec<PlayerId> = std::iter::once(*first)
+                    .chain(rest.iter().copied())
+                    .collect();
+                let shift = consumed % players.len();
+                players.rotate_left(shift);
+                Self::Named {
+                    first: players[0],
+                    rest: players[1..].to_vec(),
+                }
+            }
+        }
+    }
 }
 
 /// CR 303.4i: what the token instruction asked for as a host, and whether
@@ -487,6 +559,9 @@ pub struct CopyTokenSpec {
     pub additional_modifications: Vec<ContinuousModification>,
     pub tapped: bool,
     pub enters_attacking: bool,
+    /// CR 508.4: the batch's resolved destination.
+    #[serde(default, skip_serializing_if = "TokenAttackRequest::is_unspecified")]
+    pub attack_request: TokenAttackRequest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sacrifice_at: Option<Duration>,
     pub source_id: ObjectId,
@@ -1816,6 +1891,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(1),
             controller: PlayerId(0),
@@ -1943,6 +2019,133 @@ mod tests {
         assert!(ProposedEvent::begin_turn(PlayerId(0), false)
             .into_token_batches()
             .is_none());
+    }
+
+    #[test]
+    fn token_attack_request_selects_the_destination_by_creation_ordinal() {
+        assert_eq!(TokenAttackRequest::named(Vec::new()), None);
+
+        let request = TokenAttackRequest::named([PlayerId(1), PlayerId(2)])
+            .expect("a non-empty player list names a request");
+        let at = |player: u8| EntryAttackDestination::Exact {
+            target: AttackTarget::Player(PlayerId(player)),
+        };
+        assert_eq!(request.for_entrant(0), at(1));
+        assert_eq!(request.for_entrant(1), at(2));
+        assert_eq!(request.for_entrant(2), at(1));
+
+        for ordinal in 0..3 {
+            assert_eq!(
+                TokenAttackRequest::Unspecified.for_entrant(ordinal),
+                EntryAttackDestination::AnyDefender
+            );
+        }
+    }
+
+    #[test]
+    fn token_attack_request_after_entrants_continues_the_ordinal_sequence() {
+        let request = TokenAttackRequest::named([PlayerId(1), PlayerId(2), PlayerId(3)])
+            .expect("a non-empty player list names a request");
+        for consumed in 0..7 {
+            let resumed = request.after_entrants(consumed);
+            for ordinal in 0..7 {
+                assert_eq!(
+                    resumed.for_entrant(ordinal),
+                    request.for_entrant(consumed + ordinal),
+                    "consumed {consumed}, ordinal {ordinal}"
+                );
+            }
+        }
+        assert_eq!(
+            TokenAttackRequest::Unspecified.after_entrants(3),
+            TokenAttackRequest::Unspecified
+        );
+    }
+
+    fn token_spec_with(attack_request: TokenAttackRequest) -> TokenSpec {
+        TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Goblin".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                loyalty: None,
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Goblin".to_string()],
+                supertypes: vec![],
+                colors: vec![ManaColor::Red],
+                keywords: vec![],
+            },
+            script_name: "Goblin".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: true,
+            enters_attacking: true,
+            attack_request,
+            sacrifice_at: None,
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            attach_to: TokenHostRequest::NotRequested,
+        }
+    }
+
+    fn copy_token_spec_with(attack_request: TokenAttackRequest) -> CopyTokenSpec {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        CopyTokenSpec {
+            values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
+                &state.objects[&id],
+            )),
+            display: crate::game::game_object::DisplayIdentity {
+                display_source: crate::game::game_object::DisplaySource::Token,
+                ..Default::default()
+            },
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+            tapped: true,
+            enters_attacking: true,
+            attack_request,
+            sacrifice_at: None,
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            donor: None,
+        }
+    }
+
+    /// An unspecified request is omitted from the wire, a payload without the
+    /// key reads as unspecified, and a named request round-trips.
+    #[test]
+    fn token_attack_request_wire_shape_is_additive() {
+        let named = TokenAttackRequest::Named {
+            first: PlayerId(1),
+            rest: vec![PlayerId(2)],
+        };
+
+        let plain = serde_json::to_value(token_spec_with(TokenAttackRequest::Unspecified))
+            .expect("serializes");
+        assert!(plain.get("attack_request").is_none(), "{plain}");
+        let back: TokenSpec = serde_json::from_value(plain).expect("reads without the key");
+        assert_eq!(back.attack_request, TokenAttackRequest::Unspecified);
+        let with_named = serde_json::to_value(token_spec_with(named.clone())).expect("serializes");
+        assert!(with_named.get("attack_request").is_some(), "{with_named}");
+        let back: TokenSpec = serde_json::from_value(with_named).expect("round-trips");
+        assert_eq!(back.attack_request, named);
+
+        let plain = serde_json::to_value(copy_token_spec_with(TokenAttackRequest::Unspecified))
+            .expect("serializes");
+        assert!(plain.get("attack_request").is_none(), "{plain}");
+        let back: CopyTokenSpec = serde_json::from_value(plain).expect("reads without the key");
+        assert_eq!(back.attack_request, TokenAttackRequest::Unspecified);
+        let with_named =
+            serde_json::to_value(copy_token_spec_with(named.clone())).expect("serializes");
+        assert!(with_named.get("attack_request").is_some(), "{with_named}");
+        let back: CopyTokenSpec = serde_json::from_value(with_named).expect("round-trips");
+        assert_eq!(back.attack_request, named);
     }
 
     #[test]

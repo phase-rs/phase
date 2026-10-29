@@ -2029,7 +2029,8 @@ fn beneficial_mana_tap_trigger_hold(
 /// - Only `PassPriority` is available (no spells, abilities, or lands to play)
 /// - Initial upkeep/draw priority without an explicit phase stop (MTGA-style)
 /// - Player's own spell/ability is on top of the stack (MTGA-style: let your
-///   own spells resolve without pausing)
+///   own spells resolve without pausing), unless resolving it can remove a
+///   mana source the player can activate now
 ///
 /// This centralizes the "meaningful action" classification in the engine so
 /// frontends don't need to inspect game objects or card types.
@@ -2089,9 +2090,12 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // so the recommendation and the engine-side pass cannot disagree about the
     // same window. A yield or own object outranks every castability and
     // meaningful-action hold below, including the issue #4388 opponent-turn
-    // mana-window hold (MTGA parity).
+    // mana-window hold (MTGA parity). CR 117.1d + CR 605.3a: an own object
+    // that can move one of the player's activatable mana sources off the
+    // battlefield holds instead — the rungs below never count a mana activation
+    // as meaningful, so falling through would still pass that window.
     match standing_priority_pass(state, player, state.stack.back()) {
-        StandingPriorityPass::Withheld => return false,
+        StandingPriorityPass::Withheld | StandingPriorityPass::Held => return false,
         StandingPriorityPass::Granted => return true,
         StandingPriorityPass::Undecided => {}
     }
@@ -6201,6 +6205,8 @@ mod tests {
                     }),
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -7861,7 +7867,7 @@ mod tests {
             );
             let expected = match verdict {
                 StandingPriorityPass::Granted => (true, true),
-                StandingPriorityPass::Withheld => (false, false),
+                StandingPriorityPass::Withheld | StandingPriorityPass::Held => (false, false),
                 StandingPriorityPass::Undecided => (false, true),
             };
             assert_eq!(

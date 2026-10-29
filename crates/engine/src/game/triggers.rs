@@ -2269,10 +2269,36 @@ fn off_zone_keyword_trigger_candidates(
         .collect()
 }
 
+/// An off-zone recipient's trigger list with its keyword companions replaced
+/// by `companions`: every other entry in its current order, then `companions`.
+/// The one description of the rebuilt list, used both to decide whether the
+/// reconcile changes it and to build it.
+fn with_keyword_companions<'a>(
+    current: &'a crate::types::definitions::Definitions<TriggerEntry>,
+    companions: &'a [TriggerEntry],
+) -> impl Iterator<Item = &'a TriggerEntry> + 'a {
+    current
+        .iter_all()
+        .filter(|entry| {
+            !matches!(
+                entry.occurrence,
+                TriggerDefinitionOccurrenceRef::KeywordCompanion { .. }
+            )
+        })
+        .chain(companions)
+}
+
 /// Reconciles every nonbattlefield keyword companion before trigger matching.
+/// CR 613.1f: a keyword granted by a layer-6 effect to a card outside the
+/// battlefield brings the keyword's triggered abilities that function in that
+/// card's zone — a granted Suspend's in exile (CR 702.62a), a granted
+/// Recover's in a graveyard (CR 702.59a).
+///
 /// Candidate construction and grant allocation both complete against staged
 /// clones before any object is committed, so an allocation/duplicate failure
-/// cannot leave a partial off-zone generation visible to collection.
+/// cannot leave a partial off-zone generation visible to collection. An object
+/// whose grant state and rebuilt trigger list already equal what it holds is
+/// not written, so it stays shared with earlier copies of the state.
 fn reconcile_off_zone_keyword_triggers(state: &mut GameState) {
     let object_ids = [Zone::Graveyard, Zone::Exile, Zone::Stack, Zone::Command]
         .into_iter()
@@ -2291,21 +2317,22 @@ fn reconcile_off_zone_keyword_triggers(state: &mut GameState) {
                 };
                 let candidates = off_zone_keyword_trigger_candidates(state, obj);
                 let mut occurrence_state = obj.trigger_occurrence_state.clone();
-                let entries = occurrence_state
+                let companions = occurrence_state
                     .reconcile_trigger_entries_matching(candidates, is_keyword_companion_producer)
                     .expect("off-zone keyword producers must be distinct and allocator capacity checked");
-                let mut trigger_definitions = obj
-                    .trigger_definitions
-                    .iter_all()
-                    .filter(|entry| {
-                        !matches!(
-                            entry.occurrence,
-                            TriggerDefinitionOccurrenceRef::KeywordCompanion { .. }
-                        )
-                    })
-                    .cloned()
-                    .collect::<Vec<TriggerEntry>>();
-                trigger_definitions.extend(entries);
+                // A write that would store what the object already holds is
+                // skipped: an equal copy stored through `get_mut` would only
+                // unshare the object from every earlier copy of the state.
+                if occurrence_state == obj.trigger_occurrence_state
+                    && with_keyword_companions(&obj.trigger_definitions, &companions)
+                        .eq(obj.trigger_definitions.iter_all())
+                {
+                    continue;
+                }
+                let trigger_definitions =
+                    with_keyword_companions(&obj.trigger_definitions, &companions)
+                        .cloned()
+                        .collect::<Vec<TriggerEntry>>();
                 staged.push((object_id, occurrence_state, trigger_definitions));
             }
             staged
@@ -2331,6 +2358,8 @@ pub fn trigger_source_context_for_latch(
     state: &GameState,
     source: &GameObject,
 ) -> TriggerSourceContext {
+    #[cfg(test)]
+    note_trigger_source_latch_visit(source);
     let mut record = source.snapshot_for_zone_change(source.id, Some(source.zone), source.zone);
     record.attachments = super::zones::capture_attachment_snapshot(state, source);
     record.linked_exile_snapshot =
@@ -2347,6 +2376,38 @@ pub fn trigger_source_context_for_latch(
         .cloned()
         .unwrap_or_default();
     source_context
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only record of the sources `trigger_source_context_for_latch`
+    /// projects on this thread, as (source id, source zone) in call order. It
+    /// holds a list only while `trigger_source_latch_visits_during` runs, so the
+    /// seam keeps nothing for any other test.
+    static TRIGGER_SOURCE_LATCH_VISITS: std::cell::RefCell<Option<Vec<(ObjectId, Zone)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Appends `source` to this thread's open latch-visit record, if one is open.
+#[cfg(test)]
+fn note_trigger_source_latch_visit(source: &GameObject) {
+    TRIGGER_SOURCE_LATCH_VISITS.with_borrow_mut(|visits| {
+        if let Some(visits) = visits {
+            visits.push((source.id, source.zone));
+        }
+    });
+}
+
+/// Runs `f` with a latch-visit record open on this thread, and returns every
+/// (source id, source zone) that `trigger_source_context_for_latch` projected
+/// while `f` ran.
+#[cfg(test)]
+fn trigger_source_latch_visits_during(f: impl FnOnce()) -> Vec<(ObjectId, Zone)> {
+    let outer = TRIGGER_SOURCE_LATCH_VISITS.replace(Some(Vec::new()));
+    f();
+    TRIGGER_SOURCE_LATCH_VISITS
+        .replace(outer)
+        .unwrap_or_default()
 }
 
 /// Selects a trigger source's event-time authority for one matching pass.
@@ -3522,23 +3583,29 @@ fn collect_matching_triggers_inner(
 /// Lists the objects in `zone` that may be the source of a trigger at the
 /// collector's current observation boundary.
 ///
-/// The graveyard scan asks every graveyard card for its off-zone keywords
-/// against one unchanged state, so it shares one keyword gather.
+/// The graveyard and exile scans ask every card in the zone for its off-zone
+/// keywords against one unchanged state, so each shares one keyword gather.
 fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
     match zone {
         // CR 702.26b: Phased-out permanents don't trigger.
         Zone::Battlefield => state.battlefield_phased_in_ids(),
-        Zone::Graveyard => {
+        // CR 113.6 + CR 113.6b + CR 113.6k: a card's triggered abilities
+        // function in a graveyard or in exile only when they state that zone, or
+        // when one of their trigger conditions can't trigger from the
+        // battlefield and can trigger from there (`trigger_zones`). A card
+        // there is a trigger source only when one of its functioning triggers
+        // (printed, or a keyword companion granted off-zone, such as Suspend's
+        // per CR 702.62a) functions in `zone`. CR 800.4a: a card whose owner has
+        // left the game has no functioning trigger, though the keyword-grant
+        // check in `source_has_trigger_in_zone` does not read the owner.
+        Zone::Graveyard | Zone::Exile => {
             crate::game::off_zone_characteristics::with_off_zone_keyword_scope(state, || {
-                state
-                    .players
-                    .iter()
-                    .flat_map(|player| player.graveyard.iter().copied())
+                super::targeting::zone_object_ids(state, zone)
+                    .into_iter()
                     .filter(|id| source_has_trigger_in_zone(state, *id, zone))
                     .collect()
             })
         }
-        Zone::Exile => state.exile.iter().copied().collect(),
         Zone::Stack => state
             .stack
             .iter()
@@ -15473,9 +15540,15 @@ fn collect_matching_delayed_triggers(
     // CR 702.50a: Epic effects are a persistent rest-of-game generator (never
     // stored as a `DelayedTrigger`, so cleanup never purges them). At the
     // beginning of each controller's upkeep, synthesize a fresh `EpicCopy`
-    // trigger from each stored effect and fire it through the same path.
-    for effect in &state.epic_effects {
-        let synth = super::effects::epic::epic_upkeep_trigger(effect);
+    // trigger from each stored effect and fire it through the same path. Each
+    // trigger names the first entry whose snapshot resolves identically to its
+    // own, so equal snapshots share one handle and their triggers compare,
+    // order and serialize as one.
+    for (index, effect) in state.epic_effects.iter().enumerate() {
+        let synth = super::effects::epic::epic_upkeep_trigger(
+            state.canonical_epic_effect_id(index),
+            effect,
+        );
         if let Some((event_index, trigger_event)) = delayed_trigger_event_with_index(
             &synth.condition,
             events,
@@ -32733,6 +32806,7 @@ pub mod tests {
                                 owner: TargetFilter::Controller,
                                 attach_to: None,
                                 enters_attacking: false,
+                                attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
                                 supertypes: vec![],
                                 static_abilities: vec![],
                                 enter_with_counters: vec![],
@@ -36517,6 +36591,7 @@ pub mod tests {
                     .properties(vec![FilterProp::Token, FilterProp::EnteredThisTurn]),
             )),
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
@@ -46524,12 +46599,12 @@ pub mod tests {
 
     /// A battlefield permanent whose statics grant Recover to `recover` and
     /// Suspend to `suspend`. No transient and no granted static is involved, so
-    /// the off-zone keyword gather is structural.
+    /// the off-zone keyword gather is structural. Returns the granter's id.
     fn grant_off_zone_trigger_keywords(
         state: &mut GameState,
         recover: Option<ObjectId>,
         suspend: Option<ObjectId>,
-    ) {
+    ) -> ObjectId {
         let source = make_creature(state, PlayerId(0), "Keyword Granter", 1, 1);
         let grants = [
             recover.map(|id| (id, Keyword::Recover(ManaCost::generic(1)))),
@@ -46555,6 +46630,7 @@ pub mod tests {
                         .modifications(vec![ContinuousModification::AddKeyword { keyword }]),
                 );
         }
+        source
     }
 
     /// Creates player 0's "Off-Zone Card {index}" in `zone` with card id `8300 + index`.
@@ -46603,6 +46679,515 @@ pub mod tests {
         assert_eq!(counts.hits, counts.matched - 1, "{counts:?}");
         assert_eq!(off_zone_keyword_scope_depth(), 0);
         assert_eq!(scanned, expected);
+    }
+
+    /// Player 0's mixed exile, shared by the exile trigger-source tests: a card
+    /// with no trigger (`inert`), a card granted Suspend by a battlefield
+    /// permanent's static (`granted`, CR 702.62a), a card with a printed trigger
+    /// that states it functions in exile (`printed`, CR 113.6b), and cards whose
+    /// trigger functions only on the battlefield (`battlefield_only`, CR 113.6)
+    /// or only in a graveyard (`graveyard_only`, CR 113.6b).
+    struct MixedExile {
+        inert: ObjectId,
+        granted: ObjectId,
+        printed: ObjectId,
+        battlefield_only: ObjectId,
+        graveyard_only: ObjectId,
+    }
+
+    impl MixedExile {
+        /// `printed`'s trigger, which states that it functions in exile.
+        fn exile_trigger() -> TriggerDefinition {
+            TriggerDefinition::new(TriggerMode::BecomesPlotted).trigger_zones(vec![Zone::Exile])
+        }
+
+        /// `battlefield_only`'s trigger, which states no zone.
+        fn battlefield_trigger() -> TriggerDefinition {
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+        }
+
+        /// `graveyard_only`'s trigger, which states that it functions in a graveyard.
+        fn graveyard_trigger() -> TriggerDefinition {
+            TriggerDefinition::new(TriggerMode::ChangesZone).trigger_zones(vec![Zone::Graveyard])
+        }
+
+        /// Exiles the five cards (card ids 8300 to 8304) and creates the
+        /// permanent that grants `granted` Suspend.
+        fn build(state: &mut GameState) -> Self {
+            let mixed = Self {
+                inert: off_zone_test_card(state, 0, Zone::Exile),
+                granted: off_zone_test_card(state, 1, Zone::Exile),
+                printed: off_zone_test_card(state, 2, Zone::Exile),
+                battlefield_only: off_zone_test_card(state, 3, Zone::Exile),
+                graveyard_only: off_zone_test_card(state, 4, Zone::Exile),
+            };
+            for (id, definition) in [
+                (mixed.printed, Self::exile_trigger()),
+                (mixed.battlefield_only, Self::battlefield_trigger()),
+                (mixed.graveyard_only, Self::graveyard_trigger()),
+            ] {
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .trigger_definitions
+                    .push(definition);
+            }
+            grant_off_zone_trigger_keywords(state, None, Some(mixed.granted));
+            mixed
+        }
+    }
+
+    /// CR 113.6 + CR 113.6b: the exile trigger-source scan lists only exiled
+    /// cards with a functioning trigger that functions from exile — printed, or
+    /// a keyword companion granted off-zone (CR 702.62a) — and shares one
+    /// keyword gather, as the graveyard scan does. CR 800.4a: a card whose owner
+    /// left the game has no functioning trigger, so its exile trigger does not
+    /// list it. Fails on revert of the exile filter, which
+    /// listed every exiled card and ran no keyword query.
+    #[test]
+    fn exile_trigger_scan_keeps_only_exile_trigger_sources() {
+        use crate::game::off_zone_characteristics::{
+            off_zone_keyword_scope_counts, off_zone_keyword_scope_depth,
+            reset_off_zone_keyword_scope_counts,
+        };
+
+        let exile_trigger = MixedExile::exile_trigger;
+        let battlefield_trigger = MixedExile::battlefield_trigger();
+        let graveyard_trigger = MixedExile::graveyard_trigger();
+
+        let mut state = setup();
+        let MixedExile {
+            inert,
+            granted,
+            printed,
+            battlefield_only,
+            graveyard_only,
+        } = MixedExile::build(&mut state);
+        let departed = create_object(
+            &mut state,
+            CardId(8310),
+            PlayerId(1),
+            "Departed Owner's Card".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&departed)
+            .unwrap()
+            .trigger_definitions
+            .push(exile_trigger());
+        state
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(1))
+            .unwrap()
+            .is_eliminated = true;
+
+        // Reach-guards: all six cards are exiled, and each exclusion is decided
+        // by the gate it names.
+        assert_eq!(
+            crate::game::targeting::zone_object_ids(&state, Zone::Exile),
+            vec![
+                inert,
+                granted,
+                printed,
+                battlefield_only,
+                graveyard_only,
+                departed
+            ]
+        );
+        assert!(trigger_definition_functions_in_zone(
+            &battlefield_trigger,
+            Zone::Battlefield
+        ));
+        assert!(trigger_definition_functions_in_zone(
+            &graveyard_trigger,
+            Zone::Graveyard
+        ));
+        assert!(
+            trigger_definition_functions_in_zone(&exile_trigger(), Zone::Exile),
+            "the departed owner's card carries an exile trigger; CR 800.4a excludes it"
+        );
+        assert!(
+            source_has_trigger_in_zone(&state, granted, Zone::Exile),
+            "reach-guard: unreconciled granted Suspend is an exile trigger source"
+        );
+
+        reset_off_zone_keyword_scope_counts();
+        let scanned = trigger_source_ids_for_zone(&state, Zone::Exile);
+        let counts = off_zone_keyword_scope_counts();
+        assert!(counts.matched >= 2, "reach-guard: {counts:?}");
+        assert_eq!(counts.fills, 1, "{counts:?}");
+        assert_eq!(counts.hits, counts.matched - 1, "{counts:?}");
+        assert_eq!(off_zone_keyword_scope_depth(), 0);
+        assert_eq!(scanned, vec![granted, printed]);
+
+        // The collector's production shape: reconciliation installs Suspend's
+        // exile companions, and the granted card stays listed through them.
+        reconcile_off_zone_keyword_triggers(&mut state);
+        assert!(
+            crate::game::functioning_abilities::active_trigger_definitions(
+                &state,
+                &state.objects[&granted],
+            )
+            .any(|active| trigger_definition_functions_in_zone(active.definition, Zone::Exile)),
+            "reach-guard: reconciliation installed Suspend's exile companions"
+        );
+        assert_eq!(
+            trigger_source_ids_for_zone(&state, Zone::Exile),
+            vec![granted, printed]
+        );
+    }
+
+    /// CR 113.6 + CR 113.6b + CR 702.62a: the production trigger collector
+    /// projects a source context only for the exiled cards whose triggers
+    /// function in exile. `GameRunner` drives the `MixedExile` fixture shared
+    /// with `exile_trigger_scan_keeps_only_exile_trigger_sources`, plus a printed
+    /// Suspend card, from player 0's untap step through upkeep to the precombat
+    /// main phase. `trigger_source_context_for_latch`, where the collector
+    /// projects each listed source that has not itself just moved (no exiled
+    /// card moves here), sees the printed exile trigger and both Suspend cards, and
+    /// never the cards with no trigger, a battlefield-only trigger or a
+    /// graveyard-only trigger; both Suspend cards still lose a time counter.
+    /// Fails with the exile filter reverted, which lists every exiled card.
+    #[test]
+    fn upkeep_collection_projects_only_exile_trigger_sources() {
+        use crate::game::scenario::GameRunner;
+
+        let time_counters = |state: &GameState, id: ObjectId| {
+            state.objects[&id].counters.get(&CounterType::Time).copied()
+        };
+
+        let mut state = setup();
+        let MixedExile {
+            inert,
+            granted,
+            printed,
+            battlefield_only,
+            graveyard_only,
+        } = MixedExile::build(&mut state);
+        // A printed Suspend card carries the keyword and the two triggers that
+        // `synthesize_suspend` gives every printed Suspend card (CR 702.62a).
+        let suspend = Keyword::Suspend {
+            count: 4,
+            cost: ManaCost::generic(1),
+        };
+        let mut face = crate::types::card::CardFace {
+            keywords: vec![suspend.clone()],
+            ..Default::default()
+        };
+        crate::database::synthesis::synthesize_suspend(&mut face);
+        let printed_suspend = off_zone_test_card(&mut state, 5, Zone::Exile);
+        {
+            let card = state.objects.get_mut(&printed_suspend).unwrap();
+            card.keywords.push(suspend.clone());
+            card.base_keywords.push(suspend);
+            for definition in face.triggers {
+                card.push_printed_trigger(definition);
+            }
+        }
+        // CR 702.62b: an exiled card with suspend and a time counter is suspended.
+        for id in [granted, printed_suspend] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .counters
+                .insert(CounterType::Time, 4);
+        }
+        // CR 504.1 + CR 704.5b: player 0 draws in the draw step; an empty
+        // library would lose the game.
+        for index in 0..3 {
+            create_object(
+                &mut state,
+                CardId(8320 + index),
+                PlayerId(0),
+                format!("Library Card {index}"),
+                Zone::Library,
+            );
+        }
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert_eq!(
+            crate::game::targeting::zone_object_ids(&state, Zone::Exile),
+            vec![
+                inert,
+                granted,
+                printed,
+                battlefield_only,
+                graveyard_only,
+                printed_suspend
+            ],
+            "reach-guard: all six cards are exiled"
+        );
+
+        let mut runner = GameRunner::from_state(state);
+        let visits = trigger_source_latch_visits_during(|| {
+            runner.auto_advance_to_main_phase();
+            runner.advance_until_stack_empty();
+        });
+        let projected_from_exile: HashSet<ObjectId> = visits
+            .iter()
+            .filter(|(_, zone)| *zone == Zone::Exile)
+            .map(|(id, _)| *id)
+            .collect();
+        for (source, label) in [
+            (printed, "printed exile trigger"),
+            (granted, "granted Suspend"),
+            (printed_suspend, "printed Suspend"),
+        ] {
+            assert!(
+                projected_from_exile.contains(&source),
+                "reach-guard: the collector projects the {label} card from exile"
+            );
+        }
+        let projected_without_exile_trigger: Vec<ObjectId> =
+            [inert, battlefield_only, graveyard_only]
+                .into_iter()
+                .filter(|id| projected_from_exile.contains(id))
+                .collect();
+        assert_eq!(
+            projected_without_exile_trigger,
+            Vec::<ObjectId>::new(),
+            "CR 113.6 + CR 113.6b: an exiled card with no trigger that functions in exile \
+             is not projected as a trigger source"
+        );
+
+        // CR 702.62a: each suspended card's upkeep trigger removed one time counter.
+        assert_eq!(
+            time_counters(runner.state(), granted),
+            Some(3),
+            "the card granted Suspend loses one time counter (4 to 3)"
+        );
+        assert_eq!(
+            time_counters(runner.state(), printed_suspend),
+            Some(3),
+            "the printed Suspend card loses one time counter (4 to 3)"
+        );
+        assert_eq!(runner.state().phase, Phase::PreCombatMain);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+    }
+
+    /// CR 800.4a + CR 800.4d: when a player leaves the game, the cards that
+    /// player owns leave with them, and a triggered ability that player would
+    /// control isn't put on the stack. In a three-player game OWNER loses to a
+    /// state-based action (CR 704.5a), and the player-leaves sweep moves a card
+    /// from OWNER's graveyard to exile, recording the move as a
+    /// `ZoneDeparture::LeftGame` departure. The card's "When this card is put
+    /// into exile from anywhere" trigger names no origin zone, so it is never a
+    /// leaves-the-battlefield ability (CR 603.6c). Its `trigger_zones` state
+    /// the zones it functions in: the battlefield, a graveyard and exile
+    /// (CR 113.6b, read through `trigger_definition_functions_in_zone`). The
+    /// engine matches it in the exile scan through the card's zone-change
+    /// record. Here it triggers
+    /// nothing, for three independent reasons, each sufficient on its own:
+    /// `zone_change_clause_matches` (via `match_changes_zone`) lets a left-game
+    /// departure match only a battlefield-origin clause that names no
+    /// destination (CR 800.4a + CR 603.6c); the collector retires a trigger
+    /// whose controller has left the game (`retire_departed_controller_contexts`,
+    /// CR 800.4d); and the exile filter does not list the card. The filter
+    /// lists an exiled card only when one of its functioning triggers
+    /// functions from exile, or a keyword granted to it off-zone has a
+    /// companion that does; a departed owner's card has no functioning trigger
+    /// (CR 800.4a), and this card has no keyword. This test pins the outcome
+    /// through any one of them; reverting the filter alone does not fail it,
+    /// and `exile_trigger_scan_keeps_only_exile_trigger_sources`
+    /// pins the filter for a departed owner's card. A reach-guard
+    /// shows the sweep batch is trigger-collected: a survivor's "Whenever a
+    /// creature leaves the battlefield" observer fires as OWNER's creature
+    /// leaves the game (CR 603.6c). The paired control exiles the same card
+    /// with Coffin Purge while OWNER is still in the game, and the trigger
+    /// fires.
+    #[test]
+    fn departed_owners_exile_trigger_does_not_fire_as_it_leaves_the_game() {
+        use crate::game::scenario::{GameRunner, GameScenario};
+
+        const SURVIVOR: PlayerId = PlayerId(0);
+        const OWNER: PlayerId = PlayerId(2);
+        const COFFIN_PURGE: &str = "Exile target card from a graveyard.\n\
+            Flashback {B} (You may cast this card from your graveyard for its flashback cost. \
+            Then exile it.)";
+
+        struct Board {
+            runner: GameRunner,
+            card: ObjectId,
+            departing_creature: ObjectId,
+            observer: ObjectId,
+            coffin_purge: ObjectId,
+        }
+
+        /// A three-player game at SURVIVOR's precombat main phase, with OWNER at
+        /// `owner_life`. OWNER's graveyard holds a card with the parser's
+        /// self-referential "is put into exile from anywhere" shape: SelfRef, no
+        /// origin, destination Exile, functioning on the battlefield, in a
+        /// graveyard and in exile.
+        /// OWNER controls a creature. SURVIVOR controls an observer with
+        /// "Whenever a creature leaves the battlefield, you gain 1 life." and
+        /// holds Coffin Purge.
+        fn build(owner_life: i32) -> Board {
+            let gain_one_life = || {
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )
+            };
+            let mut scenario = GameScenario::new_n_player(3, 42);
+            scenario
+                .at_phase(Phase::PreCombatMain)
+                .with_life(OWNER, owner_life);
+            let card = scenario
+                .add_creature_to_graveyard(OWNER, "Exile-Trigger Card", 2, 2)
+                .with_trigger_definition(
+                    TriggerDefinition::new(TriggerMode::ChangesZone)
+                        .destination(Zone::Exile)
+                        .valid_card(TargetFilter::SelfRef)
+                        .trigger_zones(vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile])
+                        .execute(gain_one_life()),
+                )
+                .id();
+            let departing_creature = scenario
+                .add_creature(OWNER, "Departing Creature", 2, 2)
+                .id();
+            let observer = scenario
+                .add_creature(SURVIVOR, "Leaves-the-Battlefield Observer", 1, 1)
+                .with_trigger_definition(
+                    TriggerDefinition::new(TriggerMode::LeavesBattlefield)
+                        .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                        .execute(gain_one_life()),
+                )
+                .id();
+            let coffin_purge = scenario
+                .add_spell_to_hand_from_oracle(SURVIVOR, "Coffin Purge", true, COFFIN_PURGE)
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            Board {
+                runner: scenario.build(),
+                card,
+                departing_creature,
+                observer,
+                coffin_purge,
+            }
+        }
+
+        /// Whether a trigger from `source` is on the stack or waiting to be put there.
+        fn has_trigger_from(state: &GameState, source: ObjectId) -> bool {
+            state.stack.iter().any(|entry| entry.source_id == source)
+                || state
+                    .pending_trigger
+                    .as_ref()
+                    .is_some_and(|pending| pending.source_id == source)
+                || state
+                    .deferred_triggers
+                    .iter()
+                    .any(|context| context.pending.source_id == source)
+                || state.pending_trigger_order.as_ref().is_some_and(|order| {
+                    order
+                        .groups
+                        .iter()
+                        .flat_map(|group| &group.triggers)
+                        .any(|context| context.pending.source_id == source)
+                })
+        }
+
+        /// Whether `events` hold `object`'s move from `from` to exile.
+        fn exiled_from(events: &[GameEvent], object: ObjectId, from: Zone) -> bool {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(origin),
+                        to: Zone::Exile,
+                        ..
+                    } if *object_id == object && *origin == from
+                )
+            })
+        }
+
+        // Paired positive: OWNER is still in the game, and SURVIVOR's Coffin
+        // Purge exiles the same card from OWNER's graveyard. The card's exile
+        // trigger fires and resolves for OWNER.
+        let Board {
+            mut runner,
+            card,
+            coffin_purge,
+            ..
+        } = build(20);
+        let outcome = runner.cast(coffin_purge).target_object(card).resolve();
+        assert!(
+            exiled_from(outcome.events(), card, Zone::Graveyard),
+            "reach-guard: Coffin Purge moves the card from graveyard to exile"
+        );
+        assert_eq!(
+            outcome.life_delta(OWNER),
+            1,
+            "reach-guard: the card's exile trigger fires and resolves for its living controller"
+        );
+
+        // OWNER is at 0 life. SURVIVOR passes priority, and the game checks
+        // state-based actions before the next player receives priority
+        // (CR 704.3). OWNER loses (CR 704.5a) and leaves the game, and one
+        // sweep moves OWNER's card from graveyard to exile and OWNER's creature
+        // off the battlefield.
+        let Board {
+            mut runner,
+            card,
+            departing_creature,
+            observer,
+            ..
+        } = build(0);
+        let result = runner
+            .act(GameAction::PassPriority)
+            .expect("SURVIVOR passes priority");
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerLost { player_id } if *player_id == OWNER
+            )),
+            "reach-guard: OWNER loses to the state-based action"
+        );
+        assert!(
+            exiled_from(&result.events, card, Zone::Graveyard),
+            "reach-guard: the player-leaves sweep moves the card from graveyard to exile"
+        );
+        assert!(
+            exiled_from(&result.events, departing_creature, Zone::Battlefield),
+            "reach-guard: the same sweep moves OWNER's creature off the battlefield"
+        );
+        assert!(
+            has_trigger_from(runner.state(), observer),
+            "reach-guard: the sweep batch is trigger-collected; SURVIVOR's observer fires \
+             as OWNER's creature leaves the game (CR 603.6c)"
+        );
+        assert!(
+            !has_trigger_from(runner.state(), card),
+            "CR 800.4d: no trigger from the departed owner's card"
+        );
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            runner.life(SURVIVOR),
+            21,
+            "reach-guard: SURVIVOR's observer trigger resolves"
+        );
+        assert!(
+            !has_trigger_from(runner.state(), card),
+            "CR 800.4d: no trigger from the departed owner's card after the stack drains"
+        );
     }
 
     /// Off-zone trigger reconciliation fills the keyword scope once and matches unscoped results.
@@ -46679,6 +47264,275 @@ pub mod tests {
             })
             .collect();
         assert_eq!(reconciled, expected);
+    }
+
+    /// Whether `id` holds at least one keyword-companion trigger entry.
+    fn holds_keyword_companion(state: &GameState, id: ObjectId) -> bool {
+        state.objects[&id]
+            .trigger_definitions
+            .iter_all()
+            .any(|entry| {
+                matches!(
+                    entry.occurrence,
+                    TriggerDefinitionOccurrenceRef::KeywordCompanion { .. }
+                )
+            })
+    }
+
+    /// BASE-shaped unguarded `reconcile_off_zone_keyword_triggers`: every
+    /// visited off-zone object is written.
+    fn reference_reconcile_off_zone_keyword_triggers(state: &mut GameState) {
+        let object_ids = [Zone::Graveyard, Zone::Exile, Zone::Stack, Zone::Command]
+            .into_iter()
+            .flat_map(|zone| crate::game::targeting::zone_object_ids(state, zone))
+            .collect::<Vec<_>>();
+        let mut staged = Vec::new();
+        for object_id in object_ids {
+            let Some(obj) = state.objects.get(&object_id) else {
+                continue;
+            };
+            let candidates = off_zone_keyword_trigger_candidates(state, obj);
+            let mut occurrence_state = obj.trigger_occurrence_state.clone();
+            let entries = occurrence_state
+                .reconcile_trigger_entries_matching(candidates, is_keyword_companion_producer)
+                .expect("reference reconciliation must allocate");
+            let mut trigger_definitions = obj
+                .trigger_definitions
+                .iter_all()
+                .filter(|entry| {
+                    !matches!(
+                        entry.occurrence,
+                        TriggerDefinitionOccurrenceRef::KeywordCompanion { .. }
+                    )
+                })
+                .cloned()
+                .collect::<Vec<TriggerEntry>>();
+            trigger_definitions.extend(entries);
+            staged.push((object_id, occurrence_state, trigger_definitions));
+        }
+        for (object_id, occurrence_state, trigger_definitions) in staged {
+            let obj = state.objects.get_mut(&object_id).unwrap();
+            obj.trigger_occurrence_state = occurrence_state;
+            obj.trigger_definitions = trigger_definitions.into();
+        }
+    }
+
+    /// Sharing witness: once every off-zone card's keyword companions are
+    /// current, a further reconcile writes no object. Fails on revert of the
+    /// write guard in `reconcile_off_zone_keyword_triggers` or of the lazy
+    /// grant allocation.
+    #[test]
+    fn current_off_zone_keyword_reconcile_keeps_store_shared() {
+        use crate::types::object_map::sweep_test_support::assert_sweep_keeps_store_shared;
+
+        let mut state = setup();
+        let plain = off_zone_test_card(&mut state, 0, Zone::Graveyard);
+        let recovering = off_zone_test_card(&mut state, 1, Zone::Graveyard);
+        let suspended = off_zone_test_card(&mut state, 2, Zone::Exile);
+        grant_off_zone_trigger_keywords(&mut state, Some(recovering), Some(suspended));
+        reconcile_off_zone_keyword_triggers(&mut state);
+        assert!(
+            holds_keyword_companion(&state, recovering)
+                && holds_keyword_companion(&state, suspended),
+            "reach-guard: the granted Recover and Suspend companions are installed"
+        );
+        assert!(!holds_keyword_companion(&state, plain));
+        assert_sweep_keeps_store_shared(state, reconcile_off_zone_keyword_triggers);
+    }
+
+    /// Targeted test: after a new grant reaches one off-zone card, the
+    /// reconcile writes that card alone. Fails on revert of the write guard in
+    /// `reconcile_off_zone_keyword_triggers` or of the lazy grant allocation.
+    #[test]
+    fn off_zone_keyword_reconcile_copies_only_the_card_whose_companions_changed() {
+        use crate::types::object_map::sweep_test_support::run_sweep_targeting;
+
+        let mut state = setup();
+        let plain = off_zone_test_card(&mut state, 0, Zone::Graveyard);
+        let suspended = off_zone_test_card(&mut state, 1, Zone::Exile);
+        grant_off_zone_trigger_keywords(&mut state, None, Some(suspended));
+        reconcile_off_zone_keyword_triggers(&mut state);
+        grant_off_zone_trigger_keywords(&mut state, Some(plain), None);
+        let (before, after) =
+            run_sweep_targeting(state, plain, reconcile_off_zone_keyword_triggers);
+        assert!(!holds_keyword_companion(&before, plain));
+        assert!(holds_keyword_companion(&after, plain));
+        assert!(holds_keyword_companion(&after, suspended));
+    }
+
+    /// Reference equality, with one object per conjunct of the write guard:
+    /// a card whose granted keyword changed while its producer stayed (the
+    /// rebuilt list differs, the grant state is equal), a card whose grant
+    /// state reorders while its list stays equal, and two current cards.
+    /// Passes at BASE by construction; fails if either conjunct of the write
+    /// guard in `reconcile_off_zone_keyword_triggers` is dropped.
+    #[test]
+    fn off_zone_keyword_reconcile_matches_unguarded_sweep() {
+        use crate::types::ability::{occurrence_for_grant, TriggerProducerOrigin};
+        use crate::types::object_map::sweep_test_support::assert_sweep_matches_reference;
+
+        let mut state = setup();
+        let plain = off_zone_test_card(&mut state, 0, Zone::Graveyard);
+        let retuned = off_zone_test_card(&mut state, 1, Zone::Graveyard);
+        let reordered = off_zone_test_card(&mut state, 2, Zone::Exile);
+        let current = off_zone_test_card(&mut state, 3, Zone::Exile);
+        let recover_granter = grant_off_zone_trigger_keywords(&mut state, Some(retuned), None);
+        grant_off_zone_trigger_keywords(&mut state, None, Some(reordered));
+        grant_off_zone_trigger_keywords(&mut state, None, Some(current));
+        reconcile_off_zone_keyword_triggers(&mut state);
+        assert!(
+            holds_keyword_companion(&state, current) && !holds_keyword_companion(&state, plain),
+            "reach-guard: the current card holds its companions and the plain card has none"
+        );
+
+        // The same static now grants Recover {2}: same producer, new payload.
+        state
+            .objects
+            .get_mut(&recover_granter)
+            .unwrap()
+            .static_definitions[0]
+            .modifications = vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Recover(ManaCost::generic(2)),
+        }];
+        // An out-of-class grant listed after the companions in the grant
+        // state but before them in the trigger list.
+        {
+            let obj = state.objects.get_mut(&reordered).unwrap();
+            let granted = TriggerGrantProducerKey::Granted {
+                origin: TriggerProducerOrigin::Transient {
+                    continuous_effect_id: 900,
+                    modification_index: 0,
+                },
+                output_index: 0,
+            };
+            let instance = obj
+                .trigger_occurrence_state
+                .grant_instance_for(granted.clone())
+                .unwrap();
+            let mut entries = vec![TriggerEntry::new(
+                occurrence_for_grant(&granted, instance),
+                TriggerDefinition::new(TriggerMode::Attacks),
+            )];
+            entries.extend(obj.trigger_definitions.iter_all().cloned());
+            obj.trigger_definitions = entries.into();
+        }
+
+        let (actual, _) = assert_sweep_matches_reference(
+            &state,
+            &[retuned, reordered],
+            reconcile_off_zone_keyword_triggers,
+            reference_reconcile_off_zone_keyword_triggers,
+        );
+        let recover_companions = actual.objects[&retuned]
+            .trigger_definitions
+            .iter_all()
+            .filter(|entry| {
+                matches!(
+                    entry.occurrence,
+                    TriggerDefinitionOccurrenceRef::KeywordCompanion { .. }
+                )
+            })
+            .map(|entry| entry.definition.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            recover_companions,
+            KeywordTriggerInstaller::triggers_for(&Keyword::Recover(ManaCost::generic(2))),
+            "the retuned card carries the Recover {{2}} companion"
+        );
+    }
+
+    /// A permanent transient grant of `keyword` to `recipient` from `source`.
+    fn transient_keyword_grant(
+        id: u64,
+        source: ObjectId,
+        recipient: ObjectId,
+        keyword: Keyword,
+    ) -> TransientContinuousEffect {
+        TransientContinuousEffect {
+            id,
+            source_id: source,
+            controller: PlayerId(0),
+            timestamp: id,
+            duration: Duration::Permanent,
+            affected: TargetFilter::SpecificObject { id: recipient },
+            affected_recipient: None,
+            modifications: vec![ContinuousModification::AddKeyword { keyword }],
+            condition: None,
+            duration_subject: None,
+            end_permission: None,
+            granting_object: None,
+            duration_event_source: None,
+            source_name: "Keyword Granter".to_string(),
+        }
+    }
+
+    /// Production entry: once trigger collection has installed every granted
+    /// off-zone companion, a further collection writes no object, while a card
+    /// newly granted a keyword is still written through the same entry. Fails
+    /// on revert of the write guard in `reconcile_off_zone_keyword_triggers` or
+    /// of the lazy grant allocation. The grants are transient: a static added
+    /// to a battlefield granter after the first layer flush (which sets only
+    /// the live statics) is not part of the off-zone keyword gather.
+    #[test]
+    fn trigger_collection_keeps_current_off_zone_companion_holders_shared() {
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(0), "Keyword Granter", 1, 1);
+        let plain = off_zone_test_card(&mut state, 0, Zone::Graveyard);
+        let recovering = off_zone_test_card(&mut state, 1, Zone::Graveyard);
+        let suspended = off_zone_test_card(&mut state, 2, Zone::Exile);
+        state
+            .transient_continuous_effects
+            .push_back(transient_keyword_grant(
+                100,
+                source,
+                recovering,
+                Keyword::Recover(ManaCost::generic(1)),
+            ));
+        state
+            .transient_continuous_effects
+            .push_back(transient_keyword_grant(
+                101,
+                source,
+                suspended,
+                Keyword::Suspend {
+                    count: 0,
+                    cost: ManaCost::generic(1),
+                },
+            ));
+        process_triggers(&mut state, &[]);
+        assert!(
+            holds_keyword_companion(&state, recovering)
+                && holds_keyword_companion(&state, suspended),
+            "reach-guard: trigger collection installed the granted companions"
+        );
+        let settled = state.clone();
+        process_triggers(&mut state, &[]);
+        assert!(
+            state.objects.ptr_eq(&settled.objects),
+            "a collection that finds every companion current must write no object"
+        );
+
+        state
+            .transient_continuous_effects
+            .push_back(transient_keyword_grant(
+                102,
+                source,
+                plain,
+                Keyword::Recover(ManaCost::generic(1)),
+            ));
+        let granted = state.clone();
+        process_triggers(&mut state, &[]);
+        assert!(
+            !state.objects.shares_object_with(&granted.objects, plain)
+                && holds_keyword_companion(&state, plain),
+            "a newly granted companion is written through the same entry"
+        );
+        assert!(state
+            .objects
+            .shares_object_with(&granted.objects, suspended));
+        assert!(state
+            .objects
+            .shares_object_with(&granted.objects, recovering));
     }
 
     #[test]

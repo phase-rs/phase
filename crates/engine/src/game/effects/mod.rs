@@ -35,6 +35,7 @@ use crate::types::ability::{
     SharedQualityRelation, SiblingCondition, StaticDefinition, SubAbilityLink, TapStateChange,
     TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetReadOrigin, TargetRef,
     ThisWayCause, TrackedAnaphorSource, TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser,
+    ZoneRef,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackSubject, CombatHistoryScope};
@@ -422,7 +423,12 @@ pub(crate) fn target_filter_controller_scope(filter: &TargetFilter) -> Option<Co
     }
 }
 
-pub(crate) fn matches_player_scope(
+/// CR 608.2c + CR 102.2: whether `player` is a recipient of a `PlayerFilter`
+/// scope ("each player", "each opponent", ...) for an effect controlled by
+/// `controller` from `source_id`. Single authority for effect-recipient player
+/// scopes; `phase-ai` reads it to price non-targeted damage without
+/// re-deriving the scope rules.
+pub fn matches_player_scope(
     state: &GameState,
     player: PlayerId,
     scope: &PlayerFilter,
@@ -796,8 +802,8 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
     }
 }
 
-/// CR 402.1 / 119.1 / 404.1 / 403.3 / 608.2h: Per-candidate scalar lookup that needs game-state
-/// backing (battlefield entry ledger, shared-zone graveyard). Used by `PlayerFilter::PlayerAttribute`
+/// CR 402.1 / 119.1 / 401.3 / 404.1 / 403.3 / 608.2h: Per-candidate scalar lookup that needs game-state
+/// backing (battlefield entry ledger, shared-zone library and graveyard). Used by `PlayerFilter::PlayerAttribute`
 /// in `resolve_player_count` when `candidate_player_scalar` returns `None`.
 pub(crate) fn candidate_player_scalar_with_state(
     state: &crate::types::game_state::GameState,
@@ -822,6 +828,25 @@ pub(crate) fn candidate_player_scalar_with_state(
             Some(crate::game::arithmetic::usize_to_i32_saturating(
                 state.graveyard_of(candidate.id).len(),
             ))
+        }
+        // CR 400.1 + CR 401.3 (library) / CR 402.1 (hand) / CR 404.1 (graveyard):
+        // unfiltered count of one of the candidate's own zones, read through the
+        // storage authorities so a shared-library or shared-graveyard format
+        // counts the pile. Exile is shared (CR 400.1) and a typed/filtered count
+        // fails closed.
+        QuantityRef::ZoneCardCount {
+            zone,
+            card_types,
+            filter: None,
+            ..
+        } if card_types.is_empty() => {
+            let len = match zone {
+                ZoneRef::Library => state.library_of(candidate.id).len(),
+                ZoneRef::Graveyard => state.graveyard_of(candidate.id).len(),
+                ZoneRef::Hand => candidate.hand.len(),
+                ZoneRef::Exile => return None,
+            };
+            Some(crate::game::arithmetic::usize_to_i32_saturating(len))
         }
         QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
             Some(crate::game::arithmetic::usize_to_i32_saturating(
@@ -7706,18 +7731,21 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
             owner,
             attach_to,
             enters_attacking: _,
+            attack_destination,
             supertypes: _,
             static_abilities,
             enter_with_counters,
         } => (
             // A token's printed power, toughness and abilities could be defined
             // by what the gated action did ("an X/X token"); only a fixed,
-            // ability-free token is audited.
+            // ability-free token is audited. A named destination is not a
+            // `TargetFilter`, so this list cannot hold it.
             (pt_value_is_fixed(power)
                 && pt_value_is_fixed(toughness)
                 && keywords.is_empty()
                 && static_abilities.is_empty()
-                && enter_with_counters.is_empty())
+                && enter_with_counters.is_empty()
+                && attack_destination.is_controller_chooses())
             .then(|| std::iter::once(owner).chain(attach_to.as_ref()).collect()),
             match attach_to {
                 None => ParentTargetHandling::NamesNoObject,
@@ -21796,42 +21824,7 @@ fn resolve_chain_body(
             ability.starting_with.clone(),
             controller,
         );
-        let matching_players: Vec<PlayerId> = match scope {
-            PlayerFilter::AllExcept { .. }
-            | PlayerFilter::ParentObjectTargetController
-            | PlayerFilter::ParentObjectTargetOwner
-            | PlayerFilter::AnyOf { .. }
-            | PlayerFilter::TargetPlayer => {
-                // CR 608.2c + CR 109.4 + CR 608.2h: these anchors are all
-                // ability-target references — the `AllExcept` exclude anchor and the
-                // direct `ParentObjectTargetController` / `ParentObjectTargetOwner`
-                // scopes (e.g. Declaration in Stone's "That player investigates",
-                // where "that player" = the controller of the exiled target). The
-                // generic `matches_player_scope` predicate cannot resolve them (it
-                // carries no `ResolvedAbility`, so `parent_target_controller`'s
-                // last-known-information lookup over `ability.targets` is
-                // unavailable). Route through the ability-aware
-                // `speed_effects::players_for_filter`, then re-impose APNAP order by
-                // intersecting against the apnap sequence. CR 115.1 + CR 101.4:
-                // `AnyOf` resolves every member ability-aware; `TargetPlayer` reads
-                // `ability.targets`.
-                let set =
-                    crate::game::effects::speed_effects::players_for_filter(state, scope, ability);
-                apnap.into_iter().filter(|pid| set.contains(pid)).collect()
-            }
-            PlayerFilter::ChosenPlayer { index } => ability
-                .chosen_players
-                .get(*index as usize)
-                .copied()
-                .map(|chosen| apnap.into_iter().filter(|pid| *pid == chosen).collect())
-                .unwrap_or_default(),
-            _ => apnap
-                .into_iter()
-                .filter(|pid| {
-                    matches_player_scope(state, *pid, scope, controller, ability.source_id)
-                })
-                .collect(),
-        };
+        let matching_players = player_scope_members(state, scope, ability, apnap);
         // CR 608.2e + CR 603.10d: an `Unobservable` scoped control shape fails
         // closed before any coordinator below takes its seats.
         let unobservable =
@@ -26077,10 +26070,56 @@ fn append_after_every_route(leg: &mut ResolvedAbility, next: ResolvedAbility) {
     }
 }
 
+/// CR 101.4 + CR 109.5 + CR 608.2c: the players a `player_scope` instruction
+/// runs for, in `apnap` order.
+pub(crate) fn player_scope_members(
+    state: &GameState,
+    scope: &PlayerFilter,
+    ability: &ResolvedAbility,
+    apnap: Vec<PlayerId>,
+) -> Vec<PlayerId> {
+    match scope {
+        PlayerFilter::AllExcept { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::AnyOf { .. }
+        | PlayerFilter::TargetPlayer => {
+            // CR 608.2c + CR 109.4 + CR 608.2h: these anchors are all
+            // ability-target references — the `AllExcept` exclude anchor and the
+            // direct `ParentObjectTargetController` / `ParentObjectTargetOwner`
+            // scopes (e.g. Declaration in Stone's "That player investigates",
+            // where "that player" = the controller of the exiled target). The
+            // generic `matches_player_scope` predicate cannot resolve them (it
+            // carries no `ResolvedAbility`, so `parent_target_controller`'s
+            // last-known-information lookup over `ability.targets` is
+            // unavailable). Route through the ability-aware
+            // `speed_effects::players_for_filter`, then re-impose APNAP order by
+            // intersecting against the apnap sequence. CR 115.1 + CR 101.4:
+            // `AnyOf` resolves every member ability-aware; `TargetPlayer` reads
+            // `ability.targets`.
+            let set =
+                crate::game::effects::speed_effects::players_for_filter(state, scope, ability);
+            apnap.into_iter().filter(|pid| set.contains(pid)).collect()
+        }
+        PlayerFilter::ChosenPlayer { index } => ability
+            .chosen_players
+            .get(*index as usize)
+            .copied()
+            .map(|chosen| apnap.into_iter().filter(|pid| *pid == chosen).collect())
+            .unwrap_or_default(),
+        _ => apnap
+            .into_iter()
+            .filter(|pid| {
+                matches_player_scope(state, *pid, scope, ability.controller, ability.source_id)
+            })
+            .collect(),
+    }
+}
+
 /// CR 608.2 + CR 109.5: `template` bound to run for `seat`. The scoped player is
 /// the acting controller for the whole per-player chain; the printed controller
 /// stays in `original_controller` so "you" references are stable.
-fn bind_scoped_seat(
+pub(crate) fn bind_scoped_seat(
     template: &ResolvedAbility,
     controller: PlayerId,
     seat: PlayerId,
@@ -32651,6 +32690,33 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("; "));
     }
 
+    /// A destination a token instruction names is not a `TargetFilter`, so the
+    /// audit's referent list cannot hold it; a fixed token that names one
+    /// is read as possibly depending on the gated action, while the same token
+    /// naming none still lists its referents.
+    #[test]
+    fn a_later_token_that_names_its_defender_is_not_audited_as_independent() {
+        use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
+
+        let token = r#"{"type":"Token","name":"Ally","power":{"type":"Fixed","value":1},"toughness":{"type":"Fixed","value":1},"types":["Creature","Ally"],"colors":["White"],"keywords":[],"tapped":false,"count":{"type":"Fixed","value":1},"owner":{"type":"Controller"},"enters_attacking":true,"supertypes":[],"static_abilities":[],"enter_with_counters":[]}"#;
+        let mut effect: Effect = serde_json::from_str(token).expect("effect must parse");
+        assert!(
+            audit_later_instruction(&effect).referents.is_some(),
+            "reach guard: a fixed token naming no defender lists its referents"
+        );
+        let Effect::Token {
+            attack_destination, ..
+        } = &mut effect
+        else {
+            panic!("expected a Token effect");
+        };
+        *attack_destination = TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope: NamedDefenderScope::Player,
+        };
+        assert!(audit_later_instruction(&effect).referents.is_none());
+    }
+
     /// Phase 7, J-3 (the building block): after a declined gate, each later
     /// instruction is kept or skipped on its own. (i) is a resolution step of the
     /// gate and (iii) names the token only the gated action creates, so both are
@@ -35284,6 +35350,7 @@ mod tests {
             owner: TargetFilter::OriginalController,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -36581,6 +36648,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -36718,6 +36787,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![(
@@ -38802,6 +38873,8 @@ mod tests {
                 owner: TargetFilter::ParentTargetController,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -43134,6 +43207,8 @@ mod tests {
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -43594,6 +43669,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -43805,6 +43882,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -43891,6 +43970,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -43962,6 +44043,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -44044,6 +44127,8 @@ mod tests {
                 owner,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -48186,6 +48271,8 @@ mod tests {
         let make_chain = |child_effect: Effect, link: SubAbilityLink| {
             let mut token = ResolvedAbility::new(
                 Effect::Token {
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Fractal".to_string(),
                     power: PtValue::Fixed(0),
                     toughness: PtValue::Fixed(0),
@@ -48738,6 +48825,7 @@ mod tests {
     #[test]
     fn mark_co_scoped_created_referent_consumer_requires_the_matching_producer() {
         let token = || Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Fractal".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -48839,6 +48927,7 @@ mod tests {
             end_cost: None,
         };
         let elemental = || Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Elemental".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -49264,6 +49353,7 @@ mod tests {
             }))
         };
         let token = |static_abilities: Vec<StaticDefinition>| Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Soldier".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -49627,6 +49717,7 @@ mod tests {
             end_cost: None,
         };
         let token = |static_def: StaticDefinition| Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Soldier".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -50264,6 +50355,7 @@ mod tests {
             target: TargetFilter::LastCreated,
         };
         let token_attached = Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Aura".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -50620,6 +50712,8 @@ mod tests {
             (
                 "Token keyword Protection(Filter)",
                 effect_row(Box::new(move |filter| Effect::Token {
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Soldier".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),
@@ -52859,6 +52953,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -53017,6 +53113,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -54357,6 +54455,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -56113,6 +56213,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -57210,6 +57312,103 @@ mod tests {
         );
     }
 
+    /// CR 400.1 + CR 401.3 / CR 402.1 / CR 404.1: an unfiltered
+    /// `ZoneCardCount` over one of the candidate's own zones reads that zone's
+    /// size through the storage authorities (its embedded `CountScope` is
+    /// inert); the shared exile zone and any typed or filtered count fail
+    /// closed.
+    #[test]
+    fn candidate_player_scalar_reads_unfiltered_own_zone_counts() {
+        let mut state = GameState::new_two_player(42);
+        {
+            let p = &mut state.players[1];
+            for id in 1..=5 {
+                p.library.push_back(ObjectId(id));
+            }
+            for id in 6..=8 {
+                p.hand.push_back(ObjectId(id));
+            }
+            for id in 9..=10 {
+                p.graveyard.push_back(ObjectId(id));
+            }
+        }
+        let zone_count =
+            |zone: ZoneRef, card_types: Vec<TypeFilter>, filter| QuantityRef::ZoneCardCount {
+                zone,
+                card_types,
+                filter,
+                scope: crate::types::ability::CountScope::Controller,
+            };
+        let read = |state: &GameState, seat: usize, attr: &QuantityRef| {
+            candidate_player_scalar_with_state(
+                state,
+                &state.players[seat],
+                state.players[0].id,
+                attr,
+            )
+        };
+
+        // Distinct zone sizes (5 / 3 / 2) so a wrong-zone read cannot pass.
+        assert_eq!(
+            read(&state, 1, &zone_count(ZoneRef::Library, vec![], None)),
+            Some(5)
+        );
+        assert_eq!(
+            read(&state, 1, &zone_count(ZoneRef::Hand, vec![], None)),
+            Some(3)
+        );
+        assert_eq!(
+            read(&state, 1, &zone_count(ZoneRef::Graveyard, vec![], None)),
+            Some(2)
+        );
+        // CR 400.1: exile is a shared zone — no per-player count.
+        assert_eq!(
+            read(&state, 1, &zone_count(ZoneRef::Exile, vec![], None)),
+            None
+        );
+        // Typed or filtered counts need object inspection — fail closed.
+        assert_eq!(
+            read(
+                &state,
+                1,
+                &zone_count(ZoneRef::Library, vec![TypeFilter::Creature], None)
+            ),
+            None
+        );
+        assert_eq!(
+            read(
+                &state,
+                1,
+                &zone_count(ZoneRef::Library, vec![], Some(TargetFilter::Any))
+            ),
+            None
+        );
+
+        // CR 400.1 as modified by a shared-zone format (Dandan): every seat's
+        // library and graveyard are the one pile held at the canonical seat, so
+        // the non-holder seat counts the pile, not its own empty container.
+        let mut shared = GameState::new_two_player(42);
+        shared.format_config.format = crate::types::format::GameFormat::Dandan;
+        {
+            let holder = &mut shared.players[0];
+            for id in 1..=7 {
+                holder.library.push_back(ObjectId(id));
+            }
+            for id in 8..=11 {
+                holder.graveyard.push_back(ObjectId(id));
+            }
+        }
+        assert!(shared.players[1].library.is_empty());
+        assert_eq!(
+            read(&shared, 1, &zone_count(ZoneRef::Library, vec![], None)),
+            Some(7)
+        );
+        assert_eq!(
+            read(&shared, 1, &zone_count(ZoneRef::Graveyard, vec![], None)),
+            Some(4)
+        );
+    }
+
     /// Issue #2405: Broken Bond — optional hand→battlefield land put must not
     /// consume the land-drop counter (CR 305.4).
     #[test]
@@ -57998,6 +58197,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -62028,6 +62228,8 @@ mod resolution_progress_contract_tests {
             );
             let effect = if token {
                 Effect::Token {
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Soldier".into(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),

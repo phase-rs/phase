@@ -188,11 +188,11 @@ pub(super) fn handle_replacement_choice(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let action_event_start = events.len();
-    // A record stamped for rejection came from an action-ingress life change.
-    // Resume it inside an ingress window so every life settlement the handler
-    // reaches (a substitute's drain, post-replacement continuations, nested
-    // parks) is held to the same rule; the window closes before the combat
-    // lifelink batch resumes.
+    // A record stamped for rejection came from an action-ingress player-resource
+    // change. Resume it inside an ingress window so every life, player-counter
+    // and energy settlement the handler reaches (a substitute's drain,
+    // post-replacement continuations, nested parks) is held to the same rule;
+    // the window closes before the combat lifelink batch resumes.
     let parked_for_rejection = state.pending_replacement.as_ref().is_some_and(|pending| {
         pending.unrepresentable_life_change == UnrepresentablePolicy::Reject
     });
@@ -386,8 +386,9 @@ fn handle_replacement_choice_inner(
         .as_ref()
         .map(|pending| pending.lifelink_bonus)
         .unwrap_or(0);
-    // The life-change policy the parked record was stamped with, captured with
-    // the file's other `parked_*` reads before `continue_replacement` consumes it.
+    // The player-resource policy the parked record was stamped with, captured
+    // with the file's other `parked_*` reads before `continue_replacement`
+    // consumes it.
     let parked_life_policy = state
         .pending_replacement
         .as_ref()
@@ -632,6 +633,10 @@ fn handle_replacement_choice_inner(
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
                 // Corpsejack Menace doubler on a prompted counter-placement).
+                // CR 122.1 + CR 616.1: a player or energy placement settles under
+                // the policy the parked record was stamped with: `Reject` fails
+                // the answer (the boundary restores the record and prompt),
+                // `IgnoreImpossible` records into the open window.
                 ProposedEvent::AddCounter {
                     placement, count, ..
                 } => match placement {
@@ -656,10 +661,17 @@ fn handle_replacement_choice_inner(
                         player_id,
                         counter_kind,
                         count,
+                        parked_life_policy,
                         events,
-                    ),
+                    )?,
                     CounterPlacement::Energy { player_id, .. } => {
-                        effects::energy::apply_energy_addition(state, player_id, count, events)
+                        effects::energy::apply_energy_addition(
+                            state,
+                            player_id,
+                            count,
+                            parked_life_policy,
+                            events,
+                        )?
                     }
                 },
                 // CR 122.1: Counter removal accepted after replacement choice.
@@ -2768,6 +2780,13 @@ pub(super) fn handle_copy_target_choice(
         // only the liminal entry's PRESENCE matters here: it is what says this commit will park
         // an entry that later needs realizing.
         let has_liminal_entry = state.liminal_entries.contains_key(&source_id);
+        // CR 508.4: how many tokens of the batch exist once this entry is
+        // realized; the continuation parked behind a pause counts its own
+        // tokens from zero, so its request has to start past them.
+        let entrants_through_this_entry = state
+            .liminal_entries
+            .get(&source_id)
+            .map_or(0, |entry| entry.created_ids.len() + 1);
         let copy_continuation = state.liminal_entries.get(&source_id).and_then(|entry| {
             entry.copy_resume.as_ref().and_then(|copy| {
                 (entry.remaining_count > 0).then(|| {
@@ -2865,9 +2884,12 @@ pub(super) fn handle_copy_target_choice(
                 },
             );
         }
-        if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
+        if let Some((owner, mut copy, enter_tapped, enter_with_counters, remaining_count)) =
             copy_continuation.clone()
         {
+            copy.attack_request = copy
+                .attack_request
+                .after_entrants(entrants_through_this_entry);
             counter_pause_post_actions.push(PendingCounterPostAction::ContinueCopyTokenCreation {
                 owner,
                 copy,
@@ -5880,6 +5902,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(1),
             controller: PlayerId(0),
@@ -5966,6 +5989,8 @@ mod tests {
                     owner: crate::types::ability::TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -6008,6 +6033,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: replacement_source,
             controller: PlayerId(0),
@@ -6111,6 +6137,8 @@ mod tests {
                     owner: crate::types::ability::TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -6170,6 +6198,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: replacement_source,
             controller: PlayerId(0),
@@ -6290,6 +6319,8 @@ mod tests {
                     owner: crate::types::ability::TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -6348,6 +6379,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: replacement_source,
             controller: PlayerId(0),
@@ -6504,6 +6536,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: jinnie_source,
             controller: PlayerId(0),
@@ -6580,6 +6613,8 @@ mod tests {
                     owner: crate::types::ability::TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -6645,6 +6680,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: jinnie_source,
             controller: PlayerId(0),
@@ -8697,6 +8733,7 @@ mod tests {
                 additional_modifications: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: entering_aura,
                 controller: PlayerId(0),
@@ -9359,6 +9396,7 @@ mod tests {
                 source_id: ObjectId(999),
                 controller: PlayerId(0),
                 enters_attacking: false,
+                attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                 attach_to: None,
                 sacrifice_at: None,
                 remaining_count: 0,

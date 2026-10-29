@@ -17,11 +17,8 @@ import {
 import { CUSTOM_CUBE_SET_CODE } from "../adapter/draftKinds";
 import {
   cancelLlmDraftRun,
-  isLlmDraftDisabled,
-  recordLlmDraftSubmission,
   recordLlmDraftUsage,
   reportLlmDraftOutcomes,
-  resetLlmDraftBreaker,
   startLlmDraftRound,
   type LlmDraftRound,
   type LlmDrafterStatus,
@@ -270,10 +267,6 @@ function invalidateLifecycle(): number {
   // this, a provider call started for the old draft runs to its full timeout
   // holding a socket, and its reply lands against a pod that no longer exists.
   cancelLlmDraftRun();
-  // The failure breaker is scoped to a draft, not to the tab. A provider that
-  // was down during one draft must get a fresh chance in the next, or three
-  // transient failures would silently disable it for the rest of the session.
-  resetLlmDraftBreaker();
   return lifecycleGeneration;
 }
 
@@ -788,8 +781,7 @@ let llmRound: {
  * does, and again when the player picks, which then only waits on whatever is
  * still in flight. LLM drafters are opt-in twice over: a profile must be
  * configured AND drafting must be switched on for it. Anything else — including
- * a pod with no bot seats, or a profile the session gave up on — yields no
- * round, and the pick takes the ordinary engine-bot path.
+ * a pod with no bot seats — yields no round, and the pick takes the ordinary engine-bot path.
  */
 function ensureLlmDraftRound(view: DraftPlayerView): Promise<LlmDraftRound | null> {
   // Not remembered while drafting is off, so switching it on mid-step starts
@@ -805,7 +797,7 @@ function ensureLlmDraftRound(view: DraftPlayerView): Promise<LlmDraftRound | nul
     const catalog = await loadProviderCatalog();
     if (!isCurrent()) return null;
     const profile = draftProfile(useLlmStore.getState(), catalog);
-    if (!profile || isLlmDraftDisabled(profile.id)) return null;
+    if (!profile) return null;
     return startLlmDraftRound(profile, isCurrent, (llmDrafters) => {
       useDraftStore.setState({ llmDrafters });
     });
@@ -897,10 +889,6 @@ async function performPick(request: PickRequest): Promise<DraftPickOutcome> {
             const outcome = lease.submitPickWithLlmBotPicks(request.instanceId, llmResponses);
             reportLlmDraftOutcomes(outcome.llmOutcomes);
             recordLlmDraftUsage(llmRoundForPick, outcome.llmOutcomes);
-            // The breaker counts the ENGINE's verdict, not the fact that bytes
-            // arrived: a round of 401s or undecodable replies must count as a
-            // failure, or a broken provider would reset the breaker forever.
-            recordLlmDraftSubmission(llmRoundForPick.profileId, outcome.llmOutcomes);
             return outcome.view;
           }
           return lease.submitPick(request.instanceId);

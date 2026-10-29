@@ -634,6 +634,7 @@ fn insect_token_effect() -> Effect {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -2612,6 +2613,102 @@ fn committed_session_is_unchanged_by_the_standing_pass() {
         ),
         StackResolutionSessionPriorityDecision::Resolve { limit: 1 }
     ));
+}
+
+/// P0's own spell "return a land you control to its owner's hand" (chosen as it
+/// resolves) alone on the stack, with P0's Forest — a mana source P0 can
+/// activate now — untapped or tapped.
+fn own_bounce_of_your_land(forest_tapped: bool) -> GameState {
+    let mut scenario = crate::game::scenario::GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let forest = scenario.add_basic_land(PlayerId(0), ManaColor::Green);
+    let mut state = scenario.build().state().clone();
+    state.objects.get_mut(&forest).unwrap().tapped = forest_tapped;
+    let source = ObjectId(30_501);
+    push_spell(
+        &mut state,
+        source,
+        PlayerId(0),
+        ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::land()
+                        .controller(crate::types::ability::ControllerRef::You),
+                ),
+                destination: None,
+                selection: crate::types::ability::BounceSelection::AtResolution,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        ),
+    );
+    state
+}
+
+/// CR 117.1d + CR 605.3a: an own top that can move one of the player's
+/// activatable mana sources off the battlefield is `Held`, not a standing pass,
+/// so a rechecking session pauses an unverified representative's live window
+/// and authorizes no skipped window over it.
+#[test]
+fn recheck_session_pauses_an_own_top_held_for_a_removable_mana_source() {
+    // The look-ahead: with an own inert entry above the bounce, the skipped
+    // window over the bounce is authorized only when nothing can be lost.
+    for (forest_tapped, limit) in [(false, 1), (true, 2)] {
+        let mut state = own_bounce_of_your_land(forest_tapped);
+        push_simple_stack_entry(&mut state, 30_502, PlayerId(0));
+        install_recheck_session(&mut state, &[PlayerId(1)]);
+        assert_eq!(
+            stack_resolution_session_authorized_limit(&state),
+            Some(limit),
+            "Forest tapped: {forest_tapped}"
+        );
+    }
+
+    let mut held = own_bounce_of_your_land(false);
+    install_recheck_session(&mut held, &[PlayerId(1)]);
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut held,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::PauseRetained
+    ));
+
+    // Control: with the Forest tapped nothing can be lost, so the own-object
+    // standing pass authorizes the window again.
+    let mut granted = own_bounce_of_your_land(true);
+    install_recheck_session(&mut granted, &[PlayerId(1)]);
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut granted,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::Resolve { limit: 1 }
+    ));
+}
+
+/// CR 117.1d + CR 605.3a: a turn-boundary session breaks on an own top that is
+/// `Held` for a removable mana source, and keeps passing own tops otherwise.
+#[test]
+fn until_end_of_turn_breaks_on_an_own_top_held_for_a_removable_mana_source() {
+    for (forest_tapped, expect_break) in [(false, true), (true, false)] {
+        let mut state = own_bounce_of_your_land(forest_tapped);
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+        let decision = priority_auto_pass_decision(&state, PlayerId(0));
+        if expect_break {
+            assert!(is_break(&decision), "untapped Forest: the window is held");
+        } else {
+            assert!(is_pass(&decision), "tapped Forest: own top passes");
+        }
+    }
 }
 
 #[test]

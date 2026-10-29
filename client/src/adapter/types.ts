@@ -3243,6 +3243,8 @@ export type DebugAction =
   | { type: "LoseLife"; data: { player_id: PlayerId; amount: number } }
   | { type: "ModifyPlayerCounters"; data: { player_id: PlayerId; counter_kind: PlayerCounterKind; delta: number } }
   | { type: "ModifyEnergy"; data: { player_id: PlayerId; delta: number } }
+  | { type: "GivePlayerCounters"; data: { player_id: PlayerId; counter_kind: PlayerCounterKind; count: number } }
+  | { type: "GiveEnergy"; data: { player_id: PlayerId; count: number } }
   | { type: "AddMana"; data: { player_id: PlayerId; mana: ManaType[] } }
   | { type: "SetInfiniteMana"; data: { player_id: PlayerId; enabled: boolean } }
   | { type: "SetPhase"; data: { phase: Phase; active_player: PlayerId } }
@@ -5232,6 +5234,21 @@ export function supportsAiDecisionDiagnostics(
   return adapter != null
     && "setAiDecisionDiagnosticsEnabled" in adapter
     && "subscribeAiDecisionDiagnostics" in adapter;
+}
+
+/**
+ * Local-engine transports that can ask the engine to disclose every hand in the
+ * local seat's projection ("Show AI Hand"). The engine decides whether
+ * the seat is entitled to it; the client never reconstructs hidden cards.
+ */
+export interface DebugHandRevealCapability {
+  setDebugHandReveal(enabled: boolean): Promise<void>;
+}
+
+export function supportsDebugHandReveal(
+  adapter: EngineAdapter | null,
+): adapter is EngineAdapter & DebugHandRevealCapability {
+  return adapter != null && "setDebugHandReveal" in adapter;
 }
 
 /** Result of the engine-owned game-scoped AI worker card-data build. */

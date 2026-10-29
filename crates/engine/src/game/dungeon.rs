@@ -520,8 +520,8 @@ use crate::types::ability::{
     CastFromZoneDriver, CastingPermission, ContinuousModification, ControllerRef, Duration, Effect,
     FilterProp, ObjectProperty, ObjectSelectionCardinality, PlayerFilter, PlayerScope,
     PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TrackedAnaphorSource, TypeFilter,
-    TypedFilter,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TokenAttackDestination,
+    TrackedAnaphorSource, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -869,6 +869,7 @@ pub fn room_effects(
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination: TokenAttackDestination::ControllerChooses,
                     // CR 205.4a: The Atropal is legendary.
                     supertypes: vec![crate::types::card_type::Supertype::Legendary],
                     static_abilities: vec![],
@@ -1281,6 +1282,7 @@ fn creature_token(
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -1600,6 +1602,7 @@ fn treasure_token() -> Effect {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],

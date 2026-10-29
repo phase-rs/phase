@@ -1313,6 +1313,78 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filter_state_for_scope(state, Some(viewer))
 }
 
+/// How a seated viewer's projection treats hands the viewer cannot privately see.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HandDisclosure {
+    /// CR 400.2: hands are hidden zones; only their owner (or a player with
+    /// private access to them) sees the cards' faces.
+    #[default]
+    Rules,
+    /// Debug "show hands" (the local "Show AI Hand" toggle): every hand's
+    /// identities are disclosed to a viewer holding debug identity access.
+    /// Falls back to [`Self::Rules`] for any other viewer, so asking for it
+    /// never widens an ordinary projection.
+    DebugRevealAll,
+}
+
+/// Debug identity access: the explicit per-seat grant that lets a viewer see
+/// hidden-zone card identities. This is debug god-mode, not a rule — both
+/// `debug_mode` and an explicit `debug_permitted` membership are required, so
+/// an unrestricted (empty) permission set does not grant it. Local games grant
+/// it to the local seat and sandbox games to every seat; a non-sandbox
+/// multiplayer game grants it to no one.
+pub(crate) fn viewer_has_debug_identity_access(state: &GameState, viewer: PlayerId) -> bool {
+    state.debug_mode && state.debug_permitted.contains(&viewer)
+}
+
+/// [`filter_state_for_viewer`] with an explicit [`HandDisclosure`] choice.
+pub fn filter_state_for_viewer_with_hand_disclosure(
+    state: &GameState,
+    viewer: PlayerId,
+    disclosure: HandDisclosure,
+) -> GameState {
+    let mut filtered = filter_state_for_viewer(state, viewer);
+    match disclosure {
+        HandDisclosure::Rules => {}
+        HandDisclosure::DebugRevealAll => {
+            if viewer_has_debug_identity_access(state, viewer) {
+                disclose_hidden_hand_identities(state, &mut filtered);
+            }
+        }
+    }
+    filtered
+}
+
+/// Restore the canonical identity of every projected hand card the viewer
+/// projection hid. Only cards the canonical state also holds in a hand are
+/// restored, so a staged shadow that moved a card out of hand keeps its
+/// projected (redacted) form.
+fn disclose_hidden_hand_identities(state: &GameState, filtered: &mut GameState) {
+    let hidden_hand_ids: Vec<ObjectId> = filtered
+        .players
+        .iter()
+        .flat_map(|player| player.hand.iter().copied())
+        .filter(|id| {
+            filtered
+                .objects
+                .get(id)
+                .is_some_and(|object| !object.display_visible_to_viewer)
+        })
+        .collect();
+    for id in hidden_hand_ids {
+        let Some(canonical) = state
+            .objects
+            .get(&id)
+            .filter(|object| object.zone == Zone::Hand)
+        else {
+            continue;
+        };
+        let mut disclosed = canonical.clone();
+        disclosed.display_visible_to_viewer = true;
+        filtered.objects.insert(id, disclosed);
+    }
+}
+
 /// Returns a public projection for a wire with no authenticated seat. An
 /// unseated observer has no private-zone or team access, including in
 /// OneVsMany/Archenemy topologies.
@@ -3905,9 +3977,9 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `CollectEvidenceResume::Effect`,
 /// and the roots `pending_player_scope_sacrifice_choice`,
 /// `pending_player_scope_unless_payment`, `pending_scoped_library_search`,
-/// `pending_library_search_delivery`, `epic_effects` and the prevention rider
-/// (`runtime_execute`) of `pending_damage_replacements` and object replacement
-/// definitions (`redact_waiting_for_payment`, `redact_paused_ability_payment`). Applied
+/// `pending_library_search_delivery`, `epic_effects` and the prevention riders of
+/// `replacement_continuations`, which every shield's `runtime_execute` names
+/// (`redact_waiting_for_payment`, `redact_paused_ability_payment`). Applied
 /// after every `WaitingFor` rebuild so no rebuild re-clones an unredacted prompt.
 ///
 /// Not carriers because no viewer receives them: `pending_cost_move_resume`,
@@ -4245,7 +4317,8 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
 /// (a paused cast, a player-scope sacrifice or unless-payment, a scoped library search and
 /// its delivery, an Epic spell copy, and a resolution-installed prevention rider,
 /// CR 615.5). Only hidden-source payment entries are blanked and hidden linked-exile
-/// members' mana values zeroed.
+/// members' mana values zeroed, except that a `replacement_continuations` entry no shield
+/// names any more is blanked whole once it names a hidden object.
 fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<ObjectId>) {
     if let Some(pending) = state.pending_cast.as_deref_mut() {
         redact_pending_cast_payment(pending, hidden_ids);
@@ -4272,39 +4345,49 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
     for epic in &mut state.epic_effects {
         redact_ability_payment(&mut epic.spell, hidden_ids);
     }
-    for replacement in &mut state.pending_damage_replacements {
-        if let Some(rider) = replacement.runtime_execute.as_deref_mut() {
-            redact_ability_payment(rider, hidden_ids);
+    // CR 615.5 + CR 400.2: the arena keeps every rider for the rest of the game, including
+    // riders whose shield ended and riders whose host this projection hid (`hide_card` ran
+    // above and cleared the host's definitions). An entry that no `runtime_execute` in the
+    // projected state names, and that names a hidden object as its source or payment
+    // source, becomes an inert `NoOp` with source `ObjectId(0)`, so a single snapshot
+    // cannot pair that hidden id with the rider's effect. Its position stays, because live
+    // handles resolve by position. A rider some definition still names keeps the payment
+    // redaction below unchanged. When no rider names a hidden object, the reference walk
+    // is skipped.
+    let hidden_source_riders: Vec<usize> = state
+        .replacement_continuations
+        .iter()
+        .enumerate()
+        .filter(|(_, rider)| {
+            hidden_ids.contains(&rider.source_id)
+                || ability_payment_names_hidden_source(rider, hidden_ids)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if !hidden_source_riders.is_empty() {
+        // A state that fails to serialize cannot reach a viewer; an empty set blanks
+        // every candidate, so the failure reveals nothing.
+        let referenced = state
+            .referenced_replacement_continuations()
+            .unwrap_or_default();
+        for index in hidden_source_riders {
+            if referenced.contains(&(index as u64)) {
+                continue;
+            }
+            if let Some(rider) = state.replacement_continuations.get_mut(index) {
+                *rider = crate::types::ability::ResolvedAbility::new(
+                    crate::types::ability::Effect::NoOp,
+                    Vec::new(),
+                    ObjectId(0),
+                    rider.controller,
+                );
+            }
         }
     }
-    // A read-only pass selects the objects whose rider names a hidden source, so only
-    // those definition lists are copied on write.
-    let rider_objects: Vec<ObjectId> = state
-        .objects
-        .iter()
-        .filter(|(_, object)| {
-            object
-                .replacement_definitions
-                .iter_all()
-                .any(|replacement| {
-                    replacement
-                        .runtime_execute
-                        .as_deref()
-                        .is_some_and(|rider| ability_payment_names_hidden_source(rider, hidden_ids))
-                })
-        })
-        .map(|(id, _)| *id)
-        .collect();
-    for id in rider_objects {
-        let Some(object) = state.objects.get_mut(&id) else {
-            continue;
-        };
-        for index in 0..object.replacement_definitions.len() {
-            if let Some(rider) = object
-                .replacement_definitions
-                .get_mut(index)
-                .and_then(|replacement| replacement.runtime_execute.as_deref_mut())
-            {
+    for index in 0..state.replacement_continuations.len() {
+        if ability_payment_names_hidden_source(&state.replacement_continuations[index], hidden_ids)
+        {
+            if let Some(rider) = state.replacement_continuations.get_mut(index) {
                 redact_ability_payment(rider, hidden_ids);
             }
         }
@@ -4950,6 +5033,7 @@ mod tests {
     use crate::game::replacement::{
         continue_replacement, replace_event, replacement_choice_waiting_for, ReplacementResult,
     };
+    use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::zones::create_object;
     use crate::types::ability::EffectKind;
     use crate::types::ability::{
@@ -4973,13 +5057,14 @@ mod tests {
         PendingSearchFoundBatch, PendingTriggerOrder, PreparedScopedLibrarySearchChoice,
         SpellCastRecord, StackEntry, TargetEffectDetail, TriggerOrderGroup,
     };
-    use crate::types::identifiers::{CardId, ObjectIncarnationRef};
+    use crate::types::identifiers::{CardId, ObjectIncarnationRef, ReplacementContinuationId};
     use crate::types::mana::ManaCost;
     use crate::types::proposed_event::{ProposedEvent, SearchFoundDisposition};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::resolution::OptionalEffectFrame;
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
+    use std::collections::BTreeSet;
 
     /// U4 — CR 708.5: the battlefield-entry observation table is engine-internal (a face-down
     /// entrant's projection carries its card identity), so every viewer projection strips it.
@@ -6297,14 +6382,14 @@ mod tests {
                 },
             )]),
         );
+        let rider = state.install_replacement_continuation(ability.clone());
         state
             .objects
             .get_mut(&paid)
             .expect("paid object")
             .replacement_definitions =
-            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
-                .runtime_execute(ability.clone())]
-            .into();
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone).runtime_execute(rider)]
+                .into();
         state.transient_continuous_effects.push_back(
             crate::types::game_state::TransientContinuousEffect {
                 id: 1,
@@ -6341,7 +6426,7 @@ mod tests {
         );
         for prefix in [
             format!("/departed_stack_spells/{}/", departed.0),
-            format!("/objects/{}/replacement_definitions/", paid.0),
+            "/replacement_continuations/".to_string(),
             "/transient_continuous_effects/".to_string(),
         ] {
             let raw = linked_arrays_under(&state, &prefix);
@@ -7126,26 +7211,28 @@ mod tests {
             ),
             (
                 "pending_damage_replacements rider",
-                "/pending_damage_replacements/".to_string(),
+                "/replacement_continuations/".to_string(),
                 2,
                 Box::new(|state: &mut GameState| {
+                    let rider = state.install_replacement_continuation(fixture.ability.clone());
                     state.pending_damage_replacements =
                         vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
-                            .runtime_execute(fixture.ability.clone())];
+                            .runtime_execute(rider)];
                 }),
             ),
             (
                 "object replacement_definitions rider",
-                format!("/objects/{}/replacement_definitions/", paid.0),
+                "/replacement_continuations/".to_string(),
                 2,
                 Box::new(|state: &mut GameState| {
+                    let rider = state.install_replacement_continuation(fixture.ability.clone());
                     state
                         .objects
                         .get_mut(&paid)
                         .expect("paid object")
                         .replacement_definitions =
                         vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
-                            .runtime_execute(fixture.ability.clone())]
+                            .runtime_execute(rider)]
                         .into();
                 }),
             ),
@@ -7338,6 +7425,74 @@ mod tests {
                     ..
                 }
             ));
+        }
+    }
+
+    /// CR 702.50a + CR 707.10 + CR 400.2: an in-flight Epic upkeep copy names its
+    /// snapshot by handle, so the stack carries no copy of the snapshot's payment
+    /// record; the one snapshot is the stored `EpicEffect`, which is redacted. A
+    /// hidden mana source latched in it reaches no viewer through the stack.
+    #[test]
+    fn in_flight_epic_copy_trigger_discloses_no_hidden_mana_source() {
+        let fixture = payment_fixture();
+        let mut state = fixture.state.clone();
+        crate::game::effects::epic::arm_epic(
+            &mut state,
+            fixture.paid,
+            fixture.owner,
+            fixture.ability.clone(),
+        );
+        state.active_player = fixture.owner;
+        state.phase = crate::types::phase::Phase::Upkeep;
+        crate::game::triggers::check_delayed_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: crate::types::phase::Phase::Upkeep,
+            }],
+        );
+        let top = state
+            .stack
+            .back()
+            .expect("reach-guard: the Epic trigger is on the stack");
+        assert!(
+            matches!(top.kind, StackEntryKind::TriggeredAbility { .. })
+                && matches!(
+                    top.ability().map(|ability| &ability.effect),
+                    Some(Effect::EpicCopy { .. })
+                ),
+            "reach-guard: the stack top is the triggered EpicCopy"
+        );
+        assert_eq!(
+            payment_arrays_under(&state, "/epic_effects/").len(),
+            2,
+            "reach-guard: the stored snapshot latches root and sub payment arrays"
+        );
+        assert!(
+            payment_arrays_under(&state, "/stack/").is_empty(),
+            "the in-flight trigger holds only the handle, no snapshot payment record"
+        );
+
+        for (viewer, view) in [
+            (
+                "opponent",
+                filter_state_for_viewer(&state, fixture.opponent),
+            ),
+            ("spectator", filter_state_for_unseated_viewer(&state)),
+        ] {
+            for prefix in ["/stack/", "/epic_effects/"] {
+                for (path, carried) in payment_arrays_under(&view, prefix) {
+                    assert_eq!(
+                        carried[0].lki.name, HIDDEN_CARD_NAME,
+                        "{viewer} {path}: the hidden mana source is still named"
+                    );
+                    assert!(carried[0].lki.card_types.is_empty(), "{viewer} {path}");
+                }
+            }
+            assert_eq!(
+                payment_arrays_under(&view, "/epic_effects/").len(),
+                2,
+                "{viewer}: the projection keeps the stored snapshot's payment arrays"
+            );
         }
     }
 
@@ -7857,6 +8012,7 @@ mod tests {
                 source_id: ObjectId(1),
                 controller: PlayerId(0),
                 enters_attacking: false,
+                attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                 attach_to: None,
                 sacrifice_at: None,
                 remaining_count: 0,
@@ -9371,6 +9527,91 @@ mod tests {
             Some("Hidden Card"),
             "a stale debug permission must not reveal a library"
         );
+    }
+
+    /// Builds a two-player game with one hand card and one library card for the
+    /// opponent (PlayerId(1)), returning `(state, hand_card, library_card)`.
+    fn opponent_hand_and_library_state() -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let hand_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let library_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Library Card".to_string(),
+            Zone::Library,
+        );
+        (state, hand_card, library_card)
+    }
+
+    /// The "show hands" disclosure restores opponent hand identities for a
+    /// viewer with debug identity access, and only hands: libraries stay hidden.
+    #[test]
+    fn debug_hand_disclosure_reveals_opponent_hand_only() {
+        // Debug grants as the WASM bridge seeds them (`initialize_debug_permissions`):
+        // a sandbox game grants every seat; a local non-sandbox game grants only
+        // the local seat.
+        let grants: [&[PlayerId]; 2] = [&[PlayerId(0), PlayerId(1)], &[PlayerId(0)]];
+        for grant in grants {
+            let (mut state, hand_card, library_card) = opponent_hand_and_library_state();
+            state.debug_mode = true;
+            state.debug_permitted.extend(grant.iter().copied());
+
+            let filtered = filter_state_for_viewer_with_hand_disclosure(
+                &state,
+                PlayerId(0),
+                HandDisclosure::DebugRevealAll,
+            );
+
+            let revealed = &filtered.objects[&hand_card];
+            assert_eq!(revealed.name, "Opponent Hand Card", "grant={grant:?}");
+            assert!(revealed.display_visible_to_viewer);
+            assert!(filtered.players[1].hand.contains(&hand_card));
+            assert_eq!(filtered.objects[&library_card].name, HIDDEN_CARD_NAME);
+            assert!(!filtered.objects[&library_card].display_visible_to_viewer);
+        }
+    }
+
+    /// Without explicit debug identity access, or without asking for it, the
+    /// disclosure is the ordinary CR 400.2 projection: the hand stays hidden.
+    #[test]
+    fn debug_hand_disclosure_requires_request_and_debug_identity_access() {
+        // (debug_mode, viewer explicitly permitted, disclosure requested)
+        let cases = [
+            (true, true, HandDisclosure::Rules),
+            // A non-sandbox multiplayer game: debug mode with an unrestricted
+            // (empty) permission set is not an explicit identity grant.
+            (true, false, HandDisclosure::DebugRevealAll),
+            (false, true, HandDisclosure::DebugRevealAll),
+        ];
+        for (debug_mode, permitted, disclosure) in cases {
+            let (mut state, hand_card, _) = opponent_hand_and_library_state();
+            state.debug_mode = debug_mode;
+            if permitted {
+                state.debug_permitted.insert(PlayerId(0));
+            }
+
+            let filtered =
+                filter_state_for_viewer_with_hand_disclosure(&state, PlayerId(0), disclosure);
+
+            assert_eq!(
+                filtered.objects[&hand_card].name, HIDDEN_CARD_NAME,
+                "debug_mode={debug_mode} permitted={permitted} disclosure={disclosure:?}"
+            );
+            assert!(!filtered.objects[&hand_card].display_visible_to_viewer);
+            assert_eq!(
+                serde_json::to_value(&filtered).expect("projection serializes"),
+                serde_json::to_value(filter_state_for_viewer(&state, PlayerId(0)))
+                    .expect("projection serializes"),
+                "an unauthorized or unrequested disclosure is the rules projection"
+            );
+        }
     }
 
     #[test]
@@ -14820,6 +15061,248 @@ mod tests {
         assert!(
             shared > 0,
             "redacting one object must not copy every other object"
+        );
+    }
+
+    /// Test of Faith's Oracle text: its resolution installs one rider in the arena.
+    const TEST_OF_FAITH: &str = "Prevent the next 3 damage that would be dealt to target \
+         creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on \
+         that creature.";
+
+    /// CR 615.5: Test of Faith resolved onto P0's Bear, face up or face down (CR 708.2,
+    /// with the card underneath kept in `back_face`, as a morph or manifest keeps it).
+    /// Returns the state, the Bear, and the spell, now in its owner's graveyard.
+    fn test_of_faith_on_bear(face_down: bool) -> (GameState, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let bear = scenario.add_creature(P0, "Bear", 3, 3).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Test of Faith", true, TEST_OF_FAITH)
+            .id();
+        let mut runner = scenario.build();
+        if face_down {
+            let object = runner.state_mut().objects.get_mut(&bear).unwrap();
+            let back_face = snapshot_object_face(object);
+            object.back_face = Some(back_face);
+            apply_face_down_creature_characteristics(object, &FaceDownProfile::vanilla_2_2());
+        }
+        runner.cast(spell).target_objects(&[bear]).resolve();
+        let state = runner.state().clone();
+        assert!(
+            state.objects[&bear].replacement_definitions.len() == 1
+                && state.objects[&bear].replacement_definitions[0].runtime_execute
+                    == Some(ReplacementContinuationId(0))
+                && state.replacement_continuations.len() == 1
+                && state.replacement_continuations[0].source_id == spell
+                && state.objects[&spell].zone == Zone::Graveyard,
+            "reach guard: Test of Faith installed one rider, sourced by the spell, that the \
+             Bear's shield names (face_down={face_down})"
+        );
+        (state, bear, spell)
+    }
+
+    /// The ids `projection` hides by name.
+    fn hidden_in(projection: &GameState) -> HashSet<ObjectId> {
+        projection
+            .objects
+            .iter()
+            .filter(|(_, object)| object.name == HIDDEN_CARD_NAME)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// The projection decodes through the transport path.
+    fn decode_projection(projection: &GameState) -> GameState {
+        serde_json::from_value::<GameState>(serde_json::to_value(projection).unwrap())
+            .unwrap_or_else(|error| panic!("the projection decodes: {error}"))
+    }
+
+    /// CR 615.5 + CR 400.2: an opponent's projection keeps `replacement_continuations`
+    /// whole, so a projected shield's handle still names an entry: the projection decodes
+    /// through the transport path and the handle resolves to the installed rider, for a
+    /// face-up host and for a face-down one (CR 708.2 + CR 708.5) alike.
+    #[test]
+    fn projected_replacement_rider_handle_decodes_through_the_transport_path() {
+        for face_down in [false, true] {
+            let (state, bear, _) = test_of_faith_on_bear(face_down);
+            let shield = &state.objects[&bear].replacement_definitions[0];
+            let expected_projection = if face_down {
+                Some(IdentityProjection::FaceDownRedacted)
+            } else {
+                None
+            };
+            assert_eq!(
+                identity_projection_for_viewer(&state, P1)
+                    .get(&bear)
+                    .copied(),
+                expected_projection,
+                "reach guard: the opponent's identity decision (face_down={face_down})"
+            );
+
+            let projection = filter_state_for_viewer(&state, P1);
+            if face_down {
+                assert!(
+                    projection.objects[&bear].name == HIDDEN_CARD_NAME
+                        && projection.objects[&bear].back_face.is_none()
+                        && state.objects[&bear].back_face.is_some(),
+                    "the opponent sees the face-down Bear's identity redacted"
+                );
+            } else {
+                assert_eq!(projection.objects[&bear].name, "Bear");
+            }
+            assert_eq!(
+                projection.replacement_continuations, state.replacement_continuations,
+                "the projection keeps the arena whole (face_down={face_down})"
+            );
+            let decoded = decode_projection(&projection);
+            let projected = &decoded.objects[&bear].replacement_definitions[0];
+            assert_eq!(
+                projected.runtime_execute, shield.runtime_execute,
+                "the projected shield keeps its handle (face_down={face_down})"
+            );
+            assert_eq!(
+                decoded.replacement_rider(projected),
+                state.replacement_rider(shield),
+                "the projected handle resolves to the installed rider (face_down={face_down})"
+            );
+        }
+    }
+
+    /// CR 615.5 + CR 400.2 + CR 400.7: Test of Faith's rider outlives its shield in the
+    /// arena. Once the Bear dies and the spell returns to its owner's hand, no definition
+    /// in the opponent's projection names the rider and its source is hidden, so the
+    /// opponent receives an inert entry at the same position while the owner, who sees
+    /// that hand, keeps it whole. With `host_hidden`, the hand card carries the shield, so
+    /// the authoritative state still names the rider and only the projection's
+    /// `hide_card` leaves it unnamed.
+    #[test]
+    fn unreferenced_rider_naming_a_hidden_source_is_blanked_for_the_opponent() {
+        for host_hidden in [false, true] {
+            let (mut state, bear, spell) = test_of_faith_on_bear(false);
+            let shield = state.objects[&bear].replacement_definitions[0].clone();
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, bear, Zone::Graveyard, &mut events);
+            crate::game::zones::move_to_zone(&mut state, spell, Zone::Hand, &mut events);
+            if host_hidden {
+                state
+                    .objects
+                    .get_mut(&spell)
+                    .unwrap()
+                    .replacement_definitions
+                    .push(shield);
+            }
+            let expected_references = if host_hidden {
+                BTreeSet::from([0])
+            } else {
+                BTreeSet::new()
+            };
+            assert_eq!(
+                state.referenced_replacement_continuations().unwrap(),
+                expected_references,
+                "reach guard: the authoritative references (host_hidden={host_hidden})"
+            );
+
+            let opponent = filter_state_for_viewer(&state, P1);
+            assert!(
+                hidden_in(&opponent).contains(&spell),
+                "reach guard: the spell in its owner's hand is hidden from the opponent"
+            );
+            assert_eq!(
+                opponent.replacement_continuations.len(),
+                1,
+                "the entry keeps its position (host_hidden={host_hidden})"
+            );
+            let blanked = &opponent.replacement_continuations[0];
+            assert!(
+                blanked.source_id == ObjectId(0)
+                    && matches!(blanked.effect, Effect::NoOp)
+                    && blanked.sub_ability.is_none(),
+                "the opponent's entry reveals nothing about the hidden spell \
+                 (host_hidden={host_hidden}): {blanked:?}"
+            );
+            assert_eq!(
+                state.replacement_continuations[0].source_id, spell,
+                "the authoritative arena is untouched"
+            );
+            assert_eq!(
+                filter_state_for_viewer(&state, P0).replacement_continuations,
+                state.replacement_continuations,
+                "the owner sees its own hand, so its entry stays whole"
+            );
+            assert_eq!(
+                decode_projection(&opponent).replacement_continuations,
+                opponent.replacement_continuations,
+                "the redacted projection decodes (host_hidden={host_hidden})"
+            );
+        }
+    }
+
+    /// CR 615.5 + CR 400.2: a rider that a live shield still names keeps today's
+    /// projection when its source is hidden: the payment redaction alone, so it equals the
+    /// authoritative rider modulo that redaction and keeps its source. Covers an
+    /// object-hosted shield on a public host and a floating `pending_damage_replacements`
+    /// shield.
+    #[test]
+    fn referenced_rider_naming_a_hidden_source_keeps_its_projection() {
+        for floating in [false, true] {
+            let (mut state, bear, spell) = test_of_faith_on_bear(false);
+            if floating {
+                let shield = state.objects[&bear].replacement_definitions[0].clone();
+                state
+                    .objects
+                    .get_mut(&bear)
+                    .unwrap()
+                    .replacement_definitions
+                    .clear();
+                state.pending_damage_replacements.push(shield);
+            }
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, spell, Zone::Hand, &mut events);
+            assert_eq!(
+                state.referenced_replacement_continuations().unwrap(),
+                BTreeSet::from([0]),
+                "reach guard: a live shield names the rider (floating={floating})"
+            );
+
+            let opponent = filter_state_for_viewer(&state, P1);
+            let hidden = hidden_in(&opponent);
+            assert!(
+                hidden.contains(&spell) && !hidden.contains(&bear),
+                "reach guard: the source is hidden and the host is public"
+            );
+            let mut expected = state.replacement_continuations[0].clone();
+            redact_ability_payment(&mut expected, &hidden);
+            assert_eq!(
+                opponent.replacement_continuations[0], expected,
+                "a live rider keeps today's projection (floating={floating})"
+            );
+            assert_eq!(opponent.replacement_continuations[0].source_id, spell);
+        }
+    }
+
+    /// CR 615.5 + CR 400.2: a rider no shield names any more, whose source stays in a
+    /// public zone, names no hidden object, so the opponent receives it unchanged.
+    #[test]
+    fn unreferenced_rider_naming_only_public_objects_is_not_blanked() {
+        let (mut state, bear, spell) = test_of_faith_on_bear(false);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, bear, Zone::Graveyard, &mut events);
+        assert!(
+            state
+                .referenced_replacement_continuations()
+                .unwrap()
+                .is_empty(),
+            "reach guard: the shield ended, so no definition names the rider"
+        );
+
+        let opponent = filter_state_for_viewer(&state, P1);
+        assert!(
+            !hidden_in(&opponent).contains(&spell),
+            "reach guard: the spell stays public in its owner's graveyard"
+        );
+        assert_eq!(
+            opponent.replacement_continuations, state.replacement_continuations,
+            "an unreferenced rider naming only public objects is projected unchanged"
         );
     }
 }
