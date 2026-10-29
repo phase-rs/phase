@@ -9767,8 +9767,8 @@ where
             .map_or(0, &mut extract),
         // CR 104.3 + CR 104.5 + CR 800.4: a player who has left the game is
         // excluded from the aggregate population, same as
-        // `resolve_player_count`'s candidate loop (outside its life-history
-        // filters, `player_filter_reads_life_history`) — an eliminated player's
+        // `resolve_player_count`'s candidate loop (outside its turn-history
+        // filters, `player_filter_reads_turn_history`) — an eliminated player's
         // scalar must not inflate a `Max`/`Min`/`Sum` read over the
         // remaining, still-in-the-game players (Sokenzan Renegade: an
         // eliminated player's larger hand must not out-rank the live
@@ -9824,8 +9824,8 @@ where
 /// Rakdos, Belbe, Teysa and Kaito, and Thought Sponge's draw-count ruling.
 /// Opponent aggregates exclude teammates but retain departed opponents;
 /// all-player aggregates retain departed players too. Single-player scopes
-/// delegate to `resolve_per_player_scalar`. The life-only player-count twin is
-/// `player_filter_reads_life_history`.
+/// delegate to `resolve_per_player_scalar`. The player-count history gate is
+/// `player_filter_reads_turn_history`.
 fn resolve_per_player_history_scalar<F>(
     state: &GameState,
     scope: &PlayerScope,
@@ -9875,25 +9875,28 @@ where
     }
 }
 
-/// CR 119.3 + CR 800.4i: "each opponent who lost / gained life this turn"
-/// counts a player who has since left the game, for the reason
+/// CR 119.3 + CR 608.2i + CR 800.4i: completed this-turn life changes and
+/// discards count a player who has since left the game, for the reason
 /// `resolve_per_player_history_scalar` gives (Belbe, Teysa and Kaito rulings).
 /// In the generic player loop, every other filter counts only players still in
 /// the game.
-fn player_filter_reads_life_history(filter: &PlayerFilter) -> bool {
+fn player_filter_reads_turn_history(filter: &PlayerFilter) -> bool {
     match filter {
         PlayerFilter::OpponentLostLife | PlayerFilter::OpponentGainedLife => true,
-        // CR 119.3 + CR 800.4i: the all-players spelling of the same predicate
+        // CR 119.3 + CR 608.2i + CR 800.4i: the all-players life-history spelling
         // ("for each player who lost/gained life this turn", Reaper's Scythe /
-        // Strefan) carries the scalar on the general per-candidate carrier. The
-        // departed-player ruling belongs to the life-change ATTRIBUTE, not to
+        // Strefan), and either population's discard history, use the general
+        // per-candidate scalar carrier. The
+        // departed-player ruling belongs to the historical ATTRIBUTE, not to
         // the dedicated opponent variant, so it applies here too. Deliberately
         // narrow: other `PlayerAttribute` scalars (hand size, graveyard size,
         // player counters, …) keep excluding departed players, matching the
         // `AllPlayers` aggregate form in `resolve_per_player_history_scalar`.
         PlayerFilter::PlayerAttribute { attr, .. } => matches!(
             attr.as_ref(),
-            QuantityRef::LifeLostThisTurn { .. } | QuantityRef::LifeGainedThisTurn { .. }
+            QuantityRef::LifeLostThisTurn { .. }
+                | QuantityRef::LifeGainedThisTurn { .. }
+                | QuantityRef::CardsDiscardedThisTurn { .. }
         ),
         _ => false,
     }
@@ -10531,7 +10534,7 @@ fn player_count_matching_ids_with_ability(
         .players
         .iter()
         .filter(|p| {
-            (!p.is_eliminated || player_filter_reads_life_history(filter))
+            (!p.is_eliminated || player_filter_reads_turn_history(filter))
                 && match filter {
                     PlayerFilter::Controller => p.id == controller,
                     PlayerFilter::Opponent => p.id != controller,
@@ -19366,7 +19369,7 @@ mod tests {
     /// is still in the game; P2 lost none. Expect 2.
     ///
     /// Revert discriminator: dropping the `PlayerAttribute` arm from
-    /// `player_filter_reads_life_history` makes the generic loop skip the
+    /// `player_filter_reads_turn_history` makes the generic loop skip the
     /// eliminated P1, so this test observes 1 — while the sibling
     /// `resolve_player_count_all_players_who_lost_life_includes_the_controller`
     /// stays green, which is exactly the divergence this arm closes.
@@ -19415,6 +19418,56 @@ mod tests {
             resolve_quantity(&state, &hand_size, PlayerId(0), ObjectId(1)),
             2,
             "hand-size candidates still exclude the eliminated player"
+        );
+    }
+
+    #[test]
+    fn resolve_player_count_discard_history_includes_departed_players_only_for_history() {
+        use crate::types::ability::{Comparator, PlayerRelation, PlayerScope};
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        crate::game::restrictions::record_discard(&mut state, PlayerId(0));
+        crate::game::restrictions::record_discard(&mut state, PlayerId(1));
+        crate::game::restrictions::record_discard(&mut state, PlayerId(1));
+        state.players[1].is_eliminated = true;
+        let census = |attr| QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(attr),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 1 }),
+                },
+            },
+        };
+        // CR 608.2i + CR 800.4i: completed discards survive player departure.
+        assert_eq!(
+            resolve_quantity(
+                &state,
+                &census(QuantityRef::CardsDiscardedThisTurn {
+                    player: PlayerScope::ScopedPlayer,
+                }),
+                PlayerId(0),
+                ObjectId(1)
+            ),
+            2
+        );
+        // P2 has no history entry; all three have nonempty hands. Current-state
+        // attributes must still exclude departed P1, while including live P2.
+        for (index, player) in state.players.iter_mut().enumerate() {
+            player.hand.push_back(ObjectId(9000 + index as u64));
+        }
+        assert_eq!(
+            resolve_quantity(
+                &state,
+                &census(QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                }),
+                PlayerId(0),
+                ObjectId(1)
+            ),
+            2
         );
     }
 

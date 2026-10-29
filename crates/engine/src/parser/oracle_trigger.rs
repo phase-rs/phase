@@ -21515,6 +21515,27 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
             def.mode = TriggerMode::Discover;
             return Some((TriggerMode::Discover, def));
         }
+        // CR 603.2 + CR 702.143c: foretelling means performing the special
+        // action, not casting the foretold card. Admit only the complete bare
+        // card noun; qualified cards and semantic tails remain unsupported.
+        if all_consuming(terminated(
+            (
+                alt((tag::<_, _, OracleError<'_>>("foretells"), tag("foretell"))),
+                space1,
+                tag("a"),
+                space1,
+                tag("card"),
+            ),
+            opt(one_of(".;")),
+        ))
+        .parse(rest)
+        .is_ok()
+        {
+            let mut def = make_base();
+            def.mode = TriggerMode::Foretell;
+            def.valid_target = valid_target.clone();
+            return Some((TriggerMode::Foretell, def));
+        }
         let actions = parse_player_action_list(rest)?;
         let mut def = make_base();
         def.valid_target = valid_target.clone();
