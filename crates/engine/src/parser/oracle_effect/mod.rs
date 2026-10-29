@@ -19924,6 +19924,28 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
         });
     }
 
+    // CR 122.1 + CR 109.5 + CR 608.2c/i: compose a fixed player-counter
+    // imperative with the complete history/population quantity. A dynamic base
+    // cannot be multiplied by this carrier; retain strict unsupported coverage.
+    if let Some(ImperativeFamilyAst::GivePlayerCounter {
+        counter_kind,
+        count,
+    }) = imperative::try_parse_player_counter(&numeric_base_lower)
+    {
+        if !matches!(count, QuantityExpr::Fixed { value } if value >= 0) {
+            return None;
+        }
+        let clause =
+            imperative::lower_imperative_family_ast(ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count: replace_fixed_quantity(count, quantity),
+            });
+        let effect = thread_for_each_subject(clause.effect, base_no_duration, ctx);
+        let mut clause = parsed_for_each_quantity_effect(effect, duration, reference_target);
+        apply_optional_target_fixup(&mut clause, base_no_duration);
+        return Some(clause);
+    }
+
     // Delegate to parse_numeric_imperative_ast — it already handles draw, gain/lose life,
     // pump, scry, surveil, mill. Replace fixed counts with the for-each quantity, then
     // thread subject through for effects that carry a target.
@@ -20672,6 +20694,17 @@ fn thread_for_each_subject(effect: Effect, original: &str, ctx: &mut ParseContex
             count,
             target: TargetFilter::Controller,
         } => Effect::Draw { count, target },
+        // CR 122.1 + CR 109.5: the parsed player subject receives the counters;
+        // it is independent of ScopedPlayer inside the population quantity.
+        Effect::GivePlayerCounter {
+            counter_kind,
+            count,
+            target: TargetFilter::Controller,
+        } if target_filter_can_target_player(&target) => Effect::GivePlayerCounter {
+            counter_kind,
+            count,
+            target,
+        },
         Effect::Discard {
             count,
             target: TargetFilter::Controller,

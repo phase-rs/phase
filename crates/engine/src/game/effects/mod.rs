@@ -972,6 +972,17 @@ pub(crate) fn candidate_player_scalar_with_state(
         return Some(value);
     }
     match attr {
+        // CR 701.9a + CR 608.2i: completed discards are read for this actual
+        // candidate, including a represented zero when no discard was recorded.
+        QuantityRef::CardsDiscardedThisTurn { .. } => {
+            Some(crate::game::arithmetic::u32_to_i32_saturating(
+                state
+                    .cards_discarded_this_turn_by_player
+                    .get(&candidate.id)
+                    .copied()
+                    .unwrap_or_default(),
+            ))
+        }
         // CR 119.1 + CR 810.9a: the candidate's life total reads the team's
         // shared total in a team format (off-team it is the candidate's own
         // life). Stateful because `team_life_total` folds over teammates'

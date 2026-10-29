@@ -1,5 +1,542 @@
 use super::*;
 
+mod player_history_foretell {
+    use super::*;
+    use crate::game::combat::AttackTarget;
+    use crate::game::scenario::GameScenario;
+    use crate::types::ability::{Comparator, PlayerRelation, PlayerScope, PtValue};
+    use crate::types::actions::GameAction;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::{CastingVariant, WaitingFor};
+    use crate::types::mana::ManaColor;
+    use crate::types::phase::Phase;
+    use crate::types::player::{PlayerCounterKind, PlayerId};
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+    const P2: PlayerId = PlayerId(2);
+    const AZULA: &str = "Firebending 1 (Whenever this creature attacks, add {R}. This mana lasts until end of combat.)\nWhenever Azula attacks, you may discard a card. Then you get an experience counter for each player who discarded a card this turn.\n{2}{B}: Until end of turn, Azula gets +1/+1 for each experience counter you have and gains menace.";
+    const DREAM: &str = "Each nonland card in your hand without foretell has foretell. Its foretell cost is equal to its mana cost reduced by {2}. (During your turn, you may pay {2} and exile it from your hand face down. Cast it on a later turn for its foretell cost.)\nWhenever you foretell a card, this creature gets +2/+0 until end of turn.";
+
+    fn discarded_players() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(QuantityRef::CardsDiscardedThisTurn {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 1 }),
+                },
+            },
+        }
+    }
+
+    pub(super) fn assert_azula_attack(parsed: &ParsedAbilities) {
+        assert_eq!(
+            parsed.triggers.len(),
+            1,
+            "printed attack trigger; Firebending stays a keyword"
+        );
+        assert_eq!(parsed.triggers[0].mode, TriggerMode::Attacks);
+        assert_eq!(parsed.triggers[0].valid_card, Some(TargetFilter::SelfRef));
+        let head = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("printed discard");
+        assert!(head.optional);
+        assert!(matches!(
+            head.effect.as_ref(),
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                ..
+            }
+        ));
+        let gain = head
+            .sub_ability
+            .as_deref()
+            .expect("unconditional Then instruction");
+        assert!(!gain.optional);
+        assert!(gain.condition.is_none());
+        assert_eq!(
+            gain.duration, None,
+            "this turn belongs to the history quantity"
+        );
+        assert_eq!(
+            *gain.effect,
+            Effect::GivePlayerCounter {
+                counter_kind: PlayerCounterKind::Experience,
+                count: discarded_players(),
+                target: TargetFilter::Controller,
+            }
+        );
+        assert!(gain.sub_ability.is_none());
+    }
+
+    pub(super) fn assert_dream_trigger(trigger: &TriggerDefinition, actor: TargetFilter) {
+        assert_eq!(trigger.mode, TriggerMode::Foretell);
+        assert_eq!(trigger.trigger_zones, vec![Zone::Battlefield]);
+        assert_eq!(trigger.valid_target, Some(actor));
+        assert_eq!(trigger.valid_card, None);
+        assert!(!trigger.optional);
+        assert!(trigger.condition.is_none() && trigger.constraint.is_none());
+        let body = trigger.execute.as_deref().expect("printed SelfRef pump");
+        assert_eq!(
+            *body.effect,
+            Effect::Pump {
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(0),
+                target: TargetFilter::SelfRef,
+            }
+        );
+        assert_eq!(body.duration, Some(Duration::UntilEndOfTurn));
+        assert!(!body.optional);
+        assert!(body.condition.is_none() && body.sub_ability.is_none());
+    }
+
+    #[test]
+    fn player_history_counter_carrier_public_shape_and_strict_refusals() {
+        // SHAPE: complete public transactions, including subject and multiplier.
+        let parsed = parse_oracle_text(
+            AZULA,
+            "Azula, Ruthless Firebender",
+            &["Firebending".into()],
+            &["Creature".into()],
+            &[],
+        );
+        assert!(!parsed_has_unimplemented(&parsed), "{parsed:#?}");
+        assert_azula_attack(&parsed);
+        for (instruction, expected, target) in [
+            (
+                "You get an experience counter",
+                discarded_players(),
+                TargetFilter::Controller,
+            ),
+            (
+                "You get two experience counters",
+                QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(discarded_players()),
+                },
+                TargetFilter::Controller,
+            ),
+            (
+                "You get zero experience counters",
+                QuantityExpr::Fixed { value: 0 },
+                TargetFilter::Controller,
+            ),
+            (
+                "Target player gets an experience counter",
+                discarded_players(),
+                TargetFilter::Player,
+            ),
+        ] {
+            let text = format!("{instruction} for each player who discarded a card this turn.");
+            let parsed = parse_oracle_text(&text, "SHAPE carrier", &[], &["Sorcery".into()], &[]);
+            assert!(!parsed_has_unimplemented(&parsed), "{text}: {parsed:#?}");
+            assert_eq!(parsed.abilities.len(), 1);
+            assert_eq!(
+                *parsed.abilities[0].effect,
+                Effect::GivePlayerCounter {
+                    counter_kind: PlayerCounterKind::Experience,
+                    count: expected,
+                    target,
+                }
+            );
+            assert_eq!(parsed.abilities[0].duration, None);
+        }
+        for broken in [
+            "You get an experience counter for each player who discarded a card.",
+            "You get an experience counter for each player who discarded a card last turn.",
+            "You get an experience counter for each player who discarded a creature this turn.",
+            "You get an experience counter for each player who discarded a card this turn and controls a creature.",
+            "You get a charge counter for each player who discarded a card this turn.",
+            "You get X experience counters for each player who discarded a card this turn.",
+        ] {
+            let text = format!("Draw a card.\n{broken}");
+            let parsed = parse_oracle_text(&text, "SHAPE refusal", &[], &["Sorcery".into()], &[]);
+            assert!(matches!(parsed.abilities[0].effect.as_ref(), Effect::Draw { count: QuantityExpr::Fixed { value: 1 }, .. }), "independent supported instruction survives");
+            let value = serde_json::to_value(&parsed).unwrap();
+            let mut residuals = Vec::new();
+            complete_publication_gap_fragments(&value, &mut residuals);
+            assert!(residuals.iter().any(|fragment| *fragment == broken || *fragment == broken.trim_end_matches('.')), "the altered instruction itself must be refused: {broken}: {residuals:#?}");
+        }
+    }
+
+    #[test]
+    fn bare_foretell_trigger_public_shape_and_strict_refusals() {
+        // SHAPE: the complete grant is a positive sibling, not evidence that a
+        // malformed trigger condition was accepted.
+        let parsed = parse_oracle_text(DREAM, "Dream Devourer", &[], &["Creature".into()], &[]);
+        assert!(!parsed_has_unimplemented(&parsed), "{parsed:#?}");
+        assert_eq!(parsed.statics.len(), 1);
+        assert_eq!(parsed.triggers.len(), 1);
+        assert_dream_trigger(&parsed.triggers[0], TargetFilter::Controller);
+        for (actor, filter) in [
+            (
+                "an opponent foretells",
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            ),
+            ("a player foretells", TargetFilter::Player),
+        ] {
+            for prefix in ["When", "Whenever"] {
+                let text =
+                    format!("{prefix} {actor} a card, this creature gets +2/+0 until end of turn.");
+                let parsed =
+                    parse_oracle_text(&text, "SHAPE actor", &[], &["Creature".into()], &[]);
+                assert!(!parsed_has_unimplemented(&parsed));
+                assert_eq!(parsed.triggers.len(), 1);
+                assert_dream_trigger(&parsed.triggers[0], filter.clone());
+            }
+        }
+        let cast = parse_oracle_text(
+            "Whenever you cast a spell, this creature gets +2/+0 until end of turn.",
+            "SHAPE cast",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        assert!(!parsed_has_unimplemented(&cast));
+        assert_eq!(cast.triggers[0].mode, TriggerMode::SpellCast);
+        for condition in [
+            "Whenever you foretell",
+            "Whenever you foretell a creature",
+            "Whenever you foretell a nonland card",
+            "Whenever you foretell a card from your hand",
+            "Whenever you foretell a card and draw a card",
+            "Whenever you cast a foretold card",
+        ] {
+            let broken = format!("{condition}, this creature gets +2/+0 until end of turn.");
+            let text = format!("{}\n{broken}", DREAM.lines().next().unwrap());
+            let mut doc = parse_oracle_ir(&text, "Dream Devourer", &[], &["Creature".into()], &[]);
+            let normalized = broken.replace("this creature", "~");
+            let lowered = lower_oracle_ir(&mut doc);
+            assert_eq!(
+                lowered.statics.len(),
+                1,
+                "the independent grant remains represented"
+            );
+            assert!(
+                doc.items
+                    .iter()
+                    .any(|item| item.source.fragment() == Some(normalized.as_str())
+                        && match &item.node {
+                            OracleNodeIr::Unsupported { .. } => true,
+                            _ => false,
+                        })
+                    || lowered.triggers.iter().any(|trigger| matches!(
+                        trigger.mode,
+                        TriggerMode::Unknown(_)
+                    ) && trigger.description.as_deref()
+                        == Some(normalized.as_str())),
+                "altered condition's own strict refusal: {broken}: {doc:#?}: {lowered:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn azula_attack_counts_distinct_mind_rot_discarders_and_resets_next_turn() {
+        for accept in [false, true] {
+            let mut scenario = GameScenario::new_n_player(3, 42);
+            scenario.at_phase(Phase::PreCombatMain);
+            let azula = scenario
+                .add_creature(P0, "Azula, Ruthless Firebender", 3, 3)
+                .from_oracle_text_with_keywords(&["Firebending"], AZULA)
+                .id();
+            let optional_card = scenario.add_card_to_hand(P0, "Optional discard");
+            for player in [P0, P1, P2] {
+                scenario.with_library_top(player, &["Next draw", "Later draw", "Third draw"]);
+            }
+            for _ in 0..6 {
+                scenario.add_basic_land(P0, ManaColor::Black);
+            }
+            let mut setup = Vec::new();
+            for player in [P1, P2] {
+                let cards = [
+                    scenario.add_card_to_hand(player, "First discard"),
+                    scenario.add_card_to_hand(player, "Second discard"),
+                ];
+                let rot = scenario
+                    .add_spell_to_hand_from_oracle(
+                        P0,
+                        "Mind Rot",
+                        false,
+                        "Target player discards two cards.",
+                    )
+                    .with_mana_cost(parse_mana_symbols("{2}{B}").unwrap().0)
+                    .id();
+                setup.push((player, cards, rot));
+            }
+            let mut runner = scenario.build();
+            for (player, cards, rot) in setup {
+                let outcome = runner.cast(rot).target_player(player).resolve();
+                assert!(
+                    matches!(outcome.final_waiting_for(), WaitingFor::DiscardChoice { player: actor, count: 2, .. } if *actor == player)
+                );
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: cards.to_vec(),
+                    })
+                    .unwrap();
+                runner.advance_until_stack_empty();
+                for card in cards {
+                    assert_eq!(runner.state().objects[&card].zone, Zone::Graveyard);
+                }
+                assert!(runner.state().players[player.0 as usize].hand.is_empty());
+                assert!(runner.state().stack.is_empty());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+            }
+            runner.advance_to_combat();
+            runner
+                .declare_attackers(&[(azula, AttackTarget::Player(P1))])
+                .unwrap();
+            runner.advance_until_stack_empty(); // also drains Firebending ordering
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ));
+            runner
+                .act(GameAction::DecideOptionalEffect { accept })
+                .unwrap();
+            if accept {
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::DiscardChoice {
+                        player: P0,
+                        count: 1,
+                        ..
+                    }
+                ));
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![optional_card],
+                    })
+                    .unwrap();
+            }
+            runner.advance_until_stack_empty();
+            // CR 608.2c + CR 608.2d + CR 608.2i: the unconditional second sentence reads distinct
+            // discarding players after the optional discard, including you.
+            let expected = if accept { 3 } else { 2 };
+            assert_eq!(
+                runner.state().players[0].player_counter(&PlayerCounterKind::Experience),
+                expected
+            );
+            assert_eq!(
+                runner.state().objects[&optional_card].zone,
+                if accept { Zone::Graveyard } else { Zone::Hand }
+            );
+            assert_eq!(
+                runner.state().cards_discarded_this_turn_by_player.get(&P1),
+                Some(&2)
+            );
+            assert_eq!(
+                runner.state().cards_discarded_this_turn_by_player.get(&P2),
+                Some(&2)
+            );
+            assert_eq!(
+                runner.state().cards_discarded_this_turn_by_player.get(&P0),
+                if accept { Some(&1) } else { None }
+            );
+            for player in [P1, P2] {
+                assert_eq!(
+                    runner.state().players[player.0 as usize]
+                        .player_counter(&PlayerCounterKind::Experience),
+                    0
+                );
+            }
+            assert_eq!(
+                runner.state().players[0]
+                    .mana_pool
+                    .count_color(crate::types::mana::ManaType::Red),
+                1,
+                "the separate Firebending trigger also resolved"
+            );
+            assert!(runner.state().stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            let first_turn = runner.state().turn_number;
+            for _ in 0..256 {
+                if runner.state().turn_number > first_turn
+                    && runner.state().active_player == P0
+                    && runner.state().phase == Phase::PreCombatMain
+                {
+                    break;
+                }
+                match runner.state().waiting_for {
+                    WaitingFor::DeclareAttackers { .. } => {
+                        runner.declare_attackers(&[]).unwrap();
+                    }
+                    WaitingFor::DeclareBlockers { .. } => {
+                        runner.declare_blockers(&[]).unwrap();
+                    }
+                    WaitingFor::Priority { .. } => {
+                        runner.act(GameAction::PassPriority).unwrap();
+                    }
+                    ref other => panic!("unexpected turn-transition prompt: {other:?}"),
+                }
+            }
+            assert!(runner.state().turn_number > first_turn);
+            assert_eq!(runner.state().active_player, P0);
+            assert_eq!(runner.state().phase, Phase::PreCombatMain);
+            assert!(runner
+                .state()
+                .cards_discarded_this_turn_by_player
+                .is_empty());
+            assert_eq!(
+                runner.state().players[0].player_counter(&PlayerCounterKind::Experience),
+                expected
+            );
+            runner.advance_to_combat();
+            runner
+                .declare_attackers(&[(azula, AttackTarget::Player(P1))])
+                .unwrap();
+            runner.advance_until_stack_empty();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ));
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: false })
+                .unwrap();
+            runner.advance_until_stack_empty();
+            assert_eq!(
+                runner.state().players[0].player_counter(&PlayerCounterKind::Experience),
+                expected,
+                "next attack gains zero after history reset"
+            );
+            assert!(runner.state().stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn parsed_dream_actual_foretell_pumps_only_actor_source_and_later_cast_does_not() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let dream = scenario
+            .add_creature_from_oracle(P0, "Dream Devourer", 0, 3, DREAM)
+            .id();
+        let opposing = scenario
+            .add_creature_from_oracle(P1, "Dream Devourer", 0, 3, DREAM)
+            .id();
+        let card = scenario
+            .add_spell_to_hand_from_oracle(P0, "Divination", false, "Draw two cards.")
+            .with_mana_cost(parse_mana_symbols("{2}{U}").unwrap().0)
+            .id();
+        for _ in 0..3 {
+            scenario.add_basic_land(P0, ManaColor::Blue);
+        }
+        scenario.with_library_top(
+            P0,
+            &[
+                "Next turn draw",
+                "First Divination draw",
+                "Second Divination draw",
+                "Spare",
+            ],
+        );
+        scenario.with_library_top(P1, &["Opponent draw", "Spare"]);
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&card].card_id;
+        let event = runner
+            .act(GameAction::Foretell {
+                object_id: card,
+                card_id,
+            })
+            .unwrap();
+        assert!(event.events.iter().any(|event| matches!(event, GameEvent::Foretold { player_id: P0, object_id } if *object_id == card)));
+        assert_eq!(runner.state().objects[&card].zone, Zone::Exile);
+        assert!(runner.state().objects[&card].face_down);
+        assert!(!runner.state().players[0].hand.contains(&card));
+        assert!(runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == dream));
+        assert!(!runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == opposing));
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            (
+                runner.state().objects[&dream].power,
+                runner.state().objects[&dream].toughness
+            ),
+            (Some(2), Some(3))
+        );
+        assert_eq!(
+            (
+                runner.state().objects[&opposing].power,
+                runner.state().objects[&opposing].toughness
+            ),
+            (Some(0), Some(3))
+        );
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        let first_turn = runner.state().turn_number;
+        for _ in 0..192 {
+            if runner.state().turn_number > first_turn
+                && runner.state().active_player == P0
+                && runner.state().phase == Phase::PreCombatMain
+            {
+                break;
+            }
+            match runner.state().waiting_for {
+                WaitingFor::DeclareAttackers { .. } => {
+                    runner.declare_attackers(&[]).unwrap();
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    runner.declare_blockers(&[]).unwrap();
+                }
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                ref other => panic!("unexpected turn-transition prompt: {other:?}"),
+            }
+        }
+        assert!(runner.state().turn_number > first_turn);
+        assert_eq!(runner.state().active_player, P0);
+        assert_eq!(runner.state().phase, Phase::PreCombatMain);
+        assert_eq!(
+            runner.state().objects[&dream].power,
+            Some(0),
+            "the previous pump expired"
+        );
+        let outcome = runner
+            .cast(card)
+            .casting_variant(CastingVariant::Foretell)
+            .resolve();
+        outcome.assert_zone(&[card], Zone::Graveyard);
+        outcome.assert_hand_drawn(P0, 2);
+        assert_eq!(
+            runner.state().objects[&dream].power,
+            Some(0),
+            "a successful later cast is not foretelling"
+        );
+        assert_eq!(runner.state().objects[&opposing].power, Some(0));
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
 mod contextual_hand_publication {
     use super::*;
     use crate::parser::oracle_ir::ast::{ContinuationAst, RevealChoiceBinding};
@@ -44970,6 +45507,9 @@ fn complete_publication_full_native_companion_population() {
         assert_eq!(gap_payloads, expected_gaps, "complete source {name}: {parsed:#?}");
         assert_eq!(parsed_has_unimplemented(&parsed), name == "Alpine Moon");
         complete_publication_assert_independent_printed_units(name, text, &types, &subtypes, &parsed);
+        if name == "Azula, Ruthless Firebender" {
+            player_history_foretell::assert_azula_attack(&parsed);
+        }
         let face = complete_publication_native_face(name, text, &types, &subtypes);
         assert_eq!(crate::game::coverage::card_face_gaps(&face),
             if name == "Alpine Moon" { vec!["Effect:unknown".to_owned()] } else { vec![] },
@@ -45429,6 +45969,9 @@ fn complete_publication_preserves_full_dedicated_off_zone_identity_and_costs() {
         assert_eq!(parsed.abilities.len(), usize::from(face_name == "Varolz, the Scar-Striped"));
         assert_eq!(parsed.triggers.len(), usize::from(matches!(face_name, "Underworld Breach" | "Naktamun" | "Dream Devourer" | "Aminatou, Veil Piercer")));
         complete_publication_assert_independent_printed_units(face_name, text, &types, &subtypes, &parsed);
+        if face_name == "Dream Devourer" {
+            player_history_foretell::assert_dream_trigger(&parsed.triggers[0], TargetFilter::Controller);
+        }
         let grant = &parsed.statics[static_count - 1];
         assert_eq!(grant.mode, StaticMode::Continuous);
         assert_eq!(grant.condition, None, "none of these printed grants has Return's during-your-turn gate");

@@ -4977,19 +4977,17 @@ fn parse_lost_game_player_count(input: &str) -> OracleResult<'_, QuantityRef> {
     ))
 }
 
-/// CR 119.3: Which direction of this-turn life change a "for each" player
-/// predicate reads. A parse-local axis, not an engine type: the two values
-/// select between existing `PlayerFilter` / `QuantityRef` carriers below and
-/// never reach the AST themselves.
+/// CR 119.3 + CR 701.9a + CR 608.2i: Completed-this-turn player predicates.
+/// This parse-local axis selects existing filters/scalars, never a wire type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LifeChangeDirection {
+enum PlayerTurnHistory {
     Lost,
     Gained,
+    Discarded,
 }
 
-/// CR 119.3 + CR 608.2c + CR 608.2h: Parse a "for each" player-population
-/// clause qualified by a life-change predicate — "(of your) opponents who
-/// lost/gained life this turn" and "players who lost/gained life this turn".
+/// CR 119.3 + CR 701.9a + CR 608.2i: Parse a "for each" player-population
+/// clause qualified by completed life changes or discarding a card this turn.
 /// Reached by the for-each clause path (Belbe, Corrupted Observer: "{C}{C} for
 /// each of your opponents who lost life this turn"; Reaper's Scythe: "put a
 /// soul counter on this Equipment for each player who lost life this turn").
@@ -5010,7 +5008,9 @@ enum LifeChangeDirection {
 /// `PlayerRelation::All` census `parse_for_each_graveyard_size_clause` uses,
 /// and it correctly includes the ability's controller — "each player" is not
 /// "each opponent".
-fn parse_for_each_life_change_players(input: &str) -> OracleResult<'_, QuantityRef> {
+/// Discard history uses that same candidate attribute for both populations,
+/// with CardsDiscardedThisTurn >= 1 counting players rather than cards.
+fn parse_for_each_player_turn_history(input: &str) -> OracleResult<'_, QuantityRef> {
     // Population axis: singular and plural spellings of the same population
     // resolve identically (Gev, Scaled Scorch's singular "opponent who lost
     // life this turn" and Belbe's plural "opponents who …").
@@ -5025,30 +5025,40 @@ fn parse_for_each_life_change_players(input: &str) -> OracleResult<'_, QuantityR
         value(PlayerRelation::All, alt((tag("players "), tag("player ")))),
     ))
     .parse(input)?;
-    let (rest, direction) = alt((
-        value(LifeChangeDirection::Lost, tag("who lost life this turn")),
-        value(
-            LifeChangeDirection::Gained,
-            tag("who gained life this turn"),
-        ),
-    ))
+    let (rest, history) = preceded(
+        tag("who "),
+        alt((
+            value(PlayerTurnHistory::Lost, tag("lost life this turn")),
+            value(PlayerTurnHistory::Gained, tag("gained life this turn")),
+            value(
+                PlayerTurnHistory::Discarded,
+                (tag("discarded "), tag("a card"), tag(" this turn")),
+            ),
+        )),
+    )
     .parse(rest)?;
-    let filter = match (relation, direction) {
-        (PlayerRelation::Opponent, LifeChangeDirection::Lost) => PlayerFilter::OpponentLostLife,
-        (PlayerRelation::Opponent, LifeChangeDirection::Gained) => PlayerFilter::OpponentGainedLife,
-        (PlayerRelation::All, direction) => PlayerFilter::PlayerAttribute {
-            relation,
-            attr: Box::new(match direction {
-                LifeChangeDirection::Lost => QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::ScopedPlayer,
-                },
-                LifeChangeDirection::Gained => QuantityRef::LifeGainedThisTurn {
-                    player: PlayerScope::ScopedPlayer,
-                },
-            }),
-            comparator: Comparator::GE,
-            value: Box::new(QuantityExpr::Fixed { value: 1 }),
-        },
+    let filter = match (relation, history) {
+        (PlayerRelation::Opponent, PlayerTurnHistory::Lost) => PlayerFilter::OpponentLostLife,
+        (PlayerRelation::Opponent, PlayerTurnHistory::Gained) => PlayerFilter::OpponentGainedLife,
+        (PlayerRelation::All, history)
+        | (PlayerRelation::Opponent, history @ PlayerTurnHistory::Discarded) => {
+            PlayerFilter::PlayerAttribute {
+                relation,
+                attr: Box::new(match history {
+                    PlayerTurnHistory::Lost => QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                    PlayerTurnHistory::Gained => QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                    PlayerTurnHistory::Discarded => QuantityRef::CardsDiscardedThisTurn {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                }),
+                comparator: Comparator::GE,
+                value: Box::new(QuantityExpr::Fixed { value: 1 }),
+            }
+        }
         // The population axis above yields only Opponent or All; a Controller
         // population has no "for each player" reading and is not constructible
         // here. Fail closed rather than fabricate a filter.
@@ -6810,7 +6820,7 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
                 parse_for_each_one_life_changed,
             )),
             alt((
-                parse_for_each_life_change_players,
+                parse_for_each_player_turn_history,
                 parse_lost_game_player_count,
             )),
             parse_counter_added_this_turn_for_each,
@@ -9900,6 +9910,57 @@ mod tests {
                 .unwrap_or_else(|_| panic!("life-change phrase should parse: {phrase}"));
             assert_eq!(rest, "", "life-change phrase should fully consume");
             assert_all_players_life_change_count(qty, attr);
+        }
+    }
+
+    #[test]
+    fn parse_for_each_discard_history_players_complete() {
+        // SHAPE: history is a per-player predicate, not a sum of cards.
+        for (phrase, relation) in [
+            ("player who discarded a card this turn", PlayerRelation::All),
+            (
+                "players who discarded a card this turn",
+                PlayerRelation::All,
+            ),
+            (
+                "opponent who discarded a card this turn",
+                PlayerRelation::Opponent,
+            ),
+            (
+                "of your opponents who discarded a card this turn",
+                PlayerRelation::Opponent,
+            ),
+        ] {
+            assert_eq!(
+                parse_for_each_clause_ref_complete(phrase).unwrap(),
+                (
+                    "",
+                    QuantityRef::PlayerCount {
+                        filter: PlayerFilter::PlayerAttribute {
+                            relation,
+                            attr: Box::new(QuantityRef::CardsDiscardedThisTurn {
+                                player: PlayerScope::ScopedPlayer
+                            }),
+                            comparator: Comparator::GE,
+                            value: Box::new(QuantityExpr::Fixed { value: 1 }),
+                        }
+                    }
+                )
+            );
+        }
+        for phrase in [
+            "player who discarded a card",
+            "player who discarded a card last turn",
+            "player who discarded a card this game",
+            "player who discarded a creature this turn",
+            "player who discarded cards this turn",
+            "player who discarded a card this turn and controls a creature",
+            "player who sacrificed a card this turn",
+        ] {
+            assert!(
+                parse_for_each_clause_ref_complete(phrase).is_err(),
+                "{phrase}"
+            );
         }
     }
 
