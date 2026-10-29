@@ -298,7 +298,7 @@ jobs:
 
   rust-test:
     name: Rust tests (shard ${{ matrix.shard }}/4)
-    needs: rust-test-build
+    needs: [rust-test-build, card-data-gate]
     runs-on: ubuntu-latest
     # Archive downloads can consume over 10 minutes before tests begin.
     # Keep a bounded job with time for each shard to finish its tests.
@@ -339,6 +339,12 @@ jobs:
       - name: Restore test runtime binary permissions
         # Actions artifacts preserve file contents but not executable bits.
         run: chmod +x target/debug/probe-pin target/debug/ai-commander target/debug/ai-duel target/debug/ai-gate
+
+      - name: Download full card export for loader regressions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: rust-test-card-data
+          path: data
 
       - name: Run tests
         # The archive retains build options. Each shard only extracts it and
@@ -517,6 +523,15 @@ jobs:
         # has no CardTypes.json to regenerate correctly. The step above pins that.
         if: steps.gates-cache.outputs.cache-hit != 'true'
         run: cargo run --profile tool --features cli --bin card-data-validate -- data/card-data.json
+
+      - name: Share validated full card export with Rust test shards
+        # Both cached and freshly generated exports reach the loader regressions.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rust-test-card-data
+          path: data/card-data.json
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Draw replacement corpus freeze (Plan 03 / CR 121.2)
         # Every `ReplacementEvent::Draw` definition must declare whether it
