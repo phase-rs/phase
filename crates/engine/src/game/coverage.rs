@@ -5923,10 +5923,11 @@ fn build_ability_item(
         }
         _ => effect_type_name(&def.effect),
     };
-    // CR 608.2e + CR 603.10d: an unobservable fan-out control boundary is the
-    // same gap `collect_ability_missing_parts` reports, so the node agrees.
-    let supported = !matches!(&*def.effect, Effect::Unimplemented { .. })
-        && !fan_out_control_boundary_is_unobservable(def);
+    let supported = ability_node_gaps(def).all(|gap| match gap {
+        AbilityNodeGap::UnimplementedEffect(_) | AbilityNodeGap::UnobservableFanOutControl => false,
+        // Projected on the node's own cost child (`build_cost_item`).
+        AbilityNodeGap::UnimplementedCost(_) => true,
+    });
     let source_text = def.description.clone().or_else(|| match &*def.effect {
         Effect::Unimplemented { description, .. } => description.clone(),
         _ => None,
@@ -6652,10 +6653,30 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
         }
     }
 
-    // 2. Check abilities against known effect types
+    // 2. Every ability node's strict failures (`ability_node_gaps`, the shared
+    // node authority), over the object's abilities and its triggers' bodies.
+    let mut push_node_gaps = |def: &AbilityDefinition| {
+        for_each_ability_tree_node(def, TokenStaticTraversal::Include, &mut |node, _| {
+            for gap in ability_node_gaps(node) {
+                let label = match gap {
+                    AbilityNodeGap::UnimplementedEffect(name) => format!("Effect: {name}"),
+                    AbilityNodeGap::UnimplementedCost(_) => "Cost: unimplemented".to_string(),
+                    AbilityNodeGap::UnobservableFanOutControl => {
+                        "Effect: fan_out_control_boundary".to_string()
+                    }
+                };
+                if !missing.contains(&label) {
+                    missing.push(label);
+                }
+            }
+        });
+    };
     for def in obj.abilities.iter() {
-        if let Effect::Unimplemented { name, .. } = &*def.effect {
-            missing.push(format!("Effect: {name}"));
+        push_node_gaps(def);
+    }
+    for entry in obj.trigger_definitions.iter_all() {
+        if let Some(execute) = &entry.definition().execute {
+            push_node_gaps(execute);
         }
     }
 
@@ -7578,6 +7599,68 @@ fn fan_out_control_boundary_is_unobservable(def: &AbilityDefinition) -> bool {
         || crate::game::effects::multi_target_player_control_boundary(&resolved) == unobservable
 }
 
+/// One strict failure on a single ability node. `ability_node_gaps` is the
+/// single node-local authority every coverage support consumer reads: the
+/// missing-parts walk (`card_face_gaps`), `is_ability_supported`, the parse
+/// tree's `supported` flag, precon playability
+/// (`card_face_has_unimplemented_parts`) and the in-game warning
+/// (`unimplemented_mechanics`). A new strict-failure class added here reaches
+/// all of them.
+#[derive(Debug, Clone, Copy)]
+enum AbilityNodeGap<'a> {
+    /// The parser couldn't express the node's effect.
+    UnimplementedEffect(&'a str),
+    /// The node's cost tree holds a component the engine can't pay
+    /// (`AbilityCost::contains_unimplemented`).
+    UnimplementedCost(&'a AbilityCost),
+    /// CR 608.2e + CR 603.10d: a fan-out control boundary the runtime can't
+    /// observe (`fan_out_control_boundary_is_unobservable`).
+    UnobservableFanOutControl,
+}
+
+/// The strict failures on `def` itself (not its children).
+fn ability_node_gaps(def: &AbilityDefinition) -> impl Iterator<Item = AbilityNodeGap<'_>> {
+    let effect = match &*def.effect {
+        Effect::Unimplemented { name, .. } => Some(AbilityNodeGap::UnimplementedEffect(name)),
+        _ => None,
+    };
+    let boundary = fan_out_control_boundary_is_unobservable(def)
+        .then_some(AbilityNodeGap::UnobservableFanOutControl);
+    let cost = def
+        .cost
+        .as_ref()
+        .filter(|cost| cost.contains_unimplemented())
+        .map(AbilityNodeGap::UnimplementedCost);
+    effect.into_iter().chain(boundary).chain(cost)
+}
+
+/// Every ability node the coverage walks judge under `def`: `def` itself, its
+/// sub, else and mode abilities, and its effect's replacement and direct
+/// ability payloads, each with its token-static traversal. Static carriers are
+/// judged per node by the caller.
+fn for_each_ability_tree_node(
+    def: &AbilityDefinition,
+    token_static_traversal: TokenStaticTraversal,
+    visit: &mut dyn FnMut(&AbilityDefinition, TokenStaticTraversal),
+) {
+    visit(def, token_static_traversal);
+    for child in def
+        .sub_ability
+        .as_deref()
+        .into_iter()
+        .chain(def.else_ability.as_deref())
+        .chain(def.mode_abilities.iter())
+    {
+        for_each_ability_tree_node(child, token_static_traversal, visit);
+    }
+    visit_effect_replacement_ability_payloads(&def.effect, |payload_traversal, payload| {
+        for_each_ability_tree_node(payload, payload_traversal, visit);
+    });
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        for_each_ability_tree_node(payload, token_static_traversal, visit);
+    });
+}
+
 /// The coverage label for a face whose as-enters choice is made before it
 /// enters (CR 614.12a) but whose own statics write a characteristic that entry
 /// consumers read and the CR 614.12 entry projection doesn't apply
@@ -8494,38 +8577,12 @@ fn ability_definition_has_unimplemented_parts(
     def: &AbilityDefinition,
     token_static_traversal: TokenStaticTraversal,
 ) -> bool {
-    matches!(*def.effect, Effect::Unimplemented { .. })
-        || def
-            .cost
-            .as_ref()
-            .is_some_and(|c| c.contains_unimplemented())
-        || def.sub_ability.as_ref().is_some_and(|sub| {
-            ability_definition_has_unimplemented_parts(sub, token_static_traversal)
-        })
-        || def.else_ability.as_ref().is_some_and(|else_ability| {
-            ability_definition_has_unimplemented_parts(else_ability, token_static_traversal)
-        })
-        || def
-            .mode_abilities
-            .iter()
-            .any(|mode| ability_definition_has_unimplemented_parts(mode, token_static_traversal))
-        || effect_static_carriers_have_unimplemented_parts(&def.effect, token_static_traversal)
-        || {
-            let mut has_unimplemented_parts = false;
-            visit_effect_replacement_ability_payloads(&def.effect, |payload_traversal, payload| {
-                has_unimplemented_parts |=
-                    ability_definition_has_unimplemented_parts(payload, payload_traversal);
-            });
-            has_unimplemented_parts
-        }
-        || {
-            let mut has_unimplemented_parts = false;
-            visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
-                has_unimplemented_parts |=
-                    ability_definition_has_unimplemented_parts(payload, token_static_traversal);
-            });
-            has_unimplemented_parts
-        }
+    let mut has_unimplemented_parts = false;
+    for_each_ability_tree_node(def, token_static_traversal, &mut |node, node_traversal| {
+        has_unimplemented_parts |= ability_node_gaps(node).next().is_some()
+            || effect_static_carriers_have_unimplemented_parts(&node.effect, node_traversal);
+    });
+    has_unimplemented_parts
 }
 
 fn effect_static_carriers_have_unimplemented_parts(
@@ -8570,18 +8627,22 @@ fn collect_ability_missing_parts(
     token_static_traversal: TokenStaticTraversal,
     missing: &mut Vec<String>,
 ) {
-    if let Effect::Unimplemented { name, .. } = &*def.effect {
-        let label = format!("Effect:{name}");
+    let mut unimplemented_cost = None;
+    for gap in ability_node_gaps(def) {
+        let label = match gap {
+            AbilityNodeGap::UnimplementedEffect(name) => format!("Effect:{name}"),
+            AbilityNodeGap::UnobservableFanOutControl => {
+                PLAYER_SCOPE_CONTROL_BOUNDARY_GAP.to_string()
+            }
+            // Labelled per cost node below, after the delayed-trigger modes.
+            AbilityNodeGap::UnimplementedCost(cost) => {
+                unimplemented_cost = Some(cost);
+                continue;
+            }
+        };
         if !missing.contains(&label) {
             missing.push(label);
         }
-    }
-    if fan_out_control_boundary_is_unobservable(def)
-        && !missing
-            .iter()
-            .any(|label| label == PLAYER_SCOPE_CONTROL_BOUNDARY_GAP)
-    {
-        missing.push(PLAYER_SCOPE_CONTROL_BOUNDARY_GAP.to_string());
     }
     for mode in delayed_trigger_modes(&def.effect) {
         if !delayed_trigger_mode_is_supported(mode, trigger_registry) {
@@ -8592,7 +8653,7 @@ fn collect_ability_missing_parts(
         }
     }
 
-    if let Some(cost) = &def.cost {
+    if let Some(cost) = unimplemented_cost {
         collect_ability_cost_missing_parts(cost, missing);
     }
 
@@ -9461,85 +9522,29 @@ fn is_trigger_supported(
     })
 }
 
-/// Check if an ability definition tree has any Unimplemented effects.
+/// Whether every node of an ability definition tree is supported: no
+/// `ability_node_gaps`, no unsupported delayed-trigger mode, and supported
+/// static carriers.
 fn is_ability_supported(
     def: &AbilityDefinition,
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
     static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
     token_static_traversal: TokenStaticTraversal,
 ) -> bool {
-    if matches!(&*def.effect, Effect::Unimplemented { .. }) {
-        return false;
-    }
-    // CR 608.2e + CR 603.10d: same predicate as `collect_ability_missing_parts`.
-    if fan_out_control_boundary_is_unobservable(def) {
-        return false;
-    }
-    if delayed_trigger_modes(&def.effect)
-        .into_iter()
-        .any(|mode| !delayed_trigger_mode_is_supported(mode, trigger_registry))
-    {
-        return false;
-    }
-    if let Some(sub) = &def.sub_ability {
-        if !is_ability_supported(
-            sub,
-            trigger_registry,
-            static_registry,
-            token_static_traversal,
-        ) {
-            return false;
-        }
-    }
-    if let Some(else_ab) = &def.else_ability {
-        if !is_ability_supported(
-            else_ab,
-            trigger_registry,
-            static_registry,
-            token_static_traversal,
-        ) {
-            return false;
-        }
-    }
-    for mode_ab in &def.mode_abilities {
-        if !is_ability_supported(
-            mode_ab,
-            trigger_registry,
-            static_registry,
-            token_static_traversal,
-        ) {
-            return false;
-        }
-    }
-    if !effect_static_carriers_are_supported(
-        &def.effect,
-        trigger_registry,
-        static_registry,
-        token_static_traversal,
-    ) {
-        return false;
-    }
     let mut supported = true;
-    visit_effect_replacement_ability_payloads(&def.effect, |payload_traversal, payload| {
-        supported &= is_ability_supported(
-            payload,
-            trigger_registry,
-            static_registry,
-            payload_traversal,
-        );
+    for_each_ability_tree_node(def, token_static_traversal, &mut |node, node_traversal| {
+        supported &= ability_node_gaps(node).next().is_none()
+            && delayed_trigger_modes(&node.effect)
+                .into_iter()
+                .all(|mode| delayed_trigger_mode_is_supported(mode, trigger_registry))
+            && effect_static_carriers_are_supported(
+                &node.effect,
+                trigger_registry,
+                static_registry,
+                node_traversal,
+            );
     });
-    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
-        supported &= is_ability_supported(
-            payload,
-            trigger_registry,
-            static_registry,
-            token_static_traversal,
-        );
-    });
-    if !supported {
-        return false;
-    }
-    true
+    supported
 }
 
 fn effect_static_carriers_are_supported(
@@ -14348,6 +14353,40 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 #[cfg(test)]
 mod tests {
     /// Every `player_scope` node of a parsed ability chain.
+    /// The face's verdict from the two production consumers outside the
+    /// coverage walk: precon playability (`database::is_card_playable`, read
+    /// from an export round trip) and the in-game warning
+    /// (`derive_display_state` -> `GameObject::unimplemented_mechanics`).
+    /// Returns (playable, the derived warnings).
+    fn playability_and_object_warnings(face: &CardFace) -> (bool, Vec<String>) {
+        let mut export = serde_json::Map::new();
+        export.insert(
+            face.name.to_lowercase(),
+            serde_json::to_value(face).expect("the face serializes"),
+        );
+        let db = crate::database::CardDatabase::from_json_str(
+            &serde_json::Value::Object(export).to_string(),
+        )
+        .expect("the export round-trips");
+        let playable = crate::database::is_card_playable(&db, &face.name);
+
+        let mut state = crate::types::game_state::GameState::new_two_player(7);
+        let id = crate::game::deck_loading::create_object_from_card_face(
+            &mut state,
+            face,
+            crate::types::player::PlayerId(0),
+        );
+        state.public_state_dirty.all_objects_dirty = true;
+        crate::game::derived::derive_display_state(&mut state);
+        let object = &state.objects[&id];
+        assert_eq!(
+            object.has_unimplemented_mechanics(),
+            !object.unimplemented_mechanics.is_empty(),
+            "the derived field and the live method agree"
+        );
+        (playable, object.unimplemented_mechanics.clone())
+    }
+
     fn scoped_nodes(
         def: &crate::types::ability::AbilityDefinition,
         out: &mut Vec<crate::types::ability::AbilityDefinition>,
@@ -14459,6 +14498,27 @@ mod tests {
                     .any(|label| label == super::PLAYER_SCOPE_CONTROL_BOUNDARY_GAP),
                 "{name}: the production coverage walk doesn't mark it: {missing:?}"
             );
+            let face = CardFace {
+                name: name.to_string(),
+                abilities: parsed.abilities.clone(),
+                triggers: parsed.triggers.clone(),
+                ..Default::default()
+            };
+            let (playable, warnings) = playability_and_object_warnings(&face);
+            assert!(
+                !warnings
+                    .iter()
+                    .any(|w| w == "Effect: fan_out_control_boundary"),
+                "{name}: the in-game warning doesn't name the boundary: {warnings:?}"
+            );
+            if name == "Homeward Path" {
+                assert!(
+                    playable
+                        && warnings.is_empty()
+                        && !super::card_face_has_unimplemented_parts(&face),
+                    "Homeward Path: playable, with no in-game warning: {warnings:?}"
+                );
+            }
             for def in scoped {
                 let resolved = crate::game::ability_utils::build_resolved_from_def(
                     &def,
@@ -14586,6 +14646,17 @@ mod tests {
                     .iter()
                     .any(|gap| gap == super::PLAYER_SCOPE_CONTROL_BOUNDARY_GAP),
                 "{name}: card_face_gaps reports the boundary gap"
+            );
+            let (playable, warnings) = playability_and_object_warnings(&face);
+            assert!(
+                super::card_face_has_unimplemented_parts(&face) && !playable,
+                "{name}: precon accounting counts it unsupported"
+            );
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w == "Effect: fan_out_control_boundary"),
+                "{name}: the in-game warning names the boundary: {warnings:?}"
             );
             let trigger_registry = super::build_trigger_registry();
             let static_registry = super::build_static_registry();
