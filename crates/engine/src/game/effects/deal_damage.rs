@@ -1348,7 +1348,10 @@ pub(crate) fn park_resumed_opportunity_survivor(
     mut ctx: DamageContext,
     event: &ProposedEvent,
     opportunity: crate::types::ability::DamageOpportunity,
-    admitted: Option<super::AdmittedInstructionResult<'_>>,
+    admitted: Option<(
+        Option<crate::types::game_state::ReturnResultOccurrenceId>,
+        super::AdmittedInstructionResult<'_>,
+    )>,
 ) -> Result<(), EffectError> {
     let owned_remainder = state.active_ability_continuation().is_some_and(|pending| {
         pending
@@ -1362,7 +1365,7 @@ pub(crate) fn park_resumed_opportunity_survivor(
     let mut node =
         build_post_replacement_damage_node(&ctx, event).expect("the resumed survivor is damage");
     if owned_remainder {
-        let parent = admitted.ok_or_else(|| {
+        let (occurrence, parent) = admitted.ok_or_else(|| {
             EffectError::InvalidParam("missing resumed damage continuation owner".into())
         })?;
         let mut chain = state
@@ -1395,7 +1398,9 @@ pub(crate) fn park_resumed_opportunity_survivor(
         }
         // Validate the complete candidate against the actual carrier's program
         // before changing the resident pending chain.
-        crate::types::game_state::PendingContinuation::new_owned(chain.clone(), state, parent)?;
+        super::with_inherited_return_result_occurrence(state, occurrence, |state| {
+            crate::types::game_state::PendingContinuation::new_owned(chain.clone(), state, parent)
+        })?;
         state
             .active_ability_continuation_frame_mut()
             .expect("validation does not consume the damage remainder")
@@ -1405,7 +1410,7 @@ pub(crate) fn park_resumed_opportunity_survivor(
         // An independent child cannot splice its delivery behind its parent's
         // raw damage work or tail; its actual continuation is a separate frame.
         let pending = match admitted {
-            Some(parent) => crate::types::game_state::PendingContinuation::new_owned(
+            Some((_, parent)) => crate::types::game_state::PendingContinuation::new_owned(
                 Box::new(node),
                 state,
                 parent,
@@ -9273,7 +9278,7 @@ mod damage_opportunity_public_remainder_tests {
             let mut scenario = GameScenario::new();
             scenario.at_phase(Phase::PreCombatMain).with_life(P1, 2);
             let first = scenario.add_creature(P0, "First source", 5, 5).id();
-            scenario.add_creature(P0, "Second source", 5, 5);
+            let second = scenario.add_creature(P0, "Second source", 5, 5).id();
             scenario.add_creature(P1, "Worship creature", 0, 5);
             let worship = scenario.add_enchantment_from_oracle(P1, "Worship", "If you control a creature, damage that would reduce your life total to less than 1 reduces it to 1 instead.").id();
             let driver = scenario
@@ -9362,6 +9367,18 @@ mod damage_opportunity_public_remainder_tests {
                 runner.state().waiting_for, runner.state().pending_replacement,
                 runner.state().pending_combat_lifelink, runner.state().resolution_stack,
                 runner.state().owed_spell_final_part());
+            // CR 615.5 + CR 120.4b + CR 120.4c: the actual prevention gain
+            // raises life two to seven before the second source deals five.
+            let prevented = events.iter().position(|event| matches!(event,
+                GameEvent::DamagePrevented { source_id, target: TargetRef::Player(P1), amount: 5 } if *source_id == first))
+                .expect("the first source's actual five damage is prevented");
+            let gain = events.iter().position(|event| matches!(event,
+                GameEvent::LifeChanged { player_id: P1, amount: 5, new_total } if new_total.0 == Some(7)))
+                .expect("Awe Strike immediately raises actual life from two to seven");
+            let damage = events.iter().position(|event| matches!(event,
+                GameEvent::DamageDealt { source_id, target: TargetRef::Player(P1), amount: 5, is_combat: false, .. } if *source_id == second))
+                .expect("the second source's actual noncombat five damage survives");
+            assert!(prevented < gain && gain < damage, "events={events:?}");
             assert!(matches!(
                 runner.state().waiting_for,
                 WaitingFor::Priority { .. }

@@ -307,8 +307,9 @@ fn handle_replacement_choice_inner(
             "replacement choice index {index} is outside 0..{option_count}"
         )));
     }
-    super::replacement::admitted_damage_remainder(state)
-        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    let has_admitted_damage_remainder = super::replacement::admitted_damage_remainder(state)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+        .is_some();
     // The simultaneous combat batch owns this survivor. Delivering it here
     // would bypass the batch's lifelink and combat-damage bookkeeping.
     let combat_replacement = matches!(
@@ -2063,6 +2064,17 @@ fn handle_replacement_choice_inner(
                 replacement_action_event_start,
             )? {
                 return Ok(waiting_for);
+            }
+            // CR 120.4b + CR 120.4c + CR 615.5: prevention completed only this
+            // member. The preflighted noncombat aggregate continuation still
+            // owns its raw remainder, immediate prevention gain and survivors.
+            // Existing child-choice exits above run before this shared drain.
+            if parked_aggregate_opportunity && has_admitted_damage_remainder {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                super::engine::resume_pending_continuation_if_priority(state, events)?;
+                return Ok(state.waiting_for.clone());
             }
             // CR 608.3e: If the ETB was prevented during spell resolution,
             // the permanent goes to the graveyard instead.

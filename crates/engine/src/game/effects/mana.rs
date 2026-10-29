@@ -5452,6 +5452,7 @@ mod tests {
         for shape in [7, 8] {
             let (mut runner, spell, _, _) = departure_dynamic_mana_runner(shape, false, false);
             let mut selected = None;
+            let mut response_events = Vec::new();
             for (iteration, player, expected) in [(0, P0, 5), (1, P1, 2)] {
                 let WaitingFor::ChooseManaColor {
                     player: actor,
@@ -5460,7 +5461,14 @@ mod tests {
                     context: ManaChoiceContext::ResolvingEffect(body),
                 } = &runner.state().waiting_for
                 else {
-                    panic!("actual per-player/next-Mana prompt {shape}/{iteration}")
+                    panic!(
+                        "actual per-player/next-Mana prompt shape={shape}, iteration={iteration}; expected_player={player:?}; expected_occurrence_process={selected:?}; waiting={:?}; selector={:?}; continuation={:?}; resolution_stack={:?}; frames={:?}; response_events={response_events:?}",
+                        runner.state().waiting_for,
+                        runner.state().active_return_result_occurrence,
+                        runner.state().active_ability_continuation_frame(),
+                        runner.state().resolution_stack,
+                        runner.state().return_result_frames,
+                    )
                 };
                 assert_eq!(*actor, player);
                 assert_eq!(options, &[ManaType::Red, ManaType::Green]);
@@ -5501,12 +5509,15 @@ mod tests {
                 assert_eq!(serde_json::to_value(bad.state()).unwrap(), before);
                 let saved = serde_json::to_value(runner.state()).unwrap();
                 *runner.state_mut() = serde_json::from_value(saved).expect("the real next-seat/next-instruction owner keeps the same checked result through reload");
-                runner
-                    .act(GameAction::ChooseManaColor {
-                        choice: ManaChoice::SingleColor(ManaType::Green),
-                        count: 1,
-                    })
-                    .unwrap();
+                response_events.extend(
+                    runner
+                        .act(GameAction::ChooseManaColor {
+                            choice: ManaChoice::SingleColor(ManaType::Green),
+                            count: 1,
+                        })
+                        .unwrap()
+                        .events,
+                );
                 let units: Vec<_> = runner.state().players[player.0 as usize]
                     .mana_pool
                     .units()
@@ -5517,7 +5528,13 @@ mod tests {
                     && unit.source_could_produce_two_or_more_colors));
                 if iteration == 0 {
                     assert!(
-                        matches!(runner.state().waiting_for, WaitingFor::ChooseManaColor { player, return_result_occurrence: Some(current), .. } if player == P1 && current == occurrence)
+                        matches!(runner.state().waiting_for, WaitingFor::ChooseManaColor { player, return_result_occurrence: Some(current), .. } if player == P1 && current == occurrence),
+                        "shape={shape}, iteration={iteration}; expected_player={P1:?}; expected_occurrence={occurrence:?}; expected_process={process:?}; waiting={:?}; selector={:?}; continuation={:?}; resolution_stack={:?}; frames={:?}; response_events={response_events:?}",
+                        runner.state().waiting_for,
+                        runner.state().active_return_result_occurrence,
+                        runner.state().active_ability_continuation_frame(),
+                        runner.state().resolution_stack,
+                        runner.state().return_result_frames,
                     );
                     assert!(runner.state().return_result_frames.contains_key(&occurrence), "the first completed public response cannot retire the next real prompt's owner");
                 }
@@ -5827,7 +5844,14 @@ mod tests {
                 context: ManaChoiceContext::ResolvingEffect(body),
             } = &runner.state().waiting_for
             else {
-                panic!("the live role filter, not its fixed latched count, owns the real recipient prompt")
+                panic!(
+                    "the live role filter, not its fixed latched count, owns the real recipient prompt; empty={empty}, public={public}, eligible={eligible}; expected_player={P1:?}; expected_count=1; expected_owner=actual R7 producer frame/process; waiting={:?}; selector={:?}; continuation={:?}; resolution_stack={:?}; frames_with_actual_admitted_roots={:?}; events={events:?}",
+                    runner.state().waiting_for,
+                    runner.state().active_return_result_occurrence,
+                    runner.state().active_ability_continuation_frame(),
+                    runner.state().resolution_stack,
+                    runner.state().return_result_frames,
+                )
             };
             assert_eq!(*player, P1);
             assert_eq!(*count, 1);

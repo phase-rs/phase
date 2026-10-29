@@ -14765,6 +14765,7 @@ pub(crate) fn admitted_damage_remainder(
     Option<(
         crate::types::ability::ResolvedAbility,
         crate::types::ability::ResultProducerEnvironment,
+        Option<crate::types::game_state::ReturnResultOccurrenceId>,
     )>,
     crate::types::ability::EffectError,
 > {
@@ -14791,7 +14792,13 @@ pub(crate) fn admitted_damage_remainder(
         frame.pending.return_result_occurrence,
         &frame.pending.chain,
     )
-    .map(Some)
+    .map(|(program, declarations)| {
+        Some((
+            program,
+            declarations,
+            frame.pending.return_result_occurrence,
+        ))
+    })
 }
 
 fn continue_replacement_impl(
@@ -14902,7 +14909,7 @@ fn continue_replacement_impl(
             delivery_opportunity,
             admitted_remainder
                 .as_ref()
-                .map(|(program, declarations)| (program, declarations)),
+                .map(|(program, declarations, occurrence)| (*occurrence, (program, declarations))),
         )
         .expect("the survivor retains its preflighted damage program");
     }
