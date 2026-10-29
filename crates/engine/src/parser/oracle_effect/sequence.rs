@@ -2370,7 +2370,30 @@ pub(super) fn parse_independent_where_x_continuation(
     Ok((instruction, connector.unwrap_or(ClauseBoundary::Comma)))
 }
 
+pub(super) fn complete_where_x_continuous_member(current: &str) -> bool {
+    let body = super::lower::strip_leading_duration(current).map_or(current, |(_, body)| body);
+    let body_lower = body.to_ascii_lowercase();
+    complete_continuous_sentence(body)
+        && super::lower::strip_terminal_where_x(TextPair::new(body, &body_lower)).is_some_and(
+            |(_, expression)| {
+                super::lower::parse_where_x_quantity_expression(&expression).is_some()
+            },
+        )
+}
+
 fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(ClauseBoundary, usize)> {
+    // CR 608.2c + CR 611.2a + CR 613.4b: a complete continuous member,
+    // with or without duration, retains its definition and releases a later
+    // action. Conditional/delayed prefixes cannot satisfy its subject owner.
+    if complete_where_x_continuous_member(current) {
+        let remainder_lower = remainder.to_ascii_lowercase();
+        if let Ok((instruction, boundary)) =
+            parse_independent_where_x_continuation(&remainder_lower)
+        {
+            let consumed = remainder.len() - instruction.len();
+            return Some((boundary, remainder[..consumed].chars().count()));
+        }
+    }
     if complete_continuous_sentence(&format!("{current},{remainder}")) {
         return None;
     }
@@ -2378,28 +2401,6 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     let trimmed = remainder.trim_start();
     let whitespace_len = remainder.len() - trimmed.len();
     let trimmed_lower = trimmed.to_ascii_lowercase();
-
-    // CR 608.2c + CR 611.2a + CR 613.4b: a complete duration-framed
-    // continuous operation retains its definition and releases a later action.
-    // Conditional/delayed bodies cannot satisfy the complete subject owner.
-    if let Some((_, body)) = super::lower::strip_leading_duration(current) {
-        let body_lower = body.to_ascii_lowercase();
-        if complete_continuous_sentence(body)
-            && super::lower::strip_terminal_where_x(TextPair::new(body, &body_lower)).is_some_and(
-                |(_, expression)| {
-                    super::lower::parse_where_x_quantity_expression(&expression).is_some()
-                },
-            )
-        {
-            let remainder_lower = remainder.to_ascii_lowercase();
-            if let Ok((instruction, boundary)) =
-                parse_independent_where_x_continuation(&remainder_lower)
-            {
-                let consumed = remainder.len() - instruction.len();
-                return Some((boundary, remainder[..consumed].chars().count()));
-            }
-        }
-    }
 
     // CR 118.14 + CR 609.4b: ", and mana of any type can be spent to cast that
     // spell" / ", and you may spend mana as though it were mana of any color to
@@ -11960,6 +11961,10 @@ mod tests {
                 split_comma_clause_boundary(&head, &tail),
                 Some((expected, 1 + connector.chars().count()))
             );
+            assert_eq!(
+                split_comma_clause_boundary(body, &tail),
+                Some((expected, 1 + connector.chars().count()))
+            );
         }
         // Prefix owners retain their complete dependent chain (CR 608.2c).
         for prefix in [
@@ -12028,6 +12033,11 @@ mod tests {
                 "{source}: {tail:#?}"
             );
             assert!(tail.sub_ability.is_none(), "{source}");
+            assert_eq!(tail.sub_link, SubAbilityLink::ContinuationStep);
+            assert_eq!(
+                tail.sibling_condition,
+                crate::types::ability::SiblingCondition::Dependent
+            );
         }
         for source in [
             "Create a 1/1 creature token with \"Until end of turn, creatures you control have base power and toughness X/X, where X is the number of creatures you control, then draw a card.\"",
@@ -12035,6 +12045,372 @@ mod tests {
         ] {
             assert_eq!(clause_texts(source), vec![source.to_string()], "{source}");
         }
+    }
+
+    // SHAPE: synthetic grammar compositions; public execution follows below.
+    #[test]
+    fn conditional_where_x_keeps_exact_ir_and_strict_draw_tails() {
+        use crate::parser::oracle_ir::doc::OracleSourceSpan;
+        use crate::parser::oracle_ir::effect_chain::ClauseId;
+        let body = "creatures you control have base power and toughness X/X, where X is the number of creatures you control";
+        let prefix = "If you control a creature, ";
+        let expected_filter =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let expected_count = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: expected_filter.clone(),
+            },
+        };
+        for (separator, boundary) in [
+            (", ", ClauseBoundary::Comma),
+            (", and ", ClauseBoundary::Comma),
+            (", then ", ClauseBoundary::Then),
+        ] {
+            let source = format!("{prefix}{body}{separator}draw a card.");
+            let ir = super::super::parse_effect_chain_ir(
+                &source,
+                AbilityKind::Spell,
+                &mut ParseContext::default(),
+            );
+            assert_eq!(ir.clauses.len(), 2, "{source}: {ir:#?}");
+            for (index, fragment, start) in [
+                (0, body, prefix.len()),
+                (
+                    1,
+                    "draw a card",
+                    prefix.len() + body.len() + separator.len(),
+                ),
+            ] {
+                let clause = &ir.clauses[index];
+                assert_eq!(clause.id, ClauseId(index as u32));
+                assert_eq!(clause.source.fragment(), Some(fragment));
+                assert_eq!(
+                    clause.source.span(),
+                    &OracleSourceSpan::chain_relative(
+                        0,
+                        0,
+                        start,
+                        start + fragment.len(),
+                        index as u32
+                    )
+                );
+            }
+            assert_eq!(ir.clauses[0].boundary, Some(boundary));
+            assert!(ir.clauses[0].condition.is_some());
+            assert_eq!(ir.clauses[0].condition, ir.clauses[0].parsed.condition);
+            assert!(ir.clauses[1].condition.is_none() && ir.clauses[1].parsed.condition.is_none());
+            let parsed = parse_effect_chain(&source, AbilityKind::Spell);
+            assert_eq!(super::super::lower_effect_chain_ir(&ir), parsed);
+            assert!(!crate::parser::oracle::has_unimplemented(&parsed));
+            let Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } = parsed.effect.as_ref()
+            else {
+                panic!("complete continuous head: {parsed:#?}")
+            };
+            // CR 107.3c + CR 613.4b + CR 611.2a: defined count sets both
+            // base axes, on controlled recipients, for the unbounded duration.
+            assert_eq!(*duration, Some(Duration::Permanent));
+            assert_eq!(static_abilities.len(), 1);
+            assert_eq!(static_abilities[0].affected, Some(expected_filter.clone()));
+            assert_eq!(
+                static_abilities[0].modifications,
+                vec![
+                    ContinuousModification::SetPowerDynamic {
+                        value: expected_count.clone()
+                    },
+                    ContinuousModification::SetToughnessDynamic {
+                        value: expected_count.clone()
+                    }
+                ]
+            );
+            let tail = parsed.sub_ability.as_deref().unwrap();
+            assert_eq!(
+                *tail.effect,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller
+                }
+            );
+            assert_eq!(tail.sub_link, SubAbilityLink::ContinuationStep);
+            assert_eq!(
+                tail.sibling_condition,
+                crate::types::ability::SiblingCondition::Dependent
+            );
+            assert!(tail.condition.is_none() && tail.sub_ability.is_none());
+            for malformed in ["draw a card wearing a hat", "draw squirrels cards"] {
+                let source = format!("{prefix}{body}{separator}{malformed}.");
+                let ir = super::super::parse_effect_chain_ir(
+                    &source,
+                    AbilityKind::Spell,
+                    &mut ParseContext::default(),
+                );
+                assert_eq!(ir.clauses.len(), 2, "{source}: {ir:#?}");
+                assert_eq!(ir.clauses[1].source.fragment(), Some(malformed));
+                let parsed = super::super::lower_effect_chain_ir(&ir);
+                assert!(
+                    matches!(parsed.effect.as_ref(), Effect::GenericEffect { .. }),
+                    "positive head reach: {source}"
+                );
+                let tail = parsed
+                    .sub_ability
+                    .as_deref()
+                    .expect("strict malformed tail retained");
+                assert_eq!(tail.effect.unimplemented_description(), Some(malformed));
+            }
+        }
+    }
+
+    // These are synthetic grammar compositions, not printed card text.
+    #[test]
+    fn conditional_where_x_consequent_casts_as_one_gate() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::game_state::WaitingFor;
+        use crate::types::phase::Phase;
+
+        for (condition, recipients, independent, expected_draw) in [
+            ("you control a creature", 2, false, 1),
+            ("you control a creature", 0, false, 0),
+            ("you control a creature", 0, true, 1),
+            (
+                "you control a creature with power 4 or greater",
+                1,
+                false,
+                1,
+            ),
+        ] {
+            let source = format!("If {condition}, creatures you control have base power and toughness X/X, where X is the number of creatures you control, then draw a card.{}", if independent { " Draw a card." } else { "" });
+            let parsed = parse_effect_chain(&source, AbilityKind::Spell);
+            assert!(
+                !crate::parser::oracle::has_unimplemented(&parsed),
+                "{source}: {parsed:#?}"
+            );
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let controlled: Vec<_> = (0..recipients)
+                .map(|i| {
+                    scenario
+                        .add_creature(P0, &format!("Recipient {i}"), 6, 7)
+                        .id()
+                })
+                .collect();
+            if let Some(id) = controlled.get(1) {
+                scenario.state.objects.get_mut(id).unwrap().owner = P1;
+            }
+            let decoy = scenario.add_creature(P1, "Foreign controller", 8, 9).id();
+            scenario.with_library_top(P0, &["Conditional reward", "Reserve"]);
+            scenario.with_library_top(P1, &["Foreign reserve"]);
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(P0, "Synthetic conditional where X", true, &source)
+                .id();
+            let mut runner = scenario.build();
+            let outcome = runner.cast(spell).resolve();
+            // CR 608.2c + CR 608.2h: the true outer gate is read before
+            // the pump makes the power-threshold sibling false.
+            outcome.assert_hand_drawn(P0, expected_draw);
+            outcome.assert_hand_drawn(P1, 0);
+            for id in &controlled {
+                let object = &outcome.state().objects[id];
+                assert_eq!(
+                    (object.power, object.toughness),
+                    (Some(recipients), Some(recipients))
+                );
+            }
+            assert_eq!(
+                (
+                    outcome.state().objects[&decoy].power,
+                    outcome.state().objects[&decoy].toughness
+                ),
+                (Some(8), Some(9))
+            );
+            outcome.assert_zone(&[spell], Zone::Graveyard);
+            assert!(
+                outcome.state().stack.is_empty() && outcome.state().resolution_stack.is_empty()
+            );
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+            // CR 611.2a: the unbounded continuous effect remains after cleanup.
+            runner.advance_to_combat();
+            runner.declare_attackers(&[]).unwrap();
+            runner.advance_to_end_step();
+            runner.advance_to_phase(Phase::Cleanup);
+            for id in &controlled {
+                assert_eq!(
+                    (
+                        runner.state().objects[id].power,
+                        runner.state().objects[id].toughness
+                    ),
+                    (Some(recipients), Some(recipients))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn delayed_where_x_consequent_binds_when_real_trigger_fires_once() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::game_state::WaitingFor;
+        use crate::types::phase::Phase;
+
+        let source = "At the beginning of the next end step, creatures you control have base power and toughness X/X, where X is the number of creatures you control, then draw a card.";
+        let parsed = parse_effect_chain(source, AbilityKind::Spell);
+        assert!(
+            !crate::parser::oracle::has_unimplemented(&parsed),
+            "{parsed:#?}"
+        );
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let first = scenario.add_creature(P0, "First", 6, 7).id();
+        let second = scenario
+            .add_creature(P0, "Foreign owned recipient", 4, 5)
+            .id();
+        scenario.state.objects.get_mut(&second).unwrap().owner = P1;
+        let decoy = scenario.add_creature(P1, "Foreign controller", 8, 9).id();
+        let third = scenario
+            .add_creature_to_hand(P0, "Later recipient", 2, 4)
+            .id();
+        scenario.with_library_top(P0, &["Delayed reward", "P0 reserve", "P0 reserve two"]);
+        scenario.with_library_top(P1, &["P1 reserve", "P1 reserve two"]);
+        let reward = scenario.state.players[0].library[0];
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Synthetic delayed where X", true, source)
+            .id();
+        let mut runner = scenario.build();
+        let outcome = runner.cast(spell).resolve();
+        outcome.assert_hand_drawn(P0, 0);
+        outcome.assert_hand_drawn(P1, 0);
+        outcome.assert_zone(&[spell], Zone::Graveyard);
+        outcome.assert_zone(&[reward], Zone::Library);
+        assert_eq!(outcome.state().delayed_triggers.len(), 1);
+        assert_eq!(
+            (
+                outcome.state().objects[&first].power,
+                outcome.state().objects[&first].toughness
+            ),
+            (Some(6), Some(7))
+        );
+        assert_eq!(
+            (
+                outcome.state().objects[&second].power,
+                outcome.state().objects[&second].toughness
+            ),
+            (Some(4), Some(5))
+        );
+        assert!(outcome.state().stack.is_empty() && outcome.state().resolution_stack.is_empty());
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        runner
+            .cast(third)
+            .resolve()
+            .assert_zone(&[third], Zone::Battlefield);
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step();
+        assert_eq!(runner.state().phase, Phase::End);
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "actual phase event queued the trigger"
+        );
+        runner.advance_until_stack_empty();
+        // CR 611.2c + CR 611.2d: bind both count and recipients at firing.
+        for id in [first, second, third] {
+            assert_eq!(
+                (
+                    runner.state().objects[&id].power,
+                    runner.state().objects[&id].toughness
+                ),
+                (Some(3), Some(3))
+            );
+        }
+        assert_eq!(
+            (
+                runner.state().objects[&decoy].power,
+                runner.state().objects[&decoy].toughness
+            ),
+            (Some(8), Some(9))
+        );
+        assert_eq!(runner.state().objects[&reward].zone, Zone::Hand);
+        assert_eq!(runner.state().players[0].hand, vec![reward]);
+        assert!(runner.state().players[1].hand.is_empty());
+        assert!(runner.state().delayed_triggers.is_empty());
+        assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        // CR 603.7b: the consumed delayed trigger cannot fire at the next end step.
+        runner.advance_to_phase(Phase::PreCombatMain);
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step();
+        assert_eq!(runner.state().phase, Phase::End);
+        assert_eq!(runner.state().players[0].hand, vec![reward]);
+        assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+
+    #[test]
+    fn conditional_where_x_stated_duration_expires_after_draw() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::game_state::WaitingFor;
+        use crate::types::phase::Phase;
+        let source = "If you control a creature, until end of turn, creatures you control have base power and toughness X/X, where X is the number of creatures you control, then draw a card.";
+        let parsed = parse_effect_chain(source, AbilityKind::Spell);
+        assert!(
+            !crate::parser::oracle::has_unimplemented(&parsed),
+            "{parsed:#?}"
+        );
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let creature = scenario.add_creature(P0, "Duration recipient", 6, 7).id();
+        scenario.with_library_top(P0, &["Duration reward", "Reserve"]);
+        scenario.with_library_top(P1, &["Next turn reserve"]);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Synthetic conditional duration", true, source)
+            .id();
+        let mut runner = scenario.build();
+        let outcome = runner.cast(spell).resolve();
+        outcome.assert_hand_drawn(P0, 1);
+        outcome.assert_zone(&[spell], Zone::Graveyard);
+        // CR 611.2a + CR 613.4b: explicit EOT sets both base axes now.
+        assert_eq!(
+            (
+                outcome.state().objects[&creature].power,
+                outcome.state().objects[&creature].toughness
+            ),
+            (Some(1), Some(1))
+        );
+        assert!(outcome.state().stack.is_empty() && outcome.state().resolution_stack.is_empty());
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step();
+        runner.advance_to_phase(Phase::PreCombatMain);
+        assert_eq!(
+            (
+                runner.state().objects[&creature].power,
+                runner.state().objects[&creature].toughness
+            ),
+            (Some(6), Some(7))
+        );
+        assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
     }
 
     // CR 707.9a: a copy-effect except clause that ends in ", and has <keyword>"
