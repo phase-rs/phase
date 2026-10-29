@@ -17968,7 +17968,7 @@ pub fn preflight_debug_action(
         && !matches!(state.waiting_for, WaitingFor::Priority { .. })
     {
         return Err(EngineError::InvalidAction(
-            "Debug::GainLife / Debug::LoseLife / Debug::GivePlayerCounters / Debug::GiveEnergy require a Priority window".into(),
+            "Debug::GainLife / Debug::LoseLife / Debug::GivePlayerCounters / Debug::GiveEnergy / Debug::Discard require a Priority window".into(),
         ));
     }
 

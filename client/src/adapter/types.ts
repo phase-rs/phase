@@ -3340,6 +3340,7 @@ export type DebugAction =
     }
   | { type: "RemoveObject"; data: { object_id: ObjectId } }
   | { type: "Sacrifice"; data: { object_id: ObjectId } }
+  | { type: "Discard"; data: { object_id: ObjectId } }
   | { type: "DrawCards"; data: { player_id: PlayerId; count: number } }
   | { type: "Mill"; data: { player_id: PlayerId; count: number } }
   | { type: "Reveal"; data: { player_id: PlayerId; count: number } }

@@ -73,6 +73,7 @@ mod sakashima_of_a_thousand_faces_retains_other_abilities;
 mod same_is_true_type_statics;
 mod same_name_mass_exile_that_player_controls;
 mod same_name_nameless_10213;
+mod sandbox_discard;
 mod sandman_reanimate_self_and_land_s25;
 mod sandswirl_wanderglyph_attacked_you_cant_cast;
 mod sarkhan_dragon_ascendant_behold;

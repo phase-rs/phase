@@ -330,6 +330,7 @@ function DebugCardContextMenuInner({
   if (!obj) return null;
 
   const onBattlefield = obj.zone === "Battlefield";
+  const inHand = obj.zone === "Hand";
   const isCreature = obj.card_types?.core_types?.includes("Creature") ?? false;
   const hasSummoningSickness = obj.has_summoning_sickness ?? false;
   const currentKeywords = obj.keywords ?? [];
@@ -475,6 +476,17 @@ function DebugCardContextMenuInner({
           <MenuItem
             label={t("sandboxTools.sacrifice")}
             onClick={() => dispatchDebug({ type: "Sacrifice", data: { object_id: objectId } })}
+          />
+        </div>
+      )}
+
+      {/* Discard — routes through the engine's discard pipeline so discard
+          replacements and triggers apply. Offered for hand cards only. */}
+      {inHand && (
+        <div className="border-b border-gray-800 py-0.5">
+          <MenuItem
+            label={t("sandboxTools.discard")}
+            onClick={() => dispatchDebug({ type: "Discard", data: { object_id: objectId } })}
           />
         </div>
       )}

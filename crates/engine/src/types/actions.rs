@@ -1274,6 +1274,12 @@ pub enum DebugAction {
     /// outright with no triggers. The sacrificing player is the permanent's
     /// controller.
     Sacrifice { object_id: ObjectId },
+    /// CR 701.9a: Discard a card from its owner's hand through the single
+    /// discard authority, as an effect-caused discard (CR 614.6), with no
+    /// source object. Replacements and discard triggers (CR 603.2) apply. The
+    /// discarding player is the card's owner. Admitted only at a settled
+    /// Priority window.
+    Discard { object_id: ObjectId },
     /// Draw N cards using the real draw pipeline (CR 121.1).
     /// Routes through replacement effects and emits CardDrawn events.
     DrawCards { player_id: PlayerId, count: u32 },
@@ -1484,6 +1490,7 @@ impl DebugAction {
             Self::MoveToZone { object_id, .. }
             | Self::RemoveObject { object_id }
             | Self::Sacrifice { object_id }
+            | Self::Discard { object_id }
             | Self::SetBasePowerToughness { object_id, .. }
             | Self::ModifyCounters { object_id, .. }
             | Self::SetTapped { object_id, .. }
@@ -1565,7 +1572,8 @@ impl DebugAction {
             Self::GainLife { .. }
             | Self::LoseLife { .. }
             | Self::GivePlayerCounters { .. }
-            | Self::GiveEnergy { .. } => true,
+            | Self::GiveEnergy { .. }
+            | Self::Discard { .. } => true,
             Self::MoveToZone { .. }
             | Self::CreateCard { .. }
             | Self::RemoveObject { .. }
@@ -1623,6 +1631,7 @@ impl DebugAction {
             | Self::CreateCard { .. }
             | Self::RemoveObject { .. }
             | Self::Sacrifice { .. }
+            | Self::Discard { .. }
             | Self::DrawCards { .. }
             | Self::Mill { .. }
             | Self::Reveal { .. }
@@ -1733,6 +1742,9 @@ impl DebugAction {
             }
             DebugAction::Sacrifice { object_id } => {
                 format!("Sacrifice ({})", obj(*object_id))
+            }
+            DebugAction::Discard { object_id } => {
+                format!("Discard ({})", obj(*object_id))
             }
             DebugAction::Reveal { player_id, count } => {
                 format!("Reveal (top {} of {})", count, player_label(*player_id))
@@ -2644,6 +2656,21 @@ mod tests {
             let json = serde_json::to_string(&action).unwrap();
             assert_eq!(serde_json::from_str::<DebugAction>(&json).unwrap(), action);
         }
+    }
+
+    /// R11: the wire shape of the sandbox discard action, pinned for the
+    /// TypeScript mirror.
+    #[test]
+    fn debug_discard_wire_shape() {
+        let discard = DebugAction::Discard {
+            object_id: ObjectId(7),
+        };
+        assert_eq!(
+            serde_json::to_value(&discard).unwrap(),
+            serde_json::json!({ "type": "Discard", "data": { "object_id": 7 } })
+        );
+        let json = serde_json::to_string(&discard).unwrap();
+        assert_eq!(serde_json::from_str::<DebugAction>(&json).unwrap(), discard);
     }
 
     #[test]
