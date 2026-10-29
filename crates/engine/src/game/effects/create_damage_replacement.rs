@@ -377,7 +377,8 @@ pub fn resolve(
             // per-arm phasing decision is "keep the gate, vacuous" here — the host IS
             // the damage recipient, and a phased-out permanent cannot be dealt damage.
             if let Some(obj) = state.objects.get_mut(&host_id) {
-                obj.install_resolution_replacement(shield);
+                obj.install_resolution_replacement(shield)
+                    .map_err(|error| EffectError::InvalidParam(error.into()))?;
             }
         }
         Some(TargetRef::Player(player)) => {
@@ -414,7 +415,8 @@ pub fn resolve(
                 // PRE-EXISTING CR 113.7a divergence. Latching the player destination
                 // does not repair this object-hosted lifetime limitation.
                 if let Some(obj) = state.objects.get_mut(&ability.source_id) {
-                    obj.install_resolution_replacement(shield);
+                    obj.install_resolution_replacement(shield)
+                        .map_err(|error| EffectError::InvalidParam(error.into()))?;
                 }
             } else {
                 // CR 109.4 + CR 113.8 + CR 614.1a: Anchor the installing controller so a

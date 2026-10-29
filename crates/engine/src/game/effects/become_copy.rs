@@ -208,7 +208,7 @@ pub(crate) fn apply_precomputed_copy_values(
     let folded = cda_pruning.all_definitions_classified
         && fold_admitted_copy_exceptions_into_values(
             &mut values,
-            state.objects.get(&source_id),
+            state.entering_or_live_object(source_id),
             &layered_operations,
             &state.all_creature_types,
         );
@@ -223,11 +223,10 @@ pub(crate) fn apply_precomputed_copy_values(
 
     let recipient = ObjectIncarnationRef::from_object(
         state
-            .objects
-            .get(&recipient_id)
+            .entering_or_live_object(recipient_id)
             .ok_or(EffectError::ObjectNotFound(recipient_id))?,
     );
-    state.add_transient_continuous_effect_with_bindings(
+    let installed_id = state.add_transient_continuous_effect_with_bindings(
         source_id,
         controller,
         duration,
@@ -240,6 +239,39 @@ pub(crate) fn apply_precomputed_copy_values(
             granting_object: None,
         },
     );
+
+    if state
+        .liminal_entries
+        .get(&recipient_id)
+        .is_some_and(|entry| entry.object.is_token_projection())
+    {
+        if let Some(installed_id) = installed_id {
+            crate::game::layers::apply_installed_copy_to_liminal_entry(
+                state,
+                recipient_id,
+                installed_id,
+            );
+            let owner = crate::types::ability::CopyEffectInstanceRef {
+                continuous_effect_id: installed_id,
+                modification_index: 0,
+            };
+            let counters = entry_exception_counters(
+                state,
+                source_id,
+                controller,
+                recipient_id,
+                &additional_modifications,
+            )
+            .collect();
+            let entry = state
+                .liminal_entries
+                .get_mut(&recipient_id)
+                .expect("selected copy recipient");
+            entry.installed_copy_effects.push(owner);
+            entry.copy_exception_counters = Some((owner, counters));
+        }
+        return Ok(());
+    }
 
     // CR 707.9f: "Some exceptions to the copying process apply only if the
     // copy is or has certain characteristics" — flush the layer re-evaluation
@@ -327,8 +359,7 @@ pub(crate) fn entry_exception_counters<'a>(
         }
         let gate_passes = if_type.is_none_or(|core_type| {
             state
-                .objects
-                .get(&recipient_id)
+                .entering_or_live_object(recipient_id)
                 .is_some_and(|object| object.card_types.core_types.contains(core_type))
         });
         gate_passes.then(|| (counter_type.clone(), count))

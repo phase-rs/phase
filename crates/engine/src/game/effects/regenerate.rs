@@ -90,7 +90,8 @@ pub fn resolve(
             // `destroy_applier` marks it `is_consumed` in place, and a second copy
             // in base would be re-seeded over the consumed one on the next pass,
             // producing infinite regeneration.
-            obj.install_resolution_replacement(shield);
+            obj.install_resolution_replacement(shield)
+                .map_err(|error| EffectError::InvalidParam(error.into()))?;
         }
     }
 

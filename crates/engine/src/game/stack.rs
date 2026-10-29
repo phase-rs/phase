@@ -11664,6 +11664,7 @@ mod tests {
 
             state.pending_combat_lifelink =
                 Some(Box::new(crate::types::game_state::PendingCombatLifelink {
+                    prevention_opportunity: Default::default(),
                     replacement_work: None,
                     remaining: std::collections::VecDeque::from(vec![
                         crate::types::game_state::PendingLifelinkGain {

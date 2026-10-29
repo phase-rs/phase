@@ -2145,7 +2145,8 @@ mod tests {
             obj.base_characteristics_initialized = true;
             obj.base_replacement_definitions = Arc::new(vec![printed_def()]);
             obj.replacement_definitions = vec![printed_def()].into();
-            obj.install_resolution_replacement(resolution_shield());
+            obj.install_resolution_replacement(resolution_shield())
+                .expect("fixture installation");
             let mut back = snapshot_object_face(obj);
             back.name = "Back Face".to_string();
             obj.back_face = Some(back);

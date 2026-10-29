@@ -1474,6 +1474,8 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             state.liminal_entries.insert(
                 token_id,
                 LiminalEntry {
+                    installed_copy_effects: Vec::new(),
+                    copy_exception_counters: None,
                     creation_frame,
                     instructions,
                     // CR 111.1: the projection this entry will create is a
@@ -1545,6 +1547,9 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                     created_ids = state.last_created_token_ids.clone();
                 }
                 crate::game::replacement::ReplacementResult::Prevented => {
+                    state
+                        .abandon_liminal_token_entry(token_id)
+                        .expect("prevented entry owns its selected copies");
                     state.liminal_entries.remove(&token_id);
                 }
                 crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
@@ -3094,9 +3099,10 @@ pub(crate) mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, AdditionalCostPaymentSource, ContinuousModification,
-        ControllerRef, CostPaidObjectSnapshot, Effect, FilterProp, ObjectScope, PtValue,
-        QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition, ReplacementMode,
-        RoundingMode, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        ControllerRef, CopyTargetPurpose, CostPaidObjectSnapshot, Duration, Effect, FilterProp,
+        ObjectScope, PtValue, QuantityExpr, QuantityModification, QuantityRef,
+        ReplacementDefinition, ReplacementMode, RoundingMode, TargetFilter, TargetRef, TypeFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::PrintedCardRef;
@@ -6122,13 +6128,19 @@ pub(crate) mod tests {
             .objects
             .get(&liminal_id)
             .expect("liminal token should commit after choice");
-        assert_eq!(token.name, "Mishra's Warform");
+        assert_eq!(token.name, "Silver Myr");
         assert_eq!(token.base_name, "Mishra's Warform");
-        assert_eq!(token.power, Some(4));
-        assert_eq!(token.toughness, Some(4));
+        assert_eq!(token.power, Some(1));
+        assert_eq!(token.base_power, Some(4));
+        assert_eq!(token.toughness, Some(1));
+        assert_eq!(token.base_toughness, Some(4));
         assert!(token.card_types.core_types.contains(&CoreType::Artifact));
         assert!(token.card_types.core_types.contains(&CoreType::Creature));
-        assert!(token.card_types.subtypes.contains(&"Construct".to_string()));
+        assert!(token.card_types.subtypes.contains(&"Myr".to_string()));
+        assert!(token
+            .base_card_types
+            .subtypes
+            .contains(&"Construct".to_string()));
     }
 
     /// CR 122.1 + CR 614.1c: AddCounterOnEnter with matching `if_type` places
@@ -8394,182 +8406,1489 @@ pub(crate) mod tests {
             .contains(&TargetRef::Object(gift_id)));
         assert_eq!(state.objects[&gift_id].controller, PlayerId(1));
     }
-    #[test]
-    fn current_liminal_copy_counter_emit_keeps_exact_creation_owner_through_reload() {
-        let mut state = GameState::new_two_player(42);
-        let source_id = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Mishra, Eminent One".to_string(),
-            Zone::Battlefield,
-        );
-        let mirror_id = create_object(
-            &mut state,
-            CardId(2),
-            PlayerId(0),
-            "Cursed Mirror".to_string(),
-            Zone::Battlefield,
-        );
-        let target_id = create_object(
-            &mut state,
-            CardId(3),
-            PlayerId(0),
-            "Silver Myr".to_string(),
-            Zone::Battlefield,
-        );
-        {
-            let mirror = state.objects.get_mut(&mirror_id).unwrap();
-            mirror.base_card_types = CardType {
-                supertypes: vec![],
-                core_types: vec![CoreType::Artifact],
-                subtypes: vec![],
+    fn liminal_copy_reader_forms(state: &GameState) -> Vec<GameState> {
+        use crate::types::game_state::{PersistedGameState, TrustedGameStateEnvelope};
+        use crate::types::resolution::ResolutionFrame;
+        let mut forms = vec![
+            state.clone(),
+            serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap(),
+            serde_json::from_value::<TrustedGameStateEnvelope>(
+                serde_json::to_value(TrustedGameStateEnvelope::capture(state.clone())).unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+            PersistedGameState::capture(state.clone())
+                .into_game_state()
+                .unwrap(),
+            serde_json::from_value::<ResolutionStateWire>(
+                serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+        ];
+        let mut legacy = serde_json::to_value(state).unwrap();
+        legacy.as_object_mut().unwrap().remove("resolution_stack");
+        legacy["resolution_state_version"] = serde_json::json!(1);
+        for frame in state.resolution_stack.iter() {
+            let (field, payload) = match frame {
+                ResolutionFrame::CopyToken(pending) => (
+                    "pending_copy_token_resolution",
+                    serde_json::to_value(pending).unwrap(),
+                ),
+                ResolutionFrame::PostReplacement(pending) => (
+                    "post_replacement_drains",
+                    serde_json::to_value(pending).unwrap(),
+                ),
+                ResolutionFrame::AbilityContinuation(pending) => (
+                    "pending_continuation",
+                    serde_json::to_value(&pending.pending).unwrap(),
+                ),
+                ResolutionFrame::CounterAdditions(pending) => (
+                    "pending_counter_additions",
+                    serde_json::to_value(pending).unwrap(),
+                ),
+                ResolutionFrame::SpellResolution(pending) => (
+                    "pending_spell_resolution",
+                    serde_json::to_value(pending).unwrap(),
+                ),
+                other => panic!(
+                    "this bounded copy fixture must retain an authentic v1 carrier for {:?}",
+                    other.kind()
+                ),
             };
-            mirror.card_types = mirror.base_card_types.clone();
-            let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
-                .mode(ReplacementMode::Optional { decline: None })
-                .valid_card(TargetFilter::SelfRef)
-                .destination_zone(Zone::Battlefield)
-                .execute(AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::BecomeCopy {
-                        target: TargetFilter::Typed(TypedFilter::creature()),
-                        recipient: crate::types::ability::CopyRecipient::Source,
-                        duration: None,
-                        mana_value_limit: None,
-                        additional_modifications: Vec::new(),
-                    },
-                ));
-            mirror.replacement_definitions.push(replacement.clone());
-            Arc::make_mut(&mut mirror.base_replacement_definitions).push(replacement);
-        }
-        {
-            let target = state.objects.get_mut(&target_id).unwrap();
-            target.base_card_types = CardType {
-                supertypes: vec![],
-                core_types: vec![CoreType::Artifact, CoreType::Creature],
-                subtypes: vec!["Myr".to_string()],
-            };
-            target.card_types = target.base_card_types.clone();
-            target.base_power = Some(1);
-            target.power = Some(1);
-            target.base_toughness = Some(1);
-            target.toughness = Some(1);
-        }
-
-        let oracle = "create a token that's a copy of target noncreature artifact you control, except its name is ~'s Warform and it's a 4/4 Construct artifact creature in addition to its other types";
-        let mut ctx = crate::parser::oracle_ir::context::ParseContext {
-            card_name: Some("Mishra, Eminent One".to_string()),
-            ..Default::default()
-        };
-        let effect =
-            crate::parser::oracle_effect::try_parse_token(&oracle.to_lowercase(), oracle, &mut ctx)
-                .expect("Mishra token-copy text should parse");
-
-        let mut events = Vec::new();
-        let mut ability = ResolvedAbility::new(
-            effect,
-            vec![TargetRef::Object(mirror_id)],
-            source_id,
-            PlayerId(0),
-        );
-        ability.sub_ability = Some(Box::new(cleanup_tail(source_id)));
-        resolve(&mut state, &ability, &mut events).unwrap();
-
-        let WaitingFor::ReplacementChoice { .. } = state.waiting_for.clone() else {
-            panic!(
-                "expected optional liminal enter-as-copy ReplacementChoice, got {:?}",
-                state.waiting_for
+            assert!(
+                legacy.get(field).is_none_or(serde_json::Value::is_null),
+                "v1 has exactly one owning {field}"
             );
-        };
-        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
-            .expect("accepting optional enter-as-copy replacement should resolve");
+            legacy[field] = payload;
+        }
+        forms.push(
+            serde_json::from_value::<ResolutionStateWire>(legacy)
+                .unwrap()
+                .into_game_state(),
+        );
+        for version in [2, 3, 4] {
+            let mut wire =
+                serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap();
+            wire["resolution_state_version"] = serde_json::json!(version);
+            forms.push(
+                serde_json::from_value::<ResolutionStateWire>(wire)
+                    .unwrap()
+                    .into_game_state(),
+            );
+        }
+        forms
+    }
 
+    const PRINTED_MISHRA: &str = "At the beginning of combat on your turn, create a token that's a copy of target noncreature artifact you control, except its name is Mishra's Warform and it's a 4/4 Construct artifact creature in addition to its other types. It gains haste until end of turn. Sacrifice it at the beginning of the next end step.";
+    const PRINTED_CURSED_MIRROR: &str = "{T}: Add {R}.\nAs this artifact enters, you may have it become a copy of any creature on the battlefield until end of turn, except it has haste.";
+    const PRINTED_GHAVE: &str = "Ghave enters with five +1/+1 counters on it.\n{1}, Remove a +1/+1 counter from a creature you control: Create a 1/1 green Saproling creature token.\n{1}, Sacrifice a creature: Put a +1/+1 counter on target creature.";
+
+    #[test]
+    fn printed_mishra_mirror_selected_entry_retains_finite_copy_counter_pause_and_cleanup() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::phase::Phase;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mishra = scenario
+            .add_creature_from_oracle(P0, "Mishra, Eminent One", 5, 4, PRINTED_MISHRA)
+            .id();
+        let mirror = scenario
+            .add_artifact_from_oracle(P0, "Cursed Mirror", PRINTED_CURSED_MIRROR)
+            .id();
+        let donor = scenario
+            .add_creature_from_oracle(P1, "Silver Myr", 1, 1, "{T}: Add {U}.")
+            .as_artifact()
+            .with_subtypes(vec!["Myr"])
+            .id();
+        for player in [P0, P1] {
+            scenario.with_library_top(player, &["Reserve", "Reserve", "Reserve"]);
+        }
+        let mut runner = scenario.build();
+        runner.advance_to_phase(Phase::BeginCombat);
+        for _ in 0..20 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::TriggerTargetSelection { .. } => {
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(TargetRef::Object(mirror)),
+                        })
+                        .unwrap();
+                }
+                WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                _ => break,
+            }
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ));
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .unwrap();
         let WaitingFor::CopyTargetChoice {
-            source_id: liminal_id,
+            source_id: entrant,
+            purpose:
+                crate::types::ability::CopyTargetPurpose::BecomeCopy {
+                    continuation: Some(selected),
+                },
             valid_targets,
             ..
-        } = state.waiting_for.clone()
+        } = &runner.state().waiting_for
         else {
-            panic!(
-                "expected liminal CopyTargetChoice, got {:?}",
-                state.waiting_for
-            );
+            panic!("printed Mirror must choose before birth");
         };
+        let entrant = *entrant;
+        assert!(valid_targets.contains(&donor));
         assert!(
-            state.liminal_entries.contains_key(&liminal_id),
-            "copy choice source must be the uncommitted liminal token"
+            matches!(
+                selected.effect,
+                Effect::BecomeCopy {
+                    duration: Some(Duration::UntilEndOfTurn),
+                    ..
+                }
+            ) || selected.duration == Some(Duration::UntilEndOfTurn)
         );
-        assert!(
-            !state.objects.contains_key(&liminal_id),
-            "liminal token must not be committed before the copy target choice"
-        );
-        assert!(valid_targets.contains(&target_id));
-        install_creation_fixture_replacements(&mut state, CreationPauseCase::Counter);
-        state = serde_json::from_value::<ResolutionStateWire>(
-            serde_json::to_value(ResolutionStateWire::from_game_state(state)).unwrap(),
-        )
-        .unwrap()
-        .into_game_state();
+        assert!(!runner.state().objects.contains_key(&entrant));
+        install_creation_fixture_replacements(runner.state_mut(), CreationPauseCase::Counter);
+        let pending = runner.state().clone();
+        for viewer in [Some(P0), Some(P1), None] {
+            let filtered = viewer
+                .map(|viewer| crate::game::visibility::filter_state_for_viewer(&pending, viewer))
+                .unwrap_or_else(|| {
+                    crate::game::visibility::filter_state_for_unseated_viewer(&pending)
+                });
+            assert!(matches!(
+                filtered.waiting_for,
+                WaitingFor::CopyTargetChoice {
+                    purpose: CopyTargetPurpose::BecomeCopy { continuation: None },
+                    ..
+                }
+            ));
+            assert!(matches!(
+                pending.waiting_for,
+                WaitingFor::CopyTargetChoice {
+                    purpose: CopyTargetPurpose::BecomeCopy {
+                        continuation: Some(_)
+                    },
+                    ..
+                }
+            ));
+        }
+        let mut legacy_selected = serde_json::to_value(&pending).unwrap();
+        legacy_selected["waiting_for"]["data"]["purpose"]
+            .as_object_mut()
+            .unwrap()
+            .remove("continuation");
+        let mut irrecoverable = pending.clone();
+        if let WaitingFor::CopyTargetChoice {
+            purpose: CopyTargetPurpose::BecomeCopy { continuation },
+            ..
+        } = &mut irrecoverable.waiting_for
+        {
+            *continuation = None;
+        }
+        irrecoverable
+            .active_post_replacement_drains_mut()
+            .unwrap()
+            .resident_mut()
+            .unwrap()
+            .applied
+            .clear();
+        let invalid_wire = serde_json::to_value(&irrecoverable).unwrap();
+        let unchanged = invalid_wire.clone();
+        assert!(serde_json::from_value::<GameState>(invalid_wire.clone()).is_err(), "a reached legacy selected prompt with no original occurrence proof cannot invent a lifetime");
+        assert_eq!(invalid_wire, unchanged);
+        let recovered: GameState = serde_json::from_value(legacy_selected).unwrap();
+        assert!(matches!(
+            recovered.waiting_for,
+            WaitingFor::CopyTargetChoice {
+                purpose: CopyTargetPurpose::BecomeCopy {
+                    continuation: Some(_)
+                },
+                ..
+            }
+        ));
+        let mut reader_forms = liminal_copy_reader_forms(&pending);
+        reader_forms.push(recovered);
+        for state in reader_forms {
+            let mut runner = GameRunner::from_state(state);
+            let result = runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(donor)),
+                })
+                .unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { player: P0, .. }
+            ));
+            assert!(runner.state().delayed_triggers.is_empty());
+            let counter_pending = runner.state().pending_replacement.as_ref().unwrap();
+            assert!(matches!(
+                counter_pending.proposed,
+                ProposedEvent::AddCounter { count: 1, .. }
+            ));
+            assert_eq!(counter_pending.candidates.len(), 2);
+            let plus = counter_pending
+                .candidates
+                .iter()
+                .position(|id| runner.state().objects[&id.source].name == "Plus counters")
+                .unwrap();
+            let entry_events = result.events;
+            let counter_pause = runner.state().clone();
+            // Replay the actual installed-copy/birth prefix from the saved pre-answer
+            // state. The birth retains the original Warform recipe while the earlier
+            // installed effect determines the entry snapshot's Silver Myr identity.
+            let mut replay = pending.clone();
+            replay.liminal_entries.clear();
+            replay.pending_liminal_entry_resume = None;
+            *replay.resolution_stack = Default::default();
+            replay.waiting_for = WaitingFor::Priority { player: P0 };
+            for entry in counter_pause
+                .resolved_rules_journal
+                .entries()
+                .iter()
+                .skip(pending.resolved_rules_journal.entries().len())
+            {
+                match &entry.command {
+                    Some(
+                        crate::types::resolved_commands::ResolvedRulesCommand::ContinuousEffect(
+                            edit,
+                        ),
+                    ) => {
+                        replay.apply_resolved_continuous_effect_edit(edit).unwrap();
+                    }
+                    Some(crate::types::resolved_commands::ResolvedRulesCommand::TokenCreation(
+                        command,
+                    )) => {
+                        crate::game::effects::token::apply_resolved_token_creation(
+                            &mut replay,
+                            command,
+                        )
+                        .unwrap();
+                    }
+                    _ => {}
+                }
+            }
+            let replayed = &replay.objects[&entrant];
+            assert_eq!(
+                (replayed.name.as_str(), replayed.base_name.as_str()),
+                ("Silver Myr", "Mishra's Warform")
+            );
+            assert_eq!(
+                replayed.layer1_copy_effect,
+                counter_pause.objects[&entrant].layer1_copy_effect
+            );
+            assert_eq!(replay.next_object_id, counter_pause.next_object_id);
+            assert_eq!(replay.zone_changes_this_turn.iter().filter(|entry| entry.object_id == entrant && entry.to_zone == Zone::Battlefield).count(), 1);
+            for state in liminal_copy_reader_forms(&counter_pause) {
+                let mut resumed = GameRunner::from_state(state);
+                let result = resumed
+                    .act(GameAction::ChooseReplacement { index: plus })
+                    .unwrap();
+                crate::game::layers::flush_layers(resumed.state_mut());
+                let token = &resumed.state().objects[&entrant];
+                assert_eq!(
+                    (token.name.as_str(), token.power, token.toughness),
+                    ("Silver Myr", Some(5), Some(5))
+                );
+                assert_eq!(
+                    (
+                        token.base_name.as_str(),
+                        token.base_power,
+                        token.base_toughness
+                    ),
+                    ("Mishra's Warform", Some(4), Some(4))
+                );
+                assert!(token.has_keyword(&Keyword::Haste));
+                assert!(token.card_types.subtypes.contains(&"Myr".into()));
+                let body = resumed
+                    .state()
+                    .zone_changes_this_turn
+                    .iter()
+                    .find(|record| {
+                        record.object_id == entrant && record.to_zone == Zone::Battlefield
+                    })
+                    .unwrap();
+                assert_eq!(body.name, "Silver Myr");
+                assert_eq!(entry_events.iter().chain(result.events.iter()).filter(|event| matches!(event, GameEvent::TokenCreated { object_id, .. } if *object_id == entrant)).count(), 1);
+                let delayed = resumed
+                    .state()
+                    .delayed_triggers
+                    .iter()
+                    .find(|trigger| trigger.source_id == mishra)
+                    .unwrap();
+                assert_eq!(
+                    delayed.ability.target_incarnations,
+                    vec![ObjectIncarnationRef::from_object(token)]
+                );
+                assert!(resumed.state().resolution_stack.is_empty());
+                for _ in 0..100 {
+                    if resumed.state().phase == Phase::End && !resumed.state().stack.is_empty() {
+                        break;
+                    }
+                    let action = match resumed.state().waiting_for {
+                        WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                            attacks: vec![],
+                            bands: vec![],
+                        },
+                        WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        },
+                        _ => GameAction::PassPriority,
+                    };
+                    resumed.act(action).unwrap();
+                }
+                assert_eq!(resumed.state().phase, Phase::End);
+                resumed.advance_until_stack_empty();
+                assert!(!resumed.state().battlefield.contains(&entrant));
+                assert_eq!(resumed.state().objects[&donor].zone, Zone::Battlefield);
+            }
+        }
+    }
 
-        let copied_entry = apply_as_current(
+    #[test]
+    fn printed_mirror_cast_acquires_ghave_counters_before_sba_and_expires_to_artifact_base() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        for (ghave, extra_static) in [(true, false), (false, false), (true, true), (false, true)] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let mirror = scenario
+                .add_artifact_to_hand_from_oracle(P0, "Cursed Mirror", PRINTED_CURSED_MIRROR)
+                .id();
+            let donor = if ghave {
+                {
+                    let id = scenario
+                        .add_creature_from_oracle(P1, "Ghave, Guru of Spores", 0, 0, PRINTED_GHAVE)
+                        .id();
+                    scenario.with_counter(id, CounterType::Plus1Plus1, 5);
+                    id
+                }
+            } else {
+                scenario
+                    .add_creature_from_oracle(P1, "Silver Myr", 1, 1, "{T}: Add {U}.")
+                    .as_artifact()
+                    .id()
+            };
+            if extra_static {
+                scenario
+                    .add_artifact_from_oracle(P0, "Synthetic independent entry-counter static", "")
+                    .with_static_definition(
+                        StaticDefinition::new(
+                            crate::types::statics::StaticMode::EntersWithAdditionalCounters {
+                                counter_type: CounterType::Plus1Plus1,
+                                count: 1,
+                            },
+                        )
+                        .affected(TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::You),
+                        )),
+                    )
+                    .id();
+            }
+            let mut runner = scenario.build();
+            runner.cast(mirror).commit();
+            for _ in 0..8 {
+                if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .unwrap();
+            assert!(
+                matches!(&runner.state().waiting_for, WaitingFor::CopyTargetChoice { valid_targets, .. } if valid_targets.contains(&donor))
+            );
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(donor)),
+                })
+                .unwrap();
+            crate::game::layers::flush_layers(runner.state_mut());
+            assert_eq!(runner.state().objects[&mirror].zone, Zone::Battlefield);
+            assert_eq!(
+                runner.state().objects[&mirror]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0),
+                (if ghave { 5 } else { 0 }) + if extra_static { 1 } else { 0 }
+            );
+            assert_eq!(
+                runner.state().objects[&mirror].power,
+                Some((if ghave { 5 } else { 1 }) + if extra_static { 1 } else { 0 })
+            );
+            assert!(runner.state().objects[&mirror].has_keyword(&Keyword::Haste));
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().resolution_stack.is_empty());
+            let mut restored =
+                GameRunner::from_state(liminal_copy_reader_forms(runner.state()).remove(1));
+            crate::game::turns::execute_cleanup(restored.state_mut(), &mut Vec::new());
+            crate::game::layers::flush_layers(restored.state_mut());
+            let object = &restored.state().objects[&mirror];
+            assert_eq!(object.name, "Cursed Mirror");
+            assert_eq!(
+                (
+                    object.base_power,
+                    object.base_toughness,
+                    object.power,
+                    object.toughness
+                ),
+                (None, None, None, None)
+            );
+            assert_eq!(object.card_types.core_types, vec![CoreType::Artifact]);
+            assert!(!object.has_keyword(&Keyword::Haste));
+        }
+    }
+
+    fn synthetic_liminal_selected_copy_prompt(
+        duration: Duration,
+        exceptions: Vec<ContinuousModification>,
+    ) -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(1091);
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        let source = creation_test_source(
             &mut state,
-            GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(target_id)),
+            "Synthetic original copy body",
+            vec![CoreType::Artifact],
+            vec![],
+            4,
+            4,
+        );
+        let copy = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .mode(ReplacementMode::Optional { decline: None })
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::BecomeCopy {
+                    target: TargetFilter::Any,
+                    recipient: crate::types::ability::CopyRecipient::Source,
+                    duration: Some(duration),
+                    mana_value_limit: None,
+                    additional_modifications: exceptions,
+                },
+            ));
+        let object = state.objects.get_mut(&source).unwrap();
+        object.replacement_definitions.push(copy.clone());
+        object.base_replacement_definitions = Arc::new(vec![copy]);
+        let mut ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
             },
-        )
-        .expect("copy target choice should resolve");
-        events.extend(copied_entry.events);
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(cleanup_tail(source)));
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
         assert!(matches!(
             state.waiting_for,
-            WaitingFor::ReplacementChoice { .. }
-        ), "liminal copied entry must reach counters: wait={:?}; pending={:?}; frames={:?}; events={events:?}",
-            state.waiting_for, state.pending_replacement, state.resolution_stack);
-        assert!(state.delayed_triggers.is_empty());
-        for _ in 0..30 {
-            if state.resolution_stack.is_empty() {
-                break;
+            WaitingFor::ReplacementChoice {
+                player: PlayerId(0),
+                ..
             }
+        ));
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
+        let WaitingFor::CopyTargetChoice {
+            source_id: entrant,
+            purpose:
+                crate::types::ability::CopyTargetPurpose::BecomeCopy {
+                    continuation: Some(_),
+                },
+            ..
+        } = state.waiting_for
+        else {
+            panic!("selected synthetic copy has its full captured instruction");
+        };
+        (state, source, entrant)
+    }
+
+    #[test]
+    fn second_selected_copy_supersedes_only_owned_counter_exception_through_every_reader() {
+        for accept in [false, true] {
+            for matching_type in [false, true] {
+                let (mut state, source, entrant) = synthetic_liminal_selected_copy_prompt(
+                    Duration::Permanent,
+                    vec![ContinuousModification::AddCounterOnEnter {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 2 },
+                        if_type: Some(if matching_type {
+                            CoreType::Creature
+                        } else {
+                            CoreType::Enchantment
+                        }),
+                    }],
+                );
+                let carrier = creation_test_source(
+                    &mut state,
+                    "Synthetic second copy carrier",
+                    vec![CoreType::Creature],
+                    vec![],
+                    1,
+                    1,
+                );
+                let parsed = crate::parser::oracle::parse_oracle_text("You may have this creature enter as a copy of any creature on the battlefield.", "Clone", &[], &["Creature".into()], &[]);
+                assert_eq!(parsed.replacements.len(), 1);
+                let carrier_object = state.objects.get_mut(&carrier).unwrap();
+                carrier_object.replacement_definitions = parsed.replacements.clone().into();
+                carrier_object.base_replacement_definitions = Arc::new(parsed.replacements);
+                let final_copy = creation_test_source(
+                    &mut state,
+                    "Final independent Myr body",
+                    vec![CoreType::Artifact, CoreType::Creature],
+                    vec!["Myr".into()],
+                    1,
+                    1,
+                );
+                state
+                    .liminal_entries
+                    .get_mut(&entrant)
+                    .unwrap()
+                    .enter_with_counters
+                    .push((CounterType::Generic("saved".into()), 3));
+                install_test_replacement(
+                    &mut state,
+                    "Independent external entry counter",
+                    ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+                        .valid_card(TargetFilter::Any)
+                        .execute(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::PutCounter {
+                                target: TargetFilter::SelfRef,
+                                count: QuantityExpr::Fixed { value: 1 },
+                                counter_type: CounterType::Generic("external".into()),
+                            },
+                        )),
+                );
+                let static_source = creation_test_source(
+                    &mut state,
+                    "Independent static counter",
+                    vec![CoreType::Enchantment],
+                    vec![],
+                    0,
+                    0,
+                );
+                let static_definition = StaticDefinition::new(
+                    crate::types::statics::StaticMode::EntersWithAdditionalCounters {
+                        counter_type: CounterType::Generic("static".into()),
+                        count: 2,
+                    },
+                )
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                ));
+                let object = state.objects.get_mut(&static_source).unwrap();
+                object.static_definitions.push(static_definition.clone());
+                object.base_static_definitions = Arc::new(vec![static_definition]);
+                // The targets were offered before these synthetic fixture objects existed.
+                if let WaitingFor::CopyTargetChoice { valid_targets, .. } = &mut state.waiting_for {
+                    valid_targets.push(carrier);
+                }
+                apply_as_current(
+                    &mut state,
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(carrier)),
+                    },
+                )
+                .unwrap();
+                assert!(
+                    matches!(
+                        state.waiting_for,
+                        WaitingFor::ReplacementChoice {
+                            player: PlayerId(0),
+                            ..
+                        }
+                    ),
+                    "the acquired same-slot copy replacement is a distinct occurrence"
+                );
+                assert!(!state.objects.contains_key(&entrant));
+                let entry = &state.liminal_entries[&entrant];
+                assert_eq!(entry.installed_copy_effects.len(), 1);
+                assert_eq!(
+                    entry
+                        .copy_exception_counters
+                        .as_ref()
+                        .unwrap()
+                        .1
+                        .iter()
+                        .map(|(_, count)| *count)
+                        .sum::<u32>(),
+                    if matching_type { 2 } else { 0 }
+                );
+                assert_eq!(
+                    entry.enter_with_counters,
+                    vec![(CounterType::Generic("saved".into()), 3)]
+                );
+                let selected = state.pending_replacement.as_ref().unwrap();
+                assert_eq!(selected.candidate_keys.len(), 1);
+                assert!(matches!(
+                    selected.candidate_keys[0],
+                    crate::types::proposed_event::AppliedReplacementKey::Object {
+                        copy_effect: Some(_),
+                        index: 0,
+                        ..
+                    }
+                ));
+                let mut old = serde_json::to_value(&state).unwrap();
+                let old_entry = old["liminal_entries"][entrant.0.to_string()]
+                    .as_object_mut()
+                    .unwrap();
+                old_entry.remove("installed_copy_effects");
+                old_entry.remove("copy_exception_counters");
+                let recovered: GameState = serde_json::from_value(old).unwrap();
+                assert_eq!(
+                    recovered.liminal_entries[&entrant].installed_copy_effects,
+                    entry.installed_copy_effects
+                );
+                assert_eq!(
+                    recovered.liminal_entries[&entrant].copy_exception_counters,
+                    entry.copy_exception_counters
+                );
+                let mut reader_forms = liminal_copy_reader_forms(&state);
+                reader_forms.push(recovered);
+                for mut restored in reader_forms {
+                    assert!(matches!(
+                        restored.waiting_for,
+                        WaitingFor::ReplacementChoice {
+                            player: PlayerId(0),
+                            ..
+                        }
+                    ));
+                    apply_as_current(
+                        &mut restored,
+                        GameAction::ChooseReplacement {
+                            index: usize::from(!accept),
+                        },
+                    )
+                    .unwrap();
+                    if accept {
+                        assert!(
+                            matches!(&restored.waiting_for, WaitingFor::CopyTargetChoice { valid_targets, .. } if valid_targets.contains(&final_copy))
+                        );
+                        apply_as_current(
+                            &mut restored,
+                            GameAction::ChooseTarget {
+                                target: Some(TargetRef::Object(final_copy)),
+                            },
+                        )
+                        .unwrap();
+                    }
+                    crate::game::layers::flush_layers(&mut restored);
+                    let token = &restored.objects[&entrant];
+                    assert_eq!(
+                        token
+                            .counters
+                            .get(&CounterType::Plus1Plus1)
+                            .copied()
+                            .unwrap_or(0),
+                        if matching_type && !accept { 2 } else { 0 }
+                    );
+                    for (kind, count) in [("saved", 3), ("external", 1), ("static", 2)] {
+                        assert_eq!(
+                            token
+                                .counters
+                                .get(&CounterType::Generic(kind.into()))
+                                .copied(),
+                            Some(count)
+                        );
+                    }
+                    assert_eq!(token.base_name, "Synthetic original copy body");
+                    assert_eq!(
+                        token.name,
+                        if accept {
+                            "Final independent Myr body"
+                        } else {
+                            "Synthetic second copy carrier"
+                        }
+                    );
+                    assert!(restored.resolution_stack.is_empty());
+                    assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
+                    let delayed = restored
+                        .delayed_triggers
+                        .iter()
+                        .find(|trigger| trigger.source_id == source)
+                        .unwrap();
+                    assert_eq!(
+                        delayed.ability.target_incarnations,
+                        vec![ObjectIncarnationRef::from_object(token)]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selected_unborn_copy_cancellation_is_exact_for_permanent_and_finite_no_host_and_prevention()
+    {
+        use crate::types::resolved_commands::{ResolvedContinuousEffectEdit, ResolvedRulesCommand};
+        for duration in [Duration::Permanent, Duration::UntilEndOfTurn] {
+            for no_host in [false, true] {
+                let (mut state, source, entrant) =
+                    synthetic_liminal_selected_copy_prompt(duration.clone(), vec![]);
+                let donor = creation_test_source(
+                    &mut state,
+                    "Selected cancellation donor",
+                    if no_host {
+                        vec![CoreType::Enchantment]
+                    } else {
+                        vec![CoreType::Artifact]
+                    },
+                    if no_host { vec!["Aura".into()] } else { vec![] },
+                    1,
+                    1,
+                );
+                if no_host {
+                    let object = state.objects.get_mut(&donor).unwrap();
+                    object.keywords.push(Keyword::Enchant(TargetFilter::Typed(
+                        TypedFilter::creature(),
+                    )));
+                    object.base_keywords = object.keywords.clone();
+                    let copy = ReplacementDefinition::new(ReplacementEvent::Moved)
+                        .valid_card(TargetFilter::SelfRef)
+                        .destination_zone(Zone::Battlefield)
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .execute(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::BecomeCopy {
+                                target: TargetFilter::Any,
+                                recipient: crate::types::ability::CopyRecipient::Source,
+                                duration: None,
+                                mana_value_limit: None,
+                                additional_modifications: vec![],
+                            },
+                        ));
+                    object.replacement_definitions.push(copy.clone());
+                    object.base_replacement_definitions = Arc::new(vec![copy]);
+                } else {
+                    install_test_replacement(
+                        &mut state,
+                        "Later entry prevention",
+                        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+                            .valid_card(TargetFilter::Any)
+                            .quantity_modification(QuantityModification::Prevent)
+                            .mode(ReplacementMode::Optional { decline: None }),
+                    );
+                }
+                if let WaitingFor::CopyTargetChoice { valid_targets, .. } = &mut state.waiting_for {
+                    valid_targets.push(donor);
+                }
+                let mut replay = state.clone();
+                replay.objects.remove(&entrant);
+                replay.liminal_entries.clear();
+                replay.pending_liminal_entry_resume = None;
+                *replay.resolution_stack = Default::default();
+                replay.waiting_for = WaitingFor::Priority {
+                    player: PlayerId(0),
+                };
+                replay.next_object_id = entrant.0;
+                let commands_start = state.resolved_rules_journal.entries().len();
+                let independent = state.add_transient_continuous_effect(
+                    entrant,
+                    PlayerId(0),
+                    Duration::Permanent,
+                    TargetFilter::SpecificObject { id: source },
+                    vec![ContinuousModification::AddPower { value: 7 }],
+                    None,
+                );
+                apply_as_current(
+                    &mut state,
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(donor)),
+                    },
+                )
+                .unwrap();
+                assert!(matches!(
+                    state.waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ));
+                let entry = &state.liminal_entries[&entrant];
+                assert_eq!(
+                    entry.installed_copy_effects.len(),
+                    1,
+                    "positive selected installation precedes cancellation"
+                );
+                let pin = ObjectIncarnationRef::from_object(entry.object.projected());
+                let installed = state
+                    .transient_continuous_effects
+                    .iter()
+                    .find(|effect| {
+                        effect.id == entry.installed_copy_effects[0].continuous_effect_id
+                    })
+                    .unwrap();
+                assert_eq!(installed.duration, duration);
+                assert_eq!(installed.affected_recipient, Some(pin));
+                let before_cancel = state.clone();
+                let result = apply_as_current(
+                    &mut state,
+                    GameAction::ChooseReplacement {
+                        index: usize::from(no_host),
+                    },
+                )
+                .unwrap();
+                assert!(
+                    !state.objects.contains_key(&entrant) && !state.battlefield.contains(&entrant)
+                );
+                assert!(state.liminal_entries.is_empty());
+                assert!(result.events.iter().all(|event| !matches!(event, GameEvent::TokenCreated { object_id, .. } | GameEvent::ZoneChanged { object_id, .. } if *object_id == entrant)));
+                assert!(state.delayed_triggers.iter().all(|trigger| trigger
+                    .ability
+                    .target_incarnations
+                    .iter()
+                    .all(|member| member.object_id != entrant)));
+                assert!(state
+                    .transient_continuous_effects
+                    .iter()
+                    .any(|effect| Some(effect.id) == independent));
+                let retirement = state
+                    .resolved_rules_journal
+                    .entries()
+                    .iter()
+                    .find_map(|entry| match entry.command.as_ref() {
+                        Some(ResolvedRulesCommand::ContinuousEffect(edit)) => match edit.as_ref() {
+                            ResolvedContinuousEffectEdit::Retire(command)
+                                if command.abandoned_recipient == Some(pin) =>
+                            {
+                                Some(command.clone())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(retirement.effects.len(), 1);
+                assert_eq!(
+                    retirement.abandoned_next_object_id,
+                    Some(state.next_object_id)
+                );
+                for entry in state
+                    .resolved_rules_journal
+                    .entries()
+                    .iter()
+                    .skip(commands_start)
+                {
+                    if let Some(ResolvedRulesCommand::ContinuousEffect(edit)) = &entry.command {
+                        replay.apply_resolved_continuous_effect_edit(edit).unwrap();
+                    }
+                    assert!(
+                        !matches!(entry.command, Some(ResolvedRulesCommand::TokenCreation(_))),
+                        "install/cancel-only prefix contains no birth"
+                    );
+                }
+                assert_eq!(replay.next_object_id, state.next_object_id);
+                assert!(!replay.objects.contains_key(&entrant));
+                assert!(replay
+                    .transient_continuous_effects
+                    .iter()
+                    .any(|effect| Some(effect.id) == independent));
+                for malformed in 0..5 {
+                    let mut command = retirement.clone();
+                    match malformed {
+                        0 => {
+                            command.abandoned_recipient = None;
+                            command.abandoned_next_object_id = None;
+                        }
+                        1 => command.abandoned_next_object_id = None,
+                        2 => {
+                            command.abandoned_recipient =
+                                Some(ObjectIncarnationRef::of(source, pin.incarnation))
+                        }
+                        3 => command.effects.push(command.effects[0].clone()),
+                        _ => {
+                            command.effects[0].affected_recipient =
+                                Some(ObjectIncarnationRef::of(entrant, pin.incarnation + 1))
+                        }
+                    }
+                    let mut invalid = before_cancel.clone();
+                    let before = serde_json::to_value(&invalid).unwrap();
+                    assert!(invalid
+                        .apply_resolved_continuous_effect_edit(
+                            &ResolvedContinuousEffectEdit::Retire(command)
+                        )
+                        .is_err());
+                    assert_eq!(serde_json::to_value(&invalid).unwrap(), before);
+                }
+                let entry = &before_cancel.liminal_entries[&entrant];
+                let copy = entry.copy_resume.clone().unwrap();
+                let modifications = if copy.additional_modifications.is_empty() {
+                    ResolvedCopyBodyModifications::NoExceptions
+                } else {
+                    ResolvedCopyBodyModifications::Folded {
+                        modifications: copy.additional_modifications.clone(),
+                        all_creature_types: before_cancel.all_creature_types.clone(),
+                    }
+                };
+                let birth = ResolvedTokenCreationCommand {
+                    object: pin,
+                    owner: entry.object.projected().owner,
+                    entry_timestamp: entry.object.projected().timestamp,
+                    entry_turn: before_cancel.turn_number,
+                    body: ResolvedTokenBody::Copy {
+                        copy,
+                        modifications,
+                    },
+                    resulting_tapped: entry.object.projected().tapped,
+                    entry_choices: vec![],
+                    resulting_next_object_id: before_cancel.next_object_id,
+                    cause: retirement.cause,
+                };
+                let mut prior_birth = before_cancel.resolved_rules_journal.clone();
+                prior_birth.record_token_creation(birth.clone()).unwrap();
+                let unchanged = serde_json::to_value(&prior_birth).unwrap();
+                assert!(prior_birth
+                    .record_continuous_effect_retirement(retirement.clone())
+                    .is_err());
+                assert_eq!(serde_json::to_value(&prior_birth).unwrap(), unchanged);
+                let mut canceled = state.resolved_rules_journal.clone();
+                let unchanged = serde_json::to_value(&canceled).unwrap();
+                assert!(canceled.record_token_creation(birth).is_err());
+                assert_eq!(serde_json::to_value(&canceled).unwrap(), unchanged);
+                let before = serde_json::to_value(&replay).unwrap();
+                assert!(replay
+                    .apply_resolved_continuous_effect_edit(&ResolvedContinuousEffectEdit::Retire(
+                        retirement
+                    ))
+                    .is_err());
+                assert_eq!(serde_json::to_value(&replay).unwrap(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn acquired_ghave_same_slot_enters_with_its_own_five_counters_before_sba() {
+        let (mut state, _, entrant) =
+            synthetic_liminal_selected_copy_prompt(Duration::Permanent, vec![]);
+        let donor = creation_test_source(
+            &mut state,
+            "Ghave, Guru of Spores",
+            vec![CoreType::Creature],
+            vec![],
+            0,
+            0,
+        );
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            PRINTED_GHAVE,
+            "Ghave, Guru of Spores",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        assert_eq!(parsed.replacements.len(), 1);
+        let object = state.objects.get_mut(&donor).unwrap();
+        object.replacement_definitions = parsed.replacements.clone().into();
+        object.base_replacement_definitions = Arc::new(parsed.replacements);
+        object.counters.insert(CounterType::Plus1Plus1, 5);
+        if let WaitingFor::CopyTargetChoice { valid_targets, .. } = &mut state.waiting_for {
+            valid_targets.push(donor);
+        }
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(donor)),
+            },
+        )
+        .unwrap();
+        assert_eq!(state.objects[&entrant].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&entrant]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(5)
+        );
+        assert_eq!(
+            (
+                state.objects[&entrant].power,
+                state.objects[&entrant].toughness
+            ),
+            (Some(5), Some(5))
+        );
+        assert_eq!(state.objects[&entrant].base_power, Some(4));
+        assert_eq!(result.events.iter().filter(|event| matches!(event, GameEvent::TokenCreated { object_id, .. } if *object_id == entrant)).count(), 1);
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn liminal_copy_prefix_change_keeps_resolution_occurrences_and_rejects_reinstalled_candidate() {
+        use crate::types::proposed_event::{AppliedReplacementKey, ReplacementId};
+        for acquired_prefix in [0, 2] {
+            let (mut state, _, entrant) =
+                synthetic_liminal_selected_copy_prompt(Duration::Permanent, vec![]);
+            let donor = creation_test_source(
+                &mut state,
+                "Prefix replacement donor",
+                vec![CoreType::Creature],
+                vec![],
+                2,
+                2,
+            );
+            for index in 0..acquired_prefix {
+                let irrelevant = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                    .description(format!("Acquired prefix {index}"));
+                let object = state.objects.get_mut(&donor).unwrap();
+                object.replacement_definitions.push(irrelevant.clone());
+                Arc::make_mut(&mut object.base_replacement_definitions).push(irrelevant);
+            }
+            let rider = |kind: &str, count| {
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .expiry(crate::types::ability::RestrictionExpiry::EndOfTurn)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::PutCounter {
+                            target: TargetFilter::SelfRef,
+                            counter_type: CounterType::Generic(kind.into()),
+                            count: QuantityExpr::Fixed { value: count },
+                        },
+                    ))
+            };
+            let first = rider("first already applied", 1);
+            let second = rider("second eligible", 2);
+            let entry = state.liminal_entries.get_mut(&entrant).unwrap();
+            let mut projection = entry.object.projected().clone();
+            projection.install_resolution_replacement(first).unwrap();
+            projection
+                .install_resolution_replacement(second.clone())
+                .unwrap();
+            entry.object = crate::types::game_state::LiminalEntrant::Token(
+                crate::types::game_state::TokenProjection::materialize(projection),
+            );
+            let first = AppliedReplacementKey::for_event_in_state(
+                &state,
+                &ProposedEvent::TokenEntry {
+                    entry_ref: entrant,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enter_with_counters: vec![],
+                    enter_with_choices: None,
+                    applied: Default::default(),
+                },
+                ReplacementId {
+                    source: entrant,
+                    index: 1,
+                },
+            );
+            // Saved-field isolation: this earlier occurrence and its already-applied
+            // contribution are retained while the real public copy answer reseeds slots.
+            state
+                .liminal_entries
+                .get_mut(&entrant)
+                .unwrap()
+                .enter_with_counters
+                .push((CounterType::Generic("first already applied".into()), 1));
+            if let Some(crate::types::game_state::PendingLiminalEntryResume::Token {
+                event, ..
+            }) = &mut state.pending_liminal_entry_resume
+            {
+                event.applied_set_mut().insert(first);
+            }
+            state
+                .active_post_replacement_drains_mut()
+                .unwrap()
+                .resident_mut()
+                .unwrap()
+                .applied
+                .insert(first);
+            if let WaitingFor::CopyTargetChoice {
+                valid_targets,
+                purpose:
+                    crate::types::ability::CopyTargetPurpose::BecomeCopy {
+                        continuation: Some(selected),
+                    },
+                ..
+            } = &mut state.waiting_for
+            {
+                valid_targets.push(donor);
+                let mut applied = selected.replacement_applied.clone();
+                applied.insert(first);
+                selected.set_replacement_applied_recursive(applied);
+            }
+            apply_as_current(
+                &mut state,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(donor)),
+                },
+            )
+            .unwrap();
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            let pending = state.pending_replacement.as_ref().unwrap();
+            assert_eq!(pending.candidates.len(), 1);
+            assert_eq!(pending.candidates[0].index, acquired_prefix + 1);
+            let second_key = pending.candidate_keys[0];
+            assert!(matches!(
+                second_key,
+                AppliedReplacementKey::Object {
+                    index: 2,
+                    resolution_host: Some(_),
+                    copy_effect: None,
+                    ..
+                }
+            ));
+            assert!(pending.proposed.applied_set().contains(&first));
+            fn legacy_coordinates(value: &mut serde_json::Value, state: &GameState) {
+                match value {
+                    serde_json::Value::Object(map) => {
+                        if map.contains_key("replacement_definitions") {
+                            map.remove("next_resolution_replacement_installation");
+                        }
+                        if matches!(
+                            map.get("type").and_then(serde_json::Value::as_str),
+                            Some("Object" | "EntryControllerChoice")
+                        ) && map.get("resolution_host").is_some()
+                        {
+                            let key: AppliedReplacementKey =
+                                serde_json::from_value(serde_json::Value::Object(map.clone()))
+                                    .unwrap();
+                            let coordinate =
+                                crate::game::replacement::replacement_id_for_key(state, key)
+                                    .unwrap();
+                            map.insert("index".into(), serde_json::json!(coordinate.index));
+                            map.remove("resolution_host");
+                        }
+                        if map
+                            .get("origin")
+                            .is_some_and(|origin| origin.get("Resolution").is_some())
+                        {
+                            map.insert("origin".into(), serde_json::json!("Resolution"));
+                        }
+                        for child in map.values_mut() {
+                            legacy_coordinates(child, state);
+                        }
+                    }
+                    serde_json::Value::Array(values) => {
+                        for child in values {
+                            legacy_coordinates(child, state);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut old = serde_json::to_value(&state).unwrap();
+            legacy_coordinates(&mut old, &state);
+            old["pending_replacement"]
+                .as_object_mut()
+                .unwrap()
+                .remove("candidate_keys");
+            let recovered: GameState = serde_json::from_value(old).unwrap();
+            assert_eq!(
+                recovered
+                    .pending_replacement
+                    .as_ref()
+                    .unwrap()
+                    .candidate_keys,
+                pending.candidate_keys
+            );
+            assert_eq!(
+                recovered.liminal_entries[&entrant]
+                    .object
+                    .projected()
+                    .next_resolution_replacement_installation,
+                3
+            );
+            let mut reader_forms = liminal_copy_reader_forms(&state);
+            reader_forms.push(recovered);
+            for mut restored in reader_forms {
+                let mut stale = restored.clone();
+                let entry = stale.liminal_entries.get_mut(&entrant).unwrap();
+                let mut projection = entry.object.projected().clone();
+                projection.replacement_definitions.retain(|definition| {
+                    !matches!(
+                        definition.origin,
+                        crate::types::ability::ReplacementOrigin::Resolution {
+                            installation: Some(2)
+                        }
+                    )
+                });
+                projection
+                    .install_resolution_replacement(second.clone())
+                    .unwrap();
+                assert_eq!(projection.next_resolution_replacement_installation, 4);
+                entry.object = crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(projection),
+                );
+                assert!(
+                    crate::game::replacement::replacement_id_for_key(&stale, second_key).is_none()
+                );
+                let before = serde_json::to_value(&stale).unwrap();
+                assert!(
+                    apply_as_current(&mut stale, GameAction::ChooseReplacement { index: 0 })
+                        .is_err()
+                );
+                assert_eq!(serde_json::to_value(&stale).unwrap(), before);
+                apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 0 })
+                    .unwrap();
+                let token = &restored.objects[&entrant];
+                assert_eq!(
+                    token
+                        .counters
+                        .get(&CounterType::Generic("first already applied".into()))
+                        .copied(),
+                    Some(1)
+                );
+                assert_eq!(
+                    token
+                        .counters
+                        .get(&CounterType::Generic("second eligible".into()))
+                        .copied(),
+                    Some(2)
+                );
+                assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
+                assert!(restored.resolution_stack.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn current_liminal_copy_counter_emit_keeps_exact_creation_owner_through_reload() {
+        for plus_first in [true, false] {
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Mishra, Eminent One".to_string(),
+                Zone::Battlefield,
+            );
+            let mirror_id = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Cursed Mirror".to_string(),
+                Zone::Battlefield,
+            );
+            let target_id = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(0),
+                "Silver Myr".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let mirror = state.objects.get_mut(&mirror_id).unwrap();
+                mirror.base_card_types = CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Artifact],
+                    subtypes: vec![],
+                };
+                mirror.card_types = mirror.base_card_types.clone();
+                let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::BecomeCopy {
+                            target: TargetFilter::Typed(TypedFilter::creature()),
+                            recipient: crate::types::ability::CopyRecipient::Source,
+                            duration: None,
+                            mana_value_limit: None,
+                            additional_modifications: Vec::new(),
+                        },
+                    ));
+                mirror.replacement_definitions.push(replacement.clone());
+                Arc::make_mut(&mut mirror.base_replacement_definitions).push(replacement);
+            }
+            {
+                let target = state.objects.get_mut(&target_id).unwrap();
+                target.base_card_types = CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Artifact, CoreType::Creature],
+                    subtypes: vec!["Myr".to_string()],
+                };
+                target.card_types = target.base_card_types.clone();
+                target.base_power = Some(1);
+                target.power = Some(1);
+                target.base_toughness = Some(1);
+                target.toughness = Some(1);
+            }
+
+            let oracle = "create a token that's a copy of target noncreature artifact you control, except its name is ~'s Warform and it's a 4/4 Construct artifact creature in addition to its other types";
+            let mut ctx = crate::parser::oracle_ir::context::ParseContext {
+                card_name: Some("Mishra, Eminent One".to_string()),
+                ..Default::default()
+            };
+            let effect = crate::parser::oracle_effect::try_parse_token(
+                &oracle.to_lowercase(),
+                oracle,
+                &mut ctx,
+            )
+            .expect("Mishra token-copy text should parse");
+
+            let mut events = Vec::new();
+            let mut ability = ResolvedAbility::new(
+                effect,
+                vec![TargetRef::Object(mirror_id)],
+                source_id,
+                PlayerId(0),
+            );
+            ability.sub_ability = Some(Box::new(cleanup_tail(source_id)));
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            let WaitingFor::ReplacementChoice { .. } = state.waiting_for.clone() else {
+                panic!(
+                    "expected optional liminal enter-as-copy ReplacementChoice, got {:?}",
+                    state.waiting_for
+                );
+            };
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("accepting optional enter-as-copy replacement should resolve");
+
+            let WaitingFor::CopyTargetChoice {
+                source_id: liminal_id,
+                valid_targets,
+                ..
+            } = state.waiting_for.clone()
+            else {
+                panic!(
+                    "expected liminal CopyTargetChoice, got {:?}",
+                    state.waiting_for
+                );
+            };
+            assert!(
+                state.liminal_entries.contains_key(&liminal_id),
+                "copy choice source must be the uncommitted liminal token"
+            );
+            assert!(
+                !state.objects.contains_key(&liminal_id),
+                "liminal token must not be committed before the copy target choice"
+            );
+            assert!(valid_targets.contains(&target_id));
+            install_creation_fixture_replacements(&mut state, CreationPauseCase::Counter);
             state = serde_json::from_value::<ResolutionStateWire>(
                 serde_json::to_value(ResolutionStateWire::from_game_state(state)).unwrap(),
             )
             .unwrap()
             .into_game_state();
-            events.extend(
-                apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+
+            let copied_entry = apply_as_current(
+                &mut state,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target_id)),
+                },
+            )
+            .expect("copy target choice should resolve");
+            events.extend(copied_entry.events);
+            assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ), "liminal copied entry must reach counters: wait={:?}; pending={:?}; frames={:?}; events={events:?}",
+            state.waiting_for, state.pending_replacement, state.resolution_stack);
+            assert!(state.delayed_triggers.is_empty());
+            let pending = state
+                .pending_replacement
+                .as_ref()
+                .expect("the selected effective creature reaches its counter event");
+            assert!(
+                matches!(pending.proposed, ProposedEvent::AddCounter { count: 1, placement: crate::types::proposed_event::CounterPlacement::Object { object_id, actor: PlayerId(0), .. }, .. } if object_id == liminal_id)
+            );
+            assert_eq!(pending.candidates.len(), 2);
+            let named = if plus_first {
+                "Plus counters"
+            } else {
+                "Double counters"
+            };
+            let selected = pending
+                .candidates
+                .iter()
+                .position(|id| state.objects[&id.source].name == named)
+                .unwrap();
+            assert!(pending
+                .candidates
+                .iter()
+                .any(|id| state.objects[&id.source].name == "Plus counters"));
+            assert!(pending
+                .candidates
+                .iter()
+                .any(|id| state.objects[&id.source].name == "Double counters"));
+            for round in 0..30 {
+                if state.resolution_stack.is_empty() {
+                    break;
+                }
+                state = serde_json::from_value::<ResolutionStateWire>(
+                    serde_json::to_value(ResolutionStateWire::from_game_state(state)).unwrap(),
+                )
+                .unwrap()
+                .into_game_state();
+                events.extend(
+                    apply_as_current(
+                        &mut state,
+                        GameAction::ChooseReplacement {
+                            index: if round == 0 { selected } else { 0 },
+                        },
+                    )
                     .unwrap()
                     .events,
+                );
+            }
+            assert!(state.resolution_stack.is_empty());
+            assert_eq!(
+                state.delayed_triggers[0].ability.target_incarnations.len(),
+                1
             );
-        }
-        assert!(state.resolution_stack.is_empty());
-        assert_eq!(
-            state.delayed_triggers[0].ability.target_incarnations.len(),
-            1
-        );
-        assert_eq!(
-            state.delayed_triggers[0].ability.target_incarnations[0].object_id,
-            liminal_id
-        );
-        assert!(
-            state.objects[&liminal_id]
-                .counters
-                .get(&CounterType::Plus1Plus1)
-                .copied()
-                .unwrap_or(0)
-                >= 3
-        );
+            assert_eq!(
+                state.delayed_triggers[0].ability.target_incarnations[0].object_id,
+                liminal_id
+            );
+            assert_eq!(
+                state.objects[&liminal_id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0),
+                if plus_first { 4 } else { 3 }
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::TokenCreated { .. }))
+                    .count(),
+                1
+            );
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::ZoneChanged { record, .. } if record.object_id == liminal_id && record.to_zone == Zone::Battlefield)).count(), 1);
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 
-        let token = state
-            .objects
-            .get(&liminal_id)
-            .expect("liminal token should commit after choice");
-        assert_eq!(token.name, "Mishra's Warform");
-        assert_eq!(token.base_name, "Mishra's Warform");
-        assert_eq!(token.base_power, Some(4));
-        assert_eq!(token.base_toughness, Some(4));
-        assert!(token.card_types.core_types.contains(&CoreType::Artifact));
-        assert!(token.card_types.core_types.contains(&CoreType::Creature));
-        assert!(token.card_types.subtypes.contains(&"Construct".to_string()));
+            let token = state
+                .objects
+                .get(&liminal_id)
+                .expect("liminal token should commit after choice");
+            assert_eq!(token.name, "Silver Myr");
+            assert_eq!(token.power, Some(if plus_first { 5 } else { 4 }));
+            assert_eq!(token.toughness, token.power);
+            assert_eq!(token.base_name, "Mishra's Warform");
+            assert_eq!(token.base_power, Some(4));
+            assert_eq!(token.base_toughness, Some(4));
+            assert!(token.card_types.core_types.contains(&CoreType::Artifact));
+            assert!(token.card_types.core_types.contains(&CoreType::Creature));
+            assert!(token.card_types.subtypes.contains(&"Myr".to_string()));
+            assert!(token
+                .base_card_types
+                .subtypes
+                .contains(&"Construct".to_string()));
+        }
     }
 
     #[test]

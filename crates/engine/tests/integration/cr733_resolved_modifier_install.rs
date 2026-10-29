@@ -380,6 +380,8 @@ fn assert_exact_retirement_rejection(
         .find_map(|entry| entry.command.as_ref().map(|_| entry.node))
         .unwrap();
     let edit = ResolvedContinuousEffectEdit::Retire(ResolvedContinuousEffectRetirementCommand {
+        abandoned_recipient: None,
+        abandoned_next_object_id: None,
         effects,
         cause,
     });
@@ -426,6 +428,8 @@ fn exact_retirement_validates_the_whole_batch_before_any_mutation() {
         .find_map(|entry| entry.command.as_ref().map(|_| entry.node))
         .unwrap();
     let command = ResolvedContinuousEffectRetirementCommand {
+        abandoned_recipient: None,
+        abandoned_next_object_id: None,
         effects: vec![effects[2].clone(), effects[0].clone()],
         cause,
     };
@@ -550,6 +554,8 @@ fn exact_retirement_validates_the_whole_batch_before_any_mutation() {
     stale
         .apply_resolved_continuous_effect_edit(&ResolvedContinuousEffectEdit::Retire(
             ResolvedContinuousEffectRetirementCommand {
+                abandoned_recipient: None,
+                abandoned_next_object_id: None,
                 effects: vec![effects[0].clone()],
                 cause,
             },
@@ -689,6 +695,8 @@ fn continuous_effect_wire_reads_strict_legacy_and_tagged_operations() {
         })
         .unwrap();
     let retire = ResolvedContinuousEffectRetirementCommand {
+        abandoned_recipient: None,
+        abandoned_next_object_id: None,
         effects: vec![effects[0].clone()],
         cause: install.cause,
     };

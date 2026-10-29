@@ -2007,7 +2007,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             context.counter_removal_result = None;
         }
         WaitingFor::CopyTargetChoice {
-            purpose: crate::types::ability::CopyTargetPurpose::CopyTokenSource { continuation },
+            purpose:
+                crate::types::ability::CopyTargetPurpose::CopyTokenSource { continuation }
+                | crate::types::ability::CopyTargetPurpose::BecomeCopy { continuation },
             ..
         } => *continuation = None,
         WaitingFor::ChooseManaColor {
@@ -9041,6 +9043,8 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             crate::types::game_state::LiminalEntry {
+                installed_copy_effects: Vec::new(),
+                copy_exception_counters: None,
                 creation_frame: None,
                 instructions: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
@@ -13376,6 +13380,7 @@ mod tests {
         );
         state.pending_combat_lifelink =
             Some(Box::new(crate::types::game_state::PendingCombatLifelink {
+                prevention_opportunity: Default::default(),
                 replacement_work: None,
                 remaining: std::collections::VecDeque::from(vec![
                     crate::types::game_state::PendingLifelinkGain {

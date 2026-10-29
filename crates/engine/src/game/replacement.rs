@@ -5,13 +5,13 @@ use std::sync::LazyLock;
 
 use crate::types::ability::{
     filter_contains, AbilityCost, AbilityDefinition, CastingPermission, ChoiceType,
-    ChosenAttribute, CoinFlipRun, CombatDamageScope, ControllerRef, DamageModification,
-    DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope,
-    Duration, Effect, EffectScope, EntryAttackDestination, ManaSpendPermission, PermissionGrantee,
-    PostReplacementContinuation, PreventionAmount, PreventionFormula, QuantityExpr,
-    QuantityModification, RedirectionLifetime, ReplacementChoiceAuthority, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, ResolvedAbility, RoundingMode, ShieldKind,
-    TapStateChange, TargetFilter, TargetRef,
+    ChosenAttribute, CoinFlipRun, CombatDamageScope, ContinuousModification, ControllerRef,
+    DamageModification, DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope,
+    DrawReplacementScope, Duration, Effect, EffectScope, EntryAttackDestination,
+    ManaSpendPermission, PermissionGrantee, PostReplacementContinuation, PreventionAmount,
+    PreventionFormula, QuantityExpr, QuantityModification, RedirectionLifetime,
+    ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    ResolvedAbility, RoundingMode, ShieldKind, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::actions::ReplacementAutoChoice;
 use crate::types::card_type::CoreType;
@@ -1643,11 +1643,18 @@ fn replacement_choice_definition(
     state: &GameState,
     rid: ReplacementId,
 ) -> Option<&ReplacementDefinition> {
-    if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
-    } else {
-        replacement_definition_for_id(state, rid)
-    }
+    state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| retained_opportunity_member(&pending.damage_opportunity, rid))
+        .map(|(_, definition)| definition)
+        .or_else(|| {
+            if rid.source == ObjectId(0) {
+                state.pending_damage_replacements.get(rid.index)
+            } else {
+                replacement_definition_for_id(state, rid)
+            }
+        })
 }
 
 /// CR 616.1 + CR 113.7a (issue #8485): the object a CR 616.1 replacement-choice
@@ -2488,6 +2495,7 @@ fn redirect_damage_event(
     lifetime: RedirectionLifetime,
     events: &mut Vec<GameEvent>,
     captured: Option<&ReplacementDefinition>,
+    captured_key: Option<AppliedReplacementKey>,
 ) -> ApplyResult {
     // CR 614.5: only a single-opportunity shield spends itself on this event.
     let consume_after_redirect = lifetime.is_one_opportunity();
@@ -2558,8 +2566,11 @@ fn redirect_damage_event(
                 if redirected {
                     record_combat_one_shot_application(
                         state,
-                        AppliedReplacementKey::for_event(&event, rid),
+                        captured_key.unwrap_or_else(|| {
+                            AppliedReplacementKey::for_event_in_state(state, &event, rid)
+                        }),
                         source_id,
+                        captured.map(|definition| definition.shield_kind),
                     );
                 }
             }
@@ -2666,7 +2677,7 @@ fn damage_done_applier(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    damage_done_applier_with_definition(event, rid, state, events, None)
+    damage_done_applier_with_definition(event, rid, state, events, None, None)
 }
 
 fn damage_done_applier_with_definition(
@@ -2675,6 +2686,7 @@ fn damage_done_applier_with_definition(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     captured: Option<&ReplacementDefinition>,
+    captured_key: Option<AppliedReplacementKey>,
 ) -> ApplyResult {
     // CR 120.4c + CR 120.4d: a captured definition may intentionally defer
     // its life-floor modifier to damage-result delivery. Its absence of a
@@ -2687,7 +2699,8 @@ fn damage_done_applier_with_definition(
     if let Some(modification) = modification {
         // CR 510.2: identity for the combat-damage-batch prevention tally, taken
         // before the event is destructured (mirrors the Branch 2 shield path).
-        let applied_key = AppliedReplacementKey::for_event(&event, rid);
+        let applied_key = captured_key
+            .unwrap_or_else(|| AppliedReplacementKey::for_event_in_state(state, &event, rid));
         if let ProposedEvent::Damage {
             source_id,
             target,
@@ -2818,7 +2831,14 @@ fn damage_done_applier_with_definition(
             {
                 consume_prevention_shield(state, rid, None);
                 if amount > 0 && new_amount != amount {
-                    record_combat_one_shot_application(state, applied_key, source_id);
+                    record_combat_one_shot_application(
+                        state,
+                        applied_key,
+                        source_id,
+                        captured
+                            .map(|definition| definition.shield_kind)
+                            .or_else(|| shield_kind_for_rid(state, rid)),
+                    );
                 }
             }
             // CR 615.1a + CR 702.64b + CR 510.2: `PreventionMinus` is the typed
@@ -2850,7 +2870,15 @@ fn damage_done_applier_with_definition(
                 let prevented = amount.saturating_sub(new_amount);
                 if prevented > 0 {
                     let mut accumulated_in_batch = false;
-                    if !shield_rider_reflects_per_event(state, rid) {
+                    if !captured
+                        .map(|definition| {
+                            definition
+                                .runtime_execute
+                                .as_deref()
+                                .is_some_and(rider_reflects_per_event_damage_source)
+                        })
+                        .unwrap_or_else(|| shield_rider_reflects_per_event(state, rid))
+                    {
                         if let Some(tally) = state.combat_prevention_tally.as_mut() {
                             *tally.entry(applied_key).or_insert(0) += prevented as i32;
                             accumulated_in_batch = true;
@@ -2923,6 +2951,7 @@ fn damage_done_applier_with_definition(
                 lifetime,
                 events,
                 captured,
+                captured_key,
             );
         }
         return ApplyResult::Modified(event);
@@ -2934,11 +2963,19 @@ fn damage_done_applier_with_definition(
         .map(|definition| definition.shield_kind)
         .or_else(|| shield_kind_for_rid(state, rid));
 
-    let applied_key = AppliedReplacementKey::for_event(&event, rid);
+    let applied_key = captured_key
+        .unwrap_or_else(|| AppliedReplacementKey::for_event_in_state(state, &event, rid));
     // CR 615.5 + CR 120.1: A per-source-reflecting shield (Comeuppance) must NOT
     // aggregate into the combat batch tally — it fires per prevented event so
     // each reflection binds its own damage source and prevented amount.
-    let reflects_per_event = shield_rider_reflects_per_event(state, rid);
+    let reflects_per_event = captured
+        .map(|definition| {
+            definition
+                .runtime_execute
+                .as_deref()
+                .is_some_and(rider_reflects_per_event_damage_source)
+        })
+        .unwrap_or_else(|| shield_rider_reflects_per_event(state, rid));
     if let Some(ShieldKind::Prevention { amount }) = shield_kind {
         if let ProposedEvent::Damage {
             source_id,
@@ -2968,7 +3005,10 @@ fn damage_done_applier_with_definition(
             // a redirection here. It also owns the amount gate: `AllBut`/`Next`
             // shields route to `Prevent` and fall through to the ordinary
             // prevention arms below.
-            match prevention_shield_route(state, rid, amount) {
+            match captured
+                .map(|definition| prevention_shield_route_for_def(definition, amount))
+                .unwrap_or_else(|| prevention_shield_route(state, rid, amount))
+            {
                 PreventionShieldRoute::Redirect(recipient) => {
                     return redirect_damage_event(
                         state,
@@ -2983,6 +3023,7 @@ fn damage_done_applier_with_definition(
                         RedirectionLifetime::Continuous,
                         events,
                         captured,
+                        captured_key,
                     );
                 }
                 // CR 614.9: fail CLOSED. The shield carries a recipient this
@@ -3232,7 +3273,10 @@ fn consumed_replacement_applies_in_combat_batch(
             .combat_one_shot_applications
             .as_ref()
             .is_some_and(|applications| {
-                applications.contains(&(AppliedReplacementKey::for_event(event, rid), *source_id))
+                applications.contains(&(
+                    AppliedReplacementKey::for_event_in_state(state, event, rid),
+                    *source_id,
+                ))
             }),
         _ => false,
     }
@@ -3244,9 +3288,10 @@ fn record_combat_one_shot_application(
     state: &mut GameState,
     key: AppliedReplacementKey,
     damage_source: ObjectId,
+    shield_kind: Option<ShieldKind>,
 ) {
     if matches!(
-        shield_kind_for_rid(state, key.as_replacement_id()),
+        shield_kind,
         Some(ShieldKind::Prevention {
             amount: PreventionAmount::Next(_)
         })
@@ -3494,7 +3539,9 @@ fn apply_shield_counter_replacement(
             // removal until the post-batch aggregation fires exactly once.
             if let Some(tally) = state.combat_prevention_tally.as_mut() {
                 *tally
-                    .entry(AppliedReplacementKey::for_event(&event, rid))
+                    .entry(AppliedReplacementKey::for_event_in_state(
+                        state, &event, rid,
+                    ))
                     .or_insert(0) += amount as i32;
                 return Err(ApplyResult::Prevented);
             }
@@ -5504,7 +5551,7 @@ fn produce_mana_applier(
 /// a `StepEndManaScanEntry` iff it carries at least one unit with `Drop`
 /// disposition that the entry's filter accepts. CR 614.5 enforces "one
 /// opportunity per event" via the `applied` set checked by
-/// `event.already_applied(&rid)` upstream; the disposition gate here is a
+/// `event.already_applied_in_state(state, &rid)` upstream; the disposition gate here is a
 /// secondary correctness property that prevents a handler from re-acting on
 /// units it has already transformed in a prior pipeline pass.
 fn empty_mana_pool_matcher(event: &ProposedEvent, _source: ObjectId, state: &GameState) -> bool {
@@ -6245,7 +6292,7 @@ fn apply_bound_search_found_candidate(
     candidate: &BoundSearchFoundCandidate,
     events: &mut Vec<GameEvent>,
 ) -> ProposedEvent {
-    proposed.mark_applied(candidate.replacement_id);
+    proposed.mark_applied_in_state(state, candidate.replacement_id);
     let ProposedEvent::SearchFound { disposition, .. } = &mut proposed else {
         return proposed;
     };
@@ -8064,7 +8111,7 @@ fn object_replacement_candidate_applies_with_definition(
             return false;
         }
     }
-    if event.already_applied(&rid) {
+    if event.already_applied_in_state(state, &rid) {
         return false;
     }
     // CR 614.1: SearchFound definitions use the existing ChangeZone building
@@ -8608,6 +8655,8 @@ fn stage_transformed_entry_projection(
     state.liminal_entries.insert(
         entrant,
         LiminalEntry {
+            installed_copy_effects: Vec::new(),
+            copy_exception_counters: None,
             creation_frame: None,
             instructions: None,
             object: crate::types::game_state::LiminalEntrant::Card(projected),
@@ -8985,7 +9034,7 @@ fn find_applicable_replacements_in_opportunity(
         {
             let rid =
                 shield_counter_replacement_id(*object_id, ShieldCounterReplacementKind::Destroy);
-            if !event.already_applied(&rid) {
+            if !event.already_applied_in_state(&state, &rid) {
                 candidates.push(rid);
             }
         }
@@ -8996,7 +9045,7 @@ fn find_applicable_replacements_in_opportunity(
         } if *amount > 0 && object_has_shield_counter(state, *object_id) => {
             let rid =
                 shield_counter_replacement_id(*object_id, ShieldCounterReplacementKind::Damage);
-            if !event.already_applied(&rid) {
+            if !event.already_applied_in_state(&state, &rid) {
                 candidates.push(rid);
             }
         }
@@ -9013,7 +9062,7 @@ fn find_applicable_replacements_in_opportunity(
             ..
         } if object_has_finality_counter(state, *object_id) => {
             let rid = finality_counter_replacement_id(*object_id);
-            if !event.already_applied(&rid) {
+            if !event.already_applied_in_state(&state, &rid) {
                 candidates.push(rid);
             }
         }
@@ -9025,7 +9074,9 @@ fn find_applicable_replacements_in_opportunity(
     // the normal CR 616.1 ordering pipeline composes it with card effects.
     if let ProposedEvent::ZoneChange { object_id, .. } = event {
         let rid = commander_hand_or_library_return_replacement_id(*object_id);
-        if commander_hand_or_library_return_applies(state, event) && !event.already_applied(&rid) {
+        if commander_hand_or_library_return_applies(state, event)
+            && !event.already_applied_in_state(&state, &rid)
+        {
             candidates.push(rid);
         }
     }
@@ -9050,7 +9101,7 @@ fn find_applicable_replacements_in_opportunity(
         let rid = compleated_replacement_id(*object_id);
         if *count > 0
             && compleated_life_paid(state, *object_id).is_some()
-            && !event.already_applied(&rid)
+            && !event.already_applied_in_state(&state, &rid)
         {
             candidates.push(rid);
         }
@@ -9088,7 +9139,7 @@ fn find_applicable_replacements_in_opportunity(
         let mut live_keywords: Option<Vec<crate::types::keywords::Keyword>> = None;
         for kw in [GrantedEtbKeyword::Sunburst, GrantedEtbKeyword::Bloodthirst] {
             let rid = granted_etb_keyword_replacement_id(*object_id, kw);
-            if event.already_applied(&rid) {
+            if event.already_applied_in_state(&state, &rid) {
                 continue;
             }
             let live = live_keywords.get_or_insert_with(|| {
@@ -9197,7 +9248,7 @@ fn find_applicable_replacements_in_opportunity(
             let mut dredge_grant_live: Option<bool> = None;
             for object_id in state.graveyard_of(player.id).iter().copied() {
                 let rid = granted_dredge_replacement_id(object_id);
-                if event.already_applied(&rid) {
+                if event.already_applied_in_state(&state, &rid) {
                     continue;
                 }
                 // CR 616.1f: the CR 616.1 repetition takes "into account only
@@ -9272,7 +9323,7 @@ fn find_applicable_replacements_in_opportunity(
     if let ProposedEvent::Destroy { object_id, .. } = event {
         for umbra_id in umbra_armor_attachments(state, *object_id) {
             let rid = umbra_armor_replacement_id(umbra_id);
-            if !event.already_applied(&rid) {
+            if !event.already_applied_in_state(&state, &rid) {
                 candidates.push(rid);
             }
         }
@@ -9296,7 +9347,7 @@ fn find_applicable_replacements_in_opportunity(
                 .is_some_and(|skip| skip.active)
         {
             let rid = turn_scoped_combat_skip_replacement_id(*player_id);
-            if !event.already_applied(&rid) {
+            if !event.already_applied_in_state(&state, &rid) {
                 candidates.push(rid);
             }
         }
@@ -9311,10 +9362,15 @@ fn find_applicable_replacements_in_opportunity(
 
     // CR 615.8: every leg in this same opportunity can still consult a
     // definition spent by an earlier leg. Its complete original program is owned here.
-    for (key, definition) in opportunity {
+    for (slot, (key, definition)) in opportunity.iter().enumerate() {
         if matches!(key, AppliedReplacementKey::Object { .. }) {
-            let rid = key.as_replacement_id();
-            if !event.already_applied(&rid)
+            let rid = replacement_id_for_key(state, *key).unwrap_or(ReplacementId {
+                source: key.source(),
+                index: RETAINED_OPPORTUNITY_INDEX
+                    .checked_add(slot)
+                    .expect("bounded damage opportunity"),
+            });
+            if !event.applied_set().contains(key)
                 && object_replacement_candidate_applies_with_definition(
                     state,
                     event,
@@ -9381,7 +9437,7 @@ fn find_applicable_replacements_in_opportunity(
                 continue;
             }
 
-            if event.already_applied(&rid) {
+            if event.already_applied_in_state(&state, &rid) {
                 continue;
             }
 
@@ -9619,7 +9675,7 @@ fn find_applicable_replacements_in_opportunity(
                 index,
             };
             // CR 614.5: skip handlers that already applied to this event.
-            if event.already_applied(&rid) {
+            if event.already_applied_in_state(&state, &rid) {
                 continue;
             }
             // CR 614.5 secondary correctness: handler applies iff at least one
@@ -10491,7 +10547,9 @@ fn apply_single_replacement(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
-    apply_single_replacement_with_definition(state, proposed, rid, branch, registry, events, None)
+    apply_single_replacement_with_definition(
+        state, proposed, rid, branch, registry, events, None, None,
+    )
 }
 
 fn apply_single_replacement_with_definition(
@@ -10502,6 +10560,7 @@ fn apply_single_replacement_with_definition(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
     captured_definition: Option<&ReplacementDefinition>,
+    captured_key: Option<AppliedReplacementKey>,
 ) -> Result<ProposedEvent, ApplyResult> {
     // CR 703.4q + CR 614.1a: Path A carve-out for step-end empty-mana events.
     // Step-end mana handlers carry no `ReplacementDefinition` (no execute /
@@ -11055,6 +11114,7 @@ fn apply_single_replacement_with_definition(
     let replacement_applied = proposed.applied_set().clone();
     // CR 609.7b + CR 120.8: Membership requires positive damage actually changed
     // or prevented. Capture scalar provenance only; do not clone damage events.
+    let selected_shield_kind = repl_def_ref.map(|definition| definition.shield_kind.clone());
     let combat_one_shot_application =
         state
             .combat_one_shot_applications
@@ -11063,7 +11123,9 @@ fn apply_single_replacement_with_definition(
                 ProposedEvent::Damage {
                     source_id, amount, ..
                 } if *amount > 0 => Some((
-                    AppliedReplacementKey::for_event(&proposed, rid),
+                    captured_key.unwrap_or_else(|| {
+                        AppliedReplacementKey::for_event_in_state(state, &proposed, rid)
+                    }),
                     *source_id,
                     *amount,
                 )),
@@ -11081,7 +11143,9 @@ fn apply_single_replacement_with_definition(
     // as before).
     let pre_applier_event = (consume_on_apply
         && matches!(
-            shield_kind_for_rid(state, rid),
+            captured_definition
+                .map(|definition| definition.shield_kind)
+                .or_else(|| shield_kind_for_rid(state, rid)),
             Some(ShieldKind::PreventionOneShot)
         ))
     .then(|| proposed.clone());
@@ -11138,6 +11202,7 @@ fn apply_single_replacement_with_definition(
                     state,
                     events,
                     captured_definition,
+                    captured_key,
                 )
             } else {
                 (handler.applier)(proposed, rid, state, events)
@@ -11161,7 +11226,19 @@ fn apply_single_replacement_with_definition(
                                 source,
                                 index,
                                 controller,
-                            } if *source == rid.source && *index == rid.index => Some(*controller),
+                                copy_effect,
+                                resolution_host,
+                            } if (AppliedReplacementKey::Object {
+                                source: *source,
+                                index: *index,
+                                copy_effect: *copy_effect,
+                                resolution_host: *resolution_host,
+                            }) == AppliedReplacementKey::for_event_in_state(
+                                state, &new_event, rid,
+                            ) =>
+                            {
+                                Some(*controller)
+                            }
                             _ => None,
                         });
                     if let ProposedEvent::ZoneChange {
@@ -11278,7 +11355,12 @@ fn apply_single_replacement_with_definition(
                             _ => true,
                         };
                         if changed {
-                            record_combat_one_shot_application(state, key, damage_source);
+                            record_combat_one_shot_application(
+                                state,
+                                key,
+                                damage_source,
+                                selected_shield_kind,
+                            );
                         }
                     }
                 }
@@ -11348,7 +11430,12 @@ fn apply_single_replacement_with_definition(
                 if consume_on_apply {
                     mark_replacement_consumed(state, rid);
                     if let Some((key, damage_source, _)) = combat_one_shot_application {
-                        record_combat_one_shot_application(state, key, damage_source);
+                        record_combat_one_shot_application(
+                            state,
+                            key,
+                            damage_source,
+                            selected_shield_kind,
+                        );
                     }
                 }
                 // CR 615.5: A prevention effect's additional effect (e.g.
@@ -11408,7 +11495,9 @@ fn token_batch_admits(
     let mut unmarked = view.clone();
     unmarked
         .applied_set_mut()
-        .remove(&AppliedReplacementKey::for_event(view, rid));
+        .remove(&AppliedReplacementKey::for_event_in_state(
+            &state, view, rid,
+        ));
     find_applicable_replacements(state, &unmarked, registry).contains(&rid)
 }
 
@@ -11437,6 +11526,7 @@ fn apply_replacement_to_token_batches(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
     captured_definition: Option<&ReplacementDefinition>,
+    captured_key: Option<AppliedReplacementKey>,
 ) -> Result<ProposedEvent, ApplyResult> {
     let views = proposed.into_token_batch_views();
     let admits: Vec<bool> = views
@@ -11461,6 +11551,7 @@ fn apply_replacement_to_token_batches(
             registry,
             events,
             captured_definition,
+            captured_key,
         ) {
             Ok(applied) => survivors.push(applied),
             Err(ApplyResult::Prevented) => {}
@@ -11508,6 +11599,7 @@ fn apply_single_replacement_and_dirty(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
     captured_definition: Option<&ReplacementDefinition>,
+    captured_key: Option<AppliedReplacementKey>,
 ) -> Result<ProposedEvent, ApplyResult> {
     let before = proposed.clone();
     let mut result = if proposed.has_appended_token_batches() {
@@ -11519,6 +11611,7 @@ fn apply_single_replacement_and_dirty(
             registry,
             events,
             captured_definition,
+            captured_key,
         )
     } else {
         apply_single_replacement_with_definition(
@@ -11529,6 +11622,7 @@ fn apply_single_replacement_and_dirty(
             registry,
             events,
             captured_definition,
+            captured_key,
         )
     };
     // CR 614.5 normally records a replacement once per event. CR 903.9b is the
@@ -11589,9 +11683,11 @@ pub(crate) fn apply_damage_result_life_floor(
     };
     let player = *player;
     let mut probe = event.clone();
-    probe
-        .applied_set_mut()
-        .retain(|key| minimum(state, key.as_replacement_id()).is_none());
+    probe.applied_set_mut().retain(|key| {
+        replacement_id_for_key(state, *key)
+            .and_then(|id| minimum(state, id))
+            .is_none()
+    });
     let candidates = find_applicable_replacements_with_damage_source_context(
         state,
         &probe,
@@ -11669,7 +11765,7 @@ fn apply_single_replacement_and_record_opportunity(
     events: &mut Vec<GameEvent>,
     opportunity: &mut crate::types::ability::DamageOpportunity,
 ) -> Result<ProposedEvent, ApplyResult> {
-    let key = AppliedReplacementKey::for_event(&proposed, rid);
+    let key = candidate_key_in_opportunity(state, &proposed, rid, opportunity);
     let captured = opportunity
         .iter()
         .find(|(used, _)| *used == key)
@@ -11726,6 +11822,12 @@ fn apply_single_replacement_and_record_opportunity(
         individual = before.clone();
         individual.as_mut().unwrap().damage_modification = None;
     }
+    let tally_before = state
+        .combat_prevention_tally
+        .as_ref()
+        .and_then(|tally| tally.get(&key))
+        .copied()
+        .unwrap_or(0);
     let result = apply_single_replacement_and_dirty(
         state,
         proposed,
@@ -11734,7 +11836,29 @@ fn apply_single_replacement_and_record_opportunity(
         registry,
         events,
         individual.as_ref(),
+        Some(key),
     );
+    if state
+        .combat_prevention_tally
+        .as_ref()
+        .and_then(|tally| tally.get(&key))
+        .copied()
+        .unwrap_or(0)
+        > tally_before
+        && !opportunity
+            .prevention_definitions
+            .iter()
+            .any(|(used, _)| *used == key)
+    {
+        if let Some(definition) = before.as_ref() {
+            opportunity
+                .prevention_definitions
+                .push((key, definition.clone()));
+            opportunity
+                .prevention_definitions
+                .sort_by_key(|(key, _)| *key);
+        }
+    }
     if let Some(amount) = aggregate_amount.filter(|_| matches!(result, Err(ApplyResult::Prevented)))
     {
         let tally = opportunity
@@ -12541,6 +12665,267 @@ pub fn proposed_draw_survives_replacement(state: &GameState, event: &ProposedEve
     })
 }
 
+// Physical coordinates in this upper half are local lookup handles for an
+// original member retained by this damage opportunity. They are never identities:
+// the saved complete key is carried into offers, application and combat tallies.
+const RETAINED_OPPORTUNITY_INDEX: usize = usize::MAX / 2;
+
+fn retained_opportunity_member<'a>(
+    opportunity: &'a crate::types::ability::DamageOpportunity,
+    id: ReplacementId,
+) -> Option<&'a (AppliedReplacementKey, ReplacementDefinition)> {
+    let slot = id.index.checked_sub(RETAINED_OPPORTUNITY_INDEX)?;
+    opportunity
+        .definitions
+        .get(slot)
+        .filter(|(key, _)| key.source() == id.source)
+}
+
+fn candidate_key_in_opportunity(
+    state: &GameState,
+    event: &ProposedEvent,
+    id: ReplacementId,
+    opportunity: &crate::types::ability::DamageOpportunity,
+) -> AppliedReplacementKey {
+    retained_opportunity_member(opportunity, id)
+        .map(|(key, _)| *key)
+        .unwrap_or_else(|| AppliedReplacementKey::for_event_in_state(state, event, id))
+}
+
+fn candidate_definition_in_opportunity<'a>(
+    state: &'a GameState,
+    id: ReplacementId,
+    opportunity: &'a crate::types::ability::DamageOpportunity,
+) -> Option<&'a ReplacementDefinition> {
+    retained_opportunity_member(opportunity, id)
+        .map(|(_, definition)| definition)
+        .or_else(|| replacement_definition_for_id(state, id))
+}
+
+fn candidate_is_optional_in_opportunity(
+    state: &GameState,
+    id: ReplacementId,
+    opportunity: &crate::types::ability::DamageOpportunity,
+) -> bool {
+    retained_opportunity_member(opportunity, id)
+        .map(|(_, definition)| replacement_mode_is_optional(&definition.mode))
+        .unwrap_or_else(|| replacement_is_optional(state, id))
+}
+
+fn candidate_player_in_opportunity(
+    state: &GameState,
+    event: &ProposedEvent,
+    id: ReplacementId,
+    opportunity: &crate::types::ability::DamageOpportunity,
+) -> Option<PlayerId> {
+    let Some((_, definition)) = retained_opportunity_member(opportunity, id) else {
+        return replacement_choice_player(state, event, id);
+    };
+    match definition.choice_authority {
+        ReplacementChoiceAuthority::AffectedPlayer => Some(event.affected_player(state)),
+        ReplacementChoiceAuthority::SourceController => state
+            .entering_or_live_object(id.source)
+            .map(replacement_source_player)
+            .or(definition.source_controller),
+    }
+}
+
+pub(crate) fn authenticate_pending_candidate_keys(
+    state: &mut GameState,
+) -> Result<(), &'static str> {
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return Ok(());
+    };
+    let keys = if pending.candidate_keys.is_empty() {
+        pending
+            .candidates
+            .iter()
+            .map(|id| AppliedReplacementKey::for_event_in_state(state, &pending.proposed, *id))
+            .collect::<Vec<_>>()
+    } else {
+        pending.candidate_keys.clone()
+    };
+    if keys.len() != pending.candidates.len() {
+        return Err("replacement candidate identity count mismatch");
+    }
+    let candidates = keys
+        .iter()
+        .map(|key| {
+            replacement_id_for_key(state, *key)
+                .or_else(|| {
+                    pending
+                        .damage_opportunity
+                        .definitions
+                        .iter()
+                        .position(|(saved, _)| saved == key)
+                        .map(|slot| ReplacementId {
+                            source: key.source(),
+                            index: RETAINED_OPPORTUNITY_INDEX + slot,
+                        })
+                })
+                .or_else(|| {
+                    matches!(pending.proposed, ProposedEvent::SearchFound { .. })
+                        .then(|| {
+                            pending
+                                .candidates
+                                .iter()
+                                .zip(&keys)
+                                .find_map(|(id, saved)| {
+                                    (*saved == *key
+                                        && pending
+                                            .search_found_candidates
+                                            .iter()
+                                            .any(|bound| bound.replacement_id == *id))
+                                    .then_some(*id)
+                                })
+                        })
+                        .flatten()
+                })
+                .ok_or("offered replacement occurrence is stale")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let pending = state
+        .pending_replacement
+        .as_mut()
+        .expect("pending retained while authenticating");
+    pending.candidates = candidates;
+    pending.candidate_keys = keys;
+    Ok(())
+}
+
+pub(crate) fn is_virtual_replacement_id(id: ReplacementId) -> bool {
+    is_compleated_replacement(id)
+        || is_umbra_armor_replacement(id)
+        || is_turn_scoped_combat_skip_replacement(id)
+        || shield_counter_replacement_kind(id).is_some()
+        || is_finality_counter_replacement(id)
+        || is_commander_hand_or_library_return_replacement(id)
+        || is_granted_etb_keyword_replacement(id)
+        || is_granted_dredge_replacement(id)
+}
+
+pub(crate) fn replacement_id_for_key(
+    state: &GameState,
+    key: AppliedReplacementKey,
+) -> Option<ReplacementId> {
+    match key {
+        AppliedReplacementKey::Object {
+            source,
+            index,
+            copy_effect,
+            resolution_host,
+        }
+        | AppliedReplacementKey::EntryControllerChoice {
+            source,
+            index,
+            copy_effect,
+            resolution_host,
+            ..
+        } => {
+            let id = ReplacementId { source, index };
+            if resolution_host.is_none() && copy_effect.is_none() && is_virtual_replacement_id(id) {
+                return Some(id);
+            }
+            let object = state.entering_or_live_object(source)?;
+            let index = match resolution_host {
+                Some(host) => {
+                    if copy_effect.is_some()
+                        || host
+                            != crate::types::identifiers::ObjectIncarnationRef::from_object(object)
+                    {
+                        return None;
+                    }
+                    object.replacement_definitions.iter().position(|definition| matches!(definition.origin,
+                        crate::types::ability::ReplacementOrigin::Resolution { installation: Some(ordinal) } if ordinal == index))?
+                }
+                None => {
+                    if object.layer1_copy_effect != copy_effect {
+                        return None;
+                    }
+                    if object
+                        .replacement_definitions
+                        .get(index)
+                        .is_none_or(|definition| definition.is_resolution_installed())
+                    {
+                        return None;
+                    }
+                    index
+                }
+            };
+            Some(ReplacementId { source, index })
+        }
+        AppliedReplacementKey::Floating { index }
+        | AppliedReplacementKey::StepEndMana { index } => Some(ReplacementId {
+            source: ObjectId(0),
+            index,
+        }),
+    }
+}
+
+pub(crate) fn replacement_definition_for_key<'a>(
+    state: &'a GameState,
+    key: AppliedReplacementKey,
+    opportunity: &'a crate::types::ability::DamageOpportunity,
+) -> Option<&'a ReplacementDefinition> {
+    replacement_id_for_key(state, key)
+        .and_then(|id| replacement_definition_for_id(state, id))
+        .or_else(|| match key {
+            AppliedReplacementKey::Object {
+                source,
+                index,
+                resolution_host: None,
+                copy_effect: Some(instance),
+            }
+            | AppliedReplacementKey::EntryControllerChoice {
+                source,
+                index,
+                resolution_host: None,
+                copy_effect: Some(instance),
+                ..
+            } => {
+                let object = state.entering_or_live_object(source)?;
+                state
+                    .transient_continuous_effects
+                    .iter()
+                    .find(|effect| {
+                        effect.id == instance.continuous_effect_id
+                            && effect.affected_recipient
+                                == Some(ObjectIncarnationRef::from_object(object))
+                    })
+                    .and_then(|effect| effect.modifications.get(instance.modification_index))
+                    .and_then(|modification| match modification {
+                        ContinuousModification::CopyValues { values, .. } => {
+                            values.replacement_definitions.get(index)
+                        }
+                        _ => None,
+                    })
+            }
+            AppliedReplacementKey::Object {
+                source,
+                index,
+                resolution_host: None,
+                copy_effect: None,
+            }
+            | AppliedReplacementKey::EntryControllerChoice {
+                source,
+                index,
+                resolution_host: None,
+                copy_effect: None,
+                ..
+            } => state
+                .entering_or_live_object(source)?
+                .base_replacement_definitions
+                .get(index),
+            _ => None,
+        })
+        .or_else(|| {
+            opportunity
+                .iter()
+                .chain(opportunity.prevention_definitions.iter())
+                .find_map(|(saved, definition)| (*saved == key).then_some(definition))
+        })
+}
+
 fn replacement_definition_for_id(
     state: &GameState,
     rid: ReplacementId,
@@ -12585,7 +12970,7 @@ fn entry_controller_choice(
     proposed: &ProposedEvent,
     rid: ReplacementId,
 ) -> Option<(PlayerId, Vec<PlayerId>)> {
-    if proposed.already_applied(&rid) {
+    if proposed.already_applied_in_state(&state, &rid) {
         return None;
     }
     let ProposedEvent::ZoneChange {
@@ -12623,6 +13008,9 @@ fn park_entry_controller_choice(
     candidates: Vec<PlayerId>,
 ) -> ReplacementResult {
     state.pending_replacement = Some(Box::new(PendingReplacement {
+        candidate_keys: vec![AppliedReplacementKey::for_event_in_state(
+            state, &proposed, rid,
+        )],
         damage_opportunity: Default::default(),
         damage_source_context: None,
         proposed,
@@ -12723,7 +13111,7 @@ fn as_enters_named_choice(
     proposed: &ProposedEvent,
     rid: ReplacementId,
 ) -> Option<AsEntersChoice> {
-    if proposed.already_applied(&rid) {
+    if proposed.already_applied_in_state(&state, &rid) {
         return None;
     }
     let choice_type = as_enters_choice_for_entry(state, proposed, rid)?.clone();
@@ -12799,6 +13187,9 @@ fn park_as_enters_named_choice(
 ) -> ReplacementResult {
     let object_id = rid.source;
     state.pending_replacement = Some(Box::new(PendingReplacement {
+        candidate_keys: vec![AppliedReplacementKey::for_event_in_state(
+            state, &proposed, rid,
+        )],
         damage_opportunity: Default::default(),
         damage_source_context: None,
         proposed,
@@ -12845,7 +13236,7 @@ pub(crate) fn pending_entry_named_choice_is_live(state: &GameState) -> bool {
     };
     !pending.is_optional
         && rid.source == source.prompt.identity.reference.object_id
-        && !pending.proposed.already_applied(rid)
+        && !pending.proposed.already_applied_in_state(&state, rid)
         && as_enters_choice_for_entry(state, &pending.proposed, *rid).is_some()
 }
 
@@ -12924,7 +13315,7 @@ fn as_enters_pay_terms(
     rid: ReplacementId,
 ) -> Option<(u32, PlayerId)> {
     let def = as_enters_payment_for_entry(state, proposed, rid)?;
-    if proposed.already_applied(&rid) {
+    if proposed.already_applied_in_state(&state, &rid) {
         return None;
     }
     // Reached only for the two entry classes `as_enters_payment_for_entry`
@@ -13011,6 +13402,9 @@ fn park_as_enters_pay_choice(
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
     state.pending_replacement = Some(Box::new(PendingReplacement {
+        candidate_keys: vec![AppliedReplacementKey::for_event_in_state(
+            state, &proposed, rid,
+        )],
         damage_opportunity: Default::default(),
         damage_source_context: None,
         proposed,
@@ -13088,7 +13482,7 @@ pub(crate) fn pending_entry_payment_is_live(state: &GameState) -> bool {
         return false;
     }
     !pending.is_optional
-        && !pending.proposed.already_applied(rid)
+        && !pending.proposed.already_applied_in_state(&state, rid)
         && as_enters_payment_for_entry(state, &pending.proposed, *rid).is_some()
 }
 
@@ -13457,9 +13851,11 @@ fn auto_choice_identities(
             {
                 return None;
             }
+            let occurrence = AppliedReplacementKey::for_event_in_state(state, proposed, *rid);
             Some(ReplacementAutoChoiceIdentity::Definition {
                 source: ObjectIncarnationRef::from_object(object),
-                index: rid.index,
+                index: occurrence.index(),
+                occurrence: Some(occurrence),
                 definition: Box::new(definition.clone()),
             })
         })
@@ -13754,7 +14150,11 @@ fn pipeline_loop_in_opportunity(
 
         // CR 616.1a-e: only the earliest CR 616.1 step present may be chosen now;
         // the rest are rediscovered once the chosen effect applies (CR 616.1f).
-        let candidates = choosable_replacement_candidates(state, &proposed, candidates);
+        let candidates = if matches!(proposed, ProposedEvent::Damage { .. }) {
+            candidates
+        } else {
+            choosable_replacement_candidates(state, &proposed, candidates)
+        };
 
         // CR 616.1f: a changed remaining set stops a remembered sequence even
         // when only one mandatory replacement remains; park it for confirmation.
@@ -13765,25 +14165,32 @@ fn pipeline_loop_in_opportunity(
                 .is_none_or(|tail| {
                     auto_choice_event(&proposed).as_ref() == Some(&tail.event)
                         && proposed.affected_player(state) == tail.player
-                        && auto_choice_identities(state, &proposed, &candidates).is_some_and(
-                            |identities| same_identity_set(&identities, &tail.remaining),
-                        )
+                        && (!candidates
+                            .iter()
+                            .any(|id| retained_opportunity_member(opportunity, *id).is_some()))
+                        .then(|| auto_choice_identities(state, &proposed, &candidates))
+                        .flatten()
+                        .is_some_and(|identities| same_identity_set(&identities, &tail.remaining))
                 });
         if candidates.len() == 1
-            && (singleton_matches_tail || replacement_is_optional(state, candidates[0]))
+            && (singleton_matches_tail
+                || candidate_is_optional_in_opportunity(state, candidates[0], opportunity))
         {
             let rid = candidates[0];
 
             // Check if this single candidate is Optional — if so, present as a choice
-            let is_optional = replacement_is_optional(state, rid);
+            let is_optional = candidate_is_optional_in_opportunity(state, rid, opportunity);
 
             if !is_optional {
                 if let Some(tail) = state.replacement_auto_choice_tail.take() {
                     let matches = auto_choice_event(&proposed).as_ref() == Some(&tail.event)
                         && proposed.affected_player(state) == tail.player
-                        && auto_choice_identities(state, &proposed, &candidates).is_some_and(
-                            |identities| same_identity_set(&identities, &tail.remaining),
-                        );
+                        && (!candidates
+                            .iter()
+                            .any(|id| retained_opportunity_member(opportunity, *id).is_some()))
+                        .then(|| auto_choice_identities(state, &proposed, &candidates))
+                        .flatten()
+                        .is_some_and(|identities| same_identity_set(&identities, &tail.remaining));
                     if matches {
                         let remaining: Vec<_> = tail.remaining.into_iter().skip(1).collect();
                         state.replacement_auto_choice_tail = (!remaining.is_empty())
@@ -13792,16 +14199,24 @@ fn pipeline_loop_in_opportunity(
                 }
             }
             if is_optional {
-                let Some(affected) = replacement_choice_player(state, &proposed, rid) else {
+                let Some(affected) =
+                    candidate_player_in_opportunity(state, &proposed, rid, opportunity)
+                else {
                     // An optional replacement with no authorized chooser is
                     // treated as declined; never default it to an unrelated player.
-                    proposed.mark_applied(rid);
+                    let selected_key =
+                        candidate_key_in_opportunity(state, &proposed, rid, opportunity);
+                    proposed.applied_set_mut().insert(selected_key);
                     depth += 1;
                     continue;
                 };
                 let search_found_candidates =
                     snapshot_search_found_candidates(state, &proposed, &candidates);
                 state.pending_replacement = Some(Box::new(PendingReplacement {
+                    candidate_keys: candidates
+                        .iter()
+                        .map(|id| candidate_key_in_opportunity(state, &proposed, *id, opportunity))
+                        .collect(),
                     damage_opportunity: opportunity.clone(),
                     damage_source_context: damage_source_context.clone().map(Box::new),
                     proposed,
@@ -13854,7 +14269,8 @@ fn pipeline_loop_in_opportunity(
                 return park_as_enters_pay_choice(state, proposed, depth, rid, pay_choice, events);
             }
 
-            proposed.mark_applied(rid);
+            let selected_key = candidate_key_in_opportunity(state, &proposed, rid, opportunity);
+            proposed.applied_set_mut().insert(selected_key);
             match apply_single_replacement_and_record_opportunity(
                 state,
                 proposed,
@@ -13869,6 +14285,9 @@ fn pipeline_loop_in_opportunity(
                 Err(ApplyResult::Modified(_)) => unreachable!(),
             }
         } else if state.replacement_auto_choice_tail.is_some()
+            || candidates
+                .iter()
+                .any(|id| retained_opportunity_member(opportunity, *id).is_some())
             || replacement_ordering_is_material(state, &candidates, &proposed)
         {
             // CR 616.1: If multiple replacement effects apply, the affected player
@@ -13878,6 +14297,10 @@ fn pipeline_loop_in_opportunity(
             let search_found_candidates =
                 snapshot_search_found_candidates(state, &proposed, &candidates);
             state.pending_replacement = Some(Box::new(PendingReplacement {
+                candidate_keys: candidates
+                    .iter()
+                    .map(|id| candidate_key_in_opportunity(state, &proposed, *id, opportunity))
+                    .collect(),
                 damage_opportunity: opportunity.clone(),
                 damage_source_context: damage_source_context.clone().map(Box::new),
                 proposed,
@@ -13922,7 +14345,8 @@ fn pipeline_loop_in_opportunity(
             {
                 return park_as_enters_pay_choice(state, proposed, depth, rid, pay_choice, events);
             }
-            proposed.mark_applied(rid);
+            let selected_key = candidate_key_in_opportunity(state, &proposed, rid, opportunity);
+            proposed.applied_set_mut().insert(selected_key);
             match apply_single_replacement_and_record_opportunity(
                 state,
                 proposed,
@@ -14138,13 +14562,19 @@ fn continue_search_found_after_decline(
     if pending.damage_source_context.is_some() {
         return ReplacementResult::Prevented;
     }
-    pending.proposed.mark_applied(declined);
+    pending.proposed.mark_applied_in_state(&state, declined);
     let ProposedEvent::SearchFound { disposition, .. } = &mut pending.proposed else {
         unreachable!("SearchFound decline continuation requires a SearchFound event");
     };
     *disposition = SearchFoundDisposition::Original;
     dirty_replacement_index(state);
 
+    let offered_keys: Vec<_> = pending
+        .candidates
+        .iter()
+        .copied()
+        .zip(pending.candidate_keys.iter().copied())
+        .collect();
     pending
         .search_found_candidates
         .retain(|candidate| candidate.replacement_id != declined);
@@ -14152,6 +14582,18 @@ fn continue_search_found_after_decline(
         .search_found_candidates
         .iter()
         .map(|candidate| candidate.replacement_id)
+        .collect();
+    pending.candidate_keys = pending
+        .candidates
+        .iter()
+        .map(|id| {
+            offered_keys
+                .iter()
+                .find_map(|(offered, key)| (*offered == *id).then_some(*key))
+                .unwrap_or_else(|| {
+                    AppliedReplacementKey::for_event_in_state(state, &pending.proposed, *id)
+                })
+        })
         .collect();
     pending.depth += 1;
 
@@ -14198,6 +14640,7 @@ pub(crate) fn same_damage_opportunity_work(
     right: &crate::types::ability::DamageOpportunity,
 ) -> bool {
     left.definitions == right.definitions
+        && left.prevention_definitions == right.prevention_definitions
         && left.prevention_tally.as_deref().unwrap_or_default()
             == right.prevention_tally.as_deref().unwrap_or_default()
 }
@@ -14416,14 +14859,14 @@ fn continue_replacement_in_opportunity(
             }
             return continue_search_found_after_decline(state, pending, rid, events);
         }
-        let Some(payer) = pending
-            .choice_player
-            .or_else(|| replacement_choice_player(state, &pending.proposed, rid))
-        else {
+        let Some(payer) = pending.choice_player.or_else(|| {
+            candidate_player_in_opportunity(state, &pending.proposed, rid, opportunity)
+        }) else {
             // No live or latched authority can make an optional choice. Mark it
             // applied as declined and continue the ordinary replacement loop.
             let mut proposed = pending.proposed;
-            proposed.mark_applied(rid);
+            let selected_key = candidate_key_in_opportunity(state, &proposed, rid, opportunity);
+            proposed.applied_set_mut().insert(selected_key);
             return pipeline_loop_in_opportunity(
                 state,
                 proposed,
@@ -14454,6 +14897,12 @@ fn continue_replacement_in_opportunity(
                 // The optional accept decision is already made. Re-park the
                 // same replacement as mandatory so the entry-controller answer
                 // applies it exactly once without re-offering accept/decline.
+                pending.candidate_keys = vec![candidate_key_in_opportunity(
+                    state,
+                    &pending.proposed,
+                    rid,
+                    opportunity,
+                )];
                 pending.candidates = vec![rid];
                 pending.is_optional = false;
                 state.pending_replacement = Some(pending);
@@ -14464,7 +14913,8 @@ fn continue_replacement_in_opportunity(
                 return ReplacementResult::NeedsChoice(player);
             }
         }
-        proposed.mark_applied(rid);
+        let selected_key = candidate_key_in_opportunity(state, &proposed, rid, opportunity);
+        proposed.applied_set_mut().insert(selected_key);
         // CR 614.1a: the "first time you would create … each turn" window is
         // per-player; it is consumed by `record_token_created` when the resulting
         // tokens (copies on accept, originals on decline) are created — no separate
@@ -14509,7 +14959,7 @@ fn continue_replacement_in_opportunity(
                     None => (None, None, None, None),
                 }
             } else {
-                replacement_definition_for_id(state, rid)
+                candidate_definition_in_opportunity(state, rid, opportunity)
                     .map(|repl| {
                         let accept = repl.execute.clone();
                         let decline = replacement_mode_decline_cloned(&repl.mode);
@@ -14560,6 +15010,10 @@ fn continue_replacement_in_opportunity(
                 // `Execute` payload is inert — the flag short-circuits the caller
                 // before it is read.
                 let outer_replacement = crate::types::game_state::PendingReplacement {
+                    candidate_keys: reparked_candidates
+                        .iter()
+                        .map(|id| candidate_key_in_opportunity(state, &proposed, *id, opportunity))
+                        .collect(),
                     damage_opportunity: Default::default(),
                     damage_source_context: None,
                     proposed: proposed.clone(),
@@ -14800,7 +15254,7 @@ fn continue_replacement_in_opportunity(
             // offered identity and reach the unchanged original event without
             // offering the declined set again.
             for candidate in &pending.search_found_candidates {
-                proposed.mark_applied(candidate.replacement_id);
+                proposed.mark_applied_in_state(&state, candidate.replacement_id);
             }
             dirty_replacement_index(state);
             return pipeline_loop_in_opportunity(
@@ -14839,6 +15293,12 @@ fn continue_replacement_in_opportunity(
             let affected = pending.proposed.affected_player(state);
             let selected = pending.search_found_candidates.remove(bound_index);
             pending.search_found_candidates.insert(0, selected);
+            pending.candidate_keys = vec![candidate_key_in_opportunity(
+                state,
+                &pending.proposed,
+                rid,
+                opportunity,
+            )];
             pending.candidates = vec![rid];
             pending.is_optional = true;
             pending.choice_player = Some(affected);
@@ -14861,11 +15321,14 @@ fn continue_replacement_in_opportunity(
     // selects its turn to apply; it does not silently accept its "may" branch.
     // Re-park it through the same optional seam used for a lone candidate, then
     // re-scan the modified event so the other candidates remain available.
-    if replacement_is_optional(state, rid) {
+    if candidate_is_optional_in_opportunity(state, rid, opportunity) {
         state.replacement_auto_choice_tail = None;
-        let Some(affected) = replacement_choice_player(state, &pending.proposed, rid) else {
+        let Some(affected) =
+            candidate_player_in_opportunity(state, &pending.proposed, rid, opportunity)
+        else {
             let mut proposed = pending.proposed;
-            proposed.mark_applied(rid);
+            let selected_key = candidate_key_in_opportunity(state, &proposed, rid, opportunity);
+            proposed.applied_set_mut().insert(selected_key);
             return pipeline_loop_in_opportunity(
                 state,
                 proposed,
@@ -14876,6 +15339,12 @@ fn continue_replacement_in_opportunity(
                 opportunity,
             );
         };
+        pending.candidate_keys = vec![candidate_key_in_opportunity(
+            state,
+            &pending.proposed,
+            rid,
+            opportunity,
+        )];
         pending.candidates = vec![rid];
         pending.is_optional = true;
         pending.choice_player = Some(affected);
@@ -14885,6 +15354,12 @@ fn continue_replacement_in_opportunity(
 
     let mut proposed = pending.proposed.clone();
     if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid) {
+        pending.candidate_keys = vec![candidate_key_in_opportunity(
+            state,
+            &pending.proposed,
+            rid,
+            opportunity,
+        )];
         pending.candidates = vec![rid];
         pending.is_optional = false;
         state.pending_replacement = Some(pending);
@@ -14897,6 +15372,12 @@ fn continue_replacement_in_opportunity(
     // CR 614.12a + CR 616.1e: choosing an as-enters choice's turn to apply
     // makes its choice now, before the permanent enters.
     if let Some(choice) = as_enters_named_choice(state, &proposed, rid) {
+        pending.candidate_keys = vec![candidate_key_in_opportunity(
+            state,
+            &pending.proposed,
+            rid,
+            opportunity,
+        )];
         pending.candidates = vec![rid];
         pending.is_optional = false;
         state.pending_replacement = Some(pending);
@@ -14906,12 +15387,19 @@ fn continue_replacement_in_opportunity(
     // payment now, before the permanent enters (determined-0 auto-commits
     // into the continuing clone and falls through to the ordinary apply).
     if let Some(pay_choice) = check_and_autocommit_entry_payment(state, &mut proposed, rid) {
+        pending.candidate_keys = vec![candidate_key_in_opportunity(
+            state,
+            &pending.proposed,
+            rid,
+            opportunity,
+        )];
         pending.candidates = vec![rid];
         pending.is_optional = false;
         state.pending_replacement = Some(pending);
         return raise_as_enters_pay_choice(state, rid.source, pay_choice, events);
     }
-    proposed.mark_applied(rid);
+    let selected_key = candidate_key_in_opportunity(state, &proposed, rid, opportunity);
+    proposed.applied_set_mut().insert(selected_key);
     // CR 614.1a: per-player "first time each turn" window is consumed by
     // `record_token_created` on the created tokens; no per-source bookkeeping here.
 
@@ -15311,10 +15799,13 @@ mod tests {
             &settled,
             ProposedEvent::CreateToken { count: 2, .. }
         ));
-        assert!(settled.already_applied(&ReplacementId {
-            source: ObjectId(0),
-            index: 2
-        }));
+        assert!(settled.already_applied_in_state(
+            &state,
+            &ReplacementId {
+                source: ObjectId(0),
+                index: 2
+            }
+        ));
         let candidates = find_applicable_replacements(&state, &settled, replacement_registry());
         assert_eq!(
             choosable_replacement_candidates(&state, &settled, candidates).len(),
@@ -15325,6 +15816,8 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
+                installed_copy_effects: Vec::new(),
+                copy_exception_counters: None,
                 creation_frame: None,
                 instructions: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
@@ -15376,7 +15869,7 @@ mod tests {
                 // The production caller marks the selected replacement before
                 // invoking the leaf applier.
                 let mut proposed = event.clone();
-                proposed.mark_applied(first_id);
+                proposed.mark_applied_in_state(&state, first_id);
                 let once = apply_single_replacement(
                     &mut local,
                     proposed,
@@ -15386,14 +15879,14 @@ mod tests {
                     &mut events,
                 )
                 .unwrap();
-                assert!(once.already_applied(&first_id));
-                assert!(!once.already_applied(&second_id));
+                assert!(once.already_applied_in_state(&state, &first_id));
+                assert!(!once.already_applied_in_state(&state, &second_id));
                 assert_eq!(
                     find_applicable_replacements(&local, &once, replacement_registry()),
                     vec![second_id]
                 );
                 let mut proposed = once;
-                proposed.mark_applied(second_id);
+                proposed.mark_applied_in_state(&state, second_id);
                 let twice = apply_single_replacement(
                     &mut local,
                     proposed,
@@ -15403,7 +15896,10 @@ mod tests {
                     &mut events,
                 )
                 .unwrap();
-                assert!(twice.already_applied(&first_id) && twice.already_applied(&second_id));
+                assert!(
+                    twice.already_applied_in_state(&state, &first_id)
+                        && twice.already_applied_in_state(&state, &second_id)
+                );
                 assert_eq!(twice.battlefield_entry_tap_state(), Some(final_state));
                 assert!(
                     find_applicable_replacements(&local, &twice, replacement_registry()).is_empty()
@@ -15492,12 +15988,15 @@ mod tests {
             vec![id]
         );
         let mut applied = ordinary.clone();
-        applied.mark_applied(id);
-        assert!(applied.already_applied(&id));
-        assert!(!applied.already_applied(&ReplacementId {
-            source: ObjectId(10),
-            index: 0
-        }));
+        applied.mark_applied_in_state(&state, id);
+        assert!(applied.already_applied_in_state(&state, &id));
+        assert!(!applied.already_applied_in_state(
+            &state,
+            &ReplacementId {
+                source: ObjectId(10),
+                index: 0
+            }
+        ));
         assert!(find_applicable_replacements(&state, &applied, replacement_registry()).is_empty());
         // Creation changes are read from the current proposal, before either
         // encoding is admitted. Entry tap itself cannot erase entry counters.
@@ -16859,6 +17358,8 @@ mod tests {
             state.liminal_entries.insert(
                 entry_ref,
                 LiminalEntry {
+                    installed_copy_effects: Vec::new(),
+                    copy_exception_counters: None,
                     creation_frame: None,
                     instructions: None,
                     object: crate::types::game_state::LiminalEntrant::Token(
@@ -18644,6 +19145,7 @@ mod tests {
         // single optional replacement produces): candidate 0 is the real Riot
         // replacement, decline is synthetic. This isolates the label builder.
         state.pending_replacement = Some(Box::new(PendingReplacement {
+            candidate_keys: Vec::new(),
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
@@ -18709,6 +19211,7 @@ mod tests {
         ] {
             let mut state = test_state_with_object(commander, Zone::Battlefield, vec![]);
             state.pending_replacement = Some(Box::new(PendingReplacement {
+                candidate_keys: Vec::new(),
                 damage_opportunity: Default::default(),
                 damage_source_context: None,
                 proposed: ProposedEvent::zone_change(
@@ -18793,6 +19296,7 @@ mod tests {
                 description: "Retain green mana".to_string(),
             }];
         state.pending_replacement = Some(Box::new(PendingReplacement {
+            candidate_keys: Vec::new(),
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::EmptyManaPool {
@@ -23330,6 +23834,122 @@ mod tests {
     }
 
     #[test]
+    fn retained_opportunity_member_uses_original_key_after_slot_reuse() {
+        use crate::types::ability::{DamageOpportunity, RestrictionExpiry};
+        let mut original = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(crate::types::ability::PreventionAmount::All)
+            .expiry(RestrictionExpiry::EndOfTurn);
+        original.shield_kind = ShieldKind::PreventionOneShot;
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![]);
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .install_resolution_replacement(original.clone())
+            .unwrap();
+        let event = damage_event(3);
+        let old = AppliedReplacementKey::for_event_in_state(
+            &state,
+            &event,
+            ReplacementId {
+                source: ObjectId(10),
+                index: 0,
+            },
+        );
+        let mut opportunity = DamageOpportunity {
+            definitions: vec![(old, original)],
+            ..Default::default()
+        };
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .replacement_definitions
+            .clear();
+        let successor =
+            damage_repl(DamageModification::Double).expiry(RestrictionExpiry::EndOfTurn);
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .install_resolution_replacement(successor)
+            .unwrap();
+        assert!(replacement_id_for_key(&state, old).is_none());
+        let mut events = vec![];
+        assert!(matches!(
+            replace_damage_in_opportunity(&mut state, event, None, &mut events, &mut opportunity),
+            ReplacementResult::NeedsChoice(_)
+        ));
+        let pending = state.pending_replacement.as_ref().unwrap();
+        assert_eq!(pending.candidate_keys.len(), 2);
+        let chosen = pending
+            .candidate_keys
+            .iter()
+            .position(|key| *key == old)
+            .unwrap();
+        authenticate_pending_candidate_keys(&mut state).unwrap();
+        assert!(matches!(
+            continue_replacement(&mut state, chosen, &mut events),
+            ReplacementResult::Prevented
+        ));
+        assert!(
+            !state.objects[&ObjectId(10)].replacement_definitions[0].is_consumed,
+            "the successor slot is untouched by the original retained member"
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DamagePrevented { amount: 3, .. })));
+    }
+
+    #[test]
+    fn remembered_definition_distinguishes_copy_sets_and_keeps_resolution_ordinal() {
+        use crate::types::ability::{CopyEffectInstanceRef, RestrictionExpiry};
+        let id = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        let mut state = test_state_with_damage_repl(
+            id.source,
+            PlayerId(0),
+            vec![damage_repl(DamageModification::Double)],
+        );
+        let event = damage_event(3);
+        let own = auto_choice_identities(&state, &event, &[id]).unwrap();
+        state
+            .objects
+            .get_mut(&id.source)
+            .unwrap()
+            .layer1_copy_effect = Some(CopyEffectInstanceRef {
+            continuous_effect_id: 18,
+            modification_index: 0,
+        });
+        let copied = auto_choice_identities(&state, &event, &[id]).unwrap();
+        assert_ne!(
+            own, copied,
+            "the same definition at the same slot belongs to a different acquired set"
+        );
+        let object = state.objects.get_mut(&id.source).unwrap();
+        object.layer1_copy_effect = None;
+        object.replacement_definitions.clear();
+        object
+            .install_resolution_replacement(
+                damage_repl(DamageModification::Double).expiry(RestrictionExpiry::EndOfTurn),
+            )
+            .unwrap();
+        let before = auto_choice_identities(&state, &event, &[id]).unwrap();
+        let object = state.objects.get_mut(&id.source).unwrap();
+        let installed = object.replacement_definitions[0].clone();
+        object.replacement_definitions =
+            vec![damage_repl(DamageModification::Triple), installed].into();
+        let after =
+            auto_choice_identities(&state, &event, &[ReplacementId { index: 1, ..id }]).unwrap();
+        assert_eq!(
+            before, after,
+            "lookup-coordinate movement preserves the installed occurrence preference"
+        );
+    }
+
+    #[test]
     fn damage_applier_double() {
         let repl = damage_repl(DamageModification::Double);
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
@@ -24311,6 +24931,7 @@ mod tests {
         // ReplacementChoice — covering the non-None branch of the guard.
         let mut state = GameState::new_two_player(42);
         state.pending_replacement = Some(Box::new(PendingReplacement {
+            candidate_keys: Vec::new(),
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),

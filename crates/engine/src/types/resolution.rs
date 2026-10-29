@@ -5330,6 +5330,41 @@ impl ResolutionStack {
                 });
             }
         }
+        if let WaitingFor::CopyTargetChoice {
+            player,
+            source_id,
+            purpose:
+                crate::types::ability::CopyTargetPurpose::BecomeCopy {
+                    continuation: Some(selected),
+                },
+            ..
+        } = waiting_for
+        {
+            let drain = self.active_post_replacement_parent_slot().and_then(|slot| {
+                match self.frames.get(slot) {
+                    Some(ResolutionFrame::PostReplacement(drains)) => drains.resident(),
+                    _ => None,
+                }
+            });
+            if selected.source_id != *source_id
+                || selected.controller != *player
+                || !matches!(
+                    selected.effect,
+                    crate::types::ability::Effect::BecomeCopy { .. }
+                )
+                || drain.is_some_and(|drain| {
+                    drain.source != Some(*source_id)
+                        || drain.controller.unwrap_or(*player) != *player
+                        || drain.applied != selected.replacement_applied
+                        || !matches!(drain.status, crate::types::game_state::DrainStatus::Paused)
+                })
+            {
+                return Err(ResolutionStackError::InvalidPayload {
+                    frame: FrameKind::PostReplacement,
+                    message: "selected copy prompt has foreign saved instruction authority".into(),
+                });
+            }
+        }
         let multi_draw_count = self
             .frames
             .iter()
@@ -7265,6 +7300,7 @@ impl ResolutionStateWire {
                 legacy
                     .resolution_stack
                     .recover_post_replacement_frame_id_allocator();
+                crate::types::game_state::normalize_saved_liminal_copy_authority(&mut legacy)?;
                 normalize_logical_zone_instruction_owners(&mut legacy)?;
                 crate::types::game_state::normalize_resolution_cast_offer_allocator(&mut legacy)?;
                 let frames = canonicalize_legacy_resolution_state(&legacy)?;
@@ -7329,6 +7365,7 @@ impl ResolutionStateWire {
                 }
                 let mut state = GameStateDecode::materialize_prepared(state_value)?;
                 state.resolution_stack = Box::new(frames);
+                crate::types::game_state::normalize_saved_liminal_copy_authority(&mut state)?;
                 normalize_logical_zone_instruction_owners(&mut state)?;
                 frames = *state.resolution_stack.clone();
                 frames
@@ -9444,7 +9481,7 @@ mod tests {
         use crate::types::proposed_event::AppliedReplacementKey;
         let source = ObjectId(83);
         let applied = HashSet::from([
-            AppliedReplacementKey::Object { source, index: 0 },
+            AppliedReplacementKey::object(source, 0),
             AppliedReplacementKey::Floating { index: 7 },
         ]);
         let mut frames = ResolutionStack::default();
@@ -9471,10 +9508,9 @@ mod tests {
             .legacy_token_substitution_source(&HashSet::new())
             .is_none());
         assert!(frames
-            .legacy_token_substitution_source(&HashSet::from([AppliedReplacementKey::Object {
-                source,
-                index: 0
-            }]))
+            .legacy_token_substitution_source(&HashSet::from([AppliedReplacementKey::object(
+                source, 0
+            )]))
             .is_none());
         assert!(frames.pause_post_replacement_dispatch(dispatch));
         frames.push_inner(continuation_frame(83));
@@ -12271,6 +12307,7 @@ mod tests {
             convoked_creatures: Vec::new(),
         };
         spell.pending_replacement = Some(Box::new(crate::types::game_state::PendingReplacement {
+            candidate_keys: Vec::new(),
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Destroy {

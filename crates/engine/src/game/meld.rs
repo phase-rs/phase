@@ -245,6 +245,8 @@ pub(crate) fn finish_meld_entry(
     state.liminal_entries.insert(
         context.source_id,
         LiminalEntry {
+            installed_copy_effects: Vec::new(),
+            copy_exception_counters: None,
             creation_frame: None,
             instructions: None,
             // CR 701.42a: the meld result is card-backed — its two component

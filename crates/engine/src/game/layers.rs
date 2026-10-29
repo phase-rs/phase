@@ -9589,11 +9589,13 @@ fn retire_ended_effects(
         StateDurationRetirementOwner::LayerSettlement => {
             let command =
                 crate::types::resolved_commands::ResolvedContinuousEffectRetirementCommand {
+                    abandoned_recipient: None,
+                    abandoned_next_object_id: None,
                     effects: ended,
                     cause: state.current_or_begin_rules_execution_node(),
                 };
             state
-                .retire_exact_continuous_effects(&command.effects)
+                .retire_exact_continuous_effects(&command.effects, None, None)
                 .expect("the settled selection must match its stored continuous effects");
             state
                 .resolved_rules_journal
@@ -9602,7 +9604,7 @@ fn retire_ended_effects(
         }
         StateDurationRetirementOwner::AttachmentCommand => {
             state
-                .retire_exact_continuous_effects(&ended)
+                .retire_exact_continuous_effects(&ended, None, None)
                 .expect("the attachment-owned selection must match its stored continuous effects");
         }
     }
@@ -11456,6 +11458,84 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
     }
 }
 
+pub(crate) fn apply_installed_copy_values(
+    object: &mut crate::game::game_object::GameObject,
+    values: &crate::types::ability::CopiableValues,
+    display: &crate::game::game_object::DisplayIdentity,
+    copy_effect: crate::types::ability::CopyEffectInstanceRef,
+) {
+    apply_copiable_values(object, values, copy_effect);
+    object.layer1_copy_effect = Some(copy_effect);
+    object.install_display_identity(display);
+}
+
+/// Evaluate only this installed program on a detached entrant. The scratch
+/// state gives the existing layer operations their source/quantity context;
+/// neither zone membership nor a token birth is published to the live state.
+pub(crate) fn apply_installed_copy_to_liminal_entry(
+    state: &mut GameState,
+    recipient: ObjectId,
+    effect_id: u64,
+) {
+    let Some(entry) = state.liminal_entries.get(&recipient) else {
+        return;
+    };
+    let projection = entry.object.projected().clone();
+    let Some(installed) = state
+        .transient_continuous_effects
+        .iter()
+        .find(|effect| effect.id == effect_id)
+        .cloned()
+    else {
+        return;
+    };
+    let mut scratch = state.clone();
+    scratch.objects.insert(recipient, projection);
+    scratch.liminal_entries.remove(&recipient);
+    let mut suppressed = HashSet::new();
+    let mut cache = LayerZoneObjectCache::default();
+    let mut started = StartedContinuousEffectSets::new();
+    let restrict = BTreeSet::from([recipient]);
+    for (mod_index, modification) in installed.modifications.iter().enumerate() {
+        let effect = ActiveContinuousEffect {
+            source_id: installed.source_id,
+            controller: installed.controller,
+            def_index: None,
+            transient_id: Some(installed.id),
+            trigger_producer_origin: Some(TriggerProducerOrigin::Transient {
+                continuous_effect_id: installed.id,
+                modification_index: mod_index,
+            }),
+            expanded_trigger_provider: None,
+            mod_index,
+            layer: modification.layer(),
+            timestamp: installed.timestamp,
+            modification: modification.clone(),
+            affected_filter: installed.affected.clone(),
+            condition: installed.condition.clone(),
+            mode: StaticMode::Continuous,
+            characteristic_defining: false,
+            granter: installed.granting_object,
+        };
+        apply_continuous_effect_filtered(
+            &mut scratch,
+            &effect,
+            Some(&restrict),
+            &mut suppressed,
+            &mut cache,
+            &mut started,
+        );
+    }
+    if let Some(projected) = scratch.objects.remove(&recipient) {
+        state
+            .liminal_entries
+            .get_mut(&recipient)
+            .expect("entry retained during projection")
+            .object
+            .install_copy_projection(projected);
+    }
+}
+
 fn apply_continuous_effect_filtered(
     state: &mut GameState,
     effect: &ActiveContinuousEffect,
@@ -12008,20 +12088,7 @@ fn apply_continuous_effect_filtered(
                         .expect("CopyValues must originate from a transient continuous effect"),
                     modification_index: effect.mod_index,
                 };
-                apply_copiable_values(obj, values, copy_effect);
-                // CR 613.1a + CR 607.5: the last applied copy effect supplies this
-                // pass's characteristic abilities; a later copy overwrites it
-                // (timestamp order).
-                obj.layer1_copy_effect = Some(copy_effect);
-                // Display routing follows the copy: override the baseline
-                // restored by the layer reset so the copy renders the source's
-                // art. Reverts automatically when the copy effect expires.
-                // CR 111.1 + CR 707.2: for a copy of a true token, the source's
-                // `display_source = Token` + `token_image_ref` carry the art (the
-                // copied name has no real-card printing); for a printed source,
-                // `display_source = Card` + `printed_ref`. None are copiable
-                // values — purely display routing.
-                obj.install_display_identity(display);
+                apply_installed_copy_values(obj, values, display, copy_effect);
             }
             // CR 707.9b + CR 707.2: Name override is a copiable-value override
             // applied at Layer 1 after the base CopyValues (ordered by timestamp
@@ -14771,7 +14838,8 @@ mod tests {
             obj.base_replacement_definitions = Arc::new(vec![printed_base_shield()]);
             obj.replacement_definitions = vec![printed_base_shield()].into();
             obj.base_characteristics_initialized = true;
-            obj.install_resolution_replacement(spent_resolution_shield());
+            obj.install_resolution_replacement(spent_resolution_shield())
+                .expect("fixture installation");
         }
         assert_eq!(state.objects[&host].replacement_definitions.len(), 2);
 
@@ -14866,7 +14934,8 @@ mod tests {
         {
             let obj = state.objects.get_mut(&recipient).unwrap();
             obj.base_characteristics_initialized = true;
-            obj.install_resolution_replacement(spent_resolution_shield());
+            obj.install_resolution_replacement(spent_resolution_shield())
+                .expect("fixture installation");
         }
         state.add_transient_continuous_effect(
             recipient,
@@ -14909,7 +14978,8 @@ mod tests {
             .objects
             .get_mut(&fd)
             .unwrap()
-            .install_resolution_replacement(spent_resolution_shield());
+            .install_resolution_replacement(spent_resolution_shield())
+            .expect("fixture installation");
 
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
@@ -14931,7 +15001,8 @@ mod tests {
             .objects
             .get_mut(&up)
             .unwrap()
-            .install_resolution_replacement(spent_resolution_shield());
+            .install_resolution_replacement(spent_resolution_shield())
+            .expect("fixture installation");
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         assert!(state.objects[&up]
@@ -14958,7 +15029,8 @@ mod tests {
             obj.base_replacement_definitions = Arc::new(vec![printed_base_shield()]);
             obj.replacement_definitions = vec![printed_base_shield()].into();
             obj.base_characteristics_initialized = true;
-            obj.install_resolution_replacement(spent_resolution_shield());
+            obj.install_resolution_replacement(spent_resolution_shield())
+                .expect("fixture installation");
         }
         let grantor = create_object(
             &mut state,
@@ -15015,7 +15087,8 @@ mod tests {
         {
             let obj = state.objects.get_mut(&host).unwrap();
             obj.base_characteristics_initialized = true;
-            obj.install_resolution_replacement(granted.clone());
+            obj.install_resolution_replacement(granted.clone())
+                .expect("fixture installation");
         }
         let grantor = create_object(
             &mut state,
@@ -15089,7 +15162,8 @@ mod tests {
             obj.base_replacement_definitions = Arc::new(vec![printed_base_shield()]);
             obj.replacement_definitions = vec![printed_base_shield()].into();
             obj.base_characteristics_initialized = true;
-            obj.install_resolution_replacement(spent_resolution_shield());
+            obj.install_resolution_replacement(spent_resolution_shield())
+                .expect("fixture installation");
         }
         // Reach-guard: the printed def is present before the pass, so its removal
         // below is an observed change rather than a vacuous absence.
@@ -15164,7 +15238,8 @@ mod tests {
             obj.base_replacement_definitions = Arc::new(vec![printed_base_shield()]);
             obj.replacement_definitions = vec![printed_base_shield()].into();
             obj.base_characteristics_initialized = true;
-            obj.install_resolution_replacement(spent_resolution_shield());
+            obj.install_resolution_replacement(spent_resolution_shield())
+                .expect("fixture installation");
         }
         // Reach-guard: the printed def is present before the pass.
         assert!(state.objects[&host]

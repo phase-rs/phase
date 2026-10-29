@@ -39951,6 +39951,8 @@ pub struct PendingForwardedZoneResult {
 /// Bounded work belonging to one damage operation and its exact parks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DamageOpportunity {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prevention_definitions: Vec<(AppliedReplacementKey, ReplacementDefinition)>,
     pub definitions: Vec<(AppliedReplacementKey, ReplacementDefinition)>,
     /// CR 615.5 + CR 615.8 + CR 120.4c: settle the next-instance gain after
     /// every recipient's prevention, before processing surviving damage results.
@@ -39960,7 +39962,9 @@ pub struct DamageOpportunity {
 
 impl DamageOpportunity {
     pub fn is_empty(&self) -> bool {
-        self.definitions.is_empty() && self.prevention_tally.as_ref().is_none_or(Vec::is_empty)
+        self.definitions.is_empty()
+            && self.prevention_definitions.is_empty()
+            && self.prevention_tally.as_ref().is_none_or(Vec::is_empty)
     }
 
     pub fn len(&self) -> usize {
@@ -39969,6 +39973,7 @@ impl DamageOpportunity {
 
     pub fn clear(&mut self) {
         self.definitions.clear();
+        self.prevention_definitions.clear();
         self.prevention_tally = None;
     }
 
@@ -43457,7 +43462,7 @@ pub enum PostReplacementContinuation {
 /// is merely STORED on a host object so the replacement pipeline can find it. It
 /// lasts as long as the ability stated (CR 611.2a) and ends when it is used up or
 /// its duration expires (CR 615.3) — not at the next layer pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub enum ReplacementOrigin {
     /// A printed/copiable characteristic (CR 613.1), or a per-pass static
     /// derivation. Reset away and re-derived by every layer pass.
@@ -43465,7 +43470,46 @@ pub enum ReplacementOrigin {
     Characteristic,
     /// A continuous effect created by resolution (CR 611.2a). Survives the
     /// CR 613.1 reset; removed only by an expiry prune or a zone change.
-    Resolution,
+    Resolution {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        installation: Option<usize>,
+    },
+}
+
+impl<'de> Deserialize<'de> for ReplacementOrigin {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Installation {
+            #[serde(default)]
+            installation: Option<usize>,
+        }
+        #[derive(Deserialize)]
+        enum Current {
+            Characteristic,
+            Resolution(Installation),
+        }
+        #[derive(Deserialize)]
+        enum Legacy {
+            Characteristic,
+            Resolution,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Current(Current),
+            Legacy(Legacy),
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Current(Current::Characteristic) | Wire::Legacy(Legacy::Characteristic) => {
+                Self::Characteristic
+            }
+            Wire::Current(Current::Resolution(value)) => Self::Resolution {
+                installation: value.installation,
+            },
+            Wire::Legacy(Legacy::Resolution) => Self::Resolution { installation: None },
+        })
+    }
 }
 
 impl ReplacementOrigin {
@@ -44083,7 +44127,7 @@ impl ReplacementDefinition {
     /// derived grant)? Such a definition is carried across the CR 613.1 layer
     /// reset by `game_object::reseed_replacements_carrying_resolution_effects`.
     pub fn is_resolution_installed(&self) -> bool {
-        self.origin == ReplacementOrigin::Resolution
+        matches!(self.origin, ReplacementOrigin::Resolution { .. })
     }
 
     pub fn combat_scope(mut self, scope: CombatDamageScope) -> Self {
@@ -44568,14 +44612,16 @@ pub struct LatchedCopiableSnapshot {
 /// copy effect on the Aura's enchanted host instead. `CopyTokenSource` (Esix,
 /// Fractal Bloom) uses the chosen permanent as the copy SOURCE for a token-creation
 /// substitution, transforming nothing and latching nothing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CopyTargetPurpose {
     /// CR 707.2: the entering object (the clone) becomes a copy of the chosen
     /// permanent, acquiring its copiable values. Every classic enter-as-a-copy
     /// card (Clone, Phantasmal Image, Vesuva, meld/embalm copy tokens).
-    #[default]
-    BecomeCopy,
+    BecomeCopy {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation: Option<Box<ResolvedAbility>>,
+    },
     /// CR 707.2c + CR 614.12a: the chosen permanent's copiable values are
     /// latched and applied to a *separate* recipient (the source Aura's host)
     /// rather than to the entering object. Metamorphic Alteration.
@@ -44588,6 +44634,12 @@ pub enum CopyTargetPurpose {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         continuation: Option<Box<ResolvedAbility>>,
     },
+}
+
+impl Default for CopyTargetPurpose {
+    fn default() -> Self {
+        Self::BecomeCopy { continuation: None }
+    }
 }
 
 /// CR 702.143d + CR 702 (alternative-cost cast-from-off-zone family): how a
@@ -49395,13 +49447,36 @@ mod tests {
 
         // A Resolution def with an anchor round-trips faithfully.
         let mut stamped = plain.clone();
-        stamped.origin = ReplacementOrigin::Resolution;
+        stamped.origin = ReplacementOrigin::Resolution { installation: None };
         stamped.source_object = Some(ObjectId(42));
         let round_tripped: ReplacementDefinition =
             serde_json::from_str(&serde_json::to_string(&stamped).expect("serializes"))
                 .expect("deserializes");
         assert_eq!(round_tripped, stamped);
         assert!(round_tripped.is_resolution_installed());
+        assert_eq!(
+            serde_json::from_str::<ReplacementOrigin>("\"Resolution\"").unwrap(),
+            ReplacementOrigin::Resolution { installation: None }
+        );
+        assert_eq!(
+            serde_json::from_str::<ReplacementOrigin>(r#"{"Resolution":{"installation":7}}"#)
+                .unwrap(),
+            ReplacementOrigin::Resolution {
+                installation: Some(7)
+            }
+        );
+        assert!(serde_json::from_str::<ReplacementOrigin>(
+            r#"{"Resolution":{"installation":"seven"}}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<ReplacementOrigin>(
+            r#"{"Resolution":{"installation":7,"unknown":true}}"#
+        )
+        .is_err());
+        assert_eq!(
+            serde_json::from_str::<CopyTargetPurpose>(r#"{"type":"BecomeCopy"}"#).unwrap(),
+            CopyTargetPurpose::BecomeCopy { continuation: None }
+        );
     }
 
     #[test]

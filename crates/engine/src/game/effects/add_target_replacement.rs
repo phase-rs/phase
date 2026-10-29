@@ -767,7 +767,8 @@ pub fn resolve(
                             // stamps it `Resolution` when it carries an enforceable
                             // expiry, and fails closed (live-only, today's behavior)
                             // when it does not.
-                            obj.install_resolution_replacement(replacement);
+                            obj.install_resolution_replacement(replacement)
+                                .map_err(|error| EffectError::InvalidParam(error.into()))?;
                         }
                         attached += 1;
                     }

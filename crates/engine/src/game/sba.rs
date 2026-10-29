@@ -4613,6 +4613,7 @@ mod tests {
         // A replacement choice is pending: resolution is paused mid-event. The
         // proposed event's contents are irrelevant here — only `is_some()` matters.
         state.pending_replacement = Some(Box::new(crate::types::game_state::PendingReplacement {
+            candidate_keys: Vec::new(),
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Draw {
@@ -4793,6 +4794,7 @@ mod tests {
             remember_identity: None,
         };
         state.pending_replacement = Some(Box::new(crate::types::game_state::PendingReplacement {
+            candidate_keys: Vec::new(),
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Draw {

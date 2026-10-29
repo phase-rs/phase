@@ -1121,6 +1121,8 @@ pub struct GameObject {
         skip_serializing_if = "is_initial_next_trigger_base_set_instance"
     )]
     pub next_trigger_base_set_instance: u64,
+    #[serde(default = "initial_resolution_replacement_installation")]
+    pub next_resolution_replacement_installation: usize,
     /// Recipient-local Layer-6 grant allocator and active producer table.
     #[serde(default, skip_serializing_if = "is_default")]
     pub trigger_occurrence_state: TriggerOccurrenceState,
@@ -1942,6 +1944,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_trigger_printed_origins: _,
         trigger_base_set_instance: _,
         next_trigger_base_set_instance: _,
+        next_resolution_replacement_installation: _,
         trigger_occurrence_state: _,
         base_replacement_definitions: _,
         base_static_definitions: _,
@@ -2241,7 +2244,10 @@ impl GameObject {
     /// `base_replacement_definitions`. Violating it double-applies the effect, and
     /// it is also what makes the carry-over idempotent under mid-pass re-entry
     /// (see `reseed_replacements_carrying_resolution_effects`).
-    pub(crate) fn install_resolution_replacement(&mut self, mut def: ReplacementDefinition) {
+    pub(crate) fn install_resolution_replacement(
+        &mut self,
+        mut def: ReplacementDefinition,
+    ) -> Result<(), &'static str> {
         // CR 611.2a: a `Resolution`-origin def is carried across every CR 613.1
         // reset, so its SCHEDULED removal paths are an expiry prune (`turns.rs`, all
         // three of which key on `expiry` alone) and a zone change. (Three face
@@ -2259,7 +2265,7 @@ impl GameObject {
         // an expiry unconditionally.
         if def.expiry.is_none() {
             self.replacement_definitions.push(def);
-            return;
+            return Ok(());
         }
         // Asserts the ACTUAL precondition of the carry-over: base holds no
         // `Resolution`-origin member at all. That is what
@@ -2287,8 +2293,16 @@ impl GameObject {
             "base must never hold a `Resolution`-origin replacement: the CR 613.1 \
              carry-over would then re-add it every pass, duplicating the effect"
         );
-        def.origin = crate::types::ability::ReplacementOrigin::Resolution;
+        let installation = self.next_resolution_replacement_installation;
+        let next = installation
+            .checked_add(1)
+            .ok_or("resolution replacement installation exhausted")?;
+        def.origin = crate::types::ability::ReplacementOrigin::Resolution {
+            installation: Some(installation),
+        };
+        self.next_resolution_replacement_installation = next;
         self.replacement_definitions.push(def);
+        Ok(())
     }
 
     /// Installs a new intentional base/face/cleave trigger set and then
@@ -3257,6 +3271,7 @@ impl GameObject {
             base_trigger_printed_origins: Vec::new(),
             trigger_base_set_instance: TriggerBaseSetInstanceRef::INITIAL,
             next_trigger_base_set_instance: 2,
+            next_resolution_replacement_installation: 1,
             trigger_occurrence_state: TriggerOccurrenceState::default(),
             base_replacement_definitions: Default::default(),
             base_static_definitions: Default::default(),
@@ -5870,12 +5885,36 @@ mod tests {
             "Host".to_string(),
             Zone::Battlefield,
         );
-        obj.install_resolution_replacement(eot_shield());
+        obj.install_resolution_replacement(eot_shield())
+            .expect("fixture installation");
         assert_eq!(obj.replacement_definitions.len(), 1);
         assert!(obj.replacement_definitions[0].is_resolution_installed());
         assert!(
             obj.base_replacement_definitions.is_empty(),
             "CR 611.2c: a resolution shield is not a printed characteristic"
+        );
+        assert_eq!(
+            obj.replacement_definitions[0].origin,
+            crate::types::ability::ReplacementOrigin::Resolution {
+                installation: Some(1)
+            }
+        );
+        obj.replacement_definitions.clear();
+        obj.install_resolution_replacement(eot_shield()).unwrap();
+        assert_eq!(
+            obj.replacement_definitions[0].origin,
+            crate::types::ability::ReplacementOrigin::Resolution {
+                installation: Some(2)
+            }
+        );
+        assert_eq!(obj.next_resolution_replacement_installation, 3);
+        obj.next_resolution_replacement_installation = usize::MAX;
+        let before = obj.clone();
+        assert!(obj.install_resolution_replacement(eot_shield()).is_err());
+        assert_eq!(
+            serde_json::to_value(&obj).unwrap(),
+            serde_json::to_value(&before).unwrap(),
+            "checked exhaustion changes neither the definition vector nor the allocator"
         );
     }
 
@@ -5900,7 +5939,8 @@ mod tests {
             "Host".to_string(),
             Zone::Battlefield,
         );
-        obj.install_resolution_replacement(unbounded);
+        obj.install_resolution_replacement(unbounded)
+            .expect("fixture installation");
         assert!(
             !obj.replacement_definitions[0].is_resolution_installed(),
             "an unbounded def must NOT be carried across layer passes"
@@ -5917,7 +5957,8 @@ mod tests {
             "Host".to_string(),
             Zone::Battlefield,
         );
-        obj2.install_resolution_replacement(bounded);
+        obj2.install_resolution_replacement(bounded)
+            .expect("fixture installation");
         assert!(obj2.replacement_definitions[0].is_resolution_installed());
     }
 
@@ -5929,7 +5970,8 @@ mod tests {
     #[test]
     fn reseed_carrying_resolution_effects_is_idempotent_across_baselines() {
         let mut carried = eot_shield();
-        carried.origin = crate::types::ability::ReplacementOrigin::Resolution;
+        carried.origin =
+            crate::types::ability::ReplacementOrigin::Resolution { installation: None };
         carried.is_consumed = true;
 
         let base_x: Arc<Vec<ReplacementDefinition>> = Arc::new(vec![ReplacementDefinition::new(
@@ -5982,7 +6024,8 @@ mod tests {
             Zone::Battlefield,
         );
         obj.base_characteristics_initialized = false;
-        obj.install_resolution_replacement(eot_shield());
+        obj.install_resolution_replacement(eot_shield())
+            .expect("fixture installation");
         obj.sync_missing_base_characteristics();
         assert!(
             obj.base_replacement_definitions.is_empty(),
@@ -6278,4 +6321,8 @@ mod numeric_reset_tests {
             );
         }
     }
+}
+
+const fn initial_resolution_replacement_installation() -> usize {
+    1
 }

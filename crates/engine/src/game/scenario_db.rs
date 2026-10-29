@@ -40,8 +40,8 @@ fn abandon_as_enters_choice_for_scenario_setup(
             .as_mut()
             .expect("a live pre-entry choice owns the pending replacement");
         pending.pin_delivery_boundary();
-        let rid = pending.candidates[0];
-        pending.proposed.mark_applied(rid);
+        let key = pending.candidate_keys[0];
+        pending.proposed.applied_set_mut().insert(key);
         let mut events = Vec::new();
         if crate::game::engine_replacement::handle_replacement_choice(state, 0, &mut events)
             .is_err()

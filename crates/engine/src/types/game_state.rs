@@ -12937,6 +12937,8 @@ pub enum ReplacementAutoChoiceIdentity {
     Definition {
         source: ObjectIncarnationRef,
         index: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        occurrence: Option<AppliedReplacementKey>,
         definition: Box<crate::types::ability::ReplacementDefinition>,
     },
     Mana {
@@ -22522,6 +22524,11 @@ impl PendingCombatReplacementWork {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingCombatLifelink {
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::DamageOpportunity::is_empty"
+    )]
+    pub prevention_opportunity: crate::types::ability::DamageOpportunity,
     /// Before delivery, this owns replacement progress and the paused event's
     /// remaining siblings. None once damage has completed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -25812,6 +25819,35 @@ impl LiminalEntrant {
         }
     }
 
+    pub(crate) fn install_copy_projection(&mut self, projected: GameObject) {
+        assert_eq!(
+            ObjectIncarnationRef::from_object(self.projected()),
+            ObjectIncarnationRef::from_object(&projected)
+        );
+        let original = self.projected();
+        assert_eq!(original.card_id, projected.card_id);
+        assert_eq!(original.owner, projected.owner);
+        assert_eq!(original.zone, projected.zone);
+        assert_eq!(original.timestamp, projected.timestamp);
+        assert_eq!(original.base_name, projected.base_name);
+        assert_eq!(original.base_power, projected.base_power);
+        assert_eq!(original.base_toughness, projected.base_toughness);
+        assert_eq!(original.base_card_types, projected.base_card_types);
+        assert_eq!(original.counters, projected.counters);
+        assert_eq!(original.chosen_attributes, projected.chosen_attributes);
+        assert_eq!(
+            original.next_resolution_replacement_installation,
+            projected.next_resolution_replacement_installation
+        );
+        match self {
+            Self::Token(token) => {
+                assert!(projected.is_token);
+                token.0 = projected;
+            }
+            Self::Card(object) => *object = projected,
+        }
+    }
+
     pub fn into_projected(self) -> GameObject {
         match self {
             Self::Token(token) => token.into_projected(),
@@ -25869,6 +25905,13 @@ impl<'de> Deserialize<'de> for LiminalEntrant {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiminalEntry {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub installed_copy_effects: Vec<crate::types::ability::CopyEffectInstanceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_exception_counters: Option<(
+        crate::types::ability::CopyEffectInstanceRef,
+        Vec<(CounterType, u32)>,
+    )>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -30752,7 +30795,14 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
     let mut errors = Vec::new();
     let mut installed_updates = Vec::new();
     visit(value, "$", &mut |node, path| {
-        if let Some(map) = node.get("damage_opportunity").filter(|map| !map.is_null()) {
+        for map in [
+            node.get("damage_opportunity"),
+            node.get("prevention_opportunity"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|map| !map.is_null())
+        {
             use crate::types::ability::{
                 DamageOpportunity, PreventionAmount, RedirectionLifetime, ShieldKind,
             };
@@ -30784,6 +30834,19 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                         errors.push(format!(
                             "{path}/damage_opportunity: incoherent consumed-definition authority"
                         ));
+                    }
+                    let mut aggregate_keys = std::collections::HashSet::new();
+                    if map.prevention_definitions.iter().any(|(key, definition)| {
+                        !aggregate_keys.insert(*key)
+                            || !matches!(
+                                key,
+                                AppliedReplacementKey::Object { .. }
+                                    | AppliedReplacementKey::Floating { .. }
+                            )
+                            || definition.event
+                                != crate::types::replacements::ReplacementEvent::DamageDone
+                    }) {
+                        errors.push(format!("{path}/damage_opportunity: incoherent retained combat prevention authority"));
                     }
                     let mut rider_keys = std::collections::HashSet::new();
                     if map.prevention_tally.as_ref().is_some_and(|tally| {
@@ -30838,7 +30901,10 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
             && (path.contains("/pending_damage_replacements/")
                 || (path.contains("/replacement_definitions/")
                     && (node.get("origin").is_none()
-                        || node.get("origin").and_then(Value::as_str) == Some("Resolution"))))
+                        || node.get("origin").and_then(Value::as_str) == Some("Resolution")
+                        || node
+                            .get("origin")
+                            .is_some_and(|origin| origin.get("Resolution").is_some()))))
             && source_id(filter).is_some()
             && common_materializer_image(node)
         {
@@ -31410,6 +31476,16 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::RemoveCountersChoice { pending_effect, .. } => {
             f(pending_effect, SuspendedChainEvent::Ambient)?
         }
+        WaitingFor::CopyTargetChoice {
+            purpose:
+                crate::types::ability::CopyTargetPurpose::BecomeCopy {
+                    continuation: Some(node),
+                }
+                | crate::types::ability::CopyTargetPurpose::CopyTokenSource {
+                    continuation: Some(node),
+                },
+            ..
+        } => f(node, SuspendedChainEvent::Ambient)?,
         WaitingFor::MultiTargetSelection {
             pending_ability, ..
         } => f(pending_ability, SuspendedChainEvent::Ambient)?,
@@ -31508,7 +31584,13 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::ReplacementChoice { .. }
         | WaitingFor::EntryControllerChoice { .. }
         | WaitingFor::OrderTriggers { .. }
-        | WaitingFor::CopyTargetChoice { .. }
+        | WaitingFor::CopyTargetChoice {
+            purpose:
+                crate::types::ability::CopyTargetPurpose::BecomeCopy { continuation: None }
+                | crate::types::ability::CopyTargetPurpose::CopyTokenSource { continuation: None }
+                | crate::types::ability::CopyTargetPurpose::PersistChosenAttribute,
+            ..
+        }
         | WaitingFor::EquipTarget { .. }
         | WaitingFor::CrewVehicle { .. }
         | WaitingFor::StationTarget { .. }
@@ -31963,6 +32045,524 @@ fn validate_restored_attack_authority(
     Ok(())
 }
 
+pub(crate) fn normalize_saved_liminal_copy_authority(state: &mut GameState) -> Result<(), String> {
+    if let Some(pending) = state
+        .pending_replacement
+        .as_ref()
+        .filter(|pending| pending.candidate_keys.is_empty())
+    {
+        let keys = pending
+            .candidates
+            .iter()
+            .map(|id| AppliedReplacementKey::for_event_in_state(state, &pending.proposed, *id))
+            .collect();
+        state
+            .pending_replacement
+            .as_mut()
+            .expect("pending retained")
+            .candidate_keys = keys;
+    }
+    if state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(|pending| pending.candidate_keys.len() != pending.candidates.len())
+    {
+        return Err("replacement candidate identity count mismatch".into());
+    }
+    if let WaitingFor::CopyTargetChoice {
+        player,
+        source_id,
+        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy { continuation: None },
+        ..
+    } = &state.waiting_for
+    {
+        if state.viewer_projection.is_none() {
+            let selected = crate::game::engine_replacement::recover_selected_copy_continuation(
+                state, *source_id, *player,
+            )?;
+            if let WaitingFor::CopyTargetChoice {
+                purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy { continuation },
+                ..
+            } = &mut state.waiting_for
+            {
+                *continuation = selected;
+            }
+        }
+    }
+    if let WaitingFor::CopyTargetChoice {
+        player,
+        source_id,
+        purpose:
+            crate::types::ability::CopyTargetPurpose::BecomeCopy {
+                continuation: Some(selected),
+            },
+        ..
+    } = &state.waiting_for
+    {
+        if selected.source_id != *source_id
+            || selected.controller != *player
+            || selected.source_incarnation.is_some_and(|epoch| {
+                state
+                    .entering_or_live_object(*source_id)
+                    .is_none_or(|object| object.incarnation != epoch)
+            })
+        {
+            return Err("selected copy source epoch or actor is stale".into());
+        }
+    }
+    let entry_ids: Vec<_> = state.liminal_entries.keys().copied().collect();
+    for id in entry_ids {
+        let entry = &state.liminal_entries[&id];
+        let pin = ObjectIncarnationRef::from_object(entry.object.projected());
+        let installed: Vec<_> = state
+            .transient_continuous_effects
+            .iter()
+            .filter(|effect| effect.affected_recipient == Some(pin))
+            .flat_map(|effect| {
+                effect.modifications.iter().enumerate().filter_map(
+                    move |(modification_index, modification)| {
+                        matches!(modification, ContinuousModification::CopyValues { .. }).then_some(
+                            crate::types::ability::CopyEffectInstanceRef {
+                                continuous_effect_id: effect.id,
+                                modification_index,
+                            },
+                        )
+                    },
+                )
+            })
+            .collect();
+        let latest = entry.object.projected().layer1_copy_effect;
+        let needs_owners = entry.installed_copy_effects.is_empty() && !installed.is_empty();
+        let needs_counters = entry.copy_exception_counters.is_none() && latest.is_some();
+        if needs_owners || needs_counters {
+            let contribution = if let Some(latest) = latest.filter(|_| needs_counters) {
+                let effect = state
+                    .transient_continuous_effects
+                    .iter()
+                    .find(|effect| effect.id == latest.continuous_effect_id)
+                    .ok_or("selected liminal copy installation is missing")?;
+                let applied = state
+                    .pending_replacement
+                    .as_ref()
+                    .filter(|pending| pending.proposed.affected_object_id() == Some(id))
+                    .map(|pending| pending.proposed.applied_set())
+                    .or_else(|| match state.pending_liminal_entry_resume.as_ref() {
+                        Some(PendingLiminalEntryResume::Token {
+                            source_id, event, ..
+                        }) if *source_id == id => Some(event.applied_set()),
+                        _ => None,
+                    })
+                    .unwrap_or(&entry.replacement_applied);
+                let mut programs = Vec::new();
+                for key in applied {
+                    if key.source() != id {
+                        continue;
+                    }
+                    let definition = crate::game::replacement::replacement_definition_for_key(
+                        state,
+                        *key,
+                        &Default::default(),
+                    )
+                    .cloned();
+                    let Some(definition) = definition
+                        .and_then(|definition| definition.execute)
+                        .and_then(|definition| {
+                            crate::game::replacement::EventModifiers::first_non_modifier_ability(
+                                Some(&definition),
+                            )
+                            .cloned()
+                        })
+                    else {
+                        continue;
+                    };
+                    if let Effect::BecomeCopy {
+                        duration,
+                        additional_modifications,
+                        ..
+                    } = &*definition.effect
+                    {
+                        let duration = duration
+                            .clone()
+                            .or(definition.duration.clone())
+                            .unwrap_or(Duration::Permanent);
+                        if duration == effect.duration
+                            && !programs.contains(additional_modifications)
+                        {
+                            programs.push(additional_modifications.clone());
+                        }
+                    }
+                }
+                if programs.len() != 1 {
+                    return Err(
+                        "legacy liminal copy counter origin or lifetime is genuinely ambiguous"
+                            .into(),
+                    );
+                }
+                let counters = crate::game::effects::become_copy::entry_exception_counters(
+                    state,
+                    id,
+                    effect.controller,
+                    id,
+                    &programs[0],
+                )
+                .collect();
+                Some((latest, counters))
+            } else {
+                None
+            };
+            let entry = state
+                .liminal_entries
+                .get_mut(&id)
+                .expect("entry retained during normalization");
+            if needs_owners {
+                entry.installed_copy_effects = installed;
+            }
+            if needs_counters {
+                entry.copy_exception_counters = contribution;
+            }
+        }
+    }
+    if let Some(batch) = state
+        .pending_combat_lifelink
+        .as_ref()
+        .filter(|batch| batch.replacement_work.is_none())
+    {
+        let mut recovered = batch.prevention_opportunity.clone();
+        for (key, total) in &batch.prevention_tally {
+            if *total <= 0
+                || recovered
+                    .prevention_definitions
+                    .iter()
+                    .any(|(saved, _)| saved == key)
+            {
+                continue;
+            }
+            let definition =
+                crate::game::replacement::replacement_definition_for_key(state, *key, &recovered)
+                    .cloned();
+            if let Some(definition) = definition {
+                recovered.prevention_definitions.push((*key, definition));
+            } else if !crate::game::replacement::replacement_id_for_key(state, *key)
+                .is_some_and(crate::game::replacement::is_shield_counter_damage_replacement)
+            {
+                return Err(
+                    "legacy combat tail lacks recoverable exact prevention rider identity".into(),
+                );
+            }
+        }
+        state
+            .pending_combat_lifelink
+            .as_mut()
+            .expect("batch retained during normalization")
+            .prevention_opportunity = recovered;
+    }
+    for entry in state.liminal_entries.values() {
+        let mut owners = std::collections::HashSet::new();
+        let pin = ObjectIncarnationRef::from_object(entry.object.projected());
+        for owner in &entry.installed_copy_effects {
+            if !owners.insert(*owner)
+                || !state.transient_continuous_effects.iter().any(|effect| {
+                    effect.id == owner.continuous_effect_id
+                        && effect.affected_recipient == Some(pin)
+                        && matches!(
+                            effect.modifications.get(owner.modification_index),
+                            Some(ContinuousModification::CopyValues { .. })
+                        )
+                })
+            {
+                return Err("liminal copy ownership is foreign or duplicated".into());
+            }
+        }
+        if let Some((owner, _)) = entry.copy_exception_counters.as_ref() {
+            if !owners.contains(owner)
+                || entry.object.projected().layer1_copy_effect != Some(*owner)
+            {
+                return Err("liminal copy counter ownership is stale".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Upgrade old saved physical coordinates before any characteristic reseed.
+fn normalize_replacement_occurrence_authority(value: &mut serde_json::Value) -> Result<(), String> {
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    #[derive(Clone)]
+    struct Host {
+        pin: ObjectIncarnationRef,
+        copy: Option<Value>,
+        slots: HashMap<usize, usize>,
+        next: usize,
+        legacy: bool,
+        own_count: usize,
+    }
+    fn collect(value: &mut Value, hosts: &mut HashMap<ObjectId, Host>) -> Result<(), String> {
+        match value {
+            Value::Object(map) => {
+                if let (Some(id), Some(epoch), Some(definitions)) = (
+                    map.get("id").and_then(Value::as_u64),
+                    map.get("incarnation").and_then(Value::as_u64),
+                    map.get("replacement_definitions").and_then(Value::as_array),
+                ) {
+                    let legacy = !map.contains_key("next_resolution_replacement_installation");
+                    let mut next = map
+                        .get("next_resolution_replacement_installation")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(1) as usize;
+                    let mut used = std::collections::HashSet::new();
+                    for definition in definitions {
+                        if let Some(ordinal) = definition
+                            .pointer("/origin/Resolution/installation")
+                            .and_then(Value::as_u64)
+                        {
+                            let ordinal = usize::try_from(ordinal)
+                                .map_err(|_| "replacement installation is out of range")?;
+                            if ordinal == 0 || !used.insert(ordinal) {
+                                return Err("duplicate replacement installation".into());
+                            }
+                            next = next.max(
+                                ordinal
+                                    .checked_add(1)
+                                    .ok_or("replacement installation exhausted")?,
+                            );
+                        }
+                    }
+                    let mut slots = HashMap::new();
+                    let definitions = map
+                        .get_mut("replacement_definitions")
+                        .and_then(Value::as_array_mut)
+                        .expect("definitions inspected above");
+                    for (slot, definition) in definitions.iter_mut().enumerate() {
+                        let resolution = definition.get("origin").is_some_and(|origin| {
+                            origin == "Resolution" || origin.get("Resolution").is_some()
+                        });
+                        if resolution {
+                            let ordinal = match definition
+                                .pointer("/origin/Resolution/installation")
+                                .and_then(Value::as_u64)
+                            {
+                                Some(ordinal) => ordinal as usize,
+                                None => {
+                                    let ordinal = next;
+                                    next = next
+                                        .checked_add(1)
+                                        .ok_or("replacement installation exhausted")?;
+                                    ordinal
+                                }
+                            };
+                            definition["origin"] = json!({"Resolution": {"installation": ordinal}});
+                            slots.insert(slot, ordinal);
+                        }
+                    }
+                    let host = Host {
+                        pin: ObjectIncarnationRef::of(ObjectId(id), epoch),
+                        copy: map
+                            .get("layer1_copy_effect")
+                            .filter(|copy| !copy.is_null())
+                            .cloned(),
+                        slots,
+                        next,
+                        legacy,
+                        own_count: map
+                            .get("base_replacement_definitions")
+                            .and_then(Value::as_array)
+                            .map_or(0, Vec::len),
+                    };
+                    if let Some(previous) = hosts.get(&ObjectId(id)) {
+                        if previous.pin == host.pin && previous.slots != host.slots {
+                            return Err("conflicting saved replacement coordinates".into());
+                        }
+                    }
+                    hosts.insert(ObjectId(id), host);
+                    map.insert(
+                        "next_resolution_replacement_installation".into(),
+                        json!(next),
+                    );
+                }
+                for child in map.values_mut() {
+                    collect(child, hosts)?;
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    collect(child, hosts)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    fn rewrite(
+        value: &mut Value,
+        hosts: &mut HashMap<ObjectId, Host>,
+        legacy_key: bool,
+    ) -> Result<(), String> {
+        match value {
+            Value::Object(map) => {
+                // A remembered definition already carries its source birth and
+                // program. Upgrade its old physical coordinate only when the saved
+                // host proves the occurrence. An ambiguous old copied preference
+                // remains an unmatched preference, never authority for a successor.
+                if map.get("type").and_then(Value::as_str) == Some("Definition") {
+                    if let Some(data) = map.get_mut("data").and_then(Value::as_object_mut) {
+                        if !data.contains_key("occurrence") {
+                            if let (Some(source), Some(index)) = (
+                                data.get("source"),
+                                data.get("index").and_then(Value::as_u64),
+                            ) {
+                                if let Ok(pin) =
+                                    serde_json::from_value::<ObjectIncarnationRef>(source.clone())
+                                {
+                                    if let Some(host) =
+                                        hosts.get(&pin.object_id).filter(|host| host.pin == pin)
+                                    {
+                                        let index = usize::try_from(index).map_err(|_| {
+                                            "replacement preference coordinate is out of range"
+                                        })?;
+                                        let occurrence =
+                                            if let Some(ordinal) = host.slots.get(&index) {
+                                                if let Some(definition) = data
+                                                    .get_mut("definition")
+                                                    .and_then(Value::as_object_mut)
+                                                {
+                                                    definition.insert(
+                                                    "origin".into(),
+                                                    json!({"Resolution":{"installation":ordinal}}),
+                                                );
+                                                }
+                                                Some(AppliedReplacementKey::Object {
+                                                    source: pin.object_id,
+                                                    index: *ordinal,
+                                                    copy_effect: None,
+                                                    resolution_host: Some(pin),
+                                                })
+                                            } else if host.copy.is_none() {
+                                                Some(AppliedReplacementKey::object(
+                                                    pin.object_id,
+                                                    index,
+                                                ))
+                                            } else {
+                                                None
+                                            };
+                                        if let Some(occurrence) = occurrence {
+                                            data.insert("index".into(), json!(occurrence.index()));
+                                            data.insert(
+                                                "occurrence".into(),
+                                                serde_json::to_value(occurrence)
+                                                    .map_err(|error| error.to_string())?,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let key_kind = map.get("type").and_then(Value::as_str);
+                if matches!(key_kind, Some("Object" | "EntryControllerChoice"))
+                    || (legacy_key
+                        && key_kind.is_none()
+                        && map.len() == 2
+                        && map.contains_key("source")
+                        && map.contains_key("index"))
+                {
+                    if let (Some(source), Some(index)) = (
+                        map.get("source").and_then(Value::as_u64),
+                        map.get("index").and_then(Value::as_u64),
+                    ) {
+                        if let Some(host) = hosts.get_mut(&ObjectId(source)) {
+                            if let Some(pin) =
+                                map.get("resolution_host").filter(|pin| !pin.is_null())
+                            {
+                                let pin: ObjectIncarnationRef = serde_json::from_value(pin.clone())
+                                    .map_err(|error| error.to_string())?;
+                                if pin == host.pin {
+                                    host.next = host.next.max(
+                                        (index as usize)
+                                            .checked_add(1)
+                                            .ok_or("replacement installation exhausted")?,
+                                    );
+                                }
+                            } else if host.legacy {
+                                if let Some(ordinal) = host.slots.get(&(index as usize)) {
+                                    map.insert("type".into(), json!("Object"));
+                                    map.insert("index".into(), json!(ordinal));
+                                    map.insert(
+                                        "resolution_host".into(),
+                                        serde_json::to_value(host.pin)
+                                            .map_err(|error| error.to_string())?,
+                                    );
+                                } else if index as usize >= host.own_count {
+                                    if let Some(copy) = host.copy.as_ref() {
+                                        map.insert("copy_effect".into(), copy.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                for (field, child) in map.iter_mut() {
+                    rewrite(
+                        child,
+                        hosts,
+                        matches!(
+                            field.as_str(),
+                            "applied"
+                                | "replacement_applied"
+                                | "post_replacement_applied"
+                                | "candidate_keys"
+                                | "combat_one_shot_applications"
+                                | "prevention_tally"
+                                | "definitions"
+                                | "prevention_definitions"
+                        ),
+                    )?;
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    rewrite(child, hosts, legacy_key)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    fn high_water(value: &mut Value, hosts: &HashMap<ObjectId, Host>) {
+        match value {
+            Value::Object(map) => {
+                if map.contains_key("replacement_definitions") {
+                    if let Some(host) = map
+                        .get("id")
+                        .and_then(Value::as_u64)
+                        .and_then(|id| hosts.get(&ObjectId(id)))
+                    {
+                        map.insert(
+                            "next_resolution_replacement_installation".into(),
+                            json!(host.next),
+                        );
+                    }
+                }
+                for child in map.values_mut() {
+                    high_water(child, hosts);
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    high_water(child, hosts);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut hosts = HashMap::new();
+    collect(value, &mut hosts)?;
+    rewrite(value, &mut hosts, false)?;
+    high_water(value, &hosts);
+    Ok(())
+}
+
 impl GameStateDecode {
     pub(crate) fn decode_persisted_resolution_state(
         mut value: serde_json::Value,
@@ -31999,6 +32599,7 @@ impl GameStateDecode {
                 return Err("invalid persisted resolution-state decode mode".to_string());
             }
         }
+        normalize_replacement_occurrence_authority(&mut value)?;
         migrate_legacy_batched_zone_change_trigger_fired(&mut value)?;
         // Defaults must not turn unknown old attack authority into a recorded
         // ended relation. Preserve these input-presence facts through decoding.
@@ -32024,6 +32625,7 @@ impl GameStateDecode {
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
         crate::types::resolution::normalize_logical_zone_instruction_owners(&mut state)?;
+        normalize_saved_liminal_copy_authority(&mut state)?;
         freeze_stored_created_token_referents(&mut state);
         validate_token_creation_authorities(&state)?;
         // The PERSISTED half of the projection gate; `decode` below carries the other.
@@ -32044,6 +32646,7 @@ impl GameStateDecode {
         mut value: serde_json::Value,
         mode: GameStateDecodeMode,
     ) -> Result<GameState, String> {
+        normalize_replacement_occurrence_authority(&mut value)?;
         prepare_damage_source_authority(&mut value)?;
         crate::types::ability::normalize_legacy_damage_source_program(&mut value);
         // Like the CR 732.2a bound check below, hosted on both entry points.
@@ -32069,6 +32672,7 @@ impl GameStateDecode {
         migrate_legacy_shortcut_repetition_bound(&mut value)?;
         migrate_legacy_offer_road(&mut value);
         let mut state = Self::materialize_prepared(value)?;
+        normalize_saved_liminal_copy_authority(&mut state)?;
         freeze_stored_created_token_referents(&mut state);
         validate_token_creation_authorities(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
@@ -32114,6 +32718,7 @@ impl GameStateDecode {
         value: &mut serde_json::Value,
         mode: GameStateDecodeMode,
     ) -> Result<(), String> {
+        normalize_replacement_occurrence_authority(value)?;
         prepare_damage_source_authority(value)?;
         crate::types::ability::normalize_legacy_damage_source_program(value);
         debug_assert!(matches!(
@@ -33319,6 +33924,8 @@ fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Resul
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingReplacement {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidate_keys: Vec<AppliedReplacementKey>,
     /// CR 609.7a + CR 615.8: same-operation consumed definitions for this exact
     /// parked event, including the final recipient with no later continuation.
     #[serde(
@@ -38565,8 +39172,7 @@ impl GameState {
         // source id, so capture the active dungeon here as well; its grant can
         // remain after the venture marker leaves or enters another dungeon.
         let source_name = self
-            .objects
-            .get(&source_id)
+            .entering_or_live_object(source_id)
             .map(|o| o.name.clone())
             .or_else(|| self.lki_cache.get(&source_id).map(|lki| lki.name.clone()))
             .or_else(|| {
@@ -38591,8 +39197,7 @@ impl GameState {
         // departure record is the authority for it (CR 608.2i).
         let duration_event_source = match duration {
             Duration::UntilEvent { .. } => self
-                .objects
-                .get(&source_id)
+                .entering_or_live_object(source_id)
                 .map(|source| trigger_source_context_for_latch(self, source))
                 .or_else(|| {
                     let record = terminal_battlefield_departure_row(self, source_id)?;
@@ -38639,6 +39244,84 @@ impl GameState {
         id
     }
 
+    pub(crate) fn abandon_liminal_token_entry(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<(), ResolvedContinuousEffectRetirementInvariantError> {
+        let Some(entry) = self.liminal_entries.get(&object_id) else {
+            return Ok(());
+        };
+        let pin = ObjectIncarnationRef::from_object(entry.object.projected());
+        if !entry.object.is_token_projection() || self.objects.contains_key(&object_id) {
+            return Err(ResolvedContinuousEffectRetirementInvariantError::EffectMismatch(0));
+        }
+        let mut effects = Vec::new();
+        let mut instances = std::collections::HashSet::new();
+        for instance in &entry.installed_copy_effects {
+            if !instances.insert(*instance) {
+                return Err(
+                    ResolvedContinuousEffectRetirementInvariantError::DuplicateOperandId(
+                        instance.continuous_effect_id,
+                    ),
+                );
+            }
+            let effect = self
+                .transient_continuous_effects
+                .iter()
+                .find(|effect| effect.id == instance.continuous_effect_id)
+                .ok_or(
+                    ResolvedContinuousEffectRetirementInvariantError::MissingEffect(
+                        instance.continuous_effect_id,
+                    ),
+                )?;
+            if !matches!(
+                effect.modifications.get(instance.modification_index),
+                Some(ContinuousModification::CopyValues { .. })
+            ) || effect.affected_recipient != Some(pin)
+            {
+                return Err(
+                    ResolvedContinuousEffectRetirementInvariantError::EffectMismatch(effect.id),
+                );
+            }
+            if !effects
+                .iter()
+                .any(|owned: &TransientContinuousEffect| owned.id == effect.id)
+            {
+                effects.push(effect.clone());
+            }
+        }
+        if effects.is_empty() {
+            return Ok(());
+        }
+        let command = ResolvedContinuousEffectRetirementCommand {
+            effects,
+            abandoned_recipient: Some(pin),
+            abandoned_next_object_id: Some(self.next_object_id),
+            cause: self.current_or_begin_rules_execution_node(),
+        };
+        // Journal admission checks the exact preceding install and absence of a
+        // birth before the storage authority removes any operand.
+        let mut journal = self.resolved_rules_journal.clone();
+        journal
+            .record_continuous_effect_retirement(command.clone())
+            .map_err(|_| {
+                ResolvedContinuousEffectRetirementInvariantError::EffectMismatch(
+                    command.effects[0].id,
+                )
+            })?;
+        self.retire_exact_continuous_effects(
+            &command.effects,
+            command.abandoned_recipient,
+            command.abandoned_next_object_id,
+        )?;
+        self.resolved_rules_journal = journal;
+        if let Some(entry) = self.liminal_entries.get_mut(&object_id) {
+            entry.installed_copy_effects.clear();
+            entry.copy_exception_counters = None;
+        }
+        Ok(())
+    }
+
     /// Applies one already-resolved continuous-effect storage operation.
     /// Neither arm derives characteristics or appends a journal entry.
     pub fn apply_resolved_continuous_effect_edit(
@@ -38650,7 +39333,14 @@ impl GameState {
                 self.apply_resolved_continuous_effect(command)?;
             }
             ResolvedContinuousEffectEdit::Retire(command) => {
-                self.retire_exact_continuous_effects(&command.effects)?;
+                self.retire_exact_continuous_effects(
+                    &command.effects,
+                    command.abandoned_recipient,
+                    command.abandoned_next_object_id,
+                )?;
+                if let Some(next) = command.abandoned_next_object_id {
+                    self.next_object_id = self.next_object_id.max(next);
+                }
             }
         }
         Ok(())
@@ -38661,8 +39351,21 @@ impl GameState {
     pub(crate) fn retire_exact_continuous_effects(
         &mut self,
         effects: &[TransientContinuousEffect],
+        abandoned_recipient: Option<ObjectIncarnationRef>,
+        abandoned_next_object_id: Option<u64>,
     ) -> Result<(), ResolvedContinuousEffectRetirementInvariantError> {
-        ResolvedContinuousEffectRetirementCommand::validate_effects(effects)?;
+        ResolvedContinuousEffectRetirementCommand::validate_effects(
+            effects,
+            abandoned_recipient,
+            abandoned_next_object_id,
+        )?;
+        if let Some(pin) = abandoned_recipient {
+            if self.objects.contains_key(&pin.object_id) {
+                return Err(
+                    ResolvedContinuousEffectRetirementInvariantError::EffectMismatch(effects[0].id),
+                );
+            }
+        }
         for effect in effects {
             let mut matching = self
                 .transient_continuous_effects
@@ -42537,6 +43240,8 @@ mod tests {
         let projection = TokenProjection::materialize(state.objects[&object_id].clone());
         check(
             |attack_destination| LiminalEntry {
+                installed_copy_effects: Vec::new(),
+                copy_exception_counters: None,
                 creation_frame: None,
                 instructions: None,
                 object: LiminalEntrant::Token(projection.clone()),
@@ -45118,6 +45823,7 @@ mod tests {
         let expected =
             ProposedEvent::zone_change(object, Zone::Battlefield, Zone::Exile, Some(object));
         state.pending_replacement = Some(Box::new(PendingReplacement {
+            candidate_keys: Vec::new(),
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: expected.clone(),
@@ -45325,10 +46031,10 @@ mod tests {
                     "actor" => *performed_by = Some(PlayerId(1)),
                     "applied" => {
                         applied.insert(
-                            crate::types::proposed_event::AppliedReplacementKey::Object {
-                                source: ObjectId(99),
-                                index: 0,
-                            },
+                            crate::types::proposed_event::AppliedReplacementKey::object(
+                                ObjectId(99),
+                                0,
+                            ),
                         );
                     }
                     _ => *enter_tapped = crate::types::proposed_event::EtbTapState::Tapped,
@@ -46739,6 +47445,16 @@ mod tests {
     /// produces (Inkshield's tokens) inside a batch that then parks.
     fn parked_combat_lifelink(record: ZoneChangeRecord) -> Box<PendingCombatLifelink> {
         Box::new(PendingCombatLifelink {
+            prevention_opportunity: crate::types::ability::DamageOpportunity {
+                prevention_definitions: vec![(
+                    AppliedReplacementKey::object(ObjectId(9_402), 0),
+                    crate::types::ability::ReplacementDefinition::new(
+                        crate::types::replacements::ReplacementEvent::DamageDone,
+                    )
+                    .prevention_shield(crate::types::ability::PreventionAmount::All),
+                )],
+                ..Default::default()
+            },
             replacement_work: None,
             remaining: VecDeque::from(vec![PendingLifelinkGain {
                 controller: PlayerId(1),
@@ -46751,13 +47467,7 @@ mod tests {
                 total_damage: 3,
                 source_incarnations: vec![],
             }],
-            prevention_tally: vec![(
-                AppliedReplacementKey::Object {
-                    source: ObjectId(9_402),
-                    index: 0,
-                },
-                2,
-            )],
+            prevention_tally: vec![(AppliedReplacementKey::object(ObjectId(9_402), 0), 2)],
             lives_before: vec![20, 20],
             sub_step: CombatDamageSubStep::Regular,
         })
@@ -46822,13 +47532,7 @@ mod tests {
         );
         assert_eq!(
             parked.prevention_tally,
-            vec![(
-                AppliedReplacementKey::Object {
-                    source: ObjectId(9_402),
-                    index: 0,
-                },
-                2,
-            )],
+            vec![(AppliedReplacementKey::object(ObjectId(9_402), 0), 2,)],
             "the prevention tally round-trips as a Vec — an enum key is not a JSON map key"
         );
     }
@@ -60056,6 +60760,7 @@ mod tests {
 
     fn pending_life_gain_replacement(policy: UnrepresentablePolicy) -> PendingReplacement {
         PendingReplacement {
+            candidate_keys: Vec::new(),
             // Life gain has no damage event or consumed damage-source opportunity.
             damage_opportunity: Default::default(),
             damage_source_context: None,

@@ -1658,6 +1658,7 @@ pub(crate) fn apply_combat_damage(
     finish_combat_replacements(
         state,
         PendingCombatLifelink {
+            prevention_opportunity: Default::default(),
             replacement_work: Some(Box::new(work)),
             remaining: Default::default(),
             batch_events: events,
@@ -1736,6 +1737,7 @@ fn finish_combat_replacements(
         state,
         entries,
         work.survivors,
+        work.opportunity,
         prevention_tally,
         record.batch_events,
         record.lives_before,
@@ -1747,6 +1749,7 @@ fn finish_combat_damage_entries(
     state: &mut GameState,
     entries: Vec<BatchEntry>,
     survivors: Vec<Option<ProposedEvent>>,
+    prevention_opportunity: crate::types::ability::DamageOpportunity,
     prevention_tally: std::collections::HashMap<AppliedReplacementKey, i32>,
     mut events: Vec<GameEvent>,
     lives_before: Vec<i32>,
@@ -1896,20 +1899,12 @@ fn finish_combat_damage_entries(
     // their inner integers, exactly as `blocker_ids` is sorted above.
     let mut prevention_tally: Vec<(AppliedReplacementKey, i32)> =
         prevention_tally.into_iter().collect();
-    prevention_tally.sort_by_key(|(key, _)| match key {
-        AppliedReplacementKey::Object { source, index } => (0u8, source.0, *index, 0u8),
-        AppliedReplacementKey::Floating { index } => (1, 0, *index, 0),
-        AppliedReplacementKey::StepEndMana { index } => (2, 0, *index, 0),
-        AppliedReplacementKey::EntryControllerChoice {
-            source,
-            index,
-            controller,
-        } => (3, source.0, *index, controller.0),
-    });
+    prevention_tally.sort_by_key(|(key, _)| *key);
 
     drain_combat_lifelink(
         state,
         PendingCombatLifelink {
+            prevention_opportunity,
             replacement_work: None,
             remaining: lifelink_by_source
                 .into_iter()
@@ -1996,7 +1991,12 @@ fn drain_combat_lifelink(
     // CR 615.5 + CR 615.13: Phase D fires once per shield, and only here — after
     // the last gain, so no rider continuation can ever run while a CR 616.1
     // prompt is open, and after nothing else can stamp `last_effect_count`.
-    fire_combat_prevention_riders(state, &record.prevention_tally, &mut record.batch_events);
+    fire_combat_prevention_riders(
+        state,
+        &record.prevention_tally,
+        &record.prevention_opportunity,
+        &mut record.batch_events,
+    );
     // CR 510.2 + CR 732.2a: the simultaneous batch is the EVENT the loop-ring life
     // prohibition keys on, and this is the last statement that can move life in it.
     // The batch moves life in three places and only a call here sees all three:
@@ -2029,19 +2029,21 @@ fn drain_combat_lifelink(
 fn fire_combat_prevention_riders(
     state: &mut GameState,
     prevention_tally: &[(AppliedReplacementKey, i32)],
+    opportunity: &crate::types::ability::DamageOpportunity,
     events: &mut Vec<GameEvent>,
 ) {
     for &(key, total_prevented) in prevention_tally {
-        let rid = key.as_replacement_id();
+        let rid = replacement::replacement_id_for_key(state, key);
         if total_prevented <= 0 {
             continue;
         }
 
-        if replacement::is_shield_counter_damage_replacement(rid) {
+        if let Some(rid) = rid.filter(|rid| replacement::is_shield_counter_damage_replacement(*rid))
+        {
             replacement::consume_shield_counter(state, rid.source, events);
             events.push(GameEvent::DamagePrevented {
-                source_id: rid.source,
-                target: TargetRef::Object(rid.source),
+                source_id: key.source(),
+                target: TargetRef::Object(key.source()),
                 amount: total_prevented as u32,
             });
             continue;
@@ -2049,14 +2051,7 @@ fn fire_combat_prevention_riders(
 
         // CR 615.3: Pending shields use sentinel ObjectId(0); object-hosted
         // shields are found in the host's replacement_definitions.
-        let repl_def = if rid.source == ObjectId(0) {
-            state.pending_damage_replacements.get(rid.index)
-        } else {
-            state
-                .objects
-                .get(&rid.source)
-                .and_then(|obj| obj.replacement_definitions.get(rid.index))
-        };
+        let repl_def = replacement::replacement_definition_for_key(state, key, opportunity);
         let Some(repl_def) = repl_def else {
             continue;
         };
@@ -2069,10 +2064,10 @@ fn fire_combat_prevention_riders(
                 Some(crate::types::ability::DamageTargetFilter::Player {
                     player: crate::types::ability::DamageTargetPlayerScope::Specific(player),
                 }) => TargetRef::Player(*player),
-                _ => TargetRef::Object(rid.source),
+                _ => TargetRef::Object(key.source()),
             };
             events.push(GameEvent::DamagePrevented {
-                source_id: rid.source,
+                source_id: key.source(),
                 target: prevented_target,
                 amount: total_prevented as u32,
             });
@@ -3516,6 +3511,100 @@ mod tests {
             "CR 615.5: the prevention rider takes place immediately AFTER the \
              event it replaced (aggregate={aggregate}, prevented={prevented_at})"
         );
+    }
+
+    #[test]
+    fn prevention_rider_keeps_exact_definition_after_lifelink_pause_and_host_reseed() {
+        use crate::game::scenario::GameRunner;
+        use crate::types::ability::{PreventionAmount, RestrictionExpiry};
+        use crate::types::actions::GameAction;
+        let mut state = setup();
+        install_inkshield(&mut state, PlayerId(1));
+        let mut shield = state.pending_damage_replacements.pop().unwrap();
+        shield.expiry = Some(RestrictionExpiry::EndOfTurn);
+        let host = create_creature(&mut state, PlayerId(1), "Original shield host", 1, 1);
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .install_resolution_replacement(shield)
+            .unwrap();
+        let prevented = create_creature(&mut state, PlayerId(0), "Prevented", 3, 3);
+        let lifelinker = create_creature(&mut state, PlayerId(0), "Lifelinker", 3, 3);
+        state
+            .objects
+            .get_mut(&lifelinker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Lifelink);
+        let blocker = create_creature(&mut state, PlayerId(1), "Blocker", 2, 2);
+        install_gain_life_replacement(&mut state, PlayerId(0), "Double gain", doubler_amount());
+        install_gain_life_replacement(&mut state, PlayerId(0), "Plus gain", plus_one_amount());
+        setup_combat(
+            &mut state,
+            vec![prevented, lifelinker],
+            vec![(prevented, vec![]), (lifelinker, vec![blocker])],
+        );
+        let mut events = vec![];
+        let waiting = resolve_combat_damage(&mut state, &mut events);
+        assert!(
+            matches!(waiting, Some(WaitingFor::ReplacementChoice { .. })),
+            "the actual lifelink gain pauses: {waiting:?}"
+        );
+        state.waiting_for = waiting.unwrap();
+        assert!(matches!(
+            state.pending_replacement.as_ref().unwrap().proposed,
+            ProposedEvent::LifeGain { .. }
+        ));
+        let batch = state.pending_combat_lifelink.as_ref().unwrap();
+        assert!(batch.replacement_work.is_none());
+        assert_eq!(batch.prevention_opportunity.prevention_definitions.len(), 1);
+        let key = batch.prevention_opportunity.prevention_definitions[0].0;
+        assert_eq!(key.source(), host);
+        // Saved-tail discriminator: remove the original occurrence, then install a
+        // different program at the same physical slot. Only the retained original
+        // exact-key program is owed by this completed damage opportunity.
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .replacement_definitions
+            .clear();
+        let replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::All)
+            .expiry(RestrictionExpiry::EndOfTurn);
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .install_resolution_replacement(replacement)
+            .unwrap();
+        assert!(replacement::replacement_id_for_key(&state, key).is_none());
+        for restored in [
+            state.clone(),
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap(),
+            serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                serde_json::to_value(
+                    crate::types::resolution::ResolutionStateWire::from_game_state(state.clone()),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+        ] {
+            let mut runner = GameRunner::from_state(restored);
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .unwrap();
+            assert_eq!(
+                count_inklings(runner.state()),
+                3,
+                "the original aggregate rider fires once for the three prevented damage"
+            );
+            assert!(runner.state().pending_combat_lifelink.is_none());
+            assert!(runner.state().pending_replacement.is_none());
+            assert_eq!(runner.state().players[0].life, 27);
+        }
     }
 
     #[test]
@@ -6089,7 +6178,7 @@ mod tests {
                     runner.state().waiting_for,
                     WaitingFor::ReplacementChoice { .. }
                 ),
-                "actual combat damage replacement ordering must park"
+                "actual combat damage replacement ordering must park: wait={:?}; pending={:?}; batch={:?}; installed={:?}", runner.state().waiting_for, runner.state().pending_replacement, runner.state().pending_combat_lifelink, runner.state().pending_damage_replacements
             );
             let batch = runner.state().pending_combat_lifelink.as_ref().unwrap();
             let work = batch.replacement_work.as_ref().unwrap();

@@ -13,7 +13,7 @@ use crate::game::game_object::AttachTarget;
 use crate::game::perf_counters;
 use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
 
-use super::ability::{ChosenAttribute, ContinuousModification, TriggerDefinitionRef};
+use super::ability::{ChosenAttribute, ContinuousModification, TargetFilter, TriggerDefinitionRef};
 use super::card::TokenImageRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
@@ -349,6 +349,10 @@ pub struct ResolvedContinuousEffectCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedContinuousEffectRetirementCommand {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abandoned_recipient: Option<ObjectIncarnationRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abandoned_next_object_id: Option<u64>,
     pub effects: Vec<TransientContinuousEffect>,
     pub cause: RulesExecutionNodeRef,
 }
@@ -439,10 +443,25 @@ impl ResolvedContinuousEffectRetirementCommand {
     /// Payload-only validation shared by persistence and the exact remover.
     pub(crate) fn validate_effects(
         effects: &[TransientContinuousEffect],
+        abandoned_recipient: Option<ObjectIncarnationRef>,
+        abandoned_next_object_id: Option<u64>,
     ) -> Result<(), ResolvedContinuousEffectRetirementInvariantError> {
         if effects.is_empty() {
             return Err(ResolvedContinuousEffectRetirementInvariantError::EmptyBatch);
         }
+        let cancellation = match (abandoned_recipient, abandoned_next_object_id) {
+            (None, None) => None,
+            (Some(pin), Some(next))
+                if pin.incarnation != LEGACY_INCARNATION && next > pin.object_id.0 =>
+            {
+                Some(pin)
+            }
+            _ => {
+                return Err(
+                    ResolvedContinuousEffectRetirementInvariantError::EffectMismatch(effects[0].id),
+                )
+            }
+        };
         let mut ids = HashSet::new();
         for effect in effects {
             if !ids.insert(effect.id) {
@@ -450,7 +469,18 @@ impl ResolvedContinuousEffectRetirementCommand {
                     ResolvedContinuousEffectRetirementInvariantError::DuplicateOperandId(effect.id),
                 );
             }
-            if !effect.duration.is_for_as_long_as() {
+            if let Some(pin) = cancellation {
+                if effect.affected_recipient != Some(pin)
+                    || effect.affected != (TargetFilter::SpecificObject { id: pin.object_id })
+                    || !effect.modifications.iter().any(|modification| {
+                        matches!(modification, ContinuousModification::CopyValues { .. })
+                    })
+                {
+                    return Err(
+                        ResolvedContinuousEffectRetirementInvariantError::EffectMismatch(effect.id),
+                    );
+                }
+            } else if !effect.duration.is_for_as_long_as() {
                 return Err(
                     ResolvedContinuousEffectRetirementInvariantError::NotStateDuration(effect.id),
                 );
@@ -2761,12 +2791,16 @@ impl ResolvedRulesJournal {
         &mut self,
         command: ResolvedContinuousEffectRetirementCommand,
     ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
-        self.append_command(
-            command.cause,
-            ResolvedRulesCommand::ContinuousEffect(Box::new(ResolvedContinuousEffectEdit::Retire(
-                command,
-            ))),
-        )
+        let operation = ResolvedRulesCommand::ContinuousEffect(Box::new(
+            ResolvedContinuousEffectEdit::Retire(command.clone()),
+        ));
+        let entry = ResolvedCommandJournalEntry {
+            ordinal: ResolvedCommandOrdinal(self.next_command_ordinal),
+            node: command.cause,
+            command: None,
+        };
+        self.validate_resolved_command(&entry, &operation)?;
+        self.append_command(command.cause, operation)
     }
 
     /// Records one exact CR 506.3 / CR 506.4 combat-membership edit under its
@@ -2824,6 +2858,9 @@ impl ResolvedRulesJournal {
         &mut self,
         command: ResolvedTokenCreationCommand,
     ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        if self.entries.iter().any(|entry| matches!(&entry.command, Some(ResolvedRulesCommand::ContinuousEffect(edit)) if matches!(edit.as_ref(), ResolvedContinuousEffectEdit::Retire(retire) if retire.abandoned_recipient == Some(command.object)))) {
+            return Err(ResolvedRulesJournalError::InvalidSerializedAuthority("token birth reuses a canceled reserved incarnation".into()));
+        }
         self.append_command(
             command.cause,
             ResolvedRulesCommand::TokenCreation(Box::new(command)),
@@ -3460,10 +3497,28 @@ impl ResolvedRulesJournal {
                                 .to_string(),
                         ));
                     }
-                    ResolvedContinuousEffectRetirementCommand::validate_effects(&command.effects)
-                        .map_err(|error| {
+                    ResolvedContinuousEffectRetirementCommand::validate_effects(
+                        &command.effects,
+                        command.abandoned_recipient,
+                        command.abandoned_next_object_id,
+                    )
+                    .map_err(|error| {
                         ResolvedRulesJournalError::InvalidSerializedAuthority(error.to_string())
                     })?;
+                    if let Some(pin) = command.abandoned_recipient {
+                        for effect in &command.effects {
+                            let installed = self.entries.iter().filter(|prior| prior.ordinal < entry.ordinal).any(|prior| matches!(&prior.command,
+                                Some(ResolvedRulesCommand::ContinuousEffect(edit)) if matches!(edit.as_ref(), ResolvedContinuousEffectEdit::Install(install) if install.effect == *effect)));
+                            let spent_or_born = self.entries.iter().filter(|prior| prior.ordinal < entry.ordinal).any(|prior| match &prior.command {
+                                Some(ResolvedRulesCommand::TokenCreation(birth)) => birth.object == pin,
+                                Some(ResolvedRulesCommand::ContinuousEffect(edit)) => matches!(edit.as_ref(), ResolvedContinuousEffectEdit::Retire(retire) if retire.effects.iter().any(|retired| retired.id == effect.id)),
+                                _ => false,
+                            });
+                            if !installed || spent_or_born {
+                                return Err(ResolvedRulesJournalError::InvalidSerializedAuthority("unborn copy cancellation lacks exact unspent installation receipts".into()));
+                            }
+                        }
+                    }
                 }
             },
             ResolvedRulesCommand::CombatMembership(command) => {
@@ -3590,6 +3645,11 @@ impl ResolvedRulesJournal {
                 }
             }
             ResolvedRulesCommand::TokenCreation(command) => {
+                if self.entries.iter().filter(|prior| prior.ordinal < entry.ordinal).any(|prior| matches!(&prior.command,
+                    Some(ResolvedRulesCommand::ContinuousEffect(edit)) if matches!(edit.as_ref(), ResolvedContinuousEffectEdit::Retire(retire) if retire.abandoned_recipient == Some(command.object)))) {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority("token birth reuses a canceled reserved incarnation".into()));
+                }
+
                 // CR 111.1: the token's id must be below the high-water its own
                 // draw established, or the record cannot describe an allocation
                 // that actually happened.

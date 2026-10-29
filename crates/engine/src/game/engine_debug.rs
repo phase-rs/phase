@@ -1178,6 +1178,8 @@ fn route_debug_token_to_battlefield(
     state.liminal_entries.insert(
         object_id,
         LiminalEntry {
+            installed_copy_effects: Vec::new(),
+            copy_exception_counters: None,
             creation_frame: None,
             instructions: None,
             object: crate::types::game_state::LiminalEntrant::Token(

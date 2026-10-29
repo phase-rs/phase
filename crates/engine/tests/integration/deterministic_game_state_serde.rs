@@ -1716,6 +1716,8 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(1),
             LiminalEntry {
+                installed_copy_effects: Vec::new(),
+                copy_exception_counters: None,
                 creation_frame: None,
                 instructions: None,
                 object: LiminalEntrant::Token(TokenProjection::materialize(first.clone())),
@@ -1739,6 +1741,8 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(2),
             LiminalEntry {
+                installed_copy_effects: Vec::new(),
+                copy_exception_counters: None,
                 creation_frame: None,
                 instructions: None,
                 object: LiminalEntrant::Token(TokenProjection::materialize(second.clone())),
@@ -2618,7 +2622,10 @@ fn copy_target_choice_purpose_round_trips_and_still_defaults_to_become_copy() {
     let WaitingFor::CopyTargetChoice { purpose, .. } = restored else {
         panic!("a CopyTargetChoice blob must restore as CopyTargetChoice");
     };
-    assert_eq!(purpose, CopyTargetPurpose::BecomeCopy);
+    assert_eq!(
+        purpose,
+        CopyTargetPurpose::BecomeCopy { continuation: None }
+    );
 
     let mut state = GameState::new(FormatConfig::standard(), 2, 42);
     state.waiting_for = waiting;

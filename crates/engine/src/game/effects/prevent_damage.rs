@@ -744,7 +744,8 @@ pub fn resolve(
                         // effect is not an object characteristic (CR 611.2c), so a
                         // layer pass has no authority to end it; a zone change
                         // (CR 400.7) and the `expiry` prunes still do.
-                        obj.install_resolution_replacement(object_shield);
+                        obj.install_resolution_replacement(object_shield)
+                            .map_err(|error| EffectError::InvalidParam(error.into()))?;
                     }
                 }
                 TargetRef::Player(player) => {

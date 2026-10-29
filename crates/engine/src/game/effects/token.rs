@@ -1886,6 +1886,7 @@ pub fn apply_resolved_token_creation(
         .chosen_attributes
         .extend(command.entry_choices.iter().cloned());
     crate::game::layers::mark_layers_entered(state, object_id);
+    crate::game::layers::flush_layers(state);
     // CR 111.3 + CR 111.10: a token's abilities come from the creating effect
     // and the predefined/catalog tables, NOT from the body the command carries,
     // so the body alone materializes a Treasure with no "{T}, Sacrifice this
@@ -2154,8 +2155,7 @@ pub(crate) fn commit_liminal_copy_token_entry(
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    let continuation = liminal_copy_token_continuation_for_event(state, &event);
-    commit_liminal_copy_token_entry_with_continuation(state, event, continuation, events)
+    consult_liminal_token_entry(state, event, events, false)
 }
 
 fn commit_liminal_copy_token_entry_with_continuation(
@@ -2182,16 +2182,103 @@ pub(crate) fn commit_liminal_token_entry_and_continue_copy_batch(
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    let continuation = liminal_copy_token_continuation_for_event(state, &event);
-    if !commit_liminal_copy_token_entry_with_continuation(
-        state,
-        event,
-        continuation.clone(),
-        events,
-    ) {
-        return false;
-    }
+    consult_liminal_token_entry(state, event, events, true)
+}
+
+pub(crate) fn consult_liminal_token_entry_and_continue(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    consult_liminal_token_entry(state, event, events, true)
+}
+
+pub(crate) fn abandon_liminal_token_entry_and_continue(
+    state: &mut GameState,
+    event: &ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let continuation = liminal_copy_token_continuation_for_event(state, event);
+    let ProposedEvent::TokenEntry { entry_ref, .. } = event else {
+        return true;
+    };
+    let created = state
+        .liminal_entries
+        .get(entry_ref)
+        .map(|entry| entry.created_ids.clone())
+        .unwrap_or_default();
+    state
+        .abandon_liminal_token_entry(*entry_ref)
+        .expect("unborn entry owns its selected copy effects");
+    state.liminal_entries.remove(entry_ref);
+    state.last_created_token_ids = created;
     continue_liminal_copy_token_batch(state, continuation, events)
+}
+
+fn consult_liminal_token_entry(
+    state: &mut GameState,
+    mut event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+    continue_batch: bool,
+) -> bool {
+    let continuation = liminal_copy_token_continuation_for_event(state, &event);
+    let ProposedEvent::TokenEntry { entry_ref, .. } = &event else {
+        return true;
+    };
+    let entry_ref = *entry_ref;
+    loop {
+        match crate::game::replacement::replace_event(state, event, events) {
+            crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
+                return false;
+            }
+            crate::game::replacement::ReplacementResult::Prevented => {
+                let created = state
+                    .liminal_entries
+                    .get(&entry_ref)
+                    .map(|entry| entry.created_ids.clone())
+                    .unwrap_or_default();
+                state
+                    .abandon_liminal_token_entry(entry_ref)
+                    .expect("unborn token owns only its selected copy effects");
+                state.liminal_entries.remove(&entry_ref);
+                state.last_created_token_ids = created;
+                return !continue_batch
+                    || continue_liminal_copy_token_batch(state, continuation, events);
+            }
+            crate::game::replacement::ReplacementResult::Execute(next) => event = next,
+        }
+        if state.has_post_replacement_drain() {
+            if let Some(waiting_for) =
+                crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                    state,
+                    Some(entry_ref),
+                    None,
+                    Some(crate::types::replacements::ReplacementEvent::Moved),
+                    events,
+                )
+            {
+                state.pending_liminal_entry_resume =
+                    Some(crate::types::game_state::PendingLiminalEntryResume::Token {
+                        source_id: entry_ref,
+                        player: waiting_for.acting_player().unwrap_or(state.active_player),
+                        event,
+                    });
+                state.waiting_for = waiting_for;
+                return false;
+            }
+            continue;
+        }
+        let done = commit_liminal_copy_token_entry_with_continuation(
+            state,
+            event,
+            continuation.clone(),
+            events,
+        );
+        return done
+            && (!continue_batch || continue_liminal_copy_token_batch(state, continuation, events));
+    }
 }
 
 #[derive(Clone)]
@@ -2397,11 +2484,11 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
     {
         return true;
     }
-    let Some(mut entry) = state.liminal_entries.remove(&entry_ref) else {
+    let Some(mut entry) = state.liminal_entries.get(&entry_ref).cloned() else {
         return true;
     };
     let finalization = liminal_token_entry_finalization_action(entry_ref, &entry, entry_events);
-    let counters_to_apply: Vec<_> = enter_with_counters
+    let mut counters_to_apply: Vec<_> = enter_with_counters
         .iter()
         .chain(entry.enter_with_counters.iter())
         .cloned()
@@ -2478,9 +2565,22 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
         }
     });
 
+    let static_defs: Vec<_> = crate::game::functioning_abilities::battlefield_active_statics(state)
+        .filter(|(_, definition)| {
+            matches!(
+                definition.mode,
+                crate::types::statics::StaticMode::EntersWithAdditionalCounters { .. }
+            )
+        })
+        .map(|(source, definition)| (source.id, definition.clone()))
+        .collect();
+    if let Some((owner, contribution)) = &entry.copy_exception_counters {
+        assert_eq!(entry.object.projected().layer1_copy_effect, Some(*owner));
+        counters_to_apply.extend(contribution.iter().cloned());
+    }
     state
         .objects
-        .insert(entry_ref, entry.object.into_projected());
+        .insert(entry_ref, entry.object.clone().into_projected());
     // allow-raw-zone: liminal token birth has no from-zone move; TokenEntry already consults entry replacements (CR 111.2 + CR 614.12).
     zones::add_to_zone(state, entry_ref, Zone::Battlefield, owner);
 
@@ -2549,6 +2649,10 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
         // Leyline of the Void) still apply to it. Nothing is placed anywhere
         // here, so there is no placement for a replacement to miss.
         uncreate_unentered_aura_token(state, entry_ref, owner);
+        state
+            .abandon_liminal_token_entry(entry_ref)
+            .expect("denied token owns its exact unborn copy effects");
+        state.liminal_entries.remove(&entry_ref);
         // CR 111.1 + CR 603.7: the anaphora slot still has to be republished, or
         // the batch continuation (which reads it back to seed the next token's
         // `created_ids`) would carry whatever an EARLIER, unrelated effect left
@@ -2560,6 +2664,17 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
         // Not a pause: the batch loop must go on to the next token in the count.
         return true;
     }
+
+    state.liminal_entries.remove(&entry_ref);
+    crate::game::layers::mark_layers_entered(state, entry_ref);
+    crate::game::layers::flush_layers(state);
+    counters_to_apply.extend(
+        crate::game::zone_pipeline::enters_with_additional_counters_for_entry(
+            state,
+            entry_ref,
+            &static_defs,
+        ),
+    );
 
     if let Some(command) = birth_command {
         state
@@ -9917,6 +10032,8 @@ mod tests {
         source_id: ObjectId,
     ) -> crate::types::game_state::LiminalEntry {
         crate::types::game_state::LiminalEntry {
+            installed_copy_effects: Vec::new(),
+            copy_exception_counters: None,
             creation_frame: None,
             instructions: None,
             object,
@@ -10185,6 +10302,8 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
+                installed_copy_effects: Vec::new(),
+                copy_exception_counters: None,
                 creation_frame: None,
                 instructions: None,
                 object: crate::types::game_state::LiminalEntrant::Token(

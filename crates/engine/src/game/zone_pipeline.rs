@@ -2195,6 +2195,7 @@ mod paused_search_audience_tests {
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
         state.pending_replacement = Some(Box::new(PendingReplacement {
+            candidate_keys: Vec::new(),
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: original.clone(),
@@ -2366,7 +2367,7 @@ fn run_zone_delivery_tail_context(
 /// Returns an aggregated `(CounterType, count)` list so multiple active sources
 /// stack additively (CR 616.1f: repeat the replacement process until none apply).
 /// The caller folds this through the shared `apply_etb_counters` resolver.
-fn enters_with_additional_counters_for_entry(
+pub(crate) fn enters_with_additional_counters_for_entry(
     state: &GameState,
     object_id: ObjectId,
     static_defs: &[(ObjectId, StaticDefinition)],

@@ -30360,6 +30360,38 @@ mod tests {
                 .id();
             scenario.with_library_top(P0, &["Independent completed-empty Draw", "Reserve"]);
             let mut runner = scenario.build();
+            let branch = |selected: AbilityDefinition| {
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChooseOneOf {
+                        chooser: crate::types::ability::PlayerFilter::Controller,
+                        branches: vec![
+                            AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+                            selected,
+                        ],
+                        kind: crate::types::ability::ChooseOneOfKind::Ordinary,
+                    },
+                )
+            };
+            let mut child: Effect = serde_json::from_value(serde_json::json!({ "type": "ChangeZone", "origin": "Battlefield", "destination": "Graveyard" })).unwrap();
+            if let Effect::ChangeZone { target, .. } = &mut child {
+                *target = TargetFilter::SpecificObject { id: source };
+            }
+            let mut moving = AbilityDefinition::new(AbilityKind::Spell, child);
+            moving.sub_ability = Some(Box::new(branch(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::NoOp,
+            ))));
+            let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Exile)
+                .mode(ReplacementMode::Optional {
+                    decline: Some(Box::new(branch(moving))),
+                });
+            let object = runner.state_mut().objects.get_mut(&source).unwrap();
+            object.replacement_definitions.clear();
+            object.replacement_definitions.push(replacement.clone());
+            object.base_replacement_definitions = std::sync::Arc::new(vec![replacement]);
             crate::game::stack::create_warp_delayed_trigger(
                 runner.state_mut(),
                 source,
@@ -30426,24 +30458,44 @@ mod tests {
                     *target = TargetFilter::SelfRef;
                 }
             }
-            let mut child_events = Vec::new();
-            crate::game::zones::move_to_zone(
-                runner.state_mut(),
-                source,
-                Zone::Exile,
-                &mut child_events,
+            assert!(
+                original.terminal_completion.is_none(),
+                "the original optional parent is genuinely pending before the child dispatch"
             );
-            assert!(child_events
-                .iter()
-                .any(|event| matches!(event, GameEvent::ZoneChanged { .. })));
+            runner
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ChooseOneOfBranch { player: P0, .. }
+            ));
+            assert!(
+                runner.state().resolution_stack.iter().any(|frame| {
+                    let raw = serde_json::to_value(frame).unwrap();
+                    raw.pointer("/data/drains")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|drains| {
+                            drains.iter().any(|drain| {
+                                drain
+                                    .get("independent_departure_ancestors")
+                                    .is_some_and(|binding| !binding.is_null())
+                            })
+                        })
+                }),
+                "the actual child branch owns a bound independent-departure dispatch"
+            );
+            let child = runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+            assert!(child.events.iter().any(|event| matches!(event, GameEvent::ZoneChanged { record, .. } if record.object_id == source && record.to_zone == Zone::Graveyard)));
             assert!(!original.member.is_current(runner.state()));
-            let retained = warp_zone_delivery_from_replacement(runner.state()).unwrap();
-            assert_eq!(retained.member, original.member);
-            assert!(retained.terminal_completion.is_none(), "typed ungrouped key selects the still-pending original; it invents no terminal proof after child movement");
-            let declined = runner.act(GameAction::ChooseReplacement { index: 1 });
-            assert!(declined.is_ok(), "Warp parent decline grouped={grouped}: result={declined:?}; wait={:?}; frames={:?}; retained={:?}; ledger={:?}",
-                runner.state().waiting_for, runner.state().resolution_stack,
-                warp_zone_delivery_from_replacement(runner.state()), runner.state().zone_changes_this_turn);
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ChooseOneOfBranch { player: P0, .. }
+                ),
+                "the child actually moved before a second real pause"
+            );
+            assert_eq!(runner.state().players[0].hand.len(), 0);
+            runner.act(GameAction::ChooseBranch { index: 0 }).unwrap();
             runner.advance_until_stack_empty();
             assert!(
                 !runner.state().objects[&source]
@@ -30457,6 +30509,8 @@ mod tests {
                 1,
                 "completed-empty prunes only the dependent grant"
             );
+            drain_pending_continuation(runner.state_mut(), &mut Vec::new());
+            assert_eq!(runner.state().players[0].hand.len(), 1);
             assert!(matches!(
                 runner.state().waiting_for,
                 WaitingFor::Priority { .. }
@@ -30476,9 +30530,11 @@ mod tests {
     fn warp_ungrouped_explicit_terminal_and_missing_proof_keep_independent_sibling() {
         use crate::types::ability::{CastingPermission, PendingForwardedZoneResult};
         use crate::types::game_state::{
-            PendingZoneChangeDelivery, ResolutionSourceRelatch, ZoneMoveCompletion,
+            PendingZoneChangeDelivery, ResolutionSourceRelatch, TrustedGameStateEnvelope,
+            ZoneMoveCompletion,
         };
         use crate::types::proposed_event::ProposedEvent;
+        use crate::types::resolution::ResolutionStateWire;
         for terminal in [
             Some(ZoneMoveCompletion::Moved),
             Some(ZoneMoveCompletion::Remained),
@@ -30486,23 +30542,20 @@ mod tests {
             None,
         ] {
             let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
             let source = scenario
                 .add_creature(P0, "Explicit retained terminal member", 7, 5)
                 .id();
             scenario.with_library_top(P0, &["Independent retained-result Draw", "Reserve"]);
-            let mut state = scenario.build().state().clone();
+            let mut runner = scenario.build();
             crate::game::stack::create_warp_delayed_trigger(
-                &mut state,
+                runner.state_mut(),
                 source,
                 P0,
                 &mut Vec::new(),
             );
-            let mut grant = state.delayed_triggers[0]
-                .ability
-                .sub_ability
-                .as_deref()
-                .unwrap()
-                .clone();
+            let delayed = &mut runner.state_mut().delayed_triggers[0].ability;
+            let mut grant = delayed.sub_ability.as_deref().unwrap().clone();
             let member = grant.trigger_source.as_ref().unwrap().identity.reference;
             let mut draw = ResolvedAbility::new(
                 Effect::Draw {
@@ -30518,26 +30571,58 @@ mod tests {
             if let Effect::GrantCastingPermission { target, .. } = &mut grant.effect {
                 *target = TargetFilter::SelfRef;
             }
-            state.phase = crate::types::phase::Phase::End;
-            assert!(!crate::game::triggers::check_delayed_triggers(
-                &mut state,
-                &[GameEvent::PhaseChanged {
-                    phase: crate::types::phase::Phase::End
-                }]
-            )
-            .is_empty());
-            let popped = crate::game::stack::pop_top_stack_entry(&mut state)
-                .expect("the normal delayed producer placed its stack entry");
-            crate::game::stack::begin_resolving_stack_entry(
-                &mut state,
-                popped.entry,
-                popped.trigger_firing,
-            )
-            .expect("the normal delayed firing transfers with its resolving carrier");
+            // Synthetic pause plumbing retains the actual delayed source/member/grant.
+            delayed.effect = Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            };
+            delayed.sub_ability = Some(Box::new(grant));
+            for _ in 0..160 {
+                if runner.state().phase == crate::types::phase::Phase::End {
+                    break;
+                }
+                let action = match runner.state().waiting_for {
+                    WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    },
+                    WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    },
+                    _ => GameAction::PassPriority,
+                };
+                runner.act(action).unwrap();
+            }
+            assert_eq!(runner.state().phase, crate::types::phase::Phase::End);
             assert!(
-                state.resolving_stack_entry.is_some(),
-                "the normal delayed producer supplies the resolving source carrier"
+                !runner.state().stack.is_empty(),
+                "the real phase producer placed its delayed trigger on the stack"
             );
+            runner
+                .act(GameAction::BeginResolveAll {
+                    max_resolutions: 1,
+                    scope: crate::types::actions::ResolveAllScope::Own,
+                })
+                .unwrap();
+            for _ in 0..8 {
+                if matches!(runner.state().waiting_for, WaitingFor::ScryChoice { .. }) {
+                    break;
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ScryChoice { player: P0, .. }
+            ));
+            assert!(
+                runner.state().resolving_stack_entry.is_some()
+                    && runner.state().stack_resolution_session.is_some()
+            );
+            let mut state = runner.state().clone();
             let mut events = Vec::new();
             crate::game::zones::move_to_zone(&mut state, source, Zone::Exile, &mut events);
             assert!(events
@@ -30551,17 +30636,21 @@ mod tests {
                 Some(ResolutionSourceRelatch {
                     object_id: source,
                     original_stamp: member.incarnation,
-                    current_incarnation: pin.incarnation,
+                    current_incarnation: pin.incarnation
                 })
             );
+            let pending = state
+                .active_ability_continuation_frame_mut()
+                .expect("the genuine Scry pause owns the original grant and Draw tail");
+            assert!(is_warp_exile_grant(&pending.pending.chain));
             if terminal.is_some() {
-                grant.context.pending_forwarded_zone_result = Some(PendingForwardedZoneResult {
-                    producer: source,
-                    selected: Some(vec![member]),
-                    group: None,
-                });
+                pending.pending.chain.context.pending_forwarded_zone_result =
+                    Some(PendingForwardedZoneResult {
+                        producer: source,
+                        selected: Some(vec![member]),
+                        group: None,
+                    });
             }
-            state.park_ability_continuation(PendingContinuation::new(Box::new(grant), &state));
             if let Some(completion) = terminal {
                 let mut retained = PendingZoneChangeDelivery::new(
                     member,
@@ -30590,16 +30679,67 @@ mod tests {
             } else {
                 assert!(
                     warp_zone_delivery_from_replacement(&state).is_none(),
-                    "a bare post-move tail has no retained earning proof"
+                    "missing proof remains missing beside real movement"
                 );
             }
+            let assert_pending = |state: &GameState| {
+                assert!(matches!(
+                    state.waiting_for,
+                    WaitingFor::ScryChoice { player: P0, .. }
+                ));
+                assert!(
+                    state.resolving_stack_entry.is_some()
+                        && state.stack_resolution_session.is_some()
+                );
+                assert_eq!(state.players[0].hand.len(), 0);
+                assert!(state.objects[&source].casting_permissions.is_empty());
+                let chain = &state
+                    .active_ability_continuation()
+                    .expect("pending grant/Draw owner survives every reader")
+                    .chain;
+                assert_eq!(chain.source_id, source);
+                let mut node = Some(chain.as_ref());
+                let mut draws = 0;
+                let mut grants = 0;
+                while let Some(current) = node {
+                    if matches!(current.effect, Effect::Draw { .. }) {
+                        draws += 1;
+                        assert_eq!(current.sub_link, SubAbilityLink::SequentialSibling);
+                    }
+                    if is_warp_exile_grant(current) {
+                        grants += 1;
+                        assert_eq!(warp_grant_member(current), Some(member));
+                    }
+                    node = current.sub_ability.as_deref();
+                }
+                assert_eq!(
+                    draws, 1,
+                    "independent Draw is still pending before public resume"
+                );
+                assert_eq!(
+                    grants,
+                    usize::from(terminal == Some(ZoneMoveCompletion::Moved) || terminal.is_none()),
+                    "only the terminal-dependent grant is transformed"
+                );
+            };
+            assert_pending(&state);
             let mut forms = vec![
                 state.clone(),
-                serde_json::from_value::<GameState>(serde_json::to_value(&state).unwrap())
-                    .unwrap_or_else(|error| panic!("Warp terminal={terminal:?} current restore: {error}; wait={:?}; frames={:?}; resolving={:?}", state.waiting_for, state.resolution_stack, state.resolving_stack_entry)),
+                serde_json::from_value::<GameState>(serde_json::to_value(&state).unwrap()).unwrap(),
+                serde_json::from_value::<TrustedGameStateEnvelope>(
+                    serde_json::to_value(TrustedGameStateEnvelope::capture(state.clone())).unwrap(),
+                )
+                .unwrap()
+                .into_game_state(),
                 crate::types::game_state::PersistedGameState::capture(state.clone())
                     .into_game_state()
                     .unwrap(),
+                serde_json::from_value::<ResolutionStateWire>(
+                    serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+                        .unwrap(),
+                )
+                .unwrap()
+                .into_game_state(),
             ];
             let mut v1 = serde_json::to_value(&state).unwrap();
             v1.as_object_mut().unwrap().remove("resolution_stack");
@@ -30607,24 +30747,48 @@ mod tests {
             v1["pending_continuation"] =
                 serde_json::to_value(state.active_ability_continuation().unwrap()).unwrap();
             forms.push(
-                serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(v1)
+                serde_json::from_value::<ResolutionStateWire>(v1)
                     .unwrap()
                     .into_game_state(),
             );
             for version in [2, 3, 4] {
-                let mut wire = serde_json::to_value(
-                    crate::types::resolution::ResolutionStateWire::from_game_state(state.clone()),
-                )
-                .unwrap();
+                let mut wire =
+                    serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+                        .unwrap();
                 wire["resolution_state_version"] = serde_json::json!(version);
                 forms.push(
-                    serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(wire)
+                    serde_json::from_value::<ResolutionStateWire>(wire)
                         .unwrap()
                         .into_game_state(),
                 );
             }
-            for state in &mut forms {
-                drain_pending_continuation(state, &mut Vec::new());
+            for mut state in forms {
+                assert_pending(&state);
+                let WaitingFor::ScryChoice { cards, .. } = state.waiting_for.clone() else {
+                    unreachable!()
+                };
+                assert_eq!(cards.len(), 1);
+                crate::game::engine::apply_as_current(
+                    &mut state,
+                    GameAction::SelectCards { cards },
+                )
+                .unwrap();
+                let count = state.objects[&source]
+                    .casting_permissions
+                    .iter()
+                    .filter(|permission| matches!(permission, CastingPermission::WarpExile { .. }))
+                    .count();
+                assert_eq!(
+                    count,
+                    usize::from(terminal == Some(ZoneMoveCompletion::Moved))
+                );
+                assert_eq!(state.players[0].hand.len(), 1);
+                drain_pending_continuation(&mut state, &mut Vec::new());
+                assert_eq!(
+                    state.players[0].hand.len(),
+                    1,
+                    "completed tail drains exactly once"
+                );
                 assert_eq!(
                     state.objects[&source]
                         .casting_permissions
@@ -30634,21 +30798,15 @@ mod tests {
                             CastingPermission::WarpExile { .. }
                         ))
                         .count(),
-                    usize::from(terminal == Some(ZoneMoveCompletion::Moved)),
-                    "explicit parent terminal controls earning even beside real child movement"
+                    count
                 );
-                assert_eq!(
-                    state.players[0].hand.len(),
-                    1,
-                    "missing or empty dependent result preserves the independent Draw"
+                assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+                assert!(
+                    state.stack.is_empty()
+                        && state.resolution_stack.is_empty()
+                        && state.resolving_stack_entry.is_none()
+                        && state.stack_resolution_session.is_none()
                 );
-                drain_pending_continuation(state, &mut Vec::new());
-                assert_eq!(
-                    state.players[0].hand.len(),
-                    1,
-                    "completed tail drains exactly once"
-                );
-                assert!(state.resolution_stack.is_empty());
             }
         }
     }
@@ -64502,7 +64660,9 @@ mod entry_observation_settlement_tests {
                 source_id: parked,
                 valid_targets: vec![other],
                 max_mana_value: None,
-                purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy,
+                purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy {
+                    continuation: None,
+                },
             };
             settle_entries_before_instruction(&mut state, &events, &next, Some(&completed));
             let observed: Vec<ObjectId> = state

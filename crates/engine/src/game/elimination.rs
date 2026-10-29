@@ -2308,6 +2308,7 @@ mod tests {
 
     fn pending_replacement_for(expected_event: ProposedEvent) -> PendingReplacement {
         PendingReplacement {
+            candidate_keys: Vec::new(),
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: expected_event,
@@ -3836,6 +3837,7 @@ mod tests {
 
         // Parked OBJECT-REFERENTIAL replacement: affected_player reads O's controller.
         state.pending_replacement = Some(Box::new(PendingReplacement {
+            candidate_keys: Vec::new(),
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::AddCounter {
@@ -3986,6 +3988,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.pending_replacement = Some(Box::new(PendingReplacement {
+            candidate_keys: Vec::new(),
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Draw {
@@ -4044,6 +4047,7 @@ mod tests {
         );
         state.pending_search_found_batch = Some(pending_search_found_batch(PlayerId(0), found));
         state.pending_replacement = Some(Box::new(PendingReplacement {
+            candidate_keys: Vec::new(),
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::SearchFound {
@@ -4096,6 +4100,7 @@ mod tests {
 
         // Chooser C = P0 (survivor). Player-keyed parked Draw.
         state.pending_replacement = Some(Box::new(PendingReplacement {
+            candidate_keys: Vec::new(),
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Draw {
@@ -4177,6 +4182,7 @@ mod tests {
     fn opponent_leaving_preserves_living_choosers_draw_replacement() {
         let mut state = setup_three_player();
         state.pending_replacement = Some(Box::new(PendingReplacement {
+            candidate_keys: Vec::new(),
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Draw {

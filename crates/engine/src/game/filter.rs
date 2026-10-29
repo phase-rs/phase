@@ -5953,28 +5953,22 @@ pub fn matches_target_filter_on_battlefield_entry(
                 matches_target_filter(state, *object_id, filter, ctx)
             }
         }
-        ProposedEvent::TokenEntry { entry_ref, .. } => {
-            state.liminal_entries.get(entry_ref).is_some_and(|entry| {
-                filter_inner_for_object(
-                    state,
-                    entry.object.projected(),
-                    *entry_ref,
-                    filter,
-                    ctx.source_id,
-                    ctx.source_controller,
-                    ctx.ability,
-                    ctx.trigger_source,
-                    ctx.recipient_id,
-                    ctx.scoped_iteration_player,
-                    ctx.triggering_object,
-                    ctx.declared_slot_view,
-                    ctx.granting_object,
-                    ctx.casting_spell,
-                    ControllerLookup::LiveOrLki,
-                    HeldObject::Detached,
-                )
-            })
-        }
+        ProposedEvent::TokenEntry {
+            entry_ref,
+            enter_with_choices,
+            ..
+        } => state.liminal_entries.get(entry_ref).is_some_and(|entry| {
+            entry_filter_matches_staged(
+                state,
+                entry.object.projected(),
+                HeldObject::Detached,
+                *entry_ref,
+                crate::types::proposed_event::EntryChoices::of(enter_with_choices),
+                None,
+                filter,
+                ctx,
+            )
+        }),
         ProposedEvent::CreateToken {
             owner,
             spec,
@@ -27798,6 +27792,7 @@ mod entry_projection_tests {
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
         let record = |proposed: ProposedEvent| PendingReplacement {
+            candidate_keys: Vec::new(),
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed,

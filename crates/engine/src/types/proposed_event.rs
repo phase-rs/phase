@@ -8,8 +8,8 @@ use crate::game::game_object::{AttachTarget, DisplayIdentity};
 use super::counter::CounterType;
 
 use super::ability::{
-    ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, EntryAttackDestination,
-    FaceDownProfile, StaticDefinition, TargetRef,
+    ContinuousModification, CopiableValues, CopyEffectInstanceRef, DieRollIgnoreRule, Duration,
+    EntryAttackDestination, FaceDownProfile, StaticDefinition, TargetRef,
 };
 use super::card_type::{CoreType, Supertype};
 use super::events::EventObjectSnapshot;
@@ -84,6 +84,7 @@ pub struct TokenCreationParentContext {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReplacementId {
     pub source: ObjectId,
     pub index: usize,
@@ -146,6 +147,10 @@ pub enum AppliedReplacementKey {
     Object {
         source: ObjectId,
         index: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copy_effect: Option<CopyEffectInstanceRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution_host: Option<ObjectIncarnationRef>,
     },
     Floating {
         index: usize,
@@ -159,16 +164,24 @@ pub enum AppliedReplacementKey {
     EntryControllerChoice {
         source: ObjectId,
         index: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copy_effect: Option<CopyEffectInstanceRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution_host: Option<ObjectIncarnationRef>,
         controller: PlayerId,
     },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 enum TaggedAppliedReplacementKey {
     Object {
         source: ObjectId,
         index: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copy_effect: Option<CopyEffectInstanceRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution_host: Option<ObjectIncarnationRef>,
     },
     Floating {
         index: usize,
@@ -179,6 +192,10 @@ enum TaggedAppliedReplacementKey {
     EntryControllerChoice {
         source: ObjectId,
         index: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copy_effect: Option<CopyEffectInstanceRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution_host: Option<ObjectIncarnationRef>,
         controller: PlayerId,
     },
 }
@@ -202,7 +219,14 @@ impl AppliedReplacementKeyCompat {
             AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::Object {
                 source,
                 index,
-            }) => AppliedReplacementKey::Object { source, index },
+                copy_effect,
+                resolution_host,
+            }) => AppliedReplacementKey::Object {
+                source,
+                index,
+                copy_effect,
+                resolution_host,
+            },
             AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::Floating {
                 index,
             }) => AppliedReplacementKey::Floating { index },
@@ -214,11 +238,15 @@ impl AppliedReplacementKeyCompat {
                     source,
                     index,
                     controller,
+                    copy_effect,
+                    resolution_host,
                 },
             ) => AppliedReplacementKey::EntryControllerChoice {
                 source,
                 index,
                 controller,
+                copy_effect,
+                resolution_host,
             },
             AppliedReplacementKeyCompat::Legacy(ReplacementId {
                 source: ObjectId(0),
@@ -228,7 +256,12 @@ impl AppliedReplacementKeyCompat {
                 LegacySentinelCarrier::StepEndMana => AppliedReplacementKey::StepEndMana { index },
             },
             AppliedReplacementKeyCompat::Legacy(ReplacementId { source, index }) => {
-                AppliedReplacementKey::Object { source, index }
+                AppliedReplacementKey::Object {
+                    source,
+                    index,
+                    copy_effect: None,
+                    resolution_host: None,
+                }
             }
         }
     }
@@ -239,14 +272,98 @@ impl<'de> Deserialize<'de> for AppliedReplacementKey {
     where
         D: Deserializer<'de>,
     {
-        AppliedReplacementKeyCompat::deserialize(deserializer)
-            .map(|key| key.into_key(LegacySentinelCarrier::Floating))
+        let key = AppliedReplacementKeyCompat::deserialize(deserializer)?
+            .into_key(LegacySentinelCarrier::Floating);
+        if let Self::Object {
+            source,
+            index,
+            copy_effect,
+            resolution_host: Some(host),
+        }
+        | Self::EntryControllerChoice {
+            source,
+            index,
+            copy_effect,
+            resolution_host: Some(host),
+            ..
+        } = key
+        {
+            if source != host.object_id
+                || index == 0
+                || copy_effect.is_some()
+                || host.incarnation == super::identifiers::LEGACY_INCARNATION
+            {
+                return Err(serde::de::Error::custom(
+                    "invalid replacement resolution occurrence",
+                ));
+            }
+        }
+        Ok(key)
     }
 }
 
 impl AppliedReplacementKey {
     pub fn object(source: ObjectId, index: usize) -> Self {
-        Self::Object { source, index }
+        Self::Object {
+            source,
+            index,
+            copy_effect: None,
+            resolution_host: None,
+        }
+    }
+
+    pub fn for_event_in_state(
+        state: &crate::types::game_state::GameState,
+        event: &ProposedEvent,
+        id: ReplacementId,
+    ) -> Self {
+        if id.source == ObjectId(0) {
+            return Self::for_event(event, id);
+        }
+        if crate::game::replacement::is_virtual_replacement_id(id) {
+            return Self::object(id.source, id.index);
+        }
+        let Some(object) = state.entering_or_live_object(id.source) else {
+            return Self::object(id.source, id.index);
+        };
+        match object
+            .replacement_definitions
+            .get(id.index)
+            .map(|definition| definition.origin)
+        {
+            Some(super::ability::ReplacementOrigin::Resolution {
+                installation: Some(installation),
+            }) => Self::Object {
+                source: id.source,
+                index: installation,
+                copy_effect: None,
+                resolution_host: Some(ObjectIncarnationRef::from_object(object)),
+            },
+            _ => Self::Object {
+                source: id.source,
+                index: id.index,
+                copy_effect: object.layer1_copy_effect,
+                resolution_host: None,
+            },
+        }
+    }
+
+    pub fn with_entry_controller(self, controller: PlayerId) -> Option<Self> {
+        match self {
+            Self::Object {
+                source,
+                index,
+                copy_effect,
+                resolution_host,
+            } => Some(Self::EntryControllerChoice {
+                source,
+                index,
+                controller,
+                copy_effect,
+                resolution_host,
+            }),
+            _ => None,
+        }
     }
 
     pub fn floating(index: usize) -> Self {
@@ -273,13 +390,6 @@ impl AppliedReplacementKey {
             | AppliedReplacementKey::Floating { index }
             | AppliedReplacementKey::StepEndMana { index }
             | AppliedReplacementKey::EntryControllerChoice { index, .. } => index,
-        }
-    }
-
-    pub fn as_replacement_id(self) -> ReplacementId {
-        ReplacementId {
-            source: self.source(),
-            index: self.index(),
         }
     }
 
@@ -1389,6 +1499,24 @@ impl ProposedEvent {
         }
     }
 
+    pub fn already_applied_in_state(
+        &self,
+        state: &crate::types::game_state::GameState,
+        id: &ReplacementId,
+    ) -> bool {
+        self.applied_set()
+            .contains(&AppliedReplacementKey::for_event_in_state(state, self, *id))
+    }
+
+    pub fn mark_applied_in_state(
+        &mut self,
+        state: &crate::types::game_state::GameState,
+        id: ReplacementId,
+    ) {
+        let key = AppliedReplacementKey::for_event_in_state(state, self, id);
+        self.applied_set_mut().insert(key);
+    }
+
     pub fn already_applied(&self, id: &ReplacementId) -> bool {
         self.applied_set()
             .contains(&AppliedReplacementKey::for_event(self, *id))
@@ -2028,6 +2156,47 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let back: ProposedEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(event, back);
+    }
+
+    #[test]
+    fn complete_replacement_key_axes_are_distinct_and_strict_on_wire() {
+        let own = AppliedReplacementKey::object(ObjectId(7), 1);
+        let copied = AppliedReplacementKey::Object {
+            source: ObjectId(7),
+            index: 1,
+            copy_effect: Some(CopyEffectInstanceRef {
+                continuous_effect_id: 8,
+                modification_index: 0,
+            }),
+            resolution_host: None,
+        };
+        let installed = AppliedReplacementKey::Object {
+            source: ObjectId(7),
+            index: 1,
+            copy_effect: None,
+            resolution_host: Some(ObjectIncarnationRef::of(ObjectId(7), 3)),
+        };
+        let keys = [own, copied, installed];
+        assert_eq!(
+            keys.into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+        for key in keys {
+            assert_eq!(
+                serde_json::from_value::<AppliedReplacementKey>(serde_json::to_value(key).unwrap())
+                    .unwrap(),
+                key
+            );
+        }
+        for malformed in [
+            serde_json::json!({"type":"Object","source":7,"index":1,"resolution_host":{"object_id":9,"incarnation":3}}),
+            serde_json::json!({"type":"Object","source":7,"index":1,"copy_effect":"broken"}),
+            serde_json::json!({"type":"Object","source":7,"index":1,"resolution_host":"broken"}),
+        ] {
+            assert!(serde_json::from_value::<AppliedReplacementKey>(malformed).is_err());
+        }
     }
 
     #[test]
