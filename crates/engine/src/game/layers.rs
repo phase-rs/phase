@@ -11489,11 +11489,39 @@ pub(crate) fn apply_installed_copy_to_liminal_entry(
     else {
         return;
     };
+    // CR 400.7 + CR 614.12: this detached application belongs only to the
+    // installed copy program bound to this exact unborn token incarnation.
+    if !entry.object.is_token_projection()
+        || projection.id != recipient
+        || projection.zone != Zone::Battlefield
+        // CR 702.26e: a specifically named phased-out object is still excluded.
+        || !projection.is_phased_in()
+        || state.objects.contains_key(&recipient)
+        || installed.affected != (TargetFilter::SpecificObject { id: recipient })
+        || installed.affected_recipient != Some(ObjectIncarnationRef::from_object(&projection))
+        || !matches!(
+            installed.modifications.first(),
+            Some(ContinuousModification::CopyValues { .. })
+        )
+    {
+        return;
+    }
     let mut scratch = state.clone();
     scratch.objects.insert(recipient, projection);
     scratch.liminal_entries.remove(&recipient);
+    if !transient_effect_is_live(&scratch, &installed) {
+        return;
+    }
     let mut suppressed = HashSet::new();
     let mut cache = LayerZoneObjectCache::default();
+    // Admit the authenticated projection only to this invocation's candidate
+    // cache. Quantity and "other" readers still see the original battlefield;
+    // publishing the entrant there would change legacy dynamic copy exceptions.
+    let mut candidates = cache.ids_for(&scratch, Zone::Battlefield).to_vec();
+    if !candidates.contains(&recipient) {
+        candidates.push(recipient);
+    }
+    cache.ids_by_zone.insert(Zone::Battlefield, candidates);
     let mut started = StartedContinuousEffectSets::new();
     let restrict = BTreeSet::from([recipient]);
     for (mod_index, modification) in installed.modifications.iter().enumerate() {
