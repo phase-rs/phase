@@ -2587,6 +2587,15 @@ fn complete_modification_clause(
     if let Some(modification) = parse_all_land_types_modification(text) {
         return Some((vec![modification], inherited_verb));
     }
+    if all_consuming(super::type_change::parse_all_creature_types_predicate)
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return Some((
+            vec![ContinuousModification::AddAllCreatureTypes],
+            ContinuousVerb::Unbound,
+        ));
+    }
     let (body, verb) = match alt((
         value(
             ContinuousVerb::Pump,
@@ -2658,17 +2667,7 @@ fn complete_modification_clause(
             } else {
                 grant
             };
-            let (_, inner) = all_consuming(nom::sequence::delimited(
-                tag::<_, _, OracleError<'_>>("\""),
-                take_until("\""),
-                tag("\""),
-            ))
-            .parse(grant.original.trim())
-            .ok()?;
-            let modifications = classify_quoted_inner(inner);
-            if modifications.is_empty() {
-                return None;
-            }
+            let modifications = complete_quoted_modifications(grant.original.trim())?;
             let spec = super::oracle_effect::animation::parse_animation_spec(
                 base.original,
                 &mut ParseContext::default(),
@@ -2770,12 +2769,6 @@ fn complete_modification_clause(
     ))
     .parse(lower.as_str())
     .is_ok();
-    let complete_type_set = all_consuming((
-        alt((tag::<_, _, OracleError<'_>>("is "), tag("are "))),
-        tag("every creature type"),
-    ))
-    .parse(lower.as_str())
-    .is_ok();
     let complete_combat =
         all_consuming(super::evasion::parse_assigns_damage_from_toughness_predicate)
             .parse(lower.as_str())
@@ -2785,7 +2778,6 @@ fn complete_modification_clause(
         .is_ok();
     if complete_loss
         || complete_supertype
-        || complete_type_set
         || complete_combat
         || complete_chosen
         || parse_grant_all_abilities_clause(&lower).is_some()
@@ -2832,6 +2824,10 @@ fn complete_modification_clause(
                 .or_else(|| nom_tag_lower(part, &part_lower, "gains "))
                 .or_else(|| nom_tag_lower(part, &part_lower, "gain "))
                 .unwrap_or(part);
+            if tag::<_, _, OracleError<'_>>("\"").parse(part).is_ok() {
+                keyword_mods.extend(complete_quoted_modifications(part)?);
+                continue;
+            }
             if push_grant_clause_modifications_with_policy(
                 &mut keyword_mods,
                 part,
@@ -2868,8 +2864,8 @@ fn complete_modification_clause(
         if !matches!(verb, ContinuousVerb::Grant) {
             return None;
         }
-        let mods = classify_quoted_inner(inner);
-        return (!mods.is_empty()).then_some((mods, verb));
+        let _ = inner;
+        return complete_quoted_modifications(body).map(|modifications| (modifications, verb));
     }
     // Resolve explicit companion predicates before a deferred quantity owner
     // can interpret their words as part of its population description.
@@ -3447,6 +3443,71 @@ pub(crate) fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousMo
 /// canonical inner classifier without exposing the private
 /// `parse_quoted_ability` / `parse_quoted_rule_static_modifications` helpers.
 pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModification> {
+    classify_quoted_inner_using(ability_text, parse_quoted_ability)
+}
+
+fn complete_quoted_modifications(text: &str) -> Option<Vec<ContinuousModification>> {
+    let (_, inner) = all_consuming(nom::sequence::delimited(
+        tag::<_, _, OracleError<'_>>("\""),
+        take_until("\""),
+        tag("\""),
+    ))
+    .parse(text)
+    .ok()?;
+    let modifications =
+        classify_quoted_inner_using(inner, super::grammar::parse_complete_quoted_ability);
+    let unsupported = |definition: &AbilityDefinition| {
+        crate::game::coverage::ability_tree_any(definition, &|node| {
+            node.effect.unimplemented_description().is_some()
+                || node
+                    .cost
+                    .as_ref()
+                    .is_some_and(AbilityCost::contains_unimplemented)
+        })
+    };
+    if modifications.is_empty() {
+        return None;
+    }
+    for modification in &modifications {
+        // Complete publication includes registered-later programs too. Reuse
+        // the typed complete visitors rather than enumerate nested carriers.
+        let effects =
+            crate::types::ability_visit::visit_continuous_mod(modification, &mut |effect| {
+                if effect.unimplemented_description().is_some() {
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            });
+        let definitions =
+            crate::types::ability_visit::nodes::visit_continuous_mod(modification, &mut |node| {
+                let refused = match node {
+                    crate::types::ability_visit::DefinitionNode::Ability(definition) => {
+                        unsupported(definition)
+                    }
+                    crate::types::ability_visit::DefinitionNode::Static(definition) => definition
+                        .condition
+                        .as_ref()
+                        .is_some_and(StaticCondition::contains_unrecognized),
+                    _ => false,
+                };
+                if refused {
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            });
+        if effects.is_break() || definitions.is_break() {
+            return None;
+        }
+    }
+    Some(modifications)
+}
+
+fn classify_quoted_inner_using(
+    ability_text: &str,
+    parse_ability: fn(&str) -> AbilityDefinition,
+) -> Vec<ContinuousModification> {
     // Oracle's punctuation convention carries the *enclosing* sentence's comma
     // INSIDE the closing quote of a granted ability when a clause follows — e.g.
     // Bronzehide Lion's `..."{G}{W}: Enchanted creature gains indestructible until
@@ -3485,7 +3546,7 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
     if let Some((aw_name, body)) = super::oracle_modal::strip_ability_word_with_name(&ability_text)
     {
         if super::oracle_modal::is_known_ability_word(&aw_name) {
-            return classify_quoted_inner(&body);
+            return classify_quoted_inner_using(&body, parse_ability);
         }
     }
 
@@ -3561,7 +3622,7 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
     // Fallback: no static/trigger/keyword/replacement shape matched above —
     // parse the remaining text as an ability body and wrap it in GrantAbility.
     vec![ContinuousModification::GrantAbility {
-        definition: Box::new(parse_quoted_ability(&ability_text)),
+        definition: Box::new(parse_ability(&ability_text)),
     }]
 }
 

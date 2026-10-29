@@ -11081,6 +11081,154 @@ fn oracle_face_for(
     crate::database::synthesis::build_oracle_face(&card, None)
 }
 
+#[test]
+fn complete_static_modifier_documents_keep_full_ir_and_both_normal_loaders() {
+    // SHAPE: exact pinned documents, with independent printed abilities intact.
+    for (name, text, types, subtypes) in [
+        ("Undercover Skrull", "As long as there are two or more creature cards in your graveyard, this creature gets +2/+2 and is all creature types.\n{T}: Add one mana of any color.", &["Creature"] as &[&str], &["Skrull", "Shapeshifter", "Villain"] as &[&str]),
+        ("Slayer's Cleaver", "Equipped creature gets +3/+1 and must be blocked by an Eldrazi if able.\nEquip {4}", &["Artifact"], &["Equipment"]),
+        ("Ace's Baseball Bat", "Equipped creature gets +3/+0.\nAs long as equipped creature is attacking, it has first strike and must be blocked by a Dalek if able.\nEquip legendary creature {1}\nEquip {3}", &["Artifact"], &["Equipment"]),
+        ("Rakdos Riteknife", "Equipped creature gets +1/+0 for each blood counter on this Equipment and has \"{T}, Sacrifice a creature: Put a blood counter on Rakdos Riteknife.\"\n{B}{R}, Sacrifice this Equipment: Target player sacrifices a permanent of their choice for each blood counter on this Equipment.\nEquip {2}", &["Artifact"], &["Equipment"]),
+        ("Deconstruction Hammer", "Equipped creature gets +1/+1 and has \"{3}, {T}, Sacrifice Deconstruction Hammer: Destroy target artifact or enchantment.\"\nEquip {1} ({1}: Attach to target creature you control. Equip only as a sorcery.)", &["Artifact"], &["Equipment"]),
+        ("Presence of Gond", "Enchant creature\nEnchanted creature has \"{T}: Create a 1/1 green Elf Warrior creature token.\"", &["Enchantment"], &["Aura"]),
+        ("Maskwood Nexus", "Creatures you control are every creature type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.\n{3}, {T}: Create a 2/2 blue Shapeshifter creature token with changeling. (It is every creature type.)", &["Artifact"], &[]),
+    ] {
+        let owned_types = types.iter().map(|value| (*value).to_string()).collect::<Vec<_>>();
+        let owned_subtypes = subtypes.iter().map(|value| (*value).to_string()).collect::<Vec<_>>();
+        let mut doc = parse_oracle_ir(text, name, &[], &owned_types, &owned_subtypes);
+        assert_eq!(doc.source_text, text);
+        let normalized = normalize_card_name_refs(text, name);
+        for item in &doc.items {
+            let span = item.source.span();
+            assert!(span.is_exact());
+            assert_eq!(item.source.fragment(), Some(&normalized[span.start_byte..span.end_byte]));
+            assert!(!matches!(item.node, OracleNodeIr::Unsupported { .. }), "{name}: {item:#?}");
+        }
+        let mut lowered = lower_oracle_ir(&mut doc);
+        assert!(!parsed_has_unimplemented(&lowered), "{name}: {lowered:#?}");
+        let public = parse_oracle_text(text, name, &[], &owned_types, &owned_subtypes);
+        render_granting_self_descriptions(&mut lowered, name);
+        assert_eq!(lowered.abilities, public.abilities);
+        assert_eq!(lowered.statics, public.statics);
+        assert_eq!(lowered.triggers, public.triggers);
+        assert_eq!(lowered.replacements, public.replacements);
+        assert_eq!(lowered.extracted_keywords, public.extracted_keywords);
+        let face = oracle_face_for(name, text, types, subtypes);
+        assert_eq!(face.oracle_text.as_deref(), Some(text));
+        assert!(!crate::game::coverage::card_face_has_unimplemented_parts(&face), "whole document {name}");
+        assert_eq!(face.static_abilities, public.statics);
+        for ability in &public.abilities { assert!(face.abilities.contains(ability), "complete independent activation: {name}"); }
+        let equip_count = face.keywords.iter().filter(|keyword| matches!(keyword, Keyword::Equip(_))).count();
+        assert_eq!(face.abilities.len(), public.abilities.len() + equip_count, "printed plus synthesized Equip abilities: {name}");
+        assert_eq!(face.triggers, public.triggers);
+        assert_eq!(face.replacements, public.replacements);
+        match name {
+            "Undercover Skrull" => { assert_eq!(public.statics[0].modifications.len(), 3); assert_eq!(public.abilities.len(), 1); },
+            "Rakdos Riteknife" => { assert_eq!(public.statics[0].modifications.len(), 2); assert_eq!(public.abilities.len(), 1); assert!(face.keywords.iter().any(|keyword| matches!(keyword, Keyword::Equip(_)))); },
+            "Slayer's Cleaver" | "Ace's Baseball Bat" => assert!(public.statics.iter().any(|definition| matches!(definition.mode, StaticMode::MustBeBlocked { by: Some(_) }))),
+            "Deconstruction Hammer" | "Presence of Gond" => assert!(public.statics.iter().any(|definition| definition.modifications.iter().any(|modification| matches!(modification, ContinuousModification::GrantAbility { .. })))),
+            "Maskwood Nexus" => assert!(public.statics.iter().any(|definition| definition.modifications.contains(&ContinuousModification::AddAllCreatureTypes))),
+            _ => unreachable!(),
+        }
+        let whole = serde_json::to_string(&serde_json::json!({name.to_lowercase(): face})).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap(); std::fs::write(file.path(), &whole).unwrap();
+        for database in [crate::database::CardDatabase::from_json_str(&whole).unwrap(), crate::database::CardDatabase::from_export(file.path()).unwrap()] {
+            assert_eq!(database.get_face_by_name(name), Some(&face), "all component values survive: {name}");
+        }
+    }
+    for cost_body in [
+        "{T}, Sacrifice an unexplained thing: Draw a card.",
+        "{T}, Sacrifice a creature: An unexplained effect.",
+        "{T}: Draw a card. An unexplained effect.",
+    ] {
+        let line = format!("Equipped creature gets +1/+0 and has \"{cost_body}\"");
+        let text = format!("{line}\nFlying\n{{1}}: You gain 1 life.");
+        let mut doc = parse_oracle_ir(
+            &text,
+            "Refused quote",
+            &["Flying".into()],
+            &["Artifact".into()],
+            &["Equipment".into()],
+        );
+        assert_eq!(doc.source_text, text);
+        let item = &doc.items[0];
+        let span = item.source.span();
+        assert_eq!(item.source.fragment(), Some(line.as_str()));
+        assert_eq!(
+            (
+                span.start_byte,
+                span.end_byte,
+                span.first_line,
+                span.last_line
+            ),
+            (0, line.len(), 0, 0)
+        );
+        let OracleNodeIr::Unsupported { unsupported, .. } = &item.node else {
+            panic!("complete quote refuses its whole transaction: {item:#?}")
+        };
+        assert_eq!(unsupported.description, line);
+        let lowered = lower_oracle_ir(&mut doc);
+        assert_eq!(lowered.extracted_keywords, vec![Keyword::Flying]);
+        assert!(lowered.abilities.iter().any(|ability| matches!(
+            ability.effect.as_ref(),
+            Effect::GainLife { .. }
+        ) && ability.cost
+            == Some(AbilityCost::Mana {
+                cost: ManaCost::generic(1)
+            })));
+        assert!(lowered.statics.is_empty());
+        let face = oracle_face_for("Refused quote", &text, &["Artifact"], &["Equipment"]);
+        assert!(crate::game::coverage::card_face_has_unimplemented_parts(
+            &face
+        ));
+        assert!(face.keywords.contains(&Keyword::Flying));
+        let whole = serde_json::to_string(&serde_json::json!({"refused quote": face})).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &whole).unwrap();
+        for database in [
+            crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+            crate::database::CardDatabase::from_export(file.path()).unwrap(),
+        ] {
+            assert_eq!(database.get_face_by_name("Refused quote"), Some(&face));
+        }
+    }
+    let text = "Equipped creature gets +3/+1 and must be blocked by a Splorf if able.\nEquip {4}";
+    let face = oracle_face_for("Unknown lure", text, &["Artifact"], &["Equipment"]);
+    assert!(face.static_abilities.iter().any(|definition| definition
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 3 })
+        && definition
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 1 })));
+    assert!(crate::game::coverage::card_face_has_unimplemented_parts(
+        &face
+    ));
+    let mut gaps = Vec::new();
+    complete_publication_gap_payloads(&serde_json::to_value(&face).unwrap(), &mut gaps);
+    assert_eq!(
+        gaps.iter()
+            .filter(
+                |(name, fragment)| name == "attached_grant_unmodeled_conjunct"
+                    && fragment == "must be blocked by a Splorf if able"
+            )
+            .count(),
+        1
+    );
+    assert!(face
+        .keywords
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Equip(_))));
+    let whole = serde_json::to_string(&serde_json::json!({"unknown lure": face})).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &whole).unwrap();
+    for database in [
+        crate::database::CardDatabase::from_json_str(&whole).unwrap(),
+        crate::database::CardDatabase::from_export(file.path()).unwrap(),
+    ] {
+        assert_eq!(database.get_face_by_name("Unknown lure"), Some(&face));
+    }
+}
+
 /// CR 708.5: Found Footage's "You may look at face-down creatures your
 /// opponents control any time" lowers to a `MayLookAtFaceDown` static whose
 /// affected filter carries the FaceDown property and the opponent scope. The
@@ -45202,6 +45350,22 @@ fn complete_publication_all_mixed_honest_and_native_exceptions_keep_specific_sou
             "Undercover Skrull" => {
                 assert_eq!(parsed.abilities.len(), 1); assert_eq!(parsed.abilities[0].cost, Some(AbilityCost::Tap));
                 assert!(matches!(parsed.abilities[0].effect.as_ref(), Effect::Mana { .. }));
+                assert_eq!(parsed.statics.len(), 1);
+                assert_eq!(parsed.statics[0].affected, Some(TargetFilter::SelfRef));
+                assert!(!parsed.statics[0].characteristic_defining);
+                assert_eq!(parsed.statics[0].modifications, vec![
+                    ContinuousModification::AddPower { value: 2 },
+                    ContinuousModification::AddToughness { value: 2 },
+                    ContinuousModification::AddAllCreatureTypes,
+                ]);
+                assert_eq!(parsed.statics[0].condition, Some(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref { qty: QuantityRef::ZoneCardCount {
+                        zone: crate::types::ability::ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Creature], filter: None,
+                        scope: crate::types::ability::CountScope::Controller,
+                    } },
+                    comparator: Comparator::GE, rhs: QuantityExpr::Fixed { value: 2 },
+                }));
             }
             "Spark Rupture" | "Blood Sun" => {
                 assert_eq!(parsed.triggers.len(), 1);

@@ -678,6 +678,35 @@ pub(crate) fn extract_must_be_blocked_by_conjunct(
     })
 }
 
+/// Isolate an entire outer requirement, preserving the original source slice.
+/// A quoted requirement belongs to the acquired ability, never this host.
+pub(crate) fn split_attached_lure_conjunct<'a>(
+    predicate: &TextPair<'a>,
+) -> Option<(&'a str, MustBeBlockedByConjunct)> {
+    predicate.scan_around_outside_quotes(
+        |input| {
+            preceded(
+                tag(" and "),
+                terminated(parse_must_be_blocked_by_quality, opt(tag("."))),
+            )
+            .parse(input)
+        },
+        |prefix, quality, tail| {
+            if !tail.original.trim().is_empty() {
+                return None;
+            }
+            let residual = &predicate.original[prefix.len() + " and ".len()..];
+            let requirement = match must_be_blocked_quality_to_filter(quality) {
+                Some(filter) => MustBeBlockedByConjunct::Recognized(filter),
+                None => MustBeBlockedByConjunct::Unrecognized(
+                    residual.trim().trim_end_matches('.').to_string(),
+                ),
+            };
+            Some((prefix.original, requirement))
+        },
+    )
+}
+
 /// CR 509.1c: Build the sibling `Effect::Unimplemented` residual for an attached
 /// grant conjunct the typed static modes can't model. Carried inside a
 /// `GrantAbility` continuous modification so coverage flags the gap (stable
@@ -1159,18 +1188,10 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         // attach any trailing `suffix_condition` (Heroic Defiance: "gets +3/+3
         // unless it shares a color with the most common color among all
         // permanents"), rather than parsing the whole predicate and dropping it.
-        let grant_body = match extract_must_be_blocked_by_conjunct(body_tp.original) {
-            Some(MustBeBlockedByConjunct::Recognized(_)) => terminated(
-                take_until::<_, _, OracleError<'_>>(" and must be blocked by "),
-                tag(" and must be blocked by "),
-            )
-            .parse(body_tp.lower)
-            .ok()
-            .map_or(body_tp.original, |(_, prefix)| {
-                &body_tp.original[..prefix.len()]
-            }),
-            _ => body_tp.original,
-        };
+        let lure = split_attached_lure_conjunct(&body_tp);
+        let grant_body = lure
+            .as_ref()
+            .map_or(body_tp.original, |(prefix, _)| *prefix);
         if let Some(mut def) = parse_continuous_gets_has(grant_body, affected.clone(), description)
         {
             if let Some(condition) = &suffix_condition {
@@ -1180,6 +1201,9 @@ pub(crate) fn parse_enchanted_equipped_predicate(
                 attach_gated_condition(&mut def, condition.clone(), &gap_text);
             }
             defs.push(def);
+        } else if lure.is_some() {
+            // The requirement boundary cannot rescue a partially read grant.
+            return Vec::new();
         }
         // CR 509.1c: "<grant> and must be blocked by <filter> if able"
         // (Slayer's Cleaver: "Equipped creature gets +3/+1 and must be blocked
@@ -1187,27 +1211,35 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         // P/T/keyword grant; this branch models the filtered blocking
         // requirement as the typed `MustBeBlocked { by: Some(filter) }` static
         // (unconditional — this non-conditional path has no "as long as" gate).
-        match extract_must_be_blocked_by_conjunct(predicate) {
-            Some(MustBeBlockedByConjunct::Recognized(filter)) => {
-                defs.push(
-                    StaticDefinition::new(StaticMode::MustBeBlocked { by: Some(filter) })
-                        .affected(affected.clone())
-                        .description(description.to_string()),
-                );
-            }
+        let requirement = lure.map(|(_, requirement)| requirement).or_else(|| {
+            // A bare requirement has no preceding grant to split.
+            all_consuming(terminated(parse_must_be_blocked_by_quality, opt(tag("."))))
+                .parse(body_tp.lower)
+                .ok()
+                .and_then(|_| extract_must_be_blocked_by_conjunct(body_tp.original))
+        });
+        let mut companion = match requirement {
+            Some(MustBeBlockedByConjunct::Recognized(filter)) => Some(
+                StaticDefinition::new(StaticMode::MustBeBlocked { by: Some(filter) })
+                    .affected(affected.clone())
+                    .description(description.to_string()),
+            ),
             // CR 509.1c: the lure conjunct is present but its quality is
             // unrecognized (would weaken to `TargetFilter::Any`). Surface an
             // `Unimplemented` residual so coverage flags the gap — mirroring the
             // gated path (`try_parse_inverted_attached_combat_grant`) — instead
             // of silently dropping the blocking requirement.
-            Some(MustBeBlockedByConjunct::Unrecognized(residual)) => {
-                defs.push(attached_grant_unmodeled_conjunct_residual(
-                    affected.clone(),
-                    &residual,
-                ));
+            Some(MustBeBlockedByConjunct::Unrecognized(residual)) => Some(
+                attached_grant_unmodeled_conjunct_residual(affected.clone(), &residual),
+            ),
+            None => None,
+        };
+        if let Some(definition) = &mut companion {
+            if let Some(condition) = &suffix_condition {
+                attach_gated_condition(definition, condition.clone(), &gap_text);
             }
-            None => {}
         }
+        defs.extend(companion);
         defs
     }
 }
@@ -1740,6 +1772,23 @@ pub(crate) fn parse_quoted_rule_static_modifications(
 /// activated ability with the cost parsed separately. Otherwise it's treated as
 /// a spell-like effect.
 pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
+    parse_quoted_ability_using(text, parse_oracle_cost)
+}
+
+pub(crate) fn parse_complete_quoted_ability(text: &str) -> AbilityDefinition {
+    parse_quoted_ability_using(text, |cost_text| {
+        crate::parser::oracle_cost::parse_complete_oracle_cost(cost_text).unwrap_or_else(|| {
+            AbilityCost::Unimplemented {
+                description: cost_text.to_string(),
+            }
+        })
+    })
+}
+
+fn parse_quoted_ability_using(
+    text: &str,
+    parse_cost: fn(&str) -> AbilityCost,
+) -> AbilityDefinition {
     let lower = text.to_lowercase();
 
     // CR 702.142a: Detect "Boast — " prefix and strip it, adding the implicit
@@ -1757,7 +1806,7 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
         )
         .parse(i)
     }) {
-        let mut def = parse_quoted_ability(rest_original);
+        let mut def = parse_quoted_ability_using(rest_original, parse_cost);
         // CR 702.142a: "Activate only if this creature attacked this turn
         // and only once each turn."
         def.activation_restrictions
@@ -1794,7 +1843,7 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
     if let Some(colon_pos) = find_cost_separator(text) {
         let cost_text = text[..colon_pos].trim();
         let effect_text = text[colon_pos + 1..].trim();
-        let cost = parse_oracle_cost(cost_text);
+        let cost = parse_cost(cost_text);
         // CR 602.5c: When an object acquires an activated ability with a
         // use restriction (e.g. "Activate only as a sorcery", "Activate only
         // once each turn") from another object, that restriction applies to
