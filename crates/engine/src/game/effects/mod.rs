@@ -2081,6 +2081,8 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             }
         }
         let cont = frame.pending;
+        #[cfg(test)]
+        let drained_continuation = cont.clone();
         let PendingContinuation {
             chain,
             return_result_occurrence,
@@ -2142,26 +2144,48 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                         chain.context.forwarded_result_context.clone();
                     // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
                     settle_entries_before_instruction(state, events, &remaining, None);
-                    chain_progress = resolve_owned_ability_chain_step(
+                    let resolved = resolve_owned_ability_chain_step(
                         state,
                         &remaining,
                         events,
                         1,
                         (&declarations.0, &declarations.1),
-                    )
-                    .ok();
+                    );
+                    #[cfg(test)]
+                    let resolved = resolved.inspect_err(|error| {
+                        eprintln!(
+                            "discarded effect error [drain_pending_continuation/pruned-chain]: error={error:?}; input={remaining:?}; admitted={declarations:?}; continuation_input={drained_continuation:?}; selector={:?}; waiting={:?}; continuation={:?}; resolution_stack={:?}; return_result_frames={:?}",
+                            state.active_return_result_occurrence,
+                            state.waiting_for,
+                            state.active_ability_continuation(),
+                            state.resolution_stack,
+                            state.return_result_frames,
+                        );
+                    });
+                    chain_progress = resolved.ok();
                 }
             } else {
                 // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
                 settle_entries_before_instruction(state, events, &chain, None);
-                chain_progress = resolve_owned_ability_chain_step(
+                let resolved = resolve_owned_ability_chain_step(
                     state,
                     &chain,
                     events,
                     1,
                     (&declarations.0, &declarations.1),
-                )
-                .ok();
+                );
+                #[cfg(test)]
+                let resolved = resolved.inspect_err(|error| {
+                    eprintln!(
+                        "discarded effect error [drain_pending_continuation/resumed-chain]: error={error:?}; input={chain:?}; admitted={declarations:?}; continuation_input={drained_continuation:?}; selector={:?}; waiting={:?}; continuation={:?}; resolution_stack={:?}; return_result_frames={:?}",
+                        state.active_return_result_occurrence,
+                        state.waiting_for,
+                        state.active_ability_continuation(),
+                        state.resolution_stack,
+                        state.return_result_frames,
+                    );
+                });
+                chain_progress = resolved.ok();
             }
         }
         if let Some(source_id) = state
@@ -2197,15 +2221,27 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 });
                 // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
                 settle_entries_before_instruction(state, events, &scope.after_scope, None);
-                chain_progress = resolve_after_scope_with_created_seats(
+                let resolved = resolve_after_scope_with_created_seats(
                     state,
                     &scope.after_scope,
                     handoff,
                     events,
                     1,
                     (&declarations.0, &declarations.1),
-                )
-                .ok();
+                );
+                #[cfg(test)]
+                let resolved = resolved.inspect_err(|error| {
+                    eprintln!(
+                        "discarded effect error [drain_pending_continuation/after-scope]: error={error:?}; input={:?}; admitted={declarations:?}; continuation_input={drained_continuation:?}; selector={:?}; waiting={:?}; continuation={:?}; resolution_stack={:?}; return_result_frames={:?}",
+                        scope.after_scope,
+                        state.active_return_result_occurrence,
+                        state.waiting_for,
+                        state.active_ability_continuation(),
+                        state.resolution_stack,
+                        state.return_result_frames,
+                    );
+                });
+                chain_progress = resolved.ok();
             }
         }
         // CR 608.2c: the detached "after each player" tail is the rest of the same
@@ -27686,6 +27722,18 @@ fn resolve_owned_chain_body(
                         // Preserve this historical catalog boundary's ignored
                         // handler errors. Native producers propagate theirs;
                         // this migration does not change legacy error policy.
+                        #[cfg(test)]
+                        Err(error) => {
+                            eprintln!(
+                                "discarded effect error [resolve_owned_chain_body/catalog]: error={error:?}; input={iter_effective:?}; body={ability:?}; admitted={declarations:?}; depth={depth}; iteration={iteration}; iterations={iterations}; selector={:?}; waiting={:?}; continuation={:?}; resolution_stack={:?}; return_result_frames={:?}",
+                                state.active_return_result_occurrence,
+                                state.waiting_for,
+                                state.active_ability_continuation(),
+                                state.resolution_stack,
+                                state.return_result_frames,
+                            );
+                        }
+                        #[cfg(not(test))]
                         Err(_) => {}
                     }
                     // CR 601.2h + CR 608.2c: a staged Composite owns the
