@@ -581,6 +581,8 @@ mod contextual_hand_publication {
         let cleave = hand_body(TargetFilter::Player, nonland(), false, false).description("Target player reveals their hand. You choose a nonland card from it. That player discards that card.".into());
         let mut freebooter = TriggerDefinition::new(TriggerMode::ChangesZone).valid_card(TargetFilter::SelfRef).trigger_zones(vec![Zone::Battlefield]).execute(hand_body(opponent(), restrictive(), true, false)).description("When ~ enters, target opponent reveals their hand. You choose a noncreature, nonland card from it. Exile that card until ~ leaves the battlefield.".into());
         freebooter.destination = Some(Zone::Battlefield);
+        // CR 115.1d: "target opponent" makes the triggered ability targeted.
+        freebooter.valid_target = Some(TargetFilter::Player);
         let chapter_one = ability(Effect::Destroy {
             target: TargetFilter::Typed(
                 TypedFilter::creature()
@@ -1123,7 +1125,9 @@ mod nested_operand_publication {
     const VESTIGE: &str = "When this creature leaves the battlefield, draw a card, then you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped.\nWarp {4} (You may cast this card from your hand for its warp cost. Exile this creature at the beginning of the next end step, then you may cast it from exile on a later turn.)";
     const SPECTRAL: &str = "Flying\nWhen this creature enters, you may cast an instant or sorcery spell with mana value less than or equal to the number of Spirits you control from a graveyard without paying its mana cost. If that spell would be put into a graveyard, exile it instead.";
     const PUT: &str = "you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped";
-    const REFUSED: &str = "you may cast an instant or sorcery spell with mana value less than or equal to the number of Spirits you control from a graveyard without paying its mana cost. If that spell would be put into a graveyard, exile it instead.";
+    // The trigger-body preparation removes terminal sentence punctuation;
+    // the complete trigger description and document source retain it.
+    const REFUSED: &str = "you may cast an instant or sorcery spell with mana value less than or equal to the number of Spirits you control from a graveyard without paying its mana cost. If that spell would be put into a graveyard, exile it instead";
 
     fn expected_body() -> AbilityDefinition {
         // CR 608.2c + CR 608.2d: mandatory Draw precedes the optional resolution choice.
@@ -2236,7 +2240,13 @@ mod retained_spell_publication {
                 statics.push(StaticDefinition::new(mode).affected(TargetFilter::SelfRef).condition(condition).description(description.into()));
             }
             "Capsizing Wave" => {
-                let mut bounce=expected_spell(expected_move(None,Zone::Hand,TargetFilter::Typed(TypedFilter::creature())));
+                // CR 400.3: the implicit-origin Return constructor is a Bounce
+                // whose default destination is the target owner's hand.
+                let mut bounce=expected_spell(Effect::Bounce {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    destination: None,
+                    selection: crate::types::ability::BounceSelection::Targeted,
+                });
                 bounce.description=Some("Return target creature to its owner's hand.".into()); abilities.push(bounce);
             }
             "Gaddock Teeg" => {
@@ -2833,10 +2843,11 @@ mod retained_spell_publication {
                     assert_eq!(face.abilities.len(), 1);
                     assert!(matches!(
                         *face.abilities[0].effect,
-                        Effect::ChangeZone {
-                            destination: Zone::Hand,
-                            ..
-                        }
+                        Effect::Bounce {
+                            destination: None,
+                            selection: crate::types::ability::BounceSelection::Targeted,
+                            target: TargetFilter::Typed(ref filter),
+                        } if filter == &TypedFilter::creature()
                     ));
                 }
                 _ => {}
@@ -3473,7 +3484,9 @@ fn grant_foreign_roots_keep_complete_documents_and_loader_components() {
         ),
         (
             r###"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"d5ea905b-4bb6-48d0-9082-c472703db550"},"layout":"normal","manaCost":"{B}","manaValue":1.0,"name":"Bloodchief Ascension","subtypes":[],"supertypes":[],"text":"At the beginning of each end step, if an opponent lost 2 or more life this turn, you may put a quest counter on this enchantment. (Damage causes loss of life.)\nWhenever a card is put into an opponent's graveyard from anywhere, if this enchantment has three or more quest counters on it, you may have that player lose 2 life. If you do, you gain 2 life.","type":"Enchantment","types":["Enchantment"]}"###,
-            r###"{"triggers":[{"batched":false,"condition":{"comparator":"GE","lhs":{"qty":{"player":{"aggregate":"Max","type":"Opponent"},"type":"LifeLostThisTurn"},"type":"Ref"},"rhs":{"type":"Fixed","value":2},"type":"QuantityComparison"},"constraint":null,"damage_kind":"Any","description":"At the beginning of each end step, if an opponent lost 2 or more life this turn, you may put a quest counter on ~.","destination":null,"execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":1},"counter_type":"quest","target":{"type":"SelfRef"},"type":"PutCounter"},"forward_result":false,"kind":"Spell","optional":true,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":"Phase","optional":true,"origin":null,"phase":"End","secondary":false,"trigger_zones":["Battlefield"],"valid_card":null,"valid_source":null,"valid_target":null},{"batched":false,"condition":{"counters":{"data":"quest","type":"OfType"},"minimum":3,"type":"HasCounters"},"constraint":null,"damage_kind":"Any","description":"Whenever a card is put into an opponent's graveyard from anywhere, if ~ has three or more quest counters on it, you may have that player lose 2 life. If you do, you gain 2 life.","destination":"Graveyard","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"amount":{"type":"Fixed","value":2},"target":{"type":"TriggeringPlayer"},"type":"LoseLife"},"forward_result":false,"kind":"Spell","optional":true,"optional_targeting":false,"sub_ability":{"condition":{"signal":"OptionalEffectPerformed","type":"EffectOutcome"},"cost":null,"description":null,"duration":null,"effect":{"amount":{"type":"Fixed","value":2},"type":"GainLife"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"sub_link":"SequentialSibling","target_prompt":null},"target_prompt":null},"mode":"ChangesZone","optional":true,"origin":null,"phase":null,"secondary":false,"trigger_zones":["Battlefield"],"valid_card":{"controller":"Opponent","properties":[],"type":"Typed","type_filters":["Card"]},"valid_source":null,"valid_target":{"controller":"Opponent","properties":[],"type":"Typed","type_filters":[]}}],"replacements":[],"keywords":[]}"###,
+            // CR 400.3 + CR 608.2c: that graveyard and "that player" name the
+            // moving card's owner, regardless of its previous controller.
+            r###"{"triggers":[{"batched":false,"condition":{"comparator":"GE","lhs":{"qty":{"player":{"aggregate":"Max","type":"Opponent"},"type":"LifeLostThisTurn"},"type":"Ref"},"rhs":{"type":"Fixed","value":2},"type":"QuantityComparison"},"constraint":null,"damage_kind":"Any","description":"At the beginning of each end step, if an opponent lost 2 or more life this turn, you may put a quest counter on ~.","destination":null,"execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":1},"counter_type":"quest","target":{"type":"SelfRef"},"type":"PutCounter"},"forward_result":false,"kind":"Spell","optional":true,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":"Phase","optional":true,"origin":null,"phase":"End","secondary":false,"trigger_zones":["Battlefield"],"valid_card":null,"valid_source":null,"valid_target":null},{"batched":false,"condition":{"counters":{"data":"quest","type":"OfType"},"minimum":3,"type":"HasCounters"},"constraint":null,"damage_kind":"Any","description":"Whenever a card is put into an opponent's graveyard from anywhere, if ~ has three or more quest counters on it, you may have that player lose 2 life. If you do, you gain 2 life.","destination":"Graveyard","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"amount":{"type":"Fixed","value":2},"target":{"type":"ParentTargetOwner"},"type":"LoseLife"},"forward_result":false,"kind":"Spell","optional":true,"optional_targeting":false,"sub_ability":{"condition":{"signal":"OptionalEffectPerformed","type":"EffectOutcome"},"cost":null,"description":null,"duration":null,"effect":{"amount":{"type":"Fixed","value":2},"type":"GainLife"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"sub_link":"SequentialSibling","target_prompt":null},"target_prompt":null},"mode":"ChangesZone","optional":true,"origin":null,"phase":null,"secondary":false,"trigger_zones":["Battlefield"],"valid_card":{"controller":null,"properties":[{"type":"Owned","controller":"Opponent"}],"type":"Typed","type_filters":["Card"]},"valid_source":null,"valid_target":{"controller":"Opponent","properties":[],"type":"Typed","type_filters":[]}}],"replacements":[],"keywords":[]}"###,
         ),
         (
             r###"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"a3635b3f-839c-4fe5-83a5-7c70e8630184"},"keywords":["Menace"],"layout":"normal","manaCost":"{B}","manaValue":1.0,"name":"Moonshadow","power":"7","subtypes":["Elemental"],"supertypes":[],"text":"Menace\nThis creature enters with six -1/-1 counters on it.\nWhenever one or more permanent cards are put into your graveyard from anywhere while this creature has a -1/-1 counter on it, remove a -1/-1 counter from this creature.","toughness":"7","type":"Creature — Elemental","types":["Creature"]}"###,
@@ -44319,7 +44332,10 @@ fn u14_inherited_removal_companion_documents() {
             .find(|i| matches!(i.node, OracleNodeIr::Static(_)))
             .unwrap();
         let consumer_id = consumer.id;
-        assert_eq!(consumer.source.fragment(), Some(line.as_str()));
+        // Emitted units address the self-reference-normalized buffer; the
+        // complete raw document remains asserted above.
+        let normalized_line = line.replace("this Aura", "~");
+        assert_eq!(consumer.source.fragment(), Some(normalized_line.as_str()));
         let consumer_start = "As ~ enters, choose odd or even.".len() + 1;
         assert_eq!(
             consumer.source.span(),
@@ -44327,7 +44343,7 @@ fn u14_inherited_removal_companion_documents() {
                 1,
                 1,
                 consumer_start,
-                consumer_start + line.len(),
+                consumer_start + normalized_line.len(),
                 0
             )
         );
@@ -44357,20 +44373,24 @@ fn u14_inherited_removal_companion_documents() {
             );
             assert_eq!(bad.source_text, bad_text);
             assert!(bad.items.iter().any(source_parity_chooser));
-            assert_complete_static_structure_refusal(&bad, &failed_line);
+            let normalized_failed_line = failed_line.replace("this Aura", "~");
+            assert_complete_static_structure_refusal(&bad, &normalized_failed_line);
             let refused = bad
                 .items
                 .iter()
                 .find(|i| i.id == consumer_id)
                 .expect("same source item");
-            assert_eq!(refused.source.fragment(), Some(failed_line.as_str()));
+            assert_eq!(
+                refused.source.fragment(),
+                Some(normalized_failed_line.as_str())
+            );
             assert_eq!(
                 refused.source.span(),
                 &crate::types::oracle_diagnostic::OracleSourceSpan::exact(
                     1,
                     1,
                     consumer_start,
-                    consumer_start + failed_line.len(),
+                    consumer_start + normalized_failed_line.len(),
                     0
                 )
             );
@@ -46613,10 +46633,7 @@ pub(crate) mod population_relation_publication {
                 let mut second = damage(fixed(3), another());
                 // CR 702.33a + CR 601.2c: the kicker payment controls the second
                 // announced occurrence; it does not replace the first occurrence.
-                second.condition = Some(
-                    serde_json::from_value(json!({"type":"AdditionalCostPaid","source":"Kicker"}))
-                        .unwrap(),
-                );
+                second.condition = Some(AbilityCondition::additional_cost_paid_any());
                 out.abilities.push(described(chain(vec![damage(fixed(3), TargetFilter::Any), second]),
                     "~ deals 3 damage to any target. If this spell was kicked, it deals 3 damage to another target."));
             }
@@ -50333,7 +50350,18 @@ pub(crate) mod defining_modifier_publication {
                     }
                     assert_eq!(
                         spell.source_text,
-                        if body_start > 0 {
+                        if name == "Diaochan, Artful Beauty" {
+                            // CR 602.1b: activation instructions are separate
+                            // from the effect body and live on its shell.
+                            assert_eq!(
+                                spell.shell.activation_restrictions,
+                                vec![
+                                    ActivationRestriction::DuringYourTurn,
+                                    ActivationRestriction::BeforeAttackersDeclared,
+                                ]
+                            );
+                            "Destroy target creature of your choice, then destroy target creature of an opponent's choice"
+                        } else if body_start > 0 {
                             printed[body_start..].trim().trim_end_matches('.') // allow-noncombinator: known activated constructor terminal punctuation
                         } else {
                             printed[body_start..].trim()
