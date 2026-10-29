@@ -3,6 +3,7 @@ use super::keyword_grant::*;
 use super::prelude::*;
 use super::restriction::*;
 use super::support::*;
+use super::test_helpers::P3_SEG;
 use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
@@ -5785,7 +5786,7 @@ fn visions_of_ruin_cast_this_way_cost_reduction_binds_commander_mv() {
     assert!(matches!(
         def.condition,
         Some(StaticCondition::CastingAsVariant {
-            variant: crate::types::game_state::CastingVariant::Flashback
+            variant: crate::types::game_state_kinds::CastingVariant::Flashback
         })
     ));
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
@@ -6267,7 +6268,7 @@ fn self_cost_reduction_if_night_uses_day_night_condition() {
     assert_eq!(
         def.condition,
         Some(StaticCondition::DayNightIs {
-            state: crate::types::game_state::DayNight::Night
+            state: crate::types::game_state_kinds::DayNight::Night
         })
     );
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
@@ -10022,7 +10023,7 @@ fn cant_untap_gate_rejects_every_unenforceable_leaf_at_any_depth() {
         // CR 601.2f: decided by the in-flight cast, absent at the untap step.
         StaticCondition::AdditionalCostPaid,
         StaticCondition::CastingAsVariant {
-            variant: crate::types::game_state::CastingVariant::Flashback,
+            variant: crate::types::game_state_kinds::CastingVariant::Flashback,
         },
         // CR 725.1: scoped-player designation with no binding authority here.
         StaticCondition::IsMonarch {
@@ -10208,7 +10209,7 @@ fn payment_gate_acceptance_follows_the_mode_that_owns_the_prompt() {
     // fix: a cast-variant gate stays enforceable everywhere except the untap
     // step (CR 502.3 — a turn-based action, so no cast is ever in flight).
     let cast_variant = StaticCondition::CastingAsVariant {
-        variant: crate::types::game_state::CastingVariant::Flashback,
+        variant: crate::types::game_state_kinds::CastingVariant::Flashback,
     };
     assert_eq!(
         gate_static_condition(&StaticMode::Continuous, cast_variant.clone(), "gap text"),
@@ -34397,7 +34398,7 @@ fn static_alpine_moon_loses_land_types_and_abilities() {
 /// `PlayerPerformedAction` over [Scry, Surveil, SearchedLibrary].
 #[test]
 fn river_song_full_card_parses_without_unimplemented() {
-    use crate::types::events::PlayerActionKind;
+    use crate::types::event_kinds::PlayerActionKind;
     use crate::types::triggers::TriggerMode;
 
     let oracle = "Meet in Reverse \u{2014} You draw cards from the bottom of your library rather than the top.\n\
@@ -35651,74 +35652,6 @@ fn rayami_exiled_keyword_grant_splits_into_conditional_per_keyword_statics() {
     assert!(
         granted.contains(&Keyword::Deathtouch),
         "grants deathtouch: {granted:?}"
-    );
-}
-
-/// #5257 Rayami runtime discriminator: the keyword grant is CONDITIONAL and
-/// re-evaluated (CR 611.3a). With no matching exiled card, Rayami must NOT have
-/// flying; once an exiled creature card with a blood counter that itself has
-/// flying is present, Rayami gains flying — and only that keyword.
-///
-/// Discriminator: on `main` the condition is `Unrecognized`, so Rayami has
-/// flying (and every other listed keyword) unconditionally and the negative
-/// assertion flips.
-#[test]
-fn rayami_flying_grant_is_conditional_on_matching_exiled_card() {
-    use crate::game::scenario::{GameScenario, P0};
-    use crate::game::zones::create_object;
-    use crate::types::actions::GameAction;
-    use crate::types::card_type::CoreType;
-    use crate::types::counter::CounterType;
-    use crate::types::identifiers::CardId;
-    use crate::types::zones::Zone;
-
-    const RAYAMI: &str = "As long as an exiled creature card with a blood counter on it has flying, Rayami has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, protection, reach, trample, and vigilance.";
-
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let rayami_id = scenario
-        .add_creature_from_oracle(P0, "Rayami, First of the Fallen", 4, 4, RAYAMI)
-        .id();
-    let mut runner = scenario.build();
-    // Force layer evaluation (SBAs run, continuous effects recomputed).
-    runner.act(GameAction::PassPriority).ok();
-
-    assert!(
-        !runner.state().objects[&rayami_id].has_keyword(&Keyword::Flying),
-        "Rayami must not have flying with no matching exiled card present"
-    );
-
-    // Positive reach-guard: an exiled creature card with a blood counter that has
-    // flying. Rayami now gains flying — proving the grant path actually fires, so
-    // the negative above is a genuine conditional rather than flying being
-    // unreachable. (Seed the object directly, then re-run the continuous-effect
-    // engine — a raw state edit bypasses the normal change tracking.)
-    {
-        let state = runner.state_mut();
-        let exiled = create_object(
-            state,
-            CardId(900),
-            P0,
-            "Exiled Bat".to_string(),
-            Zone::Exile,
-        );
-        let obj = state.objects.get_mut(&exiled).expect("exiled card exists");
-        obj.card_types.core_types.push(CoreType::Creature);
-        obj.base_card_types = obj.card_types.clone();
-        obj.keywords.push(Keyword::Flying);
-        *obj.counters
-            .entry(CounterType::Generic("blood".to_string()))
-            .or_insert(0) += 1;
-    }
-    crate::game::layers::evaluate_layers(runner.state_mut());
-
-    assert!(
-        runner.state().objects[&rayami_id].has_keyword(&Keyword::Flying),
-        "Rayami must gain flying while an exiled flying creature card with a blood counter is present"
-    );
-    assert!(
-        !runner.state().objects[&rayami_id].has_keyword(&Keyword::Vigilance),
-        "Rayami must not gain vigilance — no exiled card has vigilance"
     );
 }
 
@@ -38951,10 +38884,6 @@ fn during_your_turn_keyword_grant_unchanged() {
 // differ. Do NOT "correct" these assertions against the artifact.
 // =========================================================================
 
-/// The interposed player class Weathered Sentinels prints, shared by every
-/// static-side row below so the three-production rows cannot drift from the card.
-const P3_SEG: &str = "players who attacked you during their last turn";
-
 /// Weathered Sentinels, printed line 2 — VERBATIM (verified against the base
 /// card-data artifact's `oracle_text`). Note the ASCII `'`: the parser
 /// lowercases and every defender-exception tag uses ASCII `didn't`, so a curly
@@ -39129,98 +39058,6 @@ fn defender_exception_duration_form_is_declined_by_both_static_productions() {
             }),
         }),
         "a duration-plus-class segment must fail closed, not drop the duration"
-    );
-}
-
-/// ROW 5: an unrecognized interposed class is
-/// PERMANENTLY INERT at runtime AND leaves the card RED in coverage.
-///
-/// Two fixtures differing ONLY in the interposed segment. `unenforceable_gate_marker`
-/// yields `Not(Unrecognized{..})`: `layers::evaluate_condition_inner` reads a BARE
-/// `Unrecognized` as TRUE (layers.rs:2120), so the `Not` wrapper is what makes the
-/// gate evaluate FALSE forever — a bare `Unrecognized` here would grant the
-/// PERMISSION against EVERY defender — the fail-OPEN outcome this row forbids —
-/// while `contains_unrecognized` still reports the gap either way.
-///
-/// BASE-SHAPE RECORD: before this change the same line parsed to a
-/// `Continuous`/`AddKeyword(Defender)` grant whose `card_face_gaps` was `[]` —
-/// dishonestly GREEN. This row therefore measures a real supported -> unsupported
-/// FLIP, and its value must not be mistaken for "it was always red".
-#[test]
-fn unrecognized_interposed_class_is_permanently_inert_and_leaves_the_card_red() {
-    let ok = format!("This creature can attack {P3_SEG} as though it didn't have defender.");
-    const BAD: &str =
-        "This creature can attack players who wear a hat as though it didn't have defender.";
-
-    // (i) REACH-GUARD / PAIRED POSITIVE CONTROL: the widened scan consumed THIS
-    // line shape. Without it, BAD's inert marker could be produced for a line the
-    // scan never saw — a shadowed fixture is inert and red for the WRONG reason.
-    assert_eq!(
-        parse_static_line(&ok)
-            .expect("reach-guard: the recognized class must be consumed")
-            .condition,
-        Some(StaticCondition::AnyPlayerAttackedYouLastTurn {
-            scope: AttackedYouScope::AttackedPlayer,
-        })
-    );
-
-    // (ii) the inert marker, POSITIVE shape.
-    let bad = parse_static_line(BAD).expect(
-        "the line shape is still consumed — the production must OWN the line rather \
-         than decline it back to the AddKeyword(Defender) fallback",
-    );
-    assert_eq!(bad.mode, StaticMode::CanAttackWithDefender);
-    assert_eq!(
-        bad.condition,
-        Some(StaticCondition::Not {
-            condition: Box::new(StaticCondition::Unrecognized {
-                text: "players who wear a hat".to_string(),
-            }),
-        })
-    );
-
-    // (iii) INERT AT RUNTIME — the half a parse-shape assertion cannot buy.
-    let state = crate::types::game_state::GameState::new(
-        crate::types::format::FormatConfig::standard(),
-        2,
-        42,
-    );
-    assert!(
-        !crate::game::layers::evaluate_condition_for_test(
-            &state,
-            bad.condition.as_ref().unwrap(),
-            crate::types::player::PlayerId(0),
-            crate::types::identifiers::ObjectId(1),
-        ),
-        "a Not(Unrecognized) gate must evaluate FALSE (a bare Unrecognized is TRUE, layers.rs:2120)"
-    );
-
-    // (iv) RED IN COVERAGE — the half the fallback's NAME does not guarantee:
-    // being permanently inert at runtime does not by itself make the card red.
-    let bad_face = crate::types::card::CardFace {
-        static_abilities: vec![bad.clone()],
-        ..Default::default()
-    };
-    let gaps = crate::game::coverage::card_face_gaps(&bad_face);
-    assert!(
-        gaps.iter()
-            .any(|g| g.contains("Static:Unrecognized(players who wear a hat)")),
-        "the unparsed class must leave the card RED; got {gaps:?}"
-    );
-
-    // SECOND CONTROL, SAME FIXTURE: the recognized class is GREEN, proving the gap
-    // signal comes from the MARKER and not from `CanAttackWithDefender` being
-    // unsupported in the coverage registry.
-    let ok_face = crate::types::card::CardFace {
-        static_abilities: vec![parse_static_line(&ok).unwrap()],
-        ..Default::default()
-    };
-    assert_eq!(
-        crate::game::coverage::card_face_gaps(&ok_face),
-        Vec::<String>::new(),
-        "a RECOGNIZED anchored class must report NO coverage gap — the gap signal \
-         comes from the unenforceable marker, not from `CanAttackWithDefender` \
-         being unsupported in the registry"
     );
 }
 
@@ -41248,7 +41085,7 @@ fn granted_loyalty_abilities_carry_cr_606_3_timing() {
         "{:?}",
         def.activation_restrictions
     );
-    assert!(crate::game::mana_abilities::is_mana_ability(def));
+    assert!(crate::types::ability::is_mana_ability(def));
 }
 
 /// CR 702.16i + CR 903.4: Commander's Plate — "Equipped creature gets +3/+3 and

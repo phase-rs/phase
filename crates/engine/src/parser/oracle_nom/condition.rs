@@ -25273,7 +25273,7 @@ mod tests {
         assert_eq!(
             c,
             StaticCondition::SpellCastWithVariantThisTurn {
-                variant: crate::types::game_state::CastingVariant::Warp,
+                variant: crate::types::game_state_kinds::CastingVariant::Warp,
             }
         );
     }
@@ -25340,7 +25340,7 @@ mod tests {
                 assert_eq!(
                     conditions[1],
                     StaticCondition::SpellCastWithVariantThisTurn {
-                        variant: crate::types::game_state::CastingVariant::Warp,
+                        variant: crate::types::game_state_kinds::CastingVariant::Warp,
                     }
                 );
             }

@@ -8234,8 +8234,9 @@ impl GameState {
 
     /// CR 615.5 + CR 614.6: the `replacement_continuations` positions some
     /// `ReplacementDefinition::runtime_execute` in this state names. It reads the
-    /// serialized state with the walk the decode check runs, so every holder of a
-    /// definition is covered, a holder added later included.
+    /// serialized state with the walk the decode check runs, so every serialized holder of a
+    /// definition is covered, a holder added later included; a `#[serde(skip)]` holder is not
+    /// seen.
     pub(crate) fn referenced_replacement_continuations(
         &self,
     ) -> Result<BTreeSet<u64>, serde_json::Error> {
