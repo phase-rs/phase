@@ -11908,6 +11908,12 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
+    // CR 122.1 + CR 608.2d: choose present counter kinds and feasible operations
+    // together before a generic binary choice can split the complete instruction.
+    if let Some(ast) = imperative::try_parse_choose_counter_adjustment(tp.lower) {
+        return parsed_clause(lower_zone_counter_ast(ast));
+    }
+
     // CR 608.2d: Inline binary-choice imperative — "discard a card
     // or sacrifice a land" (Highway Robbery) and analogous "A or B" patterns
     // that are not bulleted `Choose one —` modals. The split happens BEFORE

@@ -464,12 +464,15 @@ pub(crate) fn parse_complete_continuous_predicate(
                     affected.clone(),
                     description,
                 )?;
-                def.condition = Some(match def.condition.take() {
+                // CR 611.3a: gate the complete live predicate after polarity and
+                // conjunction composition; unsupported continuations stay inert.
+                let combined = match def.condition.take() {
                     Some(existing) => StaticCondition::And {
                         conditions: vec![existing, condition],
                     },
                     None => condition,
-                });
+                };
+                super::static_helpers::attach_gated_condition(&mut def, combined, description);
                 Some(def)
             },
         ) {

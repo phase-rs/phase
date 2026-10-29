@@ -39402,77 +39402,304 @@ fn alt_cost_as_foretold_stays_zone_free() {
     }
 }
 
-/// The THIRD route into the same defect class, found while self-reviewing the
-/// Awesome Presence / Hipparion fix — and the one that would have been a
-/// behavior regression, not just a reporting one.
-///
-/// `parse_subject_rule_static`'s `cant_be_blocked_mode` fallthrough runs the
-/// whole tail through `nom_condition::parse_condition`, whose `"unless "` branch
-/// yields a raw CR 118.12a `UnlessPay`. `CantBeBlocked` has no block-declaration
-/// payment prompt (`combat::combat_tax_mode_matches` covers only
-/// `CantAttack`/`CantBlock`/`CantAttackOrBlock`), so the gate must defer it — and
-/// specifically to an INERT marker. A marker that evaluated `true` forever would
-/// make every affected creature UNCONDITIONALLY unblockable: an evasion ability
-/// the card does not have. `Not(Unrecognized)` matches what the ungated raw
-/// `UnlessPay` already did at runtime (`false`), so the deferral changes
-/// reporting only. `unenforceable_gate_marker` now emits that shape for every
-/// enforcement-point rejection, in either grammatical direction, so this route
-/// can no longer regress by picking the wrong polarity at the call site.
+/// SHAPE and public combat: the complete Continuous carrier keeps an inert,
+/// visible refusal when its enforcement point cannot offer the payment.
 #[test]
 fn subject_led_cant_be_blocked_payment_gate_defers_without_inventing_evasion() {
-    let def = parse_static_line(
-        "Creatures you control can't be blocked unless defending player pays {2}.",
-    )
-    .expect("subject-led evasion line should parse");
-    assert_eq!(
-        def.mode,
-        StaticMode::CantBeBlocked,
-        "source={:?}, definition={def:#?}, condition={:?}, modifications={:?}",
-        "Creatures you control can't be blocked unless defending player pays {2}.",
-        def.condition,
-        def.modifications
+    let source = "Creatures you control can't be blocked unless defending player pays {2}.";
+    let expected = complete_evasion_static(
+        source,
+        StaticCondition::Not {
+            condition: Box::new(StaticCondition::Unrecognized {
+                text: source.to_owned(),
+            }),
+        },
     );
-    let Some(StaticCondition::Not { condition }) = def.condition.as_ref() else {
-        panic!(
-            "the gap marker MUST be Not-wrapped — a bare Unrecognized evaluates true              and would grant unconditional evasion, got {:?}",
-            def.condition
-        );
+    assert_eq!(parse_static_line(source), Some(expected.clone()));
+    let face = crate::types::card::CardFace {
+        static_abilities: vec![expected],
+        ..Default::default()
     };
-    assert!(
-        matches!(condition.as_ref(), StaticCondition::Unrecognized { .. }),
-        "expected a labelled gap inside the Not, got {condition:?}"
-    );
-    assert!(
-        def.condition
-            .as_ref()
-            .is_some_and(StaticCondition::contains_unrecognized),
-        "the deferral must be visible to every coverage-honesty gate"
-    );
+    assert!(crate::game::coverage::card_face_has_unimplemented_parts(
+        &face
+    ));
+    let (runner, _, attacker, blocker, _, _, _) = complete_evasion_fixture(source, None, false);
+    assert_complete_evasion_block(runner, attacker, blocker, true);
 }
 
-/// Guard for the complement of the test above: an enforceable positive gate on
-/// the SAME route must still pass through untouched. Without this, the fix could
-/// silently degrade into "defer every conditional evasion static", which would be
-/// a far larger coverage loss than the false green it replaces.
+fn complete_evasion_static(source: &str, condition: StaticCondition) -> StaticDefinition {
+    let mut definition = StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))
+        .modifications(vec![ContinuousModification::AddStaticMode {
+            mode: StaticMode::CantBeBlocked,
+        }])
+        .description(source.to_owned());
+    definition.condition = Some(condition);
+    definition
+}
+
 #[test]
 fn subject_led_cant_be_blocked_state_backed_gate_still_passes_through() {
-    let def = parse_static_line(
-        "Creatures you control can't be blocked as long as you control a Forest.",
-    )
-    .expect("subject-led conditional evasion should parse");
+    // CR 611.3a + CR 109.5: both filters read the source's current controller.
+    let source = "Creatures you control can't be blocked as long as you control a Forest.";
+    let condition = StaticCondition::IsPresent {
+        filter: Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Forest".to_owned())],
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }],
+        })),
+    };
     assert_eq!(
-        def.mode,
-        StaticMode::CantBeBlocked,
-        "source={:?}, definition={def:#?}, condition={:?}, modifications={:?}",
-        "Creatures you control can't be blocked as long as you control a Forest.",
-        def.condition,
-        def.modifications
+        parse_static_line(source),
+        Some(complete_evasion_static(source, condition))
     );
+    for forest in [None, Some(0), Some(1), Some(2), Some(3)] {
+        let (mut runner, source_id, attacker, blocker, forest_id, control, bounce) =
+            complete_evasion_fixture(source, forest, true);
+        let active = forest == Some(0);
+        assert_complete_evasion_block(
+            crate::game::scenario::GameRunner::from_state(runner.state().clone()),
+            attacker,
+            blocker,
+            !active,
+        );
+        if active {
+            // Public movement invalidates the live battlefield predicate.
+            let mut moved = crate::game::scenario::GameRunner::from_state(runner.state().clone());
+            moved
+                .cast(bounce)
+                .target_object(forest_id.unwrap())
+                .resolve();
+            assert_eq!(moved.state().objects[&forest_id.unwrap()].zone, Zone::Hand);
+            assert_complete_evasion_block(moved, attacker, blocker, true);
+            // Public control change invalidates You even while ownership stays fixed.
+            runner
+                .cast(control)
+                .target_player(crate::game::scenario::P1)
+                .target_object(forest_id.unwrap())
+                .resolve();
+            assert_eq!(
+                runner.state().objects[&forest_id.unwrap()].controller,
+                crate::game::scenario::P1
+            );
+            assert_complete_evasion_block(runner, attacker, blocker, true);
+        } else if forest == Some(1) {
+            // Changing the source controller rebinds both the recipient and Forest gate.
+            runner
+                .cast(control)
+                .target_player(crate::game::scenario::P1)
+                .target_object(source_id)
+                .resolve();
+            assert_eq!(
+                runner.state().objects[&source_id].controller,
+                crate::game::scenario::P1
+            );
+            assert_complete_evasion_block(runner, attacker, blocker, true);
+        }
+    }
+}
+
+#[test]
+fn complete_static_source_controller_change_rebinds_both_live_filters() {
+    use crate::game::scenario::{GameRunner, P1};
+    let source = "Creatures you control can't be blocked as long as you control a Forest.";
+    let (mut runner, source_id, attacker, blocker, _, control, _) =
+        complete_evasion_fixture(source, Some(1), false);
+    assert_complete_evasion_block(
+        GameRunner::from_state(runner.state().clone()),
+        attacker,
+        blocker,
+        true,
+    );
+    assert_complete_evasion_block(
+        GameRunner::from_state(runner.state().clone()),
+        blocker,
+        attacker,
+        true,
+    );
+    runner
+        .cast(control)
+        .target_player(P1)
+        .target_object(source_id)
+        .resolve();
+    assert_eq!(runner.state().objects[&source_id].controller, P1);
+    assert_complete_evasion_block(
+        GameRunner::from_state(runner.state().clone()),
+        attacker,
+        blocker,
+        true,
+    );
+    assert_complete_evasion_block(runner, blocker, attacker, false);
+}
+
+// Synthetic full-source fixture: cast the actual complete parsed static carrier.
+// forest: 0=source-controlled, 1=opponent-controlled, 2=source-owned/stolen,
+// 3=outside battlefield. The second source has its own distinct controller gate.
+fn complete_evasion_fixture(
+    source: &str,
+    forest: Option<u8>,
+    second_source: bool,
+) -> (
+    crate::game::scenario::GameRunner,
+    crate::types::identifiers::ObjectId,
+    crate::types::identifiers::ObjectId,
+    crate::types::identifiers::ObjectId,
+    Option<crate::types::identifiers::ObjectId>,
+    crate::types::identifiers::ObjectId,
+    crate::types::identifiers::ObjectId,
+) {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+    for player in [P0, P1] {
+        scenario.with_library_top(player, &["Safe draw", "Safe draw", "Safe draw"]);
+    }
+    let attacker = scenario.add_creature(P0, "Attacker", 2, 4).id();
+    let blocker = scenario.add_creature(P1, "Blocker", 2, 4).id();
+    let source_id = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Synthetic evasion source", source)
+        .id();
+    if second_source {
+        scenario.add_artifact_from_oracle(P1, "Independent opponent source", source);
+    }
+    let forest_id = forest.map(|kind| match kind {
+        3 => scenario
+            .add_land_to_graveyard(P0, "Forest")
+            .with_subtypes(vec!["Forest"])
+            .id(),
+        2 => scenario
+            .add_land_from_oracle(P0, "Forest", "")
+            .with_subtypes(vec!["Forest"])
+            .controlled_by(P1)
+            .id(),
+        _ => scenario
+            .add_land_from_oracle(if kind == 0 { P0 } else { P1 }, "Forest", "")
+            .with_subtypes(vec!["Forest"])
+            .id(),
+    });
+    let control = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic control change",
+            true,
+            "Target player gains control of target permanent.",
+        )
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic movement",
+            true,
+            "Return target permanent to its owner's hand.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(source_id).resolve();
+    outcome.assert_zone(&[source_id], Zone::Battlefield);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        crate::types::game_state::WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    (
+        runner, source_id, attacker, blocker, forest_id, control, bounce,
+    )
+}
+
+fn assert_complete_evasion_block(
+    mut runner: crate::game::scenario::GameRunner,
+    attacker: crate::types::identifiers::ObjectId,
+    blocker: crate::types::identifiers::ObjectId,
+    permitted: bool,
+) {
+    // CR 509.1b: the live evasion restriction is checked at blocker declaration.
+    use crate::types::{game_state::WaitingFor, phase::Phase};
+    let attacking_player = runner.state().objects[&attacker].controller;
+    let defending_player = runner.state().objects[&blocker].controller;
+    if runner.state().active_player != attacking_player {
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_phase(Phase::End);
+        runner.advance_to_phase(Phase::PreCombatMain);
+    }
+    assert_eq!(runner.state().active_player, attacking_player);
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(
+            attacker,
+            crate::game::combat::AttackTarget::Player(defending_player),
+        )])
+        .unwrap();
+    runner.advance_to_phase(Phase::DeclareBlockers);
     assert!(
-        matches!(def.condition, Some(StaticCondition::IsPresent { .. })),
-        "a board-state gate is a pure function of game state and must survive the          enforcement-point gate unchanged, got {:?}",
-        def.condition
+        matches!(runner.state().waiting_for, WaitingFor::DeclareBlockers { player, .. } if player == defending_player)
     );
+    let result = runner.declare_blockers(&[(blocker, attacker)]);
+    assert_eq!(result.is_ok(), permitted, "{result:?}");
+    if !permitted {
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ));
+        runner.declare_blockers(&[]).unwrap();
+    }
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    runner.advance_to_phase(Phase::PostCombatMain);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn complete_static_suffix_composes_polarity_before_enforcement() {
+    for source in [
+        "Creatures you control can't be blocked as long as you pay {1}.",
+        "Creatures you control can't be blocked unless you pay {1}.",
+        "Creatures you control can't be blocked if you control a Forest and you pay {1}.",
+    ] {
+        let expected = complete_evasion_static(
+            source,
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::Unrecognized {
+                    text: source.to_owned(),
+                }),
+            },
+        );
+        assert_eq!(parse_static_line(source), Some(expected), "{source}");
+    }
+    for source in [
+        "Creatures you control can't be blocked if you control a Forest.",
+        "Creatures you control can't be blocked as long as you control a Forest.",
+        "Creatures you control can't be blocked unless you control a Forest.",
+    ] {
+        let definition = parse_static_line(source).expect(source);
+        assert!(
+            !definition
+                .condition
+                .as_ref()
+                .unwrap()
+                .contains_unrecognized(),
+            "{definition:#?}"
+        );
+        assert_eq!(
+            definition.modifications,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBeBlocked
+            }]
+        );
+    }
+    let hostile =
+        "Creatures you control can't be blocked as long as you control a Forest unexplained.";
+    assert_whole_conditional_refusal(hostile);
 }
 
 /// The FOURTH route into the same defect class (maintainer review of this PR),
@@ -43175,8 +43402,8 @@ fn u14_where_x_owns_the_complete_unquoted_expression() {
         );
         let line = format!("Creatures {bad}.");
         let defs = parse_static_line_multi(&line);
-        assert!(!defs.is_empty(), "terminal refusal: {line}");
-        assert!(defs.iter().all(u14_static_residual), "{line}: {defs:?}");
+        assert!(parse_subject_continuous_static(&line).is_none(), "{line}");
+        assert!(defs.is_empty(), "{line}: {defs:?}");
     }
     let criminal = "Commander creatures you own have menace and \"This creature gets +X/+0, where X is the number of creature cards in your graveyard.\" (A creature with menace can't be blocked except by two or more creatures.)";
     let defs = parse_static_line_multi(criminal);
@@ -43319,13 +43546,9 @@ fn u14_complete_base_stat_axes_preserve_scope_and_refuse_tail() {
                 "{bad_predicate}"
             );
             let bad = format!("Creatures your opponents control {bad_predicate}.");
-            assert!(parse_subject_continuous_static(&bad).is_none_or(|d| u14_static_residual(&d)));
+            assert!(parse_subject_continuous_static(&bad).is_none());
             let refused = parse_static_line_multi(&bad);
-            assert!(!refused.is_empty(), "terminal refusal: {bad}");
-            assert!(
-                refused.iter().all(u14_static_residual),
-                "{bad}: {refused:?}"
-            );
+            assert!(refused.is_empty(), "{bad}: {refused:?}");
         }
     }
 }
@@ -43409,13 +43632,9 @@ fn u14_keyword_clause_verbs_preserve_each_operation() {
                 "{bad_predicate}"
             );
             let bad = format!("Creatures {bad_predicate}.");
-            assert!(parse_subject_continuous_static(&bad).is_none_or(|d| u14_static_residual(&d)));
+            assert!(parse_subject_continuous_static(&bad).is_none());
             let refused = parse_static_line_multi(&bad);
-            assert!(!refused.is_empty());
-            assert!(
-                refused.iter().all(u14_static_residual),
-                "{bad}: {refused:?}"
-            );
+            assert!(refused.is_empty(), "{bad}: {refused:?}");
         }
     }
 }
@@ -43551,13 +43770,9 @@ fn u14_keyword_transitions_keep_inherited_removal() {
                 "{bad_predicate}"
             );
             let bad = format!("Creatures {bad_predicate}.");
-            assert!(parse_subject_continuous_static(&bad).is_none_or(|d| u14_static_residual(&d)));
+            assert!(parse_subject_continuous_static(&bad).is_none());
             let refused = parse_static_line_multi(&bad);
-            assert!(!refused.is_empty(), "terminal refusal: {bad}");
-            assert!(
-                refused.iter().all(u14_static_residual),
-                "{bad}: {refused:?}"
-            );
+            assert!(refused.is_empty(), "{bad}: {refused:?}");
         }
     }
 }
@@ -43608,13 +43823,9 @@ fn u14_inherited_removal_preserves_modeled_companions() {
                 "{bad_predicate}"
             );
             let bad = format!("Creatures {bad_predicate}.");
-            assert!(parse_subject_continuous_static(&bad).is_none_or(|d| u14_static_residual(&d)));
+            assert!(parse_subject_continuous_static(&bad).is_none());
             let refused = parse_static_line_multi(&bad);
-            assert!(!refused.is_empty());
-            assert!(
-                refused.iter().all(u14_static_residual),
-                "{bad}: {refused:?}"
-            );
+            assert!(refused.is_empty(), "{bad}: {refused:?}");
         }
     }
 }

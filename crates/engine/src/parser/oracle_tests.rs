@@ -33099,18 +33099,94 @@ fn temporary_comma_grant_must_attack_if_able_does_not_emit_condition_warning() {
         "unexpected condition warning: {:?}",
         parsed.parse_warnings
     );
-    assert!(
-        parsed.abilities.iter().any(|ability| {
-            matches!(
-                &*ability.effect,
-                Effect::GenericEffect { static_abilities, .. }
-                    if static_abilities
-                        .iter()
-                        .any(|static_def| static_def.mode == StaticMode::MustAttack)
-            )
-        }),
+    // SHAPE: the two instructions have independent explicit turn windows.
+    use crate::types::ability::{GameRestriction, RestrictionExpiry, SubAbilityLink};
+    let grant = StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))
+        .modifications(vec![
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::DoubleStrike,
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            },
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::MustAttack,
+            },
+        ])
+        .description("have double strike, trample, and must attack if able".to_owned());
+    let mut child = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GenericEffect {
+            static_abilities: vec![grant],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+            end_cost: None,
+        },
+    )
+    .duration(Duration::UntilEndOfTurn);
+    child.sub_link = SubAbilityLink::SequentialSibling;
+    let expected = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::AddRestriction {
+            restriction: GameRestriction::DamagePreventionDisabled {
+                source: crate::types::identifiers::ObjectId(0),
+                expiry: RestrictionExpiry::EndOfTurn,
+                scope: None,
+            },
+        },
+    )
+    .description(oracle.to_owned())
+    .sub_ability(child);
+    assert_eq!(
+        parsed.abilities,
+        vec![expected],
         "source={oracle:?}, parsed={parsed:#?}"
     );
+    assert!(
+        parsed.statics.is_empty()
+            && parsed.triggers.is_empty()
+            && parsed.replacements.is_empty()
+            && parsed.extracted_keywords.is_empty()
+    );
+    assert!(!parsed_has_unimplemented(&parsed), "{parsed:#?}");
+    let mut document = parse_oracle_ir(
+        oracle,
+        "Math is for Blockers",
+        &[],
+        &["Sorcery".into()],
+        &[],
+    );
+    assert_eq!(document.items.len(), 1, "{document:#?}");
+    let item = &document.items[0];
+    assert_eq!(item.id, crate::parser::oracle_ir::doc::OracleItemId(0));
+    assert_eq!(item.source.fragment(), Some(oracle));
+    assert_eq!(
+        item.source.span(),
+        &crate::types::oracle_diagnostic::OracleSourceSpan::exact(0, 1, 0, oracle.len(), 0)
+    );
+    let OracleNodeIr::Spell(spell) = &item.node else {
+        panic!("{item:#?}")
+    };
+    let body = oracle.replace('\n', " ");
+    assert_eq!(spell.source_text, body);
+    assert_eq!(spell.body.clauses.len(), 2, "{spell:#?}");
+    population_relation_publication::assert_chain_geometry(&spell.body, &body);
+    let second = &spell.body.clauses[1];
+    assert_eq!(
+        second.id,
+        crate::parser::oracle_ir::effect_chain::ClauseId(1)
+    );
+    let second_fragment = "Creatures you control have double strike, trample, and must attack if able until end of turn";
+    assert_eq!(second.source.fragment(), Some(second_fragment));
+    assert_eq!(
+        second.source.span().start_byte,
+        "Damage can't be prevented this turn. ".len()
+    );
+    assert_eq!(second.source.span().end_byte, body.len() - 1);
+    assert_eq!(lower_oracle_ir(&mut document).abilities, parsed.abilities);
 }
 
 #[test]
@@ -43045,6 +43121,111 @@ fn prior_controller_malformed_quote_public_document_remains_unsupported() {
 }
 
 #[test]
+fn failed_numeric_keyword_parameters_keep_complete_publication_refusals() {
+    for predicate in [
+        "have mobilize X unexplained, where X is its power",
+        "have crew activate only once each turn",
+    ] {
+        let source = format!("Creatures {predicate}.");
+        let mut document = parse_oracle_ir(
+            &source,
+            "Synthetic numeric refusal",
+            &[],
+            &["Enchantment".into()],
+            &[],
+        );
+        assert_eq!(document.items.len(), 1, "{document:#?}");
+        assert_complete_static_structure_refusal(&document, &source);
+        let parsed = lower_oracle_ir(&mut document);
+        let expected = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented(
+                "static_structure",
+                format!("Static pattern matched but line failed static parser: {source}"),
+            ),
+        )
+        .description(source.clone());
+        assert_eq!(parsed.abilities, vec![expected]);
+        assert!(
+            parsed.statics.is_empty()
+                && parsed.extracted_keywords.is_empty()
+                && parsed.triggers.is_empty()
+                && parsed.replacements.is_empty()
+        );
+    }
+    let source = "Creatures have mobilize X, where X is its power.";
+    let parsed = parse_oracle_text(
+        source,
+        "Synthetic numeric reach guard",
+        &[],
+        &["Enchantment".into()],
+        &[],
+    );
+    assert_eq!(parsed.statics.len(), 1);
+    assert!(matches!(
+        parsed.statics[0].modifications.as_slice(),
+        [ContinuousModification::AddDynamicKeyword { .. }]
+    ));
+    assert!(!parsed_has_unimplemented(&parsed));
+}
+
+fn assert_complete_static_structure_refusal(
+    doc: &crate::parser::oracle_ir::doc::OracleDocIr,
+    line: &str,
+) {
+    use crate::parser::oracle_ir::doc::UnsupportedAbilityCategory;
+    let item = doc
+        .items
+        .iter()
+        .find(|item| item.source.fragment() == Some(line))
+        .expect("complete hostile source item");
+    let OracleNodeIr::Unsupported {
+        unsupported,
+        min_x_value,
+    } = &item.node
+    else {
+        panic!("{item:#?}")
+    };
+    let diagnostic = format!("Static pattern matched but line failed static parser: {line}");
+    assert_eq!(
+        unsupported.category,
+        UnsupportedAbilityCategory::StaticStructure
+    );
+    assert_eq!(unsupported.description, line);
+    assert_eq!(unsupported.fragment, diagnostic);
+    assert_eq!(*min_x_value, 0);
+    let normalized =
+        crate::parser::oracle_util::normalize_card_name_refs(&doc.source_text, &doc.card_name);
+    let index = normalized
+        .lines()
+        .position(|source| source == line)
+        .expect("physical normalized source line");
+    let start: usize = normalized
+        .lines()
+        .take(index)
+        .map(|source| source.len() + 1)
+        .sum();
+    assert_eq!(
+        item.source.span(),
+        &crate::types::oracle_diagnostic::OracleSourceSpan::exact(
+            index,
+            index,
+            start,
+            start + line.len(),
+            0
+        )
+    );
+    assert_eq!(
+        crate::parser::oracle::lower_unsupported_node(unsupported, *min_x_value),
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("static_structure", &diagnostic)
+        )
+        .description(line.to_owned())
+    );
+}
+
+#[test]
 fn legacy_counter_adjustment_document_axes_keep_complete_typed_chain() {
     use crate::types::counter::CounterMatch;
 
@@ -43079,6 +43260,52 @@ fn legacy_counter_adjustment_document_axes_keep_complete_typed_chain() {
                     target: TargetFilter::ParentTarget,
                 },
                 "{text}"
+            );
+            let mut expected_adjustment = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseCounterAdjustment {
+                    adjustment,
+                    counters: CounterMatch::Any,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ParentTarget,
+                },
+            );
+            expected_adjustment.sub_link = crate::types::ability::SubAbilityLink::SequentialSibling;
+            assert_eq!(adjustment_def, &expected_adjustment, "{text}: {parsed:#?}");
+            let expected_parent = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::TargetOnly {
+                    target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
+                },
+            )
+            .description(text.clone())
+            .sub_ability(expected_adjustment);
+            assert_eq!(parent, &expected_parent, "{text}: {parsed:#?}");
+            let document = parse_oracle_ir(
+                &text,
+                "Synthetic legacy axes",
+                &[],
+                &["Instant".into()],
+                &[],
+            );
+            assert_eq!(document.items.len(), 1, "{document:#?}");
+            let item = &document.items[0];
+            assert_eq!(item.source.fragment(), Some(text.as_str()));
+            assert_eq!(
+                item.source.span(),
+                &crate::types::oracle_diagnostic::OracleSourceSpan::exact(0, 0, 0, text.len(), 0)
+            );
+            let OracleNodeIr::Spell(spell) = &item.node else {
+                panic!("{item:#?}")
+            };
+            assert_eq!(spell.body.clauses.len(), 2, "{spell:#?}");
+            population_relation_publication::assert_chain_geometry(&spell.body, &text);
+            assert_eq!(spell.body.clauses[1].source.fragment(), Some(clause));
+            let start = "Choose a counter on target permanent. ".len();
+            assert_eq!(spell.body.clauses[1].source.span().start_byte, start);
+            assert_eq!(
+                spell.body.clauses[1].source.span().end_byte,
+                start + clause.len()
             );
             assert!(adjustment_def.sub_ability.is_none(), "{text}");
             assert!(parent.else_ability.is_none() && adjustment_def.else_ability.is_none());
@@ -43116,6 +43343,53 @@ fn legacy_counter_adjustment_document_axes_keep_complete_typed_chain() {
         assert_legacy(
             &format!("put another of those counters on {on}"),
             CounterAdjustment::Add,
+        );
+    }
+
+    let ordinary = parse_oracle_text(
+        "Discard a card or sacrifice a land.",
+        "Synthetic ordinary binary choice",
+        &[],
+        &["Instant".into()],
+        &[],
+    );
+    assert!(
+        matches!(
+            ordinary.abilities[0].effect.as_ref(),
+            Effect::ChooseOneOf { .. }
+        ),
+        "{ordinary:#?}"
+    );
+    for clause in [
+        "Remove that counter or put another of those counters on it unexplained",
+        "Put another of those counters on it unexplained",
+    ] {
+        let text = format!("Choose a counter on target permanent. {clause}.");
+        let mut document = parse_oracle_ir(
+            &text,
+            "Synthetic malformed legacy",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        assert_eq!(document.items[0].source.fragment(), Some(text.as_str()));
+        let parsed = lower_oracle_ir(&mut document);
+        let parent = &parsed.abilities[0];
+        assert!(
+            matches!(parent.effect.as_ref(), Effect::TargetOnly { .. }),
+            "{parsed:#?}"
+        );
+        let residual = parent
+            .sub_ability
+            .as_deref()
+            .expect("complete hostile adjustment");
+        assert!(
+            matches!(residual.effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment == clause),
+            "{parsed:#?}"
+        );
+        assert!(
+            residual.sub_ability.is_none(),
+            "no clean supported suffix: {parsed:#?}"
         );
     }
 
@@ -43518,7 +43792,7 @@ fn u14_complete_where_x_and_companion_documents() {
         let bad = format!("{}{connector} draw two cards.", line.trim_end_matches('.'));
         let doc = parse_oracle_ir(&bad, "Complete static", &[], &["Enchantment".into()], &[]);
         assert_eq!(doc.source_text, bad);
-        assert!(doc.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == bad)), "{doc:#?}");
+        assert_complete_static_structure_refusal(&doc, &bad);
         assert!(!doc.items.iter().any(|i| matches!(i.node, OracleNodeIr::Static(_))), "no supported partial static: {doc:#?}");
     }
 }
@@ -43583,7 +43857,7 @@ fn u14_base_stat_documents_preserve_each_axis_and_full_maha() {
             let bad_text = text.replace(&line, &failed_line);
             let bad = parse_oracle_ir(&bad_text, name, &[], &["Creature".into()], &[]);
             assert_eq!(bad.source_text, bad_text);
-            assert!(bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == failed_line)), "{bad:#?}");
+            assert_complete_static_structure_refusal(&bad, &failed_line);
             assert!(!bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Static(ir) if ir.definition.modifications.iter().any(|m| matches!(m, ContinuousModification::SetPower { .. } | ContinuousModification::SetToughness { .. })))), "no partial base setter: {bad:#?}");
         }
     }
@@ -43694,7 +43968,7 @@ fn u14_source_bound_mixed_keyword_verb_documents() {
             );
             assert_eq!(bad.source_text, bad_text);
             assert!(bad.items.iter().any(source_parity_chooser));
-            assert!(bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == failed_line)), "{bad:#?}");
+            assert_complete_static_structure_refusal(&bad, &failed_line);
             assert!(
                 !bad.items
                     .iter()
@@ -43850,7 +44124,17 @@ fn u14_inherited_removal_documents_keep_complete_operations() {
             .unwrap();
         let consumer_id = consumer.id;
         assert_eq!(consumer.source.fragment(), Some(line.as_str()));
-        assert_eq!(consumer.source.span().first_line, 2);
+        let consumer_start = "As ~ enters, choose odd or even.".len() + 1;
+        assert_eq!(
+            consumer.source.span(),
+            &crate::types::oracle_diagnostic::OracleSourceSpan::exact(
+                1,
+                1,
+                consumer_start,
+                consumer_start + line.len(),
+                0
+            )
+        );
         let parsed = lower_oracle_ir(&mut good);
         assert_eq!(parsed.statics.len(), 1);
         assert_eq!(parsed.statics[0].modifications, expected, "{predicate}");
@@ -43877,14 +44161,23 @@ fn u14_inherited_removal_documents_keep_complete_operations() {
             );
             assert_eq!(bad.source_text, bad_text);
             assert!(bad.items.iter().any(source_parity_chooser));
-            assert!(bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == failed_line)), "{bad:#?}");
+            assert_complete_static_structure_refusal(&bad, &failed_line);
             let refused = bad
                 .items
                 .iter()
                 .find(|i| i.id == consumer_id)
                 .expect("same source item");
             assert_eq!(refused.source.fragment(), Some(failed_line.as_str()));
-            assert_eq!(refused.source.span().first_line, 2);
+            assert_eq!(
+                refused.source.span(),
+                &crate::types::oracle_diagnostic::OracleSourceSpan::exact(
+                    1,
+                    1,
+                    consumer_start,
+                    consumer_start + failed_line.len(),
+                    0
+                )
+            );
             assert!(
                 !bad.items
                     .iter()
@@ -43953,7 +44246,17 @@ fn u14_inherited_removal_companion_documents() {
             .unwrap();
         let consumer_id = consumer.id;
         assert_eq!(consumer.source.fragment(), Some(line.as_str()));
-        assert_eq!(consumer.source.span().first_line, 2);
+        let consumer_start = "As ~ enters, choose odd or even.".len() + 1;
+        assert_eq!(
+            consumer.source.span(),
+            &crate::types::oracle_diagnostic::OracleSourceSpan::exact(
+                1,
+                1,
+                consumer_start,
+                consumer_start + line.len(),
+                0
+            )
+        );
         let parsed = lower_oracle_ir(&mut good);
         assert_eq!(parsed.statics.len(), 1);
         assert_eq!(parsed.statics[0].modifications, expected, "{companion}");
@@ -43980,14 +44283,23 @@ fn u14_inherited_removal_companion_documents() {
             );
             assert_eq!(bad.source_text, bad_text);
             assert!(bad.items.iter().any(source_parity_chooser));
-            assert!(bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == failed_line)), "{bad:#?}");
+            assert_complete_static_structure_refusal(&bad, &failed_line);
             let refused = bad
                 .items
                 .iter()
                 .find(|i| i.id == consumer_id)
                 .expect("same source item");
             assert_eq!(refused.source.fragment(), Some(failed_line.as_str()));
-            assert_eq!(refused.source.span().first_line, 2);
+            assert_eq!(
+                refused.source.span(),
+                &crate::types::oracle_diagnostic::OracleSourceSpan::exact(
+                    1,
+                    1,
+                    consumer_start,
+                    consumer_start + failed_line.len(),
+                    0
+                )
+            );
             assert!(
                 !bad.items
                     .iter()
@@ -44903,7 +45215,7 @@ fn complete_publication_preserves_full_dedicated_off_zone_identity_and_costs() {
         let retained = bad.statics.iter().filter(|definition| definition.modifications == grant.modifications && definition.affected == grant.affected).collect::<Vec<_>>();
         assert_eq!(retained.len(), 1, "the complete dedicated sibling cannot be swallowed by a bad U3 clause: {card_name}");
         let mut gaps = Vec::new(); let value = serde_json::to_value(&bad).unwrap(); complete_publication_gap_fragments(&value, &mut gaps);
-        assert!(gaps.contains(&invalid) || bad_doc.items.iter().any(|item| matches!(&item.node, OracleNodeIr::Unsupported { unsupported, .. } if unsupported.fragment == invalid)), "specific independent U3 gap");
+        assert_complete_static_structure_refusal(&bad_doc, invalid);
         let grant_line = match face_name {
             "Lier, Disciple of the Drowned" | "Wire Surgeons" | "Sliver Gravemother" | "Aminatou, Veil Piercer" => 1,
             "Green Goblin" => 2,
@@ -49938,7 +50250,11 @@ pub(crate) mod defining_modifier_publication {
                     }
                     assert_eq!(
                         spell.source_text,
-                        printed[body_start..].trim(),
+                        if body_start > 0 {
+                            printed[body_start..].trim().trim_end_matches('.') // allow-noncombinator: known activated constructor terminal punctuation
+                        } else {
+                            printed[body_start..].trim()
+                        },
                         "entire independent printed body before assembly: {name}"
                     );
                     population_relation_publication::assert_chain_geometry(

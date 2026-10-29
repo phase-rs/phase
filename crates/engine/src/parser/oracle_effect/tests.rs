@@ -11550,13 +11550,14 @@ fn effect_counter_unless_rejects_unrecognized_mana_symbol() {
 fn effect_counter_unless_rejects_unparsed_dynamic_x_tail() {
     let text = "Counter target spell unless its controller pays {X}, where X is the number of words in the name with the most words among permanents you control.";
     let def = parse_effect_chain(text, AbilityKind::Spell);
-    let Effect::Unimplemented { name, .. } = def.effect.as_ref() else {
+    let Effect::Unimplemented { name, description } = def.effect.as_ref() else {
         panic!(
             "unparsed dynamic X unless rider must not become a plain counter: {:?}",
             def.effect
         );
     };
-    assert_eq!(name, "unless_payment");
+    assert_eq!(name, "where_x_binding");
+    assert_eq!(description.as_deref(), Some(text.trim_end_matches('.'))); // allow-noncombinator: normalized test action punctuation
     assert!(
         def.unless_pay.is_none(),
         "unparsed dynamic X unless rider must not attach a partial cost: {:?}",
@@ -11568,13 +11569,14 @@ fn effect_counter_unless_rejects_unparsed_dynamic_x_tail() {
 fn effect_counter_unless_rejects_that_player_unparsed_dynamic_x_tail() {
     let text = "counter that spell unless that player pays {X}, where X is the number of cards in all graveyards with the same name as the spell";
     let def = parse_effect_chain(text, AbilityKind::Spell);
-    let Effect::Unimplemented { name, .. } = def.effect.as_ref() else {
+    let Effect::Unimplemented { name, description } = def.effect.as_ref() else {
         panic!(
             "unparsed trigger-relative X unless rider must not become a plain counter: {:?}",
             def.effect
         );
     };
-    assert_eq!(name, "unless_payment");
+    assert_eq!(name, "where_x_binding");
+    assert_eq!(description.as_deref(), Some(text.trim_end_matches('.'))); // allow-noncombinator: normalized test action punctuation
     assert!(
         def.unless_pay.is_none(),
         "unparsed trigger-relative X unless rider must not attach a partial cost: {:?}",
@@ -49775,19 +49777,10 @@ fn perpetual_parser_maps_modify_pt() {
         }
     ));
 
-    let e = parse_effect("it perpetually gets +3/+0.");
-    assert!(matches!(
-        e,
-        Effect::ApplyPerpetual {
-            target: TargetFilter::ParentTarget,
-            modification: PerpetualModification::ModifyPowerToughness {
-                power: QuantityExpr::Fixed { value: 3 },
-                toughness: QuantityExpr::Fixed { value: 0 },
-                ..
-            },
-            ..
-        }
-    ));
+    assert_eq!(
+        parse_effect("it perpetually gets +3/+0."),
+        Effect::unimplemented("perpetual_modify_pt", "it perpetually gets +3/+0")
+    );
 
     let e = parse_effect("Target creature an opponent controls perpetually gets -1/-2.");
     assert!(matches!(
@@ -50561,7 +50554,7 @@ fn perpetual_self_alt_cost_period_inside_quote_installs() {
 
 /// Honest-red: Divine Purge's affected-set "They" (the just-exiled mass-filter
 /// set — a binding concept this run does not design) must NOT install. The
-/// rider stays `Unimplemented` (gap `unbound_subject`); the exile head parses
+/// rider stays `Unimplemented` (gap `perpetual_quoted_scope`); the exile head parses
 /// to `ChangeZoneAll` (reach-guard).
 #[test]
 fn perpetual_they_affected_set_subject_stays_unimplemented() {
@@ -50583,7 +50576,7 @@ fn perpetual_they_affected_set_subject_stays_unimplemented() {
     assert!(
         matches!(
             rider.effect.as_ref(),
-            Effect::Unimplemented { name, .. } if name == "unbound_subject"
+            Effect::Unimplemented { name, description } if name == "perpetual_quoted_scope" && description.as_deref() == Some(r#"They perpetually gain "This spell costs {2} more to cast" and "This permanent enters the battlefield tapped.""#)
         ),
         "Divine Purge's affected-set rider must stay unimplemented, got {:?}",
         rider.effect
@@ -50593,8 +50586,7 @@ fn perpetual_they_affected_set_subject_stays_unimplemented() {
 /// Honest-red: Racketeer Boss's full production rider stays `Unimplemented`.
 /// Its "choose up to two ... and/or ..." head does not parse to
 /// `ChooseFromZone`, so no tracked-set origin exists and the "They" subject
-/// cannot bind — the whole clause fails closed at the subject, before the
-/// quoted content gate is even reached.
+/// cannot bind — the complete rider fails at `perpetual_choice_antecedent`.
 #[test]
 fn perpetual_racketeer_full_rider_stays_unimplemented() {
     let def = parse_effect_chain(
@@ -50615,7 +50607,7 @@ fn perpetual_racketeer_full_rider_stays_unimplemented() {
     assert!(
         matches!(
             rider.effect.as_ref(),
-            Effect::Unimplemented { name, .. } if name == "unbound_subject"
+            Effect::Unimplemented { name, description } if name == "perpetual_choice_antecedent" && description.as_deref() == Some(r#"They perpetually gain "When you cast this spell, create a Treasure token and this spell perpetually loses this ability.""#)
         ),
         "Racketeer Boss's full rider must stay unimplemented, got {:?}",
         rider.effect
@@ -87172,9 +87164,8 @@ fn perpetual_conjunct_after_life_gain_keeps_the_life_gain() {
 /// letting the generic pump drop "perpetually" and turn a permanent edit into an
 /// until-end-of-turn one.
 ///
-/// The paired positives keep the negative honest: the bare "it" anaphor and a
-/// comma-joined "and it" sibling still reach a real `ApplyPerpetual`, so the rows
-/// cannot pass by the whole perpetual arm having stopped matching.
+/// The unbound bare "it" retains its exact gap; the comma-joined return sibling
+/// supplies the identity and still reaches a real `ApplyPerpetual`.
 #[test]
 fn a_perpetual_pt_clause_never_lowers_to_a_plain_pump() {
     for text in [
@@ -87200,10 +87191,13 @@ fn a_perpetual_pt_clause_never_lowers_to_a_plain_pump() {
         );
     }
 
-    for text in [
-        "it perpetually gets +1/+1",
-        "return ~ to the battlefield, and it perpetually gets +1/+1",
-    ] {
+    let unbound = parse_effect_chain("it perpetually gets +1/+1", AbilityKind::Spell);
+    assert_eq!(
+        unbound.effect.as_ref(),
+        &Effect::unimplemented("perpetual_modify_pt", "it perpetually gets +1/+1")
+    );
+    assert!(unbound.sub_ability.is_none());
+    for text in ["return ~ to the battlefield, and it perpetually gets +1/+1"] {
         let def = parse_effect_chain(text, AbilityKind::Spell);
         let effects = chain_effects(&def);
         assert!(

@@ -4489,23 +4489,26 @@ mod filtered_spend_any_type_tests {
         );
     }
 
-    /// CR 609.4b: a degenerate input whose spell class is empty (here a double
-    /// space before "spells", so `cleaned` is "") reaches the empty-`Typed`
-    /// path in `parse_type_phrase_folding` — a filter that would match EVERY spell, i.e.
-    /// the board-wide concession. The empty-filter guard must decline it.
-    ///
-    /// Non-vacuity: this is the exact input the guard exists for. Remove the
-    /// empty-filter guard and this assertion flips (the helper returns
-    /// `Some(SpendManaAsAnyColor { Some(Typed{}) })`, an over-match), proving the
-    /// guard is load-bearing. The dead `SelfRef` guard the WIP shipped never
-    /// fired on this input because `parse_type_phrase_folding` does not yield `SelfRef`.
+    /// SHAPE: leading whitespace is folded before the ordinary spells noun.
     #[test]
-    fn declines_degenerate_empty_spell_class() {
+    fn accepts_double_whitespace_spell_class() {
         let text = "You can spend mana of any type to cast  spells.";
         let lower = text.to_ascii_lowercase();
-        assert!(
-            try_parse_filtered_spend_any_type_to_cast(text, &lower).is_none(),
-            "an empty spell class (matches every spell) must NOT lower to a filtered static"
+        assert_eq!(
+            try_parse_filtered_spend_any_type_to_cast(text, &lower),
+            Some(
+                StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
+                    spell_filter: Some(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Card],
+                        controller: None,
+                        properties: vec![]
+                    })),
+                    activation_source_filter: None,
+                    concession: crate::types::ability::ManaSpendPermission::AnyTypeOrColor,
+                })
+                .affected(TargetFilter::Controller)
+                .description(text.to_owned())
+            )
         );
     }
 

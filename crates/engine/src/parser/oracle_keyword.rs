@@ -1464,6 +1464,13 @@ fn parse_devour_keyword_line(text: &str) -> Option<(Keyword, &str)> {
 }
 
 pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
+    parse_keyword_line_core_with_policy(text, KeywordRemainderPolicy::DiscardRemainder)
+}
+
+fn parse_keyword_line_core_with_policy(
+    text: &str,
+    policy: KeywordRemainderPolicy,
+) -> Option<(Keyword, &str)> {
     use crate::types::keywords::PartnerType;
 
     if let Some(kw) = parse_disguise_keyword_line(text) {
@@ -2113,24 +2120,10 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     // CR 702.63a: Vanishing N.
     // CR 702.112a: Renown N.
     // CR 702.68a: Frenzy N.
-    // Bare-integer count keywords take ONLY a leading integer. The generic
-    // remainder path below would slurp a trailing clause (e.g. "vanishing 3 if
-    // that creature doesn't have vanishing") into the FromStr param, where
-    // `p.parse::<u32>()` fails and silently falls back to the default
-    // (Vanishing(0)). Take only the leading numeric token and discard the
-    // trailing text so "<kw> N <anything>" yields Keyword(N). This mirrors the
-    // Renown/Frenzy/Ripple `parse_number` arms above, except it keeps (rather
-    // than rejects) the count when trailing text follows.
-    // CR 702.63b: Vanishing without a number has no count, so `parse_number`
-    // fails and we fall through to the generic path, preserving today's
-    // Vanishing(0) routing.
-    // `unconsumed` is the input the KEYWORD does not account for. In the
-    // colon-form path below, `FromStr` is handed the ENTIRE `param`, so a
-    // successful (non-`Unknown`) parse consumed all of it and the remainder is
-    // empty. The ONE exception is the numeric-count branch, which deliberately
-    // feeds `FromStr` only the leading integer and drops the rest — that dropped
-    // tail is precisely what the strict router must see in order to reject
-    // "<kw> N <semantic clause>" (e.g. "crew 2 if it's an artifact").
+    // Consume only a checked number and report the real remainder. Compatibility
+    // decoding may retain a default on failure, but strict admission must reject
+    // that failure before the permitted-tail/modifier parser runs.
+    // CR 702.63b: vanishing without a number is a distinct optional-count form.
     let (param, unconsumed): (Cow<'_, str>, &str) = if is_numeric_count_keyword(name) {
         // Bare-integer count keywords (Vanishing/Fading/Renown/Frenzy/Bushido/…):
         // take only the leading integer and surface the trailing clause as
@@ -2144,9 +2137,20 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
                 Cow::Borrowed(&rest[..rest.len() - remainder.len()]),
                 remainder,
             ),
-            // No leading integer: the whole `rest` goes to `FromStr`, so whatever
-            // it makes of it, it saw all of it.
-            Err(_) => (Cow::Borrowed(rest), ""),
+            // Compatibility decoding may supply a default, but it consumes no
+            // numeric grammar. Strict callers must decline before a modeled
+            // modifier can make that default look like a complete declaration.
+            Err(_) => match policy {
+                KeywordRemainderPolicy::DiscardRemainder => (Cow::Borrowed(rest), rest),
+                KeywordRemainderPolicy::RequireAllConsuming => {
+                    // CR 702.63b: only vanishing has an optional count here.
+                    let bare: Keyword = format!("{name}:").parse().unwrap();
+                    if !rest.is_empty() || !matches!(bare, Keyword::Vanishing(_)) {
+                        return None;
+                    }
+                    (Cow::Borrowed(rest), rest)
+                }
+            },
         }
     } else {
         // Strip "from" preposition (used by protection keywords).
@@ -2452,7 +2456,8 @@ pub(crate) fn parse_router_keyword_line(line: &str) -> Option<RoutedKeywordLine>
     }
 
     // 3. Remainder-preserving core — it never erases a suffix.
-    let (keyword, unconsumed) = parse_keyword_line_core(&lower)?;
+    let (keyword, unconsumed) =
+        parse_keyword_line_core_with_policy(&lower, KeywordRemainderPolicy::RequireAllConsuming)?;
 
     // 4. The unconsumed tail must be entirely `P`/`M`, or we decline.
     let (modifiers, had_terminal_punctuation) = parse_permitted_keyword_tail(unconsumed)?;
@@ -2482,7 +2487,8 @@ pub(crate) fn parse_router_keyword_line(line: &str) -> Option<RoutedKeywordLine>
 /// Takes ALREADY-LOWERCASED text, matching `parse_granted_keyword_fragment`'s
 /// contract, so it is a drop-in at every site that used the permissive surface.
 pub(crate) fn parse_router_keyword_fragment(lower: &str) -> Option<Keyword> {
-    let (keyword, unconsumed) = parse_keyword_line_core(lower)?;
+    let (keyword, unconsumed) =
+        parse_keyword_line_core_with_policy(lower, KeywordRemainderPolicy::RequireAllConsuming)?;
     let (modifiers, _had_terminal_punctuation) = parse_permitted_keyword_tail(unconsumed)?;
     apply_keyword_line_modifiers(keyword, &modifiers)
 }
@@ -3159,6 +3165,136 @@ mod tests {
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerCounterKind;
     use crate::types::zones::Zone;
+
+    /// SHAPE: every existing generic numeric family retains its counted value;
+    /// failed numeric grammar cannot escape through a modeled modifier tail.
+    #[test]
+    fn strict_numeric_count_admission_preserves_family_and_remainder_contracts() {
+        let families = [
+            ("rampage", Keyword::Rampage(2)),
+            ("bushido", Keyword::Bushido(2)),
+            ("frenzy", Keyword::Frenzy(2)),
+            ("absorb", Keyword::Absorb(2)),
+            ("fading", Keyword::Fading(2)),
+            ("vanishing", Keyword::Vanishing(2)),
+            ("dredge", Keyword::Dredge(2)),
+            ("modular", Keyword::Modular(2)),
+            ("renown", Keyword::Renown(2)),
+            ("fabricate", Keyword::Fabricate(2)),
+            ("annihilator", Keyword::Annihilator(2)),
+            ("tribute", Keyword::Tribute(2)),
+            ("afterlife", Keyword::Afterlife(2)),
+            ("casualty", Keyword::Casualty(2)),
+            (
+                "mobilize",
+                Keyword::Mobilize(crate::types::ability::QuantityExpr::Fixed { value: 2 }),
+            ),
+            ("poisonous", Keyword::Poisonous(2)),
+            ("amplify", Keyword::Amplify(2)),
+            ("graft", Keyword::Graft(2)),
+            (
+                "devour",
+                Keyword::Devour {
+                    n: 2,
+                    quality: TypeFilter::Creature,
+                },
+            ),
+            ("toxic", Keyword::Toxic(2)),
+            ("saddle", Keyword::Saddle(2)),
+            ("teamwork", Keyword::Teamwork(2)),
+            ("soulshift", Keyword::Soulshift(2)),
+            ("backup", Keyword::Backup(2)),
+            (
+                "firebending",
+                Keyword::Firebending(crate::types::ability::QuantityExpr::Fixed { value: 2 }),
+            ),
+            ("hideaway", Keyword::Hideaway(2)),
+            ("afflict", Keyword::Afflict(2)),
+            (
+                "crew",
+                Keyword::Crew {
+                    power: 2,
+                    once_per_turn: None,
+                },
+            ),
+        ];
+        for (name, expected) in families {
+            assert!(is_numeric_count_keyword(name));
+            assert_eq!(
+                parse_router_keyword_fragment(&format!("{name} 2")),
+                Some(expected.clone()),
+                "{name}"
+            );
+            assert_eq!(
+                parse_granted_keyword_fragment(&format!("{name} 2")),
+                Some(expected),
+                "{name}"
+            );
+            for parameter in [
+                "unexplained",
+                "x unexplained",
+                "activate only once each turn",
+            ] {
+                let text = format!("{name} {parameter}");
+                assert_eq!(parse_router_keyword_fragment(&text), None, "{text}");
+                assert!(parse_router_keyword_line(&text).is_none(), "{text}");
+                assert!(
+                    parse_router_keyword_list(&text, &[name.to_owned()]).is_none(),
+                    "{text}"
+                );
+            }
+        }
+        assert_eq!(
+            parse_keyword_line_core("mobilize unexplained"),
+            Some((
+                Keyword::Mobilize(crate::types::ability::QuantityExpr::Fixed { value: 1 }),
+                "unexplained"
+            ))
+        );
+        assert_eq!(
+            parse_keyword_line_core("crew activate only once each turn"),
+            Some((
+                Keyword::Crew {
+                    power: 1,
+                    once_per_turn: None
+                },
+                "activate only once each turn"
+            ))
+        );
+        assert_eq!(
+            parse_router_keyword_fragment("crew 2. activate only once each turn."),
+            Some(Keyword::Crew {
+                power: 2,
+                once_per_turn: Some(Box::new(
+                    crate::types::ability::ActivationRestriction::OnlyOnceEachTurn
+                ))
+            })
+        );
+        assert_eq!(parse_granted_keyword_fragment("vanishing"), None);
+        assert_eq!(parse_router_keyword_fragment("vanishing"), None);
+        assert_eq!(
+            parse_router_keyword_fragment("vanishing "),
+            Some(Keyword::Vanishing(0))
+        );
+        assert_eq!(parse_router_keyword_fragment("crew "), None);
+        assert_eq!(
+            parse_router_keyword_fragment("ripple 2"),
+            Some(Keyword::Ripple(2))
+        );
+        assert_eq!(
+            parse_router_keyword_fragment("ward {2}"),
+            Some(Keyword::Ward(crate::types::mana::ManaCost::generic(2)))
+        );
+        assert!(parse_router_keyword_fragment("protection from red").is_some());
+        assert_eq!(
+            parse_granted_keyword_fragment("vanishing 3 if that creature doesn't have vanishing"),
+            Some(Keyword::Vanishing(3))
+        );
+        assert!(parse_router_keyword_fragment(
+            "vanishing 3 if that creature doesn't have vanishing"
+        )
+        .is_none());
+    }
 
     // SHAPE: CR 702.5a: public full-card ingestion preserves each printed
     // Enchant restriction; unrelated sibling abilities are not claimed fixed.

@@ -27,6 +27,168 @@ const CLOCK: &str = "Buyback {3} (You may pay an additional {3} as you cast this
 const IMMARD: &str = "Whenever Immard, the Stormcleaver enters or attacks, put a charge counter on it or remove one from it. When you remove a counter this way, choose one —\n• Immard deals 4 damage to any target.\n• Immard gains lifelink and indestructible until end of turn.";
 const P2: PlayerId = PlayerId(2);
 
+#[test]
+fn legacy_missing_from_counter_choice_binds_concrete_kinds_before_prompt() {
+    // CR 122.1 + CR 608.2d: present kinds and feasible operations form one choice.
+    // Synthetic grammar axis; the independent life tail checks once-only resume.
+    let text = "Choose a counter on target permanent. Remove that counter or put another of those counters on it. You gain 1 life.";
+    for wire in [false, true] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let id = s.add_creature(P0, "Chosen recipient", 2, 4).id();
+        let decoy = s.add_creature(P0, "Independent recipient", 2, 4).id();
+        s.with_counter(id, charge(), 2)
+            .with_counter(id, oil(), 1)
+            .with_counter(decoy, charge(), 7)
+            .with_counter(decoy, oil(), 9);
+        let spell = s
+            .add_spell_to_hand_from_oracle(P0, "Synthetic legacy program", true, text)
+            .id();
+        let mut r = s.build();
+        let outcome = r.cast(spell).target_object(id).resolve();
+        assert!(outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::ChooseCounterAdjustment,
+                ..
+            }
+        )));
+        prompt(&r, 4);
+        let WaitingFor::ChooseOneOfBranch {
+            branches,
+            source_id,
+            controller,
+            ..
+        } = &r.state().waiting_for
+        else {
+            panic!("concrete menu")
+        };
+        assert_eq!((*source_id, *controller), (spell, P0));
+        let mut expected = Vec::new();
+        for (kind, name) in [(charge(), "charge"), (oil(), "oil")] {
+            expected.push(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::RemoveCounter {
+                        counter_type: Some(kind.clone()),
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::ParentTarget,
+                    },
+                )
+                .description(format!("remove 1 {name} counters")),
+            );
+            expected.push(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: kind,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::ParentTarget,
+                    },
+                )
+                .description(format!("put 1 {name} counters")),
+            );
+        }
+        assert_eq!(branches, &expected);
+        let before = serde_json::to_value(r.state()).unwrap();
+        assert!(engine::game::engine::apply(
+            r.state_mut(),
+            P1,
+            GameAction::ChooseBranch { index: 2 }
+        )
+        .is_err());
+        assert_eq!(serde_json::to_value(r.state()).unwrap(), before);
+        assert!(r
+            .act(GameAction::ChooseBranch { index: usize::MAX })
+            .is_err());
+        assert_eq!(serde_json::to_value(r.state()).unwrap(), before);
+        r = reload(r, wire);
+        prompt(&r, 4);
+        let events = choose(&mut r, if wire { 3 } else { 2 });
+        assert_eq!(n(&r, id, &charge()), 2);
+        assert_eq!(n(&r, id, &oil()), if wire { 2 } else { 0 });
+        assert_eq!(event_count(&events, id, &oil(), wire), 1);
+        assert_eq!((n(&r, decoy, &charge()), n(&r, decoy, &oil())), (7, 9));
+        assert_eq!(r.life(P0), 21);
+        assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+        assert!(r.state().stack.is_empty() && r.state().resolution_stack.is_empty());
+    }
+}
+
+#[test]
+fn legacy_missing_from_empty_and_operation_feasibility_finish_public_tail() {
+    // CR 608.2d: impossible counter operations do not produce a menu option.
+    let text = "Choose a counter on target permanent. Remove that counter or put another of those counters on it. You gain 1 life.";
+    for (initial, forbid_remove, forbid_add) in [
+        (0, false, false),
+        (2, false, true),
+        (2, true, false),
+        (2, true, true),
+    ] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let id = s.add_creature(P0, "Live legal recipient", 2, 4).id();
+        s.with_counter(id, charge(), initial);
+        block(&mut s, id, forbid_remove, forbid_add);
+        let spell = s
+            .add_spell_to_hand_from_oracle(P0, "Synthetic feasible legacy", true, text)
+            .id();
+        let mut r = s.build();
+        let outcome = r.cast(spell).target_object(id).resolve();
+        assert!(outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::ChooseCounterAdjustment,
+                ..
+            }
+        )));
+        if initial == 0 || (forbid_remove && forbid_add) {
+            assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+            assert!(r.state().stack.is_empty() && r.state().resolution_stack.is_empty());
+            assert_eq!(n(&r, id, &charge()), initial);
+        } else {
+            prompt(&r, 1);
+            let WaitingFor::ChooseOneOfBranch { branches, .. } = &r.state().waiting_for else {
+                panic!("feasible operation")
+            };
+            assert!(
+                matches!(branches[0].effect.as_ref(), Effect::PutCounter { .. }) == forbid_remove
+            );
+            r = reload(r, forbid_remove);
+            let events = choose(&mut r, 0);
+            assert_eq!(event_count(&events, id, &charge(), forbid_remove), 1);
+            assert_eq!(n(&r, id, &charge()), if forbid_remove { 3 } else { 1 });
+        }
+        assert_eq!(r.life(P0), 21);
+    }
+}
+
+#[test]
+fn legacy_remove_only_and_add_only_keep_present_kind_authority() {
+    // CR 122.1: choosing oil never consumes or adds an unrelated charge counter.
+    for (clause, add) in [
+        ("Remove that counter", false),
+        ("Put another of those counters on it", true),
+    ] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let id = s.add_creature(P0, "Two counter kinds", 2, 4).id();
+        s.with_counter(id, charge(), 2).with_counter(id, oil(), 1);
+        let text = format!("Choose a counter on target permanent. {clause}. You gain 1 life.");
+        let spell = s
+            .add_spell_to_hand_from_oracle(P0, "Synthetic single operation", true, &text)
+            .id();
+        let mut r = s.build();
+        r.cast(spell).target_object(id).resolve();
+        prompt(&r, 2);
+        let events = choose(&mut r, 1);
+        assert_eq!(n(&r, id, &charge()), 2);
+        assert_eq!(n(&r, id, &oil()), if add { 2 } else { 0 });
+        assert_eq!(event_count(&events, id, &oil(), add), 1);
+        assert_eq!(r.life(P0), 21);
+    }
+}
+
 struct U13Fixture {
     runner: GameRunner,
     source: ObjectId,

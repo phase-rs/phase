@@ -18227,7 +18227,7 @@ fn rebind_costpaid_scope_to_recipient(expr: QuantityExpr) -> QuantityExpr {
 /// permanent" / "that card" / "it") is a don't-care: the established target is
 /// reused via the parent `TargetOnly` chain. Returns `None` for every other
 /// remove/add clause, leaving existing paths unchanged.
-fn try_parse_choose_counter_adjustment(lower: &str) -> Option<CounterAdjustment> {
+pub(super) fn try_parse_choose_counter_adjustment(lower: &str) -> Option<ZoneCounterImperativeAst> {
     type E<'a> = OracleError<'a>;
 
     // The reused object anaphor, longest-match-first so "that permanent or card"
@@ -18246,6 +18246,14 @@ fn try_parse_choose_counter_adjustment(lower: &str) -> Option<CounterAdjustment>
     }
 
     let clause = lower.trim_end_matches(['.', ' ']);
+    let complete = |adjustment| {
+        Some(ZoneCounterImperativeAst::ChooseCounterAdjustment {
+            adjustment,
+            counters: crate::types::counter::CounterMatch::Any,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ParentTarget,
+        })
+    };
 
     // Remove-based forms share the "remove that counter [from <anaphor>]"
     // prefix. Try AddOrRemove (longer form) before Remove-only so the shared
@@ -18263,12 +18271,12 @@ fn try_parse_choose_counter_adjustment(lower: &str) -> Option<CounterAdjustment>
         .parse(rest)
         {
             if rest2.is_empty() {
-                return Some(CounterAdjustment::AddOrRemove);
+                return complete(CounterAdjustment::AddOrRemove);
             }
         }
         // Remove-only: the remove clause consumed the entire clause.
         if rest.is_empty() {
-            return Some(CounterAdjustment::Remove);
+            return complete(CounterAdjustment::Remove);
         }
         return None;
     }
@@ -18281,7 +18289,7 @@ fn try_parse_choose_counter_adjustment(lower: &str) -> Option<CounterAdjustment>
     .parse(clause)
     {
         if rest.is_empty() {
-            return Some(CounterAdjustment::Add);
+            return complete(CounterAdjustment::Add);
         }
     }
 
@@ -18325,13 +18333,8 @@ pub(super) fn parse_zone_counter_ast<'a>(
     }
     // Complete legacy anaphors precede the specified-kind commitment gate;
     // both adjustment forms must precede generic put/remove counter parsing.
-    if let Some(adjustment) = try_parse_choose_counter_adjustment(lower) {
-        return Some(Ok(ZoneCounterImperativeAst::ChooseCounterAdjustment {
-            adjustment,
-            counters: crate::types::counter::CounterMatch::Any,
-            count: QuantityExpr::Fixed { value: 1 },
-            target: TargetFilter::ParentTarget,
-        }));
+    if let Some(ast) = try_parse_choose_counter_adjustment(lower) {
+        return Some(Ok(ast));
     }
     if let Some(parsed) = super::counter::try_parse_specified_counter_adjustment(lower, ctx) {
         return Some(
@@ -19805,14 +19808,19 @@ mod tests {
             try_parse_choose_counter_adjustment(
                 "remove that counter from that permanent or card or put another of those counters on it"
             ),
-            Some(CounterAdjustment::AddOrRemove)
+            Some(ZoneCounterImperativeAst::ChooseCounterAdjustment { adjustment: CounterAdjustment::AddOrRemove, counters: crate::types::counter::CounterMatch::Any, count: QuantityExpr::Fixed { value: 1 }, target: TargetFilter::ParentTarget })
         );
         // Trailing punctuation and the bare "it" anaphor are both accepted.
         assert_eq!(
             try_parse_choose_counter_adjustment(
                 "remove that counter or put another of those counters on it."
             ),
-            Some(CounterAdjustment::AddOrRemove)
+            Some(ZoneCounterImperativeAst::ChooseCounterAdjustment {
+                adjustment: CounterAdjustment::AddOrRemove,
+                counters: crate::types::counter::CounterMatch::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget
+            })
         );
         // An ordinary remove clause must NOT be captured here.
         assert_eq!(
@@ -19833,22 +19841,42 @@ mod tests {
         // Bare "it" anaphor.
         assert_eq!(
             try_parse_choose_counter_adjustment("remove that counter from it"),
-            Some(CounterAdjustment::Remove)
+            Some(ZoneCounterImperativeAst::ChooseCounterAdjustment {
+                adjustment: CounterAdjustment::Remove,
+                counters: crate::types::counter::CounterMatch::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget
+            })
         );
         // "that permanent" anaphor with trailing punctuation.
         assert_eq!(
             try_parse_choose_counter_adjustment("remove that counter from that permanent."),
-            Some(CounterAdjustment::Remove)
+            Some(ZoneCounterImperativeAst::ChooseCounterAdjustment {
+                adjustment: CounterAdjustment::Remove,
+                counters: crate::types::counter::CounterMatch::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget
+            })
         );
         // "that permanent or card" anaphor.
         assert_eq!(
             try_parse_choose_counter_adjustment("remove that counter from that permanent or card"),
-            Some(CounterAdjustment::Remove)
+            Some(ZoneCounterImperativeAst::ChooseCounterAdjustment {
+                adjustment: CounterAdjustment::Remove,
+                counters: crate::types::counter::CounterMatch::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget
+            })
         );
         // Clause without an explicit "from <anaphor>" phrase.
         assert_eq!(
             try_parse_choose_counter_adjustment("remove that counter"),
-            Some(CounterAdjustment::Remove)
+            Some(ZoneCounterImperativeAst::ChooseCounterAdjustment {
+                adjustment: CounterAdjustment::Remove,
+                counters: crate::types::counter::CounterMatch::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget
+            })
         );
         // Must NOT fire for an ordinary type-specific remove.
         assert_eq!(
@@ -19865,19 +19893,34 @@ mod tests {
         // Bare "it" anaphor.
         assert_eq!(
             try_parse_choose_counter_adjustment("put another of those counters on it"),
-            Some(CounterAdjustment::Add)
+            Some(ZoneCounterImperativeAst::ChooseCounterAdjustment {
+                adjustment: CounterAdjustment::Add,
+                counters: crate::types::counter::CounterMatch::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget
+            })
         );
         // "that permanent" anaphor with trailing punctuation.
         assert_eq!(
             try_parse_choose_counter_adjustment("put another of those counters on that permanent."),
-            Some(CounterAdjustment::Add)
+            Some(ZoneCounterImperativeAst::ChooseCounterAdjustment {
+                adjustment: CounterAdjustment::Add,
+                counters: crate::types::counter::CounterMatch::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget
+            })
         );
         // "that permanent or card" anaphor.
         assert_eq!(
             try_parse_choose_counter_adjustment(
                 "put another of those counters on that permanent or card"
             ),
-            Some(CounterAdjustment::Add)
+            Some(ZoneCounterImperativeAst::ChooseCounterAdjustment {
+                adjustment: CounterAdjustment::Add,
+                counters: crate::types::counter::CounterMatch::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget
+            })
         );
         // Must NOT fire for an ordinary PutCounter clause.
         assert_eq!(
@@ -25930,64 +25973,58 @@ mod tests {
     #[test]
     fn parse_choose_creature_card_in_your_hand() {
         let text = "choose a creature card in your hand";
-        let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
-            .expect("checked parser admission");
-        match result {
-            Some(ChooseImperativeAst::FromZone {
-                zones,
-                zone_owner,
-                filter,
-                ..
-            }) => {
-                assert_eq!(zones, vec![Zone::Hand]);
-                assert_eq!(zone_owner, ZoneOwner::Controller);
-                let TargetFilter::Typed(tf) = filter else {
-                    panic!("expected Typed creature filter, got {filter:?}");
-                };
-                assert!(tf.type_filters.contains(&TypeFilter::Creature));
-            }
-            other => panic!("Expected FromZone, got {other:?}"),
-        }
+        assert_eq!(
+            parse_choose_ast(text, text, &mut ParseContext::default()),
+            Ok(Some(ChooseImperativeAst::FromZone {
+                count: 1,
+                zones: vec![Zone::Hand],
+                zone_owner: ZoneOwner::Controller,
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![]
+                }),
+                chooser: crate::types::ability::Chooser::Controller,
+                up_to: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Direct,
+            }))
+        );
     }
 
-    /// D-09 regression: Riveteers Provocateur's "choose a creature card in your
-    /// hand without blitz" has an unmodeled post-zone restriction ("without
-    /// blitz"). The bare type filter (`Creature`) must still parse, but the
-    /// unparseable suffix must NOT be force-fed to the strict search-filter
-    /// suffix dispatch — doing so emits a `search-filter-suffix unmatched`
-    /// TargetFallback diagnostic, which trips the parser-diagnostic ratchet.
+    /// SHAPE: the printed without-blitz restriction must remain a complete refusal.
     #[test]
-    fn parse_choose_creature_card_with_unmodeled_post_zone_suffix_emits_no_diagnostic() {
+    fn parse_choose_creature_card_with_unmodeled_post_zone_suffix_retains_refusal_diagnostic() {
         let text = "choose a creature card in your hand without blitz";
-        let lower = text.to_lowercase();
         let mut ctx = ParseContext::default();
-        let result = parse_choose_ast(text, &lower, &mut ctx).expect("checked parser admission");
-        match result {
-            Some(ChooseImperativeAst::FromZone {
-                zones,
-                zone_owner,
-                filter,
-                ..
-            }) => {
-                assert_eq!(zones, vec![Zone::Hand]);
-                assert_eq!(zone_owner, ZoneOwner::Controller);
-                let TargetFilter::Typed(tf) = filter else {
-                    panic!("expected Typed creature filter, got {filter:?}");
-                };
-                assert!(tf.type_filters.contains(&TypeFilter::Creature));
-            }
-            other => panic!("Expected FromZone, got {other:?}"),
-        }
+        assert_eq!(
+            parse_choose_ast(text, text, &mut ctx),
+            Err(OracleError {
+                input: text,
+                code: nom::error::ErrorKind::Verify
+            })
+        );
         assert!(
-            !ctx.diagnostics.iter().any(|d| matches!(
-                d,
-                OracleDiagnostic::TargetFallback { context, .. }
-                    if context == "search-filter-suffix unmatched"
+            ctx.diagnostics.iter().any(|diagnostic| matches!(diagnostic,
+                OracleDiagnostic::TargetFallback { context, text, line_index }
+                    if context == "search-filter-suffix unmatched" && text == "without blitz" && *line_index == 0 // allow-noncombinator: exact diagnostic-field assertions in a parser test
             )),
-            "unmodeled post-zone suffix must not emit a search-filter-suffix \
-             unmatched diagnostic, got {:?}",
+            "{:?}",
             ctx.diagnostics
+        );
+        let whole = crate::parser::oracle::parse_oracle_text(
+            text,
+            "Synthetic restricted choice",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        assert!(
+            whole
+                .abilities
+                .iter()
+                .any(|ability| matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+            "{whole:#?}"
         );
     }
 
