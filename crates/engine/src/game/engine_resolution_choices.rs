@@ -15702,9 +15702,10 @@ mod token_materialization_completion_tests {
         use crate::game::effects::token_copy::tests::{
             creation_test_source, install_creation_fixture_replacements, CreationPauseCase,
         };
-        use crate::types::ability::{QuantityModification, ReplacementEvent, TargetFilter};
+        use crate::types::ability::{QuantityModification, TargetFilter};
         use crate::types::counter::CounterType;
         use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+        use crate::types::replacements::ReplacementEvent;
         for pause in [
             CreationPauseCase::Synchronous,
             CreationPauseCase::Queued,
@@ -15767,14 +15768,14 @@ mod token_materialization_completion_tests {
             let definitions = state
                 .objects
                 .values()
-                .flat_map(|object| object.replacement_definitions.iter())
+                .flat_map(|object| object.replacement_definitions.iter_unchecked())
                 .collect::<Vec<_>>();
             if queued {
                 assert!(definitions.iter().any(|definition| {
                     definition.execute.as_ref().is_some_and(|body| {
                         matches!(&body.effect, Effect::ChooseOneOf { branches, .. }
                             if branches.len() == 2 && branches.iter().all(|branch|
-                                matches!(branch.effect, Effect::Token { .. })))
+                                matches!(branch.effect.as_ref(), Effect::Token { .. })))
                     })
                 }), "actual queued two-Token legacy body; row={pause:?}; definitions={definitions:?}");
             }
@@ -15898,7 +15899,7 @@ mod token_materialization_completion_tests {
                         assert!(queued);
                         assert_eq!(*player, PlayerId(0));
                         assert_eq!(branches.len(), 2);
-                        assert!(matches!(&branches[1].effect, Effect::Token { types, .. }
+                        assert!(matches!(branches[1].effect.as_ref(), Effect::Token { types, .. }
                             if types.iter().any(|kind| kind == "Dog")));
                         branch_answers += 1;
                         GameAction::ChooseBranch { index: 1 }

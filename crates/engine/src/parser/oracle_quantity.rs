@@ -122,8 +122,9 @@ mod retained_spell_history_tests {
                 "{inner}"
             );
             assert_eq!(format!("{context:?}"), before);
+            let source = format!("for each {inner}");
             assert!(all_consuming(nom_quantity::parse_for_each)
-                .parse(&format!("for each {inner}"))
+                .parse(&source)
                 .is_err());
         }
         for source in [

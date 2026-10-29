@@ -1332,7 +1332,10 @@ fn color_conditional_keyword_grants_expand_per_color() {
     ));
     assert!(outcome.state().stack.is_empty());
     assert_eq!(outcome.state().players[0].mana_pool.total(), 0);
-    assert_eq!(outcome.state().objects[&source].static_definitions, defs);
+    assert_eq!(
+        outcome.state().objects[&source].static_definitions,
+        defs.into()
+    );
     for (recipient, (_, granted)) in recipients.iter().zip(&expected) {
         for (_, keyword) in &expected {
             assert_eq!(
@@ -3396,7 +3399,7 @@ fn dual_gated_equipment_public_equip_keeps_rule_modes_and_live_attack_gate() {
     for mode in [StaticMode::CantAttack, StaticMode::CantBlock] {
         assert!(outcome.state().objects[&source]
             .static_definitions
-            .iter()
+            .iter_unchecked()
             .any(|definition| definition.mode == mode));
     }
     let mut prohibited = GameRunner::from_state(runner.state().clone());
@@ -4296,7 +4299,10 @@ fn assault_suit_public_cast_and_equip_preserve_the_complete_grant() {
     ));
     assert!(outcome.state().stack.is_empty());
     assert_eq!(outcome.state().players[0].mana_pool.total(), 0);
-    assert_eq!(outcome.state().objects[&source].attached_to, Some(host));
+    assert_eq!(
+        outcome.state().objects[&source].attached_to,
+        Some(crate::game::game_object::AttachTarget::Object(host))
+    );
     assert_eq!(
         (
             outcome.state().objects[&host].power,
