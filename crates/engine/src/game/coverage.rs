@@ -14797,7 +14797,7 @@ mod tests {
         }
         let granted = scoped
             .into_iter()
-            .find(|def| super::fan_out_control_boundary_is_unobservable(def))
+            .find(super::fan_out_control_boundary_is_unobservable)
             .expect("REACH: the optional fan-out is an unobservable scoped node");
         let face = CardFace {
             name: "Granted Fan-Out".to_string(),
