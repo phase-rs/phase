@@ -314,9 +314,9 @@ pub(crate) mod tests {
                             object_id,
                             from: Zone::Stack,
                             to: Zone::Graveyard,
-                            cause: None,
+                            cause: Some(cause),
                             ..
-                        } if *object_id == source => {
+                        } if *object_id == source && *cause == source => {
                             // CR 608.2n + CR 614.6 + CR 616.1: the same redirects
                             // can pause the spell's final move after its instructions.
                             cleanup_prompts += 1;

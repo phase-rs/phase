@@ -6240,7 +6240,25 @@ fn execute_effect(
         return;
     }
     // Use resolve_ability_chain to support SubAbility/Execute chaining
-    let _ = effects::resolve_ability_chain(state, ability, events, 0);
+    let resolved = effects::resolve_ability_chain(state, ability, events, 0);
+    #[cfg(test)]
+    let resolved = resolved.inspect_err(|error| {
+        eprintln!(
+            "discarded effect error [stack::execute_effect/initial-chain]: error={error:?}; input={ability:?}; depth=0; selector={:?}; active_frame={:?}; waiting={:?}; continuation={:?}; resolution_stack={:?}; return_result_frames={:?}; resolving={:?}; pending_completion={:?}; pending_triggered_mana={:?}; active_triggered_mana_node={:?}; mana_subresolution_depth={}",
+            state.active_return_result_occurrence,
+            state.active_return_result_occurrence.and_then(|occurrence| state.return_result_frames.get(&occurrence)),
+            state.waiting_for,
+            state.active_ability_continuation_frame(),
+            state.resolution_stack,
+            state.return_result_frames,
+            state.resolving_stack_entry,
+            state.pending_resolution_completion,
+            state.pending_triggered_mana_resume,
+            state.active_accepted_triggered_mana_node,
+            state.mana_subresolution_depth,
+        );
+    });
+    let _ = resolved;
 }
 
 pub fn stack_is_empty(state: &GameState) -> bool {
