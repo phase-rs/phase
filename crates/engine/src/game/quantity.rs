@@ -5590,7 +5590,7 @@ fn resolve_ref(
         // `total_damage`; the scalar damage amount remains the job of
         // `EventContextAmount`.
         QuantityRef::EventContextPlayerCount { filter } => {
-            resolve_event_context_player_count(state, filter, controller, source_id)
+            resolve_event_context_player_count(state, filter, controller, ctx, ability)
         }
         // CR 122.1: Counters on an object, scoped via ObjectScope (Π-5).
         // Replaces CountersOnSelf / CountersOnTarget / AnyCountersOnSelf /
@@ -10199,10 +10199,45 @@ pub(crate) fn opponent_dealt_damage_matches(
     min_sources: u32,
     ability_source_id: ObjectId,
 ) -> bool {
-    if player == controller {
+    let ctx = FilterContext::from_source_with_controller(ability_source_id, controller);
+    opponent_dealt_damage_matches_with_context(state, player, kind, source, min_sources, &ctx)
+}
+
+/// Preserve the surrounding executable when testing historical damage sources;
+/// the inspected record never supplies instruction-result authority (CR 608.2i).
+pub(crate) fn opponent_dealt_damage_matches_with_context(
+    state: &GameState,
+    player: PlayerId,
+    kind: crate::types::ability::DamageKindFilter,
+    source: &Option<Box<TargetFilter>>,
+    min_sources: u32,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let Some(controller) = ctx.source_controller else {
+        return false;
+    };
+    if !crate::game::players::is_opponent(state, controller, player) {
         return false;
     }
-    let ctx = FilterContext::from_source_with_controller(ability_source_id, controller);
+    let mut available = true;
+    if let Some(source) = source {
+        source.for_each_nested_quantity_ref(&mut |reference| {
+            if reference.instruction_result_id().is_some()
+                && ctx.ability.is_none_or(|ability| {
+                    !crate::game::effects::addressed_quantity_ref_is_available(
+                        state,
+                        reference,
+                        ability.return_result_process,
+                    )
+                })
+            {
+                available = false;
+            }
+        });
+    }
+    if !available {
+        return false;
+    }
     let record_matches = |r: &crate::types::game_state::DamageRecord| {
         damage_record_matches_kind(r, kind)
             && matches!(r.target, TargetRef::Player(pid) if pid == player)
@@ -10211,7 +10246,7 @@ pub(crate) fn opponent_dealt_damage_matches(
                 // The matcher delegates to `filter_inner_for_object`, which
                 // already returns `true` for `TargetFilter::Any` (CR 120.9), so
                 // no separate short-circuit is needed here.
-                Some(f) => matches_target_filter_on_damage_record_source(state, r, f, &ctx),
+                Some(f) => matches_target_filter_on_damage_record_source(state, r, f, ctx),
             }
     };
     // CR 120.9: the fast, allocation-free `≥1` path for the common `min_sources
@@ -10258,6 +10293,41 @@ pub(crate) fn possessed_tracked_set_member(
     controller: PlayerId,
     source_id: ObjectId,
 ) -> bool {
+    possessed_tracked_set_member_with_context(
+        state,
+        player,
+        possession,
+        filter,
+        caused_by,
+        &FilterContext::from_source_with_controller(source_id, controller),
+    )
+}
+
+pub(crate) fn possessed_tracked_set_member_with_context(
+    state: &GameState,
+    player: PlayerId,
+    possession: PossessionAxis,
+    filter: &TargetFilter,
+    caused_by: Option<ThisWayCause>,
+    filter_ctx: &FilterContext<'_>,
+) -> bool {
+    let mut available = true;
+    filter.for_each_nested_quantity_ref(&mut |reference| {
+        if reference.instruction_result_id().is_some()
+            && filter_ctx.ability.is_none_or(|ability| {
+                !crate::game::effects::addressed_quantity_ref_is_available(
+                    state,
+                    reference,
+                    ability.return_result_process,
+                )
+            })
+        {
+            available = false;
+        }
+    });
+    if !available {
+        return false;
+    }
     // CR 700.2 + CR 608.2c: "highest id" == "the set the currently-resolving
     // instruction published" — the ordering argument is written once, on
     // `effects::publish_tracked_set`. Deliberately not routed through
@@ -10280,7 +10350,6 @@ pub(crate) fn possessed_tracked_set_member(
     {
         return true;
     }
-    let filter_ctx = FilterContext::from_source_with_controller(source_id, controller);
     ids.iter().any(|&oid| {
         // CR 608.2c + CR 614.6: an action-bound population ("a creature
         // sacrificed this way") admits only members whose recorded producer
@@ -10302,17 +10371,13 @@ pub(crate) fn possessed_tracked_set_member(
         // CR 608.2h: a member that has left the battlefield is filtered on its
         // last known information.
         let matches_filter = if state.battlefield.contains(&oid) {
-            matches_target_filter(state, oid, filter, &filter_ctx)
+            matches_target_filter(state, oid, filter, filter_ctx)
         } else {
             state.lki_cache.get(&oid).map_or_else(
-                || matches_target_filter(state, oid, filter, &filter_ctx),
+                || matches_target_filter(state, oid, filter, filter_ctx),
                 |lki| {
                     crate::game::filter::matches_target_filter_on_lki_snapshot(
-                        state,
-                        oid,
-                        lki,
-                        filter,
-                        &filter_ctx,
+                        state, oid, lki, filter, filter_ctx,
                     )
                 },
             )
@@ -10403,6 +10468,34 @@ fn player_count_matching_ids_with_ability(
     ability: Option<&ResolvedAbility>,
 ) -> Vec<PlayerId> {
     let source_id = ctx.source;
+    let mut filter_ctx = ability.map_or_else(
+        || FilterContext::from_source_with_controller(source_id, controller),
+        |ability| FilterContext::from_ability_with_controller(ability, controller),
+    );
+    filter_ctx.trigger_source = ctx.trigger_source.as_ref();
+    filter_ctx.recipient_id = ctx.recipient;
+    filter_ctx.scoped_iteration_player = ctx.scoped_player;
+    filter_ctx.granting_object = ctx.granting_object;
+    filter_ctx.casting_spell = ctx.spell;
+    // CR 608.2c: refuse the whole predicate before negation or a union can
+    // turn an unavailable instruction result into a successful match.
+    let mut available = true;
+    filter.for_each_nested_quantity_ref(&mut |reference| {
+        if reference.instruction_result_id().is_some()
+            && ability.is_none_or(|ability| {
+                !crate::game::effects::addressed_quantity_ref_is_available(
+                    state,
+                    reference,
+                    ability.return_result_process,
+                )
+            })
+        {
+            available = false;
+        }
+    });
+    if !available {
+        return Vec::new();
+    }
     // CR 104.3: the generic player loop below excludes eliminated players
     // (outside its life-history filters), so list them on a dedicated path.
     if matches!(filter, PlayerFilter::HasLostTheGame) {
@@ -10473,14 +10566,13 @@ fn player_count_matching_ids_with_ability(
                         kind,
                         source,
                         min_sources,
-                    } => opponent_dealt_damage_matches(
+                    } => opponent_dealt_damage_matches_with_context(
                         state,
                         p.id,
-                        controller,
                         *kind,
                         source,
                         *min_sources,
-                        source_id,
+                        &filter_ctx,
                     ),
                     // CR 508.6: opponent the subject attacked within scope.
                     PlayerFilter::OpponentAttacked { subject, scope } => {
@@ -10493,8 +10585,11 @@ fn player_count_matching_ids_with_ability(
                     // Delegates to the single-authority predicate in
                     // `matches_player_scope`.
                     PlayerFilter::OpponentAttackingEnchantedPlayer => {
-                        crate::game::effects::matches_player_scope(
-                            state, p.id, filter, controller, source_id,
+                        crate::game::effects::matches_player_scope_with_context(
+                            state,
+                            p.id,
+                            filter,
+                            &filter_ctx,
                         )
                     }
                     PlayerFilter::All => true,
@@ -10503,16 +10598,24 @@ fn player_count_matching_ids_with_ability(
                     // authority; ability-target anchors are resolved by the
                     // player_scope driver, not by this count helper.
                     PlayerFilter::AllExcept { exclude } => {
-                        !crate::game::effects::matches_player_scope(
-                            state, p.id, exclude, controller, source_id,
+                        !crate::game::effects::matches_player_scope_with_context(
+                            state,
+                            p.id,
+                            exclude,
+                            &filter_ctx,
                         )
                     }
                     // CR 102.1 + CR 608.2c: the union of the members (count
                     // context). Delegates to the single-authority predicate in
                     // `matches_player_scope`, which answers any-member.
-                    PlayerFilter::AnyOf { .. } => crate::game::effects::matches_player_scope(
-                        state, p.id, filter, controller, source_id,
-                    ),
+                    PlayerFilter::AnyOf { .. } => {
+                        crate::game::effects::matches_player_scope_with_context(
+                            state,
+                            p.id,
+                            filter,
+                            &filter_ctx,
+                        )
+                    }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
                             .players
@@ -10615,22 +10718,13 @@ fn player_count_matching_ids_with_ability(
                     // controlled-permanent count comparison. Mirrors the arm
                     // in `effects::mod::matches_player_scope` (the two copies
                     // must stay in sync).
-                    PlayerFilter::ControlsCount {
-                        relation,
-                        filter,
-                        comparator,
-                        count,
-                    } => {
-                        let threshold = resolve_quantity(state, count, controller, source_id);
-                        crate::game::players::matches_relation(state, p.id, controller, *relation)
-                            && crate::game::effects::player_control_count_compares(
-                                state,
-                                p.id,
-                                filter,
-                                *comparator,
-                                threshold,
-                                source_id,
-                            )
+                    PlayerFilter::ControlsCount { .. } => {
+                        crate::game::effects::matches_player_scope_with_context(
+                            state,
+                            p.id,
+                            filter,
+                            &filter_ctx,
+                        )
                     }
                     // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
                     // whose [scalar attr] [comparator] [value]" — count
@@ -10653,19 +10747,13 @@ fn player_count_matching_ids_with_ability(
                                 // Keep the actual executable when this count is
                                 // evaluated by a bound scalar/filter reader.
                                 // Source-only callers retain their original context.
-                                let threshold = match ability {
-                                    Some(ability) => {
-                                        let mut candidate = ability.clone();
-                                        candidate.scoped_player = Some(p.id);
-                                        resolve_quantity_with_targets(state, value, &candidate)
-                                    }
-                                    None => resolve_quantity_with_ctx(
-                                        state,
-                                        value,
-                                        controller,
-                                        candidate_ctx,
-                                    ),
-                                };
+                                let threshold = resolve_quantity_with_ctx_and_ability(
+                                    state,
+                                    value,
+                                    controller,
+                                    candidate_ctx,
+                                    ability,
+                                );
                                 crate::game::effects::candidate_player_scalar_with_state(
                                     state, p, controller, attr,
                                 )
@@ -10690,14 +10778,13 @@ fn player_count_matching_ids_with_ability(
                         caused_by,
                     } => {
                         crate::game::players::matches_relation(state, p.id, controller, *relation)
-                            && possessed_tracked_set_member(
+                            && possessed_tracked_set_member_with_context(
                                 state,
                                 p.id,
                                 *possession,
                                 filter,
                                 *caused_by,
-                                controller,
-                                source_id,
+                                &filter_ctx,
                             )
                     }
                 }
@@ -10722,13 +10809,26 @@ fn resolve_event_context_player_count(
     state: &GameState,
     filter: &PlayerFilter,
     controller: PlayerId,
-    source_id: ObjectId,
+    ctx: QuantityContext,
+    ability: Option<&ResolvedAbility>,
 ) -> i32 {
+    let mut filter_ctx = ability.map_or_else(
+        || FilterContext::from_source_with_controller(ctx.source, controller),
+        |ability| FilterContext::from_ability_with_controller(ability, controller),
+    );
+    filter_ctx.trigger_source = ctx.trigger_source.as_ref();
+    filter_ctx.recipient_id = ctx.recipient;
+    filter_ctx.scoped_iteration_player = ctx.scoped_player;
+    filter_ctx.granting_object = ctx.granting_object;
+    filter_ctx.casting_spell = ctx.spell;
     let mut players = HashSet::new();
     let mut record_player = |event: &crate::types::events::GameEvent| {
         if let Some(player) = crate::game::targeting::extract_player_from_event(event, state) {
-            if crate::game::effects::matches_player_scope(
-                state, player, filter, controller, source_id,
+            if crate::game::effects::matches_player_scope_with_context(
+                state,
+                player,
+                filter,
+                &filter_ctx,
             ) {
                 players.insert(player);
             }
@@ -27631,6 +27731,257 @@ mod departure_source_boundary_tests {
         }
     }
 
+    // CR 608.2c: an unavailable result cannot become true under exclusion.
+    #[test]
+    fn player_count_refuses_missing_results_before_boolean_predicates() {
+        use crate::types::ability::{Comparator, PlayerRelation};
+        let state = GameState::new_two_player(42);
+        let source = ObjectId(999);
+        let addressed = expression(ZoneChangeRecordSource::InstructionResult {
+            result: ReturnResultId(7),
+        });
+        let predicate = PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::Opponent,
+            attr: QuantityRef::HandSize {
+                player: PlayerScope::ScopedPlayer,
+            },
+            comparator: Comparator::GT,
+            value: addressed,
+        };
+        let ordinary = PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::Opponent,
+            attr: QuantityRef::HandSize {
+                player: PlayerScope::ScopedPlayer,
+            },
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: 0 },
+        };
+        assert_eq!(
+            player_count_matching_ids(&state, &ordinary, P0, QuantityContext::new(source)),
+            vec![PlayerId(1)]
+        );
+        for predicate in [
+            predicate.clone(),
+            PlayerFilter::AllExcept {
+                exclude: Box::new(predicate.clone()),
+            },
+            PlayerFilter::AnyOf {
+                filters: vec![PlayerFilter::All, predicate],
+            },
+        ] {
+            assert!(player_count_matching_ids(
+                &state,
+                &predicate,
+                P0,
+                QuantityContext::new(source)
+            )
+            .is_empty());
+        }
+    }
+
+    // CR 109.5 + CR 608.2h: You stays the original controller while candidate
+    // quantities and controlled-object predicates read the actual live player.
+    #[test]
+    fn player_count_controls_and_exclusion_keep_the_actual_executable() {
+        use crate::game::scenario::P1;
+        use crate::types::ability::{Comparator, PlayerRelation};
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature(P1, "Supplemental predicate source", 2, 2)
+            .id();
+        let controlled = scenario
+            .add_creature(P0, "Supplemental stolen candidate", 2, 2)
+            .id();
+        scenario.add_creature(P0, "Supplemental stolen candidate", 2, 2);
+        let mut state = scenario.build().state().clone();
+        state.objects.get_mut(&source).unwrap().controller = P0;
+        state.objects.get_mut(&controlled).unwrap().controller = P1;
+        state.active_return_result_occurrence = Some(ReturnResultOccurrenceId(1));
+        state.return_result_frames.insert(
+            ReturnResultOccurrenceId(1),
+            ReturnResultFrame {
+                process: Some(ReturnResultProcessId(5)),
+                declarations: None,
+                admitted_program: None,
+                results: [(ReturnResultId(7), InstructionResult::ZoneChanges(vec![]))]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+        let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], source, P1);
+        ability.original_controller = Some(P0);
+        ability.scoped_player = Some(P1);
+        ability.return_result_process = Some(ReturnResultProcessId(5));
+        let addressed = expression(ZoneChangeRecordSource::InstructionResult {
+            result: ReturnResultId(7),
+        });
+        let controls = |relation| PlayerFilter::ControlsCount {
+            relation: PlayerRelation::Opponent,
+            filter: TargetFilter::Typed(TypedFilter::creature().controller(relation).properties(
+                vec![FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: addressed.clone(),
+                }],
+            )),
+            comparator: Comparator::EQ,
+            count: QuantityExpr::Offset {
+                inner: Box::new(addressed.clone()),
+                offset: 1,
+            },
+        };
+        let opponent = controls(ControllerRef::Opponent);
+        assert_eq!(
+            player_count_matching_ids_for_ability(&state, &opponent, &ability),
+            vec![P1]
+        );
+        let negated = TargetFilter::Not {
+            filter: Box::new(TargetFilter::PlayerMatching {
+                player: Box::new(PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    attr: QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                    comparator: Comparator::GT,
+                    value: addressed.clone(),
+                }),
+            }),
+        };
+        assert!(
+            crate::game::filter::player_matches_target_filter_with_context(
+                &state,
+                &negated,
+                P1,
+                &FilterContext::from_ability_with_controller(&ability, P0)
+            ),
+            "known empty result is available before boolean inversion"
+        );
+        assert!(
+            player_count_matching_ids_for_ability(&state, &controls(ControllerRef::You), &ability)
+                .is_empty(),
+            "candidate scope must not turn You into P1 or owner into controller"
+        );
+        assert_eq!(
+            player_count_matching_ids_for_ability(
+                &state,
+                &PlayerFilter::AllExcept {
+                    exclude: Box::new(opponent.clone())
+                },
+                &ability
+            ),
+            vec![P0]
+        );
+        assert_eq!(
+            player_count_matching_ids_for_ability(
+                &state,
+                &PlayerFilter::AnyOf {
+                    filters: vec![PlayerFilter::Controller, opponent.clone()]
+                },
+                &ability
+            ),
+            vec![P0, P1]
+        );
+        let recorded_filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: addressed.clone(),
+            }]));
+        let different_name = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::DifferentNameFrom {
+                filter: Box::new(recorded_filter.clone()),
+            },
+        ]));
+        assert!(
+            !matches_target_filter(
+                &state,
+                controlled,
+                &different_name,
+                &FilterContext::from_ability_with_controller(&ability, P0)
+            ),
+            "the same-name P0 permanent remains visible through a nested addressed predicate"
+        );
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: controlled,
+            source_controller: P1,
+            target: TargetRef::Player(P1),
+            target_controller: P1,
+            amount: 1,
+            source_core_types: vec![CoreType::Creature],
+            ..Default::default()
+        });
+        let filter_ctx = FilterContext::from_ability_with_controller(&ability, P0);
+        let recorded_filter = Some(Box::new(recorded_filter));
+        assert!(opponent_dealt_damage_matches_with_context(
+            &state,
+            P1,
+            crate::types::ability::DamageKindFilter::Any,
+            &recorded_filter,
+            1,
+            &filter_ctx
+        ));
+        assert!(!opponent_dealt_damage_matches(
+            &state,
+            P1,
+            P0,
+            crate::types::ability::DamageKindFilter::Any,
+            &recorded_filter,
+            1,
+            source
+        ));
+        let tracked = crate::types::identifiers::TrackedSetId(1);
+        state.tracked_object_sets.insert(tracked, vec![controlled]);
+        let tracked_filter = recorded_filter.as_deref().unwrap();
+        assert!(possessed_tracked_set_member_with_context(
+            &state,
+            P1,
+            PossessionAxis::Controller,
+            tracked_filter,
+            None,
+            &filter_ctx
+        ));
+        assert!(!possessed_tracked_set_member_with_context(
+            &state,
+            P0,
+            PossessionAxis::Controller,
+            tracked_filter,
+            None,
+            &filter_ctx
+        ));
+        assert!(possessed_tracked_set_member_with_context(
+            &state,
+            P0,
+            PossessionAxis::Owner,
+            tracked_filter,
+            None,
+            &filter_ctx
+        ));
+        assert!(!possessed_tracked_set_member(
+            &state,
+            P1,
+            PossessionAxis::Controller,
+            tracked_filter,
+            None,
+            P0,
+            source
+        ));
+        ability.return_result_process = None;
+        assert!(
+            !crate::game::filter::player_matches_target_filter_with_context(
+                &state,
+                &negated,
+                P1,
+                &FilterContext::from_ability_with_controller(&ability, P0)
+            )
+        );
+        assert!(player_count_matching_ids_for_ability(
+            &state,
+            &PlayerFilter::AllExcept {
+                exclude: Box::new(opponent)
+            },
+            &ability
+        )
+        .is_empty());
+    }
+
     #[test]
     fn departure_source_preview_never_borrows_a_result_or_invents_known_zero() {
         let mut scenario = GameScenario::new();
@@ -27660,6 +28011,7 @@ mod departure_source_boundary_tests {
             ReturnResultFrame {
                 process: Some(ReturnResultProcessId(5)),
                 declarations: None,
+                admitted_program: None,
                 results: [(ReturnResultId(7), InstructionResult::ZoneChanges(vec![]))]
                     .into_iter()
                     .collect(),
