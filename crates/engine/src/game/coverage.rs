@@ -6638,6 +6638,10 @@ impl ParsedItem {
     }
 }
 
+/// The in-game warning for an unimplemented part inside a static or
+/// modification carrier (a granted ability, a token or emblem static, ?).
+pub const STATIC_CARRIER_WARNING: &str = "Static: unimplemented part in a granted ability";
+
 /// Check whether a game object has any mechanics the engine cannot handle.
 ///
 /// Checks keywords (Unknown variant = unrecognized), abilities (api_type
@@ -6656,20 +6660,33 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     // 2. Every ability node's strict failures (`ability_node_gaps`, the shared
     // node authority), over the object's abilities and its triggers' bodies.
     let mut push_node_gaps = |def: &AbilityDefinition| {
-        for_each_ability_tree_node(def, TokenStaticTraversal::Include, &mut |node, _| {
-            for gap in ability_node_gaps(node) {
-                let label = match gap {
-                    AbilityNodeGap::UnimplementedEffect(name) => format!("Effect: {name}"),
-                    AbilityNodeGap::UnimplementedCost(_) => "Cost: unimplemented".to_string(),
-                    AbilityNodeGap::UnobservableFanOutControl => {
-                        "Effect: fan_out_control_boundary".to_string()
+        for_each_ability_tree_node(
+            def,
+            TokenStaticTraversal::Include,
+            &mut |node, node_traversal| {
+                // A static or modification carrier (granted abilities, token and
+                // emblem statics, ?) judged by the same helper precon playability
+                // reads, so a gap granted through a static reaches the warning too.
+                if effect_static_carriers_have_unimplemented_parts(&node.effect, node_traversal) {
+                    let label = STATIC_CARRIER_WARNING.to_string();
+                    if !missing.contains(&label) {
+                        missing.push(label);
                     }
-                };
-                if !missing.contains(&label) {
-                    missing.push(label);
                 }
-            }
-        });
+                for gap in ability_node_gaps(node) {
+                    let label = match gap {
+                        AbilityNodeGap::UnimplementedEffect(name) => format!("Effect: {name}"),
+                        AbilityNodeGap::UnimplementedCost(_) => "Cost: unimplemented".to_string(),
+                        AbilityNodeGap::UnobservableFanOutControl => {
+                            "Effect: fan_out_control_boundary".to_string()
+                        }
+                    };
+                    if !missing.contains(&label) {
+                        missing.push(label);
+                    }
+                }
+            },
+        );
     };
     for def in obj.abilities.iter() {
         push_node_gaps(def);
@@ -6700,6 +6717,14 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     for stat in obj.static_definitions.iter_all() {
         if !static_registry.contains_key(&stat.mode) && !is_data_carrying_static(&stat.mode) {
             missing.push(format!("Static: {}", stat.mode));
+        }
+        // The static's own granted abilities, as `card_face_has_unimplemented_parts`
+        // judges a face's statics.
+        if static_has_unimplemented_parts(stat) {
+            let label = STATIC_CARRIER_WARNING.to_string();
+            if !missing.contains(&label) {
+                missing.push(label);
+            }
         }
     }
 
@@ -14749,6 +14774,66 @@ mod tests {
             );
         }
     }
+    /// CR 608.2e + CR 603.10d: an off-allowlist fan-out reached only through a
+    /// static carrier (`GenericEffect` -> `static_abilities` -> `GrantAbility`)
+    /// reaches the in-game warning as it reaches precon playability; the
+    /// shared node walk alone doesn't descend into carriers.
+    #[test]
+    fn a_fan_out_granted_through_a_static_carrier_reaches_the_warning() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect,
+            StaticDefinition, TargetFilter,
+        };
+        let parsed = crate::parser::parse_oracle_text(
+            "Each player may gain control of all nontoken permanents they own.",
+            "Optional Return",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        let mut scoped = Vec::new();
+        for def in parsed.abilities.iter() {
+            scoped_nodes(def, &mut scoped);
+        }
+        let granted = scoped
+            .into_iter()
+            .find(|def| super::fan_out_control_boundary_is_unobservable(def))
+            .expect("REACH: the optional fan-out is an unobservable scoped node");
+        let face = CardFace {
+            name: "Granted Fan-Out".to_string(),
+            abilities: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(TargetFilter::SelfRef)
+                        .modifications(vec![ContinuousModification::GrantAbility {
+                            definition: Box::new(granted),
+                        }])],
+                    duration: Some(Duration::UntilEndOfTurn),
+                    target: None,
+                    end_cost: None,
+                },
+            )],
+            ..Default::default()
+        };
+        assert!(
+            super::card_face_has_unimplemented_parts(&face),
+            "REACH: precon playability rejects the carried fan-out"
+        );
+        let (playable, warnings) = playability_and_object_warnings(&face);
+        assert!(!playable);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w == "Effect: fan_out_control_boundary"),
+            "REACH: the node walk alone doesn't reach the carrier: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w == super::STATIC_CARRIER_WARNING),
+            "the warning names the carried gap: {warnings:?}"
+        );
+    }
+
     /// CR 608.2e + CR 611.2c + CR 118.12a: the `Head` admission is a closed
     /// allowlist. An allowlisted printed population, mandatory and bare, is
     /// exact. The same population with any axis that lets a seat pause, pay,
