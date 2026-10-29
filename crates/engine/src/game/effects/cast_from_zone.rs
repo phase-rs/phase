@@ -5264,28 +5264,34 @@ mod tests {
             let mut program = ResolvedAbility::new(producer_effect, vec![], source, PlayerId(0));
             program.declares_return_result = Some(ReturnResultId(7));
             program.sub_ability = Some(Box::new(ability.clone()));
-            let (_, process) =
-                crate::game::effects::begin_test_return_result_occurrence(&mut state, &program)
-                    .unwrap();
-            let occurrence = state.active_return_result_occurrence.unwrap();
-            crate::game::effects::publish_return_result(
+            let (occurrence, process) = crate::game::effects::with_instruction_result_entry(
                 &mut state,
-                occurrence,
-                ReturnResultId(7),
-                Some(process),
-                vec![record],
-            )
-            .unwrap();
-            ability.bind_return_result_process(Some(process));
-            let owner =
-                crate::game::effects::owned_cursor_declarations(&state, Some(occurrence), &ability)
+                &program,
+                crate::types::ability::InstructionResultEntry::Independent,
+                |state, executable, parent| {
+                    let occurrence = state.active_return_result_occurrence.unwrap();
+                    let process = executable.return_result_process.unwrap();
+                    crate::game::effects::publish_return_result(
+                        state,
+                        occurrence,
+                        ReturnResultId(7),
+                        Some(process),
+                        vec![record],
+                    )?;
+                    let selected = crate::game::effects::project_own_resolution_chain_child(
+                        executable,
+                        crate::types::game_state::ChainStep::SubAbility,
+                    )
                     .unwrap();
-            crate::game::effects::resolve_carrier_owned_ability_chain(
-                &mut state,
-                &ability,
-                &mut events,
-                0,
-                (&owner.0, &owner.1),
+                    crate::game::effects::resolve_parent_selected_ability_chain(
+                        state,
+                        &selected,
+                        &mut events,
+                        0,
+                        parent,
+                    )?;
+                    Ok((occurrence, process))
+                },
             )
             .unwrap();
             let WaitingFor::EffectZoneChoice {

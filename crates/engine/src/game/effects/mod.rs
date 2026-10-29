@@ -2622,7 +2622,11 @@ pub(crate) fn owned_cursor_declarations(
     ),
     EffectError,
 > {
-    if !crate::types::game_state::has_return_result_metadata(ability) {
+    let has_result_metadata = crate::types::game_state::has_return_result_metadata(ability);
+    let retained_target_head = matches!(&state.waiting_for,
+        WaitingFor::MultiTargetSelection { return_result_occurrence: Some(owner), pending_ability, .. }
+            if occurrence == Some(*owner) && instruction_result_projection_eq(pending_ability, ability));
+    if !has_result_metadata && !retained_target_head {
         state.validate_replacement_program(ability)?;
         return Ok((ability.clone(), Default::default()));
     }
@@ -2685,7 +2689,14 @@ pub(crate) fn owned_cursor_declarations(
         return Ok((program.clone(), declarations));
     }
     validate_owned_instruction_result_cursor(state, ability, occurrence, (program, &declarations))?;
-    Ok((program.clone(), declarations))
+    if has_result_metadata {
+        Ok((program.clone(), declarations))
+    } else {
+        // The authenticated split head consumes no result. Its sibling retains
+        // the parent namespace separately; target selection may now run this
+        // no-reader instruction under the existing empty-namespace policy.
+        Ok((ability.clone(), Default::default()))
+    }
 }
 
 fn completed_instruction_result_declarations(
@@ -2784,14 +2795,21 @@ fn visit_instruction_result_program_projections_inner(
     if (program.optional || program.optional_for.is_some())
         && current.is_some_and(|current| !current.optional && current.optional_for.is_none())
     {
-        let mut accepted = project_optional_decision_ability(program, AutoMayChoice::Accept);
-        accepted.optional_for = None;
-        if program.optional_for.is_some() {
-            if let Some(player) = current.and_then(|current| current.scoped_player) {
-                accepted.set_scoped_player_recursive(player);
-                accepted.context.accepting_player = Some(player);
-            }
-        }
+        let accepted = if let Some(player) = current
+            .and_then(|current| current.scoped_player)
+            .filter(|_| program.optional_for.is_some())
+        {
+            let mut accepted =
+                crate::game::engine_payment_choices::project_opponent_may_accepted_ability(
+                    program, player,
+                );
+            accepted.context.optional_effect_performed = true;
+            accepted
+        } else {
+            let mut accepted = project_optional_decision_ability(program, AutoMayChoice::Accept);
+            accepted.optional_for = None;
+            accepted
+        };
         if visit_instruction_result_program_projections_inner(
             &accepted,
             scoped_player,
@@ -2802,6 +2820,30 @@ fn visit_instruction_result_program_projections_inner(
         }
     }
     if let Some(current) = current {
+        if program.unless_pay.is_some() {
+            let pending =
+                crate::game::engine_payment_choices::project_unless_payment_effect(program);
+            if visit_instruction_result_program_projections_inner(
+                &pending,
+                scoped_player,
+                Some(current),
+                visit,
+            ) {
+                return true;
+            }
+            if let Some(paid) =
+                crate::game::engine_payment_choices::project_unless_paid_successor(&pending)
+            {
+                if visit_instruction_result_program_projections_inner(
+                    &paid,
+                    scoped_player,
+                    Some(current),
+                    visit,
+                ) {
+                    return true;
+                }
+            }
+        }
         if let Some(projected) = choose_counter_adjustment::project_latched_choice(program, current)
             .or_else(|| choose_counter_adjustment::project_latched_operation(program, current))
         {
@@ -3193,6 +3235,19 @@ pub(crate) fn instruction_result_owned_program_projects_to(
     current: &ResolvedAbility,
 ) -> bool {
     instruction_result_program_projects_to(program, current)
+        || instruction_result_opponent_target_split_projects_to(state, occurrence, program, current)
+        || visit_instruction_result_program_projections_for_cursor(
+            program,
+            current,
+            &mut |candidate| {
+                if !(candidate.optional || candidate.optional_for.is_some()) {
+                    return false;
+                }
+                let declined = project_optional_decision_ability(candidate, AutoMayChoice::Decline);
+                project_optional_decline_ability(state, &declined)
+                    .is_some_and(|branch| instruction_result_program_projects_to(&branch, current))
+            },
+        )
         || instruction_result_zone_program_projects_to(state, occurrence, program, current)
         || instruction_result_coin_program_projects_to(state, occurrence, program, current)
         || instruction_result_damage_program_projects_to(program, current)
@@ -3251,6 +3306,63 @@ pub(crate) fn instruction_result_owned_program_projects_to(
                 instruction_result_projection_eq(&projected, current)
             },
         )
+}
+
+fn instruction_result_opponent_target_split_projects_to(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    program: &ResolvedAbility,
+    current: &ResolvedAbility,
+) -> bool {
+    let Some(pending) = state.active_ability_continuation() else {
+        return false;
+    };
+    if pending.return_result_occurrence != occurrence {
+        return false;
+    }
+    let (held_head, player) = match &state.waiting_for {
+        WaitingFor::MultiTargetSelection {
+            return_result_occurrence,
+            pending_ability,
+            player,
+            ..
+        } if *return_result_occurrence == occurrence => (pending_ability.as_ref(), *player),
+        _ => return false,
+    };
+    visit_instruction_result_program_projections_for_cursor(program, current, &mut |candidate| {
+        if candidate.optional_for.is_none()
+            || !matches!(
+                candidate.effect,
+                Effect::Sacrifice { .. }
+                    | Effect::SetTapState {
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                        ..
+                    }
+            )
+        {
+            return false;
+        }
+        if current.scoped_player != Some(player) {
+            return false;
+        }
+        let mut accepted =
+            crate::game::engine_payment_choices::project_opponent_may_accepted_ability(
+                candidate, player,
+            );
+        accepted.context.optional_effect_performed = true;
+        let (head, tail) =
+            crate::game::engine_payment_choices::project_opponent_may_target_split(&accepted);
+        let Some(tail) = tail else {
+            return false;
+        };
+        if !instruction_result_projection_eq(&tail, &pending.chain) {
+            return false;
+        }
+        instruction_result_projection_eq(&head, held_head)
+            && (instruction_result_projection_eq(held_head, current)
+                || instruction_result_projection_eq(&tail, current))
+    })
 }
 
 fn instruction_result_zone_program_projects_to(
@@ -4534,14 +4646,14 @@ mod revealed_instruction_authority_tests {
             &["Instant".into()],
             &[],
         );
-        let def = parsed.abilities[0].sub_ability.as_deref().unwrap();
-        let base =
-            crate::game::ability_utils::build_resolved_from_def(def, ObjectId(100), PlayerId(0));
         let program = crate::game::ability_utils::build_resolved_from_def(
             &parsed.abilities[0],
             ObjectId(100),
             PlayerId(0),
         );
+        // The full root backfills child descriptions before the production
+        // parent handoff; a separately rebuilt definition is a different input.
+        let base = project_own_resolution_chain_child(&program, ChainStep::SubAbility).unwrap();
         assert!(is_named_revealed_reader(&base));
         let id = base.reads_return_result.as_ref().unwrap().0;
         for fault in 0..12 {
@@ -4636,7 +4748,10 @@ mod revealed_instruction_authority_tests {
                         )
                     });
             if fault == 8 {
-                assert!(result.is_ok(), "present empty is an authorized 0==0");
+                assert!(
+                    result.is_ok(),
+                    "present empty is an authorized 0==0: {result:?}"
+                );
                 assert!(events.iter().any(|event| matches!(
                     event,
                     GameEvent::EffectResolved {
@@ -4674,91 +4789,94 @@ mod revealed_instruction_authority_tests {
         stale.card_types = vec![crate::types::card_type::CoreType::Land];
         state.lki_cache.insert(member, stale);
         let parsed = crate::parser::parse_oracle_text("Reveal the top card of your library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control.", "Synthetic exact reader", &[], &["Instant".into()], &[]);
-        let mut reader = crate::game::ability_utils::build_resolved_from_def(
-            parsed.abilities[0].sub_ability.as_deref().unwrap(),
-            ObjectId(100),
-            PlayerId(0),
-        );
         let program = crate::game::ability_utils::build_resolved_from_def(
             &parsed.abilities[0],
             ObjectId(100),
             PlayerId(0),
         );
-        let (_, process) = begin_test_return_result_occurrence(state, &program).unwrap();
-        reader.bind_return_result_process(Some(process));
-        let id = reader.reads_return_result.as_ref().unwrap().0;
-        publish_reveal_result_for_ability(
+        with_instruction_result_entry(
             state,
-            &{
-                let mut producer = crate::game::ability_utils::build_resolved_from_def(
+            &program,
+            crate::types::ability::InstructionResultEntry::Independent,
+            |state, executable, parent| {
+                let reader =
+                    project_own_resolution_chain_child(executable, ChainStep::SubAbility).unwrap();
+                let process = executable.return_result_process.unwrap();
+                let id = reader.reads_return_result.as_ref().unwrap().0;
+                publish_reveal_result_for_ability(
+                    state,
+                    &{
+                        let mut producer = crate::game::ability_utils::build_resolved_from_def(
+                            &parsed.abilities[0],
+                            ObjectId(100),
+                            PlayerId(0),
+                        );
+                        producer.declares_return_result = Some(id);
+                        producer.bind_return_result_process(Some(process));
+                        producer
+                    },
+                    vec![member],
+                )
+                .unwrap();
+                publish_reveal_result(state, vec![decoy]);
+                let AbilityCondition::QuantityCheck { lhs, rhs, .. } =
+                    reader.condition.as_ref().unwrap()
+                else {
+                    panic!()
+                };
+                assert_eq!(
+                    crate::game::quantity::resolve_quantity_with_targets(state, lhs, &reader),
+                    1
+                );
+                assert_eq!(
+                    crate::game::quantity::resolve_quantity_with_targets(state, rhs, &reader),
+                    1
+                );
+                assert!(evaluate_condition(
+                    reader.condition.as_ref().unwrap(),
+                    state,
+                    &reader
+                ));
+                let enclosing = state.active_return_result_occurrence;
+                validate_owned_instruction_result_cursor(state, &reader, enclosing, parent)?;
+                assert_eq!(state.active_return_result_occurrence, enclosing);
+                assert_eq!(named_revealed_members(state, &reader)?.len(), 1);
+                let local = crate::game::ability_utils::build_resolved_from_def(
                     &parsed.abilities[0],
                     ObjectId(100),
                     PlayerId(0),
                 );
-                producer.declares_return_result = Some(id);
-                producer.bind_return_result_process(Some(process));
-                producer
-            },
-            vec![member],
-        )
-        .unwrap();
-        publish_reveal_result(state, vec![decoy]);
-        let AbilityCondition::QuantityCheck { lhs, rhs, .. } = reader.condition.as_ref().unwrap()
-        else {
-            panic!()
-        };
-        assert_eq!(
-            crate::game::quantity::resolve_quantity_with_targets(state, lhs, &reader),
-            1
-        );
-        assert_eq!(
-            crate::game::quantity::resolve_quantity_with_targets(state, rhs, &reader),
-            1
-        );
-        assert!(evaluate_condition(
-            reader.condition.as_ref().unwrap(),
-            state,
-            &reader
-        ));
-        let enclosing = state.active_return_result_occurrence;
-        with_iteration_return_result_occurrence(
-            state,
-            &reader,
-            |child, executable, _declarations| {
-                assert_eq!(child.active_return_result_occurrence, enclosing);
-                assert_eq!(named_revealed_members(child, executable)?.len(), 1);
+                with_iteration_return_result_occurrence(
+                    state,
+                    &local,
+                    |child, executable, _declarations| {
+                        assert_ne!(child.active_return_result_occurrence, enclosing);
+                        publish_reveal_result_for_ability(child, executable, Vec::new())?;
+                        assert_eq!(
+                            crate::game::quantity::resolve_quantity_with_targets(
+                                child, lhs, &reader
+                            ),
+                            0
+                        );
+                        assert_eq!(
+                            crate::game::quantity::resolve_quantity_with_targets(
+                                child, rhs, &reader
+                            ),
+                            0
+                        );
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                assert_eq!(state.active_return_result_occurrence, enclosing);
+                assert_eq!(named_revealed_members(state, &reader).unwrap().len(), 1);
+                resolve_parent_selected_ability_chain(state, &reader, &mut Vec::new(), 1, parent)?;
+                assert_eq!(state.objects[&member].zone, Zone::Battlefield);
+                assert_eq!(state.objects[&decoy].zone, Zone::Library);
                 Ok(())
             },
         )
         .unwrap();
-        let local = crate::game::ability_utils::build_resolved_from_def(
-            &parsed.abilities[0],
-            ObjectId(100),
-            PlayerId(0),
-        );
-        with_iteration_return_result_occurrence(
-            state,
-            &local,
-            |child, executable, _declarations| {
-                assert_ne!(child.active_return_result_occurrence, enclosing);
-                publish_reveal_result_for_ability(child, executable, Vec::new())?;
-                assert_eq!(
-                    crate::game::quantity::resolve_quantity_with_targets(child, lhs, &reader),
-                    0
-                );
-                assert_eq!(
-                    crate::game::quantity::resolve_quantity_with_targets(child, rhs, &reader),
-                    0
-                );
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(state.active_return_result_occurrence, enclosing);
-        assert_eq!(named_revealed_members(state, &reader).unwrap().len(), 1);
-        change_zone::resolve(state, &reader, &mut Vec::new()).unwrap();
-        assert_eq!(state.objects[&member].zone, Zone::Battlefield);
-        assert_eq!(state.objects[&decoy].zone, Zone::Library);
     }
 }
 
@@ -9070,7 +9188,7 @@ fn resolve_optional_effect_decision_step(
             return Ok(progress);
         }
         AutoMayChoice::Decline => {
-            let decline_branch = optional_decline_branch(state, &ability);
+            let decline_branch = project_optional_decline_ability(state, &ability);
             // CR 608.2c: Declining the optional return skips its action, but
             // an independent following instruction can still read its named
             // result. Settle that result as empty before the surviving branch
@@ -9078,50 +9196,13 @@ fn resolve_optional_effect_decision_step(
             // same result ID, it publishes the result itself.
             if let Some(result_id) = ability.declares_return_result {
                 if decline_branch
-                    .as_deref()
+                    .as_ref()
                     .is_none_or(|branch| !branch_declares_return_result(branch, result_id))
                 {
                     publish_empty_return_result_for_active(state, result_id, &ability)?;
                 }
             }
-            if let Some(branch) = decline_branch {
-                let mut resolved = branch.into_owned();
-                // CR 608.2c: inherit the parent's resolved object targets ONLY
-                // when the decline clause's effect actually anaphors the parent
-                // target (`ParentTarget`) — e.g. Omnath, Locus of All's "if you
-                // don't, put IT into your hand", where the looked-at card is the
-                // parent's target. Mirrors the sub-ability target threading the
-                // condition-false descent applies in `resolve_ability_chain`,
-                // required here because an extracted nested decline clause is
-                // resolved directly rather than reached through that descent. The
-                // `effect_refs_parent_target` guard keeps a decline clause that
-                // carries its OWN target filter (e.g. a Chaos-Wand cleanup that
-                // returns `ExiledBySource` cards) from being clobbered with the
-                // parent's targets.
-                if should_propagate_parent_targets(&ability, &resolved)
-                    && effect_refs_parent_target(&resolved.effect)
-                {
-                    resolved.mirror_targets_from(&ability);
-                }
-                resolved.inherit_context_preserving_targets(ability.context.clone());
-                inherit_missing_parent_referent(&mut resolved, &ability);
-                // CR 608.2c: This optional effect was DECLINED — the decline
-                // branch's `Not{IfYouDo}` / `IfYouDo` gate must evaluate
-                // relative to *this* decision, not a stale `true` inherited
-                // from an enclosing optional effect that was accepted (e.g.
-                // Braids: the controller accepted the outer sacrifice, so the
-                // chain context carries `optional_effect_performed = true` —
-                // but each opponent's own decline must read `false`).
-                resolved.context.optional_effect_performed = false;
-                // CR 608.2c: The `Not(OptionalEffectPerformed)` gate's role — run
-                // this branch only because the PARENT optional was declined — is
-                // now fulfilled by the selection above. If the branch is ITSELF an
-                // optional ("If you don't, you MAY put a land" — Kellan, the Kid),
-                // accepting its own "may" latches `optional_effect_performed = true`,
-                // which would re-trip this same gate on the accept re-entry and
-                // silently skip the branch's effect. Strip the consumed gate so the
-                // branch resolves on its own optional decision.
-                strip_consumed_decline_performed_gate(&mut resolved);
+            if let Some(resolved) = decline_branch {
                 return resolve_owned_ability_chain_step(
                     state,
                     &resolved,
@@ -9133,6 +9214,49 @@ fn resolve_optional_effect_decision_step(
         }
     }
     Ok(ResolutionProgress::Complete)
+}
+
+fn project_optional_decline_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<ResolvedAbility> {
+    let mut resolved = optional_decline_branch(state, ability)?.into_owned();
+    // CR 608.2c: inherit the parent's resolved object targets ONLY
+    // when the decline clause's effect actually anaphors the parent
+    // target (`ParentTarget`) — e.g. Omnath, Locus of All's "if you
+    // don't, put IT into your hand", where the looked-at card is the
+    // parent's target. Mirrors the sub-ability target threading the
+    // condition-false descent applies in `resolve_ability_chain`,
+    // required here because an extracted nested decline clause is
+    // resolved directly rather than reached through that descent. The
+    // `effect_refs_parent_target` guard keeps a decline clause that
+    // carries its OWN target filter (e.g. a Chaos-Wand cleanup that
+    // returns `ExiledBySource` cards) from being clobbered with the
+    // parent's targets.
+    if should_propagate_parent_targets(ability, &resolved)
+        && effect_refs_parent_target(&resolved.effect)
+    {
+        resolved.mirror_targets_from(ability);
+    }
+    project_parent_chain_context(&mut resolved, ability, None, None);
+    // CR 608.2c: This optional effect was DECLINED — the decline
+    // branch's `Not{IfYouDo}` / `IfYouDo` gate must evaluate
+    // relative to *this* decision, not a stale `true` inherited
+    // from an enclosing optional effect that was accepted (e.g.
+    // Braids: the controller accepted the outer sacrifice, so the
+    // chain context carries `optional_effect_performed = true` —
+    // but each opponent's own decline must read `false`).
+    resolved.context.optional_effect_performed = false;
+    // CR 608.2c: The `Not(OptionalEffectPerformed)` gate's role — run
+    // this branch only because the PARENT optional was declined — is
+    // now fulfilled by the selection above. If the branch is ITSELF an
+    // optional ("If you don't, you MAY put a land" — Kellan, the Kid),
+    // accepting its own "may" latches `optional_effect_performed = true`,
+    // which would re-trip this same gate on the accept re-entry and
+    // silently skip the branch's effect. Strip the consumed gate so the
+    // branch resolves on its own optional decision.
+    strip_consumed_decline_performed_gate(&mut resolved);
+    Some(resolved)
 }
 
 /// CR 608.2c + CR 608.2d: Select the exact continuation that survives an
@@ -26655,8 +26779,8 @@ fn resolve_owned_chain_body(
                 })
                 .and_then(|head| unless_payers[head..].split_first())
             {
-                let mut pending = ability.clone();
-                pending.unless_pay = None;
+                let pending =
+                    crate::game::engine_payment_choices::project_unless_payment_effect(ability);
                 // CR 118.12a: A disjunctive unless-cost (`OneOf`) surfaces a
                 // sub-cost choice first; the chosen single cost re-enters
                 // `WaitingFor::UnlessPayment` via
@@ -69097,7 +69221,7 @@ mod departure_process_entry_tests {
             source,
             P0,
         )));
-        with_instruction_result_entry(&mut state, &root, InstructionResultEntry::Independent, |state, executable, _declarations| {
+        with_instruction_result_entry(&mut state, &root, InstructionResultEntry::Independent, |state, executable, declarations| {
             let mut events = vec![];
             change_zone::resolve(state, executable, &mut events)?;
             assert_eq!(state.objects[&four].zone, Zone::Exile);
@@ -69105,12 +69229,15 @@ mod departure_process_entry_tests {
             let occurrence = state.active_return_result_occurrence.unwrap();
             assert!(matches!(&state.return_result_frames[&occurrence].results[&ReturnResultId(7)],
                 InstructionResult::ZoneChanges(records) if records.len() == 2 && records.iter().all(|record| record.from_zone == Some(Zone::Graveyard) && record.to_zone == Zone::Exile)));
-            let reader = executable.sub_ability.as_deref().unwrap();
-            type Route = fn(&mut GameState, &ResolvedAbility, &mut Vec<GameEvent>, u32) -> Result<(), EffectError>;
-            for route in [resolve_selected_ability_chain as Route, resolve_resume_owned_ability_chain as Route] {
+            let reader = project_own_resolution_chain_child(executable, ChainStep::SubAbility).unwrap();
+            for resumed in [false, true] {
+                if resumed {
+                    park_parent_selected_continuation(state, reader.clone(), declarations)?;
+                }
+                let reader = if resumed {
+                    state.active_ability_continuation().unwrap().chain.as_ref().clone()
+                } else { reader.clone() };
                 let before_life = state.players[0].life;
-                route(state, reader, &mut events, 0)?;
-                assert_eq!(state.players[0].life, before_life + 4);
                 for hostile in 0..5 {
                     let mut invalid = state.clone();
                     match hostile {
@@ -69122,10 +69249,22 @@ mod departure_process_entry_tests {
                     }
                     let before = serde_json::to_value(&invalid).unwrap();
                     let mut hostile_events = vec![];
-                    assert!(route(&mut invalid, reader, &mut hostile_events, 0).is_err(), "hostile {hostile}");
+                    let result = if resumed {
+                        resolve_resume_owned_ability_chain(&mut invalid, &reader, &mut hostile_events, 0)
+                    } else {
+                        resolve_parent_selected_ability_chain(&mut invalid, &reader, &mut hostile_events, 0, declarations)
+                    };
+                    assert!(result.is_err(), "resumed {resumed}, hostile {hostile}: {result:?}");
                     assert_eq!(serde_json::to_value(&invalid).unwrap(), before);
                     assert!(hostile_events.is_empty());
                 }
+                if resumed {
+                    drain_pending_continuation(state, &mut events);
+                    assert!(state.active_ability_continuation().is_none());
+                } else {
+                    resolve_parent_selected_ability_chain(state, &reader, &mut events, 0, declarations)?;
+                }
+                assert_eq!(state.players[0].life, before_life + 4);
             }
             Ok(())
         }).unwrap();
@@ -69272,16 +69411,29 @@ mod departure_process_entry_tests {
             let arena = runner.state().replacement_continuations.clone();
             let next_process = runner.state().next_return_result_process_id;
             let next_occurrence = runner.state().next_return_result_occurrence_id;
+            let mut before_action = runner.state().clone();
+            let mut before_rng = runner.state().rng.get_word_pos();
+            let mut emitted = Vec::new();
+            let mut before_events = emitted.clone();
             let mut result = runner.act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
                 payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             });
+            if let Ok(action) = &result {
+                emitted.extend(action.events.clone());
+            }
             for _ in 0..8 {
                 if result.is_err() || runner.state().stack.is_empty() {
                     break;
                 }
+                before_action = runner.state().clone();
+                before_rng = runner.state().rng.get_word_pos();
+                before_events = emitted.clone();
                 result = runner.act(GameAction::PassPriority);
+                if let Ok(action) = &result {
+                    emitted.extend(action.events.clone());
+                }
             }
             assert_eq!(runner.state().replacement_continuations, arena);
             if fault == 0 {
@@ -69302,6 +69454,13 @@ mod departure_process_entry_tests {
                     result.is_err(),
                     "foreign/dangling/cyclic arena fault {fault}"
                 );
+                assert_eq!(
+                    runner.state(),
+                    &before_action,
+                    "fault {fault} changes the refused action's input"
+                );
+                assert_eq!(runner.state().rng.get_word_pos(), before_rng);
+                assert_eq!(emitted, before_events);
                 assert_eq!(runner.state().objects[&cohort].zone, Zone::Battlefield);
                 assert!(runner.state().objects[&host]
                     .replacement_definitions

@@ -1434,6 +1434,14 @@ fn apply_action_boundary_core(
         lifecycle.discard();
         return Err(EngineError::InvalidAction(error));
     }
+    for entry in state.stack.iter().chain(state.resolving_stack_entry.iter()) {
+        if let Some(ability) = entry.ability() {
+            if let Err(error) = state.validate_replacement_program(ability) {
+                lifecycle.discard();
+                return Err(EngineError::InvalidAction(error.to_string()));
+            }
+        }
+    }
     // CR 603.3 + CR 603.3b + CR 608.2c: recover an ownerless post-replacement
     // strand on the state AS FOUND, before this action touches it.
     //
@@ -24762,7 +24770,7 @@ mod stage2_injector_tests {
             producers,
             vec![
                 "game/effects/mod.rs::offer_repeated_payment {player,decision_subject_id:None,source_id:payment_unit.source_id,description:payment_unit.description.clone(),may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
-                "game/effects/mod.rs::resolve_chain_body {player:prompt_player,decision_subject_id,source_id:ability.source_id,description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
+                "game/effects/mod.rs::resolve_owned_chain_body {player:prompt_player,decision_subject_id,source_id:ability.source_id,description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
                 "game/effects/scoped_library_search.rs::advance_acceptance_in_occurrence {player,decision_subject_id:None,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
                 "game/engine.rs::begin_pending_trigger_target_selection {player,decision_subject_id:None,source_id,description:trigger_description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
             ],

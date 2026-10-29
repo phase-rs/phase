@@ -672,13 +672,10 @@ fn handle_opponent_may_choice_inner(
         if let Some(frame) = state.active_optional_effect_frame().cloned() {
             let (program, declarations) = owned.as_ref().expect("authenticated optional frame");
             let admitted = (program, declarations);
-            let mut ability = frame.ability.clone();
-            // CR 608.2c: "their" in an accepted any-player instruction binds
-            // to the player who accepted across the complete local chain.
-            // `controller` remains the controller of the resolving ability.
-            ability.set_scoped_player_recursive(promptee);
-            ability.context.accepting_player = Some(promptee);
-
+            let mut ability = Box::new(project_opponent_may_accepted_ability(
+                &frame.ability,
+                promptee,
+            ));
             // CR 608.2d: a player cannot accept an exact resolution-time
             // selection they cannot make. This query deliberately recognizes
             // only counted `their graveyard` exile instructions; every
@@ -712,9 +709,6 @@ fn handle_opponent_may_choice_inner(
                 );
                 return Ok(state.waiting_for.clone());
             }
-
-            ability.optional = false;
-            ability.optional_for = None;
 
             let target_selection = match &ability.effect {
                 // CR 701.21a (sacrifice) / CR 701.26a (tap): an optional
@@ -759,17 +753,25 @@ fn handle_opponent_may_choice_inner(
 
             if let Some(legal) = target_selection {
                 if !legal.is_empty() {
+                    ability.context.optional_effect_performed = true;
+                    let occurrence =
+                        effects::retained_return_result_occurrence(state, &ability, admitted)
+                            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                    let (head, tail) = project_opponent_may_target_split(&ability);
+                    let pending = tail
+                        .map(|tail| PendingContinuation::new_owned(Box::new(tail), state, admitted))
+                        .transpose()
+                        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                     state
                         .take_active_optional_effect_frame()
                         .map_err(|error| EngineError::InvalidAction(error.to_string()))?
                         .expect(
                             "cloned optional-effect frame remains active until target selection",
                         );
-                    ability.context.optional_effect_performed = true;
                     state
                         .player_actions_this_way
                         .insert((promptee, PlayerActionKind::AcceptedOptionalEffect));
-                    if let Some(mut sub) = ability.sub_ability.take() {
+                    if let Some(pending) = pending {
                         // CR 608.2c + CR 608.2d: the "If a player does, …"
                         // consequence runs because the player accepted. Carry the
                         // accepted ability's context (with
@@ -779,22 +781,15 @@ fn handle_opponent_may_choice_inner(
                         // sacrifice/tap target is chosen — otherwise the
                         // consequence (e.g. "put this creature on top of its
                         // owner's library") is silently skipped.
-                        sub.context = ability.context.clone();
-                        sub.context.optional_effect_performed = true;
-                        let pending = PendingContinuation::new_owned(sub, state, admitted)
-                            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                         state.park_ability_continuation(pending);
                     }
                     state.waiting_for = WaitingFor::MultiTargetSelection {
-                        return_result_occurrence: effects::retained_return_result_occurrence(
-                            state, &ability, admitted,
-                        )
-                        .map_err(|error| EngineError::InvalidAction(error.to_string()))?,
+                        return_result_occurrence: occurrence,
                         player: promptee,
                         legal_targets: legal,
                         min_targets: 1,
                         max_targets: 1,
-                        pending_ability: ability,
+                        pending_ability: Box::new(head),
                     };
                     return Ok(state.waiting_for.clone());
                 }
@@ -1261,6 +1256,69 @@ pub(crate) fn begin_player_scope_token_unless_sacrifice(
     }));
     set_player_scope_unless_payment_waiting_for(state);
     Ok(true)
+}
+
+/// CR 608.2c: "their" binds to the accepting player across the complete local
+/// chain; the resolving ability's controller remains unchanged.
+pub(crate) fn project_opponent_may_accepted_ability(
+    ability: &ResolvedAbility,
+    player: PlayerId,
+) -> ResolvedAbility {
+    let mut accepted = ability.clone();
+    accepted.set_scoped_player_recursive(player);
+    accepted.context.accepting_player = Some(player);
+    accepted.optional = false;
+    accepted.optional_for = None;
+    accepted
+}
+
+/// CR 608.2c + CR 608.2d: project the existing target prompt and its separate
+/// ordinary continuation from the complete accepted optional instruction.
+pub(crate) fn project_opponent_may_target_split(
+    ability: &ResolvedAbility,
+) -> (ResolvedAbility, Option<ResolvedAbility>) {
+    let tail = effects::project_own_resolution_chain_child(
+        ability,
+        crate::types::game_state::ChainStep::SubAbility,
+    );
+    let mut head = ability.clone();
+    if tail.is_some() {
+        head.sub_ability = None;
+    }
+    (head, tail)
+}
+
+/// CR 118.12a: the pending instruction resumes after its unless gate is answered.
+pub(crate) fn project_unless_payment_effect(ability: &ResolvedAbility) -> ResolvedAbility {
+    let mut pending = ability.clone();
+    pending.unless_pay = None;
+    pending
+}
+
+/// CR 118.12 + CR 608.2c: payment suppresses the guarded instruction and
+/// selects its paid alternative or next independent written instruction.
+pub(crate) fn project_unless_paid_successor(
+    pending_effect: &ResolvedAbility,
+) -> Option<ResolvedAbility> {
+    let sub = pending_effect.sub_ability.as_deref().and_then(|sub| {
+        if sub.sub_link == SubAbilityLink::SequentialSibling
+            || sub
+                .condition
+                .as_ref()
+                .is_some_and(payment_outcome_condition)
+        {
+            Some(sub)
+        } else {
+            effects::next_independent_instruction(sub.sub_ability.as_deref())
+        }
+    })?;
+    let mut projected = sub.clone();
+    effects::project_parent_chain_context(&mut projected, pending_effect, None, None);
+    if projected.targets.is_empty() {
+        projected.mirror_targets_from(pending_effect);
+    }
+    projected.context.optional_effect_performed = true;
+    Some(projected)
 }
 
 pub(crate) fn project_player_scope_token_unless_effect(
@@ -2425,25 +2483,7 @@ pub(crate) fn finish_successful_unless_payment_owned(
     // payment's outcome is a resolution step of the suppressed head, so it
     // stays off together with the steps below it, and the walk resumes at the
     // next independent instruction printed after them.
-    let paid_successor = pending_effect.sub_ability.as_deref().and_then(|sub| {
-        if sub.sub_link == SubAbilityLink::SequentialSibling
-            || sub
-                .condition
-                .as_ref()
-                .is_some_and(payment_outcome_condition)
-        {
-            Some(sub)
-        } else {
-            effects::next_independent_instruction(sub.sub_ability.as_deref())
-        }
-    });
-    if let Some(sub) = paid_successor {
-        let mut sub_resolved = sub.clone();
-        if sub_resolved.targets.is_empty() {
-            sub_resolved.mirror_targets_from(pending_effect);
-        }
-        sub_resolved.context = pending_effect.context.clone();
-        sub_resolved.context.optional_effect_performed = true;
+    if let Some(sub_resolved) = project_unless_paid_successor(pending_effect) {
         post_action_event_start = Some(resolve_ability_chain_for_unless_payment(
             state,
             &sub_resolved,
@@ -2452,7 +2492,7 @@ pub(crate) fn finish_successful_unless_payment_owned(
             None,
             admitted,
         )?);
-        if sub.sub_link == SubAbilityLink::SequentialSibling
+        if sub_resolved.sub_link == SubAbilityLink::SequentialSibling
             && !matches!(state.waiting_for, WaitingFor::Priority { .. })
         {
             let default_wf = state.waiting_for.clone();
@@ -3874,7 +3914,7 @@ mod tests {
             );
             runner
                 .act(action)
-                .expect("authenticated public answer resumes the prior-result reader");
+                .unwrap_or_else(|error| panic!("authenticated public answer resumes the prior-result reader ({optional}, {accept}): {error:?}"));
             // CR 608.2c + CR 608.2i: read the original 3+2 departures only when
             // this answer executes the instruction; the printed sibling runs once.
             let performs_reader = if optional { accept } else { !accept };
@@ -3982,6 +4022,18 @@ mod tests {
         assert_eq!(runner.state().return_result_frames.len(), 1);
         let saved = serde_json::to_value(runner.state()).unwrap();
         *runner.state_mut() = serde_json::from_value(saved).expect("opponent-may owner restores");
+        let mut accepted = project_opponent_may_accepted_ability(
+            &runner
+                .state()
+                .active_optional_effect_frame()
+                .unwrap()
+                .ability,
+            P1,
+        );
+        accepted.context.optional_effect_performed = true;
+        let (expected_head, expected_tail) = project_opponent_may_target_split(&accepted);
+        assert_eq!(accepted.ability_index, Some(0));
+        assert_eq!(expected_tail.as_ref().unwrap().ability_index, Some(0));
         runner
             .act(GameAction::DecideOptionalEffect { accept: true })
             .unwrap();
@@ -3990,6 +4042,7 @@ mod tests {
             legal_targets,
             min_targets: 1,
             max_targets: 1,
+            pending_ability,
             ..
         } = &runner.state().waiting_for
         else {
@@ -3997,10 +4050,53 @@ mod tests {
         };
         assert_eq!(legal_targets.len(), 2);
         assert!(legal_targets.contains(&first) && legal_targets.contains(&second));
+        assert!(effects::instruction_result_projection_eq(
+            &expected_head,
+            pending_ability
+        ));
+        assert!(effects::instruction_result_projection_eq(
+            expected_tail.as_ref().unwrap(),
+            &runner.state().active_ability_continuation().unwrap().chain,
+        ));
         assert_eq!(runner.life(P0), 20);
         let saved = serde_json::to_value(runner.state()).unwrap();
         *runner.state_mut() =
             serde_json::from_value(saved).expect("multi-target and separate owned tail restore");
+        for alter_tail in [false, true] {
+            let mut hostile = runner.state().clone();
+            if alter_tail {
+                hostile
+                    .active_ability_continuation_frame_mut()
+                    .unwrap()
+                    .pending
+                    .chain
+                    .chosen_x = Some(99);
+            } else {
+                let WaitingFor::MultiTargetSelection {
+                    pending_ability, ..
+                } = &mut hostile.waiting_for
+                else {
+                    unreachable!()
+                };
+                pending_ability.ability_index = Some(99);
+            }
+            let before = hostile.clone();
+            let before_rng = hostile.rng.get_word_pos();
+            assert!(crate::game::engine::apply(
+                &mut hostile,
+                P1,
+                GameAction::SelectCards {
+                    cards: vec![second]
+                }
+            )
+            .is_err());
+            assert_eq!(hostile, before);
+            assert_eq!(hostile.rng.get_word_pos(), before_rng);
+            assert!(
+                serde_json::from_value::<GameState>(serde_json::to_value(&before).unwrap())
+                    .is_err()
+            );
+        }
         for (actor, cards, erase_frame) in [
             (P0, vec![second], false),
             (P1, vec![second, second], false),
