@@ -9972,6 +9972,10 @@ mod tests {
             (true, true, false),
             (true, false, true),
         ] {
+            let axis = format!(
+                "external={external}, runtime={runtime}, unrelated_runtime={unrelated_runtime}"
+            );
+            eprintln!("{axis}: public copy producer and retained authority guards");
             let (state, entrant, donor, hosts) =
                 legacy_copy_pause(external, runtime, unrelated_runtime);
             let selected = match &state.waiting_for {
@@ -9983,7 +9987,7 @@ mod tests {
                         },
                     ..
                 } => selected.clone(),
-                other => panic!("actual copy producer must pause: {other:?}"),
+                other => panic!("{axis}: actual copy producer must pause: {other:?}"),
             };
             assert_eq!(
                 selected.controller,
@@ -10012,7 +10016,47 @@ mod tests {
                 assert_eq!(selected.targets, vec![TargetRef::Object(entrant)]);
                 assert_eq!(selected.scoped_player, external.then_some(PlayerId(0)));
             }
+            // Historical payloads start with a valid current writer. Only the
+            // erased stack and prompt below come from the materialized legacy state.
+            let intact_raw = serde_json::to_value(&state)
+                .unwrap_or_else(|error| panic!("{axis}: intact raw writer: {error}"));
+            let intact_wire =
+                serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+                    .unwrap_or_else(|error| panic!("{axis}: intact wire writer: {error}"));
+            let intact_trusted =
+                serde_json::to_value(TrustedGameStateEnvelope::capture(state.clone()))
+                    .unwrap_or_else(|error| panic!("{axis}: intact trusted writer: {error}"));
+            let intact_persisted = serde_json::to_value(PersistedGameState::capture(state.clone()))
+                .unwrap_or_else(|error| panic!("{axis}: intact persisted writer: {error}"));
+            assert_eq!(
+                intact_wire["resolution_frames"], intact_raw["resolution_stack"],
+                "{axis}"
+            );
+            assert_eq!(
+                intact_wire["waiting_for"], intact_raw["waiting_for"],
+                "{axis}"
+            );
+            assert_eq!(intact_trusted["state"], intact_wire, "{axis}");
+            assert_eq!(intact_persisted["state"], intact_wire, "{axis}");
+
+            // Native capture deliberately does not cross historical decoding.
+            let intact_native = PersistedGameState::capture(state.clone())
+                .into_game_state()
+                .unwrap_or_else(|error| panic!("{axis}: intact native capture restore: {error}"));
+            assert_eq!(
+                intact_native.waiting_for, state.waiting_for,
+                "{axis}: intact native prompt"
+            );
+            assert_eq!(
+                intact_native.resolution_stack, state.resolution_stack,
+                "{axis}: intact native frames"
+            );
+            eprintln!("{axis}, reader=intact native capture: public copy completion");
+            complete_legacy_copy(intact_native, entrant, donor, hosts[0], runtime);
+
             for (erase_source, erase_program) in [(true, false), (true, true), (false, true)] {
+                let context =
+                    format!("{axis}, erase_source={erase_source}, erase_program={erase_program}");
                 let mut legacy = state.clone();
                 if erase_source {
                     legacy
@@ -10032,53 +10076,119 @@ mod tests {
                     };
                     *continuation = None;
                 }
-                let before = serde_json::to_value(&legacy).unwrap();
-                let mut v1 =
-                    serde_json::to_value(ResolutionStateWire::from_game_state(legacy.clone()))
-                        .unwrap();
+                let before = serde_json::to_value(&legacy)
+                    .unwrap_or_else(|error| panic!("{context}: legacy raw snapshot: {error}"));
+                if erase_source && !erase_program {
+                    let error = match serde_json::to_value(ResolutionStateWire::from_game_state(
+                        legacy.clone(),
+                    )) {
+                        Ok(_) => panic!("{context}: malformed native wire writer must refuse"),
+                        Err(error) => error,
+                    };
+                    assert!(
+                        error.to_string().contains(
+                            "selected copy prompt has foreign saved instruction authority"
+                        ),
+                        "{context}: strict native wire writer: {error}"
+                    );
+                    assert_eq!(
+                        serde_json::to_value(&legacy).unwrap(),
+                        before,
+                        "{context}: refused native writer must preserve input"
+                    );
+                }
+                assert!(
+                    before.get("resolution_stack").is_some(),
+                    "{context}: raw stack field"
+                );
+                assert!(
+                    before.get("waiting_for").is_some(),
+                    "{context}: raw prompt field"
+                );
+                let mut raw = intact_raw.clone();
+                raw["resolution_stack"] = before["resolution_stack"].clone();
+                raw["waiting_for"] = before["waiting_for"].clone();
+                assert_eq!(
+                    raw, before,
+                    "{context}: only the selected erasures changed raw state"
+                );
+                let mut wire = intact_wire.clone();
+                wire["resolution_frames"] = before["resolution_stack"].clone();
+                wire["waiting_for"] = before["waiting_for"].clone();
+                let mut trusted = intact_trusted.clone();
+                trusted["state"] = wire.clone();
+                let mut persisted = intact_persisted.clone();
+                persisted["state"] = wire.clone();
+                let mut v1 = wire.clone();
                 assert_eq!(
                     legacy.resolution_stack.len(),
                     1,
-                    "the v1 fixture is representable without flattening"
+                    "{context}: the v1 fixture is representable without flattening"
                 );
                 let ResolutionFrame::PostReplacement(drains) =
                     legacy.resolution_stack.iter().next().unwrap()
                 else {
-                    unreachable!()
+                    panic!("{context}: the single v1 frame must be PostReplacement")
                 };
                 v1.as_object_mut().unwrap().remove("resolution_frames");
                 v1["resolution_state_version"] = 1.into();
-                v1["post_replacement_drains"] = serde_json::to_value(drains).unwrap();
-                let mut prior_typed =
-                    serde_json::to_value(ResolutionStateWire::from_game_state(legacy.clone()))
-                        .unwrap();
+                v1["post_replacement_drains"] =
+                    serde_json::to_value(drains).unwrap_or_else(|error| {
+                        panic!("{context}: actual v1 drain serialization: {error}")
+                    });
+                let mut prior_typed = wire.clone();
                 prior_typed["resolution_state_version"] = 2.into();
                 let readers = vec![
-                    serde_json::from_value::<GameState>(before.clone()).unwrap(),
-                    serde_json::from_value::<TrustedGameStateEnvelope>(
-                        serde_json::to_value(TrustedGameStateEnvelope::capture(legacy.clone()))
-                            .unwrap(),
-                    )
-                    .unwrap()
-                    .into_game_state(),
-                    PersistedGameState::capture(legacy.clone())
-                        .into_game_state()
-                        .unwrap(),
-                    serde_json::from_value::<ResolutionStateWire>(
-                        serde_json::to_value(ResolutionStateWire::from_game_state(legacy.clone()))
-                            .unwrap(),
-                    )
-                    .unwrap()
-                    .into_game_state(),
-                    serde_json::from_value::<ResolutionStateWire>(prior_typed)
-                        .unwrap()
-                        .into_game_state(),
-                    serde_json::from_value::<ResolutionStateWire>(v1)
-                        .unwrap()
-                        .into_game_state(),
+                    (
+                        "raw",
+                        serde_json::from_value::<GameState>(raw)
+                            .unwrap_or_else(|error| panic!("{context}, reader=raw: {error}")),
+                    ),
+                    (
+                        "trusted",
+                        serde_json::from_value::<TrustedGameStateEnvelope>(trusted)
+                            .unwrap_or_else(|error| panic!("{context}, reader=trusted: {error}"))
+                            .into_game_state(),
+                    ),
+                    (
+                        "persisted",
+                        serde_json::from_value::<PersistedGameState>(persisted)
+                            .unwrap_or_else(|error| {
+                                panic!("{context}, reader=persisted decode: {error}")
+                            })
+                            .into_game_state()
+                            .unwrap_or_else(|error| {
+                                panic!("{context}, reader=persisted checked restore: {error}")
+                            }),
+                    ),
+                    (
+                        "current wire",
+                        serde_json::from_value::<ResolutionStateWire>(wire)
+                            .unwrap_or_else(|error| {
+                                panic!("{context}, reader=current wire: {error}")
+                            })
+                            .into_game_state(),
+                    ),
+                    (
+                        "v2 wire",
+                        serde_json::from_value::<ResolutionStateWire>(prior_typed)
+                            .unwrap_or_else(|error| panic!("{context}, reader=v2 wire: {error}"))
+                            .into_game_state(),
+                    ),
+                    (
+                        "v1 wire",
+                        serde_json::from_value::<ResolutionStateWire>(v1)
+                            .unwrap_or_else(|error| panic!("{context}, reader=v1 wire: {error}"))
+                            .into_game_state(),
+                    ),
                 ];
-                assert_eq!(serde_json::to_value(&legacy).unwrap(), before);
-                for restored in readers {
+                assert_eq!(
+                    serde_json::to_value(&legacy).unwrap(),
+                    before,
+                    "{context}: readers preserve input"
+                );
+                for (reader, restored) in readers {
+                    let context = format!("{context}, reader={reader}");
                     let WaitingFor::CopyTargetChoice {
                         purpose:
                             CopyTargetPurpose::BecomeCopy {
@@ -10088,27 +10198,32 @@ mod tests {
                         ..
                     } = &restored.waiting_for
                     else {
-                        unreachable!()
+                        panic!("{context}: reader must restore the complete selected copy prompt")
                     };
                     assert_eq!(
                         actual, &selected,
-                        "the complete captured operation must survive recovery"
+                        "{context}: the complete captured operation must survive recovery"
                     );
                     assert_eq!(
                         restored
                             .active_post_replacement_drains()
-                            .unwrap()
+                            .unwrap_or_else(|| panic!(
+                                "{context}: missing active replacement frame"
+                            ))
                             .resident()
-                            .unwrap()
+                            .unwrap_or_else(|| panic!("{context}: missing selected resident"))
                             .source,
-                        Some(entrant)
+                        Some(entrant),
+                        "{context}: restore the actual entrant source"
                     );
                     restored
                         .resolution_stack
                         .validate(&restored.waiting_for)
-                        .unwrap();
+                        .unwrap_or_else(|error| panic!("{context}: canonical validation: {error}"));
+                    eprintln!("{context}: public copy completion");
                     complete_legacy_copy(restored, entrant, donor, hosts[0], runtime);
                 }
+                eprintln!("{context}, reader=direct materialized legacy: public copy completion");
                 complete_legacy_copy(legacy, entrant, donor, hosts[0], runtime);
             }
         }
