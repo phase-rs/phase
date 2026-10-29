@@ -5923,10 +5923,17 @@ fn build_ability_item(
         }
         _ => effect_type_name(&def.effect),
     };
+    let mut unobservable_fan_out = false;
     let supported = ability_node_gaps(def).all(|gap| match gap {
-        AbilityNodeGap::UnimplementedEffect(_) | AbilityNodeGap::UnobservableFanOutControl => false,
+        AbilityNodeGap::UnimplementedEffect(_) => false,
         // Projected on the node's own cost child (`build_cost_item`).
         AbilityNodeGap::UnimplementedCost(_) => true,
+        // Projected as its own unsupported child below, as a delayed trigger's
+        // event is: the node's effect is handled, its boundary isn't.
+        AbilityNodeGap::UnobservableFanOutControl => {
+            unobservable_fan_out = true;
+            true
+        }
     });
     let source_text = def.description.clone().or_else(|| match &*def.effect {
         Effect::Unimplemented { description, .. } => description.clone(),
@@ -6019,6 +6026,20 @@ fn build_ability_item(
         );
         child.supported &= delayed_trigger_mode_is_supported(&trigger.mode, trigger_registry);
         children.push(child);
+    }
+
+    // CR 608.2e + CR 603.10d: the unobservable fan-out boundary, as the gap
+    // `collect_ability_missing_parts` reports (`PLAYER_SCOPE_CONTROL_BOUNDARY_GAP`).
+    if unobservable_fan_out {
+        children.push(ParsedItem {
+            category: ParseCategory::Ability,
+            label: FAN_OUT_CONTROL_BOUNDARY_ITEM.to_string(),
+            source_text: def.description.clone(),
+            supported: false,
+            details: vec![],
+            children: vec![],
+            diagnoses: Vec::new(),
+        });
     }
 
     visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
@@ -7609,6 +7630,10 @@ pub fn card_face_gaps(face: &CardFace) -> Vec<String> {
 /// `multi_target_player_control_boundary`, on the exact template the driver
 /// resolves.
 pub const PLAYER_SCOPE_CONTROL_BOUNDARY_GAP: &str = "Effect:fan_out_control_boundary";
+
+/// The parse-tree item projecting that gap; `extract_gap_details` reports it as
+/// `PLAYER_SCOPE_CONTROL_BOUNDARY_GAP`.
+const FAN_OUT_CONTROL_BOUNDARY_ITEM: &str = "fan_out_control_boundary";
 
 fn fan_out_control_boundary_is_unobservable(def: &AbilityDefinition) -> bool {
     if def.player_scope.is_none() && def.multi_target.is_none() {
@@ -14562,15 +14587,19 @@ mod tests {
                     !super::fan_out_control_boundary_is_unobservable(&def),
                     "{name}: not marked unsupported"
                 );
+                let item = super::build_ability_item(
+                    &def,
+                    &super::build_trigger_registry(),
+                    &super::build_static_registry(),
+                    super::TokenStaticTraversal::Include,
+                );
                 assert!(
-                    super::build_ability_item(
-                        &def,
-                        &super::build_trigger_registry(),
-                        &super::build_static_registry(),
-                        super::TokenStaticTraversal::Include,
-                    )
-                    .supported,
-                    "{name}: its scoped node's parse item stays supported"
+                    item.supported
+                        && !item
+                            .children
+                            .iter()
+                            .any(|child| child.label == super::FAN_OUT_CONTROL_BOUNDARY_ITEM),
+                    "{name}: its scoped node is supported, with no boundary child"
                 );
             }
         }
@@ -14735,15 +14764,35 @@ mod tests {
                         ),
                         "{name}: is_ability_supported rejects the scoped node"
                     );
+                    // The boundary is projected as the node's own unsupported
+                    // child (as a delayed trigger's event is), so the node's
+                    // subtree is unsupported and its gap is the boundary, never
+                    // the node's handled effect.
+                    let item = super::build_ability_item(
+                        def,
+                        &trigger_registry,
+                        &static_registry,
+                        super::TokenStaticTraversal::Include,
+                    );
                     assert!(
-                        !super::build_ability_item(
-                            def,
-                            &trigger_registry,
-                            &static_registry,
-                            super::TokenStaticTraversal::Include,
-                        )
-                        .supported,
-                        "{name}: the scoped node's parse item is unsupported"
+                        !item.is_fully_supported()
+                            && item.children.iter().any(|child| {
+                                child.label == super::FAN_OUT_CONTROL_BOUNDARY_ITEM
+                                    && !child.supported
+                            }),
+                        "{name}: the scoped node carries the unsupported boundary child"
+                    );
+                    let handlers: Vec<String> = super::extract_gap_details(&[item.clone()])
+                        .into_iter()
+                        .map(|gap| gap.handler)
+                        .collect();
+                    assert!(
+                        handlers
+                            .iter()
+                            .any(|h| h == super::PLAYER_SCOPE_CONTROL_BOUNDARY_GAP)
+                            && !handlers.contains(&format!("Effect:{}", item.label)),
+                        "{name}: the parse-tree gap is the boundary, not {}: {handlers:?}",
+                        item.label
                     );
                 }
                 assert!(
