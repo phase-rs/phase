@@ -190,7 +190,7 @@ fn assert_empty_zone_contributes_nothing(library: usize, graveyard: usize, hand:
     assert!(!exiled.is_empty());
     // CR 609.3: an empty zone contributes nothing; the others still do.
     assert_eq!(exiled.len(), expected);
-    let (player, candidates, remaining) = free_cast_window(&waiting);
+    let (player, candidates, remaining) = free_cast_window(waiting);
     assert_eq!(player, P0);
     assert_eq!(remaining, Some(1));
     assert_eq!(sorted(candidates), sorted(exiled));
@@ -239,7 +239,7 @@ fn crabomination_offers_all_three_and_casts_one_free() {
         hand,
     } = fixture(1, 1, 1);
     let outcome = cast_crab(&mut runner, crab);
-    let (player, candidates, remaining) = free_cast_window(&outcome.final_waiting_for());
+    let (player, candidates, remaining) = free_cast_window(outcome.final_waiting_for());
     assert_eq!(player, P0);
     assert_eq!(remaining, Some(1));
     assert_eq!(
@@ -276,7 +276,7 @@ fn crabomination_decline_leaves_cards_exiled() {
         hand,
     } = fixture(1, 1, 1);
     let outcome = cast_crab(&mut runner, crab);
-    let (_, candidates, _) = free_cast_window(&outcome.final_waiting_for());
+    let (_, candidates, _) = free_cast_window(outcome.final_waiting_for());
     assert_eq!(candidates.len(), 3);
 
     runner
@@ -311,7 +311,7 @@ fn crabomination_exiled_land_is_not_offered_and_stays_exiled() {
     let outcome = cast_crab(&mut runner, crab);
 
     assert_eq!(runner.state().objects[&forest].zone, Zone::Exile);
-    let (_, candidates, _) = free_cast_window(&outcome.final_waiting_for());
+    let (_, candidates, _) = free_cast_window(outcome.final_waiting_for());
     // Reach-guard: the nonland cards are offered.
     assert_eq!(sorted(candidates.clone()), sorted(vec![gy, hand]));
     assert!(!candidates.contains(&forest));
@@ -460,7 +460,7 @@ fn crabomination_exiles_are_one_batch_for_laelia() {
     let hand = scenario.add_spell_to_hand(P1, "Hand Spell", true).id();
     let mut runner = scenario.build();
     let outcome = cast_crab(&mut runner, crab);
-    let _ = free_cast_window(&outcome.final_waiting_for());
+    let _ = free_cast_window(outcome.final_waiting_for());
     for id in [lib, gy, hand] {
         assert_eq!(runner.state().objects[&id].zone, Zone::Exile);
     }
