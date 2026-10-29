@@ -84,6 +84,8 @@ mod nested_operand_extent_tests {
             "less than or equal to",
             "greater than or equal to",
             "equal to",
+            "less than",
+            "greater than",
         ] {
             let positive = format!(
                 "with mana value {comparison} the number of lands you control from your hand"
@@ -97,6 +99,9 @@ mod nested_operand_extent_tests {
                 "lands an opponent controls from your hand",
                 "lands you controlled from your hand",
                 "lands you don't control from your hand",
+                "lands that player controls from your hand",
+                "lands they control from your hand",
+                "lands its controller controls from your hand",
                 "creatures you control that are Spirits or have from your hand",
             ] {
                 let input = format!("with mana value {comparison} the number of {operand}");
@@ -149,15 +154,30 @@ mod u14_quality_tests {
             parse_mana_value_suffix("with mana value 3 or less", &mut ctx),
             Some((FilterProp::Cmc { .. }, _))
         ));
-        for text in [
-            "creatures of the chosen color",
-            "creatures of the chosen type",
+        for (text, expected_rest, expected_filter) in [
+            (
+                "creatures of the chosen color",
+                " of the chosen color",
+                TargetFilter::Typed(TypedFilter::creature()),
+            ),
+            (
+                "creatures of the chosen type",
+                "",
+                TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::IsChosenCreatureType]),
+                ),
+            ),
         ] {
             let (filter, rest) = parse_type_phrase_folding_with_ctx(text, &mut ctx);
-            assert!(rest.is_empty(), "{text}: {rest}");
+            assert_eq!(filter, expected_filter, "{text}");
+            assert_eq!(rest, expected_rest, "{text}");
             assert!(!crate::types::ability::filter_contains_filter_prop(
                 &filter,
                 &|p| matches!(p, FilterProp::ManaValueParity { .. })
+            ));
+            assert!(!crate::types::ability::filter_contains_filter_prop(
+                &filter,
+                &|p| matches!(p, FilterProp::IsChosenColor)
             ));
         }
     }
@@ -325,7 +345,9 @@ mod prior_controller_population_tests {
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::{multispace0, one_of, satisfy, space0, space1};
-use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, success, value, verify};
+use nom::combinator::{
+    all_consuming, cut, eof, map, map_opt, not, opt, peek, success, value, verify,
+};
 use nom::multi::many0;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -4322,7 +4344,8 @@ fn parse_type_phrase_folding_core<'a>(
         }
     }
 
-    if let Some((prop, consumed)) = parse_attacking_defender_suffix(&lower[pos..]) {
+    if let Ok((rest, prop)) = parse_attacking_defender_suffix(&lower[pos..]) {
+        let consumed = lower[pos..].len() - rest.len();
         properties.push(prop);
         pos += consumed;
     }
@@ -6987,7 +7010,9 @@ fn parse_combat_relation_suffix(text: &str, ctx: &ParseContext) -> Option<(Filte
 /// postnominal "creature attacking your opponents"; both resolve to the same
 /// `Attacking { defender }` property, so the intro is stripped here rather than
 /// forking a second attacking grammar in the `that's`-clause path.
-fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
+/// A recognized but incomplete combat extent returns `Failure`, keeping a
+/// caller from retrying just its leading adjective through generic grammar.
+fn parse_attacking_defender_suffix(text: &str) -> OracleResult<'_, FilterProp> {
     let trimmed_outer = text.trim_start();
     let trimmed = opt(alt((
         tag::<_, _, OracleError<'_>>("that's "),
@@ -6998,8 +7023,10 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
     .map(|(rest, _)| rest)
     .unwrap_or(trimmed_outer);
 
-    if let Ok((rest, prop)) = parse_attacking_alone_suffix_status(trimmed) {
-        return Some((prop, text.len() - rest.len()));
+    match parse_attacking_alone_suffix_status(trimmed) {
+        Ok(parsed) => return Ok(parsed),
+        Err(nom::Err::Error(_)) => {}
+        Err(error) => return Err(error),
     }
 
     // CR 508.5: the defending-player anaphor is a separate axis from the printed
@@ -7008,8 +7035,10 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
     // `trimmed`, after the "that's "/"that is "/"that are " relative-clause intro
     // has already been stripped, which is what makes Ordruun Mentor's and Echoing
     // Assault's "that's attacking that player" work with no extra grammar.
-    if let Ok((rest, prop)) = parse_attacking_defender_anaphor(trimmed) {
-        return Some((prop, text.len() - rest.len()));
+    match parse_attacking_defender_anaphor(trimmed) {
+        Ok(parsed) => return Ok(parsed),
+        Err(nom::Err::Error(_)) => {}
+        Err(error) => return Err(error),
     }
 
     // Each row is a printed defender head, then the controller phrase that must
@@ -7044,6 +7073,9 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
             ControllerRef::Opponent,
         ),
     ];
+    // Printed heads overlap ("you" and "your opponents"), so retain a refused
+    // extent while allowing a later complete head in this same grammar to win.
+    let mut owned_failure = None;
     for (head, controller, defender) in rows {
         let matched = tag::<_, _, OracleError<'_>>(head)
             .parse(trimmed)
@@ -7066,22 +7098,31 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
             .parse(rest_trim)
             .is_ok()
             {
+                owned_failure = Some(nom::Err::Failure(nom::error::Error::new(
+                    rest,
+                    nom::error::ErrorKind::Verify,
+                )));
                 continue;
             }
             match rest.chars().next() {
                 None | Some('.') | Some(',') | Some(' ') if rest_trim.is_empty() => {
-                    return Some((
+                    return Ok((
+                        rest,
                         FilterProp::Attacking {
                             defender: Some(defender),
                         },
-                        text.len() - rest.len(),
                     ));
                 }
-                _ => {}
+                _ => {
+                    owned_failure = Some(nom::Err::Failure(nom::error::Error::new(
+                        rest,
+                        nom::error::ErrorKind::Verify,
+                    )));
+                }
             }
         }
     }
-    None
+    Err(owned_failure.unwrap_or_else(|| oracle_err(text)))
 }
 
 /// CR 506.5: "attacking alone" is a combat status distinct from merely
@@ -7089,7 +7130,7 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
 /// FilterProp::AttackingAlone.
 fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterProp> {
     let (input, _) = (tag("attacking"), space1, tag("alone")).parse(input)?;
-    let (_, _) = parse_attacking_status_clause_boundary(input)?;
+    let (_, _) = cut(parse_attacking_status_clause_boundary).parse(input)?;
     Ok((input, FilterProp::AttackingAlone))
 }
 
@@ -7177,7 +7218,7 @@ fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterPr
 /// here would add zero coverage.
 fn parse_attacking_defender_anaphor(input: &str) -> OracleResult<'_, FilterProp> {
     let (rest, _) = (tag("attacking"), space1, tag("that player")).parse(input)?;
-    let (_, _) = parse_attacking_status_clause_boundary(rest)?;
+    let (_, _) = cut(parse_attacking_status_clause_boundary).parse(rest)?;
     Ok((
         rest,
         FilterProp::Attacking {
@@ -7726,7 +7767,8 @@ pub(crate) fn parse_mana_value_suffix(
                     r.is_empty() || parse_zone_suffix(r).is_some()
                 })
         {
-            (qty, rest)
+            // Retain the source-aligned remainder whose zone was proved above.
+            (qty, rest.trim_start())
         } else {
             // CR 119.3: Generic quantity-ref RHS — extract the phrase up to the
             // next sentence-terminating punctuation and delegate to the shared
@@ -9547,9 +9589,13 @@ pub(crate) fn parse_that_clause_suffix<'a>(
     if let Some((after_intro, intro_len, negated)) = parse_relative_clause_intro(trimmed) {
         // The complete combat owner must see its defender/alone suffix before
         // the generic property parser can consume only the leading adjective.
-        let property = parse_attacking_defender_suffix(after_intro)
-            .map(|(property, consumed)| (&after_intro[consumed..], property))
-            .or_else(|| crate::types::text_grammar::parse_property_filter(after_intro).ok());
+        let property = match parse_attacking_defender_suffix(after_intro) {
+            Ok(parsed) => Some(parsed),
+            Err(nom::Err::Error(_)) => {
+                crate::types::text_grammar::parse_property_filter(after_intro).ok()
+            }
+            Err(nom::Err::Failure(_) | nom::Err::Incomplete(_)) => return None,
+        };
         if let Some((rest, property)) = property {
             if matches!(
                 property,
@@ -11771,11 +11817,11 @@ mod tests {
         let text = "attacking your opponents and/or planeswalkers they control";
         assert_eq!(
             parse_attacking_defender_suffix(text),
-            Some((
+            Ok((
+                "",
                 FilterProp::Attacking {
                     defender: Some(ControllerRef::Opponent),
                 },
-                text.len()
             ))
         );
         for declined in [
@@ -11784,11 +11830,11 @@ mod tests {
             "controlled by that player",
             "the chosen player controls",
         ] {
-            assert_eq!(
+            assert!(
                 parse_attacking_defender_suffix(&format!(
                     "attacking your opponents and/or planeswalkers {declined}"
-                )),
-                None,
+                ))
+                .is_err(),
                 "{declined:?}"
             );
         }
@@ -13314,10 +13360,39 @@ mod tests {
         assert!(!typed.properties.contains(&FilterProp::Attacking {
             defender: Some(ControllerRef::You),
         }));
+        assert!(!typed
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::Attacking { .. })));
         assert_eq!(
             remainder.trim_start(),
             "that's attacking you if it's controlled by the chosen player"
         );
+        for intro in ["that's", "that is", "that are"] {
+            for status in [
+                "attacking you",
+                "attacking your opponents",
+                "attacking alone",
+                "attacking that player",
+            ] {
+                for tail in [
+                    "if it's controlled by the chosen player",
+                    "unless it's controlled by the chosen player",
+                    "and/or blocking",
+                    "or blocking",
+                ] {
+                    let relative = format!("{intro} {status} {tail}");
+                    assert!(matches!(
+                        parse_attacking_defender_suffix(&relative),
+                        Err(nom::Err::Failure(_))
+                    ));
+                    let source = format!("creature {relative}");
+                    let (filter, remainder) = parse_type_phrase_folding(&source);
+                    assert_eq!(filter, TargetFilter::Typed(TypedFilter::creature()));
+                    assert_eq!(remainder.trim_start(), relative);
+                }
+            }
+        }
     }
 
     #[test]

@@ -113,23 +113,24 @@ where
     let found = super::primitives::scan_at_word_boundaries(input, |suffix| {
         let (_, _) = peek(tag("from ")).parse(suffix)?;
         let operand = input[..input.len() - suffix.len()].trim_end();
-        let owned_controller = super::primitives::scan_at_word_boundaries(operand, |candidate| {
-            map_opt(parse_controller_phrase, |phrase| {
-                match (phrase.subject, phrase.tense) {
-                    (ControllerSubject::Direct(controller), ControllerTense::Present)
-                        if admits_quantity_controller(&controller, phrase.form) =>
-                    {
-                        Some(controller)
-                    }
-                    _ => None,
+        // Recognition owns the attempted operand even when this quantity
+        // grammar cannot admit its controller form or bind its anaphor.
+        let attempted_controller =
+            super::primitives::scan_at_word_boundaries(operand, parse_controller_phrase);
+        let owned_controller = attempted_controller.as_ref().and_then(|phrase| {
+            match (&phrase.subject, phrase.tense) {
+                (ControllerSubject::Direct(controller), ControllerTense::Present)
+                    if admits_quantity_controller(controller, phrase.form) =>
+                {
+                    Some(controller.clone())
                 }
-            })
-            .parse(candidate)
+                _ => None,
+            }
         });
         let quantity = match all_consuming(parse_quantity_ref).parse(operand) {
             Ok((_, qty @ QuantityRef::ObjectCount { .. })) => qty,
             Ok(_) => return Err(oracle_err(input)),
-            Err(error) if owned_controller.is_some() => {
+            Err(error) if attempted_controller.is_some() => {
                 owned_failure = Some(match error {
                     nom::Err::Error(error) | nom::Err::Failure(error) => nom::Err::Failure(error),
                     nom::Err::Incomplete(needed) => nom::Err::Incomplete(needed),
@@ -403,6 +404,12 @@ mod outer_domain_quantity_tests {
             "the number of creatures you control that are unknown from your hand",
             "the number of lands you control unexplained from your hand",
             "the number of lands you control an opponent controls from your hand",
+            "the number of lands an opponent controls from your hand",
+            "the number of lands you controlled from your hand",
+            "the number of lands you don't control from your hand",
+            "the number of lands that player controls from your hand",
+            "the number of lands they control from your hand",
+            "the number of lands its controller controls from your hand",
             "the number of creatures you control that are Spirits or have from your hand",
             "the number of creatures you control that are Spirits and from your hand",
         ] {
