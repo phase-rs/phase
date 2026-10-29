@@ -8,6 +8,7 @@
 //! Floating quantities are fixed when the installing trigger resolves; entering
 //! object quantities retain their entry-time context.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::EffectKind;

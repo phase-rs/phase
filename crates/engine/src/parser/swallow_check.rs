@@ -47,7 +47,7 @@ use crate::types::ability::{
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
 };
-use crate::types::game_state::RetargetScope;
+use crate::types::game_state_kinds::RetargetScope;
 use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::{ManaCost, ManaExpiry, ManaSpellGrant};
 use crate::types::replacements::ReplacementEvent;

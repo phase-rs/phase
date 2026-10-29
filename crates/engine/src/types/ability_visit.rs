@@ -35,12 +35,13 @@
 //! that net deliberately does not (`CopyValues` is parse-unreachable).
 //!
 //! Two narrower ad-hoc walkers remain unmigrated and are candidate future
-//! consumers: `game::coverage::ability_tree_any` (which has a `_ => {}`
-//! wildcard and omits many carriers — broadening it would change the coverage
-//! report) and `game::replacement::ability_tree_creates_tokens` (which walks
-//! only `Token` / `ChooseOneOf` / `sub_ability` / `else_ability` — broadening it
-//! would change replacement behavior). Neither is migrated here, because either
-//! migration would change behavior.
+//! consumers: [`ability_tree_any`], which lives in this module verbatim but is
+//! not built on the shared walk (it has a `_ => {}` wildcard and omits many
+//! carriers — broadening it would change the coverage report), and
+//! `game::replacement::ability_tree_creates_tokens` (which walks only `Token` /
+//! `ChooseOneOf` / `sub_ability` / `else_ability` — broadening it would change
+//! replacement behavior). Neither is migrated onto the shared walk, because
+//! either migration would change behavior.
 //!
 //! The effect-axis walk is one `define_walk!` body, expanded as the shared
 //! `&Effect` walk here and as the exclusive definition-node walk in [`nodes_mut`].
@@ -83,8 +84,8 @@
 
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ContinuousModification, CopiableValues,
-    CounterSourceRider, Effect, ReplacementDefinition, ReplacementMode, StaticDefinition,
-    TargetFilter, TriggerDefinition, VoteSubject,
+    CounterSourceRider, Effect, NestedDefinitionEdge, ReplacementDefinition, ReplacementMode,
+    StaticDefinition, TargetFilter, TriggerDefinition, VoteSubject,
 };
 use std::ops::ControlFlow;
 
@@ -1587,4 +1588,78 @@ pub(crate) fn nested_definitions_name_granter(def: &StaticDefinition) -> bool {
 /// (CR 613.1f).
 pub(crate) fn token_static_grants_to_itself(def: &StaticDefinition) -> bool {
     matches!(def.affected.as_ref(), Some(TargetFilter::SelfRef))
+}
+
+/// Walk an ability definition tree, visiting all nested `AbilityDefinition`s including
+/// those embedded in compound effects (`FlipCoins`, `RollDie`, `GrantAbility`, etc.).
+/// Returns `true` if the predicate returns `true` for any node in the tree.
+///
+/// `pub(crate)`: also the single-authority walker `PerpetualGrantModification::try_from`
+/// (`types/ability.rs`) reuses to reject a `GrantAbility` whose nested tree contains
+/// `Effect::Unimplemented` -- never reimplement tree-walking at that call site.
+pub(crate) fn ability_tree_any(
+    def: &AbilityDefinition,
+    pred: &impl Fn(&AbilityDefinition) -> bool,
+) -> bool {
+    if pred(def) {
+        return true;
+    }
+    // Standard chaining: sub_ability, else_ability, mode_abilities
+    if let Some(ref sub) = def.sub_ability {
+        if ability_tree_any(sub, pred) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if ability_tree_any(else_ab, pred) {
+            return true;
+        }
+    }
+    for mode_ab in &def.mode_abilities {
+        if ability_tree_any(mode_ab, pred) {
+            return true;
+        }
+    }
+    let mut found = false;
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        found |= ability_tree_any(payload, pred);
+    });
+    if found {
+        return true;
+    }
+    // ContinuousModification::GrantAbility inside GenericEffect
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*def.effect
+    {
+        for stat in static_abilities {
+            for modif in &stat.modifications {
+                if let ContinuousModification::GrantAbility { definition } = modif {
+                    if ability_tree_any(definition, pred) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Visits the one-level executable ability payloads embedded directly in an effect.
+///
+/// Thin adapter over [`Effect::for_each_nested_definition`], the single
+/// authority for which effects carry a direct executable payload. The traversal
+/// and its exhaustiveness guarantee live in the AST layer; this wrapper exists
+/// only so coverage's many call sites keep their `impl FnMut` call style rather
+/// than each spelling out `&mut`.
+///
+/// Because the AST-layer match is exhaustive and wildcard-free, a newly added
+/// definition-carrying `Effect` variant is a compile error there — and every
+/// consumer in this module inherits that guarantee instead of needing its own
+/// arm list to be kept in sync by hand.
+pub(crate) fn visit_direct_effect_ability_payloads<'a>(
+    effect: &'a Effect,
+    mut visit: impl FnMut(NestedDefinitionEdge, &'a AbilityDefinition),
+) {
+    effect.for_each_nested_definition(&mut visit);
 }

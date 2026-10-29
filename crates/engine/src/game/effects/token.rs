@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::game_object::{
     AttachTarget, BackFaceData, DisplayIdentity, DisplaySource, GameObject,
 };

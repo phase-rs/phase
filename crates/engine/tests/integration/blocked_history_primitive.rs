@@ -12,6 +12,7 @@ use engine::game::combat::{AttackTarget, BlockHistoryPair};
 use engine::game::filter::{
     matches_target_filter, matches_target_filter_on_zone_change_record, FilterContext,
 };
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     CombatHistoryScope, CombatRelation, CombatRelationSubject, FilterProp, TargetFilter,

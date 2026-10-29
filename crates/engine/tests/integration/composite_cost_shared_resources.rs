@@ -13,6 +13,7 @@
 //! one sacrifice leg.
 
 use engine::game::casting::can_activate_ability_now;
+use engine::game::cost_payability::AbilityCostPayability;
 use engine::game::game_object::AttachTarget;
 use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
