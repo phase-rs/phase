@@ -1,5 +1,6 @@
 //! Final authority for composable per-event ledger facts.
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::TriggerDefinitionRef;
 use crate::types::game_state::{
     AbilityActivationRecord, CastOccurrence, GameState, SpellCastRecord,

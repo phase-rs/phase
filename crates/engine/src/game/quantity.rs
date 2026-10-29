@@ -14,6 +14,7 @@ use crate::game::filter::{
     shared_quality_characteristic_reads, spell_record_matches_filter,
     target_filter_characteristic_reads_at, type_filter_matches, CharacteristicKinds, FilterContext,
 };
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::speed::effective_speed;
 use crate::game::targeting::TriggeringSpell;
 use crate::types::ability::{

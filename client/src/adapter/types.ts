@@ -3243,6 +3243,8 @@ export type DebugAction =
   | { type: "LoseLife"; data: { player_id: PlayerId; amount: number } }
   | { type: "ModifyPlayerCounters"; data: { player_id: PlayerId; counter_kind: PlayerCounterKind; delta: number } }
   | { type: "ModifyEnergy"; data: { player_id: PlayerId; delta: number } }
+  | { type: "GivePlayerCounters"; data: { player_id: PlayerId; counter_kind: PlayerCounterKind; count: number } }
+  | { type: "GiveEnergy"; data: { player_id: PlayerId; count: number } }
   | { type: "AddMana"; data: { player_id: PlayerId; mana: ManaType[] } }
   | { type: "SetInfiniteMana"; data: { player_id: PlayerId; enabled: boolean } }
   | { type: "SetPhase"; data: { phase: Phase; active_player: PlayerId } }

@@ -1544,6 +1544,7 @@ fn defended_scope_uses_source_controller_anchor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         BasicLandType, ChoiceValue, ChosenSubtypeKind, ContinuousModification, ControllerRef,

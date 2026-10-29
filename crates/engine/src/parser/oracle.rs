@@ -10921,7 +10921,7 @@ fn demote_sweeps_in_ability(def: &mut AbilityDefinition) {
 ///    parse path plants one.
 /// 6. [`render_effect_descriptions`] is NOT wildcard-free over `Effect`
 ///    (duplicating `ability_visit`'s ~206-name leaf list here would be the
-///    duplication CLAUDE.md forbids; `game::coverage::ability_tree_any` is the
+///    duplication CLAUDE.md forbids; `types::ability_visit::ability_tree_any` is the
 ///    in-tree precedent). Completeness therefore rests on named standing
 ///    instruments plus one contributor obligation, across THREE distinct drift
 ///    classes. (a) A new `Effect` VARIANT: caught by

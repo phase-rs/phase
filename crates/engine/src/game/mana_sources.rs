@@ -13,6 +13,7 @@
 //! inline resolution — which is why any irreversible sub-effect (damage,
 //! life loss, sacrifice) disqualifies a source from UI-level undo.
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{cost_has_component, ManaSpendRestriction};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ControllerRef,

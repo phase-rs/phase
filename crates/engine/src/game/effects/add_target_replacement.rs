@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::quantity::{
     quantity_ref_object_scope, quantity_ref_recipient_read, resolve_quantity_with_targets,
     RecipientRead,

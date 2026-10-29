@@ -17,6 +17,7 @@
 //!
 //! [`declared_to_stored`] is the only bridge between them.
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{ResolvedAbility, TargetRef};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectIncarnationRef;
