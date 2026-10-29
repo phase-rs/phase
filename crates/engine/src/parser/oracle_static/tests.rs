@@ -34381,7 +34381,13 @@ fn compound_static_foreign_pt_grant_splits_thunderfoot_baloth() {
         let crate::parser::oracle_ir::doc::OracleNodeIr::Static(ir) = &item.node else {
             panic!("both Lieutenant subjects must remain static IR: {item:?}");
         };
-        assert_eq!(ir.source_text, normalized_source);
+        // CR 207.2c: public dispatch parses the body after the ability word;
+        // the outer item and display description retain the complete line.
+        assert_eq!(ir.source_text, "As long as you control your commander, ~ gets +2/+2 and other creatures you control get +2/+2 and have trample.");
+        assert_eq!(
+            ir.definition.description.as_deref(),
+            Some(normalized_source)
+        );
     }
     let parsed = crate::parser::oracle::lower_oracle_ir(&mut doc);
     let expected = defs
@@ -34505,11 +34511,15 @@ fn recognized_static_framing_akawalli_complete_document() {
     assert_eq!(doc.source_text, text);
     assert_eq!(doc.items.len(), 3);
     let first_end = normalized.lines().next().unwrap().len();
-    for ((item, definition), (line, start, end, ordinal)) in doc.items.iter().zip(&expected).zip([
-        (0, 0, first_end, 0),
-        (1, first_end + 1, normalized.len(), 0),
-        (1, first_end + 1, normalized.len(), 1),
-    ]) {
+    let descend_four_body = "As long as there are four or more permanent cards in your graveyard, ~ gets +2/+2 and has trample.";
+    let descend_eight_body = "As long as there are eight or more permanent cards in your graveyard, ~ gets an additional +2/+2 and can't be blocked by more than one creature.";
+    for ((item, definition), (line, start, end, ordinal, body)) in
+        doc.items.iter().zip(&expected).zip([
+            (0, 0, first_end, 0, descend_four_body),
+            (1, first_end + 1, normalized.len(), 0, descend_eight_body),
+            (1, first_end + 1, normalized.len(), 1, descend_eight_body),
+        ])
+    {
         let source = definition.description.as_deref().unwrap();
         assert_eq!(item.source.fragment(), Some(source));
         assert_eq!(
@@ -34521,7 +34531,9 @@ fn recognized_static_framing_akawalli_complete_document() {
         let crate::parser::oracle_ir::doc::OracleNodeIr::Static(ir) = &item.node else {
             panic!("every Descend companion must remain static IR: {item:?}");
         };
-        assert_eq!(ir.source_text, source);
+        // CR 207.2c: the body is the static parser's input; the labeled line
+        // remains the outer source and the complete public description.
+        assert_eq!(ir.source_text, body);
         assert_eq!(super::lower_static_ir(ir), *definition);
     }
     let parsed = crate::parser::oracle::lower_oracle_ir(&mut doc);
@@ -34545,8 +34557,64 @@ fn recognized_static_framing_keeps_unknown_labels_gates_and_tails_refused() {
     let parsed = parse_card(positive, "Conditional refusal", &[], &["Creature"], &[]);
     assert_eq!(parsed.statics, definitions);
     assert!(parsed.abilities.is_empty());
+    // CR 207.2d: this flavor label has no rules meaning. The direct static
+    // APIs only peel known frames; public dispatch validates the complete body.
+    let source = "Vigilant Sentry — Other creatures you control have vigilance.";
+    assert!(parse_static_line(source).is_none(), "{source}");
+    assert!(parse_static_line_multi(source).is_empty(), "{source}");
+    let expected = StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::Another]),
+        ))
+        .modifications(vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Vigilance,
+        }])
+        .description(source.to_owned());
+    let text = format!("{source}\nFlying");
+    let mut doc = crate::parser::oracle::parse_oracle_ir(
+        &text,
+        "Conditional refusal",
+        &["Flying".into()],
+        &["Creature".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, text);
+    assert_eq!(doc.items.len(), 2);
+    assert_eq!(doc.items[0].source.fragment(), Some(source));
+    assert_eq!(
+        doc.items[0].source.span(),
+        &crate::parser::oracle_ir::doc::OracleSourceSpan::exact(0, 0, 0, source.len(), 0)
+    );
+    assert_ne!(doc.items[0].id, doc.items[1].id);
+    assert_eq!(doc.items[1].source.fragment(), Some("Flying"));
+    assert_eq!(
+        doc.items[1].source.span(),
+        &crate::parser::oracle_ir::doc::OracleSourceSpan::exact(
+            1,
+            1,
+            source.len() + 1,
+            text.len(),
+            0,
+        )
+    );
+    let crate::parser::oracle_ir::doc::OracleNodeIr::Static(ir) = &doc.items[0].node else {
+        panic!("the complete flavor-labeled grant must remain static IR");
+    };
+    assert_eq!(
+        ir.source_text,
+        "Other creatures you control have vigilance."
+    );
+    assert_eq!(super::lower_static_ir(ir), expected);
+    let parsed = crate::parser::oracle::lower_oracle_ir(&mut doc);
+    assert_eq!(parsed.statics, vec![expected]);
+    assert_eq!(parsed.extracted_keywords, vec![Keyword::Flying]);
+    assert!(parsed.abilities.is_empty());
+    assert!(parsed.triggers.is_empty());
+    assert!(parsed.replacements.is_empty());
+
     for source in [
-        "Vigilant Sentry — Other creatures you control have vigilance.",
         "Metalcraft — As long as you cast this spell from exile, enchanted creature gets +1/+1.",
         "Metalcraft — Creatures you control can't be blocked if you control a Forest unexplained.",
     ] {
