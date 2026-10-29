@@ -486,10 +486,48 @@ pub(crate) fn validate_mana_choice_response(
 
 pub(crate) fn admitted_mana_response_matches_program(
     state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
     program: &ResolvedAbility,
     ability: &ResolvedAbility,
     prompt: &ManaChoicePrompt,
 ) -> bool {
+    let frame = if occurrence.is_some() {
+        let Ok(frame) = crate::types::game_state::checked_owned_return_result_frame(
+            state,
+            occurrence,
+            ability.return_result_process,
+        ) else {
+            return false;
+        };
+        if program.return_result_process != frame.process {
+            return false;
+        }
+        Some(frame)
+    } else {
+        None
+    };
+    let mut available = true;
+    for_each_mana_choice_response_quantity(ability, prompt, &mut |reference| {
+        if let Some(result) = reference.instruction_result_id() {
+            available &= matches!(frame.and_then(|frame| frame.results.get(&result)),
+                Some(crate::types::game_state::InstructionResult::ZoneChanges(records))
+                    if records.iter().all(crate::game::filter::departure_record_has_coherent_snapshot));
+        }
+    });
+    if !available {
+        return false;
+    }
+    // Liveness and save recovery observe a parked prompt outside execution's
+    // selector scope. Evaluate against that prompt's authenticated occurrence,
+    // preserving the actual state and every frame/program/record unchanged.
+    let mut selected_state;
+    let state = if state.active_return_result_occurrence == occurrence {
+        state
+    } else {
+        selected_state = state.clone();
+        selected_state.active_return_result_occurrence = occurrence;
+        &selected_state
+    };
     let mut current = ability.clone();
     current.sub_ability = None;
     current.else_ability = None;
@@ -642,8 +680,13 @@ fn validate_mana_choice_response_owned(
         {
             return Err(EffectError::InvalidParam("mana response does not own the active typed prompt".into()));
         }
-        let matches_program =
-            admitted_mana_response_matches_program(state, saved_program, ability, prompt);
+        let matches_program = admitted_mana_response_matches_program(
+            state,
+            occurrence,
+            saved_program,
+            ability,
+            prompt,
+        );
         if !matches_program {
             return Err(EffectError::InvalidParam(
                 "mana response is not the admitted operation and latched prompt".into(),
@@ -4216,6 +4259,61 @@ mod tests {
         assert!(runner.state().stack.is_empty());
         assert!(runner.state().resolution_stack.is_empty());
         assert!(runner.state().return_result_frames.is_empty());
+    }
+
+    #[test]
+    fn departure_parked_mana_validation_and_program_recovery_use_the_saved_selector() {
+        use crate::game::scenario::GameRunner;
+        use crate::types::actions::GameAction;
+        for shape in [0, 2, 4] {
+            let (runner, spell, _, _) = departure_dynamic_mana_runner(shape, false, false);
+            assert_eq!(runner.state().active_return_result_occurrence, None);
+            let WaitingFor::ChooseManaColor {
+                return_result_occurrence: Some(occurrence),
+                choice,
+                context: ManaChoiceContext::ResolvingEffect(ability),
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("the real paid producer must reach its owned mana response");
+            };
+            let occurrence = *occurrence;
+            let before = serde_json::to_value(runner.state()).unwrap();
+            validate_mana_choice_response(runner.state(), ability, choice, Some(occurrence))
+                .expect("read-only validation binds the saved owner outside execution");
+            assert!(
+                crate::types::game_state::live_return_result_occurrences(runner.state())
+                    .contains(&occurrence)
+            );
+            assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+            for recover_program in [false, true] {
+                let mut saved = runner.state().clone();
+                if recover_program {
+                    let frame = saved.return_result_frames.get_mut(&occurrence).unwrap();
+                    frame.admitted_program = None;
+                    frame.declarations = None;
+                }
+                let payload = serde_json::to_value(&saved).unwrap();
+                let restored: GameState = serde_json::from_value(payload)
+                    .expect("the actual installed paid program recovers its parked response");
+                assert_eq!(restored.active_return_result_occurrence, None);
+                assert!(restored.return_result_frames[&occurrence]
+                    .admitted_program
+                    .is_some());
+                let mut restored = GameRunner::from_state(restored);
+                restored
+                    .act(GameAction::ChooseManaColor {
+                        choice: ManaChoice::SingleColor(ManaType::Green),
+                        count: 1,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    restored.state().players[0].mana_pool.total(),
+                    if shape == 4 { 5 } else { 1 }
+                );
+                assert_departure_mana_completion(&restored, spell);
+            }
+        }
     }
 
     #[test]

@@ -15319,7 +15319,7 @@ fn retained_instruction_result_projection(
         })
     {
         return crate::game::effects::mana::admitted_mana_response_matches_program(
-            state, program, body, choice,
+            state, occurrence, program, body, choice,
         );
     }
     crate::game::effects::instruction_result_owned_program_projects_to(
@@ -31763,20 +31763,22 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
     fn retain_historical_recheck(node: &mut Value, qualifier: &Value) {
         match node {
             Value::Object(object) => {
-                if object.get("type").and_then(Value::as_str) == Some("ChosenDamageSource")
-                    && !object.contains_key("chooser")
-                {
-                    object.insert("chooser".into(), Value::Null);
-                    if qualifier.get("type").and_then(Value::as_str) != Some("Any") {
-                        let previous = object
-                            .get("filter")
-                            .filter(|filter| !filter.is_null())
-                            .cloned();
-                        object.insert("filter".into(), match previous {
-                            Some(previous) if previous != *qualifier => serde_json::json!({"type":"And", "filters":[previous, qualifier]}),
-                            _ => qualifier.clone(),
-                        });
+                if object.get("type").and_then(Value::as_str) == Some("ChosenDamageSource") {
+                    if !object.contains_key("chooser") {
+                        object.insert("chooser".into(), Value::Null);
+                        if qualifier.get("type").and_then(Value::as_str) != Some("Any") {
+                            let previous = object
+                                .get("filter")
+                                .filter(|filter| !filter.is_null())
+                                .cloned();
+                            object.insert("filter".into(), match previous {
+                                Some(previous) if previous != *qualifier => serde_json::json!({"type":"And", "filters":[previous, qualifier]}),
+                                _ => qualifier.clone(),
+                            });
+                        }
                     }
+                    // This tagged operand is already normalized. Its chooser,
+                    // qualifier and scalar discriminator are not child programs.
                     return;
                 }
                 let effect_type = object
@@ -31784,10 +31786,12 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                     .and_then(Value::as_str)
                     .map(str::to_owned);
                 for (key, child) in object.iter_mut() {
-                    if !crate::types::ability::is_registered_damage_source_payload(
-                        effect_type.as_deref(),
-                        key,
-                    ) {
+                    if key != "type"
+                        && !crate::types::ability::is_registered_damage_source_payload(
+                            effect_type.as_deref(),
+                            key,
+                        )
+                    {
                         retain_historical_recheck(child, qualifier);
                     }
                 }
