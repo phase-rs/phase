@@ -666,17 +666,18 @@ mod owned_continuation_tests {
                     payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 })
                 .unwrap();
-            for _ in 0..8 {
+            for step in 0..8 {
                 if matches!(
                     runner.state().waiting_for,
                     WaitingFor::ChooseFromZoneChoice { .. }
                 ) {
                     break;
                 }
-                assert!(matches!(
-                    runner.state().waiting_for,
-                    WaitingFor::Priority { .. }
-                ));
+                assert!(
+                    matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                    "choose_augment={choose_augment}; step={step}; waiting={:?}",
+                    runner.state().waiting_for
+                );
                 runner.act(GameAction::PassPriority).unwrap();
             }
             let WaitingFor::ChooseFromZoneChoice {
@@ -700,6 +701,67 @@ mod owned_continuation_tests {
             assert_eq!(runner.state().objects[&departed].zone, Zone::Exile);
             assert_eq!(runner.life(P0), 20);
             assert_eq!(runner.state().return_result_frames.len(), 1);
+            let pending = runner.state().active_ability_continuation().unwrap();
+            let occurrence = pending.return_result_occurrence;
+            let admitted = runner.state().return_result_frames[&occurrence.unwrap()]
+                .admitted_program
+                .as_deref()
+                .unwrap();
+            assert!(
+                crate::game::effects::instruction_result_owned_program_projects_to(
+                    runner.state(),
+                    occurrence,
+                    admitted,
+                    &pending.chain
+                )
+            );
+            assert!(admitted.effect_context_object.is_none());
+            let captured = pending.chain.effect_context_object.as_ref().unwrap();
+            assert_eq!(captured.object_id, departed);
+            assert_eq!(captured.lki.power, Some(3));
+            assert_eq!(
+                captured.incarnation,
+                runner.state().objects[&departed].incarnation
+            );
+            assert!(captured.binding.is_none());
+            let mut repeated_producer = admitted.clone();
+            repeated_producer.set_effect_context_object_recursive(captured.clone());
+            assert!(
+                !crate::game::effects::instruction_result_owned_program_projects_to(
+                    runner.state(),
+                    occurrence,
+                    admitted,
+                    &repeated_producer
+                )
+            );
+            let mut unfinished = runner.state().clone();
+            unfinished
+                .active_ability_continuation_frame_mut()
+                .unwrap()
+                .pending
+                .pending_return_result_producer = Some((occurrence.unwrap(), ReturnResultId(7)));
+            assert!(
+                !crate::game::effects::instruction_result_owned_program_projects_to(
+                    &unfinished,
+                    occurrence,
+                    admitted,
+                    &pending.chain
+                )
+            );
+            let mut foreign = runner.state().clone();
+            foreign
+                .return_result_frames
+                .get_mut(&occurrence.unwrap())
+                .unwrap()
+                .process = None;
+            assert!(
+                !crate::game::effects::instruction_result_owned_program_projects_to(
+                    &foreign,
+                    occurrence,
+                    admitted,
+                    &pending.chain
+                )
+            );
             let saved = serde_json::to_value(runner.state()).unwrap();
             *runner.state_mut() =
                 serde_json::from_value(saved).expect("generated augment owner restores");
@@ -715,6 +777,54 @@ mod owned_continuation_tests {
             )
             .is_err());
             assert_eq!(hostile, before);
+            for changed in ["power", "incarnation", "object"] {
+                let mut hostile = runner.state().clone();
+                let chain = &mut hostile
+                    .active_ability_continuation_frame_mut()
+                    .unwrap()
+                    .pending
+                    .chain;
+                let mut altered = chain.effect_context_object.clone().unwrap();
+                match changed {
+                    "power" => altered.lki.power = Some(99),
+                    "incarnation" => altered.incarnation += 1,
+                    "object" => altered.object_id = first_host,
+                    _ => unreachable!(),
+                }
+                // Alter every retained instruction copy consistently. The
+                // independent completed record, not internal disagreement,
+                // must reject this forged operative input.
+                chain.set_effect_context_object_recursive(altered.clone());
+                assert_eq!(
+                    chain
+                        .sub_ability
+                        .as_ref()
+                        .unwrap()
+                        .effect_context_object
+                        .as_ref(),
+                    Some(&altered)
+                );
+                let value = serde_json::to_value(&hostile).unwrap();
+                let original = value.clone();
+                assert!(
+                    serde_json::from_value::<GameState>(value.clone()).is_err(),
+                    "{changed}"
+                );
+                assert_eq!(value, original);
+                let before = hostile.clone();
+                assert!(
+                    crate::game::engine::apply(
+                        &mut hostile,
+                        P0,
+                        GameAction::SelectCards {
+                            cards: vec![selected]
+                        }
+                    )
+                    .is_err(),
+                    "{changed}"
+                );
+                assert_eq!(hostile, before, "{changed}");
+            }
             runner
                 .act(GameAction::SelectCards {
                     cards: vec![selected],

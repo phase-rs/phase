@@ -41,12 +41,13 @@ use crate::types::proposed_event::TokenAttackRequest;
 /// It does not for counter-placement continuations (Bolster, Gluntch: their
 /// `sub_ability` is an independent trailing clause), nor for a parked
 /// untargeted `TargetOnly` chooser, whose pick is the whole choice (CR 115.10a).
+/// Generated augment choices likewise select one component, not a partition.
 /// A `Stack`-timed `TargetOnly` is an ordinary wrapper and keeps the forward.
 fn continuation_forwards_unchosen_complement(chain: &ResolvedAbility) -> bool {
     use crate::types::ability::{Effect, TargetChoiceTiming};
     !matches!(
         chain.effect,
-        Effect::PutCounter { .. } | Effect::ChooseCounterKind { .. }
+        Effect::PutCounter { .. } | Effect::ChooseCounterKind { .. } | Effect::CombineHost { .. }
     ) && !(matches!(chain.effect, Effect::TargetOnly { .. })
         && chain.target_choice_timing == TargetChoiceTiming::Resolution)
 }
@@ -15618,9 +15619,9 @@ mod tests {
         );
     }
 
-    /// CR 115.10a: only a parked UNTARGETED (Resolution-timed)
-    /// `TargetOnly` chooser, and the counter-placement continuations, decline the
-    /// unchosen-complement forward; a Stack-timed `TargetOnly` wrapper after a
+    /// CR 608.2c + CR 115.10a: independent trailing instructions retain their
+    /// operands after untargeted choices, counter placement and augment choices;
+    /// a Stack-timed `TargetOnly` wrapper after a
     /// `ChooseFromZone` and an ordinary partition head keep it.
     #[test]
     fn only_untargeted_choosers_and_counter_placements_skip_the_complement_forward() {
@@ -15666,6 +15667,24 @@ mod tests {
             },
             TargetChoiceTiming::Resolution
         )));
+        let parent = chain(Effect::NoOp, TargetChoiceTiming::Resolution).sub_ability(chain(
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Fixed { value: 3 },
+            },
+            TargetChoiceTiming::Resolution,
+        ));
+        for generated in [
+            crate::game::augment::continuation_for_host_choice(&parent, ObjectId(2)),
+            crate::game::augment::continuation_for_augment_choice(
+                &parent,
+                TargetFilter::SpecificObject { id: ObjectId(3) },
+            ),
+        ] {
+            assert!(!continuation_forwards_unchosen_complement(&generated));
+            assert_eq!(generated.sub_ability, parent.sub_ability);
+            assert!(generated.sub_ability.as_ref().unwrap().targets.is_empty());
+        }
     }
 }
 

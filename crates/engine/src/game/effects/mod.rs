@@ -2877,29 +2877,10 @@ fn visit_instruction_result_program_projections_inner(
             }
         }
     }
-    for (is_sub, child) in program
-        .sub_ability
-        .iter()
-        .map(|child| (true, child))
-        .chain(program.else_ability.iter().map(|child| (false, child)))
-    {
-        if child
-            .condition
-            .as_ref()
-            .is_some_and(AbilityCondition::has_when_you_do_marker)
-            || (is_sub && program.effect.sub_ability_resolves_later(child.sub_link))
-        {
-            continue;
-        }
-        let mut child = (**child).clone();
-        project_parent_chain_context(&mut child, program, None, None);
-        if should_propagate_parent_targets(program, &child) {
-            child.replace_target_occurrences(inherited_parent_occurrences(program, &child));
-        }
-        if visit_instruction_result_program_projections_inner(&child, scoped_player, current, visit)
-        {
-            return true;
-        }
+    if visit_instruction_result_child_projections(program, &mut |child| {
+        visit_instruction_result_program_projections_inner(child, scoped_player, current, visit)
+    }) {
+        return true;
     }
     if matches!(program.effect, Effect::Investigate)
         && visit_instruction_result_program_projections_inner(
@@ -3045,6 +3026,36 @@ fn visit_instruction_result_program_projections_inner(
     found
 }
 
+fn visit_instruction_result_child_projections(
+    program: &ResolvedAbility,
+    visit: &mut impl FnMut(&ResolvedAbility) -> bool,
+) -> bool {
+    for (is_sub, child) in program
+        .sub_ability
+        .iter()
+        .map(|child| (true, child))
+        .chain(program.else_ability.iter().map(|child| (false, child)))
+    {
+        if child
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::has_when_you_do_marker)
+            || (is_sub && program.effect.sub_ability_resolves_later(child.sub_link))
+        {
+            continue;
+        }
+        let mut child = (**child).clone();
+        project_parent_chain_context(&mut child, program, None, None);
+        if should_propagate_parent_targets(program, &child) {
+            child.replace_target_occurrences(inherited_parent_occurrences(program, &child));
+        }
+        if visit(&child) {
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) fn instruction_result_program_projects_to(
     program: &ResolvedAbility,
     current: &ResolvedAbility,
@@ -3061,6 +3072,7 @@ pub(crate) fn instruction_result_owned_program_projects_to(
     current: &ResolvedAbility,
 ) -> bool {
     instruction_result_program_projects_to(program, current)
+        || instruction_result_zone_program_projects_to(state, occurrence, program, current)
         || instruction_result_coin_program_projects_to(state, occurrence, program, current)
         || instruction_result_damage_program_projects_to(program, current)
         || visit_instruction_result_program_projections_for_cursor(
@@ -3118,6 +3130,103 @@ pub(crate) fn instruction_result_owned_program_projects_to(
                 instruction_result_projection_eq(&projected, current)
             },
         )
+}
+
+fn instruction_result_zone_program_projects_to(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    program: &ResolvedAbility,
+    current: &ResolvedAbility,
+) -> bool {
+    let Ok(frame) = crate::types::game_state::checked_owned_return_result_frame(
+        state,
+        occurrence,
+        current.return_result_process,
+    ) else {
+        return false;
+    };
+    if frame.process != program.return_result_process
+        || !frame
+            .admitted_program
+            .as_deref()
+            .is_some_and(|admitted| instruction_result_projection_eq(admitted, program))
+    {
+        return false;
+    }
+    let Ok((_, declarations)) = crate::types::ability::classify_instruction_result_invocation(
+        program,
+        crate::types::ability::InstructionResultEntry::Independent,
+        None,
+    ) else {
+        return false;
+    };
+    if frame.declarations.as_ref() != Some(&declarations) {
+        return false;
+    }
+    let pending = crate::types::game_state::pending_instruction_results(
+        state,
+        occurrence,
+        current.return_result_process,
+    );
+    completed_zone_result_projects_to(program, current, frame, &pending)
+}
+
+fn completed_zone_result_projects_to(
+    program: &ResolvedAbility,
+    current: &ResolvedAbility,
+    frame: &crate::types::game_state::ReturnResultFrame,
+    pending: &HashSet<crate::types::ability::ReturnResultId>,
+) -> bool {
+    visit_instruction_result_program_projections_for_cursor(program, current, &mut |producer| {
+        let Some(result) = producer.declares_return_result else {
+            return false;
+        };
+        if pending.contains(&result)
+            || !matches!(
+                producer.effect,
+                Effect::ChangeZone { .. }
+                    | Effect::ChangeZoneAll { .. }
+                    | Effect::Bounce { .. }
+                    | Effect::BounceAll { .. }
+                    | Effect::Seek { .. }
+                    | Effect::ChooseFromZone { .. }
+                    | Effect::SearchLibrary { .. }
+                    | Effect::Dig { reveal: false, .. }
+                    | Effect::ExileTop { .. }
+                    | Effect::ExileFromTopUntil { .. }
+                    | Effect::Mill { .. }
+            )
+        {
+            return false;
+        }
+        let Some(crate::types::game_state::InstructionResult::ZoneChanges(records)) =
+            frame.results.get(&result)
+        else {
+            return false;
+        };
+        if frame.declarations.as_ref().is_none_or(|declarations| {
+            declarations.get(&result).is_none_or(|zones| {
+                zones.is_some_and(|(origin, _)| {
+                    records
+                        .iter()
+                        .any(|record| record.from_zone != Some(origin))
+                })
+            })
+        }) {
+            return false;
+        }
+        let Some(snapshot) = moved_object_context_from_completed_records(records) else {
+            return false;
+        };
+        let mut parent = producer.clone();
+        parent.set_effect_context_object_recursive(snapshot);
+        // A settled producer supplies an input to its real children. It does
+        // not become a newly executable cursor or modify the admitted root.
+        visit_instruction_result_child_projections(&parent, &mut |child| {
+            instruction_result_program_projects_to(child, current)
+                || completed_zone_result_projects_to(child, current, frame, pending)
+        })
+    })
 }
 
 fn instruction_result_damage_program_projects_to(
@@ -6390,6 +6499,44 @@ fn snapshot_for_sacrificed_object(
             ))
         }
         _ => None,
+    })
+}
+
+/// CR 400.7 + CR 608.2h: reconstruct the move-time binding from its settled
+/// record, never from the object's possibly newer live incarnation.
+fn moved_object_context_from_completed_records(
+    records: &[ZoneChangeRecord],
+) -> Option<CostPaidObjectSnapshot> {
+    if !records
+        .iter()
+        .all(crate::game::filter::departure_record_has_coherent_snapshot)
+    {
+        return None;
+    }
+    let mut eligible = records.iter().filter(|record| {
+        record.from_zone.is_some_and(|from| {
+            is_public_zone(record.to_zone) || (record.to_zone == Zone::Hand && is_public_zone(from))
+        })
+    });
+    let record = eligible.next()?;
+    if eligible.next().is_some() {
+        return None;
+    }
+    let before = record.trigger_source_context()?.identity.reference;
+    let incarnation =
+        if record.to_zone == Zone::Battlefield || record.from_zone != Some(record.to_zone) {
+            before.incarnation.checked_add(1)?
+        } else {
+            before.incarnation
+        };
+    if record.entered_incarnation != (record.to_zone == Zone::Battlefield).then_some(incarnation) {
+        return None;
+    }
+    Some(CostPaidObjectSnapshot {
+        object_id: record.object_id,
+        lki: lki_snapshot_from_zone_change_record(record),
+        incarnation,
+        binding: None,
     })
 }
 
@@ -32188,6 +32335,82 @@ mod tests {
         LibraryPosition, ParentTargetMissingReason, SearchSelectionConstraint, SpentColor,
         UNION_DEPTH_BUDGET,
     };
+
+    #[test]
+    fn completed_zone_referent_uses_the_recorded_post_move_epoch_and_full_lki() {
+        use crate::game::zones;
+        for (from, to, eligible) in [
+            (Zone::Battlefield, Zone::Exile, true),
+            (Zone::Graveyard, Zone::Battlefield, true),
+            (Zone::Battlefield, Zone::Hand, true),
+            (Zone::Library, Zone::Hand, false),
+            (Zone::Battlefield, Zone::Library, false),
+        ] {
+            let mut scenario = GameScenario::new();
+            let object = scenario.add_creature(P0, "Moved referent", 3, 4).id();
+            let mut runner = scenario.build();
+            if from != Zone::Battlefield {
+                zones::move_to_zone(runner.state_mut(), object, from, &mut Vec::new());
+            }
+            let mut events = Vec::new();
+            zones::move_to_zone(runner.state_mut(), object, to, &mut events);
+            let record = events
+                .iter()
+                .find_map(|event| match event {
+                    GameEvent::ZoneChanged { record, .. } => Some(record.as_ref().clone()),
+                    _ => None,
+                })
+                .unwrap();
+            let snapshot =
+                moved_object_context_from_completed_records(std::slice::from_ref(&record));
+            assert_eq!(snapshot.is_some(), eligible, "{from:?}->{to:?}");
+            assert_eq!(
+                snapshot,
+                moved_object_context_from_events(runner.state(), &events)
+            );
+            let Some(snapshot) = snapshot else {
+                continue;
+            };
+            assert_eq!(snapshot.lki, lki_snapshot_from_zone_change_record(&record));
+            assert_eq!(
+                snapshot.incarnation,
+                runner.state().objects[&object].incarnation
+            );
+            assert!(snapshot.binding.is_none());
+            zones::move_to_zone(runner.state_mut(), object, Zone::Command, &mut Vec::new());
+            assert_ne!(
+                snapshot.incarnation,
+                runner.state().objects[&object].incarnation
+            );
+            assert_eq!(
+                moved_object_context_from_completed_records(std::slice::from_ref(&record)),
+                Some(snapshot)
+            );
+            assert!(
+                moved_object_context_from_completed_records(&[record.clone(), record.clone()])
+                    .is_none()
+            );
+            let mut malformed = record.clone();
+            malformed.entered_incarnation = Some(u64::MAX);
+            assert!(moved_object_context_from_completed_records(&[malformed]).is_none());
+            let mut malformed = record.clone();
+            malformed
+                .trigger_source_context
+                .as_mut()
+                .unwrap()
+                .identity
+                .reference
+                .incarnation = u64::MAX;
+            assert!(moved_object_context_from_completed_records(&[malformed]).is_none());
+            let mut malformed = record.clone();
+            malformed.power = Some(99);
+            assert!(moved_object_context_from_completed_records(&[malformed]).is_none());
+            let mut legacy = record;
+            legacy.trigger_source_context = None;
+            assert!(moved_object_context_from_completed_records(&[legacy]).is_none());
+        }
+        assert!(moved_object_context_from_completed_records(&[]).is_none());
+    }
 
     /// CR 608.2c + CR 702.185a: pending parent delivery retains its dependent tail.
     #[test]
