@@ -1743,6 +1743,77 @@ fn departure_public_program_runner_with_setup(
     engine::types::identifiers::ObjectId,
     Vec<engine::types::identifiers::ObjectId>,
 ) {
+    departure_public_program_runner_with_state_setup(
+        foreign_seven,
+        empty,
+        players,
+        build,
+        |state, victims, _, _| setup(state, victims),
+    )
+}
+
+// Arena payloads belong to the actual runner, after scenario construction and
+// before the same paid cast. The placeholder is replaced before any action.
+fn departure_public_program_runner_with_arena(
+    foreign_seven: bool,
+    empty: bool,
+    players: u8,
+    setup: impl FnOnce(
+        &mut engine::game::scenario::GameScenario,
+    ) -> Vec<engine::types::identifiers::ObjectId>,
+    build: impl FnOnce(
+        &mut GameState,
+        &[engine::types::identifiers::ObjectId],
+    ) -> engine::types::ability::AbilityDefinition,
+) -> (
+    engine::game::scenario::GameRunner,
+    engine::types::identifiers::ObjectId,
+    Vec<engine::types::identifiers::ObjectId>,
+) {
+    departure_public_program_runner_with_state_setup(
+        foreign_seven,
+        empty,
+        players,
+        |scenario| {
+            (
+                engine::types::ability::AbilityDefinition::new(
+                    engine::types::ability::AbilityKind::Spell,
+                    engine::types::ability::Effect::NoOp,
+                ),
+                setup(scenario),
+            )
+        },
+        |state, _, spell, subjects| {
+            let program = build(state, subjects);
+            let object = state.objects.get_mut(&spell).unwrap();
+            std::sync::Arc::make_mut(&mut object.abilities)[0].sub_ability =
+                Some(Box::new(program));
+            object.base_abilities = object.abilities.clone();
+        },
+    )
+}
+
+fn departure_public_program_runner_with_state_setup(
+    foreign_seven: bool,
+    empty: bool,
+    players: u8,
+    build: impl FnOnce(
+        &mut engine::game::scenario::GameScenario,
+    ) -> (
+        engine::types::ability::AbilityDefinition,
+        Vec<engine::types::identifiers::ObjectId>,
+    ),
+    setup: impl FnOnce(
+        &mut GameState,
+        &[engine::types::identifiers::ObjectId],
+        engine::types::identifiers::ObjectId,
+        &[engine::types::identifiers::ObjectId],
+    ),
+) -> (
+    engine::game::scenario::GameRunner,
+    engine::types::identifiers::ObjectId,
+    Vec<engine::types::identifiers::ObjectId>,
+) {
     use engine::game::scenario::{GameScenario, P0, P1};
     use engine::types::ability::{AbilityDefinition, TargetFilter};
     use engine::types::identifiers::ObjectId;
@@ -1829,7 +1900,7 @@ fn departure_public_program_runner_with_setup(
         runner.state_mut().next_return_result_occurrence_id = 19;
         runner.state_mut().next_return_result_process_id = 37;
     }
-    setup(runner.state_mut(), &victims);
+    setup(runner.state_mut(), &victims, spell, &subjects);
     runner.cast(spell).commit();
     for _ in 0..8 {
         if !matches!(
@@ -3162,6 +3233,41 @@ fn departure_rewrite_lookup(
     }
 }
 
+// An arena leaf's JSON is opaque. The positive privacy witness follows only
+// handles actually serialized by that retained payload into its actual state.
+fn departure_assert_retained_arena_process(state: &GameState, payload: &serde_json::Value) {
+    fn contains_private_rider(state: &GameState, value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if let Some(handle) = fields
+                    .get("runtime_execute")
+                    .filter(|value| value.is_number())
+                {
+                    let handle = serde_json::from_value(handle.clone()).unwrap();
+                    let rider = state.replacement_continuation(handle).unwrap();
+                    if rider.return_result_process
+                        == Some(engine::types::game_state::ReturnResultProcessId(901))
+                        || contains_private_rider(state, &serde_json::to_value(rider).unwrap())
+                    {
+                        return true;
+                    }
+                }
+                fields
+                    .values()
+                    .any(|child| contains_private_rider(state, child))
+            }
+            serde_json::Value::Array(values) => values
+                .iter()
+                .any(|child| contains_private_rider(state, child)),
+            _ => false,
+        }
+    }
+    assert!(
+        contains_private_rider(state, payload),
+        "retained payload reaches its actual P901 arena body"
+    );
+}
+
 // Actual public prompts plus supplemental typed stored custody use the same redactor.
 fn departure_assert_private_result_views(state: &GameState) {
     use engine::game::derived_views::ClientGameStateRef;
@@ -3207,6 +3313,10 @@ fn departure_assert_private_result_views(state: &GameState) {
             };
             assert!(projected.return_result_frames.is_empty());
             assert!(projected.resolution_stack.is_empty());
+            assert_eq!(
+                projected.replacement_continuations.len(),
+                authoritative.replacement_continuations.len()
+            );
             let plain = serde_json::to_value(&projected).unwrap();
             let wire =
                 serde_json::to_value(&ClientGameStateRef::wrap(authoritative, viewer)).unwrap();
@@ -13264,15 +13374,12 @@ fn departure_raw_replacements_refuse_outer_imports_before_producers_and_install_
                 assert_eq!(runner.state().next_return_result_process_id, 1);
             } else {
                 assert_eq!(runner.state().objects[&victim].zone, Zone::Exile);
-                let substitute = runner
+                let installed = runner
                     .state()
                     .pending_damage_replacements
                     .last()
-                    .expect("the actual carrier installed its later raw executable")
-                    .runtime_execute
-                    .as_deref()
-                    .unwrap()
-                    .clone();
+                    .expect("the actual carrier installed its later raw executable");
+                let substitute = runner.state().replacement_rider(installed).unwrap().clone();
                 assert!(substitute.return_result_process.is_none());
                 // Supplemental independent invocation of the actually installed body;
                 // public selection and priority complete its nested local process.
@@ -13637,10 +13744,11 @@ fn departure_independent_replacement_import_is_refused_before_the_outer_producer
     let victim = scenario.add_creature(P0, "Centaur Courser", 3, 3).id();
     let mut root = departure_exile_definition(7);
     let snapshot = build_resolved_from_def(&departure_gain_definition(7, P0), victim, P0);
-    let mut replacement = engine::types::ability::ReplacementDefinition::new(
-        engine::types::replacements::ReplacementEvent::DamageDone,
-    );
-    replacement.runtime_execute = Some(Box::new(snapshot));
+    let spell = scenario
+        .add_spell_to_hand(P0, "Supplemental invalid replacement import", false)
+        .id();
+    let mut runner = scenario.build();
+    let replacement = departure_hostile_runtime_replacement(runner.state_mut(), snapshot);
     root.sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::AddTargetReplacement {
@@ -13648,11 +13756,9 @@ fn departure_independent_replacement_import_is_refused_before_the_outer_producer
             target: engine::types::ability::TargetFilter::None,
         },
     )));
-    let spell = scenario
-        .add_spell_to_hand(P0, "Supplemental invalid replacement import", false)
-        .with_ability_definition(root.clone())
-        .id();
-    let mut runner = scenario.build();
+    let object = runner.state_mut().objects.get_mut(&spell).unwrap();
+    object.abilities = std::sync::Arc::new(vec![root.clone()]);
+    object.base_abilities = object.abilities.clone();
     let mut state = runner.state().clone();
     let before = serde_json::to_value(&state).unwrap();
     let mut events = Vec::new();
@@ -13672,7 +13778,54 @@ fn departure_independent_replacement_import_is_refused_before_the_outer_producer
     departure_assert_program_complete(&runner, spell, 0, 0);
 }
 
-fn departure_independent_replacement_cost(mode: u8) -> engine::types::ability::AbilityCost {
+fn departure_runtime_replacement(
+    state: &mut GameState,
+    snapshot: engine::types::ability::ResolvedAbility,
+) -> engine::types::ability::ReplacementDefinition {
+    let mut replacement = engine::types::ability::ReplacementDefinition::new(
+        engine::types::replacements::ReplacementEvent::DamageDone,
+    );
+    replacement.runtime_execute = Some(
+        state
+            .install_replacement_continuation(snapshot)
+            .expect("the actual state admits this complete independent rider"),
+    );
+    replacement
+}
+
+fn departure_hostile_runtime_replacement(
+    state: &mut GameState,
+    snapshot: engine::types::ability::ResolvedAbility,
+) -> engine::types::ability::ReplacementDefinition {
+    let before = state.replacement_continuations.clone();
+    let error = state
+        .install_replacement_continuation(snapshot.clone())
+        .expect_err("an independent rider cannot import the outer invocation's result");
+    assert!(format!("{error:?}").contains("foreign instruction-result dependency"));
+    assert_eq!(state.replacement_continuations, before);
+    let valid = build_resolved_from_def(
+        &engine::types::ability::AbilityDefinition::new(
+            engine::types::ability::AbilityKind::Spell,
+            engine::types::ability::Effect::NoOp,
+        ),
+        snapshot.source_id,
+        snapshot.controller,
+    );
+    let replacement = departure_runtime_replacement(state, valid);
+    // Deliberately corrupt an authentically installed entry to exercise public
+    // preflight, independently of the installer's already-proved rejection.
+    let handle = replacement.runtime_execute.unwrap();
+    *state
+        .replacement_continuations
+        .get_mut(usize::try_from(handle.0).unwrap())
+        .unwrap() = snapshot;
+    replacement
+}
+
+fn departure_independent_replacement_cost(
+    state: &mut GameState,
+    mode: u8,
+) -> engine::types::ability::AbilityCost {
     use engine::game::scenario::P0;
     use engine::types::ability::*;
     use engine::types::game_state::ReturnResultProcessId;
@@ -13699,10 +13852,11 @@ fn departure_independent_replacement_cost(mode: u8) -> engine::types::ability::A
     };
     let mut snapshot = build_resolved_from_def(&definition, ObjectId(0), P0);
     snapshot.return_result_process = Some(ReturnResultProcessId(901));
-    let mut replacement = engine::types::ability::ReplacementDefinition::new(
-        engine::types::replacements::ReplacementEvent::DamageDone,
-    );
-    replacement.runtime_execute = Some(Box::new(snapshot));
+    let replacement = if mode == 3 {
+        departure_hostile_runtime_replacement(state, snapshot)
+    } else {
+        departure_runtime_replacement(state, snapshot)
+    };
     AbilityCost::EffectCost {
         effect: Box::new(Effect::AddTargetReplacement {
             replacement: Box::new(replacement),
@@ -13720,24 +13874,30 @@ fn departure_payment_ordinary_alternative_and_decline_do_not_import_independent_
     use engine::types::game_state::WaitingFor;
     for mode in 0..3 {
         for decline in [false, true] {
-            let (mut runner, spell, _) = departure_public_program_runner(false, false, 2, |_| {
-                let mut body = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
-                body.unless_pay = Some(UnlessPayModifier {
-                    cost: AbilityCost::OneOf {
-                        costs: vec![
-                            AbilityCost::PayLife {
-                                amount: QuantityExpr::Fixed { value: 1 },
-                            },
-                            departure_independent_replacement_cost(mode),
-                        ],
-                    },
-                    payer: TargetFilter::Controller,
-                });
-                let mut tail = departure_dual_reader();
-                tail.sub_link = SubAbilityLink::SequentialSibling;
-                body.sub_ability = Some(Box::new(tail));
-                (body, vec![])
-            });
+            let (mut runner, spell, _) = departure_public_program_runner_with_arena(
+                false,
+                false,
+                2,
+                |_| vec![],
+                |state, _| {
+                    let mut body = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+                    body.unless_pay = Some(UnlessPayModifier {
+                        cost: AbilityCost::OneOf {
+                            costs: vec![
+                                AbilityCost::PayLife {
+                                    amount: QuantityExpr::Fixed { value: 1 },
+                                },
+                                departure_independent_replacement_cost(state, mode),
+                            ],
+                        },
+                        payer: TargetFilter::Controller,
+                    });
+                    let mut tail = departure_dual_reader();
+                    tail.sub_link = SubAbilityLink::SequentialSibling;
+                    body.sub_ability = Some(Box::new(tail));
+                    body
+                },
+            );
             let WaitingFor::UnlessPaymentChooseCost {
                 player,
                 costs,
@@ -13755,7 +13915,7 @@ fn departure_payment_ordinary_alternative_and_decline_do_not_import_independent_
             let Effect::AddTargetReplacement { replacement, .. } = effect.as_ref() else {
                 unreachable!()
             };
-            let retained = replacement.runtime_execute.as_ref().unwrap();
+            let retained = runner.state().replacement_rider(replacement).unwrap();
             assert_eq!(
                 retained.return_result_process,
                 Some(engine::types::game_state::ReturnResultProcessId(901))
@@ -13799,6 +13959,7 @@ fn departure_nested_mana_payment_custody_validates_its_independent_replacement_a
             // The public source/payment pause is real; only the retained cost
             // alternative is changed here to isolate the second validator.
             let mut custody = reached.state().clone();
+            let independent = departure_independent_replacement_cost(&mut custody, 0);
             let Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. }) =
                 &mut custody.pending_cost_move_resume
             else {
@@ -13810,7 +13971,7 @@ fn departure_nested_mana_payment_custody_validates_its_independent_replacement_a
                 _ => unreachable!(),
             };
             **cost = AbilityCost::OneOf {
-                costs: vec![(**cost).clone(), departure_independent_replacement_cost(0)],
+                costs: vec![(**cost).clone(), independent],
             };
             let saved = serde_json::to_value(&custody).unwrap();
             let loaded: GameState = serde_json::from_value(saved.clone())
@@ -14311,7 +14472,7 @@ fn departure_prevention_rider_installs_unbound_and_gets_a_fresh_process_on_actua
                 let before_damage_process = runner.state().next_return_result_process_id;
                 let shield = runner.state().pending_damage_replacements.last().unwrap();
                 assert_eq!(shield.runtime_execute.is_some(), !sibling);
-                if let Some(rider) = &shield.runtime_execute {
+                if let Some(rider) = runner.state().replacement_rider(shield) {
                     assert!(rider.return_result_process.is_none());
                 }
                 departure_assert_program_complete(
@@ -14366,6 +14527,14 @@ fn departure_unselected_replacement_cost_and_installed_rider_cannot_import_the_c
             let mut scenario = GameScenario::new();
             scenario.at_phase(Phase::PreCombatMain);
             let victim = (!empty).then(|| scenario.add_creature(P0, "Centaur Courser", 3, 3).id());
+            let spell = scenario
+                .add_spell_to_hand(
+                    P0,
+                    "Supplemental independent payload refuses caller import",
+                    false,
+                )
+                .id();
+            let mut runner = scenario.build();
             let mut body = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
             if cost_payload {
                 body.unless_pay = Some(UnlessPayModifier {
@@ -14374,7 +14543,7 @@ fn departure_unselected_replacement_cost_and_installed_rider_cannot_import_the_c
                             AbilityCost::PayLife {
                                 amount: QuantityExpr::Fixed { value: 1 },
                             },
-                            departure_independent_replacement_cost(3),
+                            departure_independent_replacement_cost(runner.state_mut(), 3),
                         ],
                     },
                     payer: TargetFilter::Controller,
@@ -14396,15 +14565,9 @@ fn departure_unselected_replacement_cost_and_installed_rider_cannot_import_the_c
             }
             let mut root = departure_exile_definition(7);
             root.sub_ability = Some(Box::new(body));
-            let spell = scenario
-                .add_spell_to_hand(
-                    P0,
-                    "Supplemental independent payload refuses caller import",
-                    false,
-                )
-                .with_ability_definition(root.clone())
-                .id();
-            let mut runner = scenario.build();
+            let object = runner.state_mut().objects.get_mut(&spell).unwrap();
+            object.abilities = std::sync::Arc::new(vec![root.clone()]);
+            object.base_abilities = object.abilities.clone();
             let mut state = runner.state().clone();
             let before = serde_json::to_value(&state).unwrap();
             let mut events = vec![];
@@ -14983,7 +15146,6 @@ fn departure_raw_runtime_replacement_rejects_caller_import_before_install_and_ru
             replacement.shield_kind = ShieldKind::Prevention {
                 amount: PreventionAmount::All,
             };
-            replacement.runtime_execute = Some(Box::new(runtime));
             let mut root = departure_exile_definition(7);
             let Effect::ChangeZoneAll { target, .. } = root.effect.as_mut() else {
                 unreachable!()
@@ -15018,6 +15180,20 @@ fn departure_raw_runtime_replacement_rejects_caller_import_before_install_and_ru
                 ))
                 .id();
             let mut runner = scenario.build();
+            let installed = if imported {
+                departure_hostile_runtime_replacement(runner.state_mut(), runtime)
+            } else {
+                departure_runtime_replacement(runner.state_mut(), runtime)
+            };
+            let Effect::AddTargetReplacement { replacement, .. } =
+                root.sub_ability.as_mut().unwrap().effect.as_mut()
+            else {
+                unreachable!()
+            };
+            replacement.runtime_execute = installed.runtime_execute;
+            let object = runner.state_mut().objects.get_mut(&spell).unwrap();
+            object.abilities = std::sync::Arc::new(vec![root.clone()]);
+            object.base_abilities = object.abilities.clone();
             if imported {
                 let mut state = runner.state().clone();
                 let before = serde_json::to_value(&state).unwrap();
@@ -15089,16 +15265,21 @@ fn departure_raw_runtime_replacement_rejects_caller_import_before_install_and_ru
 }
 
 fn departure_retained_replacement_definition(
+    state: &mut GameState,
     mode: u8,
 ) -> engine::types::ability::AbilityDefinition {
     use engine::types::ability::*;
-    let AbilityCost::EffectCost { effect } = departure_independent_replacement_cost(mode) else {
+    let AbilityCost::EffectCost { effect } = departure_independent_replacement_cost(state, mode)
+    else {
         unreachable!()
     };
     AbilityDefinition::new(AbilityKind::Activated, *effect)
 }
 
-fn departure_retained_replacement_values(mode: u8) -> engine::types::ability::CopiableValues {
+fn departure_retained_replacement_values(
+    state: &mut GameState,
+    mode: u8,
+) -> engine::types::ability::CopiableValues {
     use engine::types::ability::*;
     use std::sync::Arc;
     CopiableValues {
@@ -15111,7 +15292,7 @@ fn departure_retained_replacement_values(mode: u8) -> engine::types::ability::Co
         loyalty: None,
         printed_loyalty: None,
         keywords: vec![],
-        abilities: Arc::new(vec![departure_retained_replacement_definition(mode)]),
+        abilities: Arc::new(vec![departure_retained_replacement_definition(state, mode)]),
         trigger_definitions: Arc::new(vec![]),
         trigger_printed_origins: Arc::new(vec![]),
         replacement_definitions: Arc::new(vec![]),
@@ -15127,16 +15308,22 @@ fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms
     use engine::game::derived_views::ClientGameStateRef;
     use engine::game::scenario::P0;
     use engine::types::ability::*;
-    use engine::types::replacements::ReplacementEvent;
     use engine::types::triggers::TriggerMode;
     for arm in 0..7 {
         for mode in [0, 2] {
-            let (mut runner, spell, subjects) =
-                departure_public_program_runner(false, false, 2, |scenario| {
+            let (mut runner, spell, subjects) = departure_public_program_runner_with_arena(
+                false,
+                false,
+                2,
+                |scenario| {
                     let recipient = scenario
                         .add_artifact_from_oracle(P0, "Supplemental continuous recipient", "")
                         .id();
-                    let definition = departure_retained_replacement_definition(mode);
+                    vec![recipient]
+                },
+                |state, subjects| {
+                    let recipient = subjects[0];
+                    let definition = departure_retained_replacement_definition(state, mode);
                     let modification = match arm {
                         0 => ContinuousModification::GrantAbility {
                             definition: Box::new(definition),
@@ -15147,13 +15334,10 @@ fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms
                             ),
                         },
                         2 => {
-                            let mut replacement =
-                                ReplacementDefinition::new(ReplacementEvent::DamageDone);
-                            replacement.runtime_execute = Some(Box::new(build_resolved_from_def(
-                                &definition,
-                                recipient,
-                                P0,
-                            )));
+                            let replacement = departure_runtime_replacement(
+                                state,
+                                build_resolved_from_def(&definition, recipient, P0),
+                            );
                             ContinuousModification::GrantReplacement {
                                 replacement: Box::new(replacement),
                             }
@@ -15168,7 +15352,7 @@ fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms
                             ),
                         },
                         4 => ContinuousModification::CopyValues {
-                            values: Box::new(departure_retained_replacement_values(mode)),
+                            values: Box::new(departure_retained_replacement_values(state, mode)),
                             display: engine::game::game_object::DisplayIdentity {
                                 display_source: Default::default(),
                                 printed_ref: None,
@@ -15178,19 +15362,19 @@ fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms
                         },
                         5 => ContinuousModification::RemoveKeyword {
                             keyword: engine::types::keywords::Keyword::CumulativeUpkeep(
-                                departure_independent_replacement_cost(mode),
+                                departure_independent_replacement_cost(state, mode),
                             ),
                         },
                         6 => ContinuousModification::AddStaticMode {
                             mode: StaticMode::CastWithAlternativeCost {
-                                cost: departure_independent_replacement_cost(mode),
+                                cost: departure_independent_replacement_cost(state, mode),
                                 timing_permission: None,
                                 frequency: Default::default(),
                             },
                         },
                         _ => unreachable!(),
                     };
-                    let body = AbilityDefinition::new(
+                    AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::GenericEffect {
                             static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
@@ -15200,9 +15384,9 @@ fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms
                             target: None,
                             end_cost: None,
                         },
-                    );
-                    (body, vec![recipient])
-                });
+                    )
+                },
+            );
             departure_assert_program_complete(&runner, spell, 0, 0);
             assert_eq!(runner.state().objects[&subjects[0]].zone, Zone::Battlefield);
             assert_eq!(
@@ -15212,9 +15396,7 @@ fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms
             );
             let authoritative = serde_json::to_value(runner.state()).unwrap();
             let retained = &authoritative["transient_continuous_effects"];
-            assert!(retained
-                .to_string()
-                .contains("\"return_result_process\":901"));
+            departure_assert_retained_arena_process(runner.state(), retained);
             *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
             assert_eq!(serde_json::to_value(runner.state()).unwrap(), authoritative);
             departure_assert_private_result_views(runner.state());
@@ -15263,18 +15445,15 @@ fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms
     }
 }
 
-fn departure_nested_runtime_replacement_cost() -> engine::types::ability::AbilityCost {
+fn departure_nested_runtime_replacement_cost(
+    state: &mut GameState,
+) -> engine::types::ability::AbilityCost {
     use engine::game::scenario::P0;
     use engine::types::ability::*;
     use engine::types::identifiers::ObjectId;
-    use engine::types::replacements::ReplacementEvent;
-    let definition = departure_retained_replacement_definition(0);
-    let mut replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone);
-    replacement.runtime_execute = Some(Box::new(build_resolved_from_def(
-        &definition,
-        ObjectId(0),
-        P0,
-    )));
+    let definition = departure_retained_replacement_definition(state, 0);
+    let replacement =
+        departure_runtime_replacement(state, build_resolved_from_def(&definition, ObjectId(0), P0));
     AbilityCost::EffectCost {
         effect: Box::new(Effect::AddTargetReplacement {
             replacement: Box::new(replacement),
@@ -15289,7 +15468,6 @@ fn departure_public_cost_keyword_face_and_copiable_supplements_redact_nested_run
     use engine::game::scenario::P0;
     use engine::types::ability::*;
     use engine::types::keywords::*;
-    use engine::types::replacements::ReplacementEvent;
     use engine::types::triggers::TriggerMode;
     use std::sync::Arc;
     for additional in 0..4 {
@@ -15303,7 +15481,7 @@ fn departure_public_cost_keyword_face_and_copiable_supplements_redact_nested_run
                 )
             });
         departure_assert_program_complete(&runner, spell, 0, 0);
-        let cost = departure_nested_runtime_replacement_cost();
+        let cost = departure_nested_runtime_replacement_cost(runner.state_mut());
         let keywords = vec![
             Keyword::CumulativeUpkeep(cost.clone()),
             Keyword::Escalate(cost.clone()),
@@ -15331,19 +15509,17 @@ fn departure_public_cost_keyword_face_and_copiable_supplements_redact_nested_run
             3 => AdditionalCost::Required(cost.clone()),
             _ => unreachable!(),
         };
-        let definition = departure_retained_replacement_definition(0);
+        let definition = departure_retained_replacement_definition(runner.state_mut(), 0);
         let trigger = TriggerDefinition::new(TriggerMode::SpellCast).execute(definition.clone());
         let static_definition = StaticDefinition::new(StaticMode::Continuous).modifications(vec![
             ContinuousModification::GrantAbility {
                 definition: Box::new(definition.clone()),
             },
         ]);
-        let mut replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone);
-        replacement.runtime_execute = Some(Box::new(build_resolved_from_def(
-            &definition,
-            subjects[0],
-            P0,
-        )));
+        let replacement = departure_runtime_replacement(
+            runner.state_mut(),
+            build_resolved_from_def(&definition, subjects[0], P0),
+        );
         // Supplemental typed retained faces/costs on a real public object after
         // a paid producer's retirement; no natural face-switch/payment claim.
         let object = runner.state_mut().objects.get_mut(&subjects[0]).unwrap();
@@ -15393,7 +15569,7 @@ fn departure_public_cost_keyword_face_and_copiable_supplements_redact_nested_run
             base_statics: object.base_static_definitions.clone(),
             base_replacements: object.base_replacement_definitions.clone(),
         });
-        let mut values = departure_retained_replacement_values(0);
+        let mut values = departure_retained_replacement_values(runner.state_mut(), 0);
         values.prepare_face = Some(Arc::new(prepare_face));
         values.keywords = keywords;
         runner
@@ -15470,7 +15646,10 @@ fn departure_current_and_stored_free_cast_riders_keep_public_payload_without_pri
             member_pool: vec![spell],
             enters_with_modifications: PendingEntersModifications {
                 modifications: vec![ContinuousModification::GrantAbility {
-                    definition: Box::new(departure_retained_replacement_definition(0)),
+                    definition: Box::new(departure_retained_replacement_definition(
+                        runner.state_mut(),
+                        0,
+                    )),
                 }],
                 cast_filter: None,
             },
@@ -15893,14 +16072,21 @@ fn departure_actual_emitted_mana_units_keep_grants_order_and_pips_while_all_view
     use engine::types::ability::*;
     use engine::types::keywords::Keyword;
     use engine::types::mana::{ManaColor, ManaCost, ManaSpellGrant, ManaType};
-    let (mut runner, spell, subjects) =
-        departure_public_program_runner(false, false, 2, |scenario| {
+    let (mut runner, spell, subjects) = departure_public_program_runner_with_arena(
+        false,
+        false,
+        2,
+        |scenario| {
             let marker = scenario
                 .add_spell_to_hand(P0, "Supplemental usable grant-bearing mana", false)
                 .with_mana_cost(ManaCost::generic(2))
                 .with_ability_definition(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp))
                 .id();
-            let keyword = Keyword::CumulativeUpkeep(departure_independent_replacement_cost(0));
+            vec![marker]
+        },
+        |state, _| {
+            let keyword =
+                Keyword::CumulativeUpkeep(departure_independent_replacement_cost(state, 0));
             let filter = TargetFilter::Typed({
                 let mut typed = TypedFilter::default();
                 typed.properties.push(FilterProp::WithKeyword {
@@ -15924,26 +16110,24 @@ fn departure_actual_emitted_mana_units_keep_grants_order_and_pips_while_all_view
                 },
                 ManaSpellGrant::TriggerOnSpend {
                     filter: TargetFilter::Typed(TypedFilter::creature()),
-                    ability: Box::new(departure_retained_replacement_definition(0)),
+                    ability: Box::new(departure_retained_replacement_definition(state, 0)),
                 },
             ];
-            (
-                AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::Mana {
-                        produced: ManaProduction::Fixed {
-                            colors: vec![ManaColor::Green, ManaColor::Blue],
-                            contribution: ManaContribution::Base,
-                        },
-                        restrictions: vec![],
-                        grants,
-                        expiry: None,
-                        target: None,
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green, ManaColor::Blue],
+                        contribution: ManaContribution::Base,
                     },
-                ),
-                vec![marker],
+                    restrictions: vec![],
+                    grants,
+                    expiry: None,
+                    target: None,
+                },
             )
-        });
+        },
+    );
     departure_assert_program_complete(&runner, spell, 0, 0);
     let units: Vec<_> = runner.state().players[0].mana_pool.units().collect();
     assert_eq!(units.len(), 2);
@@ -15955,12 +16139,7 @@ fn departure_actual_emitted_mana_units_keep_grants_order_and_pips_while_all_view
         .iter()
         .all(|unit| unit.grants.len() == 4 && unit.source_id == spell && unit.pip_id.0 != 0));
     assert_ne!(units[0].pip_id, units[1].pip_id);
-    assert!(
-        serde_json::to_string(&units)
-            .unwrap()
-            .contains("\"return_result_process\":901"),
-        "actual production copied the independent snapshots into real pool units"
-    );
+    departure_assert_retained_arena_process(runner.state(), &serde_json::to_value(&units).unwrap());
     let authoritative = serde_json::to_value(runner.state()).unwrap();
     *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
     departure_assert_private_result_views(runner.state());
@@ -16020,16 +16199,13 @@ fn departure_public_history_lki_and_chosen_keyword_custody_keeps_public_spine_wi
     use engine::types::identifiers::ObjectId;
     use engine::types::keywords::Keyword;
     use engine::types::mana::{ManaCost, ManaType, ManaUnit};
-    let keyword = Keyword::CumulativeUpkeep(departure_independent_replacement_cost(0));
     let mut scenario = GameScenario::new();
     scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
     let public_source = scenario
         .add_artifact_from_oracle(P0, "Supplemental public record source", "")
-        .with_keyword(keyword.clone())
         .id();
     let spell = scenario
         .add_spell_to_hand(P0, "Supplemental actual keyword history producer", true)
-        .with_keyword(keyword.clone())
         .with_mana_cost(ManaCost::generic(1))
         .with_ability_definition(AbilityDefinition::new(
             AbilityKind::Spell,
@@ -16046,6 +16222,15 @@ fn departure_public_history_lki_and_chosen_keyword_custody_keeps_public_spine_wi
         vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])],
     );
     let mut runner = scenario.build();
+    let keyword = Keyword::CumulativeUpkeep(departure_independent_replacement_cost(
+        runner.state_mut(),
+        0,
+    ));
+    for id in [public_source, spell] {
+        let object = runner.state_mut().objects.get_mut(&id).unwrap();
+        object.keywords.push(keyword.clone());
+        object.base_keywords = object.keywords.clone();
+    }
     runner.cast(spell).resolve();
     departure_assert_program_complete(&runner, spell, -1, 0);
     assert!(runner.state().spells_cast_this_turn_by_player[&P0]
@@ -16225,19 +16410,19 @@ fn departure_public_history_lki_and_chosen_keyword_custody_keeps_public_spine_wi
 }
 
 // Supplemental canonical payload constructors: no printed-card or replacement-payment claim.
-fn departure_opaque_replacement_cost(mode: u8) -> engine::types::ability::AbilityCost {
+fn departure_opaque_replacement_cost(
+    state: &mut GameState,
+    mode: u8,
+) -> engine::types::ability::AbilityCost {
     use engine::types::ability::*;
     if mode != 4 {
-        return departure_independent_replacement_cost(mode);
+        return departure_independent_replacement_cost(state, mode);
     }
     let mut body = departure_exile_definition(7);
     body.sub_ability = Some(Box::new(departure_gain_definition(7, PlayerId(0))));
     let mut snapshot = build_resolved_from_def(&body, ObjectId(0), PlayerId(0));
     snapshot.return_result_process = Some(engine::types::game_state::ReturnResultProcessId(901));
-    let mut replacement = engine::types::ability::ReplacementDefinition::new(
-        engine::types::replacements::ReplacementEvent::DamageDone,
-    );
-    replacement.runtime_execute = Some(Box::new(snapshot));
+    let replacement = departure_runtime_replacement(state, snapshot);
     AbilityCost::EffectCost {
         effect: Box::new(Effect::AddTargetReplacement {
             replacement: Box::new(replacement),
@@ -16273,27 +16458,33 @@ fn departure_opaque_token_spec() -> engine::types::proposed_event::TokenSpec {
     }
 }
 
-fn departure_opaque_filter(mode: u8) -> engine::types::ability::TargetFilter {
+fn departure_opaque_filter(
+    state: &mut GameState,
+    mode: u8,
+) -> engine::types::ability::TargetFilter {
     use engine::types::ability::*;
     TargetFilter::Typed({
         let mut filter = TypedFilter::default();
         filter.properties.push(FilterProp::WithKeyword {
             value: engine::types::keywords::Keyword::CumulativeUpkeep(
-                departure_opaque_replacement_cost(mode),
+                departure_opaque_replacement_cost(state, mode),
             ),
         });
         filter
     })
 }
 
-fn departure_opaque_conditions(mode: u8) -> Vec<engine::types::ability::DelayedTriggerCondition> {
+fn departure_opaque_conditions(
+    state: &mut GameState,
+    mode: u8,
+) -> Vec<engine::types::ability::DelayedTriggerCondition> {
     use engine::types::ability::*;
     use engine::types::phase::Phase;
     use engine::types::triggers::TriggerMode;
-    let filter = departure_opaque_filter(mode);
+    let filter = departure_opaque_filter(state, mode);
     let mut matcher = TriggerDefinition::new(TriggerMode::SpellCast).valid_card(filter.clone());
     matcher.unless_pay = Some(UnlessPayModifier {
-        cost: departure_opaque_replacement_cost(mode),
+        cost: departure_opaque_replacement_cost(state, mode),
         payer: filter.clone(),
     });
     vec![
@@ -16339,6 +16530,7 @@ fn departure_opaque_conditions(mode: u8) -> Vec<engine::types::ability::DelayedT
 }
 
 fn departure_opaque_payloads(
+    state: &mut GameState,
     mode: u8,
     face: &engine::game::game_object::BackFaceData,
 ) -> Vec<engine::types::ability::Effect> {
@@ -16346,8 +16538,9 @@ fn departure_opaque_payloads(
     use engine::types::replacements::ReplacementEvent;
     use engine::types::triggers::TriggerMode;
     use std::sync::Arc;
-    let keyword =
-        engine::types::keywords::Keyword::CumulativeUpkeep(departure_opaque_replacement_cost(mode));
+    let keyword = engine::types::keywords::Keyword::CumulativeUpkeep(
+        departure_opaque_replacement_cost(state, mode),
+    );
     let body = if mode == 4 {
         let mut body = departure_exile_definition(7);
         body.sub_ability = Some(Box::new(departure_gain_definition(7, PlayerId(0))));
@@ -16396,7 +16589,7 @@ fn departure_opaque_payloads(
         },
         ContinuousModification::CopyValues {
             values: Box::new({
-                let mut values = departure_retained_replacement_values(2);
+                let mut values = departure_retained_replacement_values(state, 2);
                 values.abilities = Arc::new(vec![]);
                 values.keywords = vec![keyword.clone()];
                 values
@@ -16429,7 +16622,7 @@ fn departure_opaque_payloads(
         }
     }
     for leaf in 0..3 {
-        let mut values = departure_retained_replacement_values(2);
+        let mut values = departure_retained_replacement_values(state, 2);
         values.abilities = Arc::new(vec![]);
         if leaf == 0 {
             values.keywords = vec![keyword.clone()];
@@ -16438,7 +16631,8 @@ fn departure_opaque_payloads(
             copied_face.abilities.clear();
             copied_face.keywords.clear();
             if leaf == 1 {
-                let AbilityCost::EffectCost { effect } = departure_opaque_replacement_cost(mode)
+                let AbilityCost::EffectCost { effect } =
+                    departure_opaque_replacement_cost(state, mode)
                 else {
                     unreachable!()
                 };
@@ -16447,7 +16641,7 @@ fn departure_opaque_payloads(
                     .push(AbilityDefinition::new(AbilityKind::Activated, *effect));
             } else {
                 copied_face.additional_cost = Some(AdditionalCost::Required(
-                    departure_opaque_replacement_cost(mode),
+                    departure_opaque_replacement_cost(state, mode),
                 ));
             }
             values.prepare_face = Some(Arc::new(copied_face));
@@ -16469,7 +16663,7 @@ fn departure_opaque_payloads(
             end_cost: None,
         });
     }
-    for condition in departure_opaque_conditions(mode) {
+    for condition in departure_opaque_conditions(state, mode) {
         effects.push(Effect::CreateDelayedTrigger {
             condition: condition.clone(),
             effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
@@ -16500,25 +16694,29 @@ fn departure_opaque_installed_payloads_refuse_before_any_producer_and_preserve_i
         let face = engine::game::printed_cards::snapshot_object_face(
             &fixture.state().objects[&face_source],
         );
-        for (slot, effect) in departure_opaque_payloads(mode, &face)
-            .into_iter()
-            .enumerate()
-        {
+        // Ten token arms, three copied-value leaves and eleven conditions on
+        // each of two routes retain the same 35-member matrix.
+        for slot in 0..35 {
             let mut scenario = GameScenario::new();
             scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
             let victim = scenario.add_creature(P0, "Centaur Courser", 3, 3).id();
-            let mut root = departure_exile_definition(7);
-            root.sub_ability = Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)));
             let spell = scenario
                 .add_spell_to_hand(P0, "Supplemental opaque installer", false)
                 .with_mana_cost(ManaCost::generic(1))
-                .with_ability_definition(root.clone())
                 .id();
             scenario.with_mana_pool(
                 P0,
                 vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])],
             );
             let mut runner = scenario.build();
+            let mut payloads = departure_opaque_payloads(runner.state_mut(), mode, &face);
+            assert_eq!(payloads.len(), 35);
+            let effect = payloads.remove(slot);
+            let mut root = departure_exile_definition(7);
+            root.sub_ability = Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)));
+            let object = runner.state_mut().objects.get_mut(&spell).unwrap();
+            object.abilities = std::sync::Arc::new(vec![root.clone()]);
+            object.base_abilities = object.abilities.clone();
             let mut state = runner.state().clone();
             let before = serde_json::to_value(&state).unwrap();
             let mut events = vec![];
@@ -16564,49 +16762,11 @@ fn departure_both_replacement_token_specs_install_real_later_triggers_with_priva
     use engine::types::replacements::ReplacementEvent;
     use engine::types::triggers::TriggerMode;
     for ensure in [false, true] {
-        let (mut runner, spell, subjects) =
-            departure_public_program_runner(false, false, 2, |scenario| {
-                let mut spec = departure_opaque_token_spec();
-                spec.characteristics
-                    .keywords
-                    .push(Keyword::CumulativeUpkeep(
-                        departure_independent_replacement_cost(0),
-                    ));
-                let trigger = TriggerDefinition::new(TriggerMode::SpellCast)
-                    .valid_card(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)))
-                    .execute(departure_selected_local_body(true, false));
-                spec.static_abilities.push(
-                    StaticDefinition::new(StaticMode::Continuous)
-                        .affected(TargetFilter::SelfRef)
-                        .modifications(vec![
-                            ContinuousModification::GrantTrigger {
-                                trigger: Box::new(trigger),
-                            },
-                            ContinuousModification::GrantAbility {
-                                definition: Box::new(departure_retained_replacement_definition(0)),
-                            },
-                        ]),
-                );
-                // Retained duration matcher/cost/filter custody is tested before the token event;
-                // no claim that UntilEvent is a newly implemented token-sacrifice scheduler.
-                spec.sacrifice_at = Some(Duration::UntilEvent {
-                    event: Box::new({
-                        let mut event = TriggerDefinition::new(TriggerMode::SpellCast)
-                            .valid_card(departure_opaque_filter(0));
-                        event.unless_pay = Some(UnlessPayModifier {
-                            cost: departure_independent_replacement_cost(0),
-                            payer: departure_opaque_filter(0),
-                        });
-                        event
-                    }),
-                });
-                let mut replacement = ReplacementDefinition::new(ReplacementEvent::CreateToken)
-                    .token_owner_scope(ControllerRef::You);
-                if ensure {
-                    replacement.ensure_token_specs = Some(vec![spec]);
-                } else {
-                    replacement.additional_token_spec = Some(Box::new(spec));
-                }
+        let (mut runner, spell, subjects) = departure_public_program_runner_with_arena(
+            false,
+            false,
+            2,
+            |scenario| {
                 let token = scenario
                     .add_spell_to_hand(P0, "Supplemental real token event", false)
                     .with_ability_definition(AbilityDefinition::new(
@@ -16638,17 +16798,61 @@ fn departure_both_replacement_token_specs_install_real_later_triggers_with_priva
                         Effect::NoOp,
                     ))
                     .id();
-                (
-                    AbilityDefinition::new(
-                        AbilityKind::Spell,
-                        Effect::AddTargetReplacement {
-                            replacement: Box::new(replacement),
-                            target: TargetFilter::None,
-                        },
-                    ),
-                    vec![token, marker],
+                vec![token, marker]
+            },
+            |state, _| {
+                let mut spec = departure_opaque_token_spec();
+                spec.characteristics
+                    .keywords
+                    .push(Keyword::CumulativeUpkeep(
+                        departure_independent_replacement_cost(state, 0),
+                    ));
+                let trigger = TriggerDefinition::new(TriggerMode::SpellCast)
+                    .valid_card(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)))
+                    .execute(departure_selected_local_body(true, false));
+                spec.static_abilities.push(
+                    StaticDefinition::new(StaticMode::Continuous)
+                        .affected(TargetFilter::SelfRef)
+                        .modifications(vec![
+                            ContinuousModification::GrantTrigger {
+                                trigger: Box::new(trigger),
+                            },
+                            ContinuousModification::GrantAbility {
+                                definition: Box::new(departure_retained_replacement_definition(
+                                    state, 0,
+                                )),
+                            },
+                        ]),
+                );
+                // Retained duration matcher/cost/filter custody is tested before the token event;
+                // no claim that UntilEvent is a newly implemented token-sacrifice scheduler.
+                spec.sacrifice_at = Some(Duration::UntilEvent {
+                    event: Box::new({
+                        let mut event = TriggerDefinition::new(TriggerMode::SpellCast)
+                            .valid_card(departure_opaque_filter(state, 0));
+                        event.unless_pay = Some(UnlessPayModifier {
+                            cost: departure_independent_replacement_cost(state, 0),
+                            payer: departure_opaque_filter(state, 0),
+                        });
+                        event
+                    }),
+                });
+                let mut replacement = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                    .token_owner_scope(ControllerRef::You);
+                if ensure {
+                    replacement.ensure_token_specs = Some(vec![spec]);
+                } else {
+                    replacement.additional_token_spec = Some(Box::new(spec));
+                }
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::AddTargetReplacement {
+                        replacement: Box::new(replacement),
+                        target: TargetFilter::None,
+                    },
                 )
-            });
+            },
+        );
         departure_assert_program_complete(&runner, spell, 0, 0);
         assert_eq!(runner.state().pending_damage_replacements.len(), 1);
         let installed = &runner.state().pending_damage_replacements[0];
@@ -16660,9 +16864,10 @@ fn departure_both_replacement_token_specs_install_real_later_triggers_with_priva
         assert_eq!(spec.characteristics.keywords.len(), 1);
         assert_eq!(spec.static_abilities.len(), 1);
         let authoritative = serde_json::to_value(runner.state()).unwrap();
-        assert!(authoritative["pending_damage_replacements"]
-            .to_string()
-            .contains("\"return_result_process\":901"));
+        departure_assert_retained_arena_process(
+            runner.state(),
+            &authoritative["pending_damage_replacements"],
+        );
         *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
         departure_assert_private_result_views(runner.state());
         for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
@@ -16784,18 +16989,25 @@ fn departure_layered_copy_retains_keywords_prepare_face_and_later_independent_ac
     let mut face =
         engine::game::printed_cards::snapshot_object_face(&fixture.state().objects[&face_source]);
     face.layout_kind = Some(engine::types::card::LayoutKind::Prepare);
-    face.additional_cost = Some(AdditionalCost::Required(
-        departure_independent_replacement_cost(0),
-    ));
     let artifact_types = fixture.state().objects[&face_source].card_types.clone();
     let mut retained_snapshot = None;
-    let (mut runner, spell, subjects) =
-        departure_public_program_runner(false, false, 2, |scenario| {
+    let (mut runner, spell, subjects) = departure_public_program_runner_with_arena(
+        false,
+        false,
+        2,
+        |scenario| {
             let recipient = scenario
                 .add_artifact_from_oracle(P0, "Supplemental layered recipient", "")
                 .id();
+            vec![recipient]
+        },
+        |state, subjects| {
+            let recipient = subjects[0];
+            face.additional_cost = Some(AdditionalCost::Required(
+                departure_independent_replacement_cost(state, 0),
+            ));
             // Typed face setup; real resolution installs both leaves before layers apply the copy.
-            let mut values = departure_retained_replacement_values(0);
+            let mut values = departure_retained_replacement_values(state, 0);
             values.card_types = artifact_types.clone();
             values.prepare_face = Some(Arc::new(face.clone()));
             let mut snapshot =
@@ -16810,32 +17022,29 @@ fn departure_layered_copy_retains_keywords_prepare_face_and_later_independent_ac
                 },
             )]);
             values.keywords = vec![Keyword::CumulativeUpkeep(
-                departure_independent_replacement_cost(0),
+                departure_independent_replacement_cost(state, 0),
             )];
-            // snapshot_object_face requires the real scenario object after build; supply it below using the existing setup callback instead.
-            (
-                AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::GenericEffect {
-                        static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
-                            .affected(TargetFilter::SpecificObject { id: recipient })
-                            .modifications(vec![ContinuousModification::CopyValues {
-                                values: Box::new(values),
-                                display: engine::game::game_object::DisplayIdentity {
-                                    display_source: Default::default(),
-                                    printed_ref: None,
-                                    token_image_ref: None,
-                                    token_art: None,
-                                },
-                            }])],
-                        duration: Some(Duration::UntilEndOfTurn),
-                        target: None,
-                        end_cost: None,
-                    },
-                ),
-                vec![recipient],
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
+                        .affected(TargetFilter::SpecificObject { id: recipient })
+                        .modifications(vec![ContinuousModification::CopyValues {
+                            values: Box::new(values),
+                            display: engine::game::game_object::DisplayIdentity {
+                                display_source: Default::default(),
+                                printed_ref: None,
+                                token_image_ref: None,
+                                token_art: None,
+                            },
+                        }])],
+                    duration: Some(Duration::UntilEndOfTurn),
+                    target: None,
+                    end_cost: None,
+                },
             )
-        });
+        },
+    );
     runner
         .state_mut()
         .epic_effects
@@ -16863,9 +17072,7 @@ fn departure_layered_copy_retains_keywords_prepare_face_and_later_independent_ac
     assert!(saved["epic_effects"]
         .to_string()
         .contains("\"return_result_process\":901"));
-    assert!(saved["transient_continuous_effects"]
-        .to_string()
-        .contains("\"return_result_process\":901"));
+    departure_assert_retained_arena_process(runner.state(), &saved["transient_continuous_effects"]);
     *runner.state_mut() = serde_json::from_value(saved.clone()).unwrap();
     departure_assert_private_result_views(runner.state());
     for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
@@ -16945,11 +17152,11 @@ fn departure_actual_delayed_conditions_and_return_timing_keep_local_snapshots_pr
     // Actual installations cover the filter-bearing conditions; embedded matchers
     // carry filters (not execute bodies). All remaining variants have typed custody below.
     for route in [false, true] {
-        let (mut runner, spell, subjects) =
-            departure_public_program_runner(false, false, 2, |scenario| {
-                let condition = DelayedTriggerCondition::WhenDies {
-                    filter: departure_opaque_filter(0),
-                };
+        let (mut runner, spell, subjects) = departure_public_program_runner_with_arena(
+            false,
+            false,
+            2,
+            |scenario| {
                 if route {
                     let marker = scenario
                         .add_spell_to_hand(P0, "Supplemental returned spell", false)
@@ -16960,41 +17167,49 @@ fn departure_actual_delayed_conditions_and_return_timing_keep_local_snapshots_pr
                         .id();
                     let host = scenario
                         .add_artifact_from_oracle(P0, "Supplemental ReturnTo stamper", "")
-                        .with_trigger_definition(
-                            TriggerDefinition::new(TriggerMode::SpellCast)
-                                .valid_card(TargetFilter::SpecificObject { id: marker })
-                                .execute(AbilityDefinition::new(
-                                    AbilityKind::Spell,
-                                    Effect::ExileResolvingSpellInsteadOfGraveyard {
-                                        on_exile: Some(ExiledSpellRider::ReturnTo {
-                                            destination: Zone::Hand,
-                                            timing: condition,
-                                        }),
-                                    },
-                                )),
-                        )
                         .id();
-                    (
-                        AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
-                        vec![marker, host],
-                    )
+                    vec![marker, host]
                 } else {
-                    (
-                        AbilityDefinition::new(
+                    vec![]
+                }
+            },
+            |state, subjects| {
+                let condition = DelayedTriggerCondition::WhenDies {
+                    filter: departure_opaque_filter(state, 0),
+                };
+                if route {
+                    let trigger = TriggerDefinition::new(TriggerMode::SpellCast)
+                        .valid_card(TargetFilter::SpecificObject { id: subjects[0] })
+                        .execute(AbilityDefinition::new(
                             AbilityKind::Spell,
-                            Effect::CreateDelayedTrigger {
-                                condition,
-                                effect: Box::new(AbilityDefinition::new(
-                                    AbilityKind::Spell,
-                                    Effect::NoOp,
-                                )),
-                                uses_tracked_set: false,
+                            Effect::ExileResolvingSpellInsteadOfGraveyard {
+                                on_exile: Some(ExiledSpellRider::ReturnTo {
+                                    destination: Zone::Hand,
+                                    timing: condition,
+                                }),
                             },
-                        ),
-                        vec![],
+                        ));
+                    state
+                        .objects
+                        .get_mut(&subjects[1])
+                        .unwrap()
+                        .push_printed_trigger(trigger);
+                    AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)
+                } else {
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::CreateDelayedTrigger {
+                            condition,
+                            effect: Box::new(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::NoOp,
+                            )),
+                            uses_tracked_set: false,
+                        },
                     )
                 }
-            });
+            },
+        );
         departure_assert_program_complete(&runner, spell, 0, 0);
         if route {
             runner.cast(subjects[0]).commit();
@@ -17018,11 +17233,11 @@ fn departure_actual_delayed_conditions_and_return_timing_keep_local_snapshots_pr
                 Some(ExiledSpellRider::ReturnTo { .. })
             ));
             let stamped = serde_json::to_value(runner.state()).unwrap();
-            assert!(serde_json::to_string(
-                &runner.state().objects[&subjects[0]].exile_from_stack_rider
-            )
-            .unwrap()
-            .contains("\"return_result_process\":901"));
+            departure_assert_retained_arena_process(
+                runner.state(),
+                &serde_json::to_value(&runner.state().objects[&subjects[0]].exile_from_stack_rider)
+                    .unwrap(),
+            );
             *runner.state_mut() = serde_json::from_value(stamped.clone()).unwrap();
             departure_assert_private_result_views(runner.state());
             for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
@@ -17082,9 +17297,7 @@ fn departure_actual_delayed_conditions_and_return_timing_keep_local_snapshots_pr
             DelayedTriggerCondition::WhenDies { .. }
         ));
         let authoritative = serde_json::to_value(runner.state()).unwrap();
-        assert!(authoritative["delayed_triggers"]
-            .to_string()
-            .contains("\"return_result_process\":901"));
+        departure_assert_retained_arena_process(runner.state(), &authoritative["delayed_triggers"]);
         *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
         departure_assert_private_result_views(runner.state());
         for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
@@ -17120,7 +17333,8 @@ fn departure_actual_delayed_conditions_and_return_timing_keep_local_snapshots_pr
         }
         assert_eq!(serde_json::to_value(runner.state()).unwrap(), authoritative);
         // Explicit typed-custody supplements for all 11 shapes / 3 embedded-trigger slots.
-        for condition in departure_opaque_conditions(0) {
+        let conditions = departure_opaque_conditions(runner.state_mut(), 0);
+        for condition in conditions {
             let mut supplement = runner.state().clone();
             supplement.delayed_triggers[0].condition = condition;
             let original = serde_json::to_value(&supplement).unwrap();
@@ -17143,9 +17357,6 @@ fn departure_public_departed_spell_object_keeps_its_pending_cast_trigger_and_red
     scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
     let spell = scenario
         .add_spell_to_hand(P0, "Supplemental public countered spell", false)
-        .with_keyword(Keyword::CumulativeUpkeep(
-            departure_independent_replacement_cost(0),
-        ))
         .with_ability_definition(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp))
         .id();
     let watcher = scenario
@@ -17169,6 +17380,13 @@ fn departure_public_departed_spell_object_keeps_its_pending_cast_trigger_and_red
                 )),
         );
     let mut runner = scenario.build();
+    let keyword = Keyword::CumulativeUpkeep(departure_independent_replacement_cost(
+        runner.state_mut(),
+        0,
+    ));
+    let object = runner.state_mut().objects.get_mut(&spell).unwrap();
+    object.keywords.push(keyword);
+    object.base_keywords = object.keywords.clone();
     runner.cast(spell).commit();
     for _ in 0..12 {
         if runner.state().departed_stack_spells.contains_key(&spell) {
@@ -17197,9 +17415,10 @@ fn departure_public_departed_spell_object_keeps_its_pending_cast_trigger_and_red
     assert_eq!(departed.object.keywords.len(), 1);
     assert_eq!(departed.entry.id, spell);
     let authoritative = serde_json::to_value(runner.state()).unwrap();
-    assert!(serde_json::to_string(&departed.object)
-        .unwrap()
-        .contains("\"return_result_process\":901"));
+    departure_assert_retained_arena_process(
+        runner.state(),
+        &serde_json::to_value(&departed.object).unwrap(),
+    );
     *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
     departure_assert_private_result_views(runner.state());
     for viewer in [Some(P0), Some(P1), None] {
@@ -17297,8 +17516,15 @@ fn departure_actual_aura_host_pause_projects_the_parked_entrant_without_private_
     let aura = scenario.add_enchantment_from_oracle(P1, "Fylgja", "Enchant creature\nThis Aura enters with four healing counters on it.\nRemove a healing counter from this Aura: Prevent the next 1 damage that would be dealt to enchanted creature this turn.\n{2}{W}: Put a healing counter on this Aura.")
         .with_subtypes(vec!["Aura"])
         .with_keyword(Keyword::Enchant(TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))))
-        .with_keyword(Keyword::CumulativeUpkeep(departure_independent_replacement_cost(0))).id();
+        .id();
     let mut runner = scenario.build();
+    let keyword = Keyword::CumulativeUpkeep(departure_independent_replacement_cost(
+        runner.state_mut(),
+        0,
+    ));
+    let object = runner.state_mut().objects.get_mut(&aura).unwrap();
+    object.keywords.push(keyword);
+    object.base_keywords = object.keywords.clone();
     runner
         .state_mut()
         .objects
@@ -17329,9 +17555,10 @@ fn departure_actual_aura_host_pause_projects_the_parked_entrant_without_private_
     assert_eq!(parked.aura_id, copy);
     assert_eq!(parked.entrant.name, "Fylgja");
     assert_eq!(parked.entrant.color, vec![ManaColor::Blue]);
-    assert!(serde_json::to_string(&parked.entrant)
-        .unwrap()
-        .contains("\"return_result_process\":901"));
+    departure_assert_retained_arena_process(
+        runner.state(),
+        &serde_json::to_value(&parked.entrant).unwrap(),
+    );
     let authoritative = serde_json::to_value(runner.state()).unwrap();
     *runner.state_mut() = serde_json::from_value(authoritative.clone()).unwrap();
     departure_assert_private_result_views(runner.state());
