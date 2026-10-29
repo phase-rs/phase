@@ -29821,7 +29821,7 @@ mod tests {
                 That planeswalker enters with an additional loyalty counter on it."
             );
             let parsed = parse_oracle_text(&line, "Filler", &[], &["Sorcery".to_string()], &[]);
-            assert_whole_line_gap(&parsed, &line);
+            assert_whole_line_gap(&parsed, &normalize_card_name_refs(&line, "Filler"));
         }
         for tail in [
             " and with haste.",
