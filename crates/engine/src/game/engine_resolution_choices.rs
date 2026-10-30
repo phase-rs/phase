@@ -15484,7 +15484,8 @@ mod random_result_resolution_context_tests {
                 .unwrap();
             state.rng = GameRng::seed_from_u64(seed);
         }
-        let ability = ResolvedAbility::new(effect, vec![], source, P0);
+        let mut ability = ResolvedAbility::new(effect, vec![], source, P0);
+        crate::game::ability_utils::materialize_coin_branches(&mut ability);
         match boundary {
             Boundary::Coin => {
                 effects::flip_coin::resolve(&mut state, &ability, &mut vec![]).unwrap()

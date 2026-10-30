@@ -2148,10 +2148,17 @@ fn synthetic_thumb_legacy_v9_does_not_invent_departure_authority() {
                 .unwrap();
             value["resolution_frames"] = frames;
             value["resolution_state_version"] = serde_json::json!(9);
-            serde_json::from_value::<PersistedGameState>(value)
-                .unwrap()
-                .into_game_state()
-                .unwrap()
+            // CR 601.2c + CR 608.2b: a v9 coin frame cannot prove the outcome bindings
+            // announced at cast, so the v11 wire refuses it instead of resuming it under
+            // historical authority.
+            let error = serde_json::from_value::<PersistedGameState>(value)
+                .expect_err("a v9 coin frame is refused")
+                .to_string();
+            assert!(
+                error.contains("RESTORE_INCOMPATIBLE_COIN_BRANCH_BINDINGS:"),
+                "{error}"
+            );
+            continue;
         } else {
             serde_json::from_value::<GameState>(value).unwrap()
         };
@@ -2515,7 +2522,11 @@ fn synthetic_scoped_actor_survives_identity_transfer_without_borrowing_foreign_h
         )));
         // Represents a player-scope iteration: its actor is P1 even though
         // the triggering source's captured controller remains P0.
-        let mut flip = ResolvedAbility::new(flip_to(branch), vec![], source, P1);
+        let mut flip = engine::game::ability_utils::build_resolved_from_def(
+            &AbilityDefinition::new(AbilityKind::Spell, flip_to(branch)),
+            source,
+            P1,
+        );
         flip.set_scoped_player_recursive(P1);
         pin(&mut run.runner, coin_seed(&[true]));
         flip_coin::resolve(run.runner.state_mut(), &flip, &mut run.events).unwrap();
