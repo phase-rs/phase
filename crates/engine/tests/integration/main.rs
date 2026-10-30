@@ -141,6 +141,7 @@ mod bring_the_ending_corrupted_instead_branch_5683;
 mod bring_to_light_free_cast_2880;
 mod broken_bond_land_prompt;
 mod burning_eye_zubera_damage_threshold;
+mod burning_rune_demon_exact_count_search;
 mod cait_sith_fortune_teller;
 mod calamity_of_the_titans_reveal_cost;
 mod call_damage_control_modal_return;

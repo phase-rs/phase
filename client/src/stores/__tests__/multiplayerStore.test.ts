@@ -2146,6 +2146,7 @@ describe("multiplayerStore", () => {
       type: "SetKind",
       data: {
         seatIndex: 1,
+        expectedKind: { type: "WaitingHuman" },
         kind: {
           type: "Ai",
           data: { difficulty: "Hard", deck: { type: "Random" } },
@@ -2156,6 +2157,7 @@ describe("multiplayerStore", () => {
       type: "SetKind",
       data: {
         seatIndex: 3,
+        expectedKind: { type: "WaitingHuman" },
         kind: {
           type: "Ai",
           data: { difficulty: "Easy", deck: { type: "Named", data: "My Deck" } },
