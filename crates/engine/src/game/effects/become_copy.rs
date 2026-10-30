@@ -1222,6 +1222,7 @@ mod tests {
             token.is_token = true;
             token.display_source = crate::game::game_object::DisplaySource::Token;
             token.token_image_ref = Some(token_ref.clone());
+            token.install_display_identity_as_base(&token.display_identity());
         }
         // Copier: a real nontoken card with its own printed identity.
         let copier_id = create_creature(&mut state, 2, PlayerId(0), "Mockingbird", 1, 1);
@@ -1306,6 +1307,7 @@ mod tests {
             token.is_token = true;
             token.display_source = crate::game::game_object::DisplaySource::Token;
             token.token_image_ref = None;
+            token.install_display_identity_as_base(&token.display_identity());
             token.token_art = Some(source_art.clone());
         }
         let copier_id = create_creature(&mut state, 2, PlayerId(0), "Mockingbird", 1, 1);

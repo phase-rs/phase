@@ -1659,6 +1659,9 @@ export interface GameObject {
    *  image is unavailable. Absent for non-predefined objects. */
   token_rules_text?: string;
   token_image_ref?: TokenImageRef | null;
+  /** Retained origin metadata; absence means unavailable legacy knowledge. */
+  base_display_source?: "Card" | "Token" | null;
+  base_token_image_ref?: TokenImageRef | null;
   token_art?: TokenArtDescriptor | null;
   source_related_token_ids?: string[];
   unimplemented_mechanics?: string[];

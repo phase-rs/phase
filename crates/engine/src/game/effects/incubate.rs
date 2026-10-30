@@ -51,6 +51,8 @@ pub fn resolve(
     if let Some(obj) = state.objects.get_mut(&obj_id) {
         obj.is_token = true;
         obj.display_source = DisplaySource::Token;
+        obj.base_display_source = Some(DisplaySource::Token);
+        obj.base_token_image_ref = None;
         // CR 111.10i: Front face is a colorless Incubator artifact.
         obj.card_types = CardType {
             supertypes: vec![],
@@ -154,6 +156,60 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    #[test]
+    fn public_incubate_and_transform_keep_native_display_baseline() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Synthetic incubate spell", false, "Incubate 3.")
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, false, false, vec![]); 2],
+        );
+        let mut runner = scenario.build();
+        let outcome = runner.cast(spell).resolve();
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        let incubators: Vec<_> = runner
+            .state()
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| runner.state().objects[id].name == "Incubator")
+            .collect();
+        assert_eq!(incubators.len(), 1);
+        let id = incubators[0];
+        let object = &runner.state().objects[&id];
+        assert!(object.is_token);
+        assert_eq!(object.base_display_source, Some(DisplaySource::Token));
+        assert_eq!(object.base_token_image_ref, None);
+        assert_eq!(object.counters.get(&CounterType::Plus1Plus1), Some(&3));
+        runner.activate(id, 0).resolve();
+        crate::game::layers::evaluate_layers(runner.state_mut());
+        let object = &runner.state().objects[&id];
+        assert_eq!(object.name, "Phyrexian Token");
+        assert_eq!((object.power, object.toughness), (Some(3), Some(3)));
+        assert_eq!(object.display_source, DisplaySource::Token);
+        assert_eq!(object.base_display_source, Some(DisplaySource::Token));
+        assert_eq!(object.base_token_image_ref, None);
+        let restored: GameState =
+            serde_json::from_value(serde_json::to_value(runner.state()).unwrap()).unwrap();
+        assert_eq!(
+            restored.objects[&id].base_display_source,
+            Some(DisplaySource::Token)
+        );
+        assert!(restored.stack.is_empty());
+        assert!(restored.resolution_stack.is_empty());
+        assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
     }
 
     #[test]

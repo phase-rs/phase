@@ -199,6 +199,13 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     // Display-identity baseline: the layer reset restores `printed_ref` from
     // this each pass (see `game_object::base_printed_ref`).
     obj.base_printed_ref = obj.printed_ref.clone();
+    // This authority installs an actual printed card face; it can establish a
+    // missing card baseline without reading a temporary live display override.
+    // Token faces retain their independent object-origin channel and image.
+    if !obj.is_token && obj.base_display_source.is_none() {
+        obj.base_display_source = Some(crate::game::game_object::DisplaySource::Card);
+        obj.base_token_image_ref = None;
+    }
     obj.source_related_token_ids = card_face.metadata.related_token_ids.clone();
     obj.spellbook = card_face.metadata.spellbook.clone();
     // Evidence that this face's printed text did not parse cleanly. Carried onto
@@ -1856,7 +1863,16 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
                 // pointer the DB lookup confirmed; leave game characteristics
                 // untouched.
                 obj.printed_ref = printed_ref_from_face(&card_face);
-                obj.base_printed_ref = obj.printed_ref.clone();
+                // The live pointer may belong to a temporary CopyValues layer.
+                // Validate the independently saved base through its own face;
+                // neither the live pointer nor the name authenticates that base.
+                if let Some(base_face) = obj
+                    .base_printed_ref
+                    .as_ref()
+                    .and_then(|reference| db.get_face_by_printed_ref(reference))
+                {
+                    obj.base_printed_ref = printed_ref_from_face(base_face);
+                }
             } else {
                 apply_card_face_to_object(obj, &card_face);
                 if in_prototype_lifetime {
@@ -2996,6 +3012,114 @@ mod tests {
     }
 
     #[test]
+    fn token_db_refresh_does_not_rebase_live_copy_pointer_and_faces_keep_origin_display() {
+        use crate::game::game_object::{DisplayIdentity, DisplaySource};
+        let front = test_face(
+            "Token origin face",
+            "token-origin",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let back = test_face(
+            "Token alternate face",
+            "token-origin",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let donor = test_face(
+            "Temporary donor face",
+            "temporary-donor",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let db = CardDatabase::from_json_str(&serde_json::json!({
+            "token origin face": front, "token alternate face": back, "temporary donor face": donor,
+        }).to_string()).unwrap();
+        let front = db.get_face_by_name("Token origin face").unwrap();
+        let back = db.get_face_by_name("Token alternate face").unwrap();
+        let donor = db.get_face_by_name("Temporary donor face").unwrap();
+        let image = crate::types::card::TokenImageRef {
+            scryfall_id: "origin-token-image".into(),
+            scryfall_oracle_id: None,
+            face_name: None,
+            preset_id: "origin-token-preset".into(),
+        };
+        for known in [true, false] {
+            let mut state = GameState::new_two_player(42);
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Synthetic origin".into(),
+                Zone::Battlefield,
+            );
+            {
+                let object = state.objects.get_mut(&id).unwrap();
+                object.is_token = true;
+                object.base_power = Some(7);
+                object.base_toughness = Some(8);
+                object.base_card_types.core_types = vec![CoreType::Creature];
+                object.install_display_identity_as_base(&DisplayIdentity {
+                    display_source: DisplaySource::Token,
+                    printed_ref: printed_ref_from_face(front),
+                    token_image_ref: Some(image.clone()),
+                    token_art: None,
+                });
+                if !known {
+                    object.base_display_source = None;
+                }
+                object.printed_ref = printed_ref_from_face(donor);
+                object.base_characteristics_initialized = true;
+            }
+            rehydrate_game_from_card_db_with_finalization(
+                &mut state,
+                &db,
+                CardDbRehydrationFinalization::Defer,
+            );
+            let object = &state.objects[&id];
+            assert_eq!(
+                object.printed_ref,
+                printed_ref_from_face(donor),
+                "the live DB refresh really ran"
+            );
+            assert_eq!(object.base_printed_ref, printed_ref_from_face(front));
+            assert_eq!(
+                (object.base_power, object.base_toughness),
+                (Some(7), Some(8))
+            );
+            assert_eq!(
+                object.base_display_source,
+                known.then_some(DisplaySource::Token)
+            );
+            assert_eq!(object.base_token_image_ref, Some(image.clone()));
+            let object = state.objects.get_mut(&id).unwrap();
+            let front_snapshot = snapshot_object_base_face(object);
+            let mut back_snapshot = front_snapshot.clone();
+            back_snapshot.name = back.name.clone();
+            back_snapshot.printed_ref = printed_ref_from_face(back);
+            apply_back_face_to_object(object, back_snapshot);
+            assert_eq!(object.base_printed_ref, printed_ref_from_face(back));
+            assert_eq!(
+                object.base_display_source,
+                known.then_some(DisplaySource::Token)
+            );
+            assert_eq!(object.base_token_image_ref, Some(image.clone()));
+            apply_back_face_to_object(object, front_snapshot);
+            object.revert_layered_characteristics_to_base();
+            assert_eq!(object.base_printed_ref, printed_ref_from_face(front));
+            assert_eq!(
+                object.base_display_source,
+                known.then_some(DisplaySource::Token)
+            );
+            assert_eq!(object.base_token_image_ref, Some(image.clone()));
+            if known {
+                assert_eq!(object.display_source, DisplaySource::Token);
+                assert_eq!(object.token_image_ref, Some(image.clone()));
+            }
+        }
+    }
+
+    #[test]
     fn ravenous_intrinsic_counters_use_paid_x() {
         let mut obj = GameObject::new(
             ObjectId(1),
@@ -3637,7 +3761,9 @@ mod tests {
             let object = state.objects.get_mut(token).unwrap();
             object.is_token = true;
             object.zone = Zone::Battlefield;
-            object.base_printed_ref = None;
+            // The saved token owns its independently captured printed hint.
+            // Rehydration may validate it, never invent it from live display.
+            object.base_printed_ref = object.printed_ref.clone();
             object.power = Some(6);
             object.toughness = Some(8);
         }

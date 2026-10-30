@@ -2032,8 +2032,12 @@ pub(crate) fn materialize_token_spec_body(
     object.is_token = true;
     // True token from a TokenSpec — image lives in the generic-token
     // database (Treasure, Spirit, Saproling, Soldier, etc.).
-    object.display_source = DisplaySource::Token;
-    object.token_image_ref = token_image_ref;
+    object.install_display_identity_as_base(&DisplayIdentity {
+        display_source: DisplaySource::Token,
+        printed_ref: None,
+        token_image_ref,
+        token_art: None,
+    });
     let has_attrs = ch.power.is_some()
         || ch.toughness.is_some()
         || ch.loyalty.is_some()
@@ -2503,6 +2507,7 @@ pub(crate) fn uncreate_unentered_aura_token(
     state.objects.remove(&object_id);
 }
 
+#[cfg(test)]
 pub(crate) fn commit_liminal_token_entry_with_post_actions(
     state: &mut GameState,
     event: ProposedEvent,
@@ -8056,6 +8061,8 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.is_token = true;
             obj.token_image_ref = preset.token_image_ref.clone();
+            obj.display_source = DisplaySource::Token;
+            obj.install_display_identity_as_base(&obj.display_identity());
         }
         inject_catalog_token_abilities(&mut state, obj_id);
         let obj = &state.objects[&obj_id];
@@ -8139,7 +8146,12 @@ mod tests {
         let before = channels(&state.objects[&obj_id]);
         let rules_text_before = state.objects[&obj_id].token_rules_text.clone();
 
-        state.objects.get_mut(&obj_id).unwrap().token_image_ref = preset.token_image_ref.clone();
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.token_image_ref = preset.token_image_ref.clone();
+            obj.display_source = DisplaySource::Token;
+            obj.install_display_identity_as_base(&obj.display_identity());
+        }
         inject_catalog_token_abilities(&mut state, obj_id);
 
         let obj = &state.objects[&obj_id];
@@ -8274,6 +8286,8 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.is_token = true;
             obj.token_image_ref = preset.token_image_ref.clone();
+            obj.display_source = DisplaySource::Token;
+            obj.install_display_identity_as_base(&obj.display_identity());
         }
         inject_catalog_token_abilities(&mut state, obj_id);
 
@@ -8325,6 +8339,8 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.is_token = true;
             obj.token_image_ref = preset.token_image_ref.clone();
+            obj.display_source = DisplaySource::Token;
+            obj.install_display_identity_as_base(&obj.display_identity());
         }
         inject_catalog_token_abilities(&mut state, obj_id);
 
@@ -8376,6 +8392,8 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.is_token = true;
             obj.token_image_ref = preset.token_image_ref.clone();
+            obj.display_source = DisplaySource::Token;
+            obj.install_display_identity_as_base(&obj.display_identity());
         }
         inject_catalog_token_abilities(&mut state, obj_id);
 
@@ -8417,6 +8435,8 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.is_token = true;
             obj.token_image_ref = preset.token_image_ref.clone();
+            obj.display_source = DisplaySource::Token;
+            obj.install_display_identity_as_base(&obj.display_identity());
             obj.card_types.core_types.push(CoreType::Creature);
             obj.power = Some(1);
             obj.toughness = Some(1);
@@ -8484,6 +8504,8 @@ mod tests {
             let obj = runner.state_mut().objects.get_mut(&pest).unwrap();
             obj.is_token = true;
             obj.token_image_ref = preset.token_image_ref.clone();
+            obj.display_source = DisplaySource::Token;
+            obj.install_display_identity_as_base(&obj.display_identity());
             obj.card_types.core_types.push(CoreType::Creature);
             obj.power = Some(1);
             obj.toughness = Some(1);
@@ -10869,6 +10891,8 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.is_token = true;
             obj.token_image_ref = preset.token_image_ref.clone();
+            obj.display_source = DisplaySource::Token;
+            obj.install_display_identity_as_base(&obj.display_identity());
         }
         inject_catalog_token_abilities(state, obj_id);
         obj_id
@@ -11159,6 +11183,8 @@ mod tests {
             obj.base_power = Some(1);
             obj.base_toughness = Some(1);
             obj.token_image_ref = aetherdrift_pilot.token_image_ref.clone();
+            obj.display_source = DisplaySource::Token;
+            obj.install_display_identity_as_base(&obj.display_identity());
             // The creating effect (Shorikai/Kotori) already granted the crew-only
             // static via its `with "..."` clause.
             let with_clause = StaticDefinition::new(StaticMode::CrewContribution {

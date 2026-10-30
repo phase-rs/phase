@@ -26675,6 +26675,12 @@ impl LiminalEntrant {
         assert_eq!(original.base_power, projected.base_power);
         assert_eq!(original.base_toughness, projected.base_toughness);
         assert_eq!(original.base_card_types, projected.base_card_types);
+        assert_eq!(original.base_printed_ref, projected.base_printed_ref);
+        assert_eq!(original.base_display_source, projected.base_display_source);
+        assert_eq!(
+            original.base_token_image_ref,
+            projected.base_token_image_ref
+        );
         assert_eq!(original.counters, projected.counters);
         assert_eq!(original.chosen_attributes, projected.chosen_attributes);
         assert_eq!(
@@ -33297,7 +33303,155 @@ fn validate_restored_attack_authority(
     Ok(())
 }
 
+/// Recover display-only metadata from independent, exact birth bodies. Missing
+/// or conflicting evidence is playable legacy state, not a gameplay refusal.
+fn recover_saved_display_baselines(state: &mut GameState) {
+    use crate::game::game_object::DisplaySource;
+    use crate::types::resolved_commands::{ResolvedCopyBodyModifications, ResolvedTokenBody};
+
+    // Reconstruct bodies only, never replay an effect or consult a name/catalog.
+    // A Card-routed copy can be finalized to a preset after its birth command;
+    // that command alone cannot prove its final baseline. Debug Spec births
+    // likewise have a separate preset completion (source 0).
+    let mut witnesses: Vec<_> = state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry.command.as_ref()? {
+            ResolvedRulesCommand::TokenCreation(command) => Some(command),
+            _ => None,
+        })
+        .filter_map(|command| {
+            let mut body = GameObject::new(
+                command.object.object_id,
+                CardId(0),
+                command.owner,
+                String::new(),
+                Zone::Battlefield,
+            );
+            match &command.body {
+                ResolvedTokenBody::Spec {
+                    spec,
+                    token_image_ref,
+                } if spec.source_id != ObjectId(0) => {
+                    crate::game::effects::token::materialize_token_spec_body(
+                        &mut body,
+                        spec,
+                        token_image_ref.clone(),
+                        command.entry_turn,
+                        command.entry_timestamp,
+                        command.resulting_tapped,
+                    );
+                }
+                ResolvedTokenBody::Copy {
+                    copy,
+                    modifications,
+                } if copy.display.display_source == DisplaySource::Token
+                    && !matches!(
+                        modifications,
+                        ResolvedCopyBodyModifications::DeferredToUnjournaledSeam { .. }
+                    ) =>
+                {
+                    crate::game::effects::token::materialize_token_copy_body(
+                        &mut body,
+                        copy,
+                        modifications,
+                        command.entry_turn,
+                        command.entry_timestamp,
+                        command.resulting_tapped,
+                    );
+                }
+                _ => return None,
+            }
+            Some((command.object, body))
+        })
+        .collect();
+    for entry in state.liminal_entries.values() {
+        let Some(copy) = entry.copy_resume.as_ref().filter(|copy| {
+            copy.display.display_source == DisplaySource::Token
+                && copy.additional_modifications.is_empty()
+        }) else {
+            continue;
+        };
+        let object = entry.object.projected();
+        if !entry.object.is_token_projection() {
+            continue;
+        }
+        let mut body = GameObject::new(
+            object.id,
+            object.card_id,
+            object.owner,
+            copy.values.name.clone(),
+            object.zone,
+        );
+        crate::game::effects::token::materialize_token_copy_body(
+            &mut body,
+            copy,
+            &ResolvedCopyBodyModifications::NoExceptions,
+            object.entered_battlefield_turn.unwrap_or(state.turn_number),
+            object.timestamp,
+            object.tapped,
+        );
+        witnesses.push((ObjectIncarnationRef::from_object(object), body));
+    }
+
+    let recover = |object: &mut GameObject| {
+        if object.base_display_source.is_some() {
+            return;
+        }
+        let mut known = None;
+        let mut conflict = false;
+        for (pin, body) in &witnesses {
+            if *pin != ObjectIncarnationRef::from_object(object)
+                || body.owner != object.owner
+                || body.timestamp != object.timestamp
+                || body.entered_battlefield_turn != object.entered_battlefield_turn
+                || !object.is_token
+                || body.base_printed_ref != object.base_printed_ref
+                || crate::game::printed_cards::intrinsic_copiable_values(body)
+                    != crate::game::printed_cards::intrinsic_copiable_values(object)
+            {
+                continue;
+            }
+            let candidate = (body.base_display_source, body.base_token_image_ref.clone());
+            if known
+                .as_ref()
+                .is_some_and(|previous| previous != &candidate)
+            {
+                conflict = true;
+            }
+            known = Some(candidate);
+        }
+        if !conflict {
+            if let Some((source, image)) = known {
+                object.base_display_source = source;
+                object.base_token_image_ref = image;
+            }
+        }
+    };
+    for object in state.objects.values_mut() {
+        recover(object);
+    }
+    for entry in state.liminal_entries.values_mut() {
+        match &mut entry.object {
+            LiminalEntrant::Token(token) => recover(&mut token.0),
+            LiminalEntrant::Card(object) => recover(object),
+        }
+    }
+    for records in state.departed_stack_spells.values_mut() {
+        for record in records.values_mut() {
+            recover(&mut record.object);
+        }
+    }
+    if let Some(authority) = state.entering_aura_authority.as_mut() {
+        recover(&mut authority.entrant);
+    }
+}
+
 pub(crate) fn normalize_saved_liminal_copy_authority(state: &mut GameState) -> Result<(), String> {
+    if state.viewer_projection.is_none() {
+        recover_saved_display_baselines(state);
+    }
     if let Some(pending) = state
         .pending_replacement
         .as_ref()
@@ -34034,6 +34188,9 @@ impl GameStateDecode {
         let raw = serde_json::from_value::<RawGameStateFields>(value)
             .map_err(|error| error.to_string())?;
         let mut state = GameState::from(raw);
+        if state.viewer_projection.is_none() {
+            recover_saved_display_baselines(&mut state);
+        }
         normalize_adventure_permissions(&mut state)?;
         Ok(state)
     }

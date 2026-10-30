@@ -14,7 +14,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use engine::game::game_object::GameObject;
-use engine::game::visibility::filter_state_for_viewer;
+use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
 use engine::types::ability::TriggerBaseSetInstanceRef;
 use engine::types::game_state::{GameState, PersistedGameState};
 use engine::types::identifiers::{CardId, ObjectId};
@@ -23,6 +23,82 @@ use engine::types::zones::Zone;
 use serde::{Deserialize, Serialize};
 
 const HIDDEN_CARD_NAME: &str = "Hidden Card";
+
+#[test]
+fn display_baseline_wire_retains_known_card_and_legacy_unknown_distinctly() {
+    use engine::game::game_object::DisplaySource;
+    let object = GameObject::new(
+        ObjectId(1),
+        CardId(1),
+        PlayerId(0),
+        "Card baseline".into(),
+        Zone::Library,
+    );
+    let current = serde_json::to_value(&object).unwrap();
+    assert_eq!(current["base_display_source"], "Card");
+    assert!(current.get("base_token_image_ref").is_none());
+    let mut legacy = current;
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("base_display_source");
+    let mut legacy: GameObject = serde_json::from_value(legacy).unwrap();
+    for _ in 0..3 {
+        assert_eq!(legacy.base_display_source, None);
+        let serialized = serde_json::to_value(&legacy).unwrap();
+        assert!(serialized.get("base_display_source").is_none());
+        legacy = serde_json::from_value(serialized).unwrap();
+    }
+    assert_eq!(object.base_display_source, Some(DisplaySource::Card));
+}
+
+#[test]
+fn hidden_display_baselines_are_redacted_for_opponent_and_unseated_wire() {
+    use engine::game::game_object::DisplaySource;
+    use engine::game::zones::create_object;
+    use engine::types::card::TokenImageRef;
+    let mut state = GameState::new_two_player(42);
+    let id = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Private exact image".into(),
+        Zone::Hand,
+    );
+    let image = TokenImageRef {
+        scryfall_id: "private-image".into(),
+        scryfall_oracle_id: None,
+        face_name: None,
+        preset_id: "private-preset".into(),
+    };
+    let object = state.objects.get_mut(&id).unwrap();
+    object.base_token_image_ref = Some(image.clone());
+    object.token_image_ref = Some(image.clone());
+    let own = filter_state_for_viewer(&state, PlayerId(0));
+    assert_eq!(own.objects[&id].name, "Private exact image");
+    assert_eq!(
+        own.objects[&id].base_display_source,
+        Some(DisplaySource::Card)
+    );
+    assert_eq!(own.objects[&id].base_token_image_ref, Some(image.clone()));
+    assert_eq!(state.objects[&id].base_token_image_ref, Some(image));
+    for projected in [
+        filter_state_for_viewer(&state, PlayerId(1)),
+        filter_state_for_unseated_viewer(&state),
+    ] {
+        let hidden = &projected.objects[&id];
+        assert_eq!(hidden.name, HIDDEN_CARD_NAME);
+        assert_eq!(hidden.base_display_source, None);
+        assert_eq!(hidden.base_token_image_ref, None);
+        let json = serde_json::to_value(hidden).unwrap();
+        assert!(json.get("base_display_source").is_none());
+        assert!(json.get("base_token_image_ref").is_none());
+        let decoded: GameState =
+            serde_json::from_value(serde_json::to_value(&projected).unwrap()).unwrap();
+        assert_eq!(decoded.objects[&id].base_display_source, None);
+        assert_eq!(decoded.objects[&id].base_token_image_ref, None);
+    }
+}
 
 /// Every key a hidden library stub emits on at least one object of the seat-0 projection:
 /// the fields that serialize unconditionally, plus the four a stub still holds at a

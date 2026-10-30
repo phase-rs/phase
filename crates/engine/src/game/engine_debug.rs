@@ -1565,11 +1565,16 @@ pub(crate) fn complete_token_creation(
                     && object.base_keywords == body.keywords
             });
             if matches {
-                state
+                let object = state
                     .objects
                     .get_mut(&member.object_id)
-                    .expect("matched current preset body")
-                    .token_image_ref = Some(image_ref.clone());
+                    .expect("matched current preset body");
+                object.base_display_source = Some(crate::game::game_object::DisplaySource::Token);
+                object.base_token_image_ref = Some(image_ref.clone());
+                if object.layer1_copy_effect.is_none() {
+                    object.display_source = crate::game::game_object::DisplaySource::Token;
+                    object.token_image_ref = Some(image_ref.clone());
+                }
                 super::effects::token::inject_catalog_token_abilities(state, member.object_id);
                 super::trigger_index::reindex_object_triggers(state, member.object_id);
             }
@@ -2206,6 +2211,16 @@ mod tests {
             pest.token_image_ref.is_some(),
             "the Pest carries its preset"
         );
+        assert_eq!(
+            pest.base_display_source,
+            Some(crate::game::game_object::DisplaySource::Token)
+        );
+        assert_eq!(pest.base_token_image_ref, pest.token_image_ref);
+        assert_eq!(
+            squirrel.base_display_source,
+            Some(crate::game::game_object::DisplaySource::Token)
+        );
+        assert_ne!(squirrel.base_token_image_ref, pest.base_token_image_ref);
         assert_eq!(
             pest.trigger_definitions.len(),
             1,

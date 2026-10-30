@@ -93,9 +93,31 @@ impl GameObject {
     /// injection (which reflects copy exceptions the source never had).
     pub fn install_display_identity_as_base(&mut self, display: &DisplayIdentity) {
         self.display_source = display.display_source;
+        self.base_display_source = Some(display.display_source);
         self.printed_ref = display.printed_ref.clone();
         self.base_printed_ref = display.printed_ref.clone();
         self.token_image_ref = display.token_image_ref.clone();
+        self.base_token_image_ref = display.token_image_ref.clone();
+    }
+
+    /// Restore presentation without promoting an old rendering fallback into
+    /// knowledge of the object's original display channel or exact image.
+    pub(crate) fn restore_display_identity_baseline(&mut self) {
+        self.printed_ref.clone_from(&self.base_printed_ref);
+        if let Some(source) = self.base_display_source {
+            self.display_source = source;
+            self.token_image_ref.clone_from(&self.base_token_image_ref);
+        } else {
+            // Compatibility with snapshots which did not retain these axes.
+            self.display_source = if self.is_token && self.base_printed_ref.is_none() {
+                DisplaySource::Token
+            } else {
+                DisplaySource::Card
+            };
+            if !self.is_token {
+                self.token_image_ref = None;
+            }
+        }
     }
 }
 
@@ -984,6 +1006,13 @@ pub struct GameObject {
     /// `base_name`/`name` pair so a temporary copy's art reverts on expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_printed_ref: Option<PrintedCardRef>,
+    /// Object-origin display routing, independent of token status and live
+    /// copy effects. None is unavailable legacy metadata, never a default Card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_display_source: Option<DisplaySource>,
+    /// Exact baseline image. With a known channel, None is a known absence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_token_image_ref: Option<TokenImageRef>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub base_characteristics_initialized: bool,
 
@@ -1791,6 +1820,9 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_static_definitions: _,
         base_color: _,
         base_printed_ref: _,
+        // Presentation metadata, omitted with the live display axes above.
+        base_display_source: _,
+        base_token_image_ref: _,
         base_characteristics_initialized: _,
         timestamp: _,
         incarnation: _,
@@ -3012,7 +3044,11 @@ impl GameObject {
         if self.base_color.is_empty() && !self.color.is_empty() {
             self.base_color = self.color.clone();
         }
-        if self.base_printed_ref.is_none() && self.printed_ref.is_some() {
+        if self.base_display_source.is_some()
+            && self.layer1_copy_effect.is_none()
+            && self.base_printed_ref.is_none()
+            && self.printed_ref.is_some()
+        {
             self.base_printed_ref = self.printed_ref.clone();
         }
 
@@ -3093,6 +3129,8 @@ impl GameObject {
             color: Vec::new(),
             printed_ref: None,
             base_printed_ref: None,
+            base_display_source: Some(DisplaySource::Card),
+            base_token_image_ref: None,
             token_image_ref: None,
             token_art: None,
             source_related_token_ids: Vec::new(),
@@ -3634,7 +3672,7 @@ impl GameObject {
         self.replacement_definitions = Arc::clone(&self.base_replacement_definitions).into();
         self.static_definitions = Arc::clone(&self.base_static_definitions).into();
         self.color = self.base_color.clone();
-        self.printed_ref = self.base_printed_ref.clone();
+        self.restore_display_identity_baseline();
         self.controller = self.base_controller.unwrap_or(self.owner);
         self.assigns_damage_from_toughness = false;
         self.assigns_damage_as_though_unblocked = false;

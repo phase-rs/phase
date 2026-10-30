@@ -1421,7 +1421,9 @@ fn resolve_predefined_token_display(
     };
     if let Some(token) = state.objects.get_mut(&token_id) {
         token.display_source = DisplaySource::Token;
-        token.token_image_ref = Some(image_ref);
+        token.base_display_source = Some(DisplaySource::Token);
+        token.token_image_ref = Some(image_ref.clone());
+        token.base_token_image_ref = Some(image_ref);
     }
 }
 
@@ -4450,6 +4452,726 @@ pub(crate) mod tests {
         );
         assert_eq!(token.display_source, DisplaySource::Card);
         assert_eq!(token.token_image_ref, None);
+    }
+
+    #[test]
+    fn twinflame_public_name_only_copy_preserves_card_baseline_through_flush_and_cleanup() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        const TWINFLAME: &str = "Strive — This spell costs {2}{R} more to cast for each target beyond the first.\nChoose any number of target creatures you control. For each of them, create a token that's a copy of that creature, except it has haste. Exile those tokens at the beginning of the next end step.";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let donor = scenario.add_creature(P0, "Fanatic of Rhonas", 4, 4).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Twinflame", false, TWINFLAME)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Red],
+            })
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Red, false, false, vec![]); 2],
+        );
+        let mut runner = scenario.build();
+        {
+            // Deliberately synthetic, ref-less 4/4 body; the printed Fanatic's
+            // name does not supply catalog provenance or change this body.
+            let object = runner.state_mut().objects.get_mut(&donor).unwrap();
+            object.color = vec![ManaColor::Black];
+            object.base_color = object.color.clone();
+            object.card_types.subtypes = vec!["Zombie".into(), "Snake".into(), "Druid".into()];
+            object.base_card_types = object.card_types.clone();
+        }
+        let original = runner.state().objects[&donor].display_identity();
+        let outcome = runner.cast(spell).target_object(donor).resolve();
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        let births: Vec<_> = outcome
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(births.len(), 1);
+        let token = births[0];
+        let pin = ObjectIncarnationRef::from_object(&runner.state().objects[&token]);
+        for _ in 0..3 {
+            crate::game::layers::evaluate_layers(runner.state_mut());
+            crate::game::layers::mark_layers_entered(runner.state_mut(), token);
+            crate::game::layers::flush_layers(runner.state_mut());
+            let object = &runner.state().objects[&token];
+            // CR 111.1 + CR 707.2 + CR 707.9a: a created token copies the
+            // synthetic body and gains haste, independently of display routing.
+            assert!(object.is_token);
+            assert_eq!(object.name, "Fanatic of Rhonas");
+            assert_eq!((object.power, object.toughness), (Some(4), Some(4)));
+            assert_eq!(object.color, vec![ManaColor::Black]);
+            assert_eq!(object.card_types.subtypes, vec!["Zombie", "Snake", "Druid"]);
+            assert!(object.has_keyword(&Keyword::Haste));
+            assert_eq!(object.display_source, DisplaySource::Card);
+            assert_eq!(object.base_display_source, Some(DisplaySource::Card));
+            assert!(object.printed_ref.is_none());
+            assert!(object.base_printed_ref.is_none());
+            assert!(object.token_image_ref.is_none());
+            assert!(object.base_token_image_ref.is_none());
+        }
+        assert_eq!(runner.state().objects[&donor].display_identity(), original);
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(runner.state().return_result_frames.is_empty());
+        assert!(runner.state().liminal_entries.is_empty());
+        assert!(runner
+            .state()
+            .delayed_triggers
+            .iter()
+            .any(|trigger| trigger.ability.target_incarnations.contains(&pin)));
+        let mut departures = Vec::new();
+        for _ in 0..160 {
+            if !runner.state().battlefield.contains(&token)
+                && runner.state().stack.is_empty()
+                && runner.state().resolution_stack.is_empty()
+            {
+                break;
+            }
+            let action = match runner.state().waiting_for {
+                WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                    attacks: vec![],
+                    bands: vec![],
+                },
+                WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                    assignments: vec![],
+                },
+                _ => GameAction::PassPriority,
+            };
+            departures.extend(runner.act(action).unwrap().events);
+        }
+        // CR 603.7c: observe the real delayed exile before token cessation.
+        assert_eq!(departures.iter().filter(|event| matches!(event,
+            GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Exile, record }
+            if *object_id == token && record.trigger_source_context.as_ref().is_some_and(|context| context.identity.reference == pin)
+        )).count(), 1);
+        assert!(!runner.state().battlefield.contains(&token));
+        assert_eq!(runner.state().objects[&donor].zone, Zone::Battlefield);
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+
+    #[test]
+    fn printed_mirror_public_token_display_accept_decline_no_source_and_expiry() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::card::{PrintedCardRef, TokenImageRef};
+        use crate::types::phase::Phase;
+        for (has_donor, accept) in [(true, true), (true, false), (false, true)] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let mirror = scenario
+                .add_artifact_to_hand_from_oracle(P0, "Cursed Mirror", PRINTED_CURSED_MIRROR)
+                .id();
+            let donor = has_donor.then(|| {
+                scenario
+                    .add_creature(P1, "Synthetic native Rabbit", 2, 3)
+                    .id()
+            });
+            let own_ref = PrintedCardRef {
+                oracle_id: "mirror-original-face".into(),
+                face_name: "Cursed Mirror".into(),
+            };
+            let image = TokenImageRef {
+                scryfall_id: "native-rabbit-image".into(),
+                scryfall_oracle_id: None,
+                face_name: None,
+                preset_id: "native-rabbit".into(),
+            };
+            let mut runner = scenario.build();
+            {
+                let object = runner.state_mut().objects.get_mut(&mirror).unwrap();
+                object.printed_ref = Some(own_ref.clone());
+                object.base_printed_ref = Some(own_ref.clone());
+            }
+            if let Some(donor) = donor {
+                let object = runner.state_mut().objects.get_mut(&donor).unwrap();
+                object.is_token = true;
+                object.install_display_identity_as_base(&DisplayIdentity {
+                    display_source: DisplaySource::Token,
+                    printed_ref: None,
+                    token_image_ref: Some(image.clone()),
+                    token_art: None,
+                });
+                object.restore_token_art_baseline();
+            }
+            runner.cast(mirror).commit();
+            for _ in 0..8 {
+                if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            if let Some(donor) = donor {
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { player: P0, .. }
+                ));
+                assert!(
+                    runner
+                        .state()
+                        .pending_replacement
+                        .as_ref()
+                        .unwrap()
+                        .is_optional
+                );
+                runner
+                    .act(GameAction::ChooseReplacement {
+                        index: if accept { 0 } else { 1 },
+                    })
+                    .unwrap();
+                if accept {
+                    assert!(matches!(&runner.state().waiting_for,
+                        WaitingFor::CopyTargetChoice { player: P0, valid_targets, .. }
+                        if valid_targets.contains(&donor)));
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(TargetRef::Object(donor)),
+                        })
+                        .unwrap();
+                }
+            }
+            crate::game::layers::flush_layers(runner.state_mut());
+            let object = &runner.state().objects[&mirror];
+            assert!(!object.is_token);
+            assert_eq!(object.zone, Zone::Battlefield);
+            assert_eq!(object.base_display_source, Some(DisplaySource::Card));
+            assert_eq!(object.base_printed_ref, Some(own_ref.clone()));
+            assert_eq!(object.base_token_image_ref, None);
+            if has_donor && accept {
+                assert_eq!(object.display_source, DisplaySource::Token);
+                assert_eq!(object.token_image_ref, Some(image.clone()));
+                assert_eq!((object.power, object.toughness), (Some(2), Some(3)));
+                assert!(object.has_keyword(&Keyword::Haste));
+            } else {
+                assert_eq!(object.name, "Cursed Mirror");
+                assert_eq!(object.display_source, DisplaySource::Card);
+                assert_eq!(object.token_image_ref, None);
+                assert_eq!(object.card_types.core_types, vec![CoreType::Artifact]);
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+            for state in liminal_copy_reader_forms(runner.state()) {
+                let mut restored = GameRunner::from_state(state);
+                for _ in 0..160 {
+                    if restored.state().turn_number > runner.state().turn_number {
+                        break;
+                    }
+                    let action = match restored.state().waiting_for {
+                        WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                            attacks: vec![],
+                            bands: vec![],
+                        },
+                        WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        },
+                        _ => GameAction::PassPriority,
+                    };
+                    restored.act(action).unwrap();
+                }
+                assert!(restored.state().turn_number > runner.state().turn_number);
+                let object = &restored.state().objects[&mirror];
+                assert_eq!(object.name, "Cursed Mirror");
+                assert_eq!(object.card_types.core_types, vec![CoreType::Artifact]);
+                assert_eq!(object.display_source, DisplaySource::Card);
+                assert_eq!(object.printed_ref, Some(own_ref.clone()));
+                assert_eq!(object.token_image_ref, None);
+                assert!(restored.state().stack.is_empty());
+                assert!(restored.state().resolution_stack.is_empty());
+                assert!(matches!(
+                    restored.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn public_copy_preset_finalization_installs_exact_baseline_without_legacy_guessing() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::phase::Phase;
+        const PRESET: &str = "001dd45c-851b-5eb3-9a53-fc9fb2c0e322";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature(P0, "Fanatic of Rhonas", 4, 4)
+            .with_ability_definition(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::CopyTokenOf {
+                    target: TargetFilter::SelfRef,
+                    owner: TargetFilter::Controller,
+                    source_filter: None,
+                    enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    extra_keywords: vec![],
+                    additional_modifications: vec![],
+                },
+            ))
+            .id();
+        let mut runner = scenario.build();
+        {
+            // Synthetic activation; independently supplied printed source and
+            // exact related-token link exercise the existing preset authority.
+            let object = runner.state_mut().objects.get_mut(&source).unwrap();
+            object.printed_ref = Some(PrintedCardRef {
+                oracle_id: "7973820b-fdaf-46ec-9e3e-d4c0e77b5067".into(),
+                face_name: "Fanatic of Rhonas".into(),
+            });
+            object.base_printed_ref = object.printed_ref.clone();
+            object.source_related_token_ids = vec![PRESET.into()];
+            object.base_color = vec![ManaColor::Black];
+            object.color = object.base_color.clone();
+            object.base_card_types.subtypes = vec!["Zombie".into(), "Snake".into(), "Druid".into()];
+            object.card_types = object.base_card_types.clone();
+        }
+        let result = runner.activate(source, 0).resolve();
+        assert!(matches!(
+            result.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        let births: Vec<_> = result
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(births.len(), 1);
+        let id = births[0];
+        for _ in 0..3 {
+            crate::game::layers::evaluate_layers(runner.state_mut());
+            let object = &runner.state().objects[&id];
+            assert!(object.is_token);
+            assert_eq!((object.power, object.toughness), (Some(4), Some(4)));
+            assert_eq!(object.display_source, DisplaySource::Token);
+            assert_eq!(object.base_display_source, Some(DisplaySource::Token));
+            assert_eq!(
+                object
+                    .token_image_ref
+                    .as_ref()
+                    .map(|image| image.preset_id.as_str()),
+                Some(PRESET)
+            );
+            assert_eq!(
+                object
+                    .base_token_image_ref
+                    .as_ref()
+                    .map(|image| image.scryfall_id.as_str()),
+                Some("6ef58164-4155-4e5b-8c16-f16f2ab65baa")
+            );
+        }
+        let mut legacy = serde_json::to_value(runner.state()).unwrap();
+        let object = legacy["objects"][id.0.to_string()].as_object_mut().unwrap();
+        object.remove("base_display_source");
+        object.remove("base_token_image_ref");
+        let legacy: GameState = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            legacy.objects[&id].base_display_source, None,
+            "the initial Card birth cannot prove this later Token preset baseline"
+        );
+        assert!(legacy.stack.is_empty());
+        assert!(legacy.resolution_stack.is_empty());
+    }
+
+    #[test]
+    fn native_token_finite_public_copy_restores_own_exact_image_after_all_readers() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0};
+        use crate::types::card::TokenImageRef;
+        use crate::types::phase::Phase;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // Explicit synthetic activation exercises the ordinary public pipeline;
+        // this fixture makes no printed-card support claim.
+        let first = scenario
+            .add_creature(P0, "Native T1", 2, 3)
+            .with_ability_definition(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::BecomeCopy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    recipient: crate::types::ability::CopyRecipient::Source,
+                    duration: Some(Duration::UntilEndOfTurn),
+                    mana_value_limit: None,
+                    additional_modifications: vec![],
+                },
+            ))
+            .id();
+        let second = scenario.add_creature(P0, "Native T2", 5, 6).id();
+        let image1 = TokenImageRef {
+            scryfall_id: "T1-exact-image".into(),
+            scryfall_oracle_id: None,
+            face_name: None,
+            preset_id: "T1-preset".into(),
+        };
+        let image2 = TokenImageRef {
+            scryfall_id: "T2-exact-image".into(),
+            scryfall_oracle_id: None,
+            face_name: None,
+            preset_id: "T2-preset".into(),
+        };
+        let mut runner = scenario.build();
+        for (id, image) in [(first, &image1), (second, &image2)] {
+            let object = runner.state_mut().objects.get_mut(&id).unwrap();
+            object.is_token = true;
+            object.install_display_identity_as_base(&DisplayIdentity {
+                display_source: DisplaySource::Token,
+                printed_ref: None,
+                token_image_ref: Some(image.clone()),
+                token_art: None,
+            });
+            object.restore_token_art_baseline();
+        }
+        let outcome = runner.activate(first, 0).target_object(second).resolve();
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(outcome.state().objects[&first].name, "Native T2");
+        assert_eq!(
+            outcome.state().objects[&first].token_image_ref,
+            Some(image2.clone())
+        );
+        assert_eq!(
+            outcome.state().objects[&first].base_token_image_ref,
+            Some(image1.clone())
+        );
+        assert!(outcome.state().objects[&first].layer1_copy_effect.is_some());
+        assert!(outcome.state().objects[&first].is_token);
+        let mut forms: Vec<_> = liminal_copy_reader_forms(runner.state())
+            .into_iter()
+            .map(|state| (state, true))
+            .collect();
+        let mut old_active = serde_json::to_value(runner.state()).unwrap();
+        let old_object = old_active["objects"][first.0.to_string()]
+            .as_object_mut()
+            .unwrap();
+        old_object.remove("base_display_source");
+        old_object.remove("base_token_image_ref");
+        forms.push((serde_json::from_value(old_active).unwrap(), false));
+        for (mut state, known) in forms {
+            for _ in 0..3 {
+                crate::game::layers::evaluate_layers(&mut state);
+                crate::game::layers::mark_layers_entered(&mut state, first);
+                crate::game::layers::flush_layers(&mut state);
+                assert_eq!(state.objects[&first].token_image_ref, Some(image2.clone()));
+                assert_eq!(
+                    state.objects[&first].base_token_image_ref,
+                    known.then(|| image1.clone())
+                );
+                assert_eq!(
+                    state.objects[&first].base_display_source,
+                    known.then_some(DisplaySource::Token)
+                );
+            }
+            let old_turn = state.turn_number;
+            let mut restored = GameRunner::from_state(state);
+            for _ in 0..160 {
+                if restored.state().turn_number > old_turn {
+                    break;
+                }
+                let action = match restored.state().waiting_for {
+                    WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    },
+                    WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    },
+                    _ => GameAction::PassPriority,
+                };
+                restored.act(action).unwrap();
+            }
+            assert!(restored.state().turn_number > old_turn);
+            let object = &restored.state().objects[&first];
+            assert_eq!(object.name, "Native T1");
+            assert_eq!((object.power, object.toughness), (Some(2), Some(3)));
+            assert_eq!(object.display_source, DisplaySource::Token);
+            assert_eq!(
+                object.token_image_ref,
+                Some(if known {
+                    image1.clone()
+                } else {
+                    image2.clone()
+                })
+            );
+            assert_eq!(object.base_token_image_ref, known.then(|| image1.clone()));
+            assert_eq!(
+                object.base_display_source,
+                known.then_some(DisplaySource::Token)
+            );
+            let again: GameState =
+                serde_json::from_value(serde_json::to_value(restored.state()).unwrap()).unwrap();
+            assert_eq!(
+                again.objects[&first].base_display_source,
+                known.then_some(DisplaySource::Token)
+            );
+            assert!(restored.state().stack.is_empty());
+            assert!(restored.state().resolution_stack.is_empty());
+            assert!(matches!(
+                restored.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn legacy_display_birth_evidence_and_actual_turn_truncation_remain_honest() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0};
+        use crate::types::phase::Phase;
+        use crate::types::resolved_commands::ResolvedRulesCommand;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let donor = scenario.add_creature(P0, "Fanatic of Rhonas", 4, 4).id();
+        let factory = scenario
+            .add_artifact_from_oracle(P0, "Synthetic birth factory", "")
+            .with_ability_definition(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Token {
+                    name: "Fanatic of Rhonas".into(),
+                    power: PtValue::Fixed(4),
+                    toughness: PtValue::Fixed(4),
+                    types: vec![
+                        "Creature".into(),
+                        "Zombie".into(),
+                        "Snake".into(),
+                        "Druid".into(),
+                    ],
+                    colors: vec![ManaColor::Black],
+                    keywords: vec![Keyword::Haste],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            ))
+            .with_ability_definition(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::CopyTokenOf {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    owner: TargetFilter::Controller,
+                    source_filter: None,
+                    enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    extra_keywords: vec![],
+                    additional_modifications: vec![],
+                },
+            ))
+            .id();
+        let mut runner = scenario.build();
+        {
+            let object = runner.state_mut().objects.get_mut(&donor).unwrap();
+            object.base_color = vec![ManaColor::Black];
+            object.color = object.base_color.clone();
+            object.base_card_types.subtypes = vec!["Zombie".into(), "Snake".into(), "Druid".into()];
+            object.card_types = object.base_card_types.clone();
+            object.base_keywords = vec![Keyword::Haste];
+            object.keywords = object.base_keywords.clone();
+        }
+        let native_result = runner.activate(factory, 0).resolve();
+        assert!(matches!(
+            native_result.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        let native: Vec<_> = native_result
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(native.len(), 1);
+        let native = native[0];
+        let copy_result = runner.activate(factory, 1).target_object(donor).resolve();
+        assert!(matches!(
+            copy_result.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        let copied: Vec<_> = copy_result
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(copied.len(), 1);
+        let copied = copied[0];
+        assert_eq!(
+            crate::game::printed_cards::intrinsic_copiable_values(&runner.state().objects[&native]),
+            crate::game::printed_cards::intrinsic_copiable_values(&runner.state().objects[&copied])
+        );
+        assert_eq!(
+            runner.state().objects[&native].base_display_source,
+            Some(DisplaySource::Token)
+        );
+        assert_eq!(
+            runner.state().objects[&copied].base_display_source,
+            Some(DisplaySource::Card)
+        );
+        assert!(runner.state().resolved_rules_journal.entries().iter().any(|entry|
+            matches!(&entry.command, Some(ResolvedRulesCommand::TokenCreation(command)) if command.object.object_id == native)));
+        let erase = |state: &GameState| {
+            let mut value = serde_json::to_value(state).unwrap();
+            for id in [native, copied] {
+                let object = value["objects"][id.0.to_string()].as_object_mut().unwrap();
+                object.remove("base_display_source");
+                object.remove("base_token_image_ref");
+            }
+            value
+        };
+        let legacy: GameState = serde_json::from_value(erase(runner.state())).unwrap();
+        assert_eq!(
+            legacy.objects[&native].base_display_source,
+            Some(DisplaySource::Token)
+        );
+        // Initial Card copy display alone does not prove post-birth preset finalization.
+        assert_eq!(legacy.objects[&copied].base_display_source, None);
+        let mut wrong = erase(runner.state());
+        let mut changed = 0;
+        for entry in wrong["resolved_rules_journal"]["entries"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if let Some(command) = entry.pointer_mut("/command/TokenCreation") {
+                if command["object"]["object_id"] == native.0 {
+                    command["object"]["incarnation"] =
+                        serde_json::json!(runner.state().objects[&native].incarnation + 1);
+                    changed += 1;
+                }
+            }
+        }
+        assert_eq!(changed, 1, "the wrong-incarnation witness really changed");
+        let wrong: GameState = serde_json::from_value(wrong).unwrap();
+        assert_eq!(wrong.objects[&native].base_display_source, None);
+        assert!(wrong.objects[&native].is_token);
+        assert_eq!(
+            (
+                wrong.objects[&native].power,
+                wrong.objects[&native].toughness
+            ),
+            (Some(4), Some(4))
+        );
+        let old_turn = runner.state().turn_number;
+        for _ in 0..160 {
+            if runner.state().turn_number > old_turn {
+                break;
+            }
+            let action = match runner.state().waiting_for {
+                WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                    attacks: vec![],
+                    bands: vec![],
+                },
+                WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                    assignments: vec![],
+                },
+                _ => GameAction::PassPriority,
+            };
+            runner.act(action).unwrap();
+        }
+        assert!(runner.state().turn_number > old_turn);
+        assert!(runner
+            .state()
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .all(|entry| !matches!(&entry.command, Some(ResolvedRulesCommand::TokenCreation(_)))));
+        for state in liminal_copy_reader_forms(runner.state()) {
+            assert_eq!(
+                state.objects[&native].base_display_source,
+                Some(DisplaySource::Token)
+            );
+            assert_eq!(
+                state.objects[&copied].base_display_source,
+                Some(DisplaySource::Card)
+            );
+        }
+        let mut legacy: GameState = serde_json::from_value(erase(runner.state())).unwrap();
+        for _ in 0..3 {
+            crate::game::layers::evaluate_layers(&mut legacy);
+            for id in [native, copied] {
+                assert_eq!(legacy.objects[&id].base_display_source, None);
+                assert_eq!(legacy.objects[&id].base_token_image_ref, None);
+                assert_eq!(legacy.objects[&id].display_source, DisplaySource::Token);
+                assert!(legacy.objects[&id].is_token);
+            }
+            legacy = serde_json::from_value(serde_json::to_value(&legacy).unwrap()).unwrap();
+        }
+        for restored in liminal_copy_reader_forms(&legacy) {
+            for id in [native, copied] {
+                assert_eq!(restored.objects[&id].base_display_source, None);
+                assert_eq!(restored.objects[&id].base_token_image_ref, None);
+            }
+        }
+        // A genuine new copy may bind the presented fallback for its own birth;
+        // it must not write proof back into the old donor's unknown baseline.
+        let mut legacy = GameRunner::from_state(legacy);
+        if matches!(legacy.state().waiting_for, WaitingFor::Priority { player } if player != P0) {
+            legacy.act(GameAction::PassPriority).unwrap();
+        }
+        let result = legacy.activate(factory, 1).target_object(copied).resolve();
+        assert!(matches!(
+            result.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        let born: Vec<_> = result
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(born.len(), 1);
+        assert_eq!(
+            legacy.state().objects[&born[0]].base_display_source,
+            Some(DisplaySource::Token)
+        );
+        assert_eq!(legacy.state().objects[&copied].base_display_source, None);
+        let mut saved = serde_json::to_value(legacy.state()).unwrap();
+        let object = saved["objects"][born[0].0.to_string()]
+            .as_object_mut()
+            .unwrap();
+        object.remove("base_display_source");
+        object.remove("base_token_image_ref");
+        let recovered: GameState = serde_json::from_value(saved).unwrap();
+        assert_eq!(
+            recovered.objects[&born[0]].base_display_source,
+            Some(DisplaySource::Token)
+        );
+        assert_eq!(recovered.objects[&copied].base_display_source, None);
+        assert!(legacy.state().stack.is_empty());
+        assert!(legacy.state().resolution_stack.is_empty());
     }
 
     /// CR 614.1a + CR 707.2: A token-count-doubling replacement (Doubling
@@ -9026,6 +9748,8 @@ pub(crate) mod tests {
                 }
             }
             let replayed = &replay.objects[&entrant];
+            assert_eq!(replayed.base_display_source, Some(DisplaySource::Card));
+            assert_eq!(replayed.base_token_image_ref, None);
             assert_eq!(
                 (replayed.name.as_str(), replayed.base_name.as_str()),
                 ("Silver Myr", "Mishra's Warform")

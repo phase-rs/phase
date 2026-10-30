@@ -501,11 +501,8 @@ fn host_copying_a_token_donor_routes_token_display() {
     blue_pool(&mut scenario);
 
     let mut runner = scenario.build();
-    // Make the donor a TRUE token so its display routes to the token art db
-    // (CR 111.1): `is_token` with no `base_printed_ref` derives
-    // `DisplaySource::Token` in the layer engine; its `token_image_ref` is its
-    // own art pointer. Mutate via `GameRunner::state_mut` (GameScenario has no
-    // mutable state escape hatch).
+    // CR 111.1: stage an explicitly native token baseline, independently of
+    // the object's token status and any later live copy override.
     {
         let d = runner.state_mut().objects.get_mut(&donor).unwrap();
         d.is_token = true;
@@ -516,6 +513,8 @@ fn host_copying_a_token_donor_routes_token_display() {
             face_name: None,
             preset_id: "angel_4_4".to_string(),
         });
+        d.display_source = DisplaySource::Token;
+        d.install_display_identity_as_base(&d.display_identity());
     }
     runner
         .cast(aura)
@@ -568,6 +567,8 @@ fn host_copying_a_refless_token_donor_carries_token_art() {
         d.is_token = true;
         d.base_printed_ref = None;
         d.token_image_ref = None;
+        d.display_source = DisplaySource::Token;
+        d.install_display_identity_as_base(&d.display_identity());
         d.base_card_types.subtypes = vec!["Angel".to_string()];
         d.base_color = vec![ManaColor::White];
     }

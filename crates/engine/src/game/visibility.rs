@@ -4386,6 +4386,8 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     Arc::make_mut(&mut obj.base_static_definitions).clear();
     obj.base_color.clear();
     obj.base_printed_ref = None;
+    obj.base_display_source = None;
+    obj.base_token_image_ref = None;
 }
 
 /// The retained event shapes that carry a `ZoneChangeRecord` or a `TriggerSourceContext`:
@@ -12099,8 +12101,15 @@ mod tests {
             "Secret Manifest".to_string(),
             Zone::Library,
         );
+        let secret_image = crate::types::card::TokenImageRef {
+            scryfall_id: "secret-manifest-image".into(),
+            scryfall_oracle_id: None,
+            face_name: None,
+            preset_id: "secret-manifest-preset".into(),
+        };
         {
             let obj = state.objects.get_mut(&secret).unwrap();
+            obj.base_token_image_ref = Some(secret_image.clone());
             obj.power = Some(5);
             obj.toughness = Some(4);
             obj.card_types = CardType {
@@ -12133,6 +12142,14 @@ mod tests {
             .expect("controller must retain back_face to look at their own manifest");
         assert_eq!(controller_back.name, "Secret Manifest");
         assert_eq!(controller_back.power, Some(5));
+        assert_eq!(
+            controller_obj.base_display_source,
+            Some(crate::game::game_object::DisplaySource::Card)
+        );
+        assert_eq!(
+            controller_obj.base_token_image_ref,
+            Some(secret_image.clone())
+        );
 
         // CR 708.5: an opponent can't look at it — back_face is redacted, but
         // the public 2/2 face is still shown.
@@ -12146,6 +12163,15 @@ mod tests {
         );
         assert_eq!(opponent_obj.power, Some(2));
         assert_eq!(opponent_obj.toughness, Some(2));
+        for projected in [opponent_view, filter_state_for_unseated_viewer(&state)] {
+            let hidden = &projected.objects[&secret];
+            assert_eq!(hidden.base_display_source, None);
+            assert_eq!(hidden.base_token_image_ref, None);
+        }
+        assert_eq!(
+            state.objects[&secret].base_token_image_ref,
+            Some(secret_image)
+        );
     }
 
     #[test]

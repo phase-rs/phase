@@ -21,7 +21,6 @@ use crate::game::filter::{
     target_filter_characteristic_reads_at, CharacteristicKinds, FilterContext,
     CHARACTERISTIC_READ_DEPTH, UNPAIRED_READS,
 };
-use crate::game::game_object::DisplaySource;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::printed_cards::{
     apply_copiable_values, ensure_keyword_triggers_for_copiable_values, intrinsic_copiable_values,
@@ -3597,32 +3596,9 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
         );
     obj.static_definitions = Arc::clone(&obj.base_static_definitions).into();
     obj.color = obj.base_color.clone();
-    // Reset the display-identity pointer to its baseline; the Copy layer
-    // re-applies the copied source's `printed_ref` below for objects
-    // under a copy effect, so a temporary copy's art reverts on expiry.
-    obj.printed_ref = obj.base_printed_ref.clone();
-    // Reset display routing to the object's own derived baseline so a
-    // copy effect's override (set by `CopyValues` below) reverts on
-    // expiry. Display routing is derived state, not a copiable value
-    // (CR 707.2): a true token — created by a token-making effect
-    // (CR 111.1), so carrying no printed identity — routes to the token
-    // art database; everything else (a real card, or a token-copy *of a
-    // real card*, which carries `base_printed_ref`) routes to the card
-    // database. Deriving here (rather than storing a `base_display_source`)
-    // keeps tokens in pre-existing saved states correct on load.
-    obj.display_source = if obj.is_token && obj.base_printed_ref.is_none() {
-        DisplaySource::Token
-    } else {
-        DisplaySource::Card
-    };
-    // A nontoken never has its own token-art pointer, so clear it to its
-    // baseline (`None`); a copy-of-token effect re-applies the source
-    // token's `token_image_ref` below while active. A true token keeps
-    // its own pointer (its baseline), which the copy layer overrides only
-    // while it is copying another object.
-    if !obj.is_token {
-        obj.token_image_ref = None;
-    }
+    // CopyValues changes live presentation only; expiry restores the actual
+    // underlying channel/image, including a Card-routed ref-less copy token.
+    obj.restore_display_identity_baseline();
     // Intrinsic art body baseline. A nontoken carries no descriptor of its
     // own: reset to `None` (a plain drop, never an allocation); a
     // copy-of-token effect re-applies the source's descriptor below while
