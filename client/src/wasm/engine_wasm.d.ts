@@ -2,6 +2,43 @@
 /* eslint-disable */
 
 /**
+ * Immutable exact-JSON state owned by wasm-bindgen, not an authoritative restore.
+ *
+ * Optional baseline arguments consume their handles. Call `clone_handle` before
+ * transferring a baseline if the caller needs to retain it.
+ */
+export class StateCodecHandle {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Cheaply share immutable state before transferring a baseline handle.
+     */
+    clone_handle(): StateCodecHandle;
+    /**
+     * Return the full SHA-256 digest of the retained JSON bytes as lowercase hex.
+     */
+    hash(): string;
+    /**
+     * Return the exact retained JSON value as text, including internal whitespace.
+     */
+    json(): string;
+    /**
+     * Return the exact retained JSON bytes, without parsing through JavaScript.
+     */
+    json_bytes(): Uint8Array;
+    /**
+     * Return the publication revision, if supplied, as a JavaScript bigint.
+     */
+    revision(): bigint | undefined;
+    /**
+     * Share immutable JSON with publication metadata, without changing its bytes or hash.
+     * Revisions are supplied by the publisher, not inferred from JSON.
+     */
+    with_revision(revision: bigint): StateCodecHandle;
+}
+
+/**
  * Apply a seat mutation to a seat state, using the TLS card database for deck
  * resolution. Both arguments are JSON strings; returns `{ state, delta }` as
  * a JS object on success, or a JS error string on failure.
@@ -707,6 +744,40 @@ export function sideboardPolicyForFormat(format_config: any): any;
 export function signatureSpellSelectionPolicy(request: any): any;
 
 /**
+ * Decode frame bytes into exact JSON, never through the engine's state decoder.
+ *
+ * FULL ignores every baseline. Passing a baseline consumes that handle; call
+ * `clone_handle` before transfer to retain it. Malformed frames and DELTA
+ * revision/hash mismatches return errors without changing retained clones.
+ */
+export function state_codec_decode(bytes: Uint8Array, baseline?: StateCodecHandle | null): StateCodecHandle;
+
+/**
+ * Encode exact JSON as FULL or, with a compatible revisioned baseline, DELTA.
+ * Pass no baseline to force FULL for initial delivery or stream recovery.
+ *
+ * Passing a baseline consumes that handle; call `clone_handle` before transfer
+ * to retain it. The state argument is borrowed and remains usable.
+ */
+export function state_codec_encode(state: StateCodecHandle, baseline?: StateCodecHandle | null): Uint8Array;
+
+/**
+ * Serialize the current game's engine-filtered viewer state, without changing it.
+ *
+ * A seat selects that player's projection; 255 selects the server's spectator
+ * sentinel. An omitted viewer selects the engine's unseated public projection.
+ * Returns an error when no game is initialized. No derived-view envelope is added.
+ */
+export function state_codec_for_viewer(viewer?: number | null): StateCodecHandle;
+
+/**
+ * Validate raw JSON bytes and retain their exact value span, not outer whitespace.
+ *
+ * This does not deserialize or validate an authoritative engine state.
+ */
+export function state_codec_from_json(bytes: Uint8Array): StateCodecHandle;
+
+/**
  * Submit a game action on behalf of `actor` and return the ActionResult
  * (events + waiting_for).
  *
@@ -760,6 +831,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly __wbg_statecodechandle_free: (a: number, b: number) => void;
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly bestOfThreeCeilingForFormat: (a: any) => any;
     readonly buildLlmDecisionRequest: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
@@ -824,6 +896,16 @@ export interface InitOutput {
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
     readonly signatureSpellSelectionPolicy: (a: any) => [number, number, number];
+    readonly state_codec_decode: (a: number, b: number, c: number) => [number, number, number];
+    readonly state_codec_encode: (a: number, b: number) => [number, number, number, number];
+    readonly state_codec_for_viewer: (a: number) => [number, number, number];
+    readonly state_codec_from_json: (a: number, b: number) => [number, number, number];
+    readonly statecodechandle_clone_handle: (a: number) => number;
+    readonly statecodechandle_hash: (a: number) => [number, number];
+    readonly statecodechandle_json: (a: number) => [number, number];
+    readonly statecodechandle_json_bytes: (a: number) => [number, number];
+    readonly statecodechandle_revision: (a: number) => [number, bigint];
+    readonly statecodechandle_with_revision: (a: number, b: bigint) => number;
     readonly submit_action: (a: number, b: any) => any;
     readonly submit_ai_action_proposal: (a: number, b: number, c: number, d: any) => any;
     readonly submit_interaction_js: (a: number, b: any) => any;

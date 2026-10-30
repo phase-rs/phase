@@ -1,0 +1,22 @@
+[package]
+name = "state-codec"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+engine = { package = "phase-engine", path = "../engine" }
+serde = { workspace = true }
+serde_json = { version = "1", features = ["raw_value"] }
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+engine = { package = "phase-engine", path = "../engine", features = ["test-support"] }
+phase-ai = { path = "../phase-ai" }
+rand = "0.9"
+flate2 = "1"
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
