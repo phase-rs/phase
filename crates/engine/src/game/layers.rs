@@ -9624,20 +9624,7 @@ fn retire_ended_effects(
         return false;
     }
     match retirement_owner {
-        StateDurationRetirementOwner::LayerSettlement => {
-            let command =
-                crate::types::resolved_commands::ResolvedContinuousEffectRetirementCommand {
-                    effects: ended,
-                    cause: state.current_or_begin_rules_execution_node(),
-                };
-            state
-                .retire_exact_continuous_effects(&command.effects)
-                .expect("the settled selection must match its stored continuous effects");
-            state
-                .resolved_rules_journal
-                .record_continuous_effect_retirement(command)
-                .expect("state-duration retirement must have a live journal cause");
-        }
+        StateDurationRetirementOwner::LayerSettlement => retire_and_journal(state, ended),
         StateDurationRetirementOwner::AttachmentCommand => {
             state
                 .retire_exact_continuous_effects(&ended)
@@ -9645,6 +9632,39 @@ fn retire_ended_effects(
         }
     }
     true
+}
+
+/// Remove the exact stored records and journal that removal under the current
+/// execution node, so command replay removes them verbatim.
+fn retire_and_journal(state: &mut GameState, effects: Vec<TransientContinuousEffect>) {
+    let command = crate::types::resolved_commands::ResolvedContinuousEffectRetirementCommand {
+        effects,
+        cause: state.current_or_begin_rules_execution_node(),
+    };
+    state
+        .retire_exact_continuous_effects(&command.effects)
+        .expect("the retired selection must match its stored continuous effects");
+    state
+        .resolved_rules_journal
+        .record_continuous_effect_retirement(command)
+        .expect("continuous-effect retirement must have a live journal cause");
+}
+
+/// End the resolution-created effect `effect_id` whose single cast permission
+/// (CR 601.3) has just been used: its Oracle wording authorizes one cast ("you
+/// may cast a creature spell from your graveyard this turn"). Its stated duration
+/// has not run out — the cast it allowed ends it — so it is removed here, and
+/// journaled as the `prune_*` passes journal the effects whose durations end.
+pub(crate) fn retire_used_single_cast_grant(state: &mut GameState, effect_id: u64) {
+    let used: Vec<_> = state
+        .transient_continuous_effects
+        .iter()
+        .filter(|effect| effect.id == effect_id)
+        .cloned()
+        .collect();
+    if !used.is_empty() {
+        retire_and_journal(state, used);
+    }
 }
 
 /// CR 611.2b: end every duration the settled board shows has ended, one family

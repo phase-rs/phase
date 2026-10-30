@@ -19882,6 +19882,9 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             enters_with_counter: None,
             required_cast_keyword,
             pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
         })
         .affected(TargetFilter::Typed(
             crate::types::ability::TypedFilter::creature(),

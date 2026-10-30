@@ -12142,6 +12142,22 @@ pub struct GraveyardPermissionLatch {
     pub extra_cost: Option<crate::types::statics::CastExtraCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enters_with_counter: Option<crate::types::counter::CounterType>,
+    /// CR 601.3 + CR 601.2i: a `Single` grant allows one cast and ends when
+    /// this cast becomes cast.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::statics::PermissionCastLimit::is_unlimited"
+    )]
+    pub cast_limit: crate::types::statics::PermissionCastLimit,
+    /// CR 609.4b: the grant's mana concession for this spell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
+    /// CR 614.1c + CR 613.1d: modifications this spell keeps as a permanent.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::PendingEntersModifications::is_empty"
+    )]
+    pub enters_modifications: crate::types::ability::PendingEntersModifications,
 }
 
 /// The engine-authored authority of a graveyard casting option: the
@@ -22497,6 +22513,14 @@ declare_game_state! {
     /// consults it only inside that synchronous window; it is never serialized.
     #[serde(skip)]
     pub active_casting_permission_index: Option<CastingPermissionIndex>,
+    /// CR 601.2a + CR 609.4b: transient copy of the graveyard permission latch
+    /// (`SpellContext::graveyard_permission_latch`) while finalization owns the
+    /// `PendingCast` by value, so the spend reads the grant's mana concession.
+    /// Set and cleared beside `active_casting_permission_index`; never
+    /// serialized. Boxed: `GameState` is moved by value and has a stack budget
+    /// (`game_state_size`).
+    #[serde(skip)]
+    pub active_graveyard_permission_latch: Option<Box<GraveyardPermissionLatch>>,
     /// The single synchronous handoff from a paid offer's immediate direct
     /// `CreateDelayedTrigger` tail to the installer. It is never persisted.
     #[serde(skip)]
@@ -32062,6 +32086,7 @@ impl GameState {
             active_payment_pins: Vec::new(),
             active_rules_execution_node: None,
             active_casting_permission_index: None,
+            active_graveyard_permission_latch: None,
             active_paid_resolution_offer_tail: None,
             active_spend_only_on_x_count: None,
             ingress_life_window: None,
@@ -35369,6 +35394,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_payment_pins: _,
         active_rules_execution_node: _,
         active_casting_permission_index: _,
+        active_graveyard_permission_latch: _,
         active_paid_resolution_offer_tail: _,
         active_spend_only_on_x_count: _,
         ingress_life_window: _,
@@ -53759,6 +53785,20 @@ mod tests {
     fn transient_active_casting_fields_are_skipped_by_serde() {
         let mut state = GameState::new_two_player(7);
         state.active_casting_permission_index = Some(CastingPermissionIndex(42));
+        state.active_graveyard_permission_latch = Some(Box::new(GraveyardPermissionLatch {
+            permission: GraveyardPermissionId {
+                source: ObjectId(7),
+                grant: PermissionGrant::Transient {
+                    effect_id: 3,
+                    modification: 0,
+                },
+            },
+            extra_cost: None,
+            enters_with_counter: None,
+            cast_limit: crate::types::statics::PermissionCastLimit::Single,
+            mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyColor),
+            enters_modifications: Default::default(),
+        }));
         state.active_spend_only_on_x_count = Some((ObjectId(123), 5));
         state.active_auto_tap_row_policy =
             Some(crate::game::casting_costs::AutoTapRowPolicy::AllRows);
@@ -53771,6 +53811,10 @@ mod tests {
         assert!(
             !serialized.contains("active_casting_permission_index"),
             "active_casting_permission_index must be skipped by serde: {serialized}"
+        );
+        assert!(
+            !serialized.contains("active_graveyard_permission_latch"),
+            "active_graveyard_permission_latch must be skipped by serde: {serialized}"
         );
         assert!(
             !serialized.contains("active_spend_only_on_x_count"),

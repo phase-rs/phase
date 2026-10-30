@@ -2231,7 +2231,15 @@ fn lower_trigger_effect_chain(
     // CR 603.5: A triggered ability whose effect is optional ("may") goes
     // on the stack regardless; the choice is made when it resolves. Carry
     // that optionality onto the execute ability, which is what resolves.
-    if modifiers.optional {
+    //
+    // CR 601.3: except for a granted graveyard cast permission ("you may cast a
+    // creature spell from that player's graveyard this turn" — Whispersteel
+    // Dagger): its "may" is the later cast the permission allows, not a choice
+    // made as the trigger resolves, as for the same grant in a spell or an
+    // activated ability.
+    if modifiers.optional
+        && !crate::parser::oracle_ir::ast::is_graveyard_permission_grant(&ability.effect)
+    {
         ability.optional = true;
     }
     ability

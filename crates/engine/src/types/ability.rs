@@ -5306,7 +5306,7 @@ pub enum CastingPermission {
             deserialize_with = "deserialize_graveyard_replacement_compat"
         )]
         graveyard_replacement: Option<SpellStackToGraveyardReplacement>,
-        /// CR 614.1c + CR 122.1: Osteomancer Adept / The Tomb of Aclazotz class —
+        /// CR 614.1c + CR 122.1: Osteomancer Adept class —
         /// a `CastFromZone` grant whose sub-ability is "the creature cast this way
         /// enters with a [counter] counter on it." When `Some(ct)`, the granted
         /// cast finalization registers a pending ETB counter of type `ct` on the
@@ -5318,7 +5318,7 @@ pub enum CastingPermission {
         /// the rider covers any counter the cast-this-way creature enters with.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_with_counter: Option<CounterType>,
-        /// CR 205.1b + CR 611.2c: The Tomb of Aclazotz class — a `CastFromZone`
+        /// CR 205.1b + CR 611.2c: a `CastFromZone`
         /// grant whose sub-ability is "the creature cast this way … is a
         /// [type] in addition to its other types." Continuous modifications
         /// (Layer 4, CR 613.1d) recorded on the grant so the cast finalization

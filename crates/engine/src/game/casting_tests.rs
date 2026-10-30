@@ -21127,9 +21127,9 @@ fn graveyard_in_place_alt_cost_grant_is_consumed_after_one_cast() {
     );
 }
 
-/// CR 614.1c + CR 122.1: Osteomancer Adept / The Tomb of Aclazotz —
-/// "you may cast a creature spell from your graveyard this turn. The creature
-/// cast this way enters with a finality counter on it." Drives the FULL cast
+/// CR 614.1c + CR 122.1: the enters-with-counter rider ("The creature cast this
+/// way enters with a finality counter on it.") on a hand-built lingering
+/// `CastFromZone` grant (Osteomancer Adept's rider shape). Drives the FULL cast
 /// pipeline: the `CastFromZone` grant carrying the enters-with-counter rider
 /// stamps `enters_with_counter` on the granted permission; casting the
 /// creature and resolving it onto the battlefield must apply the finality
@@ -21318,7 +21318,8 @@ fn graveyard_cast_without_rider_has_no_finality_counter() {
     );
 }
 
-/// CR 205.1b + CR 611.2c + CR 613.1d — The Tomb of Aclazotz: a creature cast
+/// CR 205.1b + CR 611.2c + CR 613.1d — The Tomb of Aclazotz's compound rider
+/// shape on a hand-built `CastFromZone` grant: a creature cast
 /// from the graveyard under a `CastFromZone` grant carrying the compound rider
 /// ("enters with a finality counter on it AND is a Vampire in addition to its
 /// other types") must, after resolving onto the battlefield:
@@ -32433,6 +32434,9 @@ fn chosen_muldrotha_variant_requests_and_consumes_permanent_type_slot() {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent))),
         );
@@ -32581,6 +32585,9 @@ fn muldrotha_and_graveyard_artifact_creature(state: &mut GameState) -> (ObjectId
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent))),
         );

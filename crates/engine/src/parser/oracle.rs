@@ -34,7 +34,9 @@ use crate::types::mana::{ManaCost, ManaSpellGrant};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::{CastFrequency, GraveyardPermissionPool, StaticMode};
+use crate::types::statics::{
+    CastFrequency, GraveyardPermissionPool, PermissionCastLimit, StaticMode,
+};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -2738,7 +2740,10 @@ fn plain_own_graveyard_cast_grant_filter(effect: &Effect) -> Option<&TargetFilte
             enters_with_counter: None,
             required_cast_keyword: None,
             pool: GraveyardPermissionPool::OwnGraveyard,
-        } => definition.affected.as_ref(),
+            cast_limit: PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications,
+        } if enters_modifications.is_empty() => definition.affected.as_ref(),
         _ => None,
     }
 }
@@ -2801,6 +2806,9 @@ fn coordinated_graveyard_permission(cast_target: &TargetFilter) -> Option<Static
             enters_with_counter: None,
             required_cast_keyword: None,
             pool: GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
         })
         // CR 611.2c: class-wide and re-evaluated live, so cards that reach the
         // graveyard later this turn are covered.
@@ -9403,7 +9411,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         }
         // CR 611.2: the seventh carrier is one level down — the granted permission's own
         // `enters_with_modifications`, the type-grant rider on a cast-this-way creature
-        // (The Tomb of Aclazotz class; see that field's own doc).
+        // (see that field's own doc).
         Effect::GrantCastingPermission { permission, .. } => {
             resolve_guards_in_casting_permission(permission)
         }
@@ -9655,7 +9663,7 @@ fn resolve_guards_in_replacement(replacement: &mut ReplacementDefinition) {
 /// `CastingPermission` variant must force a descend-or-leaf decision here.
 ///
 /// CR 611.2: only `ExileWithAltCost` carries modifications — the type-grant rider on a
-/// cast-this-way permission (The Tomb of Aclazotz class). The remaining seven variants
+/// cast-this-way permission. The remaining seven variants
 /// carry costs, zones and turn stamps, none of which is a definition carrier.
 fn resolve_guards_in_casting_permission(permission: &mut CastingPermission) {
     match permission {
@@ -9677,7 +9685,10 @@ fn resolve_guards_in_casting_permission(permission: &mut CastingPermission) {
     }
 }
 
-/// CR 611.2: a static's modifications are the only definition carriers it has.
+/// CR 611.2: a static's modifications are the only definition carriers it has
+/// (a granted graveyard cast permission's `enters_modifications` holds only a
+/// cast-this-way rider's modifications — today the Tomb's type change, which
+/// carries no definition).
 fn resolve_guards_in_static(static_def: &mut StaticDefinition) {
     for modification in &mut static_def.modifications {
         resolve_guards_in_continuous_mod(modification);

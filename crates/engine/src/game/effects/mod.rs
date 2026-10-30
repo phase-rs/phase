@@ -11787,10 +11787,19 @@ fn detach_after_player_scope_local_chain(
     // per-opponent by construction — its gate only has meaning relative to the
     // scoped player's own optional decision. It must stay inside the scoped
     // template, never detach as the unscoped tail.
-    let next_is_performed_gated = next
-        .condition
-        .as_ref()
-        .is_some_and(condition_depends_on_effect_performed);
+    // CR 608.2e: EXCEPT a child that carries its OWN `player_scope` — this
+    // fan-out's population or another. That child is the next multi-player
+    // action ("each player discards their hand, then draws four cards" —
+    // Sensation Gorger), and its "If you do" is the gate the whole
+    // instruction inherited, not one seat's decision. It resolves as its own
+    // fan-out after this action has been processed for every player, exactly
+    // like its ungated twin (Wheel of Fortune); kept here it would re-enter the
+    // driver from every seat.
+    let next_is_performed_gated = next.player_scope.is_none()
+        && next
+            .condition
+            .as_ref()
+            .is_some_and(condition_depends_on_effect_performed);
     // CR 608.2c + CR 109.5: a decline-branch sub-ability gated on
     // `ZoneChangedThisWay` (Kroxa, Titan of Death's Hunger: "each opponent who
     // didn't discard a nonland card this way") reads `last_zone_changed_ids`
@@ -14728,11 +14737,12 @@ fn affected_objects_from_events(
 /// yes" (`mandatory_parent_effect_performed`'s default arm), and any recorded
 /// performance (`optional_effect_performed`) otherwise wins.
 ///
-/// A mass zone move is the exception: CR 603.12 keys the reflexive on the
-/// move EVENT, which CR 118.12's "started to pay" reading of "if you do" does
-/// not need. An empty or CR 610.3a/b-refused `ChangeZoneAll` moved nothing, so
-/// no reflexive — authoritative even over an accepted or inherited performed
-/// mark (`mandatory_parent_event_occurred`).
+/// A mass zone move or a discard is the exception: CR 603.12 keys the
+/// reflexive on the move EVENT, which CR 118.12's "started to pay" reading of
+/// "if you do" does not need. An empty or CR 610.3a/b-refused `ChangeZoneAll`,
+/// or a discard that moved no card, moved nothing, so no reflexive —
+/// authoritative even over an accepted or inherited performed mark
+/// (`mandatory_parent_event_occurred`).
 fn when_you_do_mandatory_parent_did_nothing(
     condition: &AbilityCondition,
     parent: &ResolvedAbility,
@@ -14789,17 +14799,22 @@ fn gated_run_keeps_ledger_for_this_way_head(ability: &ResolvedAbility) -> bool {
         )
 }
 
-/// CR 603.12: Effect kinds whose reflexive "when you do" needs an actual move
-/// event even though their "if you do" (CR 118.12) treats a started-but-empty
-/// move as performed.
+/// CR 603.12 + CR 701.9a: Effect kinds whose reflexive "when you do" needs an
+/// actual move event even though their "if you do" (CR 118.12) treats a
+/// started-but-empty move as performed: a mass zone move, and a discard — which
+/// is moving a card from hand to graveyard — so "discard your hand" with an
+/// empty hand pays its "if you do" but triggers no "when you do".
 fn effect_reflexive_needs_move_event(effect: &Effect) -> bool {
-    matches!(effect, Effect::ChangeZoneAll { .. })
+    matches!(
+        effect,
+        Effect::ChangeZoneAll { .. } | Effect::Discard { .. } | Effect::DiscardCard { .. }
+    )
 }
 
 /// CR 603.12: Whether the parent's own event slice witnesses the event a
-/// reflexive "when you do" keys on. A mass zone move occurred only if some
-/// object actually changed zones; every other kind defers to the shared
-/// performed reader.
+/// reflexive "when you do" keys on. A mass zone move or a discard occurred
+/// only if some object actually changed zones; every other kind defers to the
+/// shared performed reader.
 fn mandatory_parent_event_occurred(effect: &Effect, parent_events: &[GameEvent]) -> bool {
     if effect_reflexive_needs_move_event(effect) {
         return parent_events
@@ -21974,6 +21989,15 @@ fn resolve_chain_body(
         let scoped_search_delivery_is_safe =
             scoped_library_search::has_only_detachable_shuffle_tail(ability);
         let (mut scoped_template, mut after_scope) = split_player_scope_chain(ability, scope);
+        // CR 608.2c + CR 118.12: the detached remainder is the instruction
+        // printed after this clause, so it receives this clause's chain hand-off
+        // before any route takes it (the linearized route already got it from
+        // the last seat leg's sub-walk; the synchronous, sidecar and batch
+        // routes ran it without a parent). An inherited "If you do" on it reads
+        // the performance this hand-off carries.
+        if let Some(tail) = after_scope.as_deref_mut() {
+            apply_parent_chain_context(tail, ability, None, state);
+        }
         // CR 608.2e: prove the per-seat created-referent partition at
         // split time, before any completion route (sync, sidecar, sacrifice,
         // search, draw, discard batch) takes the tail.
@@ -24787,7 +24811,7 @@ fn resolve_chain_body(
         // (recorded on the granted `ExileWithAltCost`). Resolving the structural
         // `AddPendingETBCounters` rider here would read the (absent) SpellCast
         // trigger event of the granting ability, not the future graveyard cast —
-        // so it is skipped (Osteomancer Adept, The Tomb of Aclazotz). The same
+        // so it is skipped (Osteomancer Adept's rider shape). The same
         // metadata treatment applies to the gains-modifications rider ("If you
         // cast a [quality] spell this way, it gains …", Strago and Relm); both
         // are spliced out of the walk at the top of this block
@@ -27161,7 +27185,10 @@ pub(crate) fn evaluate_condition(
         //    and mandatory-discard handlers signal this via
         //    `cost_payment_failed_flag`. This is NOT subsumed by (1) — the
         //    optional action WAS taken, it is the payment underneath that did
-        //    not happen — so both gates are load-bearing.
+        //    not happen — so both gates are load-bearing. A discard that required
+        //    zero cards ("discard your hand" with an empty hand) does not set the
+        //    flag; its reflexive is suppressed by
+        //    `when_you_do_mandatory_parent_did_nothing` instead (CR 603.12).
         AbilityCondition::WhenYouDo => {
             let optional_action_not_taken =
                 ability.optional && !ability.context.optional_effect_performed;
@@ -43312,6 +43339,85 @@ mod tests {
         );
     }
 
+    /// CR 603.12 + CR 701.9a: a discard's reflexive "when you do" keys on the
+    /// discard event — a card moving from hand to graveyard — so a discard that
+    /// moved no card ("discard your hand" with an empty hand, which CR 118.12
+    /// still counts as paid for "if you do") produces no reflexive, even over
+    /// the accepted performed mark. The parent is shaped as it arrives
+    /// post-accept: `optional` lowered, `optional_effect_performed` set.
+    #[test]
+    fn a_discard_reflexive_needs_a_moved_card() {
+        let mut parent = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                target: TargetFilter::Controller,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        parent.optional = false;
+        parent.context.optional_effect_performed = true;
+        let no_events: Vec<GameEvent> = vec![];
+
+        // The suppression case: accepted, but no card moved.
+        assert!(
+            when_you_do_mandatory_parent_did_nothing(
+                &AbilityCondition::WhenYouDo,
+                &parent,
+                &no_events
+            ),
+            "a discard that moved no card triggers no \"when you do\" (CR 603.12)"
+        );
+
+        // Paired positive: a real hand card moving to the graveyard is the
+        // discard event, so the reflexive survives.
+        let mut state = GameState::new_two_player(42);
+        let card = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Discarded".to_string(),
+            Zone::Hand,
+        );
+        let mut moved = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Graveyard, &mut moved);
+        assert!(
+            moved
+                .iter()
+                .any(|event| matches!(event, GameEvent::ZoneChanged { .. })),
+            "reach guard: the move emits the ZoneChanged a discard publishes"
+        );
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &AbilityCondition::WhenYouDo,
+                &parent,
+                &moved
+            ),
+            "a discard that moved a card keeps its \"when you do\""
+        );
+
+        // "If you do" is not this stage's business: CR 118.12 reads the
+        // accepted discard as paid regardless of what moved.
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &AbilityCondition::EffectOutcome {
+                    signal: EffectOutcomeSignal::OptionalEffectPerformed,
+                },
+                &parent,
+                &no_events
+            ),
+            "only `WhenYouDo` is routed through this predicate"
+        );
+    }
+
     #[test]
     fn chain_depth_exceeds_limit_returns_error() {
         let mut state = GameState::new_two_player(42);
@@ -51943,6 +52049,128 @@ mod tests {
             return_in_scope.player_scope.is_none(),
             "the kept ChangeZone's redundant player_scope is cleared"
         );
+    }
+
+    /// CR 608.2e + CR 118.12: a performed-gated child that carries its OWN
+    /// `player_scope` is the next multi-player action under the gate the whole
+    /// instruction inherited ("If you do, each player discards their hand, then
+    /// draws four cards" — Sensation Gorger), so it detaches as its own fan-out
+    /// instead of re-entering the driver from every seat. A performed-gated
+    /// child WITHOUT a scope is a per-seat decline / "who can't" body and stays
+    /// in the template (Refurbished Familiar); a gated child scoped to a
+    /// different population detaches too.
+    #[test]
+    fn split_player_scope_detaches_a_co_scoped_performed_gated_member() {
+        let discard_hand = |scope: PlayerFilter| {
+            let mut discard = ResolvedAbility::new(
+                Effect::Discard {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    },
+                    target: TargetFilter::Controller,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    unless_filter: None,
+                    filter: None,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            );
+            discard.player_scope = Some(scope);
+            discard
+        };
+        let draw = |value: i32| {
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+
+        // Gated co-scoped member: Discard(All, If you do) → Draw(All, If you do).
+        let mut gorger = discard_hand(PlayerFilter::All);
+        gorger.condition = Some(AbilityCondition::effect_performed());
+        let mut gated_draw = draw(4);
+        gated_draw.player_scope = Some(PlayerFilter::All);
+        gated_draw.condition = Some(AbilityCondition::effect_performed());
+        gorger.sub_ability = Some(Box::new(gated_draw));
+
+        let (scoped, tail) = split_player_scope_chain(&gorger, &PlayerFilter::All);
+        assert!(
+            scoped.sub_ability.is_none(),
+            "the gated co-scoped Draw is not kept in the per-seat template"
+        );
+        let tail = tail.expect("the gated co-scoped Draw detaches as its own fan-out");
+        assert!(matches!(tail.effect, Effect::Draw { .. }));
+        assert_eq!(
+            tail.player_scope,
+            Some(PlayerFilter::All),
+            "the detached Draw keeps its own player_scope so it fans out after every discard"
+        );
+        assert!(
+            tail.condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_optional_effect_performed),
+            "the detached Draw keeps its inherited \"If you do\" gate"
+        );
+
+        // Control A (Refurbished Familiar): an unscoped "for each opponent who
+        // can't" body is per-seat and stays in the template.
+        let mut familiar = discard_hand(PlayerFilter::Opponent);
+        let mut cant_draw = draw(1);
+        cant_draw.condition = Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::current_scope_succeeded()),
+        });
+        familiar.sub_ability = Some(Box::new(cant_draw));
+
+        let (scoped_familiar, tail_familiar) =
+            split_player_scope_chain(&familiar, &PlayerFilter::Opponent);
+        assert!(
+            tail_familiar.is_none(),
+            "an unscoped per-seat decline body does not detach"
+        );
+        let kept = scoped_familiar
+            .sub_ability
+            .as_ref()
+            .expect("the per-seat draw stays in the template");
+        assert!(matches!(kept.effect, Effect::Draw { .. }));
+        assert!(kept.player_scope.is_none());
+
+        // Control B: a gated child scoped to a DIFFERENT population (the players
+        // who drew this way) is a separate scoped instruction and detaches.
+        let mut each_draws = draw(1);
+        each_draws.player_scope = Some(PlayerFilter::All);
+        let drawers = PlayerFilter::PerformedActionThisWay {
+            relation: PlayerRelation::All,
+            action: PlayerActionKind::Draw,
+        };
+        let mut drawers_gain = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        drawers_gain.player_scope = Some(drawers.clone());
+        drawers_gain.condition = Some(AbilityCondition::effect_performed());
+        each_draws.sub_ability = Some(Box::new(drawers_gain));
+
+        let (scoped_draws, tail_draws) = split_player_scope_chain(&each_draws, &PlayerFilter::All);
+        assert!(
+            scoped_draws.sub_ability.is_none(),
+            "a distinct-scope gated child is not kept in this fan-out's template"
+        );
+        let tail_draws = tail_draws.expect("a distinct-scope gated child detaches");
+        assert!(matches!(tail_draws.effect, Effect::GainLife { .. }));
+        assert_eq!(tail_draws.player_scope, Some(drawers));
     }
 
     /// Scholarship Sponsor / Enigma Ridges lower one scoped search with a

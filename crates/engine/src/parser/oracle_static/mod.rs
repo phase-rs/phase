@@ -69,8 +69,8 @@ mod prelude {
         CombatAloneAction, CombatAloneRequirement, CostModifyMode, CostPaymentProhibition,
         CostReductionReach, CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost,
         ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool, HandSizeModification,
-        ProhibitionScope, RequiredDefender, StaticMode, SuppressedTriggerEvent, TriggerCause,
-        ZoneChangeQualifier,
+        PermissionCastLimit, ProhibitionScope, RequiredDefender, StaticMode,
+        SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
     };
     pub(super) use crate::types::zones::Zone;
 }

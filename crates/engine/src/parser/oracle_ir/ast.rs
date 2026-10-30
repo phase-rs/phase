@@ -2562,6 +2562,33 @@ fn apply_sentence_duration_to_coordinated_cast_defs(
     }
 }
 
+/// CR 601.3 + CR 611.2c: the permission a resolution-created graveyard cast
+/// grant ([`is_graveyard_permission_grant`]) grants, for a rider that modifies
+/// it to fold onto. `None` for any other effect.
+pub(crate) fn granted_graveyard_permission_mut(
+    effect: &mut Effect,
+) -> Option<&mut crate::types::statics::StaticMode> {
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = effect
+    else {
+        return None;
+    };
+    let [grant] = static_abilities.as_mut_slice() else {
+        return None;
+    };
+    let [ContinuousModification::GrantStaticAbility { definition }] =
+        grant.modifications.as_mut_slice()
+    else {
+        return None;
+    };
+    matches!(
+        definition.mode,
+        crate::types::statics::StaticMode::GraveyardCastPermission { .. }
+    )
+    .then_some(&mut definition.mode)
+}
+
 /// CR 601.3 + CR 611.2c: whether `effect` is a resolution-created graveyard
 /// cast permission bound to its controller — the shape
 /// `oracle_effect::graveyard_permission_grant` builds (Yawgmoth's Will, The

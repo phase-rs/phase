@@ -4535,6 +4535,12 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // linked. See `refuse_cast_rider_on_lingering_grant`.
     super::lower::refuse_cast_rider_on_lingering_grant(&mut result);
 
+    // CR 614.1c + CR 613.1d: a "cast this way" rider after a granted graveyard
+    // cast permission describes the spell cast through it, so the permission
+    // carries it to that cast. Applied on the FINAL tree, where the grant and
+    // its rider are linked. See `fold_cast_rider_into_graveyard_grant`.
+    super::lower::fold_cast_rider_into_graveyard_grant(&mut result);
+
     // CR 608.2c + CR 107.1c: A trailing "repeat this process" directive sets a
     // chain-level loop predicate; apply it to the assembled root ability so the
     // resolver re-follows the whole chain.
