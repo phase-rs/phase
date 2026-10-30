@@ -21120,8 +21120,8 @@ fn try_parse_nth_spell_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefin
         OtherThanFirstSpellParse::Accepted(def) => {
             return Some((TriggerMode::SpellCast, *def));
         }
-        // The marker commits this grammar: never let a malformed qualifier
-        // silently broaden through the generic SpellCast parser.
+        // A recognized exclusion determiner commits this grammar: never let a
+        // malformed qualifier silently broaden through the generic SpellCast parser.
         OtherThanFirstSpellParse::Rejected => {
             return Some((
                 TriggerMode::Unknown("malformed other-than-first spell trigger".to_string()),
