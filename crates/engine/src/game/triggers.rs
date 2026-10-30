@@ -18533,8 +18533,7 @@ pub mod tests {
         assert_eq!(source_scoped.target_filter(), None);
         // The declared damage source still supplies its independent target role.
         assert!(
-            crate::game::ability_utils::damage_replacement_source_slot_filter(&source_scoped)
-                .is_some()
+            crate::types::ability::damage_replacement_source_slot_filter(&source_scoped).is_some()
         );
         // A single declared recipient keeps its target filter.
         let source_less = prevent(EffectScope::Single, None);
@@ -18543,8 +18542,7 @@ pub mod tests {
             Some(&TargetFilter::Player)
         );
         assert!(
-            crate::game::ability_utils::damage_replacement_source_slot_filter(&source_less)
-                .is_none()
+            crate::types::ability::damage_replacement_source_slot_filter(&source_less).is_none()
         );
     }
 

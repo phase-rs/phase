@@ -27828,7 +27828,7 @@ fn resolve_unless_payer(
         // the single authority for the declared-target shape (shared with slot
         // creation in `ability_utils` and the resolver arm in `targeting`), so it
         // stays mutually exclusive with the `ChosenPlayer` `Typed` arm there.
-        _ if crate::game::ability_utils::payer_is_declared_target(payer) => {
+        _ if crate::types::ability::payer_is_declared_target(payer) => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         }
         // CR 118.12a: An unresolved payer yields an EMPTY poll list, which makes

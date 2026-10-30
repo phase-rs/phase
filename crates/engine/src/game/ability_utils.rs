@@ -1,18 +1,31 @@
 use crate::game::game_object::ObjectIncarnationRefExt;
-#[cfg(test)]
-use crate::types::ability::TapStateChange;
 use crate::types::ability::{
-    attach_host_filter_needs_target_slot, effect_bound_filter_matches,
-    extract_target_filter_from_effect, filter_binds_player, filter_binds_target_player,
-    mass_all_target_filter, AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCost,
-    AttachSelection, AttachmentReferent, CardTypeSetSource, CastManaSpentMetric, ChosenTargetSlots,
-    CombatRelationSubject, ContinuousModification, ControllerRef, CountBinding,
-    CounterMoveSelection, DamageSource, EachDamageRecipient, Effect, EffectKind, EffectScope,
-    FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
-    MultiTargetSpec, ObjectScope, PlayerBindingAxis, PlayerFilter, PlayerScope, PreventionAmount,
-    PtValue, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext,
+    attach_attachment_claims_announcement_slot, attach_host_filter_needs_target_slot,
+    become_copy_recipient_slot_filter, damage_replacement_source_slot_filter,
+    damage_replacement_target_roles, effect_bound_filter_matches,
+    effect_needs_parent_target_combat_relation_slot, effect_needs_target_creature_quantity_slot,
+    effect_references_target_player, effect_stack_target_declaration_matching,
+    effect_target_filter_references_chosen_player, effect_target_slot_filter,
+    extract_target_filter_from_effect, fight_declared_slot_filters,
+    fight_subject_needs_target_slot, filter_references_target_opponent, is_any_target_filter,
+    mass_all_target_filter, move_counter_stack_target_filters,
+    one_sided_fight_source_supplies_quantity_creature, paired_subject_filters,
+    paired_subject_slot_filters, parent_target_combat_relation_slot_filter,
+    payer_is_declared_target, quantity_slot_filter_selects_players, relative_controller_kind,
+    AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCost, AttachSelection,
+    AttachmentReferent, ChosenTargetSlots, ControllerRef, DamageReplacementTargetRole,
+    EachDamageRecipient, Effect, EffectKind, EffectScope, FilterProp, ModalChoice,
+    ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectScope, PlayerFilter,
+    PreventionAmount, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SpellContext,
     SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TypeFilter,
     TypedFilter,
+};
+#[cfg(test)]
+use crate::types::ability::{
+    filter_target_slot_filter, quantity_expr_target_slot_filter, quantity_ref_target_slot_spec,
+    CardTypeSetSource, CastManaSpentMetric, ContinuousModification, CountBinding,
+    CounterMoveSelection, DamageSource, GameRestriction, PlayerScope, QuantitySlotDerivation,
+    RestrictionPlayerScope, TapStateChange,
 };
 use crate::types::game_state::RandomDraw;
 // CR 601.2c: mana recipient / count-source role slot gate.
@@ -31,22 +44,9 @@ use rand::seq::IndexedRandom;
 
 use super::engine::EngineError;
 use super::players;
-use super::quantity::{quantity_expr_uses_recipient, resolve_quantity_with_targets};
+use super::quantity::resolve_quantity_with_targets;
 use super::stack::stack_object_controller;
 use super::targeting;
-
-fn move_counter_stack_target_filters<'a>(
-    source: &'a TargetFilter,
-    target: &'a TargetFilter,
-    selection: CounterMoveSelection,
-) -> Vec<&'a TargetFilter> {
-    match selection {
-        CounterMoveSelection::StackTarget | CounterMoveSelection::StackTargetAnyNumber => {
-            vec![source, target]
-        }
-        CounterMoveSelection::ResolutionDistributionAnyNumber => vec![source],
-    }
-}
 
 /// CR 113.1a: Build a resolved ability from its definition, preserving sub-ability chains,
 /// conditions, durations, and targeting configuration.
@@ -4046,53 +4046,6 @@ fn restamp_inherited_rider_target(parent: &mut ResolvedAbility) {
     }
 }
 
-/// CR 609.7 + CR 601.2c: For a source-scoped `PreventDamage`
-/// ("prevent all damage target instant or sorcery spell would deal this turn"),
-/// surface the choosable source object as a target slot.
-///
-/// The effect's `damage_source_filter` is an `And` pairing a
-/// `ParentTargetSlot { index }` sentinel (which captures the chosen object at
-/// resolution, CR 609.7a) with the choosable `Typed`/stack-spell leaf. The
-/// sentinel cannot be enumerated by `find_legal_targets`, so we return the
-/// SIBLING leaf — the actual "instant or sorcery spell" filter that
-/// `targeting.rs::filter_targets_stack_spells` can enumerate on the stack.
-///
-/// Returns `None` for recipient-scoped or `ChosenDamageSource`/`IsChosenColor`
-/// ("by …" Arachnogenesis) prevents, so those are NOT diverted into a source
-/// target slot.
-pub(crate) fn damage_replacement_source_slot_filter(effect: &Effect) -> Option<&TargetFilter> {
-    let source_filter = match effect {
-        Effect::PreventDamage {
-            damage_source_filter,
-            ..
-        } => damage_source_filter.as_ref()?,
-        Effect::CreateDamageReplacement { source_filter, .. } => source_filter.as_ref()?,
-        _ => return None,
-    };
-    // The source-target contract is intentionally exact: its first declared
-    // target is captured by `ParentTargetSlot { index: 0 }`, followed by the
-    // source's live legality/recheck leaf. Other dynamic source forms do not
-    // announce a target slot.
-    let TargetFilter::And { filters } = source_filter else {
-        return None;
-    };
-    let [TargetFilter::ParentTargetSlot { index: 0 }, source_leaf] = filters.as_slice() else {
-        return None;
-    };
-    Some(source_leaf)
-}
-
-/// The announced target roles of a damage-redirection replacement, in Oracle
-/// declaration order. Keeping these together prevents the cast, modal,
-/// validation, retarget, and resolver paths from independently re-deriving a
-/// different index convention.
-#[derive(Clone, Copy)]
-pub(crate) enum DamageReplacementTargetRole<'a> {
-    DeclaredSource(&'a TargetFilter),
-    OriginalRecipient(&'a TargetFilter),
-    RedirectRecipient(&'a TargetFilter),
-}
-
 /// Resolution-time legality of the declared roles for a damage replacement.
 ///
 /// The variants distinguish a fully valid replacement instruction from the
@@ -4109,76 +4062,6 @@ impl DamageReplacementTargetRoleLegality {
     pub(crate) fn all_required_roles_are_legal(self) -> bool {
         matches!(self, Self::All)
     }
-}
-
-impl<'a> DamageReplacementTargetRole<'a> {
-    pub(crate) fn filter(self) -> &'a TargetFilter {
-        match self {
-            Self::DeclaredSource(filter)
-            | Self::OriginalRecipient(filter)
-            | Self::RedirectRecipient(filter) => filter,
-        }
-    }
-
-    /// CR 115.4 + CR 614.9: "any target" is a creature, player, planeswalker or
-    /// battle. Both damage-recipient roles of a redirection — the recipient the
-    /// damage would have been dealt to and the recipient it is redirected to —
-    /// name that domain when their filter is `Any`, so neither may admit a land
-    /// or a noncreature artifact at target selection or on the resolution
-    /// recheck. A declared source is not a damage recipient: its legal choices
-    /// are the CR 609.7a source domain, which `Any` must not narrow.
-    pub(crate) fn denotes_damage_any_target(self) -> bool {
-        match self {
-            Self::OriginalRecipient(filter) | Self::RedirectRecipient(filter) => {
-                is_any_target_filter(filter)
-            }
-            Self::DeclaredSource(_) => false,
-        }
-    }
-}
-
-/// CR 115.4: "any target" or "any other target" in damage effects denotes a creature, player,
-/// planeswalker or battle.
-fn is_any_target_filter(filter: &TargetFilter) -> bool {
-    matches!(filter, TargetFilter::Any)
-        || matches!(
-            filter,
-            TargetFilter::Typed(tf)
-                if tf.type_filters.is_empty()
-                    && tf.controller.is_none()
-                    && tf.properties.as_slice() == [FilterProp::Another]
-        )
-}
-
-pub(crate) fn damage_replacement_target_roles(
-    effect: &Effect,
-) -> Option<Vec<DamageReplacementTargetRole<'_>>> {
-    let Effect::CreateDamageReplacement {
-        recipient_object_filter,
-        redirect_object_filter,
-        ..
-    } = effect
-    else {
-        return None;
-    };
-
-    let mut roles = Vec::with_capacity(3);
-    if let Some(filter) = damage_replacement_source_slot_filter(effect) {
-        roles.push(DamageReplacementTargetRole::DeclaredSource(filter));
-    }
-    if let Some(filter) = recipient_object_filter
-        .as_ref()
-        .filter(|filter| !filter.is_context_ref())
-    {
-        roles.push(DamageReplacementTargetRole::OriginalRecipient(filter));
-    }
-    if let Some(filter) = redirect_object_filter {
-        roles.push(DamageReplacementTargetRole::RedirectRecipient(filter));
-    }
-    // CR 608.2b: A role-less replacement has no declared target slots, so it
-    // must fall through to generic target validation rather than report an
-    // empty role set as a separate targeting case.
-    (!roles.is_empty()).then_some(roles)
 }
 
 /// CR 608.2b: Revalidate every CDR role against its original declaration-order
@@ -4271,40 +4154,6 @@ fn damaged_player_targets_for_companion_slot(
     (!players.is_empty()).then_some(players)
 }
 
-/// CR 701.14a: True when a fight's `subject` filter must surface its own target
-/// slot ("target creature you control fights another target creature"). False
-/// for "~ fights", ParentTarget anaphors, and enchanted/equipped hosts.
-pub(crate) fn fight_subject_needs_target_slot(subject: &TargetFilter) -> bool {
-    use crate::types::ability::FilterProp;
-    if subject.is_context_ref() {
-        return false;
-    }
-    match subject {
-        TargetFilter::SelfRef | TargetFilter::ParentTarget | TargetFilter::AttachedTo => false,
-        TargetFilter::Typed(tf)
-            if tf
-                .properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::EnchantedBy | FilterProp::EquippedBy)) =>
-        {
-            false
-        }
-        _ => true,
-    }
-}
-
-/// CR 601.2c + CR 701.14a: Only declared fighters occupy announcement slots.
-fn fight_declared_slot_filters<'a>(
-    subject: &'a TargetFilter,
-    target: &'a TargetFilter,
-) -> impl Iterator<Item = &'a TargetFilter> {
-    fight_subject_needs_target_slot(subject)
-        .then_some(subject)
-        .into_iter()
-        .chain(std::iter::once(target))
-        .filter(|filter| !filter.is_context_ref())
-}
-
 /// CR 601.2c: The recipient is mandatory independently of the source count.
 fn each_power_damage_recipient_slot_filter(ability: &ResolvedAbility) -> Option<&TargetFilter> {
     if ability.target_choice_timing != TargetChoiceTiming::Stack {
@@ -4341,108 +4190,6 @@ pub(crate) fn node_has_stack_target_declaration_matching(
         || is_per_opponent_target_fanout(ability),
         predicate,
     )
-}
-
-/// CR 115.1a + CR 601.2c: the effect's announced roles, without resolved-node
-/// metadata. Shares the role matcher used by `node_has_stack_target_declaration`;
-/// callers inspect descendants and clause-level unless-payers separately.
-pub(crate) fn effect_has_stack_target_declaration(effect: &Effect) -> bool {
-    effect_stack_target_declaration_matching(
-        effect,
-        || effect_references_target_player(effect),
-        || false,
-        &|_| true,
-    )
-}
-
-fn effect_stack_target_declaration_matching(
-    effect: &Effect,
-    companion_player: impl FnOnce() -> bool,
-    fanout_player: impl FnOnce() -> bool,
-    predicate: &dyn Fn(&TargetFilter) -> bool,
-) -> bool {
-    if let Some(roles) = damage_replacement_target_roles(effect) {
-        return roles.into_iter().any(|role| predicate(role.filter()));
-    }
-    if let Some(filter) = damage_replacement_source_slot_filter(effect) {
-        return predicate(filter);
-    }
-    if paired_subject_filters(effect).is_some() {
-        return paired_subject_slot_filters(effect).any(predicate);
-    }
-    if let Effect::Fight { subject, target } = effect {
-        return fight_declared_slot_filters(subject, target).any(predicate);
-    }
-    if let Effect::MoveCounters {
-        source,
-        target,
-        selection,
-        ..
-    } = effect
-    {
-        return move_counter_stack_target_filters(source, target, *selection)
-            .into_iter()
-            .filter(|filter| !filter.is_context_ref())
-            .any(predicate);
-    }
-    if let Some(role) = mana_multi_role(effect) {
-        return role.surfaced_filters().any(|(_, filter)| predicate(filter));
-    }
-    if let Effect::Attach {
-        attachment,
-        target,
-        selection,
-    } = effect
-    {
-        return (attach_attachment_claims_announcement_slot(attachment, selection)
-            && predicate(attachment))
-            || (attach_host_filter_needs_target_slot(target) && predicate(target));
-    }
-    if let Effect::EachDealsDamageEqualToPower { recipient, .. } = effect {
-        return predicate(recipient);
-    }
-    if fanout_player() {
-        return predicate(&TargetFilter::Player) || effect.target_filter().is_some_and(predicate);
-    }
-    (companion_player() && predicate(&TargetFilter::Player))
-        || (effect_needs_target_creature_quantity_slot(effect)
-            && !one_sided_fight_source_supplies_quantity_creature(effect)
-            && predicate(
-                &effect_target_slot_filter(effect)
-                    .expect("slot filter present when gate true")
-                    .filter,
-            ))
-        || (effect_needs_parent_target_combat_relation_slot(effect)
-            && predicate(&parent_target_combat_relation_slot_filter()))
-        || become_copy_recipient_slot_filter(effect).is_some_and(predicate)
-        || (!effect_target_filter_references_chosen_player(effect)
-            && extract_target_filter_from_effect(effect).is_some_and(predicate))
-}
-
-/// CR 115.1 + CR 601.2c: the `Effect::BecomeCopy` RECIPIENT filter that must be
-/// announced as its own target slot, or `None` when the recipient needs no
-/// announcement (`crate::types::ability::CopyRecipient::Source`, or an untargeted CR 611.2c set).
-///
-/// **Single authority.** Three consumers must agree exactly or the target
-/// machinery silently misbinds:
-///
-/// 1. `collect_target_slots_inner` — surfaces the cast-time slot.
-/// 2. `collect_target_slot_specs` — surfaces the matching per-slot spec. The
-///    two are mirrors with NO assertion linking them; divergence fails silently
-///    as misaligned `TargetInstanceId`s.
-/// 3. `game::effects::become_copy::resolve` — reads
-///    [`become_copy_copy_source_target_index`] to know which declared object
-///    target is the copy SOURCE rather than the recipient.
-///
-/// The recipient is declared FIRST because it is printed first ("**Target
-/// artifact you control** becomes a copy of **a second target artifact you
-/// control**" — Shuri, Wakandan Inventor), and CR 601.2c declares targets in
-/// the order written.
-pub(crate) fn become_copy_recipient_slot_filter(effect: &Effect) -> Option<&TargetFilter> {
-    match effect {
-        Effect::BecomeCopy { recipient, .. } => recipient.announced_filter(),
-        _ => None,
-    }
 }
 
 /// CR 115.1: index into an ability's declared OBJECT targets at which the
@@ -6131,27 +5878,6 @@ fn ability_distribution_pool_needs_chosen_x(
     quantity_expr_has_unresolved_x(ability, inner)
 }
 
-fn effect_references_target_player(effect: &Effect) -> bool {
-    if let Effect::AddRestriction {
-        restriction:
-            GameRestriction::ProhibitActivity {
-                affected_players: RestrictionPlayerScope::TargetedPlayer,
-                ..
-            },
-    } = effect
-    {
-        return true;
-    }
-    // CR 115.1 + CR 404 + CR 406: A mass filter set to a bare `TargetFilter::Player`
-    // (e.g. `ChangeZoneAll { origin: Graveyard, target: Player }` for "exile target
-    // player's graveyard" — Nihil Spellbomb class) parameterizes the scan by a player
-    // target and needs a companion slot even though no controller ref is present.
-    if mass_all_target_filter(effect).is_some_and(|t| matches!(t, TargetFilter::Player)) {
-        return true;
-    }
-    effect_bound_filter_matches(effect, filter_references_target_player)
-}
-
 /// CR 109.4 + CR 102.2 / CR 102.3: opponent-constrained sibling of
 /// `effect_references_target_player` — no `AddRestriction` / bare-`Player` branch
 /// (those are opponent-agnostic). Drives the companion-slot legal-target
@@ -6253,34 +5979,6 @@ pub(crate) fn primary_announced_player(
     }
 }
 
-/// CR 608.2c + CR 109.4: Tree-walks a `TargetFilter` and returns true if any
-/// `TypedFilter` inside it is scoped to `ControllerRef::ChosenPlayer`. Such a
-/// filter resolves against a player chosen *during* resolution (an earlier
-/// `Effect::Choose`), so it must NOT surface a stack-push target slot — the
-/// chosen player (and therefore the legal-target set) is not known when the
-/// ability goes on the stack. The dependent effect selects its target during
-/// resolution instead.
-fn filter_references_chosen_player(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(TypedFilter { controller, .. }) => {
-            matches!(controller, Some(ControllerRef::ChosenPlayer { .. }))
-        }
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(filter_references_chosen_player)
-        }
-        TargetFilter::Not { filter } => filter_references_chosen_player(filter),
-        _ => false,
-    }
-}
-
-/// True when the effect's primary target filter is scoped to a resolution-time
-/// chosen player — see `filter_references_chosen_player`.
-fn effect_target_filter_references_chosen_player(effect: &Effect) -> bool {
-    effect
-        .target_filter()
-        .is_some_and(filter_references_chosen_player)
-}
-
 /// CR 608.2c + CR 109.4: First `ControllerRef::ChosenPlayer` index found in
 /// the filter tree, if any. Used at resolution time to bind the chosen player
 /// before enumerating the dependent effect's legal targets.
@@ -6323,49 +6021,6 @@ pub(crate) fn rewrite_chosen_player_to_you(filter: &TargetFilter) -> TargetFilte
         },
         other => other.clone(),
     }
-}
-
-/// Whether the attachment operand of `Effect::Attach` consumes an explicit
-/// player-chosen target. Scan-based filters (e.g. "Equipment attached to ~")
-/// resolve from the battlefield/LKI and must not steal `ParentTarget` slots.
-pub(crate) fn attach_attachment_filter_needs_target_slot(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Any => true,
-        TargetFilter::Typed(tf) => !tf.properties.iter().any(|p| {
-            matches!(
-                p,
-                FilterProp::AttachedTo {
-                    to: AttachmentReferent::Source
-                }
-            )
-        }),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
-            .iter()
-            .any(attach_attachment_filter_needs_target_slot),
-        TargetFilter::Not { filter } => attach_attachment_filter_needs_target_slot(filter),
-        _ => false,
-    }
-}
-
-/// CR 115.1a / CR 115.1c / CR 115.1d / CR 115.1e + CR 608.2d: whether the
-/// ATTACHMENT operand of an `Attach` instruction claims an ANNOUNCED target
-/// slot. Two independent facts must both hold:
-///
-/// 1. the filter can express a player choice at all
-///    ([`attach_attachment_filter_needs_target_slot`] — context references and
-///    scan-based filters resolve without one), and
-/// 2. the printed role is `Targeted` ([`AttachSelection`] — a described operand
-///    is chosen while the effect resolves, CR 608.2d).
-///
-/// Single authority for the announcement walk, the target-spec walk, the
-/// assignment windows and the two resolution-time role gates in
-/// `effects::attach`, so the slot counts cannot disagree. The role conjunct can
-/// only ever REMOVE a slot claim, never add one.
-pub(crate) fn attach_attachment_claims_announcement_slot(
-    attachment: &TargetFilter,
-    selection: &AttachSelection,
-) -> bool {
-    attach_attachment_filter_needs_target_slot(attachment) && selection.is_targeted()
 }
 
 /// CR 115.6 + CR 601.2c: the ATTACHMENT operand's own zero-target authority.
@@ -6673,41 +6328,6 @@ fn attach_object_binding(
     ))
 }
 
-/// CR 109.4 + CR 115.1: a filter whose controller or owner is a declared target player.
-pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
-    filter_binds_target_player(filter, PlayerBindingAxis::ControllerOrOwner)
-}
-
-/// CR 109.4 + CR 102.2 / CR 102.3: Opponent-constrained mirror — true only for
-/// `TargetOpponent`. Drives the companion-slot legal-target discriminator
-/// (opponent-only vs. any player).
-fn filter_references_target_opponent(filter: &TargetFilter) -> bool {
-    filter_binds_player(filter, PlayerBindingAxis::ControllerOrOwner, |c| {
-        matches!(c, ControllerRef::TargetOpponent)
-    })
-}
-
-/// CR 115.1 + CR 118.12a: True when an `UnlessPayModifier` payer was DECLARED as a
-/// target inside the unless clause ("unless target opponent/target player pays"),
-/// as opposed to an anaphoric payer ("they pay" -> `Player`, "that player pays" ->
-/// `TriggeringPlayer`). The declared-target forms are the only player-typed `Typed`
-/// payers with empty type filters/properties and a None/Opponent controller; no
-/// anaphoric path emits that shape, so the match is unambiguous.
-///
-/// Single authority for the declared-target shape: slot creation here, the
-/// payer resolver in `effects::resolve_unless_payer`, and the `Typed` arm in
-/// `targeting::resolve_effect_player_ref` all gate on this one predicate so the
-/// structural guard cannot drift as new parser shapes are added.
-pub(crate) fn payer_is_declared_target(payer: &TargetFilter) -> bool {
-    matches!(
-        payer,
-        TargetFilter::Typed(tf)
-            if tf.type_filters.is_empty()
-                && tf.properties.is_empty()
-                && matches!(tf.controller, None | Some(ControllerRef::Opponent))
-    )
-}
-
 /// Resolve a player-scoped `TargetFilter` to the concrete set of player ids it
 /// affects, for an effect whose targets live on `ability`.
 ///
@@ -6838,67 +6458,6 @@ pub(crate) fn collect_player_targets(
     }
 }
 
-fn parent_target_combat_relation_slot_filter() -> TargetFilter {
-    TargetFilter::Typed(TypedFilter::creature())
-}
-
-fn effect_needs_parent_target_combat_relation_slot(effect: &Effect) -> bool {
-    effect_references_parent_target_combat_relation(effect)
-}
-
-fn effect_needs_target_creature_quantity_slot(effect: &Effect) -> bool {
-    // Despite the legacy name (kept to avoid churning every slot-mapping site),
-    // this gate covers player-typed quantity slots too (the
-    // `CardsDiscardedThisTurn { Target }` arm below surfaces an opponent slot).
-    // CR 115.1 + CR 601.2c: classify the slot FIRST, then apply only the
-    // matching primary-target guard. A player-typed slot (the targeted
-    // opponent's zone count, discards, ...) is supplied only by a declared
-    // player choice ("Target player mills half their library" declares
-    // exactly one — no second prompt); an object primary does NOT supply it,
-    // so e.g. "deals damage to target creature equal to the number of cards
-    // in target opponent's hand" still gets its opponent slot instead of
-    // resolving the count to 0. Symmetrically, an object-typed slot
-    // (`Power { Target }`) is supplied only by a declared object choice: a
-    // `Player` primary does not supply the object the magnitude reads.
-    // An `Explicit` count is exempt from both guards: it declares its own
-    // CR 601.2c instance, announced separately from any primary choice.
-    let Some(derived) = effect_target_slot_filter(effect) else {
-        return false;
-    };
-    if quantity_slot_filter_selects_players(&derived.filter) {
-        if derived.binding == Some(CountBinding::Explicit) {
-            return true;
-        }
-        return !effect_primary_target_supplies_player_target(effect);
-    }
-    !effect_primary_target_supplies_creature_target(effect)
-}
-
-/// CR 115.1: whether a count-derived slot filter enumerates players (a bare
-/// `Player`/`Opponent` choice, or an object-typeless `Typed` constrained to a
-/// controller) rather than objects. A typeless `Typed` with no controller
-/// ("target player controls" population filters) or with object properties is
-/// object-side and answers false.
-fn quantity_slot_filter_selects_players(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Player | TargetFilter::Opponent => true,
-        TargetFilter::Typed(typed) => {
-            typed.type_filters.is_empty()
-                && typed.controller.is_some()
-                && typed.properties.is_empty()
-        }
-        _ => false,
-    }
-}
-
-/// CR 115.1 + CR 601.2c: the effect's primary target already declares a player
-/// choice, so a player-typed quantity magnitude reads that choice. Mirrors the
-/// generic slot path's authority (`types::ability::extract_target_filter_from_effect`)
-/// so "declares a choice" means exactly what slot collection means by it.
-fn effect_primary_target_supplies_player_target(effect: &Effect) -> bool {
-    extract_target_filter_from_effect(effect).is_some_and(quantity_slot_filter_selects_players)
-}
-
 /// CR 608.2c + CR 115.1: Chained riders like Swords to Plowshares ("Exile target
 /// creature. Its controller gains life equal to its power.") reuse the parent's
 /// chosen object for the life-gain magnitude. They must not surface a second
@@ -6938,87 +6497,6 @@ fn sub_ability_inherits_parent_creature_target_only(
             || sub.target_reads == TargetReadOrigin::ParentAnnouncement)
 }
 
-/// CR 115.1 + CR 115.10a + CR 608.2c: A one-sided-fight `DealDamage` ("Target
-/// creature you control deals damage equal to its power to target creature or
-/// planeswalker you don't control") reuses the parent-declared source creature
-/// (`targets[0]`) for BOTH the damage source (`damage_source: Target`) and the
-/// `Power { Target }` / `Toughness { Target }` magnitude. The amount's per-target
-/// creature-quantity slot would therefore surface a SECOND "target creature" —
-/// the bug in GH #4234, where Bite Down asked for one target too many (CR 601.2c:
-/// one slot per distinct instance of "target", and the magnitude here is NOT a
-/// distinct instance — "its power" anaphorically reuses the source).
-///
-/// Sibling of `sub_ability_inherits_parent_creature_target_only`, which handles
-/// the Swords to Plowshares GainLife rider whose ONLY slot is the redundant
-/// magnitude; here the genuine recipient slot remains, so we drop only the
-/// magnitude slot. The boost variant (Bite Down on Crime / Ambuscade) reads
-/// `Power { Anaphoric }`, which surfaces no quantity slot, so it is unaffected.
-///
-/// `damage_source: Some(Target)` is only emitted for a one-sided-fight clause
-/// whose damage-dealing object was named with "target" in an earlier clause (the
-/// subject, e.g. "Target creature you control deals…"), so that earlier slot
-/// always supplies `targets[0]`; the magnitude `Power { Target }` reads the SAME
-/// `targets[0]` and never needs a slot of its own. This is purely a function of
-/// the effect shape, so every slot-mapping site (producer, spec builder, both
-/// consumers, the minimum-count) can apply it identically and stay in lockstep
-/// (CR 700.2 slot-mapping invariant). It only ever fires when
-/// `effect_needs_target_creature_quantity_slot` is already true — i.e. the
-/// recipient filter (here `Or[Creature, Planeswalker] you don't control`) failed
-/// `effect_primary_target_supplies_creature_target`, the exact gap that left Bite
-/// Down asking for an extra target while Rabid Bite (plain creature recipient)
-/// was already correct — so it can only drop a redundant slot, never a real one.
-fn one_sided_fight_source_supplies_quantity_creature(effect: &Effect) -> bool {
-    let amount = match effect {
-        Effect::DealDamage {
-            damage_source: Some(DamageSource::Target),
-            amount,
-            ..
-        }
-        | Effect::DamageAll {
-            damage_source: Some(DamageSource::Target),
-            amount,
-            ..
-        } => amount,
-        _ => return false,
-    };
-    // CR 208.1: the magnitude reads the Target-scoped source object's P/T — the
-    // same object `damage_source: Target` reads. Recipient-scoped or fixed
-    // magnitudes keep their own slots.
-    quantity_expr_reads_target_object_pt(amount)
-}
-
-/// CR 208.1: whether a magnitude reads the Target-scoped object's power or
-/// toughness (`Power { Target }` / `Toughness { Target }`), recursing through the
-/// arithmetic wrappers `quantity_expr_target_slot_filter` already traverses.
-fn quantity_expr_reads_target_object_pt(expr: &QuantityExpr) -> bool {
-    match expr {
-        QuantityExpr::Ref { qty } => matches!(
-            qty,
-            QuantityRef::Power {
-                scope: ObjectScope::Target,
-            } | QuantityRef::Toughness {
-                scope: ObjectScope::Target,
-            }
-        ),
-        QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::UpTo { max: inner }
-        | QuantityExpr::Power {
-            exponent: inner, ..
-        } => quantity_expr_reads_target_object_pt(inner),
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-            exprs.iter().any(quantity_expr_reads_target_object_pt)
-        }
-        QuantityExpr::Difference { left, right } => {
-            quantity_expr_reads_target_object_pt(left)
-                || quantity_expr_reads_target_object_pt(right)
-        }
-        QuantityExpr::Fixed { .. } => false,
-    }
-}
-
 fn effect_player_filter_is_parent_target_anaphor(effect: &Effect) -> bool {
     match effect {
         Effect::GainLife { player, .. } => matches!(
@@ -7026,509 +6504,6 @@ fn effect_player_filter_is_parent_target_anaphor(effect: &Effect) -> bool {
             TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner
         ),
         _ => false,
-    }
-}
-
-fn effect_references_parent_target_combat_relation(effect: &Effect) -> bool {
-    if effect
-        .target_filter()
-        .is_some_and(filter_references_parent_target_combat_relation)
-    {
-        return true;
-    }
-
-    match effect {
-        Effect::DestroyAll { target, .. }
-        | Effect::PumpAll { target, .. }
-        | Effect::SetTapState {
-            scope: EffectScope::All,
-            target,
-            ..
-        }
-        | Effect::BounceAll { target, .. }
-        | Effect::CounterAll { target, .. }
-        | Effect::ChangeZoneAll { target, .. }
-        | Effect::DoublePTAll { target, .. }
-        | Effect::DamageAll { target, .. }
-        // CR 701.27a + CR 115.10a: parity with the other mass-population `target`
-        // filters — mass Transform's population filter is walked here too.
-        | Effect::Transform {
-            scope: EffectScope::All,
-            target,
-            ..
-        }
-        | Effect::PutCounterAll { target, .. } => {
-            filter_references_parent_target_combat_relation(target)
-        }
-        _ => false,
-    }
-}
-
-fn filter_references_parent_target_combat_relation(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(|prop| {
-            matches!(
-                prop,
-                FilterProp::CombatRelation {
-                    subject: CombatRelationSubject::ParentTarget,
-                    ..
-                }
-            )
-        }),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
-            .iter()
-            .any(filter_references_parent_target_combat_relation),
-        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
-            filter_references_parent_target_combat_relation(filter)
-        }
-        _ => false,
-    }
-}
-
-fn effect_primary_target_supplies_creature_target(effect: &Effect) -> bool {
-    extract_target_filter_from_effect(effect)
-        .is_some_and(target_filter_can_supply_creature_quantity)
-}
-
-fn target_filter_can_supply_creature_quantity(filter: &TargetFilter) -> bool {
-    matches!(
-        filter,
-        TargetFilter::Any | TargetFilter::Typed(_) | TargetFilter::SpecificObject { .. }
-    )
-}
-
-/// CR 115.1: Derive the `TargetFilter` for the count-derived target slot an
-/// effect needs, if any. Walks each amount/target arm and maps the inner
-/// quantity/filter through `quantity_ref_target_slot_spec` (the spec authority),
-/// returning the FIRST `Some`. `Some(filter)` means the effect's magnitude/scope
-/// references a value that requires its own surfaced target slot whose legal
-/// candidates are `filter`; `None` means no count-derived slot is needed.
-/// CR 608.2h + CR 611.2d: only the immediate P/T values snapshotted by
-/// `effect::snapshot_transient_modifications` consume targets on this resolution.
-/// Granted abilities/triggers/statics are later contexts; recipient-live and CDA
-/// quantities are not announcement-time target declarations here.
-fn immediate_modification_target_slot_filter(
-    modification: &ContinuousModification,
-) -> Option<QuantitySlotDerivation> {
-    match modification {
-        ContinuousModification::AddDynamicPower { value }
-        | ContinuousModification::AddDynamicToughness { value }
-        | ContinuousModification::SetPowerDynamic { value }
-        | ContinuousModification::SetToughnessDynamic { value } => {
-            if quantity_expr_uses_recipient(value) {
-                None
-            } else {
-                quantity_expr_target_slot_filter(value)
-            }
-        }
-        ContinuousModification::CopyValues { .. }
-        | ContinuousModification::CopyChosen
-        | ContinuousModification::SetName { .. }
-        | ContinuousModification::SetTextName { .. }
-        | ContinuousModification::AddPower { .. }
-        | ContinuousModification::AddToughness { .. }
-        | ContinuousModification::SetPower { .. }
-        | ContinuousModification::SetToughness { .. }
-        | ContinuousModification::AddKeyword { .. }
-        | ContinuousModification::RemoveKeyword { .. }
-        | ContinuousModification::GrantAbility { .. }
-        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
-        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
-        | ContinuousModification::GrantTrigger { .. }
-        | ContinuousModification::GrantReplacement { .. }
-        | ContinuousModification::RemoveAllAbilities
-        | ContinuousModification::AddType { .. }
-        | ContinuousModification::RemoveType { .. }
-        | ContinuousModification::AddSubtype { .. }
-        | ContinuousModification::RemoveSubtype { .. }
-        | ContinuousModification::SetCardTypes { .. }
-        | ContinuousModification::RemoveAllSubtypes { .. }
-        | ContinuousModification::SetDynamicPower { .. }
-        | ContinuousModification::SetDynamicToughness { .. }
-        | ContinuousModification::AddDynamicKeyword { .. }
-        | ContinuousModification::AddKeywordWithDerivedCost { .. }
-        | ContinuousModification::AddAllCreatureTypes
-        | ContinuousModification::AddAllBasicLandTypes
-        | ContinuousModification::AddAllLandTypes
-        | ContinuousModification::AddChosenSubtype { .. }
-        | ContinuousModification::AddChosenColor { .. }
-        | ContinuousModification::RemoveChosenKeyword
-        | ContinuousModification::AddChosenKeyword
-        | ContinuousModification::SetColor { .. }
-        | ContinuousModification::AddColor { .. }
-        | ContinuousModification::AddStaticMode { .. }
-        | ContinuousModification::GrantStaticAbility { .. }
-        | ContinuousModification::SwitchPowerToughness
-        | ContinuousModification::AssignDamageFromToughness
-        | ContinuousModification::AssignDamageAsThoughUnblocked
-        | ContinuousModification::AssignNoCombatDamage
-        | ContinuousModification::ChangeController
-        | ContinuousModification::SetBasicLandType { .. }
-        | ContinuousModification::SetChosenBasicLandType
-        | ContinuousModification::SetChosenName
-        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
-        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
-        | ContinuousModification::RetainAllOtherAbilitiesFromSource
-        | ContinuousModification::AddSupertype { .. }
-        | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::AddCounterOnEnter { .. }
-        | ContinuousModification::SetStartingLoyalty { .. }
-        | ContinuousModification::RemoveManaCost
-        | ContinuousModification::SubstituteTextWord { .. } => None,
-    }
-}
-
-fn effect_target_slot_filter(effect: &Effect) -> Option<QuantitySlotDerivation> {
-    if let Some(filter) = effect.target_filter().and_then(filter_target_slot_filter) {
-        return Some(filter);
-    }
-
-    match effect {
-        Effect::GenericEffect { static_abilities, .. } => static_abilities
-            .iter()
-            .flat_map(|definition| &definition.modifications)
-            .find_map(immediate_modification_target_slot_filter),
-        Effect::GainLife { amount, .. }
-        | Effect::Draw { count: amount, .. }
-        | Effect::Mill { count: amount, .. }
-        | Effect::Discard { count: amount, .. }
-        | Effect::Scry { count: amount, .. }
-        | Effect::Surveil { count: amount, .. }
-        | Effect::LoseLife { amount, .. }
-        | Effect::SetLifeTotal { amount, .. }
-        | Effect::DealDamage { amount, .. }
-        | Effect::DamageAll { amount, .. }
-        | Effect::DamageEachPlayer { amount, .. }
-        | Effect::PutCounter { count: amount, .. }
-        | Effect::PutCounterAll { count: amount, .. }
-        // CR 115.1 + CR 601.2c + CR 111.2: a token count read off a target-bound
-        // population ("a number of tokens equal to the number of creatures target
-        // player controls": Will of the Mardu, Ferrafor) announces that player as
-        // its own slot. The tokens' owner stays the controller (CR 111.2), so
-        // `target_filter()` surfaces no slot for it.
-        | Effect::Token { count: amount, .. }
-        | Effect::Sacrifice { count: amount, .. } => quantity_expr_target_slot_filter(amount),
-        Effect::DestroyAll { target, .. }
-        | Effect::PumpAll { target, .. }
-        | Effect::SetTapState {
-            scope: EffectScope::All,
-            target,
-            ..
-        }
-        | Effect::BounceAll { target, .. }
-        | Effect::CounterAll { target, .. }
-        | Effect::ChangeZoneAll { target, .. }
-        // CR 701.27a + CR 115.10a: mass Transform's population filter is a
-        // resolution-time scan, walked here like the other mass-`All` effects.
-        | Effect::Transform {
-            scope: EffectScope::All,
-            target,
-            ..
-        }
-        | Effect::DoublePTAll { target, .. } => filter_target_slot_filter(target),
-        _ => None,
-    }
-}
-
-/// CR 115.1 + CR 115.10a: a counted population can name its controller or
-/// owner as a target without targeting any member of that population.
-fn population_target_slot_filter(filter: &TargetFilter) -> Option<QuantitySlotDerivation> {
-    if filter_references_target_player(filter) {
-        Some(QuantitySlotDerivation {
-            filter: if filter_references_target_opponent(filter) {
-                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
-            } else {
-                TargetFilter::Player
-            },
-            binding: None,
-        })
-    } else {
-        filter_target_slot_filter(filter)
-    }
-}
-
-fn filter_target_slot_filter(filter: &TargetFilter) -> Option<QuantitySlotDerivation> {
-    match filter {
-        TargetFilter::Typed(TypedFilter { properties, .. }) => {
-            properties.iter().find_map(filter_prop_target_slot_filter)
-        }
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().find_map(filter_target_slot_filter)
-        }
-        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
-            filter_target_slot_filter(filter)
-        }
-        _ => None,
-    }
-}
-
-/// The first target-slot filter reachable through a [`CardTypeSetSource`]
-/// population.
-///
-/// Only the object-filter, journal-filter, and tracked-set-filter arms carry
-/// a `TargetFilter` that could name a target slot; the zone / linked-exile
-/// arms are fixed-vocabulary. `AnyOf` recurses so a union member's slot is not
-/// dropped.
-///
-/// Deliberately UNCITED. This is a structural query over the AST — which arms
-/// hold a filter — not a rule implementation. It previously cited CR 109.2,
-/// which says a bare type description means a permanent on the battlefield;
-/// that rule has nothing to say about target-slot extraction, and a citation
-/// that does not support its code is worse than none because it reads as
-/// evidence the behavior was checked against the rules.
-fn characteristic_source_target_slot_filter(
-    source: &CardTypeSetSource,
-) -> Option<QuantitySlotDerivation> {
-    // FIRST match wins, preserving the previous `find_map` semantics: the walker
-    // visits members in declaration order, and later members do not overwrite an
-    // earlier hit. Truncation needs no conservative branch here — this returns a
-    // slot to wire, and inventing one would be worse than finding none.
-    let mut found: Option<QuantitySlotDerivation> = None;
-    source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
-        if found.is_some() {
-            return;
-        }
-        found = match leaf {
-            CardTypeSetSource::Objects { filter } => filter_target_slot_filter(filter),
-            CardTypeSetSource::TurnJournal { filter, .. } => {
-                filter.as_ref().and_then(filter_target_slot_filter)
-            }
-            CardTypeSetSource::TrackedSet { filter, .. } => {
-                filter.as_ref().and_then(filter_target_slot_filter)
-            }
-            // CR 601.2c + CR 115.1: a targeted-objects population READS the
-            // chain's announced targets — it never declares its own slot. The
-            // declaring head surfaces the announcement through the generic
-            // path; a ParentTarget-derived slot here would be unfillable at
-            // announcement (nothing is chosen yet) and wrongly reject
-            // well-formed chains (Command the Dreadhorde). The parser only
-            // emits this population behind a proven target-set publisher, so
-            // no dangling read can reach this arm.
-            CardTypeSetSource::TargetedObjects { .. } => None,
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::AnyOf { .. } => None,
-        };
-    });
-    found
-}
-
-fn filter_prop_target_slot_filter(
-    prop: &crate::types::ability::FilterProp,
-) -> Option<QuantitySlotDerivation> {
-    match prop {
-        crate::types::ability::FilterProp::Counters { count, .. }
-        | crate::types::ability::FilterProp::Cmc { value: count, .. }
-        | crate::types::ability::FilterProp::PtComparison { value: count, .. } => {
-            quantity_expr_target_slot_filter(count)
-        }
-        crate::types::ability::FilterProp::CanEnchant { target } => {
-            filter_target_slot_filter(target)
-        }
-        crate::types::ability::FilterProp::AnyOf { props } => {
-            props.iter().find_map(filter_prop_target_slot_filter)
-        }
-        // CR 608.2c: Negation reads the inner prop's references — recurse (mirrors AnyOf).
-        crate::types::ability::FilterProp::Not { prop } => filter_prop_target_slot_filter(prop),
-        crate::types::ability::FilterProp::DifferentNameFrom { filter } => {
-            filter_target_slot_filter(filter)
-        }
-        crate::types::ability::FilterProp::SharesQuality { reference, .. } => {
-            reference.as_deref().and_then(filter_target_slot_filter)
-        }
-        crate::types::ability::FilterProp::TargetsOnly { filter }
-        | crate::types::ability::FilterProp::Targets { filter } => {
-            filter_target_slot_filter(filter)
-        }
-        _ => None,
-    }
-}
-
-fn quantity_expr_target_slot_filter(expr: &QuantityExpr) -> Option<QuantitySlotDerivation> {
-    match expr {
-        QuantityExpr::Ref { qty } => quantity_ref_target_slot_spec(qty),
-        QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::UpTo { max: inner }
-        | QuantityExpr::Power {
-            exponent: inner, ..
-        } => quantity_expr_target_slot_filter(inner),
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-            exprs.iter().find_map(quantity_expr_target_slot_filter)
-        }
-        QuantityExpr::Difference { left, right } => quantity_expr_target_slot_filter(left)
-            .or_else(|| quantity_expr_target_slot_filter(right)),
-        QuantityExpr::Fixed { .. } => None,
-    }
-}
-
-/// CR 115.1 + CR 601.2c: A target slot derived from a count `QuantityRef` —
-/// the slot's legality filter plus, for `TargetZoneCardCount`, the count's
-/// announcement binding (which decides whether the slot is a separately
-/// declared CR 601.2c instance or rides the primary's choice). `None`
-/// binding = legacy refs without the axis (today's gate behavior applies).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct QuantitySlotDerivation {
-    filter: TargetFilter,
-    binding: Option<CountBinding>,
-}
-
-/// CR 115.1: The single authority mapping a count `QuantityRef` to the
-/// `TargetFilter` of the target slot that count requires (if any). A `Some`
-/// result means this ref references a TARGET object/player and the surfaced
-/// slot's legal candidates are the returned filter; the slot filter is DERIVED
-/// from the ref itself, never assumed to be "creature". `None` means the ref
-/// reads a value that needs no target slot.
-fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<QuantitySlotDerivation> {
-    match qty {
-        // CR 208.1: power/toughness are creature numbers — the target slot is a creature.
-        QuantityRef::Power {
-            scope: ObjectScope::Target,
-        }
-        | QuantityRef::BasePower {
-            scope: ObjectScope::Target,
-        }
-        | QuantityRef::Toughness {
-            scope: ObjectScope::Target,
-        } => Some(QuantitySlotDerivation {
-            filter: TargetFilter::Typed(TypedFilter::creature()),
-            binding: None,
-        }),
-        QuantityRef::Power { .. }
-        | QuantityRef::BasePower { .. }
-        | QuantityRef::Toughness { .. } => None,
-        // CR 202.3 + CR 115.1: the ref carries its own slot filter.
-        QuantityRef::TargetObjectManaValue { filter } => Some(QuantitySlotDerivation {
-            filter: (**filter).clone(),
-            binding: None,
-        }),
-        // CR 701.9 + CR 115.1: cards a single targeted opponent discarded this
-        // turn (Discard keyword action; NOT 121.1, which is Draw). Other player
-        // scopes are not target-bearing and fall through.
-        QuantityRef::CardsDiscardedThisTurn {
-            player: PlayerScope::Target,
-        } => Some(QuantitySlotDerivation {
-            filter: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-            binding: None,
-        }),
-        QuantityRef::CardsDiscardedThisTurn { .. } => None,
-        // CR 115.1 + CR 402.1 + CR 601.2c: a zone count bound to the
-        // ability's player target needs its own slot when the effect's
-        // primary target declares no player choice. Recurring Insight is the
-        // class: the drawer is the controller (`Draw { target: Controller }`
-        // supplies no slot), so without this arm no prompt appears and the
-        // count reads empty `ability.targets`, resolving to 0 (issue #6856).
-        // The slot's legality follows the count's `scope`, mirroring the
-        // `ControllerRef::{TargetPlayer, TargetOpponent}` legality-scope
-        // pair: "target opponent's ..." (Recurring Insight, Borrowed
-        // Knowledge mode 1, Gerrard Capashen) surfaces the Opponent-scoped
-        // slot (enumerable, mirroring the `CardsDiscardedThisTurn { Target }`
-        // arm above); "target player's ..." surfaces the any-player `Player`
-        // slot. Recipient==counted cards whose primary already declares the
-        // player ("Target player mills half their library"; Tibalt's -4,
-        // whose dead `TriggeringPlayer` recipient the damage parser rebinds
-        // to `Player`) keep working through that `Player` slot via the
-        // `effect_primary_target_supplies_player_target` guard on the shared
-        // gate above. An `Explicit` count is exempt from that guard: it
-        // declares its own CR 601.2c instance and always surfaces its slot.
-        QuantityRef::TargetZoneCardCount { scope, binding, .. } => {
-            Some(QuantitySlotDerivation {
-                filter: match scope {
-                    // CR 109.4 + CR 102.2: "target opponent's ..." — opponent-only.
-                    ControllerRef::TargetOpponent => TargetFilter::Typed(
-                        TypedFilter::default().controller(ControllerRef::Opponent),
-                    ),
-                    // CR 109.4 + CR 115.1: "target player's ..." (and the anaphoric
-                    // "their"/"that player's") — any announced player. Other scopes
-                    // are parser-unreachable here; the widest slot keeps the count
-                    // reading an announced choice instead of 0.
-                    _ => TargetFilter::Player,
-                },
-                binding: Some(*binding),
-            })
-        }
-        // CR 115.1 + CR 109.4: surface an OPPONENT-scoped PLAYER slot (enumerable);
-        // TargetPlayer is non-enumerable (targeting.rs fails closed) since
-        // ability.targets is empty at selection. The derived slot must be a BARE
-        // opponent filter (identical to the CardsDiscardedThisTurn{Target} arm
-        // above) — NOT the record-match `And{[Player, Typed(controller=TargetPlayer)]}`
-        // rewritten in place. A player cannot satisfy a `Typed` (object) leaf, so an
-        // And-wrapped `Typed` slot enumerates ZERO players; for a required trigger
-        // slot that empties legal targets and `collect_target_slots` errors (CR
-        // 603.3d), so the trigger silently resolves target-less. The parser-stored
-        // record-match filter on the `QuantityRef` is UNCHANGED; resolution reads
-        // the chosen opponent from `ability.targets`. The non-targeted "your
-        // opponents" class (And{[Player, controller=Opponent]}) returns None here —
-        // it surfaces no slot.
-        QuantityRef::DamageDealtThisTurn { target, .. }
-            if relative_controller_kind(target) == Some(ControllerRef::TargetPlayer) =>
-        {
-            Some(QuantitySlotDerivation {
-                filter: TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::Opponent),
-                ),
-                binding: None,
-            })
-        }
-        // CR 120.9: a DamageDealtThisTurn whose source or target embeds a
-        // target-creature quantity (e.g. aggregate over "target creature") still
-        // needs a creature slot, matching the legacy behavior; otherwise no slot.
-        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
-            filter_target_slot_filter(source).or_else(|| filter_target_slot_filter(target))
-        }
-        // Count-over-filter refs can name a target player whose population is
-        // counted, or carry an embedded target-derived object property.
-        QuantityRef::ObjectCount { filter }
-        | QuantityRef::ObjectCountDistinct { filter, .. }
-        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
-        | QuantityRef::CountersOnObjects { filter, .. }
-        | QuantityRef::EnteredThisTurn { filter }
-        // CR 608.2i: the look-back sibling of `EnteredThisTurn` carries the same
-        // kind of population filter, so it must reach the same recursion instead
-        // of dropping into the `_ => None` fallback. Direct precedent in this
-        // group: `SacrificedThisTurn` / `TokensCreatedThisTurn`, both
-        // `PlayerScope`-carrying history refs.
-        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
-        | QuantityRef::SacrificedThisTurn { filter, .. }
-        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
-        | QuantityRef::CounterAddedThisTurn { target: filter, .. }
-        | QuantityRef::TokensCreatedThisTurn { filter, .. }
-        | QuantityRef::DistinctCounterKindsAmong { filter } => population_target_slot_filter(filter),
-        QuantityRef::SpellsCastThisTurn { filter, .. }
-        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
-        | QuantityRef::SpellsCastThisGame { filter, .. } => {
-            filter.as_ref().and_then(filter_target_slot_filter)
-        }
-        QuantityRef::DistinctCardTypes { source }
-        | QuantityRef::SharedCardTypes { source }
-        | QuantityRef::DistinctSubtypes { source, .. }
-        | QuantityRef::DistinctColorsAmong { source } => {
-            characteristic_source_target_slot_filter(source)
-        }
-        QuantityRef::PropertyAggregate(aggregate) => {
-            characteristic_source_target_slot_filter(aggregate.source())
-        }
-        QuantityRef::ManaSpentToCast { metric, .. } => match metric {
-            CastManaSpentMetric::FromSource { source_filter } => {
-                filter_target_slot_filter(source_filter)
-            }
-            CastManaSpentMetric::Total
-            | CastManaSpentMetric::DistinctColors
-            | CastManaSpentMetric::OfColor { .. } => None,
-        },
-        QuantityRef::PlayerCount {
-            filter: crate::types::ability::PlayerFilter::ControlsCount { filter, .. },
-        } => filter_target_slot_filter(filter),
-        // CR 402.1 / 119.1 / 122.1f / 404.1: a player-scalar predicate is read
-        // off each candidate player, never off a target creature, so it cannot
-        // reference the resolving ability's target-creature slot.
-        QuantityRef::PlayerCount {
-            filter: crate::types::ability::PlayerFilter::PlayerAttribute { .. },
-        } => None,
-        _ => None,
     }
 }
 
@@ -8232,44 +7207,6 @@ fn declared_slot_filter_is_bindable(filter: &TargetFilter) -> bool {
         TargetFilter::Typed(_) => leg_binds(filter),
         TargetFilter::Or { filters } => filters.iter().all(leg_binds),
         _ => false,
-    }
-}
-
-/// Returns the player-relative `ControllerRef` (`TargetPlayer` or `DeclaredPlayer`)
-/// embedded in `filter`, if any. Used by `legal_targets_for_ability_filter` (static slot
-/// build) and `legal_targets_for_selected_slot` (selection-time recompute) to
-/// detect filters that need per-player re-enumeration against the player chosen
-/// in a prior player slot. `You` is the caster and is never player-relative.
-fn relative_controller_kind(filter: &TargetFilter) -> Option<crate::types::ability::ControllerRef> {
-    use crate::types::ability::ControllerRef;
-    match filter {
-        TargetFilter::Typed(tf) => match tf.controller {
-            // CR 608.2c + CR 115.1a: "that player controls" after a declared player.
-            Some(ControllerRef::DeclaredPlayer { group }) => {
-                Some(ControllerRef::DeclaredPlayer { group })
-            }
-            // CR 109.4 + CR 102.2 / CR 102.3: normalize the opponent-constrained scope
-            // to TargetPlayer so the per-player re-enumeration guards / rewrite args
-            // (hardcoded on TargetPlayer) fire; the opponent constraint already lives
-            // in the companion slot's legal-target set.
-            Some(ControllerRef::TargetPlayer) | Some(ControllerRef::TargetOpponent) => {
-                Some(ControllerRef::TargetPlayer)
-            }
-            _ => tf.properties.iter().find_map(|prop| match prop {
-                FilterProp::Owned {
-                    controller: ControllerRef::TargetPlayer | ControllerRef::TargetOpponent,
-                } => Some(ControllerRef::TargetPlayer),
-                FilterProp::Owned {
-                    controller: ControllerRef::DeclaredPlayer { group },
-                } => Some(ControllerRef::DeclaredPlayer { group: *group }),
-                _ => None,
-            }),
-        },
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().find_map(relative_controller_kind)
-        }
-        TargetFilter::Not { filter } => relative_controller_kind(filter),
-        _ => None,
     }
 }
 
@@ -11326,60 +10263,6 @@ fn validate_target_constraints(
     }
 
     Ok(())
-}
-
-/// CR 601.2c + CR 115.1: The effects whose two subjects are declared as two
-/// INDEPENDENT per-slot filters rather than one unified filter. Because there
-/// is no single filter to return, `Effect::target_filter()` answers `None` for
-/// both of them (see its `=> None` arm) — which is correct, and is exactly why
-/// every seam that reasons about "does this node claim a target slot", "how
-/// many", or "which filter governs slot i" must ask THIS function instead.
-///
-/// CR 701.12a: both members are exchanges, and an exchange names two subjects.
-/// `ExchangeControl` names two permanents (or a permanent and a stack spell,
-/// CR 400.7a); `ExchangeLifeTotals` names two players (CR 701.12c).
-///
-/// SINGLE AUTHORITY. Consulted by `collect_target_slots_inner`,
-/// `collect_target_slot_specs`, `chain_has_target_sink`,
-/// `assign_targets_recursive`, `assign_selected_slots_recursive`,
-/// `minimum_targets_in_chain` (its own term, the generic-term zeroing, and all
-/// THREE companion-term gates), `validate_targets_in_chain`, and
-/// `retarget_slot_violation`. Mirrors `mana_multi_role`
-/// (`crate::types::ability`, `pub fn`) at every one of those sites. Adding a
-/// third paired-subject effect means adding one arm HERE — never a second
-/// `if let Effect::… { .. }` at a call site.
-///
-/// NOT mirrored at `chain_has_target_sink`'s own three
-/// `mana_multi_role(..).is_none()` companion conjuncts: the paired arm added to
-/// that function returns `true` before they are reached whenever ≥1 slot is
-/// claimed, and for a zero-claim paired node (both filters context refs) the
-/// generic companion verdict is the correct one, unchanged.
-fn paired_subject_filters(effect: &Effect) -> Option<[&TargetFilter; 2]> {
-    match effect {
-        Effect::ExchangeControl { target_a, target_b } => Some([target_a, target_b]),
-        Effect::ExchangeLifeTotals { player_a, player_b } => Some([player_a, player_b]),
-        _ => None,
-    }
-}
-
-/// CR 608.2k + CR 601.2c: the subset of `paired_subject_filters` that actually
-/// claims a declared target slot, in declaration order. A context-ref filter
-/// (`SelfRef` — Avarice Totem; `TriggeringSource` — Perplexing Chimera;
-/// `Controller` — Mister Negative's "with target opponent" and Cliffside
-/// Market's "exchange life totals with target player") is bound at resolution by
-/// `targeting::resolved_targets` (objects) or `resolve_effect_player_ref`
-/// (players), so it is no instance of the word "target" and reserves nothing.
-///
-/// Exact analogue of `ManaTargetRole::surfaced_filters`
-/// (`crate::types::ability`), which is likewise `declared_filters()` filtered by
-/// `!is_context_ref()`. Writing the rule once here keeps the slot builders, both
-/// assigners, the minimum-reservation term, the re-validation arm and the
-/// retarget gate from disagreeing.
-fn paired_subject_slot_filters(effect: &Effect) -> impl Iterator<Item = &TargetFilter> {
-    paired_subject_filters(effect)
-        .into_iter()
-        .flatten()
-        .filter(|filter| !filter.is_context_ref())
 }
 
 fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {

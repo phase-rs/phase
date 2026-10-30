@@ -120,32 +120,33 @@ use super::oracle_util::{
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
 use crate::types::ability::{
-    effect_owns_resolution_zone_choice, effect_parent_ref_slot_count, effect_refs_parent_target,
-    effect_requires_parent_target_object, extract_target_filter_from_effect,
-    instruction_object_reach, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
-    AbilityTag, AggregateFunction, AttachCardinality, AttachSelection, AttackSubject,
-    BounceSelection, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, CastMechanism,
-    CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint,
-    ChooseOneOfKind, Chooser, ChosenGroupId, CoinFlipRun, CombatDamageScope, CombatHistoryScope,
-    Comparator, ConjureCard, ConjureSource, ContinuousEffectOnset, ContinuousModification,
-    ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
-    DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
-    DieResultBranch, DigRestOrder, Duration, Effect, EffectOutcomeSignal, EffectScope,
-    ExtraPhaseRecipient, FilterProp, GameRestriction, GuardReading, GuessSubject, IntensityScope,
-    IterationKindBinding, KeeperConstraint, KeeperCounterMark, LibraryPosition, ManaProduction,
-    ManaSpendPermission, ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec, NameStickerSet,
-    NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope,
-    PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter,
-    PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity,
-    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
-    ReplacementCondition, ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry,
-    RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
-    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
-    TargetFilter, TargetReadOrigin, TargetSelectionMode, ThisWayCause, TokenAttackDestination,
-    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
-    UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry,
-    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
+    effect_has_stack_target_declaration, effect_owns_resolution_zone_choice,
+    effect_parent_ref_slot_count, effect_refs_parent_target, effect_requires_parent_target_object,
+    extract_target_filter_from_effect, instruction_object_reach, payer_is_declared_target,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
+    AttachCardinality, AttachSelection, AttackSubject, BounceSelection, CardPlayMode,
+    CardTypeSetSource, CastFromZoneDriver, CastMechanism, CastPermissionConstraint,
+    CastingPermission, ChoiceType, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
+    ChosenGroupId, CoinFlipRun, CombatDamageScope, CombatHistoryScope, Comparator, ConjureCard,
+    ConjureSource, ContinuousEffectOnset, ContinuousModification, ControlWindow, ControllerRef,
+    CopyChooseScope, CopyRetargetPermission, CopyScale, DamageModification, DamageSource,
+    DelayedTriggerCondition, DelayedTriggerLifetime, DieResultBranch, DigRestOrder, Duration,
+    Effect, EffectOutcomeSignal, EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction,
+    GuardReading, GuessSubject, IntensityScope, IterationKindBinding, KeeperConstraint,
+    KeeperCounterMark, LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole,
+    MassLibraryShuffleMode, MultiTargetSpec, NameStickerSet, NumberDistinctness, ObjectProperty,
+    ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
+    PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
+    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue,
+    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ReplacementCondition,
+    ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
+    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
+    SkipScope, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
+    SubAbilityLink, TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode,
+    ThisWayCause, TokenAttackDestination, TrackedAnaphorSource, TriggerCondition,
+    TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier, UnloweredGuard,
+    UntilCondition, VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser,
+    ZoneOwner,
 };
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
@@ -24952,12 +24953,11 @@ fn try_split_damage_compound_with_damage_context(
     // Parse the sub-effect through the full clause pipeline (not just imperative),
     // because the sub-text may have a subject prefix like "you gain 3 life".
     // CR 608.2c: a preceding announced target prevents treating the tail as a fresh head.
-    let continuation_context =
-        if crate::game::ability_utils::effect_has_stack_target_declaration(&primary_effect) {
-            DamageTargetContext::InheritedTargets
-        } else {
-            damage_context
-        };
+    let continuation_context = if effect_has_stack_target_declaration(&primary_effect) {
+        DamageTargetContext::InheritedTargets
+    } else {
+        damage_context
+    };
     let mut sub_clause =
         parse_effect_clause_with_damage_context(sub_parse_text, ctx, continuation_context);
     let sub_target_chooser = ctx.target_chooser.clone();
@@ -44563,12 +44563,9 @@ fn parse_effect_chain_ir_body(
                         .map(|ability| (ability.effect.as_ref(), ability.unless_pay.as_ref())),
                     )
                     .any(|(effect, unless_pay)| {
-                        crate::game::ability_utils::effect_has_stack_target_declaration(effect)
-                            || unless_pay.is_some_and(|modifier| {
-                                crate::game::ability_utils::payer_is_declared_target(
-                                    &modifier.payer,
-                                )
-                            })
+                        effect_has_stack_target_declaration(effect)
+                            || unless_pay
+                                .is_some_and(|modifier| payer_is_declared_target(&modifier.payer))
                     })
                 }) {
             DamageTargetContext::InheritedTargets

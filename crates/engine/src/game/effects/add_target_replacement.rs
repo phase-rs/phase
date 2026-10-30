@@ -1,18 +1,16 @@
 use crate::game::game_object::ObjectIncarnationRefExt;
-use crate::game::quantity::{
-    quantity_ref_object_scope, quantity_ref_recipient_read, resolve_quantity_with_targets,
-    RecipientRead,
-};
+use crate::game::quantity::{quantity_ref_object_scope, resolve_quantity_with_targets};
 use crate::game::replacement::EventModifiers;
 use crate::game::targeting::{
     resolve_event_context_target, triggering_spell, triggering_spell_identity, TriggeringSpell,
 };
 use crate::types::ability::{
-    expiry_from_duration, host_gate_enforceable, replacement_install_is_refused, AbilityDefinition,
-    CastManaObjectScope, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectError,
-    EffectKind, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementDurationExpiry, ResolvedAbility, RestrictionExpiry,
-    SourceExclusion, TargetFilter, TargetRef,
+    expiry_from_duration, host_gate_enforceable, quantity_ref_recipient_read,
+    replacement_install_is_refused, AbilityDefinition, CastManaObjectScope, DamageTargetFilter,
+    DamageTargetPlayerScope, Effect, EffectError, EffectKind, ObjectScope, PlayerFilter,
+    QuantityExpr, QuantityRef, RecipientRead, ReplacementCondition, ReplacementDefinition,
+    ReplacementDurationExpiry, ResolvedAbility, RestrictionExpiry, SourceExclusion, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;

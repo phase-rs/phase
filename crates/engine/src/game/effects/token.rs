@@ -7,19 +7,19 @@ use crate::game::game_object::{
     AttachTarget, BackFaceData, DisplayIdentity, DisplaySource, GameObject,
 };
 use crate::game::quantity::{
-    quantity_expr_recipient_read, resolve_quantity_with_targets,
-    resolve_quantity_with_targets_and_recipient, RecipientRead,
+    resolve_quantity_with_targets, resolve_quantity_with_targets_and_recipient,
 };
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AttachCardinality,
-    AttachSelection, CastingPermission, ChosenAttribute, Comparator, ContinuousModification,
-    ControllerRef, CopiableValues, DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect,
-    EffectError, EffectKind, FilterProp, ManaContribution, ManaProduction, PermissionGrantee,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SacrificeCost,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef, TokenAttackDestination,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    quantity_expr_recipient_read, AbilityCost, AbilityDefinition, AbilityKind,
+    ActivationRestriction, AttachCardinality, AttachSelection, CastingPermission, ChosenAttribute,
+    Comparator, ContinuousModification, ControllerRef, CopiableValues, DelayedTriggerCondition,
+    DelayedTriggerKind, Duration, Effect, EffectError, EffectKind, FilterProp, ManaContribution,
+    ManaProduction, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
+    RecipientRead, ResolvedAbility, SacrificeCost, SearchSelectionConstraint, StaticDefinition,
+    TargetFilter, TargetRef, TokenAttackDestination, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card::PrintedLoyalty;
 use crate::types::card_type::{CardType, CoreType, Supertype};
