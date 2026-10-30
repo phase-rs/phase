@@ -76,19 +76,12 @@ fn deck() -> DeckList {
     }
 }
 
-fn resolved_pools(
-    combos: &ComboTable,
-    list: &DeckList,
-) -> Option<Vec<engine::types::game_state::PlayerDeckPool>> {
+fn resolved_pool(combos: &ComboTable) -> Option<engine::types::game_state::PlayerDeckPool> {
     let db = shared_db()?;
-    let payload = resolve_deck_list(db, combos, list);
+    let payload = resolve_deck_list(db, combos, &deck());
     let mut state = GameState::new_two_player(42);
     load_deck_into_state(&mut state, &payload);
-    Some(state.deck_pools.clone())
-}
-
-fn resolved_pool(combos: &ComboTable) -> Option<engine::types::game_state::PlayerDeckPool> {
-    Some(resolved_pools(combos, &deck())?.swap_remove(0))
+    Some(state.deck_pools[0].clone())
 }
 
 #[test]
@@ -118,26 +111,45 @@ fn resolve_deck_list_with_a_default_table_is_unchanged() {
 }
 
 #[test]
-fn resolve_deck_list_floors_each_deck_by_its_own_combo_declaration() {
-    let mut list = deck();
-    list.player.combo_declaration = ComboDeclaration::Intended {
-        window: Some(ComboWindow::EarlyGame),
-    };
-    list.opponent = deck().player;
-    let Some(pools) = resolved_pools(&ComboTable::default(), &list) else {
+fn resolve_deck_list_floors_each_seat_by_its_own_combo_declaration() {
+    let Some(db) = shared_db() else {
         return;
     };
+    let undeclared = deck().player;
+    let early_combo = PlayerDeckList {
+        combo_declaration: ComboDeclaration::Intended {
+            window: Some(ComboWindow::EarlyGame),
+        },
+        ..undeclared.clone()
+    };
+    let list = DeckList {
+        player: early_combo.clone(),
+        opponent: undeclared.clone(),
+        ai_decks: vec![early_combo, undeclared],
+        ..Default::default()
+    };
+
+    let payload = resolve_deck_list(db, &ComboTable::default(), &list);
+    let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+    load_deck_into_state(&mut state, &payload);
+
+    let estimates: Vec<_> = state
+        .deck_pools
+        .iter()
+        .map(|pool| pool.estimated_bracket_tier)
+        .collect();
     assert_eq!(
-        pools[0].estimated_bracket_tier,
-        Some(CommanderBracketTier::Optimized)
+        estimates,
+        [
+            Some(CommanderBracketTier::Optimized),
+            Some(CommanderBracketTier::Core),
+            Some(CommanderBracketTier::Optimized),
+            Some(CommanderBracketTier::Core),
+        ]
     );
     assert_eq!(
-        pools[0].effective_bracket_tier().tier(),
+        state.deck_pools[2].effective_bracket_tier().tier(),
         CommanderBracketTier::Optimized
-    );
-    assert_eq!(
-        pools[1].estimated_bracket_tier,
-        Some(CommanderBracketTier::Core)
     );
 }
 
