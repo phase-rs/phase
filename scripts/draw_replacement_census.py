@@ -79,7 +79,7 @@ CARD_DATA = REPO_ROOT / "data" / "card-data.json"
 # `client/src-tauri` grows a gitignored `target/` on any local Tauri build, which
 # an `rglob("*.rs")` would happily descend into -- making the scanned population
 # depend on whether a developer had run a Tauri build.
-SCOPES = tuple(sorted(str(p.relative_to(REPO_ROOT)) for p in (REPO_ROOT / "crates").glob("*/src")))
+SCOPES = tuple(sorted(p.relative_to(REPO_ROOT).as_posix() for p in (REPO_ROOT / "crates").glob("*/src")))
 
 # ---------------------------------------------------------------------------
 # (A) Producer surface
@@ -156,7 +156,7 @@ def collect_producers() -> dict[tuple[str, str, str], int]:
                 continue
             if name == "tests.rs" or name.endswith("_tests.rs"):
                 continue
-            rel = str(path.relative_to(REPO_ROOT))
+            rel = path.relative_to(REPO_ROOT).as_posix()
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
             # No exemption annotation is honoured here, unlike the zone census: a
             # Draw producer is never exempt. Every one of them must assign a scope.
@@ -478,7 +478,7 @@ def main() -> int:
 
     if args.write:
         baseline_path.write_text(render(header, rows), encoding="utf-8")
-        print(f"wrote {baseline_path.relative_to(REPO_ROOT)}: {len(rows)} rows")
+        print(f"wrote {baseline_path.relative_to(REPO_ROOT).as_posix()}: {len(rows)} rows")
         return 0
 
     return diff_and_report(kind, rows, load_baseline(baseline_path), refreeze)

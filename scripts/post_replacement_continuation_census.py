@@ -100,7 +100,7 @@ def census_file(path: Path) -> list[tuple[str, str, str]]:
     Patterns run only on the shared scanner's stripped `code`, never `raw`, so
     a comment or string that names a continuation cannot create a fake site.
     """
-    rel = str(path.relative_to(REPO_ROOT))
+    rel = path.relative_to(REPO_ROOT).as_posix()
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     hits: list[tuple[str, str, str]] = []
 
@@ -203,7 +203,7 @@ def main() -> int:
 
     if args.write:
         BASELINE.write_text(render(counts), encoding="utf-8")
-        print(f"wrote {BASELINE.relative_to(REPO_ROOT)}: {total} hits / {len(counts)} rows")
+        print(f"wrote {BASELINE.relative_to(REPO_ROOT).as_posix()}: {total} hits / {len(counts)} rows")
         return 0
 
     baseline = load_baseline()

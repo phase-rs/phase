@@ -447,6 +447,10 @@ for file_name in files:
         # v1 child continuation before ResolutionStateWire projects it into a
         # typed resolution frame.
         allowed_spans.append(function_span(source, "migrate_legacy_trigger_firing_carriers"))
+        # Complete-state and resolution-wire decode upgrade saved replacement
+        # coordinates before materialization. This migration recognizes the old
+        # applied-key carriers while recovering their original saved hosts.
+        allowed_spans.append(function_span(source, "normalize_replacement_occurrence_authority"))
         allowed_spans.extend(source_choice_legacy_read_spans(source))
 
     for offset, key in string_literals(source):
