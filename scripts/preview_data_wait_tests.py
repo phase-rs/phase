@@ -85,8 +85,21 @@ elif me == "curl":  # a just-published object, read back for verification
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+    # Objects uploaded on their first 404, so an upload lands during the wait
+    # by the script's own probe rather than by wall-clock time. The upload is
+    # written before that 404 is sent: under ThreadingHTTPServer the next probe
+    # can otherwise reach another worker first and miss again.
+    upload_after_miss: set[str] = set()
+
     def log_message(self, *args: object) -> None:
         pass
+
+    def send_error(self, code: int, *args, **kwargs) -> None:
+        name = self.path.lstrip("/")
+        if code == 404 and name in self.upload_after_miss:
+            self.upload_after_miss.discard(name)
+            Path(self.directory, name).write_text("{}", encoding="utf-8")
+        super().send_error(code, *args, **kwargs)
 
 
 class DataWaitScriptTests(unittest.TestCase):
@@ -108,6 +121,10 @@ class DataWaitScriptTests(unittest.TestCase):
 
     def put(self, name: str) -> None:
         Path(self._objects.name, name).write_text("{}", encoding="utf-8")
+
+    def put_after_first_miss(self, name: str) -> None:
+        _QuietHandler.upload_after_miss.add(name)
+        self.addCleanup(_QuietHandler.upload_after_miss.discard, name)
 
     def uploaded(self, *names: str) -> None:
         for name in (CARD_DATA, DRAFT_POOLS):
@@ -156,12 +173,8 @@ class DataWaitScriptTests(unittest.TestCase):
 
     def test_a_file_uploaded_during_the_wait_passes(self) -> None:
         self.uploaded(DRAFT_POOLS)
-        upload = threading.Timer(1.5, self.put, [CARD_DATA])
-        upload.start()
-        try:
-            result = self.wait(window=10, poll=1)
-        finally:
-            upload.join()
+        self.put_after_first_miss(CARD_DATA)
+        result = self.wait(window=10, poll=1)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         # The first round missed it, so exit 0 came from a later round.
         self.assertIn("Waiting (HTTP 404)", result.stdout)
@@ -188,12 +201,8 @@ class DataWaitScriptTests(unittest.TestCase):
         # An upload the first round misses must still reach the manifest, even
         # when the window leaves no room for a third round.
         self.uploaded(DRAFT_POOLS)
-        upload = threading.Timer(1.5, self.put, [CARD_DATA])
-        upload.start()
-        try:
-            result = self.wait(window=0, poll=3)
-        finally:
-            upload.join()
+        self.put_after_first_miss(CARD_DATA)
+        result = self.wait(window=0, poll=3)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Waiting (HTTP 404)", result.stdout)
         self.assertIn(f"Available: {self.base}/{CARD_DATA}", result.stdout)
