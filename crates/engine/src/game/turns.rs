@@ -1702,6 +1702,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.triggers_fired_this_turn.clear();
     state.trigger_fire_counts_this_turn.clear();
     state.triggers_fired_this_turn_per_opponent.clear();
+    // CR 603.2h: "that turn" — indicated actions reset each turn.
+    state.trigger_indicated_actions_this_turn.clear();
     state.activated_abilities_this_turn.clear();
     // CR 602.5b: "Activate only once each turn" crew restriction resets each turn.
     state.crew_activated_this_turn.clear();
@@ -5544,7 +5546,7 @@ card into your hand at the beginning of your next end step.";
         // P0 is debug-toggled (SetInfiniteMana marks `debug_infinite_mana`) AND holds the
         // recorded Mana axes — the multi-authority case: the debug marker dominates.
         state.debug_infinite_mana.insert(p0);
-        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES);
+        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES, &INFINITE_MANA_AXES);
         state.players[0].mana_pool.add(ManaUnit::new(
             ManaType::Blue,
             ObjectId(11),
@@ -6601,6 +6603,35 @@ card into your hand at the beginning of your next end step.";
         assert!(
             state.cards_exiled_with_source_this_turn.is_empty(),
             "per-turn exiled-with-source pool must reset at turn start"
+        );
+    }
+
+    /// CR 603.2h: "has not yet taken the indicated action that turn" — the
+    /// indicated-action facts reset at turn start. Driven through
+    /// `start_next_turn` so dropping the reset line fails here.
+    #[test]
+    fn start_next_turn_resets_trigger_indicated_actions() {
+        let mut state = setup();
+        let key = crate::types::ability::TriggerDefinitionRef {
+            source: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(42), 0),
+            occurrence: crate::types::ability::TriggerDefinitionOccurrenceRef::Printed {
+                base_set: crate::types::ability::TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 0,
+            },
+        };
+        state
+            .trigger_indicated_actions_this_turn
+            .insert((key, PlayerId(0)));
+        assert!(
+            !state.trigger_indicated_actions_this_turn.is_empty(),
+            "precondition"
+        );
+
+        start_next_turn(&mut state, &mut Vec::new());
+
+        assert!(
+            state.trigger_indicated_actions_this_turn.is_empty(),
+            "CR 603.2h indicated actions must reset at turn start"
         );
     }
 

@@ -840,7 +840,7 @@
     "targetingLabel": "Apuntando a {{label}}",
     "titleTargets": "Objetivos: {{targets}}",
     "titlePaid": "Pagado: {{paid}}",
-    "titleContext": "Contexto: {{context}}",
+    "titleContext": "Contexto: {{items}}",
     "revealedCards": "Revelada: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} de maná",
@@ -2501,6 +2501,7 @@
     "triggerFallback": "Disparo {{number}}"
   },
   "costReductionOrder": {
+    "announcedHybrids": "Pagos híbridos anunciados",
     "eyebrow": "Orden de reducción de costes",
     "title": "Ordena tus reducciones de coste",
     "subtitle": "Estas reducciones fijan un coste total distinto según el orden en que las apliques (CR 601.2f). La parte superior de esta lista se aplica primero.",

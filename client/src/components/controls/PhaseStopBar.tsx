@@ -1,3 +1,4 @@
+import type { ParseKeys, TFunction } from "i18next";
 import type { Phase, PhaseStop, PhaseStopScope } from "../../adapter/types";
 import { useId, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
@@ -102,7 +103,7 @@ const COMBAT_PHASES: Phase[] = [
 
 // i18n key suffix per phase, used to look up the localized label/description
 // from the `phaseStop` group in game.json (e.g. `phaseStop.untapLabel`).
-export const PHASE_KEY: Record<Phase, string> = {
+export const PHASE_KEY = {
   Untap: "untap",
   Upkeep: "upkeep",
   Draw: "draw",
@@ -115,15 +116,15 @@ export const PHASE_KEY: Record<Phase, string> = {
   PostCombatMain: "postCombatMain",
   End: "end",
   Cleanup: "cleanup",
-};
+} as const satisfies Record<Phase, string>;
 
-type PhaseTranslate = ReturnType<typeof useTranslation>["t"];
+type PhaseTranslate = TFunction<"game">;
 
-const SCOPE_TOOLTIP_KEY: Record<PhaseStopScope, string> = {
+const SCOPE_TOOLTIP_KEY = {
   AllTurns: "phaseStop.scopeAllTurns",
   OwnTurn: "phaseStop.scopeOwnTurn",
   OpponentsTurns: "phaseStop.scopeOpponentsTurns",
-};
+} as const satisfies Record<PhaseStopScope, ParseKeys<"game">>;
 
 // Scope hue, shared with the mobile sheet's scope pills (MobilePhaseChip.tsx —
 // keep the two maps' hues in sync): amber = all turns (the established "stop

@@ -29,16 +29,16 @@ use crate::game::printed_cards::{
 };
 use crate::game::quantity::{
     continuous_modification_dynamic_quantity, filter_uses_recipient,
-    quantity_expr_characteristic_reads_at, quantity_expr_uses_recipient, QuantityContext,
+    quantity_expr_characteristic_reads_at, QuantityContext,
 };
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AttachmentReferent,
-    AttackedYouScope, BasicLandType, CardTypeSetSource, CastingPermission, ChosenSubtypeKind,
-    CommanderOwnership, ContinuousModification, CopiableValues, Designation, Duration, Effect,
-    FilterProp, ManaContribution, ManaProduction, PlayerFilter, PlayerScope, QuantityExpr,
-    QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerGrantProducerKey,
-    TriggerProducerOrigin, TypedFilter,
+    quantity_expr_uses_recipient, AbilityCost, AbilityDefinition, AbilityKind,
+    ActivationRestriction, AttachmentReferent, AttackedYouScope, BasicLandType, CardTypeSetSource,
+    CastingPermission, ChosenSubtypeKind, CommanderOwnership, ContinuousModification,
+    CopiableValues, Designation, Duration, Effect, FilterProp, ManaContribution, ManaProduction,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
 };
 use crate::types::ability_visit::{
     each_granter_symbol, granter_symbols_mut, names_unbound_granter, own_fields_name_granter,
@@ -10821,7 +10821,7 @@ fn static_mode_carries_directing_source(mode: &crate::types::statics::StaticMode
 /// CR 109.5: True when a `TargetFilter` constrains the controller of matched
 /// objects via a `ControllerRef` slot (any variant qualifies — none is a
 /// concrete-player anchor). Recurses through `And`/`Or`/`Not`, modeled on
-/// `ability_utils::filter_references_target_player`.
+/// `types::ability::filter_references_target_player`.
 fn target_filter_controller_is_relative(filter: &TargetFilter) -> bool {
     use crate::types::ability::TypedFilter;
     match filter {
@@ -11880,7 +11880,7 @@ fn apply_continuous_effect_filtered(
         .map(|o| o.controller)
         .unwrap_or(PlayerId(0));
     let dynamic_uses_recipient =
-        dynamic_pt_expr.is_some_and(crate::game::quantity::quantity_expr_uses_recipient);
+        dynamic_pt_expr.is_some_and(crate::types::ability::quantity_expr_uses_recipient);
     // CR 201.5a: the effect's static names its granter when it was granted.
     let quantity_ctx = QuantityContext {
         granting_object: effect.granter,

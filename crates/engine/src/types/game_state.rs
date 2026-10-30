@@ -23429,6 +23429,14 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unbounded_resources: BTreeMap<PlayerId, BTreeSet<ResourceAxis>>,
 
+    /// CR 732.2a: per controller, the marked axes its loop drives up — always a subset of
+    /// `unbounded_resources[controller]`, written only by `mark_unbounded_loop` and restored to
+    /// that subset by `retain_marked_rising` in every clear authority; a missing entry means
+    /// not rising. INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
+    /// `loop_fingerprint` (same family as `unbounded_resources`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unbounded_rising: BTreeMap<PlayerId, BTreeSet<ResourceAxis>>,
+
     /// CR 104.4b / CR 732.2a: for each controller with a marked revocable-∞ capability
     /// (`unbounded_resources`), the set of battlefield permanents whose presence enables the
     /// loop (the stable recurring board: `battlefield_ids(prior) ∩ battlefield_ids(state)`).
@@ -23618,6 +23626,8 @@ declare_game_state! {
     pub sideboard_submitted: Vec<PlayerId>,
 
     // Trigger constraint tracking keyed by exact source incarnation + occurrence.
+    /// CR 603.2: once-each-turn limits spent by triggering
+    /// (`OncePerTurn { spent_by: Triggering }`).
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub triggers_fired_this_turn: HashSet<TriggerDefinitionRef>,
@@ -23634,6 +23644,16 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub triggers_fired_this_turn_per_opponent: HashSet<(TriggerDefinitionRef, PlayerId)>,
+    /// CR 603.2h: (trigger definition, player) pairs — that player, controlling that
+    /// ability, has taken its "Do this only once each turn" indicated action this turn.
+    /// Sole writer: `triggers::record_indicated_action`, on acceptance of a non-cast
+    /// instruction or when a CR 603.2h resolution cast becomes cast. Read at fire time and at resolution (incl. the
+    /// `upfront_optional_gate` authority). Cleared at turn start. Boxed: populated only
+    /// once a CR 603.2h ability's action is taken, so it keeps `GameState`'s inline size
+    /// inside the `game_state_size` stack budget.
+    #[serde(default)]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+    pub trigger_indicated_actions_this_turn: Box<HashSet<(TriggerDefinitionRef, PlayerId)>>,
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub triggers_fired_this_game: HashSet<TriggerDefinitionRef>,
@@ -32171,6 +32191,7 @@ impl GameState {
             triggers_fired_this_turn: HashSet::new(),
             trigger_fire_counts_this_turn: HashMap::new(),
             triggers_fired_this_turn_per_opponent: HashSet::new(),
+            trigger_indicated_actions_this_turn: Box::default(),
             triggers_fired_this_game: HashSet::new(),
             triggered_abilities_added_mana_this_turn: HashSet::new(),
             activated_abilities_this_turn: im::HashMap::new(),
@@ -32372,6 +32393,7 @@ impl GameState {
             debug_permitted: BTreeSet::new(),
             debug_infinite_mana: BTreeSet::new(),
             unbounded_resources: BTreeMap::new(),
+            unbounded_rising: BTreeMap::new(),
             unbounded_loop_enablers: BTreeMap::new(),
             unbounded_loop_pile: BTreeMap::new(),
             unbounded_counter_targets: BTreeMap::new(),
@@ -34756,20 +34778,46 @@ impl GameState {
 
     /// CR 732.2a: record that an unbounded (net-progress) loop under `controller`
     /// pumps `axes`. The single write authority for `unbounded_resources` —
-    /// every producer routes through here, never mutating the map inline. Two
-    /// producers exist: the infinite-mana debug toggle
-    /// (`DebugAction::SetInfiniteMana`, ungated) and the live combo-detector at the
-    /// reconcile seam (`game::engine::reconcile_terminal_result`), which persists a
-    /// confirmed loop's `delta.unbounded_axes_for(winner)` — the same axes
-    /// `detect_loop` names in `LoopCertificate.unbounded` — but ONLY when the
-    /// user-controllable `GameState::loop_detection` gate is `On`. Idempotent
+    /// every producer routes through here, never mutating the map inline. Idempotent
     /// set-union: storing exactly the axes it is given
     /// (so a mana toggle stores its six `Mana(_)` axes, a drain certificate stores
     /// its `Life`/`DamageDealt` axes) without clobbering axes a prior producer
     /// already recorded for the same controller.
-    pub fn mark_unbounded_loop(&mut self, controller: PlayerId, axes: &[ResourceAxis]) {
+    /// Records each given axis's direction: an axis in `rising` is stored in `unbounded_rising`,
+    /// any other given axis is removed from it.
+    pub fn mark_unbounded_loop(
+        &mut self,
+        controller: PlayerId,
+        axes: &[ResourceAxis],
+        rising: &[ResourceAxis],
+    ) {
         let entry = self.unbounded_resources.entry(controller).or_default();
         entry.extend(axes.iter().copied());
+        let marked_rising = self.unbounded_rising.entry(controller).or_default();
+        for axis in axes {
+            if rising.contains(axis) {
+                marked_rising.insert(*axis);
+            } else {
+                marked_rising.remove(axis);
+            }
+        }
+        if marked_rising.is_empty() {
+            self.unbounded_rising.remove(&controller);
+        }
+    }
+
+    /// Restores `unbounded_rising[controller] ⊆ unbounded_resources[controller]` after a clear.
+    fn retain_marked_rising(&mut self, controller: PlayerId) {
+        let Some(marked) = self.unbounded_resources.get(&controller) else {
+            self.unbounded_rising.remove(&controller);
+            return;
+        };
+        if let Some(rising) = self.unbounded_rising.get_mut(&controller) {
+            rising.retain(|axis| marked.contains(axis));
+            if rising.is_empty() {
+                self.unbounded_rising.remove(&controller);
+            }
+        }
     }
 
     /// Single write authority for `unbounded_loop_enablers` (an engine bookkeeping map; no CR
@@ -35025,6 +35073,7 @@ impl GameState {
         self.unbounded_counter_targets.remove(&controller); // display-only counter analog of the pile
         self.pending_unbounded_materialization.remove(&controller);
         self.pending_materialization_count.remove(&controller); // CR 732.2c bound, in lockstep
+        self.retain_marked_rising(controller);
     }
 
     /// CR 732.2a: end the ACTUALLY-collapsed persistent axes for `controller` after
@@ -35110,6 +35159,7 @@ impl GameState {
         }
         self.pending_unbounded_materialization.remove(&controller);
         self.pending_materialization_count.remove(&controller); // CR 732.2c bound, in lockstep
+        self.retain_marked_rising(controller);
     }
 
     /// CR 500.5 + CR 106.4: end a loop-backed ∞-mana capability at a step/phase boundary — an
@@ -35134,6 +35184,7 @@ impl GameState {
                 self.unbounded_loop_enablers.remove(&controller); // engine-state lockstep-iff-empty
             }
         }
+        self.retain_marked_rising(controller);
     }
 }
 
@@ -35459,6 +35510,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         debug_permitted: _,
         debug_infinite_mana: _,
         unbounded_resources: _,
+        unbounded_rising: _,
         unbounded_loop_enablers: _,
         unbounded_loop_pile: _,
         unbounded_counter_targets: _,
@@ -35480,6 +35532,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         triggers_fired_this_turn: _,
         trigger_fire_counts_this_turn: _,
         triggers_fired_this_turn_per_opponent: _,
+        trigger_indicated_actions_this_turn: _,
         triggers_fired_this_game: _,
         triggered_abilities_added_mana_this_turn: _,
         activated_abilities_this_turn: _,
@@ -35860,6 +35913,8 @@ impl PartialEq for GameState {
             && self.triggers_fired_this_turn == other.triggers_fired_this_turn
             && self.trigger_fire_counts_this_turn == other.trigger_fire_counts_this_turn
             && self.triggers_fired_this_turn_per_opponent == other.triggers_fired_this_turn_per_opponent
+            && self.trigger_indicated_actions_this_turn
+                == other.trigger_indicated_actions_this_turn
             && self.triggers_fired_this_game == other.triggers_fired_this_game
             && self.triggered_abilities_added_mana_this_turn
                 == other.triggered_abilities_added_mana_this_turn
@@ -36298,6 +36353,7 @@ mod forced_cascade_window_tests {
     fn certificate() -> crate::analysis::loop_check::LoopCertificate {
         crate::analysis::loop_check::LoopCertificate {
             unbounded: vec![crate::analysis::resource::ResourceAxis::Life(PlayerId(1))],
+            rising: Vec::new(),
             win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
             win_kind_at: None,
             mandatory: false,
@@ -36595,6 +36651,7 @@ mod forced_cascade_window_tests {
                         predicted_winner: Some(PlayerId(0)),
                         count: crate::analysis::decision_template::IterationCount::UntilLethal,
                         unbounded: vec![crate::analysis::resource::ResourceAxis::Life(PlayerId(1))],
+                        rising: Vec::new(),
                         win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
                         win_kind_at: None,
                         template: None,
@@ -38077,6 +38134,7 @@ mod tests {
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                     delayed_trigger_receipts: vec![receipt.clone()],
+                    indicated_action: None,
                 },
             },
         };
@@ -38252,6 +38310,7 @@ mod tests {
             reject_action: ResolutionMvRejectAction::RemainExiled,
             success_action: ResolutionCastSuccessAction::BottomMisses,
             delayed_trigger_receipts: Vec::new(),
+            indicated_action: None,
         };
 
         // GraveyardPaidCast — an empty rider is skipped and a carried rider
@@ -47153,12 +47212,15 @@ mod tests {
 
         let a = GameState::new_two_player(7);
         let mut b = a.clone();
-        b.mark_unbounded_loop(PlayerId(0), &INFINITE_MANA_AXES);
+        b.mark_unbounded_loop(PlayerId(0), &INFINITE_MANA_AXES, &INFINITE_MANA_AXES);
+        let life_p1 = crate::analysis::resource::ResourceAxis::Life(PlayerId(1));
+        b.mark_unbounded_loop(PlayerId(0), &[life_p1], &[life_p1]);
         // Sanity: the populated field really does differ between the two states.
         assert_ne!(
             a.unbounded_resources, b.unbounded_resources,
             "fixture must actually differ in unbounded_resources"
         );
+        assert_ne!(a.unbounded_rising, b.unbounded_rising);
 
         assert!(
             a == b,
@@ -47172,6 +47234,59 @@ mod tests {
             loop_states_equal_modulo_resources(&a, &b),
             "the PR-0/PR-2 modulo path must exclude unbounded_resources"
         );
+    }
+
+    /// CR 732.2a: the writer records each given axis's direction, and every clear authority keeps
+    /// `unbounded_rising` a subset of `unbounded_resources`.
+    #[test]
+    fn unbounded_rising_stays_a_subset_of_the_mark() {
+        use crate::analysis::resource::ResourceAxis;
+        use crate::game::mana_payment::INFINITE_MANA_AXES;
+
+        let p0 = PlayerId(0);
+        let [l0, l1, l2] = [0, 1, 2].map(|p| ResourceAxis::Life(PlayerId(p)));
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let rising = |state: &GameState| -> BTreeMap<PlayerId, BTreeSet<ResourceAxis>> {
+            assert!(
+                state.unbounded_rising.iter().all(|(c, r)| state
+                    .unbounded_resources
+                    .get(c)
+                    .is_some_and(|marked| r.is_subset(marked))),
+                "rising {:?} escaped the mark {:?}",
+                state.unbounded_rising,
+                state.unbounded_resources
+            );
+            state.unbounded_rising.clone()
+        };
+        let only_p0 =
+            |axes: &[ResourceAxis]| BTreeMap::from([(p0, axes.iter().copied().collect())]);
+
+        state.mark_unbounded_loop(p0, &[l0, l1], &[l0]);
+        assert_eq!(rising(&state), only_p0(&[l0]));
+        state.mark_unbounded_loop(p0, &[l1], &[l1]);
+        assert_eq!(rising(&state), only_p0(&[l0, l1]));
+        state.mark_unbounded_loop(p0, &[l1], &[]);
+        assert_eq!(rising(&state), only_p0(&[l0]));
+        state.mark_unbounded_loop(p0, &[l0], &[l0, l2]);
+        assert_eq!(rising(&state), only_p0(&[l0]));
+
+        state.mark_unbounded_loop(p0, &[l1], &[l1]);
+        state.clear_collapsed_materializations(
+            p0,
+            &[PersistentAxisMaterialization::Life {
+                player: PlayerId(1),
+                per_cycle_delta: 1,
+            }],
+        );
+        assert_eq!(rising(&state), only_p0(&[l0]));
+        assert_eq!(state.unbounded_resources, only_p0(&[l0]));
+
+        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES, &INFINITE_MANA_AXES);
+        state.clear_unbounded_mana_loop(p0);
+        assert_eq!(rising(&state), only_p0(&[l0]));
+
+        state.clear_unbounded_loop(p0);
+        assert!(rising(&state).is_empty());
     }
 
     /// PR-7 Phase 4c (B5, R3): sibling of `unbounded_resources_excluded_from_loop_equality`
@@ -47434,6 +47549,7 @@ mod tests {
         state.mark_unbounded_loop(
             PlayerId(0),
             &[crate::analysis::resource::ResourceAxis::Life(PlayerId(0))],
+            &[crate::analysis::resource::ResourceAxis::Life(PlayerId(0))],
         );
         state.register_unbounded_loop_enablers(PlayerId(0), BTreeSet::from([ObjectId(1)]));
         state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([ObjectId(1)]));
@@ -47552,6 +47668,10 @@ mod tests {
                 ResourceAxis::TokensCreated,
                 ResourceAxis::Mana(ManaType::Colorless),
             ],
+            &[
+                ResourceAxis::TokensCreated,
+                ResourceAxis::Mana(ManaType::Colorless),
+            ],
         );
         state.register_pending_materialization(
             PlayerId(0),
@@ -47596,7 +47716,11 @@ mod tests {
         use crate::analysis::resource::ResourceAxis;
 
         let mut state = GameState::new_two_player(7);
-        state.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::TokensCreated]);
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[ResourceAxis::TokensCreated],
+            &[ResourceAxis::TokensCreated],
+        );
         state.register_pending_materialization(
             PlayerId(0),
             PersistentAxisMaterialization::Tokens(Box::new(TokenGrowth {
@@ -47662,7 +47786,11 @@ mod tests {
 
         let plus1_axis = ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature);
         let generic_axis = ResourceAxis::Counter(CounterClass::Other, ObjectClass::Other);
-        state.mark_unbounded_loop(PlayerId(0), &[plus1_axis, generic_axis]);
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[plus1_axis, generic_axis],
+            &[plus1_axis, generic_axis],
+        );
         // The Generic loop's surviving display target (kept — NOT collapsed here).
         state.register_unbounded_counter_targets(
             PlayerId(0),
@@ -47735,6 +47863,10 @@ mod tests {
                 ResourceAxis::Mana(ManaType::Colorless),
                 ResourceAxis::TokensCreated,
             ],
+            &[
+                ResourceAxis::Mana(ManaType::Colorless),
+                ResourceAxis::TokensCreated,
+            ],
         );
         state.register_pending_materialization(
             PlayerId(0),
@@ -47793,7 +47925,11 @@ mod tests {
         use crate::types::mana::ManaType;
 
         let mut state = GameState::new_two_player(7);
-        state.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::Mana(ManaType::Colorless)]);
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[ResourceAxis::Mana(ManaType::Colorless)],
+            &[ResourceAxis::Mana(ManaType::Colorless)],
+        );
         assert!(
             state.unbounded_resources.contains_key(&PlayerId(0)),
             "fixture precondition: P0 flagged with a lone Mana axis"
@@ -47826,7 +47962,11 @@ mod tests {
         // Case (a): mana-only → clearing the Mana axis empties the set → axis AND
         // enablers both drop.
         let mut a = GameState::new_two_player(7);
-        a.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::Mana(ManaType::Colorless)]);
+        a.mark_unbounded_loop(
+            PlayerId(0),
+            &[ResourceAxis::Mana(ManaType::Colorless)],
+            &[ResourceAxis::Mana(ManaType::Colorless)],
+        );
         a.register_unbounded_loop_enablers(PlayerId(0), BTreeSet::from([ObjectId(7)]));
         // Non-vacuity: the enabler entry really exists pre-clear.
         assert!(
@@ -47850,6 +47990,10 @@ mod tests {
         let mut b = GameState::new_two_player(7);
         b.mark_unbounded_loop(
             PlayerId(0),
+            &[
+                ResourceAxis::Mana(ManaType::Colorless),
+                ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
+            ],
             &[
                 ResourceAxis::Mana(ManaType::Colorless),
                 ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),

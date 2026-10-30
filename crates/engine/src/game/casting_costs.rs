@@ -13470,6 +13470,16 @@ fn finalize_cast_with_phyrexian_choices_inner(
             player,
             casting_permission_index,
         );
+    // CR 603.2h + CR 601.2i: capture the elected resolution cast's "Do this only once
+    // each turn" limit BEFORE the stack move, whose zone-exit cleanup drops the
+    // `ExileWithAltCost` permission carrying it. Spent below, once the spell is cast.
+    let resolution_cast_indicated_action =
+        super::casting::selected_resolution_cast_indicated_action(
+            state,
+            object_id,
+            player,
+            casting_permission_index,
+        );
     // CR 601.2a + CR 601.2i: The spell was announced onto the stack earlier,
     // but the object's `zone` field stayed at its origin through cost payment
     // so continuous effects that granted castability ("cards in your graveyard
@@ -13726,6 +13736,22 @@ fn finalize_cast_with_phyrexian_choices_inner(
             .pending
             .chain
             .set_first_optional_effect_performed_gate(true);
+    }
+
+    // CR 603.2h + CR 601.2i: the spell is now cast — the controller has taken a
+    // "you may cast … Do this only once each turn" indicated action. Recorded before
+    // this action's triggers are collected, so the SpellCast it causes cannot re-trigger.
+    // CR 601.2g + CR 605.3b + CR 603.2h + CR 702.132a: a mana ability activated while
+    // paying for this cast had its events collected before this commit — the caster's
+    // auto-payment and an Assist helper's payment each by
+    // `triggers::settle_skipped_echo_before_spend` (through
+    // `casting::settle_pre_spend_echoes`) before the spend, a manual activation's at its
+    // own action — so a trigger event it raised (Cryptolith Fragment's life loss) still
+    // sees the action untaken. A non-mana cost event raised in the committing action
+    // itself (a CR 601.2h cost such as Phyrexian life) is collected after this record,
+    // a known latent gap that no printed card in the class reaches.
+    if let Some(limit) = resolution_cast_indicated_action.as_deref() {
+        crate::game::triggers::record_indicated_action(state, limit);
     }
 
     // CR 601.2a + CR 601.2b + CR 110.4: Record permission usage when the spell
@@ -16989,6 +17015,7 @@ pub(super) fn apply_committed_assist(
     // irreversible boundary, not a completed source plan. A replacement can
     // pause after only one selected helper source; retry auto-tap against the
     // residual pool payment so the still-untapped sources cover the deficit.
+    let events_before = events.len();
     auto_tap_mana_sources_with_context_and_resume(
         state, helper, &probe, events, None, None, resume,
     );
@@ -16997,6 +17024,20 @@ pub(super) fn apply_committed_assist(
         return Err(EngineError::InvalidAction(
             "Assist mana payment is awaiting a replacement choice".to_string(),
         ));
+    }
+    // CR 605.4a + CR 603.2 + CR 603.2h + CR 601.2i: the helper's auto-tap is a
+    // pre-spend mana frame of this cast, settled through the same authority as the
+    // caster's auto-payment: coupled triggered mana abilities resolve now, and every
+    // event of the frame is collected and claimed before the spend. A trigger event
+    // a helper's mana ability raises (Cryptolith Fragment's life loss) is therefore
+    // collected before the spell becomes cast, while a "Do this only once each turn"
+    // action the cast takes is still untaken.
+    super::triggers::resolve_tap_mana_triggers_inline(state, events, events_before);
+    if let Err(error) =
+        super::casting::settle_pre_spend_echoes(state, helper, events, events_before, resume, None)
+    {
+        state.pending_cast = Some(Box::new(pending.clone()));
+        return Err(error);
     }
     if state.players.iter().any(|p| p.id == helper) {
         state.restamp_pool_pip_ids(helper);
@@ -25483,6 +25524,7 @@ mod tests {
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::BottomMisses,
                         delayed_trigger_receipts: Vec::new(),
+                        indicated_action: None,
                     }),
                     duration: None,
 
@@ -25611,6 +25653,7 @@ mod tests {
                             remaining_hits: vec![next_hit],
                         },
                         delayed_trigger_receipts: Vec::new(),
+                        indicated_action: None,
                     }),
                     duration: None,
 
@@ -25694,6 +25737,7 @@ mod tests {
                             remaining_hits: vec![],
                         },
                         delayed_trigger_receipts: Vec::new(),
+                        indicated_action: None,
                     }),
                     duration: None,
 
@@ -25984,6 +26028,7 @@ mod tests {
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::BottomMisses,
                         delayed_trigger_receipts: Vec::new(),
+                        indicated_action: None,
                     }),
                     duration: None,
 
@@ -26056,6 +26101,7 @@ mod tests {
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                         success_action: ResolutionCastSuccessAction::BottomMisses,
                         delayed_trigger_receipts: Vec::new(),
+                        indicated_action: None,
                     }),
                     duration: None,
 
@@ -26212,6 +26258,7 @@ mod tests {
                     reject_action: ResolutionMvRejectAction::BottomWithMisses,
                     success_action: ResolutionCastSuccessAction::BottomMisses,
                     delayed_trigger_receipts: Vec::new(),
+                    indicated_action: None,
                 },
                 &mut events,
             )

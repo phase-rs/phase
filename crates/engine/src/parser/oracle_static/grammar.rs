@@ -6,6 +6,7 @@ use super::oracle_trigger::NthEventTimingKind;
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::parser::oracle_effect::parse_effect_chain_with_context_ability_root;
 use crate::parser::oracle_nom::defender_exception;
 use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 use crate::types::ability::PlayerFilter;
@@ -1756,8 +1757,12 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
             in_granted_activated_ability: true,
             ..ParseContext::default()
         };
-        let mut def =
-            parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
+        // CR 602.1: the cost separator starts this granted ability's own effect body.
+        let mut def = parse_effect_chain_with_context_ability_root(
+            &effect_text,
+            AbilityKind::Activated,
+            &mut ctx,
+        );
         def.cost = Some(cost);
         def.activation_restrictions.extend(constraints.restrictions);
         // CR 606.2 + CR 606.3: an activated ability with a loyalty symbol in

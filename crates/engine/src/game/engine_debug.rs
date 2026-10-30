@@ -61,12 +61,14 @@ pub fn apply_debug_action(
                 enter_battlefield_with_etb(state, object_id, None, events);
             } else {
                 // Debug forces a zone change — route through the zone pipeline under
-                // the `DebugCommand` exempt cause, which is FULLY inert: it skips
+                // the `DebugCommand` exempt cause, which skips
                 // both the replacement consult and the delivery tail (no
                 // enters-with-counter statics, no pending-ETB-counter consumption,
-                // no devour snapshot), while the unconditional primitive guards
-                // still run. DebugCommand is non-pausing by construction (always
-                // `Done`), so the result is safely discarded. The library-position
+                // no devour snapshot); the CR 306.5b / CR 310.4b characteristic
+                // counters are installed by the DebugCommand arm, and the
+                // unconditional primitive guards still run. DebugCommand is
+                // non-pausing by construction (always `Done`), so the result is
+                // safely discarded. The library-position
                 // arm folds the raw `move_to_library_position` / `_at_index`
                 // siblings in via the placement request.
                 let mut req =
@@ -571,7 +573,11 @@ pub fn apply_debug_action(
             validate_player(state, player_id)?;
             if enabled {
                 // Delegate to the single write authority; record the six Mana axes.
-                state.mark_unbounded_loop(player_id, &super::mana_payment::INFINITE_MANA_AXES);
+                state.mark_unbounded_loop(
+                    player_id,
+                    &super::mana_payment::INFINITE_MANA_AXES,
+                    &super::mana_payment::INFINITE_MANA_AXES,
+                );
                 // CR 500.5 debug exemption marker: tag this player's Mana axes as the debug
                 // toggle so the end-of-step keep-gate suppresses the empty for them only (a
                 // loop-backed Mana axis, absent from this set, drains and de-realizes instead).
@@ -1047,10 +1053,11 @@ pub fn route_debug_create_to_battlefield(
     // stack.
     if !run_etb {
         // Debug staging — route through the pipeline under `DebugCommand`,
-        // which is FULLY inert: no replacement consult AND no delivery tail
-        // (no intrinsic or statics-derived enters-with counters, no
-        // pending-ETB-counter consumption, no devour snapshot), matching the
-        // prior raw placement exactly. ETB triggers / SBA are NOT run here;
+        // which makes no replacement consult AND runs no delivery tail
+        // (no replacement-derived or statics-derived enters-with counters, no
+        // pending-ETB-counter consumption, no devour snapshot); the CR 306.5b
+        // / CR 310.4b characteristic counters are installed by the
+        // DebugCommand arm. ETB triggers / SBA are NOT run here;
         // that is `run_etb`'s job below. DebugCommand is non-pausing by
         // construction (always `Done`), so the result is safely discarded.
         let req = crate::game::zone_pipeline::ZoneMoveRequest::debug(object_id, Zone::Battlefield);
@@ -1073,23 +1080,38 @@ pub fn route_debug_create_to_battlefield(
 
 /// CR 614.12 + CR 603.6a: Move an existing object onto the battlefield through
 /// the real entry pipeline — the replacement consult (enters tapped, enters
-/// with counters, "as enters" choices), delivery, ETB triggers, then SBAs. A
-/// replacement choice parks on `state.waiting_for`. Shared by debug card
-/// creation and `MoveToZone { simulate: true }`; tokens that already left the
-/// battlefield stay put via the CR 111.8 delivery guard.
+/// with counters, including the CR 306.5b / CR 310.4b intrinsic
+/// loyalty/defense counters, "as enters" choices), delivery, ETB triggers,
+/// then SBAs. A replacement choice parks on `state.waiting_for`. Shared by debug card
+/// creation and `MoveToZone { simulate: true }`. A move the zone primitive
+/// rejects as a no-op — an object already on the battlefield (CR 400.6 +
+/// CR 603.6d), or a token that has left it (CR 111.8) — builds no proposal
+/// (nothing is seeded, consulted or delivered) and runs only the trigger / SBA
+/// epilogue, through `zone_pipeline::zone_move_is_primitive_noop`, the guard the
+/// zone pipeline hoists ahead of its own consult.
 fn enter_battlefield_with_etb(
     state: &mut GameState,
     object_id: ObjectId,
     attach_to: Option<AttachTarget>,
     events: &mut Vec<GameEvent>,
 ) {
-    let from = state
-        .objects
-        .get(&object_id)
-        .map(|o| o.zone)
-        .unwrap_or(Zone::Hand);
+    let Some(object) = state.objects.get(&object_id) else {
+        return;
+    };
+    let from = object.zone;
+    // CR 400.6 + CR 603.6d + CR 111.8: an object already on the battlefield is
+    // not put onto it, and a token that has left the battlefield can't return —
+    // the pipeline's own pre-consult guard, so nothing is seeded, consulted or
+    // delivered for a move the zone primitive rejects. Like every other simulated
+    // move, triggers and state-based actions are still checked, so a stranded
+    // token ceases to exist (CR 704.5d).
+    if crate::game::zone_pipeline::zone_move_is_primitive_noop(state, object, Zone::Battlefield) {
+        super::triggers::process_triggers(state, events); // CR 603: Process triggers
+        super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
+        return;
+    }
 
-    let proposed = ProposedEvent::ZoneChange {
+    let mut proposed = ProposedEvent::ZoneChange {
         object_id,
         from,
         to: Zone::Battlefield,
@@ -1109,6 +1131,11 @@ fn enter_battlefield_with_etb(
         performed_by: None,
         applied: HashSet::new(),
     };
+    // CR 306.5b + CR 310.4b + CR 614.1c: seed the intrinsic enters-with
+    // counters the effect-driven pipeline seeds, so the replacement consult
+    // sees them and the delivery tail applies Doubling Season class
+    // replacements (CR 614.1a) to them.
+    crate::game::zone_pipeline::seed_intrinsic_entry_counters(state, &mut proposed);
 
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
@@ -1159,6 +1186,19 @@ fn route_debug_token_to_battlefield(
     zones::remove_from_zone(state, object_id, staged.zone, staged.owner);
 
     let values = super::printed_cards::intrinsic_copiable_values(&staged);
+    // CR 306.5b + CR 310.4b + CR 614.1c: the sandbox token's body is the
+    // card's copiable printed characteristics; its printed loyalty and the
+    // staged card's printed defense (CopiableValues carries no defense) seed
+    // the intrinsic loyalty/defense counters onto the TokenEntry proposal,
+    // which the liminal commit applies through the replacement pipeline
+    // (CR 614.1a). The production copy-token path seeds the same counters
+    // itself and uses this liminal seam only when it has none.
+    let intrinsic_counters = super::printed_cards::intrinsic_face_entry_counters(
+        values.printed_loyalty,
+        values.loyalty,
+        None,
+        staged.base_defense,
+    );
     let copy = CopyTokenSpec {
         values: Box::new(values.clone()),
         display: super::game_object::DisplayIdentity {
@@ -1219,7 +1259,7 @@ fn route_debug_token_to_battlefield(
     let proposed = ProposedEvent::TokenEntry {
         entry_ref: object_id,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-        enter_with_counters: Vec::new(),
+        enter_with_counters: intrinsic_counters,
         enter_with_choices: None,
         applied: HashSet::new(),
     };
@@ -2756,8 +2796,9 @@ mod tests {
         assert_eq!(state.players[0].library.back(), Some(&to_bottom));
     }
 
-    /// Phase D review fix: a `DebugCommand` zone change is FULLY inert — it
-    /// skips the delivery tail, not just the replacement consult. Pending ETB
+    /// Phase D review fix: a `DebugCommand` zone change skips the delivery
+    /// tail, not just the replacement consult (it installs only a planeswalker's
+    /// or battle's CR 306.5b / CR 310.4b counters on arrival). Pending ETB
     /// counters from delayed triggers ("that creature enters with an
     /// additional +1/+1 counter") must NOT be applied to or consumed by a
     /// debug-staged battlefield entry. Pre-fix, the exempt path delivered

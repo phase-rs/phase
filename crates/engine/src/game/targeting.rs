@@ -2938,7 +2938,7 @@ pub fn resolve_effect_player_ref(
         // `ability_utils` and the `resolve_unless_payer` arm) so the declared-
         // target shape has one definition. Ordered after the `ChosenPlayer` arm,
         // which it never overlaps (declared-target payers carry no chosen index).
-        _ if crate::game::ability_utils::payer_is_declared_target(filter) => {
+        _ if crate::types::ability::payer_is_declared_target(filter) => {
             ability.targets.iter().find_map(|target| match target {
                 TargetRef::Player(player) => Some(*player),
                 _ => None,

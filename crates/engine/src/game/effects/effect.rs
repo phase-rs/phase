@@ -1,10 +1,10 @@
 use crate::game::filter;
 use crate::game::layers::evaluate_condition;
-use crate::game::quantity::{quantity_expr_uses_recipient, resolve_quantity_with_targets};
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, Duration, Effect, EffectError, EffectKind, QuantityExpr,
-    QuantityRef, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
-    TypedFilter,
+    quantity_expr_uses_recipient, ContinuousModification, ControllerRef, Duration, Effect,
+    EffectError, EffectKind, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition,
+    StaticDefinition, TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{EndEffectPermission, GameState, TransientContinuousEffectBindings};
@@ -611,7 +611,7 @@ fn bind_transient_effect(
         && static_def
             .affected
             .as_ref()
-            .is_some_and(crate::game::ability_utils::filter_references_target_player);
+            .is_some_and(crate::types::ability::filter_references_target_player);
     let forwarded_parent_target = ability.context.forwarded_result_context.is_some()
         && application_filter.is_some_and(crate::types::ability::filter_refs_parent_target);
     let inherited_object_target = (static_def
@@ -669,7 +669,7 @@ fn bind_transient_effect(
         && !static_affected_references_target_player
     {
         let skip_companion_player_target = target_filter
-            .is_some_and(crate::game::ability_utils::filter_references_target_player)
+            .is_some_and(crate::types::ability::filter_references_target_player)
             && matches!(ability.targets.first(), Some(TargetRef::Player(_)));
         for bound_filter in transient_bound_filters(
             state,

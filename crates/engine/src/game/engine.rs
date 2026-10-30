@@ -2664,7 +2664,11 @@ fn reconcile_loop_shortcut(state: &mut GameState, result: &mut ActionResult) {
                         // the live producer of `unbounded_resources` for a detected loop (the
                         // debug `SetInfiniteMana` toggle is the only other producer). It runs
                         // only inside this OFF-gated block, so a default-OFF game never marks ∞.
-                        state.mark_unbounded_loop(winner, &delta.unbounded_axes_for(winner));
+                        state.mark_unbounded_loop(
+                            winner,
+                            &delta.unbounded_axes_for(winner),
+                            &delta.rising_unbounded_axes_for(winner),
+                        );
                         super::elimination::end_game(state, Some(winner), &mut result.events);
                     }
                 }
@@ -2747,7 +2751,11 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
         if mandatory {
             // FIRM #1 — mandatory winning drain: identical to the `On` auto-win.
             // CR 732.2a: mark the loop's unbounded axes; CR 704.5a: terminal GameOver.
-            state.mark_unbounded_loop(winner, &delta.unbounded_axes_for(winner));
+            state.mark_unbounded_loop(
+                winner,
+                &delta.unbounded_axes_for(winner),
+                &delta.rising_unbounded_axes_for(winner),
+            );
             super::elimination::end_game(state, Some(winner), &mut result.events);
         } else {
             // CR 732.2a: OPTIONAL winning drain — only the player with priority may propose
@@ -2965,12 +2973,12 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
                     .copied()
                     .filter(|id| frames.current().battlefield.contains(id))
                     .collect();
-                Some((axes, enablers))
+                Some((axes, delta.rising_unbounded_axes_for(controller), enablers))
             })
         };
-        if let Some((axes, enablers)) = hit {
+        if let Some((axes, rising, enablers)) = hit {
             // CR 104.4b: mark the revocable unbounded capability (idempotent set-union).
-            state.mark_unbounded_loop(controller, &axes);
+            state.mark_unbounded_loop(controller, &axes, &rising);
             state.register_unbounded_loop_enablers(controller, enablers);
         }
     }
@@ -3052,6 +3060,7 @@ fn build_cert(
     };
     crate::analysis::loop_check::LoopCertificate {
         unbounded: delta.unbounded_axes_for(winner),
+        rising: delta.rising_unbounded_axes_for(winner),
         win_kind: Some(crate::analysis::loop_check::classify_win_kind(
             winner,
             &win_kind_delta,
@@ -3833,7 +3842,10 @@ fn bounded_offer_tail(
         use crate::analysis::resource::ResourceAxis;
         base.unbounded
             .retain(|axis| *axis != ResourceAxis::LibraryDelta(proposer));
+        base.rising
+            .retain(|axis| *axis != ResourceAxis::LibraryDelta(proposer));
         base.unbounded.push(ResourceAxis::ExtraTurns);
+        base.rising.push(ResourceAxis::ExtraTurns);
     }
     let certificate = crate::analysis::loop_check::LoopCertificate {
         per_cycle: Some(crate::analysis::resource::PeriodSignature::EveryRepetition(
@@ -5868,7 +5880,7 @@ fn apply_until_lethal_shortcut(
                             winner.filter(|winner| Some(*winner) == proposal.predicted_winner)
                         {
                             let mut w = *s;
-                            w.mark_unbounded_loop(winner, &proposal.unbounded);
+                            w.mark_unbounded_loop(winner, &proposal.unbounded, &proposal.rising);
                             *state = w;
                             result.events.append(&mut events);
                             result.waiting_for = state.waiting_for.clone();
@@ -5959,7 +5971,7 @@ fn crown_until_lethal(
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     winner: PlayerId,
 ) {
-    state.mark_unbounded_loop(winner, &proposal.unbounded);
+    state.mark_unbounded_loop(winner, &proposal.unbounded, &proposal.rising);
     super::elimination::end_game(state, Some(winner), &mut result.events);
     result.waiting_for = state.waiting_for.clone();
 }
@@ -8248,6 +8260,7 @@ pub(crate) fn counted_offer(
     // published as one repetition's and classifies nothing.
     let certificate = crate::analysis::loop_check::LoopCertificate {
         unbounded: Vec::new(),
+        rising: Vec::new(),
         win_kind: ending,
         win_kind_at: ending.map(|_| count),
         mandatory: false,
@@ -8295,7 +8308,7 @@ fn materialize_object_growth_shortcut(
 ) {
     // CR 732.2a: reuse the single `unbounded_resources` writer (never mutate the map inline). The
     // proposer is the loop controller (the offer required the whole period to be theirs).
-    state.mark_unbounded_loop(proposal.proposer, &proposal.unbounded);
+    state.mark_unbounded_loop(proposal.proposer, &proposal.unbounded, &proposal.rising);
     // CR 732.2a / CR 110.1: snapshot the ∞ pile — the proposer's tapped fodder-class members —
     // for `DerivedViews::unbounded_pile`. A mana-engine loop reproduces no token ⇒ no fodder ⇒ no
     // pile (correct).
@@ -8817,6 +8830,7 @@ fn handle_declare_shortcut(
         predicted_winner: offer.predicted_winner,
         count,
         unbounded: offer.certificate.unbounded.clone(),
+        rising: offer.certificate.rising.clone(),
         win_kind: offer.certificate.win_kind,
         win_kind_at: offer.certificate.win_kind_at,
         template,
@@ -22596,6 +22610,7 @@ mod stage2_injector_tests {
             predicted_winner: None,
             certificate: LoopCertificate {
                 unbounded: Vec::new(),
+                rising: Vec::new(),
                 win_kind: Some(WinKind::LethalDamage),
                 win_kind_at: None,
                 mandatory: false,
@@ -22884,6 +22899,7 @@ mod stage2_injector_tests {
             predicted_winner: Some(P0),
             count: IterationCount::UntilLethal,
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
             win_kind_at: None,
             template: Some(template),
@@ -23039,6 +23055,7 @@ mod stage2_injector_tests {
             predicted_winner: Some(P0),
             count: IterationCount::UntilLethal,
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
             win_kind_at: None,
             template: Some(sched),
@@ -25803,7 +25820,7 @@ mod kilo_interruptibility_tests {
         // axis and left it ∞-marked for manual play). The offer hook never reads
         // `unbounded_resources`, so the mark must NOT suppress the re-offer.
         let mut marked = base.clone();
-        marked.mark_unbounded_loop(P0, &[ResourceAxis::Life(P0)]);
+        marked.mark_unbounded_loop(P0, &[ResourceAxis::Life(P0)], &[ResourceAxis::Life(P0)]);
         assert!(
             marked
                 .unbounded_resources

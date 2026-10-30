@@ -5166,9 +5166,14 @@ fn fmt_ordinal(n: u32) -> String {
 
 /// Format a `TriggerConstraint` as a human-readable string for the parse-details overlay.
 fn fmt_trigger_constraint(c: &crate::types::ability::TriggerConstraint) -> String {
-    use crate::types::ability::TriggerConstraint as TC;
+    use crate::types::ability::{TriggerConstraint as TC, TriggerLimitSpend};
     match c {
-        TC::OncePerTurn => "once per turn".into(),
+        TC::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering,
+        } => "once per turn".into(),
+        TC::OncePerTurn {
+            spent_by: TriggerLimitSpend::IndicatedAction,
+        } => "do this only once each turn".into(),
         TC::OncePerGame => "once per game".into(),
         TC::OnlyDuringYourTurn => "only during your turn".into(),
         TC::NthSpellThisTurn {

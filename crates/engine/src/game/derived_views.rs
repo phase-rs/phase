@@ -367,12 +367,11 @@ pub struct UnboundedFamilyView {
     pub state: FamilyCollapseState,
 }
 
-/// CR 122.1 + CR 732.2a: whether a counter row's count is a real quantity or one an accepted
-/// shortcut pumps without bound. Typed rather than a bool because the row is engine-classified
-/// data, not a render-time guess. `Finite` is the dominant case and is therefore the serde
-/// default, so the wire stays quiet for it.
+/// CR 732.2a: whether a displayed quantity — a counter row's count (CR 122.1) or a player's life
+/// total (CR 119.3) — is real or pumped without bound by an accepted shortcut. `Finite` is the
+/// dominant case and is therefore the serde default, so the wire stays quiet for it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CounterMagnitude {
+pub enum DisplayMagnitude {
     #[default]
     Finite,
     Unbounded,
@@ -380,8 +379,8 @@ pub enum CounterMagnitude {
 
 /// `skip_serializing_if` predicate for [`CounterRowView`]'s `magnitude`, mirroring the free-fn
 /// `is_false` shape every sibling display row in this module already uses.
-fn is_finite(magnitude: &CounterMagnitude) -> bool {
-    matches!(magnitude, CounterMagnitude::Finite)
+fn is_finite(magnitude: &DisplayMagnitude) -> bool {
+    matches!(magnitude, DisplayMagnitude::Finite)
 }
 
 /// One RENDERABLE counter row on one object: an (object, counter) pair. CR 122.1 — a counter is a
@@ -403,7 +402,7 @@ pub struct CounterRowView {
     pub counter: CounterType,
     pub count: u32,
     #[serde(default, skip_serializing_if = "is_finite")]
-    pub magnitude: CounterMagnitude,
+    pub magnitude: DisplayMagnitude,
 }
 
 /// Every counter row one object renders, PRE-PARTITIONED by where it renders — so the display
@@ -981,6 +980,11 @@ pub struct DerivedViews {
     /// omits the channel entirely for a counterless board.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub counter_display: HashMap<ObjectId, ObjectCounterDisplay>,
+
+    /// CR 119.3 + CR 732.2a: per-player life-readout magnitude — `Unbounded` while some marked
+    /// `Life` axis for that seat is rising; only non-`Finite` entries are emitted.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub life_magnitude: BTreeMap<PlayerId, DisplayMagnitude>,
 }
 
 /// Serialize-only wrapper. The wire shape is
@@ -1926,6 +1930,17 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
             {
                 continue;
             }
+            // CR 119.3 + CR 732.2a: a seat's readout is ∞ while some controller's surviving row
+            // marks its life as rising.
+            if let ResourceAxis::Life(p) = axis {
+                if state
+                    .unbounded_rising
+                    .get(&controller)
+                    .is_some_and(|rising| rising.contains(&axis))
+                {
+                    views.life_magnitude.insert(p, DisplayMagnitude::Unbounded);
+                }
+            }
             let player = attribution_player(axis, controller);
             let state_for_axis = if accepted_axes.contains(&axis) {
                 FamilyCollapseState::Scheduled {
@@ -2091,7 +2106,7 @@ fn counter_display_views(state: &GameState) -> HashMap<ObjectId, ObjectCounterDi
             CounterRowView {
                 counter: ct.clone(),
                 count,
-                magnitude: CounterMagnitude::Unbounded,
+                magnitude: DisplayMagnitude::Unbounded,
             },
         );
         annotated.entry(*id).or_default().insert(ct);
@@ -2109,7 +2124,7 @@ fn counter_display_views(state: &GameState) -> HashMap<ObjectId, ObjectCounterDi
                 CounterRowView {
                     counter: counter.clone(),
                     count,
-                    magnitude: CounterMagnitude::Finite,
+                    magnitude: DisplayMagnitude::Finite,
                 },
             );
         }
@@ -3475,7 +3490,11 @@ mod tests {
                 "Pentad Prism".to_string(),
                 Zone::Battlefield,
             );
-            state.mark_unbounded_loop(PlayerId(0), &[plus1_axis, generic_axis]);
+            state.mark_unbounded_loop(
+                PlayerId(0),
+                &[plus1_axis, generic_axis],
+                &[plus1_axis, generic_axis],
+            );
             // CR 701.34a: the registered backing is the GENERIC channel's, derived axis-blind.
             // Nothing here backs `plus1_axis` — that is the whole point.
             state.register_unbounded_counter_targets(
@@ -3555,7 +3574,11 @@ mod tests {
                 "Saproling".to_string(),
                 Zone::Battlefield,
             );
-            state.mark_unbounded_loop(p0, &[ResourceAxis::TokensCreated]);
+            state.mark_unbounded_loop(
+                p0,
+                &[ResourceAxis::TokensCreated],
+                &[ResourceAxis::TokensCreated],
+            );
             state.register_unbounded_loop_pile(p0, BTreeSet::from([token]));
             if accepted {
                 state.register_pending_materialization(
@@ -3640,7 +3663,7 @@ mod tests {
                 Zone::Battlefield,
             );
             let axis = collapsed_counter_axis(&state, prism, &charge);
-            state.mark_unbounded_loop(p0, &[axis]);
+            state.mark_unbounded_loop(p0, &[axis], &[axis]);
             state.register_unbounded_counter_targets(p0, vec![(prism, charge.clone())]);
             if accepted {
                 state.register_pending_materialization(
@@ -3758,7 +3781,7 @@ mod tests {
             "reach: a CREATURE bearer derives the Creature-classed axis — if this is `Other` the \
              rig lost its core_types and the drift below would be invisible"
         );
-        state.mark_unbounded_loop(p0, &[axis]);
+        state.mark_unbounded_loop(p0, &[axis], &[axis]);
         state.register_unbounded_counter_targets(p0, vec![(bearer, CounterType::Plus1Plus1)]);
 
         // BASELINE: the bearer leaves the battlefield but still EXISTS, so it still derives the
@@ -5929,6 +5952,7 @@ mod tests {
                         instance: DelayedTriggerInstanceId(41),
                         source_id: source,
                     }],
+                    indicated_action: None,
                 },
             },
         };
@@ -6074,6 +6098,7 @@ mod tests {
                     instance: DelayedTriggerInstanceId(42),
                     source_id: source,
                 }],
+                indicated_action: None,
             }),
             duration: None,
             source_id: None,
@@ -6904,8 +6929,8 @@ mod tests {
         let axis = ResourceAxis::Life(victim);
 
         // Both controllers run their own drain loop on the same victim.
-        state.mark_unbounded_loop(p0, &[axis]);
-        state.mark_unbounded_loop(p1, &[axis]);
+        state.mark_unbounded_loop(p0, &[axis], &[]);
+        state.mark_unbounded_loop(p1, &[axis], &[]);
         // Only P1's collapse has been accepted.
         state.register_pending_materialization(
             p1,
@@ -7009,8 +7034,8 @@ mod tests {
         // `Some(p1)` depending on iteration order — which is exactly the order-dependence the join
         // laws exist to forbid.
         let mut both = GameState::new(FormatConfig::commander(), 3, 42);
-        both.mark_unbounded_loop(p0, &[axis]);
-        both.mark_unbounded_loop(p1, &[axis]);
+        both.mark_unbounded_loop(p0, &[axis], &[]);
+        both.mark_unbounded_loop(p1, &[axis], &[]);
         for controller in [p0, p1] {
             both.register_pending_materialization(
                 controller,
@@ -7035,7 +7060,7 @@ mod tests {
         // MUTATION: emit `player` (the attribution seat) instead of `controller` ⇒ the `assert_ne!`
         // below reds, because on this rig `player` IS the victim.
         let mut agreed = GameState::new(FormatConfig::commander(), 3, 42);
-        agreed.mark_unbounded_loop(p1, &[axis]);
+        agreed.mark_unbounded_loop(p1, &[axis], &[]);
         agreed.register_pending_materialization(
             p1,
             PersistentAxisMaterialization::Life {
@@ -7087,7 +7112,11 @@ mod tests {
             "the controller has no Life axis — the drain is on the victim P1"
         );
 
-        state.mark_unbounded_loop(PlayerId(0), &cert_axes);
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &cert_axes,
+            &delta.rising_unbounded_axes_for(PlayerId(0)),
+        );
         let views = derive_views(&state, None);
         assert!(
             views.unbounded_resources.contains(&UnboundedResourceView {
@@ -7134,6 +7163,7 @@ mod tests {
                 ResourceAxis::DamageDealt(PlayerId(1)),
                 ResourceAxis::Life(PlayerId(1)),
             ],
+            &[ResourceAxis::DamageDealt(PlayerId(1))],
         );
 
         let views = derive_views(&state, None);
@@ -7200,7 +7230,11 @@ mod tests {
     #[test]
     fn non_mana_axis_projects_to_controller_hud() {
         let mut state = GameState::new(FormatConfig::standard(), 2, 42);
-        state.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::TokensCreated]);
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[ResourceAxis::TokensCreated],
+            &[ResourceAxis::TokensCreated],
+        );
 
         let views = derive_views(&state, None);
         assert!(
@@ -7294,7 +7328,7 @@ mod tests {
             if also_poison {
                 axes.push(ResourceAxis::Poison(p0));
             }
-            state.mark_unbounded_loop(p0, &axes);
+            state.mark_unbounded_loop(p0, &axes, &axes);
             // Only the counter axis is accepted; `Poison` is marked ∞ but unscheduled.
             state.register_pending_materialization(
                 p0,
@@ -7379,6 +7413,10 @@ mod tests {
         let mut state = GameState::new(FormatConfig::standard(), 2, 42);
         state.mark_unbounded_loop(
             p0,
+            &[
+                ResourceAxis::Mana(ManaType::Green),
+                ResourceAxis::Mana(ManaType::White),
+            ],
             &[
                 ResourceAxis::Mana(ManaType::Green),
                 ResourceAxis::Mana(ManaType::White),
@@ -7674,19 +7712,21 @@ mod tests {
         use crate::types::mana::ManaType;
 
         let mut state = GameState::new(FormatConfig::standard(), 2, 42);
-        state.mark_unbounded_loop(
-            PlayerId(0),
-            &[
-                ResourceAxis::Mana(ManaType::Red),
-                ResourceAxis::Life(PlayerId(1)),
-                // Victim-keyed poison axis (PlayerId-transparent wire shape).
-                ResourceAxis::Poison(PlayerId(1)),
-                // A non-poison Counter keeps the tuple externally-tagged wire shape covered.
-                ResourceAxis::Counter(CounterClass::Energy, ObjectClass::Player),
-                ResourceAxis::Trigger(TriggerKind::Proliferate),
-                ResourceAxis::TokensCreated,
-            ],
-        );
+        let axes = [
+            ResourceAxis::Mana(ManaType::Red),
+            ResourceAxis::Life(PlayerId(1)),
+            // Victim-keyed poison axis (PlayerId-transparent wire shape).
+            ResourceAxis::Poison(PlayerId(1)),
+            // A non-poison Counter keeps the tuple externally-tagged wire shape covered.
+            ResourceAxis::Counter(CounterClass::Energy, ObjectClass::Player),
+            ResourceAxis::Trigger(TriggerKind::Proliferate),
+            ResourceAxis::TokensCreated,
+        ];
+        let rising: Vec<ResourceAxis> = axes
+            .into_iter()
+            .filter(|axis| *axis != ResourceAxis::Life(PlayerId(1)))
+            .collect();
+        state.mark_unbounded_loop(PlayerId(0), &axes, &rising);
 
         let json =
             serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");
@@ -7718,6 +7758,9 @@ mod tests {
         assert!(rows
             .iter()
             .any(|r| r.player == PlayerId(1) && r.axis == ResourceAxis::Life(PlayerId(1))));
+        // CR 119.3 + CR 732.2a: a victim-keyed Life axis under P0 marks neither seat's readout.
+        assert!(round.derived.life_magnitude.is_empty());
+        assert!(!json.contains("life_magnitude"));
 
         // Empty case: skip_serializing_if omits the key entirely.
         let empty = GameState::new(FormatConfig::standard(), 2, 42);
@@ -7920,7 +7963,7 @@ mod tests {
             pills: vec![CounterRowView {
                 counter: CounterType::Plus1Plus1,
                 count: 3,
-                magnitude: CounterMagnitude::Finite,
+                magnitude: DisplayMagnitude::Finite,
             }],
             loyalty: None,
         };
@@ -7984,12 +8027,12 @@ mod tests {
                     CounterRowView {
                         counter: charge,
                         count: 4,
-                        magnitude: CounterMagnitude::Unbounded,
+                        magnitude: DisplayMagnitude::Unbounded,
                     },
                     CounterRowView {
                         counter: CounterType::Plus1Plus1,
                         count: 2,
-                        magnitude: CounterMagnitude::Finite,
+                        magnitude: DisplayMagnitude::Finite,
                     },
                 ],
                 loyalty: None,
@@ -8010,7 +8053,7 @@ mod tests {
         let finite_row = CounterRowView {
             counter: CounterType::Plus1Plus1,
             count: 1,
-            magnitude: CounterMagnitude::Finite,
+            magnitude: DisplayMagnitude::Finite,
         };
 
         let mut unmarked = GameState::new(FormatConfig::standard(), 2, 42);
@@ -8042,7 +8085,7 @@ mod tests {
                     CounterRowView {
                         counter: charge,
                         count: 0,
-                        magnitude: CounterMagnitude::Unbounded,
+                        magnitude: DisplayMagnitude::Unbounded,
                     },
                     finite_row,
                 ],
@@ -8088,7 +8131,7 @@ mod tests {
                 loyalty: Some(CounterRowView {
                     counter: CounterType::Loyalty,
                     count: 4,
-                    magnitude: CounterMagnitude::Finite,
+                    magnitude: DisplayMagnitude::Finite,
                 }),
             }),
             "arm 1: a planeswalker's loyalty counters drive the TOTAL, never a stray pill"
@@ -8099,7 +8142,7 @@ mod tests {
                 pills: vec![CounterRowView {
                     counter: CounterType::Loyalty,
                     count: 1,
-                    magnitude: CounterMagnitude::Finite,
+                    magnitude: DisplayMagnitude::Finite,
                 }],
                 loyalty: None,
             }),
@@ -8115,12 +8158,12 @@ mod tests {
         let finite = CounterRowView {
             counter: CounterType::Plus1Plus1,
             count: 2,
-            magnitude: CounterMagnitude::Finite,
+            magnitude: DisplayMagnitude::Finite,
         };
         let unbounded = CounterRowView {
             counter: CounterType::Plus1Plus1,
             count: 2,
-            magnitude: CounterMagnitude::Unbounded,
+            magnitude: DisplayMagnitude::Unbounded,
         };
 
         let finite_wire = serde_json::to_value(&finite).expect("the finite row serializes");
@@ -8216,7 +8259,7 @@ mod tests {
                 pills: vec![CounterRowView {
                     counter: CounterType::Plus1Plus1,
                     count: 2,
-                    magnitude: CounterMagnitude::Finite,
+                    magnitude: DisplayMagnitude::Finite,
                 }],
                 loyalty: None,
             }),

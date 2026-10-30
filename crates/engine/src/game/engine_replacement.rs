@@ -4509,7 +4509,8 @@ pub fn find_copy_targets(
 /// `zone_pipeline` an unconditional producer plus a meld-aware drain here.
 ///
 /// Returns the new pause when the commit itself pauses (a CR 616.1 ordering
-/// choice between two enter-with-counters replacements), otherwise `None`.
+/// choice between two enter-with-counters replacements) or the parent frame it
+/// resumes pauses (a debug batch's next member), otherwise `None`.
 pub(super) fn resume_pending_liminal_token_entry(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -4540,6 +4541,12 @@ pub(super) fn resume_pending_liminal_token_entry(
     ) {
         return Some(state.waiting_for.clone());
     }
+    // CR 608.2c + CR 614.12a: the commit is the step the parent frame below the
+    // entry's retired post-replacement frame was waiting on (a debug Create Card
+    // batch's next member). The boundary pass spent its one frame step retiring
+    // that post-replacement frame, so advance the exposed parent now, as the
+    // unpaused path continues its batch right after the entry.
+    effects::resume_resolution_frames(state, events);
     (!matches!(state.waiting_for, WaitingFor::Priority { .. })).then(|| state.waiting_for.clone())
 }
 

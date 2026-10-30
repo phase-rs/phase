@@ -112,8 +112,12 @@ fn once_per_turn_combat_damage_trigger_admits_one_of_two_qualifying_attackers() 
     );
 }
 
+/// CR 603.2h: "Do this only once each turn" is spent by taking the action, not by
+/// triggering. Calix and the enchanted creature each deal combat damage, so the ability
+/// triggers twice; declining the first takes no action, so the second instance still
+/// offers its "you may".
 #[test]
-fn calix_once_per_turn_combat_trigger_declines_once_then_returns_to_priority() {
+fn calix_declining_one_combat_trigger_leaves_the_second_instance_to_prompt() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let calix = scenario
@@ -158,19 +162,34 @@ fn calix_once_per_turn_combat_trigger_declines_once_then_returns_to_priority() {
     ));
     runner
         .act(GameAction::DecideOptionalEffect { accept: false })
-        .expect("declining Calix's only admitted combat-damage trigger succeeds");
+        .expect("declining the first Calix combat-damage trigger succeeds");
+    runner.advance_until_stack_empty();
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ),
+        "declining takes no action, so the second Calix instance still prompts: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the second Calix combat-damage trigger succeeds");
     runner.advance_until_stack_empty();
 
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "after declining the only Calix trigger, priority resumes without a second prompt"
+        "after declining both Calix triggers, priority resumes: {:?}",
+        runner.state().waiting_for
     );
+    assert!(runner.state().stack.is_empty());
     assert!(
-        !matches!(
-            runner.state().waiting_for,
-            WaitingFor::OptionalEffectChoice { .. }
-        ),
-        "two qualifying attackers must not produce a second Calix optional prompt"
+        runner
+            .state()
+            .trigger_indicated_actions_this_turn
+            .is_empty(),
+        "two declines take no indicated action"
     );
 }
 

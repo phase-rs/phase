@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -16,7 +17,7 @@ const FAILURE_DISMISS_DELAY_MS = 5_000;
 
 function phaseLabel(
   phase: NativeEngineProgressPhase,
-  t: ReturnType<typeof useTranslation>["t"],
+  t: TFunction<"common">,
 ): string {
   switch (phase) {
     case "resolving":

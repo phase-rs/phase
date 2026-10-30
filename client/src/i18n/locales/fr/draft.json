@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Difficulté des bots",
+    "pickEnhancements": {
+      "label": "Utiliser l'IA intégrée avec améliorations des choix de draft",
+      "hint": "Les bots suivent un guide écrit d'ordre de choix pour les formats qui en ont un (actuellement Mirrodin, Darksteel et Fifth Dawn). S'applique à partir de la difficulté moyenne."
+    },
     "difficultyLevels": {
       "VeryEasy": "Très facile",
       "Easy": "Facile",
@@ -132,6 +136,12 @@
     "packOrder": "Ordre des boosters",
     "candidateSets": "Extensions candidates",
     "clearPacks": "Vider",
+    "randomSet": "Extension aléatoire",
+    "randomSetHint": "Remplir tous les boosters avec une extension choisie au hasard",
+    "randomPacks": "Boosters aléatoires",
+    "randomPacksHint": "Attribuer à chaque booster sa propre extension choisie au hasard",
+    "randomCandidates": "Extensions aléatoires",
+    "randomCandidatesHint": "Choisir au hasard des extensions candidates distinctes",
     "emptyPacks_one": "Choisissez une extension pour chaque booster. Un draft ouvre {{count}} booster par défaut — répétez une extension ou mélangez-en plusieurs.",
     "emptyPacks_other": "Choisissez une extension pour chaque booster. Un draft ouvre {{count}} boosters par défaut — répétez une extension ou mélangez-en plusieurs pour drafter un bloc.",
     "emptyPacksFixed_one": "Le scellé ouvre exactement {{count}} booster. Choisissez une extension pour celui-ci.",
@@ -156,6 +166,7 @@
     "startSealed": "Lancer le scellé"
   },
   "pack": {
+    "label": "Booster de draft",
     "confirmPick": "Confirmer le choix",
     "selected": "Sélection",
     "draftEffects": "Effets de draft :",

@@ -65,7 +65,7 @@ interface StackEntryProps {
 }
 
 export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1, details }: StackEntryProps) {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -681,6 +681,6 @@ function stackEntryTitle(
     description ? `${label}: ${description}` : label,
     targets.length > 0 ? t("stack.titleTargets", { targets: targets.join(", ") }) : "",
     paid.length > 0 ? t("stack.titlePaid", { paid: paid.join(", ") }) : "",
-    context.length > 0 ? t("stack.titleContext", { context: context.join(", ") }) : "",
+    context.length > 0 ? t("stack.titleContext", { items: context.join(", ") }) : "",
   ].filter(Boolean).join("\n");
 }

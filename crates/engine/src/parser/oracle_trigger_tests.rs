@@ -3658,7 +3658,9 @@ fn trigger_card_leaves_your_graveyard_during_your_turn_once_each_turn() {
     // CR 603.2h: "triggers only once each turn" → OncePerTurn.
     assert_eq!(
         def.constraint,
-        Some(crate::types::ability::TriggerConstraint::OncePerTurn),
+        Some(crate::types::ability::TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        }),
     );
     assert!(def.execute.is_some());
 }
@@ -6860,6 +6862,233 @@ fn arabella_attack_trigger_binds_x_to_creature_count() {
 /// its execute must be a `Discover` whose limit binds to the *entering*
 /// creature's toughness - NOT a `Variable("X")` placeholder, which resolves
 /// to 0 at runtime and makes discover a silent no-op ("did not discover").
+/// CR 603.2h + CR 608.2d: "Do this only once each turn" after a mandatory instruction
+/// names an action the engine cannot observe as the controller's choice, so the
+/// trigger is a strict failure rather than a limit that never (or wrongly) spends.
+/// Reach guard: the same body under the "triggers only once each turn" wording parses
+/// to a live trigger.
+#[test]
+fn do_this_only_once_each_turn_after_a_mandatory_instruction_is_strict() {
+    let reach = parse_trigger_line(
+        "Whenever you gain life, draw a card. This ability triggers only once each turn.",
+        "Synthetic Once",
+    );
+    assert_eq!(reach.mode, TriggerMode::LifeGained);
+    assert_eq!(
+        reach.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
+
+    let def = parse_trigger_line(
+        "Whenever you gain life, draw a card. Do this only once each turn.",
+        "Synthetic Do This",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "{:?}",
+        def.mode
+    );
+    assert!(def.execute.is_none());
+}
+
+/// Parse a single trigger line through the full Oracle pipeline under each
+/// once-each-turn wording, returning (triggers-only-once, do-this-only-once).
+fn once_each_turn_pair(body: &str) -> (TriggerDefinition, TriggerDefinition) {
+    let parse = |sentence: &str| {
+        let triggers = parse_oracle_text(
+            &format!("{body} {sentence}"),
+            "Synthetic Once",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        )
+        .triggers;
+        assert_eq!(triggers.len(), 1, "{body}: {triggers:#?}");
+        triggers.into_iter().next().unwrap()
+    };
+    (
+        parse("This ability triggers only once each turn."),
+        parse("Do this only once each turn."),
+    )
+}
+
+/// CR 603.2h + CR 603.3c: an optional modal root ("you may choose one") is accepted
+/// while the trigger is put on the stack, never at the resolution-time Accept that
+/// takes the indicated action, so "Do this only once each turn" on it is strict.
+/// Reach guard: the same body under "triggers only once each turn" is a live,
+/// optional, modal SpellCast trigger.
+#[test]
+fn do_this_only_once_each_turn_on_an_optional_modal_root_is_strict() {
+    let (reach, def) = once_each_turn_pair(
+        "Whenever you cast a spell, you may choose one \u{2014} Draw a card; or You gain 2 life.",
+    );
+    assert_eq!(reach.mode, TriggerMode::SpellCast);
+    let execute = reach.execute.as_deref().expect("reach: modal execute");
+    assert!(execute.modal.is_some() && execute.optional, "{execute:#?}");
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "{:?}",
+        def.mode
+    );
+}
+
+/// CR 603.2h + CR 608.2d: an instruction another player answers ("they may") is not
+/// the source's controller taking the indicated action, so the trigger is strict.
+/// Reach guard: the same body under "triggers only once each turn" parses its real
+/// mode with an `optional_player` subject.
+#[test]
+fn do_this_only_once_each_turn_on_another_players_may_is_strict() {
+    let (reach, def) =
+        once_each_turn_pair("Whenever a player commits a crime, they may draw a card.");
+    assert_eq!(reach.mode, TriggerMode::CommitCrime);
+    let execute = reach.execute.as_deref().expect("reach: execute");
+    assert!(
+        execute.optional && execute.optional_player.is_some(),
+        "{execute:#?}"
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "{:?}",
+        def.mode
+    );
+}
+
+/// CR 603.2h + CR 118.12: a payment another player may make ("that player may pay")
+/// is not the source's controller taking the indicated action, so the trigger is
+/// strict. Reach guard: the same body under "triggers only once each turn" parses
+/// an optional `PayCost` whose payer is not the controller.
+#[test]
+fn do_this_only_once_each_turn_on_another_players_payment_is_strict() {
+    let (reach, def) = once_each_turn_pair(
+        "Whenever an opponent draws a card, that player may pay {2}. If the player doesn't, you create a Treasure token.",
+    );
+    assert_eq!(reach.mode, TriggerMode::Drawn);
+    let execute = reach.execute.as_deref().expect("reach: execute");
+    assert!(
+        execute.optional
+            && matches!(&*execute.effect, Effect::PayCost { payer, .. } if *payer != TargetFilter::Controller),
+        "{execute:#?}"
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "{:?}",
+        def.mode
+    );
+}
+
+/// CR 603.2h + CR 608.2c: a per-player fan-out (`player_scope`) makes each scoped player
+/// the acting player, so "Do this only once each turn" on it is strict. Reach guard: the
+/// Hunted Wumpus body under "triggers only once each turn" is a live ETB trigger whose
+/// spine carries a `player_scope`.
+#[test]
+fn do_this_only_once_each_turn_on_a_player_scoped_fan_out_is_strict() {
+    let (reach, def) = once_each_turn_pair(
+        "When this creature enters, each other player may put a creature card from their hand onto the battlefield.",
+    );
+    assert_eq!(reach.mode, TriggerMode::ChangesZone);
+    let execute = reach.execute.as_deref().expect("reach: execute");
+    let mut spine = vec![execute];
+    while let Some(next) = spine.last().and_then(|node| node.sub_ability.as_deref()) {
+        spine.push(next);
+    }
+    assert!(
+        spine.iter().any(|node| node.player_scope.is_some()),
+        "{execute:#?}"
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "{:?}",
+        def.mode
+    );
+}
+
+/// CR 603.2h + CR 608.2c: the `player_scope` rejection on its own — a per-player
+/// fan-out whose optional instruction has no addressee route of its own ("each player
+/// may draw a card"), so only the spine's `player_scope` names the acting players.
+/// Reach guard: under "triggers only once each turn" the spine carries a `player_scope`
+/// and the optional node has no addressee route.
+#[test]
+fn do_this_only_once_each_turn_on_an_each_player_may_fan_out_is_strict() {
+    let (reach, def) =
+        once_each_turn_pair("Whenever you cast a spell, each player may draw a card.");
+    assert_eq!(reach.mode, TriggerMode::SpellCast);
+    let execute = reach.execute.as_deref().expect("reach: execute");
+    let mut spine = vec![execute];
+    while let Some(next) = spine.last().and_then(|node| node.sub_ability.as_deref()) {
+        spine.push(next);
+    }
+    assert!(
+        spine.iter().any(|node| node.player_scope.is_some()),
+        "{execute:#?}"
+    );
+    let optional: Vec<_> = spine.iter().filter(|node| node.optional).collect();
+    assert!(
+        matches!(optional.as_slice(), [only]
+            if only.optional_for.is_none()
+                && only
+                    .effect
+                    .optional_address_routes(only.optional_player.as_ref())
+                    .is_empty()),
+        "{execute:#?}"
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "{:?}",
+        def.mode
+    );
+}
+
+/// CR 603.2h + CR 608.2d: a per-player instruction scoped to the iterated player
+/// (Braids, Conjurer Adept: "that player may put … from their hand") is answered by the
+/// scoped player, so the shared routing classification rejects it. Reach guard: the same
+/// body under "triggers only once each turn" is a live upkeep trigger whose optional
+/// instruction carries the `ScopedPlayer` route.
+#[test]
+fn do_this_only_once_each_turn_on_a_scoped_players_instruction_is_strict() {
+    let (reach, def) = once_each_turn_pair(
+        "At the beginning of each player's upkeep, that player may put an artifact, creature, or land card from their hand onto the battlefield.",
+    );
+    assert_eq!(reach.mode, TriggerMode::Phase);
+    let execute = reach.execute.as_deref().expect("reach: execute");
+    assert!(execute.optional, "{execute:#?}");
+    assert!(
+        execute
+            .effect
+            .optional_address_routes(execute.optional_player.as_ref())
+            .contains(&crate::types::ability::OptionalAddressRoute::ScopedPlayer),
+        "{execute:#?}"
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "{:?}",
+        def.mode
+    );
+}
+
+/// CR 603.2h + CR 608.2d + CR 101.4: an instruction offered to other players
+/// (`optional_for`) is not the source's controller taking the indicated action. Reach
+/// guard: the same body under "triggers only once each turn" sets `optional_for` (and no
+/// `player_scope`).
+#[test]
+fn do_this_only_once_each_turn_on_an_any_opponent_may_is_strict() {
+    let (reach, def) = once_each_turn_pair(
+        "Whenever you cast a spell, any opponent may sacrifice a creature of their choice.",
+    );
+    assert_eq!(reach.mode, TriggerMode::SpellCast);
+    let execute = reach.execute.as_deref().expect("reach: execute");
+    assert!(
+        execute.optional && execute.optional_for.is_some() && execute.player_scope.is_none(),
+        "{execute:#?}"
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "{:?}",
+        def.mode
+    );
+}
+
 #[test]
 fn trigger_pantlaza_etb_discover_x_is_entering_creature_toughness() {
     let def = parse_trigger_line(
@@ -6875,8 +7104,10 @@ fn trigger_pantlaza_etb_discover_x_is_entering_creature_toughness() {
     assert_eq!(def.destination, Some(Zone::Battlefield));
     assert_eq!(
         def.constraint,
-        Some(crate::types::ability::TriggerConstraint::OncePerTurn),
-        "\"Do this only once each turn\" must map to OncePerTurn",
+        Some(crate::types::ability::TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::IndicatedAction
+        }),
+        "\"Do this only once each turn\" must map to the CR 603.2h indicated-action limit",
     );
 
     let execute = def
@@ -7762,7 +7993,9 @@ fn trigger_once_each_turn_constraint() {
     assert_eq!(def.mode, TriggerMode::LifeGained);
     assert_eq!(
         def.constraint,
-        Some(crate::types::ability::TriggerConstraint::OncePerTurn)
+        Some(crate::types::ability::TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
     );
 }
 
@@ -10849,7 +11082,9 @@ fn trigger_you_put_counters_on_self() {
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     assert_eq!(
         def.constraint,
-        Some(crate::types::ability::TriggerConstraint::OncePerTurn)
+        Some(crate::types::ability::TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
     );
     // Constraint sentence should NOT leak as a sub-ability
     if let Some(ref exec) = def.execute {
@@ -11388,7 +11623,9 @@ fn trigger_one_or_more_artifacts_leave_battlefield_during_your_turn() {
     );
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::OncePerTurn),
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        }),
         "'only once each turn' must set OncePerTurn constraint"
     );
     assert!(
@@ -11419,7 +11656,9 @@ fn trigger_another_permanent_leaves_battlefield_during_your_turn() {
     );
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::OncePerTurn),
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        }),
         "'only once each turn' must set OncePerTurn constraint"
     );
 }
@@ -14449,7 +14688,12 @@ fn trigger_you_gain_or_lose_life_during_your_turn_once_each_turn() {
             player: PlayerFilter::Controller,
         })
     );
-    assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
 }
 
 #[test]
@@ -15687,6 +15931,39 @@ fn nth_spell_constraint_serde_defaults_and_omits_exact_comparator() {
     );
 }
 
+/// CR 603.2 + CR 603.2h: the "triggers only once each turn" wire shape is unchanged
+/// (`spent_by` defaults to `Triggering` and is omitted), while the "Do this only once
+/// each turn" limit serializes its spend explicitly and round-trips.
+#[test]
+fn once_per_turn_constraint_serde_defaults_and_omits_triggering_spend() {
+    let old = r#"{"type":"OncePerTurn"}"#;
+    let decoded: TriggerConstraint = serde_json::from_str(old).expect("legacy export loads");
+    assert_eq!(
+        decoded,
+        TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        }
+    );
+    assert_eq!(
+        serde_json::to_string(&decoded).expect("triggering limit serializes"),
+        old,
+        "default spend must preserve the export shape"
+    );
+
+    let indicated = TriggerConstraint::OncePerTurn {
+        spent_by: TriggerLimitSpend::IndicatedAction,
+    };
+    let json = serde_json::to_string(&indicated).expect("indicated-action limit serializes");
+    assert_eq!(
+        json,
+        r#"{"type":"OncePerTurn","spent_by":"IndicatedAction"}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<TriggerConstraint>(&json).expect("indicated action round-trips"),
+        indicated
+    );
+}
+
 #[test]
 fn trigger_nth_spell_with_filter_constrains_triggering_spell() {
     let def = parse_trigger_line(
@@ -16141,7 +16418,12 @@ fn trigger_you_investigate() {
     );
     assert_eq!(def.mode, TriggerMode::Investigated);
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
-    assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
 }
 
 #[test]
@@ -16169,7 +16451,9 @@ fn trigger_curator_discover_again_for_the_same_value() {
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     assert_eq!(
         def.constraint,
-        Some(crate::types::ability::TriggerConstraint::OncePerTurn),
+        Some(crate::types::ability::TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        }),
     );
     let execute = def
         .execute
@@ -20090,7 +20374,12 @@ fn trigger_loki_becomes_target_of_ability_you_control() {
         })
     );
     // "This ability triggers only once each turn." → OncePerTurn (auto-wired).
-    assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
     // Effect body: untargeted single-card draw.
     let execute = def.execute.as_ref().expect("Loki has an execute body");
     match &*execute.effect {
@@ -23647,7 +23936,12 @@ fn ninjutsu_activation_trigger_with_once_per_turn() {
         );
     assert_eq!(triggers.len(), 1);
     assert_eq!(triggers[0].mode, TriggerMode::NinjutsuActivated);
-    assert_eq!(triggers[0].constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        triggers[0].constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
 }
 
 #[test]
@@ -31440,7 +31734,12 @@ fn burrowfiend_becomes_saddled_parses_with_once_per_turn() {
         "Stubborn Burrowfiend",
     );
     assert_eq!(def.mode, TriggerMode::BecomesSaddled);
-    assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
 }
 
 #[test]
@@ -31487,7 +31786,12 @@ fn first_time_each_turn_in_condition_sets_once_per_turn() {
         "Godo, Bandit Warlord",
     );
     assert_eq!(def.mode, TriggerMode::Attacks);
-    assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
 }
 
 #[test]
@@ -31528,7 +31832,12 @@ fn valiant_rescuer_regression() {
             "Valiant Rescuer",
         );
     assert_eq!(def.mode, TriggerMode::Cycled);
-    assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
     assert!(!def.secondary, "removed hack should not set secondary");
     match &def.valid_card {
         Some(TargetFilter::Typed(tf)) => {
@@ -31547,7 +31856,12 @@ fn aurelia_attacks_first_time_has_constraint() {
             "Aurelia, the Warleader",
         );
     assert_eq!(def.mode, TriggerMode::Attacks);
-    assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
 }
 
 #[test]
@@ -31604,7 +31918,12 @@ fn mighty_servant_becomes_crewed_parses_with_once_per_turn() {
         "Mighty Servant of Leuk-O",
     );
     assert_eq!(def.mode, TriggerMode::BecomesCrewed);
-    assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
 }
 
 #[test]
@@ -31621,8 +31940,18 @@ fn gourmand_talent_two_triggers_both_constrained() {
         "Whenever you gain life for the first time each turn, create a Food token.",
         "Gourmand's Talent",
     );
-    assert_eq!(first.constraint, Some(TriggerConstraint::OncePerTurn));
-    assert_eq!(second.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        first.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
+    assert_eq!(
+        second.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
 }
 
 #[test]
@@ -31635,7 +31964,12 @@ fn stensia_generic_damage_trigger_constrained() {
             "Whenever a creature deals damage to one or more players for the first time each turn, put a +1/+1 counter on it.",
             "Stensia, Condemner's Keep",
         );
-    assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
 }
 
 // SOC Tier 2.6: "Whenever you create one or more creature tokens" —
@@ -38584,6 +38918,7 @@ fn zone_choice_is_a_chosen_object_boundary_for_the_event_source_lift() {
         chooser: ZoneChoiceChooser::default(),
         candidate_source: ZoneChoiceCandidateSource::default(),
         reciprocal_role: None,
+        gather_role: None,
         up_to: false,
         selection,
         constraint: None,
@@ -39956,7 +40291,12 @@ fn bill_potts_activation_half_stays_strict_until_one_counter_spans_both_halves()
         })
     );
     assert_eq!(spell_half.valid_target, Some(TargetFilter::Controller));
-    assert_eq!(spell_half.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        spell_half.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
     assert_copies_triggering_source(spell_half, "Bill Potts spell half");
 
     assert!(
@@ -39984,7 +40324,12 @@ fn glava_spell_half_keeps_its_x_qualifier_and_activation_half_is_strict() {
             ],
         })
     );
-    assert_eq!(triggers[0].constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        triggers[0].constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::IndicatedAction
+        })
+    );
     assert!(triggers[0].optional);
     assert!(
         matches!(triggers[1].mode, TriggerMode::Unknown(_)),
@@ -40129,7 +40474,12 @@ fn cast_or_activate_split_never_ships_two_counted_halves() {
     );
     assert_eq!(lone.len(), 1);
     assert_eq!(lone[0].mode, TriggerMode::AbilityActivated);
-    assert_eq!(lone[0].constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        lone[0].constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
 
     let triggers = cast_or_activate_triggers(
         "Whenever you cast an instant spell or activate an ability, draw a card. This ability triggers only once each turn.",
@@ -40142,13 +40492,164 @@ fn cast_or_activate_split_never_ships_two_counted_halves() {
         triggers[0].valid_card,
         Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)))
     );
-    assert_eq!(triggers[0].constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        triggers[0].constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
     assert!(
         matches!(&triggers[1].mode, TriggerMode::Unknown(text)
             if text == "Whenever you activate an ability"),
         "{:?}",
         triggers[1].mode
     );
+}
+
+// ---------------------------------------------------------------------------
+// Shared limit across the halves of one split printed ability (CR 113.2c +
+// CR 603.2 + CR 603.2h). Oracle text verbatim from MTGJSON.
+// ---------------------------------------------------------------------------
+
+const CORRUPTION_OF_TOWASHI: &str = "When this enchantment enters, incubate 4. (Create an Incubator token with four +1/+1 counters on it and \"{2}: Transform this token.\" It transforms into a 0/0 Phyrexian artifact creature.)\nWhenever a permanent you control transforms or a permanent you control enters transformed, you may draw a card. Do this only once each turn.";
+const MACH_1: &str = "Flying\nWhen MACH-1 enters and whenever you gain life, surveil 1. This ability triggers only once each turn. (To surveil 1, look at the top card of your library. You may put it into your graveyard.)";
+const TWO_STREAMS_FACILITY: &str = "Whenever you planeswalk to Two Streams Facility and at the beginning of the first upkeep of the game, each player chooses green anchor or red waterfall.\nEach player who last chose green anchor may play an additional land during each of their turns.\nCreatures controlled by players who last chose red waterfall get +2/+0 and have haste.\nWhenever chaos ensues, each player who last chose green anchor chooses red waterfall, and vice versa.";
+
+fn split_limit_triggers(text: &str, name: &str, card_type: &str) -> Vec<TriggerDefinition> {
+    parse_oracle_text(text, name, &[], &[card_type.to_string()], &[]).triggers
+}
+
+fn leader_offsets(triggers: &[TriggerDefinition]) -> Vec<Option<usize>> {
+    triggers
+        .iter()
+        .map(|def| def.limit_leader_offset.map(NonZeroUsize::get))
+        .collect()
+}
+
+/// Corruption of Towashi: the cross-subject split ("transforms or ... enters
+/// transformed") lowers to two definitions; the second keys its CR 603.2h limit on
+/// the first. The ETB line is a separate paragraph (CR 113.2c), so it shares nothing.
+#[test]
+fn corruption_of_towashi_split_halves_share_one_indicated_action_limit() {
+    let triggers = split_limit_triggers(
+        CORRUPTION_OF_TOWASHI,
+        "Corruption of Towashi",
+        "Enchantment",
+    );
+    assert_eq!(triggers.len(), 3, "{triggers:#?}");
+    assert_eq!(triggers[1].mode, TriggerMode::Transformed);
+    assert_eq!(triggers[2].mode, TriggerMode::ChangesZone);
+    for half in &triggers[1..] {
+        assert_eq!(
+            half.constraint,
+            Some(TriggerConstraint::OncePerTurn {
+                spent_by: TriggerLimitSpend::IndicatedAction
+            })
+        );
+    }
+    assert_eq!(leader_offsets(&triggers), vec![None, None, Some(1)]);
+}
+
+/// MACH-1: the "when ... enters and whenever ..." split (Pattern 1) shares its
+/// "This ability triggers only once each turn" limit (CR 603.2).
+#[test]
+fn mach_1_and_when_split_halves_share_one_trigger_limit() {
+    let triggers = split_limit_triggers(MACH_1, "MACH-1, Swooping Scoundrel", "Creature");
+    assert_eq!(triggers.len(), 2, "{triggers:#?}");
+    assert_eq!(triggers[0].mode, TriggerMode::ChangesZone);
+    assert_eq!(triggers[1].mode, TriggerMode::LifeGained);
+    for half in &triggers {
+        assert_eq!(
+            half.constraint,
+            Some(TriggerConstraint::OncePerTurn {
+                spent_by: TriggerLimitSpend::Triggering
+            })
+        );
+    }
+    assert_eq!(leader_offsets(&triggers), vec![None, Some(1)]);
+}
+
+/// Every split branch marks its later halves when the line carries a per-definition
+/// limit: the "and whenever" split, the 2-way shared-subject "or" split, and the
+/// N-way serial list (each later half counts back to the first). Without a limit
+/// sentence no half is marked.
+#[test]
+fn split_branches_mark_later_halves_only_when_the_line_has_a_shared_limit() {
+    let cases: [(&str, usize); 3] = [
+        (
+            "Whenever this creature attacks and whenever this creature becomes tapped, you may draw a card.",
+            2,
+        ),
+        (
+            "Whenever this creature attacks or becomes tapped, you may draw a card.",
+            2,
+        ),
+        (
+            "Whenever this creature attacks, blocks, or becomes the target of a spell, you may draw a card.",
+            3,
+        ),
+    ];
+    for (body, halves) in cases {
+        let limited = split_limit_triggers(
+            &format!("{body} Do this only once each turn."),
+            "Synthetic Split",
+            "Creature",
+        );
+        assert_eq!(limited.len(), halves, "{body}: {limited:#?}");
+        assert!(
+            limited.iter().all(|def| def.constraint
+                == Some(TriggerConstraint::OncePerTurn {
+                    spent_by: TriggerLimitSpend::IndicatedAction
+                })),
+            "{body}: {limited:#?}"
+        );
+        let expected: Vec<_> = (0..halves).map(|i| (i > 0).then_some(i)).collect();
+        assert_eq!(leader_offsets(&limited), expected, "{body}");
+
+        let unlimited = split_limit_triggers(body, "Synthetic Split", "Creature");
+        assert_eq!(
+            unlimited.len(),
+            halves,
+            "reach: {body} splits: {unlimited:#?}"
+        );
+        assert_eq!(leader_offsets(&unlimited), vec![None; halves], "{body}");
+    }
+}
+
+/// Two Streams Facility: its first-upkeep half carries a once-per-game limit of its
+/// own event, not a limit sentence of the line, so the halves share nothing.
+#[test]
+fn two_streams_facility_event_level_limit_is_not_shared() {
+    let triggers = split_limit_triggers(TWO_STREAMS_FACILITY, "Two Streams Facility", "Plane");
+    let upkeep = triggers
+        .iter()
+        .position(|def| def.mode == TriggerMode::Phase)
+        .unwrap_or_else(|| panic!("reach: the first-upkeep half parses: {triggers:#?}"));
+    assert_eq!(
+        triggers[upkeep].constraint,
+        Some(TriggerConstraint::OncePerGame),
+        "reach: the first-upkeep half is once per game"
+    );
+    assert!(upkeep > 0, "reach: the planeswalk half precedes it");
+    assert_eq!(
+        leader_offsets(&triggers),
+        vec![None; triggers.len()],
+        "{triggers:#?}"
+    );
+}
+
+/// The cast-or-activate split is unchanged: Glava's activation half stays a strict
+/// failure and its spell half carries no leader offset.
+#[test]
+fn cast_or_activate_split_keeps_its_strict_activation_half_unmarked() {
+    let triggers = cast_or_activate_triggers(GLAVA, "Glava, Five-Advents Mage", "Creature");
+    assert_eq!(triggers.len(), 2, "{triggers:#?}");
+    assert!(
+        matches!(triggers[1].mode, TriggerMode::Unknown(_)),
+        "{:?}",
+        triggers[1].mode
+    );
+    assert_eq!(leader_offsets(&triggers), vec![None, None]);
 }
 
 // CR 603.4 + CR 722.3a: Woodwork Prodigy (FRA) front face, verbatim Oracle —
@@ -40766,7 +41267,12 @@ fn event_window_composes_with_once_per_turn() {
         "Synthetic Window Once Per Turn",
     );
     assert_eq!(def.mode, TriggerMode::ChangesZone);
-    assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
     assert_eq!(def.condition, Some(event_time(combat_window())));
 }
 
@@ -40792,4 +41298,194 @@ fn untyped_event_window_declines_the_head() {
     );
     assert_eq!(plain.mode, TriggerMode::ChangesZone);
     assert_eq!(plain.condition, None);
+}
+
+// ---------------------------------------------------------------------------
+// CR 603.2h cast indicated actions: the lowering guard admits only a single-card
+// cast made during this resolution (CR 601.2i + CR 608.2g), the one shape whose
+// commit spends the limit. Oracle text verbatim from MTGJSON.
+// ---------------------------------------------------------------------------
+
+const EMET_SELCH_OF_THE_THIRD_SEAT: &str = "Spells you cast from your graveyard cost {2} less to cast.\nWhenever one or more opponents lose life, you may cast target instant or sorcery card from your graveyard. If that spell would be put into your graveyard, exile it instead. Do this only once each turn.";
+const PLANETARIUM_OF_WAN_SHI_TONG: &str = "{1}, {T}: Scry 2.\nWhenever you scry or surveil, look at the top card of your library. You may cast that card without paying its mana cost. Do this only once each turn. (Look at the card after you scry or surveil.)";
+
+/// The chain's optional instruction (the indicated action's node).
+fn optional_node(def: &TriggerDefinition) -> &AbilityDefinition {
+    let mut node = def.execute.as_deref();
+    while let Some(current) = node {
+        if current.optional {
+            return current;
+        }
+        node = current.sub_ability.as_deref();
+    }
+    panic!("the chain has an optional instruction: {def:#?}");
+}
+
+/// P-G1: Emet-Selch and Planetarium make a single-card cast during the resolution,
+/// so the guard admits their CR 603.2h limit.
+#[test]
+fn single_card_during_resolution_cast_lowers_to_an_indicated_action_limit() {
+    for (text, name, card_type) in [
+        (
+            EMET_SELCH_OF_THE_THIRD_SEAT,
+            "Emet-Selch of the Third Seat",
+            "Creature",
+        ),
+        (
+            PLANETARIUM_OF_WAN_SHI_TONG,
+            "Planetarium of Wan Shi Tong",
+            "Artifact",
+        ),
+    ] {
+        let triggers = split_limit_triggers(text, name, card_type);
+        let [trigger] = triggers.as_slice() else {
+            panic!("{name}: one trigger, got {triggers:#?}");
+        };
+        assert!(
+            !matches!(trigger.mode, TriggerMode::Unknown(_)),
+            "{name}: {:?}",
+            trigger.mode
+        );
+        assert_eq!(
+            trigger.constraint,
+            Some(TriggerConstraint::OncePerTurn {
+                spent_by: TriggerLimitSpend::IndicatedAction
+            }),
+            "{name}"
+        );
+        assert!(
+            matches!(
+                &*optional_node(trigger).effect,
+                Effect::CastFromZone {
+                    driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+                    duration: None,
+                    ..
+                }
+            ),
+            "{name}: the indicated action is a during-resolution cast"
+        );
+    }
+}
+
+/// P-G2: a lingering "you may cast … this turn" grant has no CR 601.2i commit the
+/// limit can ride, so the CR 603.2h line strict-fails.
+#[test]
+fn lingering_cast_from_zone_indicated_action_strict_fails() {
+    const NAME: &str = "Synthetic Lingering Caster";
+    let limited = parse_trigger_line(
+        "Whenever you gain life, you may cast target instant card from your graveyard this turn. Do this only once each turn.",
+        NAME,
+    );
+    assert!(
+        matches!(limited.mode, TriggerMode::Unknown(_)),
+        "{:?}",
+        limited.mode
+    );
+    // Reach guard: without the limit sentence the same body is a supported optional
+    // lingering `CastFromZone`, so the Unknown above comes from the cast guard.
+    let plain = parse_trigger_line(
+        "Whenever you gain life, you may cast target instant card from your graveyard this turn.",
+        NAME,
+    );
+    assert_eq!(plain.mode, TriggerMode::LifeGained);
+    let execute = plain.execute.as_deref().expect("cast body");
+    assert!(execute.optional);
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::CastFromZone {
+                duration: Some(_),
+                ..
+            }
+        ),
+        "{:?}",
+        execute.effect
+    );
+}
+
+/// P-G3: a cast instruction other than `CastFromZone` (Skyclave Shade's lingering
+/// graveyard grant plus a limit sentence) has no commit either, so it strict-fails
+/// instead of spending on acceptance.
+#[test]
+fn granted_casting_permission_indicated_action_strict_fails() {
+    const NAME: &str = "Synthetic Skyclave Grant";
+    let limited = parse_trigger_line(
+        "Whenever a land you control enters, if this card is in your graveyard and it's your turn, you may cast it from your graveyard this turn. Do this only once each turn.",
+        NAME,
+    );
+    assert!(
+        matches!(limited.mode, TriggerMode::Unknown(_)),
+        "{:?}",
+        limited.mode
+    );
+    // Reach guard: without the limit sentence the body is an optional
+    // `GrantCastingPermission` root.
+    let plain = parse_trigger_line(
+        "Whenever a land you control enters, if this card is in your graveyard and it's your turn, you may cast it from your graveyard this turn.",
+        NAME,
+    );
+    assert!(
+        !matches!(plain.mode, TriggerMode::Unknown(_)),
+        "{:?}",
+        plain.mode
+    );
+    let execute = plain.execute.as_deref().expect("grant body");
+    assert!(execute.optional);
+    assert!(
+        matches!(&*execute.effect, Effect::GrantCastingPermission { .. }),
+        "{:?}",
+        execute.effect
+    );
+}
+
+/// P-G4: casting a spell copy the chain put on the stack (Spellbinder's
+/// copy-then-cast body, with the copy made mandatory so the cast is the only "you
+/// may") completes in place, outside the CR 601.2i finalization that spends the
+/// limit (CR 707.12), so the CR 603.2h line strict-fails.
+#[test]
+fn stack_spell_copy_cast_indicated_action_strict_fails() {
+    const NAME: &str = "Synthetic Copy Caster";
+    let limited = parse_trigger_line(
+        "Whenever equipped creature deals combat damage to a player, copy the exiled card. You may cast the copy without paying its mana cost. Do this only once each turn.",
+        NAME,
+    );
+    assert!(
+        matches!(limited.mode, TriggerMode::Unknown(_)),
+        "{:?}",
+        limited.mode
+    );
+    // Reach guard: without the limit sentence the body is a mandatory `CopySpell`
+    // whose only optional instruction is a single-card during-resolution
+    // `CastFromZone` of that copy — the shape every other conjunct of the guard
+    // admits — so the Unknown above comes from the stack-copy conjunct.
+    let plain = parse_trigger_line(
+        "Whenever equipped creature deals combat damage to a player, copy the exiled card. You may cast the copy without paying its mana cost.",
+        NAME,
+    );
+    assert_eq!(plain.mode, TriggerMode::DamageDone);
+    let execute = plain.execute.as_deref().expect("copy body");
+    assert!(!execute.optional);
+    assert!(
+        matches!(&*execute.effect, Effect::CopySpell { .. }),
+        "{:?}",
+        execute.effect
+    );
+    let cast = execute.sub_ability.as_deref().expect("cast the copy");
+    assert!(cast.optional);
+    assert!(cast.multi_target.is_none());
+    assert!(
+        matches!(
+            &*cast.effect,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                mode: CardPlayMode::Cast,
+                driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+                duration: None,
+                alt_ability_cost: None,
+                ..
+            }
+        ),
+        "{:?}",
+        cast.effect
+    );
 }

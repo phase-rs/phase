@@ -34,7 +34,8 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
 use super::oracle_nom::target::{
-    controller_phrase_among, ControllerPhrase, ControllerSubject, ControllerTense, PlayerAnaphor,
+    controller_phrase_among, ControllerForm, ControllerPhrase, ControllerSubject, ControllerTense,
+    PlayerAnaphor,
 };
 use super::oracle_quantity::capitalize_first;
 use super::oracle_util::{
@@ -703,6 +704,75 @@ pub(crate) fn parse_neighbor_seat_direction(input: &str) -> OracleResult<'_, Sea
 pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
     let (filter, rest, _syntax) = parse_target_with_syntax(text, ctx);
     (filter, rest)
+}
+
+/// CR 115.10a + CR 608.2h: Bind an untargeted "each other" population to the
+/// immediate instruction's sole object target, never to a target-selection slot.
+pub(crate) fn parse_parent_target_controller_population<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+    parent_object_target: Option<&TargetFilter>,
+) -> Option<(TargetFilter, &'a str)> {
+    let TargetFilter::Typed(parent) = parent_object_target? else {
+        return None;
+    };
+    if parent.type_filters.is_empty()
+        || resolve_pronoun_target(ctx, "it") != TargetFilter::ParentTarget
+    {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    preceded(
+        tag::<_, _, OracleError<'_>>("each other "),
+        not(|input| parse_word_bounded(input, "target")),
+    )
+    .parse(lower.as_str())
+    .ok()?;
+
+    let mut tentative_ctx = ctx.clone();
+    let (filter, remainder, syntax) = parse_target_with_syntax(text, &mut tentative_ctx);
+    if syntax != TargetSyntax::Descriptor {
+        return None;
+    }
+    let consumed = &lower[..text.len() - remainder.len()];
+    if nom_primitives::scan_at_word_boundaries(consumed, |input| {
+        parse_word_bounded(input, "target")
+    })
+    .is_some()
+    {
+        return None;
+    }
+    let TargetFilter::Typed(mut population) = filter else {
+        return None;
+    };
+    if population.type_filters.is_empty()
+        || population.controller.is_some()
+        || population.properties.first() != Some(&FilterProp::Another)
+    {
+        return None;
+    }
+    let suffix_lower = remainder.to_lowercase();
+    let (_, suffix_remainder) = nom_on_lower(remainder, &suffix_lower, |input| {
+        preceded(multispace0, |input| {
+            parse_word_bounded(input, "with the same controller")
+        })
+        .parse(input)
+    })?;
+    let phrase = ControllerPhrase {
+        subject: ControllerSubject::Anaphoric(PlayerAnaphor::ItsController),
+        form: ControllerForm::Singular,
+        tense: ControllerTense::Present,
+    };
+    let controller = bind_controller_phrase(&phrase, &ctx.player_antecedents())?;
+    if controller != ControllerRef::ParentTargetController {
+        return None;
+    }
+    population.controller = Some(controller);
+    population.properties[0] = FilterProp::DistinctFrom {
+        reference: Box::new(TargetFilter::ParentTarget),
+    };
+    *ctx = tentative_ctx;
+    Some((TargetFilter::Typed(population), suffix_remainder))
 }
 
 /// CR 701.14a: Parse the object of a `fight` clause. The reciprocal "each other"
@@ -11080,6 +11150,163 @@ mod tests {
     use crate::types::ability::{PtStat, PtValueScope};
     use crate::types::counter::CounterType;
     use crate::types::keywords::Keyword;
+
+    #[test]
+    fn parent_controller_population_requires_a_typed_object_permission() {
+        let parent = TargetFilter::Typed(TypedFilter::creature());
+        let text = "each other creature with the same controller.";
+        let mut ctx = ParseContext::default();
+        let (ordinary, remainder, syntax) = parse_target_with_syntax(text, &mut ctx);
+        assert_eq!(syntax, TargetSyntax::Descriptor);
+        assert_eq!(remainder.trim_start(), "with the same controller.");
+        let TargetFilter::Typed(ordinary) = ordinary else {
+            panic!("the ordinary parser must reach the creature noun");
+        };
+        assert_eq!(ordinary.properties, vec![FilterProp::Another]);
+
+        let (population, remainder) =
+            parse_parent_target_controller_population(text, &mut ctx, Some(&parent)).unwrap();
+        let TargetFilter::Typed(population) = population else {
+            panic!("expected a typed object population");
+        };
+        // CR 608.2h + CR 115.10a: the untargeted population reads the chosen object's controller.
+        assert_eq!(population.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(
+            population.controller,
+            Some(ControllerRef::ParentTargetController)
+        );
+        assert_eq!(
+            population.properties,
+            vec![FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::ParentTarget),
+            }]
+        );
+        assert_eq!(remainder, ".");
+
+        for permission in [
+            None,
+            Some(&TargetFilter::Any),
+            Some(&TargetFilter::ParentTarget),
+            Some(&TargetFilter::Typed(TypedFilter::default())),
+        ] {
+            let mut ctx = ParseContext::default();
+            let before = format!("{ctx:?}");
+            assert!(
+                parse_parent_target_controller_population(text, &mut ctx, permission).is_none()
+            );
+            assert_eq!(
+                format!("{ctx:?}"),
+                before,
+                "a refusal must not mutate context"
+            );
+        }
+    }
+
+    #[test]
+    fn parent_controller_population_refuses_target_slots_and_suffix_prefixes() {
+        let parent = TargetFilter::Typed(TypedFilter::creature());
+        for text in [
+            "target creature with the same controller.",
+            "another target creature with the same controller.",
+            "each other target creature with the same controller.",
+            "each another target creature with the same controller.",
+            "each other creature with the same controllers.",
+            "each other creature you control with the same controller.",
+            "each other creature that player controls.",
+        ] {
+            let mut ctx = ParseContext::default();
+            let baseline = parse_target_with_syntax(text, &mut ctx.clone());
+            let before = format!("{ctx:?}");
+            assert!(
+                parse_parent_target_controller_population(text, &mut ctx, Some(&parent)).is_none(),
+                "{text}"
+            );
+            assert_eq!(format!("{ctx:?}"), before);
+            assert_eq!(
+                parse_target_with_syntax(text, &mut ctx),
+                baseline,
+                "refusal preserves the ordinary parser's complete result: {text}"
+            );
+        }
+        for text in [
+            "another target creature with the same controller.",
+            "each other target creature with the same controller.",
+        ] {
+            let (filter, remainder, _) =
+                parse_target_with_syntax(text, &mut ParseContext::default());
+            let TargetFilter::Typed(filter) = filter else {
+                panic!("must reach target noun")
+            };
+            assert!(filter
+                .properties
+                .iter()
+                .any(|property| matches!(property, FilterProp::Another)));
+            assert_eq!(remainder.trim_start(), "with the same controller.");
+        }
+    }
+
+    #[test]
+    fn parent_controller_population_preserves_original_case_remainders() {
+        let parent = TargetFilter::Typed(TypedFilter::creature());
+        let (filter, remainder) = parse_parent_target_controller_population(
+            "Each other artifact creature with the same controller, THEN draw a card.",
+            &mut ParseContext::default(),
+            Some(&parent),
+        )
+        .unwrap();
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("typed artifact creature")
+        };
+        assert_eq!(
+            filter.type_filters,
+            vec![TypeFilter::Artifact, TypeFilter::Creature]
+        );
+        assert_eq!(remainder, ", THEN draw a card.");
+    }
+
+    #[test]
+    fn parent_controller_population_respects_trigger_and_event_antecedents() {
+        use crate::parser::oracle_ir::context::PlayerAntecedents;
+        use crate::parser::oracle_nom::target::ControllerForm;
+        let parent = TargetFilter::Typed(TypedFilter::creature());
+        let phrase = ControllerPhrase {
+            subject: ControllerSubject::Anaphoric(PlayerAnaphor::ItsController),
+            form: ControllerForm::Singular,
+            tense: ControllerTense::Present,
+        };
+        // Binder unit control: an empty hand-built antecedent set binds nothing.
+        assert_eq!(
+            bind_controller_phrase(&phrase, &PlayerAntecedents::default()),
+            None
+        );
+        let mut trigger_ctx = ParseContext {
+            subject: Some(parent.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            bind_controller_phrase(&phrase, &trigger_ctx.player_antecedents()),
+            Some(ControllerRef::TriggeringPlayer)
+        );
+        assert!(parse_parent_target_controller_population(
+            "each other creature with the same controller.",
+            &mut trigger_ctx,
+            Some(&parent),
+        )
+        .is_none());
+        for antecedent in [TargetFilter::EventTarget, TargetFilter::TriggeringSource] {
+            let mut ctx = ParseContext {
+                object_pronoun_ref: Some(antecedent.clone()),
+                ..Default::default()
+            };
+            assert_eq!(resolve_pronoun_target(&mut ctx, "it"), antecedent);
+            assert!(parse_parent_target_controller_population(
+                "each other creature with the same controller.",
+                &mut ctx,
+                Some(&parent),
+            )
+            .is_none());
+        }
+    }
 
     #[test]
     fn attacking_defender_suffix_marker() {

@@ -873,7 +873,7 @@
     "targetingLabel": "Targeting {{label}}",
     "titleTargets": "Targets: {{targets}}",
     "titlePaid": "Paid: {{paid}}",
-    "titleContext": "Context: {{context}}",
+    "titleContext": "Context: {{items}}",
     "revealedCards": "Revealed: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} mana",
@@ -2539,6 +2539,7 @@
     "triggerFallback": "Trigger {{number}}"
   },
   "costReductionOrder": {
+    "announcedHybrids": "Announced hybrid payments",
     "eyebrow": "Cost Reduction Order",
     "title": "Order Your Cost Reductions",
     "subtitle": "These reductions lock in a different total depending on the order you apply them (CR 601.2f). The top of this list is applied first.",

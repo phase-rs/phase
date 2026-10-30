@@ -264,6 +264,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         game_state,
         "GameState",
         None,
+        "trigger_indicated_actions_this_turn",
+        "Box<HashSet>",
+        Classification::Canonical(HASH_SET),
+    );
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
         "post_replacement_token_choice_applied",
         "Option<HashSet>",
         Classification::Canonical(OPTION_HASH_SET),

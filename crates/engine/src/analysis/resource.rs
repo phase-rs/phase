@@ -3017,17 +3017,30 @@ impl ResourceVector {
     /// drain loop would otherwise name no axis. Single authority shared by Engine
     /// A and Engine B.
     pub fn unbounded_axes_for(&self, controller: PlayerId) -> Vec<ResourceAxis> {
-        let mut out: Vec<ResourceAxis> = self
-            .unbounded_components()
+        self.signed_unbounded_axes_for(controller)
             .into_iter()
             .map(|(axis, _)| axis)
-            .collect();
+            .collect()
+    }
+
+    /// CR 732.2a: the subset of [`Self::unbounded_axes_for`] this delta drives up, from the same
+    /// derivation; the rest (an opponent's drained life, CR 704.5a; a shrinking library) falls.
+    pub fn rising_unbounded_axes_for(&self, controller: PlayerId) -> Vec<ResourceAxis> {
+        self.signed_unbounded_axes_for(controller)
+            .into_iter()
+            .filter(|&(_, n)| n > 0)
+            .map(|(axis, _)| axis)
+            .collect()
+    }
+
+    fn signed_unbounded_axes_for(&self, controller: PlayerId) -> Vec<(ResourceAxis, i64)> {
+        let mut out = self.unbounded_components();
         // CR 704.5a: an opponent's life driven *down* each cycle is the drain win.
         for (pid, &n) in &self.life {
             if n < 0 && *pid != controller {
                 let axis = ResourceAxis::Life(*pid);
-                if !out.contains(&axis) {
-                    out.push(axis);
+                if !out.iter().any(|(a, _)| *a == axis) {
+                    out.push((axis, n));
                 }
             }
         }
@@ -5364,6 +5377,7 @@ history_members! {
         PlayersWhoDiscardedCardThisTurn => players_who_discarded_card_this_turn: true,
         PlayersWhoSearchedLibraryThisTurn => players_who_searched_library_this_turn: false,
         TriggerFireCountsThisTurn => trigger_fire_counts_this_turn: true,
+        TriggerIndicatedActionsThisTurn => trigger_indicated_actions_this_turn: true,
         TriggersFiredThisTurn => triggers_fired_this_turn: true,
         TriggersFiredThisTurnPerOpponent => triggers_fired_this_turn_per_opponent: true,
         CityBlessing => city_blessing: false,
@@ -8144,18 +8158,22 @@ fn project_out_resources(state: &GameState) -> GameState {
     s.triggered_abilities_added_mana_this_turn.clear();
     s.loyalty_abilities_activated_this_turn.clear();
     s.extra_loyalty_activations_this_turn.clear();
-    // CR 603.2h: trigger once-per-turn / N-times-per-turn limits. These maps have
-    // EXACTLY ONE writer each — the constraint-keyed `record_trigger_fired`
-    // (triggers.rs), which returns early for an unconstrained trigger:
-    // `triggers_fired_this_turn` is written ONLY for `TriggerConstraint::OncePerTurn`,
-    // `trigger_fire_counts_this_turn` ONLY for `MaxTimesPerTurn`. An UNRESTRICTED
-    // (repeatable) trigger inserts into NEITHER, so a legitimate unrestricted-trigger
-    // loop never touches them and PRESERVING them cannot break legit-loop equality.
-    // For a GATED trigger the key/count is present/grows, so two cycles compare
-    // DIFFERENT — exactly the soundness the gate enforces (a once-per-turn trigger
-    // cannot drive an infinite loop). `triggers_fired_this_turn_per_opponent`
-    // (OncePerOpponentPerTurn) and `triggers_fired_this_game` (OncePerGame) are
-    // likewise NOT cleared here — consistent with the preserved `crew_activated_this_turn`.
+    // CR 603.2 + CR 603.2h: trigger once-per-turn / N-times-per-turn limits. These maps
+    // have EXACTLY ONE writer each. The constraint-keyed `record_trigger_fired`
+    // (triggers.rs) returns early for an unconstrained trigger and writes
+    // `triggers_fired_this_turn` ONLY for `OncePerTurn { spent_by: Triggering }` at
+    // admission, and `trigger_fire_counts_this_turn` ONLY for `MaxTimesPerTurn`.
+    // `trigger_indicated_actions_this_turn` is written ONLY by
+    // `triggers::record_indicated_action`, on acceptance of a non-cast instruction or
+    // when a CR 603.2h resolution cast becomes cast. An UNRESTRICTED (repeatable) trigger, or a CR 603.2h trigger
+    // that is always declined, inserts into NONE of them, so a legitimate
+    // unrestricted-trigger loop never touches them and PRESERVING them cannot break
+    // legit-loop equality. For a GATED trigger the key/count is present/grows, so two
+    // cycles compare DIFFERENT — exactly the soundness the gate enforces (a once-per-turn
+    // trigger cannot drive an infinite loop). `trigger_indicated_actions_this_turn`,
+    // `triggers_fired_this_turn_per_opponent` (OncePerOpponentPerTurn) and
+    // `triggers_fired_this_game` (OncePerGame) are likewise NOT cleared here — consistent
+    // with the preserved `crew_activated_this_turn`.
     // CR 120: who has dealt damage + the per-turn damage event log.
     s.objects_that_dealt_damage.clear();
     s.damage_dealt_this_turn.clear();
@@ -19981,6 +19999,7 @@ mod tests {
         // The ACTUAL wire payload: the `WaitingFor` variant that carries it.
         let cert = LoopCertificate {
             unbounded: vec![],
+            rising: vec![],
             win_kind: Some(WinKind::LethalDamage),
             win_kind_at: None,
             mandatory: false,
@@ -20163,6 +20182,7 @@ mod tests {
             predicted_winner: Some(PlayerId(0)),
             count: IterationCount::UntilLethal,
             unbounded: vec![],
+            rising: vec![],
             win_kind: Some(WinKind::LethalDamage),
             win_kind_at: None,
             template: None,

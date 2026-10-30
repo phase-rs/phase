@@ -14,9 +14,11 @@ use super::oracle_effect::conditions::{
     parse_phase_name_set, source_saddled_filter, split_leading_conditional,
 };
 use super::oracle_effect::gap_diagnosis::clause_gap_unimplemented;
+#[cfg(test)]
+use super::oracle_effect::parse_effect_chain_ir;
 use super::oracle_effect::{
     attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
-    lower_effect_chain_ir, parse_effect_chain_ir, parse_player_relative_clause,
+    lower_effect_chain_ir, parse_effect_chain_ir_ability_root, parse_player_relative_clause,
     rebind_event_context_amount_counts_in_ability, target_filter_controller_ref,
     try_parse_reanimator_aura_etb_effect_ir, try_parse_reanimator_aura_grant_etb_effect_ir,
 };
@@ -71,6 +73,10 @@ use super::oracle_util::{
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::ManaProduction;
 use crate::types::ability::{
+    indicated_action_commit, optional_addressee_is_always_controller, CardPlayMode,
+    CastFromZoneDriver, IndicatedActionCommit,
+};
+use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
     AttachmentReferent, AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource,
@@ -83,8 +89,8 @@ use crate::types::ability::{
     PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, SpentColor,
     StaticCondition, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause,
+    TriggerConstraint, TriggerDefinition, TriggerLimitSpend, TypeFilter, TypedFilter,
+    UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -96,6 +102,7 @@ use crate::types::triggers::{
     AbilityLifecyclePoint, AttackTargetFilter, ControlChangeSide, PlaneswalkRole, TriggerMode,
 };
 use crate::types::zones::Zone;
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 
 /// Returns true if `filter` references the trigger source itself — directly
@@ -259,7 +266,10 @@ fn parse_self_return_origin_zone(lower: &str) -> Option<Zone> {
     .and_then(|(_, zone, _)| zone)
 }
 
-fn self_recursion_trigger_zone(
+/// CR 113.6m: self-moving abilities function in the specified origin zone,
+/// including delayed self-moves. Callers retain trigger-condition precedence
+/// and the attached-Aura exception.
+pub(super) fn self_recursion_trigger_zone(
     ability: &crate::types::ability::AbilityDefinition,
     source_lower: &str,
 ) -> Option<Zone> {
@@ -871,6 +881,7 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
                 ctx,
             ));
         }
+        share_split_limit(&mut results);
         return results;
     }
 
@@ -924,16 +935,15 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
                 ir
             })
             .collect();
-        // Shared-constraint marker. A constraint that counts firings per
-        // definition (`constraint_counts_per_definition`) must span both halves
-        // of the one printed ability: CR 603.2h for "Do this only once each
-        // turn" (Glava, Five-Advents Mage); for "This ability triggers only
-        // once each turn" (Bill Potts) the engine fact is that the counter is
-        // keyed per `TriggerDefinitionRef`, so two lowered halves would each
-        // fire once. Until a single-definition disjunctive trigger lets one
-        // counter span both events, the activation half is a strict failure
-        // and the spell half keeps the constraint, so exactly one counted
-        // definition is live.
+        // A constraint with a per-definition ledger
+        // (`constraint_counts_per_definition`) spans both halves of the one
+        // printed ability (CR 113.2c + CR 603.2h): "Do this only once each turn"
+        // (Glava, Five-Advents Mage) and "This ability triggers only once each
+        // turn" (Bill Potts). The shared-limit marker (`share_split_limit`) would
+        // key both halves' ledgers on the spell half, but the activation half's
+        // runtime is not yet covered by tests, so it stays a strict failure: the
+        // spell half keeps the constraint and is the one live counted definition.
+        // Lifting this is gated on activation-half runtime tests.
         if results.iter().any(|ir| {
             lowered_trigger_constraint(&ir.modifiers, ir.partial_def.constraint.clone())
                 .as_ref()
@@ -965,6 +975,7 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
                 ctx,
             ));
         }
+        share_split_limit(&mut results);
         return results;
     }
 
@@ -1934,7 +1945,8 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             // conservative side of that line: a split body that would have been
             // answerable stays an honest gap rather than a guessed binding.
             let mut reflexive_ctx = effect_ctx.clone_for_independent_body();
-            let mut effect_chain = parse_effect_chain_ir(
+            // CR 603.12: the split reflexive trigger has its own ability body.
+            let mut effect_chain = parse_effect_chain_ir_ability_root(
                 &reflexive_effect_text,
                 AbilityKind::Spell,
                 &mut reflexive_ctx,
@@ -2048,7 +2060,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     extract_illegal_targets_disposition(&effect_for_parse);
                 let (chain_text, ir) = match disposition {
                     IllegalTargetsDisposition::DoesNotResolve => {
-                        let ir = parse_effect_chain_ir(
+                        let ir = parse_effect_chain_ir_ability_root(
                             &stripped_text,
                             AbilityKind::Spell,
                             &mut effect_ctx,
@@ -2058,7 +2070,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     IllegalTargetsDisposition::StillResolves => {
                         // Parse the stripped chain on a clone: it is committed only if kept.
                         let mut stripped_ctx = effect_ctx.clone();
-                        let ir = parse_effect_chain_ir(
+                        let ir = parse_effect_chain_ir_ability_root(
                             &stripped_text,
                             AbilityKind::Spell,
                             &mut stripped_ctx,
@@ -2068,7 +2080,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                             // with its own targets; the root stamp would not govern it. Fail
                             // closed: re-parse the unstripped body so the sentence stays a
                             // strict failure and the disposition stays the default.
-                            let ir = parse_effect_chain_ir(
+                            let ir = parse_effect_chain_ir_ability_root(
                                 &effect_for_parse,
                                 AbilityKind::Spell,
                                 &mut effect_ctx,
@@ -2718,6 +2730,22 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     }
 
     def.constraint = lowered_trigger_constraint(modifiers, def.constraint.take());
+    // CR 603.2h + CR 608.2d: the engine observes the indicated action as the controller
+    // accepting the ability's single non-iterated "you may" instruction. Any other body
+    // names an action the engine cannot observe — strict failure, not a limit that never
+    // (or wrongly) spends.
+    if matches!(
+        def.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::IndicatedAction
+        })
+    ) && !def
+        .execute
+        .as_deref()
+        .is_some_and(has_single_indicated_action_instruction)
+    {
+        return unknown_trigger_definition(&ir.source_text).1;
+    }
     constrain_triggering_spell_with_nth_filter(&mut def);
 
     // Preserve original oracle text for coverage/UI annotation.
@@ -4190,12 +4218,10 @@ pub(crate) fn parse_trigger_line_with_index(
 fn parse_trigger_constraint(lower: &str) -> Option<TriggerConstraint> {
     // Order is load-bearing: longer/more-specific matches must precede shorter ones
     // ("only once each turn" before "only once", etc.).
-    if scan_contains(lower, "this ability triggers only once each turn")
-        || scan_contains(lower, "triggers only once each turn")
-        // CR 603.2h: "Do this only once each turn" is functionally equivalent.
-        || scan_contains(lower, "do this only once each turn")
-    {
-        return Some(TriggerConstraint::OncePerTurn);
+    // CR 603.2 + CR 603.2h: "triggers only once each turn" is spent by triggering;
+    // "Do this only once each turn" is spent by the controller taking the indicated action.
+    if let Some((_, constraint, _)) = scan_preceded(lower, parse_once_each_turn_limit) {
+        return Some(constraint);
     }
     if scan_contains(lower, "this ability triggers only once") {
         return Some(TriggerConstraint::OncePerGame);
@@ -4223,6 +4249,24 @@ fn parse_trigger_constraint(lower: &str) -> Option<TriggerConstraint> {
         return Some(constraint);
     }
     None
+}
+
+/// CR 603.2 + CR 603.2h: the two once-each-turn limit sentences, distinguished by what
+/// spends the limit. The word-boundary scan also covers the "this ability triggers only
+/// once each turn" wording.
+fn parse_once_each_turn_limit(input: &str) -> OracleResult<'_, TriggerConstraint> {
+    alt((
+        value(
+            TriggerLimitSpend::IndicatedAction,
+            tag::<_, _, OracleError<'_>>("do this only once each turn"),
+        ),
+        value(
+            TriggerLimitSpend::Triggering,
+            tag("triggers only once each turn"),
+        ),
+    ))
+    .map(|spent_by| TriggerConstraint::OncePerTurn { spent_by })
+    .parse(input)
 }
 
 fn parse_nth_spell_this_turn_intervening_if(input: &str) -> OracleResult<'_, TriggerConstraint> {
@@ -4309,23 +4353,51 @@ fn lowered_trigger_constraint(
         .or_else(|| {
             // CR 603.2: Apply trigger-event frequency limits as a fallback.
             modifiers.first_time_limit.map(|limit| match limit {
-                FirstTimeLimit::EachTurn => TriggerConstraint::OncePerTurn,
+                FirstTimeLimit::EachTurn => TriggerConstraint::OncePerTurn {
+                    spent_by: TriggerLimitSpend::Triggering,
+                },
                 FirstTimeLimit::EachOpponentTurn => TriggerConstraint::OncePerOpponentPerTurn,
             })
         })
 }
 
-/// Whether `constraint` counts firings per trigger definition. The four
-/// counting arms are keyed by `TriggerDefinitionRef` in
-/// `triggers.rs::check_trigger_constraint_with_ref`, so a printed line that a
-/// compound split lowers to two definitions would count each half separately
-/// (CR 603.2h: "Do this only once each turn" limits the one printed ability, not
-/// each of its events). The remaining arms are predicates on the event or the
-/// game state, which every half evaluates identically. Exhaustive, so a new
+/// CR 113.2c + CR 603.2 + CR 603.2h: the halves of one printed triggered ability that a
+/// compound split lowered to several definitions spend one per-definition limit. When
+/// the line's own limit sentence (`modifiers.constraint`, parsed from the full line)
+/// keeps a per-definition ledger, each later half records its distance back to the
+/// leading half, whose identity keys the ledgers at runtime. The halves occupy adjacent
+/// printed slots (`base_trigger_index.offset(i)`). A "for the first time each turn"
+/// event qualifier (`first_time_limit`) limits only the half whose event it qualifies,
+/// so it is not shared.
+fn share_split_limit(results: &mut [TriggerIr]) {
+    let shares_limit = results.iter().any(|ir| {
+        ir.modifiers
+            .constraint
+            .as_ref()
+            .is_some_and(constraint_counts_per_definition)
+    });
+    if !shares_limit {
+        return;
+    }
+    for (i, ir) in results.iter_mut().enumerate() {
+        ir.partial_def.limit_leader_offset = NonZeroUsize::new(i);
+    }
+}
+
+/// Whether `constraint` keeps a per-trigger-definition ledger. The four
+/// ledger arms are keyed by `TriggerDefinitionRef` in
+/// `triggers.rs::check_trigger_constraint_with_ref` (firings, or for CR 603.2h
+/// the controller's indicated action), so a printed line that a compound split
+/// lowers to two definitions must spend one limit across its halves (CR 603.2h:
+/// "Do this only once each turn" limits the one printed ability, not each of its
+/// events): `share_split_limit` marks the later halves with
+/// `TriggerDefinition::limit_leader_offset`, and the ledgers key on the leading
+/// half. The remaining arms are predicates on the event or the game state,
+/// which every half evaluates identically. Exhaustive, so a new
 /// `TriggerConstraint` variant is forced into this decision.
 fn constraint_counts_per_definition(constraint: &TriggerConstraint) -> bool {
     match constraint {
-        TriggerConstraint::OncePerTurn
+        TriggerConstraint::OncePerTurn { .. }
         | TriggerConstraint::OncePerGame
         | TriggerConstraint::MaxTimesPerTurn { .. }
         | TriggerConstraint::OncePerOpponentPerTurn => true,
@@ -4501,6 +4573,99 @@ fn chain_creates_reflexive_ability(def: &AbilityDefinition) -> bool {
             .else_ability
             .as_deref()
             .is_some_and(chain_creates_reflexive_ability)
+}
+
+/// CR 603.2h: whether this chain names exactly one observable indicated action — a single
+/// non-iterated "you may" instruction (`optional`) across its `sub_ability` /
+/// `else_ability` spine, answered by the source's controller at resolution. Its
+/// acceptance is the controller taking the indicated action. Fail-closed rejections:
+/// - an optional modal root ("you may choose one"), whose acceptance is consumed while
+///   the trigger is put on the stack (CR 603.3c + CR 700.2);
+/// - a per-player fan-out anywhere on the spine (`player_scope`, CR 608.2c), which makes
+///   each scoped player the acting player;
+/// - an instruction offered to other players (`optional_for`, CR 608.2d + CR 101.4);
+/// - any instruction whose prompt the shared routing classification
+///   ([`optional_addressee_is_always_controller`]) cannot prove is addressed to the
+///   controller ("they may", another player's payment, subject-anchored and scoped
+///   instructions, a copy offered to a targeted player);
+/// - a cast indicated action that is not a single-card cast made during this resolution
+///   (CR 601.2i + CR 608.2g), or that can cast a spell copy the chain put on the stack
+///   (CR 707.12; the engine's stack-copy cast route carries no limit): only that shape
+///   reaches the commit that spends the limit.
+fn has_single_indicated_action_instruction(def: &AbilityDefinition) -> bool {
+    fn spine<'a>(def: &'a AbilityDefinition, nodes: &mut Vec<&'a AbilityDefinition>) {
+        nodes.push(def);
+        for branch in [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            spine(branch, nodes);
+        }
+    }
+    let mut nodes = Vec::new();
+    spine(def, &mut nodes);
+    let optional: Vec<_> = nodes.iter().copied().filter(|node| node.optional).collect();
+    // CR 707.10: a player target reaches an instruction only through its own chosen
+    // target slot or by inheritance from an ancestor. The root's targets are its own; a
+    // root that copies the triggering spell (`TriggeringSource`) can name no player.
+    // Anything else is conservatively assumed to admit a player target.
+    let targets_may_include_player = |node: &AbilityDefinition| {
+        !(std::ptr::eq(node, def)
+            && matches!(
+                node.effect.target_filter(),
+                Some(TargetFilter::TriggeringSource)
+            ))
+    };
+    // CR 707.12 + CR 603.2h: casting a copy this chain put on the stack (Spellbinder's
+    // "copy the exiled card … you may cast the copy") is a cast, but the engine completes
+    // it through `cast_stack_spell_copy_during_resolution` → `casting_costs::commit_copy_cast`,
+    // which carries no indicated-action limit, so the guard fails closed.
+    let chain_copies_a_spell = nodes.iter().any(|node| {
+        matches!(
+            &*node.effect,
+            Effect::CopySpell { .. } | Effect::EpicCopy { .. }
+        )
+    });
+    // CR 608.2g + CR 601.2i: only a single-card cast made during this resolution, of a
+    // card not already on the stack, reaches the commit that spends the limit; a
+    // lingering grant, a window, a play, a borrowed alternative cost, the cast of a
+    // stack spell copy or any other cast instruction has no observable commit → strict
+    // failure.
+    let commit_is_observable =
+        |node: &AbilityDefinition| match indicated_action_commit(&node.effect) {
+            IndicatedActionCommit::OnAccept => true,
+            IndicatedActionCommit::OnSpellCast => {
+                matches!(
+                    &*node.effect,
+                    Effect::CastFromZone {
+                        mode: CardPlayMode::Cast,
+                        driver: CastFromZoneDriver::DuringResolution,
+                        duration: None,
+                        alt_ability_cost: None,
+                        ..
+                    }
+                ) && node.multi_target.is_none()
+                    && !chain_copies_a_spell
+            }
+        };
+    def.modal.is_none()
+        && nodes.iter().all(|node| node.player_scope.is_none())
+        && matches!(optional.as_slice(), [only]
+        if only.repeat_for.is_none()
+            && only.optional_for.is_none()
+            && optional_addressee_is_always_controller(
+                &only.effect,
+                only.optional_player.as_ref(),
+                targets_may_include_player(only),
+            )
+            && commit_is_observable(only)
+            // The carrier builders stamp the limit from any `CastFromZone` node of the
+            // chain, and no other cast instruction has a commit at all: the indicated
+            // action must be the chain's only cast instruction.
+            && nodes.iter().all(|node| {
+                indicated_action_commit(&node.effect) == IndicatedActionCommit::OnAccept
+                    || std::ptr::eq(*node, *only)
+            }))
 }
 
 /// Strip constraint sentences from effect text so they don't produce spurious sub-abilities.
@@ -23904,7 +24069,7 @@ fn turn_window_condition(constraint: TriggerConstraint) -> Option<TriggerConditi
     let player = match constraint {
         TriggerConstraint::OnlyDuringYourTurn => PlayerFilter::Controller,
         TriggerConstraint::OnlyDuringOpponentsTurn => PlayerFilter::Opponent,
-        TriggerConstraint::OncePerTurn
+        TriggerConstraint::OncePerTurn { .. }
         | TriggerConstraint::OncePerGame
         | TriggerConstraint::NthSpellThisTurn { .. }
         | TriggerConstraint::NthDrawThisTurn { .. }

@@ -2726,6 +2726,9 @@ pub(super) fn handle_resolution_choice(
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                     delayed_trigger_receipts: Vec::new(),
+                    // CR 603.2h: Discover's indicated action is the discover — spent on
+                    // acceptance (Pantlaza ruling), never by this cast.
+                    indicated_action: None,
                 };
                 let result = match casting::initiate_cast_during_resolution(
                     state,
@@ -3114,6 +3117,9 @@ pub(super) fn handle_resolution_choice(
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                     delayed_trigger_receipts: Vec::new(),
+                    // CR 603.2h + CR 702.85a: a cascade cast is part of the cascade, never
+                    // a CR 603.2h indicated action of its own.
+                    indicated_action: None,
                 };
                 let result = match casting::initiate_cast_during_resolution(
                     state,
@@ -3196,6 +3202,9 @@ pub(super) fn handle_resolution_choice(
                             remaining_hits,
                         },
                     delayed_trigger_receipts: Vec::new(),
+                    // CR 603.2h + CR 702.60a: a ripple cast is part of the ripple, never a
+                    // CR 603.2h indicated action of its own.
+                    indicated_action: None,
                 };
                 let result = match casting::initiate_cast_during_resolution(
                     state,
@@ -9629,6 +9638,8 @@ pub(crate) fn abort_resolution_cast(
         reject_action,
         success_action,
         delayed_trigger_receipts: _,
+        // CR 733.1: an offered cast that is not cast was never taken — no CR 603.2h spend.
+        indicated_action: _,
     } = cleanup;
 
     match success_action {
@@ -11871,6 +11882,7 @@ mod tests {
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                     delayed_trigger_receipts: Vec::new(),
+                    indicated_action: None,
                 }),
                 duration: None,
                 graveyard_replacement: None,

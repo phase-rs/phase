@@ -1261,6 +1261,9 @@ pub fn resolve(
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                     delayed_trigger_receipts: Vec::new(),
+                    // CR 603.2h + CR 601.2i: carried to the commit; spent only if the spell becomes cast.
+                    indicated_action: crate::game::triggers::indicated_action_for(ability)
+                        .map(Box::new),
                 },
             },
         };
@@ -2219,6 +2222,9 @@ fn cast_stack_spell_copy_during_resolution(
     copy_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 603.2h: the lowering guard admits no cast indicated action that takes this
+    // route, which has no CR 601.2i commit carrier.
+    debug_assert!(crate::game::triggers::indicated_action_for(ability).is_none());
     let Some(obj) = state.objects.get(&copy_id).cloned() else {
         return Err(EffectError::InvalidParam(format!(
             "stack spell copy {copy_id:?} not found"
@@ -2357,6 +2363,8 @@ fn resolution_cast_request_for_single_target(
         reject_action,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
         delayed_trigger_receipts: Vec::new(),
+        // CR 603.2h + CR 601.2i: carried to the commit; spent only if the spell becomes cast.
+        indicated_action: crate::game::triggers::indicated_action_for(ability).map(Box::new),
     };
     let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
     // CR 608.2c + CR 611.2a: the gains-modifications rider (Strago and Relm's
@@ -2671,6 +2679,9 @@ pub(crate) fn grant_lingering_permissions(
     target_ids: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<LingeringPermissionGrantResult, EffectError> {
+    // CR 603.2h: the lowering guard admits no cast indicated action that takes this
+    // route, which has no CR 601.2i commit carrier.
+    debug_assert!(crate::game::triggers::indicated_action_for(ability).is_none());
     let mut in_place_ids = Vec::new();
     let mut exile_delivery_ids = Vec::new();
     for &obj_id in target_ids {
