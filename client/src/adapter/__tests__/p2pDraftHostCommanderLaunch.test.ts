@@ -70,8 +70,8 @@ function seatGuestSession(privateHost: PrivateHost, seat: number) {
  * from omitted the key entirely, and under `!is_bot && connected` an
  * `undefined` is falsy — so EVERY seat, host included, would classify
  * engine-piloted, `liveHumanSeats` would be `[]`, and the ported axes would go
- * green while exercising a state `commanderSeatPlan` itself says cannot occur
- * in production (the host is always live).
+ * green while exercising a state that cannot occur in production (the host,
+ * pod seat 0, is always live).
  *
  * Default shape: seat 0 live human host, seat 1 bot, seat 2 live human guest,
  * seat 3 a human who dropped before the launch.
@@ -255,8 +255,9 @@ describe("P2PDraftHost.commanderSeatDecks + sendCommanderLaunches", () => {
   /**
    * `localSeat` is a PARAMETER, not a hardcoded 0.
    *
-   * The recipient set does not vary with `localSeat` — it is exactly
-   * `liveHumanSeats`. What `localSeat` selects is which seat's deck becomes
+   * The recipient set does not vary with `localSeat` — `sendCommanderLaunches`
+   * finalizes it from both deck arrays against current transports. What
+   * `localSeat` selects is which seat's deck becomes
    * `hostDeck`. At a non-zero `localSeat` that seat is reached over the wire
    * like any other live seat, so this row asserts the wire delivery rather than
    * a local emit; the seat-0 row above covers the emit.

@@ -2715,7 +2715,7 @@ export class P2PDraftHost {
   }
 
   /**
-   * Finalize transport participation using the prepared decks, then invite.
+   * CR 903.13a: finalize transport participation using the prepared decks, then invite.
    * Every engine seat is installed BEFORE any invitation: a guest invited early
    * takes the first waiting game seat, and a later `SetKind` on that index kicks it.
    * Engine assignments are latched for this attempt, including reconnects
@@ -2725,6 +2725,10 @@ export class P2PDraftHost {
    * Capture current endpoints and enqueue all remote invitations in one turn.
    * Drops after dispatch are ordinary post-invitation failures; rejected sends
    * fail the attempt rather than silently leaving a WaitingHuman hole.
+   * A guest whose connection has closed but whose disconnect `DraftPeerSession`
+   * has not yet reported is still deliverable here; its rejected send fails the
+   * whole attempt (the host cancels and relaunches) instead of installing an
+   * engine pilot.
    */
   async sendCommanderLaunches(
     view: DraftPlayerView,
@@ -2738,6 +2742,12 @@ export class P2PDraftHost {
     const candidates = new Map<number, DraftDeckPayload>();
     let engineSeats: Array<{ seat: number; deck: DraftDeckPayload }> = [];
     for (const entry of [...decks.liveSeatDecks, ...decks.engineSeatDecks]) {
+      // The host is always pod seat 0 and occupies game seat 0 itself: it is
+      // never installed as an engine seat nor sent over the wire. Its launch is
+      // the local emit below (`sendToSeat`'s seat-0 arm), which is the ONLY path
+      // by which the host learns of its own launch. Seat 0 is always live: the
+      // engine's `apply_set_seat_connected` rejects bot seats and every
+      // client-side `setSeatConnected(x, false)` site is guest-keyed.
       if (entry.seat === 0) continue;
       if (this.isBotSeatFromView(view, entry.seat) || !this.deliverableSession(entry.seat)) {
         engineSeats.push(entry);

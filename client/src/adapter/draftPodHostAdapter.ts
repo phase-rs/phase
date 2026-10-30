@@ -636,7 +636,7 @@ export class DraftPodHostAdapter {
   }
 
   /**
-   * Prepare every deck once from a bound pod view. Sends nothing; the host
+   * CR 903.13a: prepare every deck once from a bound pod view. Sends nothing; the host
    * finalizer decides transport participation after the game is initialized.
    */
   async commanderSeatDecks(view: DraftPlayerView, localSeat: number): Promise<CommanderSeatDecks> {
@@ -645,7 +645,7 @@ export class DraftPodHostAdapter {
   }
 
   /**
-   * Install engine seats and dispatch invitations using the host's current
+   * CR 903.13a: install engine seats and dispatch invitations using the host's current
    * transport roster. Resolves after all selected sends settle.
    */
   async sendCommanderLaunches(
