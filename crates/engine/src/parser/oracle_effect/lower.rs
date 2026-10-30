@@ -2825,6 +2825,22 @@ pub(super) fn entry_rider_folds_into(prior: &Effect, cond: &AbilityCondition) ->
     )
 }
 
+/// The complete entry-counter pair the fold can represent. Keep refusal
+/// admission and folding on the same typed producer, condition and payload.
+pub(super) fn entry_counter_rider_folds_into(prior: &Effect, rider: &AbilityDefinition) -> bool {
+    rider
+        .condition
+        .as_ref()
+        .is_some_and(|condition| entry_rider_folds_into(prior, condition))
+        && matches!(
+            rider.effect.as_ref(),
+            Effect::PutCounter {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        )
+}
+
 pub(super) fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
     let parent_moves_to_battlefield = matches!(
         *def.effect,
@@ -2852,12 +2868,12 @@ pub(super) fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
 
     // CR 122.6: counters given as an object enters the battlefield use the
     // same entry-counter representation as counters put on a battlefield object.
-    // Only the shared producer/condition shape folds (`entry_rider_folds_into`);
+    // Only the shared complete pair folds (`entry_counter_rider_folds_into`);
     // a `Dig` parent, other named destinations and non-this-way conditions
     // remain standalone riders.
     let filter = match sub.condition.as_ref() {
-        Some(condition @ AbilityCondition::ZoneChangedThisWay { filter, .. })
-            if entry_rider_folds_into(&def.effect, condition) =>
+        Some(AbilityCondition::ZoneChangedThisWay { filter, .. })
+            if entry_counter_rider_folds_into(&def.effect, &sub) =>
         {
             filter.clone()
         }

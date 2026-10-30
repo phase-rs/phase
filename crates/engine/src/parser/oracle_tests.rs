@@ -166,6 +166,86 @@ mod player_history_foretell {
     }
 
     #[test]
+    fn zero_and_two_history_carriers_cast_after_real_discards_and_finish_draw() {
+        // Synthetic grammar witnesses; CR 107.1b + CR 608.2c: zero still executes
+        // the following instruction, and a nonzero sibling proves history reach.
+        for (word, expected) in [("zero", 0), ("two", 4)] {
+            let text = format!("You get {word} experience counters for each player who discarded a card this turn. Draw a card.");
+            let parsed = parse_oracle_text(
+                &text,
+                "Synthetic history carrier",
+                &[],
+                &["Sorcery".into()],
+                &[],
+            );
+            assert!(!parsed_has_unimplemented(&parsed), "{text}: {parsed:#?}");
+            let mut scenario = GameScenario::new_n_player(3, 42);
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(P0, &["Independent draw", "Spare"]);
+            let carrier = scenario
+                .add_spell_to_hand_from_oracle(P0, "Synthetic history carrier", false, &text)
+                .id();
+            let mut setup = Vec::new();
+            for player in [P1, P2] {
+                let card = scenario.add_card_to_hand(player, "Actual discard");
+                let spell = scenario
+                    .add_spell_to_hand_from_oracle(
+                        P0,
+                        "Synthetic discard",
+                        false,
+                        "Target player discards a card.",
+                    )
+                    .id();
+                setup.push((player, card, spell));
+            }
+            let mut runner = scenario.build();
+            for (player, card, spell) in setup {
+                let outcome = runner.cast(spell).target_player(player).resolve();
+                assert!(
+                    matches!(outcome.final_waiting_for(), WaitingFor::DiscardChoice { player: actor, count: 1, .. } if *actor == player)
+                );
+                runner
+                    .act(GameAction::SelectCards { cards: vec![card] })
+                    .unwrap();
+                runner.advance_until_stack_empty();
+                assert_eq!(runner.state().objects[&card].zone, Zone::Graveyard);
+                assert_eq!(
+                    runner
+                        .state()
+                        .cards_discarded_this_turn_by_player
+                        .get(&player),
+                    Some(&1)
+                );
+                assert!(runner.state().stack.is_empty());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+            }
+            let outcome = runner.cast(carrier).resolve();
+            outcome.assert_hand_drawn(P0, 1);
+            outcome.assert_zone(&[carrier], Zone::Graveyard);
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+            assert_eq!(
+                runner.state().players[0].player_counter(&PlayerCounterKind::Experience),
+                expected
+            );
+            for player in [P1, P2] {
+                assert_eq!(
+                    runner.state().players[player.0 as usize]
+                        .player_counter(&PlayerCounterKind::Experience),
+                    0
+                );
+            }
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolving_stack_entry.is_none());
+        }
+    }
+
+    #[test]
     fn bare_foretell_trigger_public_shape_and_strict_refusals() {
         // SHAPE: the complete grant is a positive sibling, not evidence that a
         // malformed trigger condition was accepted.
@@ -3482,21 +3562,21 @@ mod retained_spell_publication {
         for source in ["As long as you've cast two or more mysterious spells this turn, this creature has double strike.", "The first mysterious spell you cast each turn costs {1} less to cast.", "You may collect evidence 10 rather than pay the mana cost for mysterious spells you cast.", "Players can't cast mysterious spells this turn.", "The first noncreature spell nonsense you cast each turn costs {1} less to cast.", "You may collect evidence 10 rather than pay the mana cost for noncreature spells you cast nonsense.", "You may cast mysterious spells from your graveyard.", "Noncreature spells with mana value 4 or greater nonsense can't be cast.", "Noncreature or mysterious spells you cast cost {1} less to cast."] {
             let complete = format!("{source}\nFlying");
             let mut doc = parse_oracle_ir(&complete, "Synthetic spell refusal", &["Flying".into()], &["Creature".into()], &[]);
-            assert_eq!(doc.source_text, complete);
+            assert_eq!(doc.source_text, complete, "source={source:?}, document={doc:#?}");
             let normalized = match source {
                 "As long as you've cast two or more mysterious spells this turn, this creature has double strike." => "As long as you've cast two or more mysterious spells this turn, ~ has double strike.",
                 _ => source,
             };
-            let refused = doc.items.iter().find(|item| item.source.fragment() == Some(normalized)).expect("whole refused atomic source");
-            assert!(matches!(refused.node, crate::parser::oracle_ir::doc::OracleNodeIr::Unsupported { .. } | crate::parser::oracle_ir::doc::OracleNodeIr::Spell(_)), "the refused operation retains its own item identity");
-            let span = refused.source.span(); assert!(span.is_exact()); assert_eq!((span.start_byte, span.end_byte, span.first_line, span.last_line, span.ordinal_within_span), (0, normalized.len(), 0, 0, 0));
-            let flying = doc.items.iter().find(|item| item.source.fragment() == Some("Flying")).unwrap();
-            assert_eq!(flying.source.span().start_byte, normalized.len() + 1);
+            let refused = doc.items.iter().find(|item| item.source.fragment() == Some(normalized)).unwrap_or_else(|| panic!("whole refused atomic source: source={source:?}, document={doc:#?}"));
+            assert!(matches!(refused.node, crate::parser::oracle_ir::doc::OracleNodeIr::Unsupported { .. } | crate::parser::oracle_ir::doc::OracleNodeIr::Spell(_)), "the refused operation retains its own item identity: source={source:?}, document={doc:#?}");
+            let span = refused.source.span(); assert!(span.is_exact(), "source={source:?}, document={doc:#?}"); assert_eq!((span.start_byte, span.end_byte, span.first_line, span.last_line, span.ordinal_within_span), (0, normalized.len(), 0, 0, 0), "source={source:?}, document={doc:#?}");
+            let flying = doc.items.iter().find(|item| item.source.fragment() == Some("Flying")).unwrap_or_else(|| panic!("following Flying item: source={source:?}, document={doc:#?}"));
+            assert_eq!(flying.source.span().start_byte, normalized.len() + 1, "source={source:?}, document={doc:#?}");
             let parsed = lower_oracle_ir(&mut doc);
-            assert!(parsed.extracted_keywords.contains(&Keyword::Flying));
-            assert!(parsed.statics.is_empty(), "an unknown operation cannot publish executable statics: {source}");
-            let unsupported = parsed.abilities.iter().find(|ability| super::has_unimplemented(ability)).expect("whole refused operation");
-            assert_eq!(unsupported.description.as_deref(), Some(normalized));
+            assert!(parsed.extracted_keywords.contains(&Keyword::Flying), "source={source:?}, document={doc:#?}, lowered={parsed:#?}");
+            assert!(parsed.statics.is_empty(), "an unknown operation cannot publish executable statics: source={source:?}, document={doc:#?}, lowered={parsed:#?}");
+            let unsupported = parsed.abilities.iter().find(|ability| super::has_unimplemented(ability)).unwrap_or_else(|| panic!("whole refused operation: source={source:?}, document={doc:#?}, lowered={parsed:#?}"));
+            assert_eq!(unsupported.description.as_deref(), Some(normalized), "source={source:?}, document={doc:#?}, lowered={parsed:#?}");
         }
     }
 }
@@ -5031,18 +5111,29 @@ fn ordinary_destroy_full_native_broken_and_historical_attachment_rider_keep_thei
             let rider = parsed.abilities[0]
                 .sub_ability
                 .as_deref()
-                .expect("whole historical rider retained");
+                .unwrap_or_else(|| panic!("whole historical rider retained: source={text:?}, document={doc:#?}, parsed={parsed:#?}, face={face:#?}"));
             assert!(
-                matches!(&*rider.effect, Effect::Unimplemented { name, description: Some(fragment) } if name == "attached_to_qualifier" && fragment.trim_end_matches('.').trim_start_matches("You ").trim_start_matches("you ") == "gain control of all Equipment that were attached to it")
+                matches!(&*rider.effect, Effect::Unimplemented { name, description: Some(fragment) } if name == "attached_to_qualifier" && fragment.trim_end_matches('.').trim_start_matches("You ").trim_start_matches("you ") == "gain control of all Equipment that were attached to it"),
+                "source={text:?}, rider={rider:#?}, document={doc:#?}, parsed={parsed:#?}, face={face:#?}"
             );
-            assert!(rider.sub_ability.is_none());
+            assert!(
+                rider.sub_ability.is_none(),
+                "source={text:?}, rider={rider:#?}, document={doc:#?}, parsed={parsed:#?}"
+            );
             assert!(crate::game::coverage::card_face_has_unimplemented_parts(
                 &face
-            ));
+            ), "source={text:?}, rider={rider:#?}, document={doc:#?}, parsed={parsed:#?}, face={face:#?}");
             let mut payloads = Vec::new();
             complete_publication_gap_payloads(&serde_json::to_value(&face).unwrap(), &mut payloads);
-            assert_eq!(payloads.len(), 1);
-            assert_eq!(payloads[0].0, "attached_to_qualifier");
+            assert_eq!(
+                payloads.len(),
+                1,
+                "source={text:?}, document={doc:#?}, parsed={parsed:#?}, payloads={payloads:#?}"
+            );
+            assert_eq!(
+                payloads[0].0, "attached_to_qualifier",
+                "source={text:?}, document={doc:#?}, parsed={parsed:#?}, payloads={payloads:#?}"
+            );
         }
         let whole = serde_json::to_string(&serde_json::json!({name.to_lowercase(): face})).unwrap();
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -6883,14 +6974,72 @@ fn numeric_gain_outer_ownership_preserves_complete_chains() {
                 "Feudkiller's Verdict" => matches!(*conditional.effect, Effect::Token { .. }),
                 "Pulse of the Fields" => matches!(
                     *conditional.effect,
-                    Effect::ChangeZone {
+                    Effect::Bounce {
                         target: TargetFilter::SelfRef,
-                        destination: Zone::Hand,
-                        ..
+                        destination: None,
+                        selection: crate::types::ability::BounceSelection::Targeted,
                     }
                 ),
                 _ => matches!(*conditional.effect, Effect::Draw { .. }),
             }, "name={name}, prefix={prefix:?}, source={source:?}, conditional={conditional:#?}, parsed={parsed:#?}");
+            if name == "Pulse of the Fields" {
+                let mut expected_return = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Bounce {
+                        target: TargetFilter::SelfRef,
+                        destination: None,
+                        selection: crate::types::ability::BounceSelection::Targeted,
+                    },
+                )
+                .condition(AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: PlayerScope::Opponent {
+                                aggregate: AggregateFunction::Max,
+                            },
+                        },
+                    },
+                    comparator: crate::types::ability::Comparator::GT,
+                    rhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                });
+                expected_return.sub_link = SubAbilityLink::SequentialSibling;
+                assert_eq!(
+                    conditional, &expected_return,
+                    "complete return/gate/link/defaults: {source}: {parsed:#?}"
+                );
+                let mut expected_gain = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 4 },
+                        player: TargetFilter::Controller,
+                    },
+                )
+                .sub_ability(expected_return);
+                if prefix.is_empty() {
+                    expected_gain.description = Some(pulse.replace("Pulse of the Fields", "~"));
+                    assert_eq!(
+                        parsed.abilities,
+                        vec![expected_gain],
+                        "{source}: {parsed:#?}"
+                    );
+                } else {
+                    expected_gain.sub_link = SubAbilityLink::SequentialSibling;
+                    let expected = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    )
+                    .sub_ability(expected_gain)
+                    .description(source.replace("Pulse of the Fields", "~"));
+                    assert_eq!(parsed.abilities, vec![expected], "{source}: {parsed:#?}");
+                }
+            }
             if name == "Survival Cache" {
                 assert!(parsed.extracted_keywords.contains(&Keyword::Rebound));
             }
@@ -7814,104 +7963,166 @@ fn assert_coordinated_where_x_full_source_honesty(introductions: &[&str]) {
 #[test]
 fn coordinated_population_where_x_instruction_boundary() {
     let operand = "the total number of cards you own in exile and in your graveyard that are instant cards, are sorcery cards, and/or have an Adventure";
-    for separator in [", ", ", and ", ", then ", ". "] {
-        let source = format!("Until end of turn, creatures you control have base power and toughness X/X, where X is {operand}{separator}draw a card.");
-        let parsed = parse_oracle_text(
-            &source,
-            "Synthetic instruction boundary",
-            &[],
-            &["Sorcery".into()],
-            &[],
-        );
-        let mut doc = parse_oracle_ir(
-            &source,
-            "Synthetic instruction boundary",
-            &[],
-            &["Sorcery".into()],
-            &[],
-        );
-        assert_eq!(doc.source_text, source);
-        assert_eq!(doc.items.len(), 1, "{source}");
-        assert_eq!(doc.items[0].source.fragment(), Some(source.as_str()));
-        let span = doc.items[0].source.span();
-        assert!(span.is_exact());
-        assert_eq!(
-            (
-                span.start_byte,
-                span.end_byte,
-                span.first_line,
-                span.last_line
-            ),
-            (0, source.len(), 0, 0)
-        );
-        assert_eq!(
-            lower_oracle_ir(&mut doc).abilities,
-            parsed.abilities,
-            "ordinary IR lowering: {source}"
-        );
-        assert!(parsed.parse_warnings.is_empty(), "{source}");
-        assert!(
-            parsed.abilities.iter().all(|a| !has_unimplemented(a)),
-            "{source}: {:?}",
-            parsed.abilities
-        );
-        let head = parsed
-            .abilities
-            .iter()
-            .find(|a| matches!(a.effect.as_ref(), Effect::GenericEffect { .. }))
-            .expect("continuous head retained");
-        assert_eq!(head.duration, Some(Duration::UntilEndOfTurn), "{source}");
-        let Effect::GenericEffect {
-            static_abilities,
-            duration,
-            ..
-        } = head.effect.as_ref()
-        else {
-            unreachable!()
-        };
-        assert_eq!(*duration, Some(Duration::UntilEndOfTurn), "{source}");
-        assert_eq!(static_abilities.len(), 1, "{source}");
-        assert_eq!(
-            static_abilities[0].affected,
-            Some(TargetFilter::Typed(
-                TypedFilter::creature().controller(ControllerRef::You)
-            )),
-            "{source}"
-        );
-        assert_eq!(
-            static_abilities[0].modifications,
-            vec![
-                ContinuousModification::SetPowerDynamic {
-                    value: complete_coordinated_population_quantity()
-                },
-                ContinuousModification::SetToughnessDynamic {
-                    value: complete_coordinated_population_quantity()
-                }
-            ],
-            "{source}"
-        );
-        fn has_draw(a: &AbilityDefinition) -> bool {
-            matches!(a.effect.as_ref(), Effect::Draw { .. })
-                || a.sub_ability.as_deref().is_some_and(has_draw)
+    for (prefix, expected) in [
+        ("", complete_coordinated_population_quantity()),
+        (
+            "one plus ",
+            QuantityExpr::Offset {
+                offset: 1,
+                inner: Box::new(complete_coordinated_population_quantity()),
+            },
+        ),
+        (
+            "twice ",
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(complete_coordinated_population_quantity()),
+            },
+        ),
+    ] {
+        for separator in [", ", ", and ", ", then ", ". "] {
+            let source = format!("Until end of turn, creatures you control have base power and toughness X/X, where X is {prefix}{operand}{separator}draw a card.");
+            let parsed = parse_oracle_text(
+                &source,
+                "Synthetic instruction boundary",
+                &[],
+                &["Sorcery".into()],
+                &[],
+            );
+            let mut doc = parse_oracle_ir(
+                &source,
+                "Synthetic instruction boundary",
+                &[],
+                &["Sorcery".into()],
+                &[],
+            );
+            assert_eq!(doc.source_text, source);
+            assert_eq!(doc.items.len(), 1, "{source}");
+            assert_eq!(doc.items[0].source.fragment(), Some(source.as_str()));
+            let span = doc.items[0].source.span();
+            assert!(span.is_exact());
+            assert_eq!(
+                (
+                    span.start_byte,
+                    span.end_byte,
+                    span.first_line,
+                    span.last_line
+                ),
+                (0, source.len(), 0, 0)
+            );
+            assert_eq!(
+                lower_oracle_ir(&mut doc).abilities,
+                parsed.abilities,
+                "ordinary IR lowering: {source}"
+            );
+            assert!(parsed.parse_warnings.is_empty(), "{source}");
+            assert!(
+                parsed.abilities.iter().all(|a| !has_unimplemented(a)),
+                "{source}: {:?}",
+                parsed.abilities
+            );
+            let head = parsed
+                .abilities
+                .iter()
+                .find(|a| matches!(a.effect.as_ref(), Effect::GenericEffect { .. }))
+                .expect("continuous head retained");
+            assert_eq!(head.duration, Some(Duration::UntilEndOfTurn), "{source}");
+            let Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+                end_cost,
+            } = head.effect.as_ref()
+            else {
+                unreachable!()
+            };
+            assert_eq!(*duration, Some(Duration::UntilEndOfTurn), "{source}");
+            assert!(
+                target.is_none() && end_cost.is_none(),
+                "{source}: {head:#?}"
+            );
+            assert!(
+                head.cost.is_none() && head.condition.is_none() && head.else_ability.is_none(),
+                "{source}: {head:#?}"
+            );
+            assert!(
+                parsed.statics.is_empty()
+                    && parsed.triggers.is_empty()
+                    && parsed.replacements.is_empty(),
+                "{source}: {parsed:#?}"
+            );
+            assert_eq!(static_abilities.len(), 1, "{source}");
+            assert_eq!(static_abilities[0].mode, StaticMode::Continuous, "{source}");
+            assert!(
+                static_abilities[0].condition.is_none()
+                    && !static_abilities[0].characteristic_defining,
+                "{source}: {head:#?}"
+            );
+            assert_eq!(
+                static_abilities[0].affected,
+                Some(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You)
+                )),
+                "{source}"
+            );
+            assert_eq!(
+                static_abilities[0].modifications,
+                vec![
+                    ContinuousModification::SetPowerDynamic {
+                        value: expected.clone()
+                    },
+                    ContinuousModification::SetToughnessDynamic {
+                        value: expected.clone()
+                    }
+                ],
+                "{source}"
+            );
+            let expected_static = StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                ))
+                .modifications(vec![
+                    ContinuousModification::SetPowerDynamic {
+                        value: expected.clone(),
+                    },
+                    ContinuousModification::SetToughnessDynamic {
+                        value: expected.clone(),
+                    },
+                ])
+                .description("have base power and toughness X/X".into());
+            assert_eq!(
+                &static_abilities[0], &expected_static,
+                "complete independent population/static model: {source}: {parsed:#?}"
+            );
+            assert_eq!(
+                head.entry_onset,
+                crate::types::ability::ContinuousEffectOnset::WithEntry,
+                "{source}"
+            );
+            fn has_draw(a: &AbilityDefinition) -> bool {
+                matches!(a.effect.as_ref(), Effect::Draw { .. })
+                    || a.sub_ability.as_deref().is_some_and(has_draw)
+            }
+            assert!(
+                parsed.abilities.iter().any(has_draw),
+                "following instruction retained: {source}"
+            );
+            let mut draws = 0;
+            for ability in &parsed.abilities {
+                let _ = crate::types::ability_visit::visit_ability_def(ability, &mut |effect| {
+                    if let Effect::Draw { count, target } = effect {
+                        assert_eq!(count, &QuantityExpr::Fixed { value: 1 }, "{source}");
+                        assert_eq!(target, &TargetFilter::Controller, "{source}");
+                        draws += 1;
+                    }
+                    std::ops::ControlFlow::<()>::Continue(())
+                });
+            }
+            assert_eq!(draws, 1, "no duplicated later instruction: {source}");
         }
-        assert!(
-            parsed.abilities.iter().any(has_draw),
-            "following instruction retained: {source}"
-        );
-        let mut draws = 0;
-        for ability in &parsed.abilities {
-            let _ = crate::types::ability_visit::visit_ability_def(ability, &mut |effect| {
-                if let Effect::Draw { count, target } = effect {
-                    assert_eq!(count, &QuantityExpr::Fixed { value: 1 }, "{source}");
-                    assert_eq!(target, &TargetFilter::Controller, "{source}");
-                    draws += 1;
-                }
-                std::ops::ControlFlow::<()>::Continue(())
-            });
-        }
-        assert_eq!(draws, 1, "no duplicated later instruction: {source}");
     }
-    for prefix in ["one plus ", "twice ", "half "] {
+    {
+        let prefix = "half ";
         let source = format!("Until end of turn, creatures you control have base power and toughness X/X, where X is {prefix}{operand}.");
         let parsed = parse_oracle_text(
             &source,
@@ -7920,9 +8131,16 @@ fn coordinated_population_where_x_instruction_boundary() {
             &["Sorcery".into()],
             &[],
         );
+        let document = parse_oracle_ir(
+            &source,
+            "Synthetic arithmetic boundary",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
         assert!(
             parsed.abilities.iter().any(has_unimplemented),
-            "unchanged unsupported consumer: {source}"
+            "unchanged unsupported consumer: source={source:?}, document={document:#?}, parsed={parsed:#?}"
         );
     }
 }
@@ -13896,11 +14114,20 @@ fn random_target_creature_marks_ability_random_mode() {
         &["Instant"],
         &[],
     );
-    assert_eq!(r.abilities.len(), 1);
-    assert!(matches!(
-        r.abilities[0].target_selection_mode,
-        TargetSelectionMode::Random
-    ));
+    let source = "~ deals 3 damage to a random target creature.";
+    let doc = parse_oracle_ir(source, "Test Card", &[], &["Instant".into()], &[]);
+    assert_eq!(
+        r.abilities.len(),
+        1,
+        "source={source:?}, document={doc:#?}, lowered={r:#?}"
+    );
+    assert!(
+        matches!(
+            r.abilities[0].target_selection_mode,
+            TargetSelectionMode::Random
+        ),
+        "source={source:?}, document={doc:#?}, lowered={r:#?}"
+    );
 }
 
 /// CR 115.1 + CR 701.9b: "random target X" without the leading article —
@@ -13916,11 +14143,20 @@ fn random_target_without_article_marks_random_mode() {
         &["Instant"],
         &[],
     );
-    assert_eq!(r.abilities.len(), 1);
-    assert!(matches!(
-        r.abilities[0].target_selection_mode,
-        TargetSelectionMode::Random
-    ));
+    let source = "~ deals 3 damage to random target creature.";
+    let doc = parse_oracle_ir(source, "Test Card", &[], &["Instant".into()], &[]);
+    assert_eq!(
+        r.abilities.len(),
+        1,
+        "source={source:?}, document={doc:#?}, lowered={r:#?}"
+    );
+    assert!(
+        matches!(
+            r.abilities[0].target_selection_mode,
+            TargetSelectionMode::Random
+        ),
+        "source={source:?}, document={doc:#?}, lowered={r:#?}"
+    );
 }
 
 /// CR 115.1: Ordinary "target X" stays at `Chosen` (default), so existing
@@ -23208,24 +23444,36 @@ fn phyrexian_incubator_incubate_repeat_for_that_many_shape() {
         &["Artifact"],
         &[],
     );
+    let source = "{3}, {T}, Sacrifice Phyrexian Incubator: Search your library for any number of Phyrexian cards or cards with phyrexian back faces, exile them, then incubate 2 that many times. Then shuffle.";
+    let doc = parse_oracle_ir(
+        source,
+        "Phyrexian Incubator",
+        &[],
+        &["Artifact".into()],
+        &[],
+    );
+    let context = format!(
+        "source={source:?}, document={doc:#?}, parsed={parsed:#?}, first_ability={:#?}",
+        parsed.abilities.first()
+    );
     let search = parsed
         .abilities
         .iter()
         .find(|ability| matches!(&*ability.effect, Effect::SearchLibrary { .. }))
-        .expect("Phyrexian Incubator must retain its search ability");
+        .unwrap_or_else(|| panic!("Phyrexian Incubator must retain its search ability: {context}"));
     let exile = search
         .sub_ability
         .as_deref()
-        .expect("search must chain into the exile");
+        .unwrap_or_else(|| panic!("search must chain into the exile: {context}"));
     assert!(
         matches!(&*exile.effect, Effect::ChangeZone { .. }),
-        "reach-guard: search chains into ChangeZone, got {:?}",
+        "reach-guard: search chains into ChangeZone, got {:?}; {context}",
         exile.effect,
     );
     let incubate = exile
         .sub_ability
         .as_deref()
-        .expect("exile must chain into the incubate");
+        .unwrap_or_else(|| panic!("exile must chain into the incubate: {context}"));
     assert!(
         matches!(
             &*incubate.effect,
@@ -23233,7 +23481,7 @@ fn phyrexian_incubator_incubate_repeat_for_that_many_shape() {
                 count: QuantityExpr::Fixed { value: 2 },
             }
         ),
-        "reach-guard: the incubate keeps its two counters, got {:?}",
+        "reach-guard: the incubate keeps its two counters, got {:?}; {context}",
         incubate.effect,
     );
     assert_eq!(
@@ -23241,19 +23489,23 @@ fn phyrexian_incubator_incubate_repeat_for_that_many_shape() {
         Some(QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
         }),
-        "\"incubate 2 that many times\" repeats the incubate that many times",
+        "\"incubate 2 that many times\" repeats the incubate that many times; {context}",
     );
     let shuffle = incubate
         .sub_ability
         .as_deref()
-        .expect("incubate must chain into the shuffle");
+        .unwrap_or_else(|| panic!("incubate must chain into the shuffle: {context}"));
     assert!(
         matches!(&*shuffle.effect, Effect::Shuffle { .. }),
-        "reach-guard: the trailing instruction is the shuffle, got {:?}",
+        "reach-guard: the trailing instruction is the shuffle, got {:?}; {context}",
         shuffle.effect,
     );
-    assert_eq!(shuffle.repeat_for, None);
-    assert_eq!(shuffle.sub_link, SubAbilityLink::SequentialSibling);
+    assert_eq!(shuffle.repeat_for, None, "{context}");
+    assert_eq!(
+        shuffle.sub_link,
+        SubAbilityLink::SequentialSibling,
+        "{context}"
+    );
 }
 
 #[test]
@@ -34070,6 +34322,7 @@ fn temporary_comma_grant_must_attack_if_able_does_not_emit_condition_warning() {
         parsed.parse_warnings
     );
     // SHAPE: the two instructions have independent explicit turn windows.
+    use crate::parser::oracle_ir::doc::SpellPayloadIr;
     use crate::types::ability::{GameRestriction, RestrictionExpiry, SubAbilityLink};
     let grant = StaticDefinition::continuous()
         .affected(TargetFilter::Typed(
@@ -34096,8 +34349,9 @@ fn temporary_comma_grant_must_attack_if_able_does_not_emit_condition_warning() {
             end_cost: None,
         },
     )
-    .duration(Duration::UntilEndOfTurn);
-    child.sub_link = SubAbilityLink::SequentialSibling;
+    .duration(Duration::UntilEndOfTurn)
+    .description("Creatures you control have double strike, trample, and must attack if able until end of turn.".into());
+    child.entry_onset = crate::types::ability::ContinuousEffectOnset::WithEntry;
     let expected = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::AddRestriction {
@@ -34108,11 +34362,10 @@ fn temporary_comma_grant_must_attack_if_able_does_not_emit_condition_warning() {
             },
         },
     )
-    .description(oracle.to_owned())
-    .sub_ability(child);
+    .duration(Duration::UntilEndOfTurn);
     assert_eq!(
         parsed.abilities,
-        vec![expected],
+        vec![expected.clone(), child.clone()],
         "source={oracle:?}, parsed={parsed:#?}"
     );
     assert!(
@@ -34129,34 +34382,70 @@ fn temporary_comma_grant_must_attack_if_able_does_not_emit_condition_warning() {
         &["Sorcery".into()],
         &[],
     );
-    assert_eq!(document.items.len(), 1, "{document:#?}");
+    assert_eq!(document.items.len(), 2, "{document:#?}");
     let item = &document.items[0];
     assert_eq!(item.id, crate::parser::oracle_ir::doc::OracleItemId(0));
-    assert_eq!(item.source.fragment(), Some(oracle));
+    let first_line = "Damage can't be prevented this turn.";
+    let second_line = "Creatures you control have double strike, trample, and must attack if able until end of turn.";
+    assert_eq!(item.source.fragment(), Some(first_line));
     assert_eq!(
         item.source.span(),
-        &crate::types::oracle_diagnostic::OracleSourceSpan::exact(0, 1, 0, oracle.len(), 0)
+        &crate::types::oracle_diagnostic::OracleSourceSpan::exact(0, 0, 0, first_line.len(), 0)
     );
-    let OracleNodeIr::Spell(spell) = &item.node else {
+    let Some(SpellPayloadIr::Lowered(first)) = item.node.spell_payload() else {
         panic!("{item:#?}")
     };
-    let body = oracle.replace('\n', " ");
-    assert_eq!(spell.source_text, body);
-    assert_eq!(spell.body.clauses.len(), 2, "{spell:#?}");
-    population_relation_publication::assert_chain_geometry(&spell.body, &body);
-    let second = &spell.body.clauses[1];
+    assert_eq!(first, &expected);
+    let second_item = &document.items[1];
+    assert_ne!(item.id, second_item.id);
+    assert_eq!(
+        second_item.id,
+        crate::parser::oracle_ir::doc::OracleItemId(1)
+    );
+    assert_eq!(second_item.source.fragment(), Some(second_line));
+    assert_eq!(
+        second_item.source.span(),
+        &crate::types::oracle_diagnostic::OracleSourceSpan::exact(
+            1,
+            1,
+            first_line.len() + 1,
+            oracle.len(),
+            0
+        )
+    );
+    let OracleNodeIr::Spell(spell) = &second_item.node else {
+        panic!("{second_item:#?}")
+    };
+    assert_eq!(spell.source_text, second_line);
+    assert_eq!(spell.body.clauses.len(), 1, "{spell:#?}");
+    population_relation_publication::assert_chain_geometry(&spell.body, second_line);
+    let second = &spell.body.clauses[0];
     assert_eq!(
         second.id,
-        crate::parser::oracle_ir::effect_chain::ClauseId(1)
+        crate::parser::oracle_ir::effect_chain::ClauseId(0)
     );
     let second_fragment = "Creatures you control have double strike, trample, and must attack if able until end of turn";
     assert_eq!(second.source.fragment(), Some(second_fragment));
+    assert_eq!(second.source.span().start_byte, 0);
+    assert_eq!(second.source.span().end_byte, second_line.len() - 1);
     assert_eq!(
-        second.source.span().start_byte,
-        "Damage can't be prevented this turn. ".len()
+        lower_oracle_ir(&mut document).abilities,
+        vec![expected.clone(), child.clone()]
     );
-    assert_eq!(second.source.span().end_byte, body.len() - 1);
-    assert_eq!(lower_oracle_ir(&mut document).abilities, parsed.abilities);
+    // The cast consumer appends each independently owned spell paragraph once.
+    let mut object = crate::game::game_object::GameObject::new(
+        crate::types::identifiers::ObjectId(1),
+        crate::types::identifiers::CardId(1),
+        crate::types::player::PlayerId(0),
+        "Math is for Blockers".into(),
+        Zone::Hand,
+    );
+    object.abilities = parsed.abilities;
+    child.sub_link = SubAbilityLink::SequentialSibling;
+    assert_eq!(
+        crate::game::casting::combined_spell_ability_def(&object),
+        Some(expected.sub_ability(child))
+    );
 }
 
 #[test]
@@ -37690,6 +37979,7 @@ fn reflexive_entry_rider_voices_all_stay_on_the_trigger_path() {
             origin,
             destination,
             conditional_enter_with_counters,
+            target,
             ..
         } = execute.effect.as_ref()
         else {
@@ -37697,10 +37987,162 @@ fn reflexive_entry_rider_voices_all_stay_on_the_trigger_path() {
         };
         assert_eq!(*origin, Some(Zone::Graveyard), "{name}");
         assert_eq!(*destination, Zone::Battlefield, "{name}");
-        assert!(
-            !conditional_enter_with_counters.is_empty(),
-            "{name}: the rider must be folded into the typed slot: {execute:#?}"
+        if name == "Winter Soldier, Reborn Avenger" {
+            assert!(
+                target_filter_uses_filter_prop(target, &|property| matches!(
+                    property,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: ObjectScope::Source
+                            }
+                        }
+                    }
+                )),
+                "printed target's mana-value/source-power limit survives: {execute:#?}"
+            );
+        }
+        let gate = if name == "Winter Soldier, Reborn Avenger" {
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Hero".into())))
+        } else {
+            TargetFilter::Typed(TypedFilter::creature())
+        };
+        assert_eq!(
+            conditional_enter_with_counters,
+            &vec![(
+                gate,
+                crate::types::counter::CounterType::Plus1Plus1,
+                QuantityExpr::Fixed { value: 1 }
+            )],
+            "{name}: exact entry rider: {execute:#?}"
         );
+        assert!(
+            execute.sub_ability.is_none(),
+            "{name}: no residual rider: {execute:#?}"
+        );
+        assert!(!parsed_has_unimplemented(&parsed), "{name}: {parsed:#?}");
+        let doc = parse_oracle_ir(oracle, name, &[], &["Creature".into()], &[]);
+        assert_eq!(doc.source_text, oracle);
+        assert_eq!(doc.items.len(), 1, "{doc:#?}");
+        assert!(doc.items[0].source.span().is_exact());
+        assert_eq!(doc.items[0].source.span().start_byte, 0);
+        assert_eq!(
+            doc.items[0].source.span().end_byte,
+            doc.items[0].source.fragment().unwrap().len()
+        );
+    }
+}
+
+#[test]
+fn passive_entry_rider_attack_returns_only_selected_entrant_with_counter_at_entry() {
+    use crate::game::combat::AttackTarget;
+    use crate::game::scenario::GameScenario;
+    use crate::types::ability::TargetRef;
+    use crate::types::actions::GameAction;
+    use crate::types::counter::CounterType;
+    use crate::types::game_state::WaitingFor;
+    use crate::types::phase::Phase;
+    use crate::types::player::PlayerId;
+    let p0 = PlayerId(0);
+    let p1 = PlayerId(1);
+    // Synthetic passive-voice witnesses share the printed card's typed entry seam.
+    for (gate, expected) in [("a creature", 1), ("a Hero", 0)] {
+        let oracle = format!("Whenever this creature attacks, return target creature card from your graveyard to the battlefield. If {gate} is put onto the battlefield this way, it enters with an additional +1/+1 counter on it.");
+        let parsed = parse(
+            &oracle,
+            "Synthetic passive reanimator",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert!(!parsed_has_unimplemented(&parsed), "{oracle}: {parsed:#?}");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature_from_oracle(p0, "Synthetic passive reanimator", 3, 3, &oracle)
+            .id();
+        let unrelated = scenario.add_creature(p0, "Unrelated creature", 2, 2).id();
+        let returned = scenario
+            .add_creature_to_graveyard(p0, "Selected Soldier", 2, 2)
+            .with_subtypes(vec!["Soldier"])
+            .id();
+        let other = scenario
+            .add_creature_to_graveyard(p0, "Unselected Hero", 2, 2)
+            .with_subtypes(vec!["Hero"])
+            .id();
+        // CR 122.6 + CR 614.12: the event's filter must see the entry counter;
+        // putting it on the creature after its entry cannot trigger this observer.
+        let observer = "Whenever a creature with a +1/+1 counter on it enters under your control, you gain 1 life.";
+        let observation = parse(
+            observer,
+            "Synthetic entry observer",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        assert!(!parsed_has_unimplemented(&observation), "{observation:#?}");
+        assert_eq!(observation.triggers.len(), 1);
+        assert_eq!(observation.triggers[0].mode, TriggerMode::ChangesZone);
+        assert_eq!(observation.triggers[0].destination, Some(Zone::Battlefield));
+        assert!(
+            observation.triggers[0]
+                .valid_card
+                .as_ref()
+                .is_some_and(|filter| target_filter_uses_filter_prop(
+                    filter,
+                    &|property| matches!(
+                        property,
+                        FilterProp::Counters {
+                            counters: crate::types::counter::CounterMatch::OfType(
+                                CounterType::Plus1Plus1
+                            ),
+                            comparator: Comparator::GE,
+                            count: QuantityExpr::Fixed { value: 1 }
+                        }
+                    )
+                )),
+            "the event matcher owns the entry-counter predicate: {observation:#?}"
+        );
+        scenario.add_enchantment_from_oracle(p0, "Synthetic entry observer", observer);
+        let mut runner = scenario.build();
+        let life = runner.state().players[0].life;
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(source, AttackTarget::Player(p1))])
+            .unwrap();
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::TriggerTargetSelection { player, .. } if player == p0)
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(returned)),
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&returned].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().objects[&returned]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            expected
+        );
+        assert_eq!(
+            runner.state().players[0].life,
+            life + expected as i32,
+            "entry observer must see the counter at entry"
+        );
+        assert_eq!(runner.state().objects[&other].zone, Zone::Graveyard);
+        assert!(runner.state().objects[&unrelated].counters.is_empty());
+        assert!(runner.state().objects[&source].counters.is_empty());
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolving_stack_entry.is_none());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
     }
 }
 
@@ -44390,7 +44832,7 @@ fn legacy_counter_adjustment_document_axes_keep_complete_typed_chain() {
             );
             expected_adjustment.sub_link = crate::types::ability::SubAbilityLink::SequentialSibling;
             assert_eq!(adjustment_def, &expected_adjustment, "{text}: {parsed:#?}");
-            let expected_parent = AbilityDefinition::new(
+            let mut expected_parent = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::TargetOnly {
                     target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
@@ -44398,6 +44840,7 @@ fn legacy_counter_adjustment_document_axes_keep_complete_typed_chain() {
             )
             .description(text.clone())
             .sub_ability(expected_adjustment);
+            expected_parent.declares_chosen_group = Some(crate::types::ability::ChosenGroupId(0));
             assert_eq!(parent, &expected_parent, "{text}: {parsed:#?}");
             let document = parse_oracle_ir(
                 &text,
@@ -44831,6 +45274,13 @@ fn u14_compound_and_turn_documents_link_only_affected_object_filters() {
 
 #[test]
 fn u14_reference_full_documents_preserve_independent_items() {
+    use crate::types::ability::{
+        AttachCardinality, AttachSelection, CastManaObjectScope, CastManaSpentMetric,
+    };
+    use crate::types::card::CardFace;
+    use crate::types::card_type::{CardType, Supertype};
+    use crate::types::mana::ManaColor;
+    use crate::types::statics::{ActivationExemption, CostModifyMode};
     let cloud = "During your turn, as long as Cloud is equipped, it has double strike and indestructible. (This creature deals both first-strike and regular combat damage. Damage and effects that say \"destroy\" don't destroy this creature.)\nEquip abilities you activate that target Cloud cost {2} less to activate.";
     let mut doc = parse_oracle_ir(
         cloud,
@@ -44841,10 +45291,21 @@ fn u14_reference_full_documents_preserve_independent_items() {
     );
     assert_eq!(doc.source_text, cloud);
     let parsed = lower_oracle_ir(&mut doc);
-    assert!(parsed
-        .statics
-        .iter()
-        .any(|s| matches!(s.mode, StaticMode::ModifyCost { .. })));
+    let cloud_statics = vec![
+        StaticDefinition::continuous().affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword { keyword: Keyword::DoubleStrike }, ContinuousModification::AddKeyword { keyword: Keyword::Indestructible }])
+            .condition(StaticCondition::And { conditions: vec![StaticCondition::DuringYourTurn, StaticCondition::SourceIsEquipped] })
+            .description("During your turn, as long as ~ is equipped, it has double strike and indestructible.".into()),
+        StaticDefinition::new(StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce, keyword: "equip".into(), amount: 2,
+            minimum_mana: None, dynamic_count: None, exemption: ActivationExemption::None,
+            activator: Some(PlayerFilter::Controller), targets: Some(TargetFilter::SelfRef), frequency: None,
+        }).description("Equip abilities you activate that target ~ cost {2} less to activate.".into()),
+    ];
+    assert_eq!(
+        parsed.statics, cloud_statics,
+        "source={cloud:?}, document={doc:#?}, parsed={parsed:#?}"
+    );
     assert!(parsed.statics.iter().any(|s| s.modifications.contains(
         &ContinuousModification::AddKeyword {
             keyword: Keyword::DoubleStrike
@@ -44875,6 +45336,55 @@ fn u14_reference_full_documents_preserve_independent_items() {
                 p,
                 FilterProp::HasManaAbility
             )))));
+    let mana_creatures = TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::HasManaAbility]),
+    );
+    let raggadragga_statics = vec![StaticDefinition::continuous()
+        .affected(mana_creatures.clone())
+        .modifications(vec![
+            ContinuousModification::AddPower { value: 2 },
+            ContinuousModification::AddToughness { value: 2 },
+        ])
+        .description("Each creature you control with a mana ability gets +2/+2.".into())];
+    let mut pump = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::ParentTarget)
+                .modifications(vec![
+                    ContinuousModification::AddPower { value: 7 },
+                    ContinuousModification::AddToughness { value: 7 },
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Trample,
+                    },
+                ])
+                .description("get +7/+7 and gains trample".into())],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: Some(TargetFilter::ParentTarget),
+            end_cost: None,
+        },
+    )
+    .duration(Duration::UntilEndOfTurn);
+    pump.sub_link = SubAbilityLink::SequentialSibling;
+    let raggadragga_triggers = vec![
+        TriggerDefinition::new(TriggerMode::Attacks).trigger_zones(vec![Zone::Battlefield]).valid_card(mana_creatures)
+            .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::SetTapState { target: TargetFilter::ParentTarget, scope: EffectScope::Single, state: TapStateChange::Untap }))
+            .description("Whenever a creature you control with a mana ability attacks, untap it.".into()),
+        TriggerDefinition::new(TriggerMode::SpellCast).trigger_zones(vec![Zone::Battlefield]).valid_target(TargetFilter::Controller)
+            .condition(TriggerCondition::QuantityComparison { lhs: QuantityExpr::Ref { qty: QuantityRef::ManaSpentToCast { scope: CastManaObjectScope::TriggeringSpell, metric: CastManaSpentMetric::Total } }, comparator: Comparator::GE, rhs: QuantityExpr::Fixed { value: 7 } })
+            .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::SetTapState { target: TargetFilter::Typed(TypedFilter::creature()), scope: EffectScope::Single, state: TapStateChange::Untap }).sub_ability(pump))
+            .description("Whenever you cast a spell, if at least seven mana was spent to cast it, untap target creature. It gets +7/+7 and gains trample until end of turn.".into()),
+    ];
+    assert_eq!(
+        parsed.statics, raggadragga_statics,
+        "source={raggadragga:?}, document={doc:#?}, parsed={parsed:#?}"
+    );
+    assert_eq!(
+        parsed.triggers, raggadragga_triggers,
+        "source={raggadragga:?}, document={doc:#?}, parsed={parsed:#?}"
+    );
     let whip = "Equipped creature has reach, \"{2}, {T}: Tap target artifact or creature,\" and \"{8}, {T}: Discover 10.\" (Exile cards from the top of your library until you exile a nonland card with mana value 10 or less. Cast it without paying its mana cost or put it into your hand. Put the rest on the bottom in a random order.)\nEquip {1}";
     let mut doc = parse_oracle_ir(
         whip,
@@ -44893,6 +45403,182 @@ fn u14_reference_full_documents_preserve_independent_items() {
         .filter(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
         .count();
     assert_eq!(grants, 2);
+    let whip_statics = vec![StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])))
+        .modifications(vec![
+            ContinuousModification::GrantAbility { definition: Box::new(AbilityDefinition::new(AbilityKind::Activated, Effect::SetTapState {
+                target: TargetFilter::Or { filters: vec![TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)), TargetFilter::Typed(TypedFilter::creature())] }, scope: EffectScope::Single, state: TapStateChange::Tap,
+            }).cost(AbilityCost::Composite { costs: vec![AbilityCost::Mana { cost: ManaCost::generic(2) }, AbilityCost::Tap] }).description("{2}, {T}: Tap target artifact or creature".into())) },
+            ContinuousModification::GrantAbility { definition: Box::new(AbilityDefinition::new(AbilityKind::Activated, Effect::Discover { mana_value_limit: QuantityExpr::Fixed { value: 10 }, player: TargetFilter::Controller })
+                .cost(AbilityCost::Composite { costs: vec![AbilityCost::Mana { cost: ManaCost::generic(8) }, AbilityCost::Tap] }).description("{8}, {T}: Discover 10.".into())) },
+            ContinuousModification::AddKeyword { keyword: Keyword::Reach },
+        ])
+        .description("Equipped creature has reach, \"{2}, {T}: Tap target artifact or creature,\" and \"{8}, {T}: Discover 10.\"".into())];
+    let mut equip = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Attach {
+            attachment: TargetFilter::SelfRef,
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
+        },
+    )
+    .cost(AbilityCost::Mana {
+        cost: ManaCost::generic(1),
+    })
+    .activation_restrictions(vec![ActivationRestriction::AsSorcery])
+    .description("Equip {1}".into());
+    equip.ability_tag = Some(crate::types::ability::AbilityTag::Equip);
+    assert_eq!(
+        parsed.statics, whip_statics,
+        "source={whip:?}, document={doc:#?}, parsed={parsed:#?}"
+    );
+    assert_eq!(
+        parsed.abilities,
+        vec![equip.clone()],
+        "source={whip:?}, document={doc:#?}, parsed={parsed:#?}"
+    );
+
+    // Complete independent native models also travel through both ordinary loaders.
+    for (name, source, mana, core, subtypes, colors, oracle_id, statics, triggers, abilities) in [
+        (
+            "Cloud, Planet's Champion",
+            cloud,
+            "{3}{R}{W}",
+            CoreType::Creature,
+            vec!["Human", "Soldier", "Mercenary"],
+            vec![ManaColor::Red, ManaColor::White],
+            "8512bd08-ecba-4e0e-b65c-8209764a65e5",
+            cloud_statics,
+            vec![],
+            vec![],
+        ),
+        (
+            "Raggadragga, Goreguts Boss",
+            raggadragga,
+            "{2}{R}{G}",
+            CoreType::Creature,
+            vec!["Human", "Boar"],
+            vec![ManaColor::Green, ManaColor::Red],
+            "a7641ee0-9c0d-4201-9827-a775ed03797c",
+            raggadragga_statics,
+            raggadragga_triggers,
+            vec![],
+        ),
+        (
+            "Swashbuckler's Whip",
+            whip,
+            "{1}",
+            CoreType::Artifact,
+            vec!["Equipment"],
+            vec![],
+            "5cdb69e5-9395-4ef6-be18-71e3dd70df66",
+            whip_statics,
+            vec![],
+            vec![equip],
+        ),
+    ] {
+        let creature = core == CoreType::Creature;
+        let supertypes = if creature {
+            vec![Supertype::Legendary]
+        } else {
+            vec![]
+        };
+        let expected = CardFace {
+            name: name.into(),
+            mana_cost: parse_mana_symbols(mana).unwrap().0,
+            card_type: CardType {
+                core_types: vec![core],
+                subtypes: subtypes.iter().map(|s| (*s).into()).collect(),
+                supertypes,
+            },
+            power: creature.then_some(crate::types::ability::PtValue::Fixed(4)),
+            toughness: creature.then_some(crate::types::ability::PtValue::Fixed(4)),
+            oracle_text: Some(source.into()),
+            abilities: abilities.clone(),
+            static_abilities: statics.clone(),
+            triggers: triggers.clone(),
+            color_identity: colors.clone(),
+            color_override: (name == "Raggadragga, Goreguts Boss").then_some(colors.clone()),
+            scryfall_oracle_id: Some(oracle_id.into()),
+            brawl_commander: creature,
+            is_commander: creature,
+            ..Default::default()
+        };
+        let types = vec![if creature {
+            "Creature".into()
+        } else {
+            "Artifact".into()
+        }];
+        let subtypes: Vec<String> = subtypes.into_iter().map(String::from).collect();
+        let mut doc = parse_oracle_ir(source, name, &[], &types, &subtypes);
+        assert_eq!(doc.source_text, source);
+        let normalized = source
+            .replace("Cloud", "~")
+            .replace("This creature", "~")
+            .replace("this creature", "~");
+        let mut start = 0;
+        assert_eq!(
+            doc.items.len(),
+            normalized.lines().count(),
+            "{name}: {doc:#?}"
+        );
+        for (index, line) in normalized.lines().enumerate() {
+            let item = &doc.items[index];
+            assert_eq!(item.source.fragment(), Some(line), "{name}: {doc:#?}");
+            assert_eq!(
+                item.source.span(),
+                &crate::types::oracle_diagnostic::OracleSourceSpan::exact(
+                    index,
+                    index,
+                    start,
+                    start + line.len(),
+                    0
+                ),
+                "{name}: {doc:#?}"
+            );
+            assert_eq!(item.source.id().item, item.id);
+            start += line.len() + 1;
+        }
+        let parsed = lower_oracle_ir(&mut doc);
+        assert_eq!(parsed.abilities, abilities, "{name}: {doc:#?}: {parsed:#?}");
+        assert_eq!(parsed.statics, statics, "{name}: {doc:#?}: {parsed:#?}");
+        assert_eq!(parsed.triggers, triggers, "{name}: {doc:#?}: {parsed:#?}");
+        assert!(
+            parsed.replacements.is_empty()
+                && parsed.extracted_keywords.is_empty()
+                && parsed.modal.is_none()
+                && parsed.additional_cost.is_none(),
+            "{name}: {parsed:#?}"
+        );
+        assert!(
+            parsed.parse_warnings.is_empty() && !parsed_has_unimplemented(&parsed),
+            "{name}: {parsed:#?}"
+        );
+        let atomic: crate::database::mtgjson::AtomicCard = serde_json::from_value(serde_json::json!({
+            "name":name, "text":source, "manaCost":mana, "manaValue":if creature { if name == "Cloud, Planet's Champion" {5} else {4} } else {1},
+            "types":types, "subtypes":subtypes, "supertypes":if creature {vec!["Legendary"]} else {vec![]},
+            "colors":colors.iter().map(|color| match color { ManaColor::Red => "R", ManaColor::White => "W", ManaColor::Green => "G", _ => unreachable!() }).collect::<Vec<_>>(),
+            "colorIdentity":colors.iter().map(|color| match color { ManaColor::Red => "R", ManaColor::White => "W", ManaColor::Green => "G", _ => unreachable!() }).collect::<Vec<_>>(),
+            "power":creature.then_some("4"), "toughness":creature.then_some("4"), "layout":"normal", "identifiers":{"scryfallOracleId":oracle_id}
+        })).unwrap();
+        let native = crate::database::synthesis::build_oracle_face(&atomic, Some(oracle_id.into()));
+        assert_eq!(
+            native, expected,
+            "{name}: complete independently derived native face"
+        );
+        let export =
+            serde_json::to_string(&serde_json::json!({name.to_lowercase(): native})).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &export).unwrap();
+        for database in [
+            crate::database::CardDatabase::from_json_str(&export).unwrap(),
+            crate::database::CardDatabase::from_export(file.path()).unwrap(),
+        ] {
+            assert_eq!(database.get_face_by_name(name), Some(&expected), "{name}");
+        }
+    }
 }
 
 #[test]

@@ -1400,9 +1400,9 @@ fn damage_amount_reads_event_context(effect: &Effect) -> bool {
 /// `crate::types::ability::is_oneshot_target_source_prevent_shape` predicate
 /// (the single authority, also consumed by the resolver discriminator in
 /// `prevent_damage::resolve`). The bare "prevented this way" rider folds into
-/// the shield only for this root; other prevention roots (Reverse Damage's
-/// `ChosenDamageSource`, Comeuppance's color-axis source filter, ...) keep
-/// their bare rider as an independent `SequentialSibling`.
+/// the shield for this root and for a `OneOpportunity` prevention whose source
+/// filter is `ChosenDamageSource` (Reverse Damage). Other prevention roots
+/// remain outside this predicate.
 fn is_oneshot_target_source_prevent_chain(defs: &[AbilityDefinition]) -> bool {
     defs.iter()
         .rfind(|d| matches!(&*d.effect, Effect::PreventDamage { .. }))
@@ -3389,15 +3389,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // immediate predecessor is the first rider, not the PreventDamage) so the
         // clause is folded into the prevention rather than dropped as a sibling.
         //
-        // CR 615.5: AWE STRIKE — "You gain life equal to the damage prevented
-        // this way." is a BARE rider (no when/whenever/if prelude; the "this
-        // way" binds to the preceding prevention sentence). It folds into the
-        // shield ONLY when the chain root's prevention is the one-shot
-        // target-source shape (`And { [ParentTargetSlot, Typed(creature)] }`
-        // damage_source_filter) — that is the Awe Strike class. Reverse Damage's
-        // chain root (`ChosenDamageSource`) must NOT fold: its bare rider stays a
-        // `SequentialSibling` (its "equal to the damage prevented this way"
-        // quantity still resolves via `last_effect_count`).
+        // CR 615.5: AWE STRIKE — a bare "prevented this way" rider folds into
+        // the shield when `is_oneshot_target_source_prevent_chain` admits the
+        // preceding prevention. That predicate also admits Reverse Damage's
+        // `OneOpportunity` / `ChosenDamageSource` prevention. The rider keeps
+        // a `ContinuationStep` link so the prevention installs its payoff.
         //
         // CR 615.5: INKSHIELD / BRACE FOR IMPACT / TEMPER / TEST OF FAITH — "For
         // each 1 damage prevented this way, <effect>" is a DISTRIBUTIVE rider
@@ -4435,8 +4431,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             matches!(definition.effect.as_ref(), Effect::Attach { attachment: TargetFilter::ParentTarget, target, .. }
                 if !matches!(target, TargetFilter::Any | TargetFilter::None | TargetFilter::SelfRef))
         });
+        let represented_entry_counter = current_defs.len() == 1
+            && defs.last().is_some_and(|prior| {
+                super::lower::entry_counter_rider_folds_into(&prior.effect, &current_defs[0])
+            });
         unbound_search_cohort =
-            (names_search_cohort && !represented_attachment) || continues_unbound_cohort;
+            (names_search_cohort && !represented_attachment && !represented_entry_counter)
+                || continues_unbound_cohort;
         if unbound_search_cohort {
             current_defs.truncate(1);
             if let Some(current) = current_defs.first_mut() {
