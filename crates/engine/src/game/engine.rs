@@ -2809,9 +2809,10 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
     // optional loop falls through to the pre-feature halt. A seat whose life total sits at
     // `i32::MAX` at both ends of the compared cycle has its life axis read from the cycle's
     // rules amount (`ResourceVector::with_at_limit_life_reading`), so a mandatory loop that
-    // only gains life at the cap is drawn as it is below the cap. `i32::MIN` is not read: a
-    // seat alive there has an effect keeping it from losing (CR 704.5a), and a loss axis
-    // there would veto the CR 104.4b draw of a loop that drains it.
+    // only gains life at the cap is drawn as it is below the cap, unless a per-turn counter
+    // fell or ends the cycle at `u32::MAX` (no reading; the stored 0 stands). `i32::MIN` is
+    // not read: a seat alive there has an effect keeping it from losing (CR 704.5a), and a
+    // loss axis there would veto the CR 104.4b draw of a loop that drains it.
     if mandatory {
         let _timed = crate::analysis::resource::CostTimer::start(|cost| {
             (
@@ -2836,9 +2837,10 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
                     &cur,
                 )
                 // CR 104.4b + CR 732.4: a life total held at `i32::MAX` at both ends of the
-                // cycle reads the cycle's rules amount, not the stored 0. `i32::MIN` is not
-                // read (CR 704.5a + CR 104.4b: a seat alive there cannot lose, and a loss
-                // axis would veto the draw of a loop that drains it).
+                // cycle reads the cycle's rules amount, not the stored 0, unless a per-turn
+                // counter fell or ends the cycle at `u32::MAX`. `i32::MIN` is not read
+                // (CR 704.5a + CR 104.4b: a seat alive there cannot lose, and a loss axis
+                // would veto the draw of a loop that drains it).
                 .with_at_limit_life_reading(prior, frames.current());
                 // CR 732.2a board-recurrence (constant-depth OR ω growing cascade) + net
                 // progress + NO loss axis for anyone ⇒ the loop grinds forever with nobody
@@ -8002,7 +8004,8 @@ fn current_period_counter_growth(
 /// CR 119.3 + CR 732.2a: the per-player life GAIN δ of the accepted period, diffed off the one
 /// driven iteration's frames (`grown_life_deltas`): the stored gain or, where the period ends
 /// with the player's life total (the team's shared total in a shared-life format) at
-/// `i32::MAX`, the larger of that gain and the rules amount the period carried. The
+/// `i32::MAX`, the larger of that gain and the rules amount the period carried (the stored
+/// gain alone when a per-turn counter fell or ends at `u32::MAX`). The
 /// batched-collapse δ source for the life axis. Empty when no player's stored total grows
 /// across the period. Only reached in the UNOBSERVED batched route (the firewall gates it).
 fn current_period_life_growth(before: &GameState, after: &GameState) -> Vec<(PlayerId, u32)> {
