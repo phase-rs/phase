@@ -2242,12 +2242,12 @@ pub(crate) fn apply_zone_delivery_tail(
                         .map(|entry| entry.kind.clone())
                     {
                         state.pending_liminal_entry_resume =
-                            Some(Box::new(PendingLiminalEntryResume::Meld {
+                            Some(PendingLiminalEntryResume::Meld {
                                 source_id: object_id,
                                 player: wf.acting_player().unwrap_or(state.active_player),
                                 context,
                                 attack_target,
-                            }));
+                            });
                     }
                 }
                 state.waiting_for = wf;

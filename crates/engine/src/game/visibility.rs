@@ -8123,8 +8123,8 @@ mod tests {
                 replacement_applied: std::collections::HashSet::new(),
             },
         );
-        state.pending_liminal_entry_resume = Some(Box::new(
-            crate::types::game_state::PendingLiminalEntryResume::Token {
+        state.pending_liminal_entry_resume =
+            Some(crate::types::game_state::PendingLiminalEntryResume::Token {
                 source_id: entry_ref,
                 player: PlayerId(0),
                 event: crate::types::proposed_event::ProposedEvent::TokenEntry {
@@ -8134,8 +8134,7 @@ mod tests {
                     enter_with_choices: None,
                     applied: std::collections::HashSet::new(),
                 },
-            },
-        ));
+            });
 
         let serialized = serde_json::to_string(&state).unwrap();
         let restored: GameState = serde_json::from_str(&serialized).unwrap();

@@ -883,11 +883,11 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                             )
                         {
                             state.pending_liminal_entry_resume =
-                                Some(Box::new(PendingLiminalEntryResume::Token {
+                                Some(PendingLiminalEntryResume::Token {
                                     source_id: token_id,
                                     player: waiting_for.acting_player().unwrap_or(controller),
                                     event: event.clone(),
-                                }));
+                                });
                             state.waiting_for = waiting_for;
                             state.last_created_token_ids = created_ids.clone();
                             return CopyTokenApplyStatus {
