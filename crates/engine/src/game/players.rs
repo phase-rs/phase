@@ -509,15 +509,67 @@ pub fn team_life_sum(state: &GameState, player: PlayerId) -> i64 {
 /// that cost or effect uses the team's life total instead" — callers that
 /// read an individual life total for a comparison, cost, or SBA check in a
 /// team-based format must go through this accessor rather than `Player::life`
-/// directly. The underlying per-player `life` fields remain the single
-/// source of truth (CR 810.9: life loss/gain still happens to "each player
-/// individually") — this is a pure derived reading, not a separate stored
-/// pool: the exact [`team_life_sum`] saturated into `i32`. Saturation keeps the
-/// sign, so the CR 810.8c / CR 704.5a "0 or less" loss check answers as the
-/// exact total does. Life-payment affordability and budgets read
+/// directly. The members' `life` fields are the only storage, and how the
+/// team's total is split across them is storage only (CR 810.9a). A life
+/// change happens to a player and adjusts the team's shared total, which
+/// [`spread_life_change`] stores (CR 810.9). This is a pure derived reading,
+/// not a separate stored pool: the exact [`team_life_sum`] saturated into
+/// `i32`. Saturation keeps the sign, so the CR 810.8c / CR 704.5a "0 or less"
+/// loss check answers as the exact total does. Life-payment affordability and budgets read
 /// [`team_life_sum`] instead (CR 119.4a).
 pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
     super::arithmetic::i64_to_i32_saturating(team_life_sum(state, player))
+}
+
+/// CR 810.4 + CR 810.9: The stored life fields a life change to `player`
+/// adjusts, in the order the change is stored: `player`'s own field first,
+/// then the other living members of its shared life total in
+/// `topology::shared_resource_members` order (a Two-Headed Giant team has one
+/// teammate). Outside a shared-life format this is `player` alone; `player` is
+/// always included, so a player outside every living team adjusts its own
+/// total.
+fn life_change_fields(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+    std::iter::once(player)
+        .chain(
+            super::topology::shared_resource_members(state, player)
+                .into_iter()
+                .filter(|&member| member != player),
+        )
+        .collect()
+}
+
+/// CR 810.4 + CR 810.9: The exact total a life change to `player` adjusts:
+/// the sum of [`life_change_fields`]. Outside a shared-life format it is the
+/// player's own life; in Two-Headed Giant it is the team's shared total
+/// ([`team_life_sum`] for a living player).
+pub(crate) fn life_change_total(state: &GameState, player: PlayerId) -> i64 {
+    life_change_fields(state, player)
+        .into_iter()
+        .filter_map(|member| state.players.iter().find(|p| p.id == member))
+        .map(|p| i64::from(p.life))
+        .sum()
+}
+
+/// CR 810.9 + CR 810.9a: Stores a change of the total a life change to
+/// `player` adjusts ([`life_change_total`]). The change lands on `player`'s
+/// own field first, and only the part that field cannot hold within the `i32`
+/// limits moves on to its teammates, each field saturating at its own limits.
+/// How a team's total is split across its members' fields is storage only:
+/// every rules reading uses the team's total (CR 810.9a).
+pub(crate) fn spread_life_change(state: &mut GameState, player: PlayerId, change: i64) {
+    let mut remaining = change;
+    for member in life_change_fields(state, player) {
+        if remaining == 0 {
+            break;
+        }
+        let Some(field) = state.players.iter_mut().find(|p| p.id == member) else {
+            continue;
+        };
+        let before = i64::from(field.life);
+        field.life = super::arithmetic::i64_to_i32_saturating(before.saturating_add(remaining));
+        remaining -= i64::from(field.life) - before;
+    }
+    debug_assert_eq!(remaining, 0, "a saturated total always fits its fields");
 }
 
 /// CR 810.10 + CR 810.10a: A player's team's shared poison-counter total.

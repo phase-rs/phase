@@ -55,10 +55,10 @@ pub enum PayLifeCostResult {
     },
     /// CR 118.3: Player's life total is below `amount` — cost can't be paid.
     /// Also returned when the post-replacement deduction is not representable
-    /// (a final amount past the engine's `i32` delta, an overflowed replacement
-    /// quantity, or a nested player-counter or energy settlement that
-    /// overflows; the life total and the lost-this-turn counter saturate
-    /// instead).
+    /// (an overflowed replacement quantity, or a nested player-counter or
+    /// energy settlement that overflows; a deduction of any `u32` amount is
+    /// carried exactly, and the life total and the lost-this-turn counter
+    /// saturate instead).
     InsufficientLife,
     /// CR 119.8 / CR 118.3: A static prohibition makes the cost unpayable.
     Prohibited,
@@ -173,9 +173,10 @@ pub fn pay_life_as_cost(
     // CR 118.3 + CR 119.4a: Resource check through the single affordability
     // authority, on the unreplaced payment and before any replacement sees the
     // loss — affordability is bounded by the team's exact shared total. The
-    // DEDUCTION below lands on the individual `Player::life` (CR 810.9: life
-    // loss happens to each player individually) and may go negative — only the
-    // affordability gate reads the team total.
+    // deduction below is a life loss of the paying player (CR 810.9) applied to
+    // the team's shared total; the edit authority stores it on the payer's own
+    // `Player::life` first, so that field may go negative while the team total
+    // is positive (CR 810.9a: the split across members is storage only).
     if !can_pay_life_cost(state, player, amount) {
         return PayLifeCostResult::InsufficientLife;
     }
@@ -659,9 +660,11 @@ mod tests {
     }
 
     /// CR 119.4a + CR 810.9: pay-life affordability is team-bounded, and the
-    /// DEDUCTION lands on the individual `Player::life` — a member may go
-    /// negative while the team stays positive. Pay 6 from a {2, 6} team: payer
-    /// goes to -4 (team 4), no SBA runs here (this is the cost helper only).
+    /// deduction (the payer's life loss, applied to the team's shared total) is
+    /// stored on the payer's own `Player::life` first, so a member's field may go
+    /// negative while the team stays positive (CR 810.9a: the split is storage
+    /// only). Pay 6 from a {2, 6} team: payer goes to -4 (team 2), no SBA runs
+    /// here (this is the cost helper only).
     #[test]
     fn pay_life_team_bounded_deduction_lands_individual_in_2hg() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
@@ -672,7 +675,7 @@ mod tests {
         let result = pay_life_as_cost(&mut state, PlayerId(0), 6, &mut events);
 
         assert_eq!(result, PayLifeCostResult::Paid { amount: 6 });
-        // Deduction is individual (CR 810.9): payer 2 - 6 = -4.
+        // The payer's own field stores the deduction first (CR 810.9 + CR 810.9a): payer 2 - 6 = -4.
         assert_eq!(state.players[0].life, -4);
         // Team total now 2 (-4 + 6).
         assert_eq!(

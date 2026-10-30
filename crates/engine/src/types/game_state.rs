@@ -8063,10 +8063,12 @@ pub struct PendingCounterAdditionQueue {
 /// simultaneous life-total assignment that paused on a replacement choice. The
 /// current gain/loss event is owned by `pending_replacement`; this record holds
 /// only the tail plus the completion work that runs after the full assignment.
+/// `remaining` holds exact `i64` differences: a difference between two life
+/// totals spans up to `u32::MAX`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingLifeTotalAssignment {
     pub completion_player: PlayerId,
-    pub remaining: Vec<(PlayerId, i32)>,
+    pub remaining: Vec<(PlayerId, i64)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<PendingEffectResolved>,
 }
@@ -27991,9 +27993,11 @@ pub struct PendingReplacement {
 }
 
 /// Who owns a player-resource change (life, player counter, energy) whose final
-/// result the engine cannot represent (a final amount beyond an `i32` delta, or
-/// a counter/energy total overflow; a life total and its per-turn gained/lost
-/// counters saturate instead).
+/// result the engine cannot represent (a player-counter or energy amount beyond
+/// an `i32` delta or total past `u32::MAX`, or a replacement quantity that
+/// overflowed while the event was replaced; a life change carries any `u32`
+/// amount exactly, and its total and per-turn gained/lost counters saturate
+/// instead).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnrepresentablePolicy {
     /// Action ingress: return the typed error so the caller rejects the
@@ -30967,41 +30971,49 @@ impl GameState {
     /// Applies one final player-resource edit without replacements, quantity
     /// evaluation, or an implicit player selection.
     ///
-    /// The life arm saturates: a gain stops at `i32::MAX` and a loss at
-    /// `i32::MIN` (`arithmetic::saturating_life_total`), and the per-turn
-    /// gained/lost counters add the reported magnitude, saturating at
-    /// `u32::MAX`. Energy and player counters keep the checked edit. Replaying
-    /// a recorded command on the same prefix reproduces the same result.
+    /// The life arm adjusts the total the change applies to — the player's own
+    /// life, or in a shared-life format the team's exact shared total
+    /// (CR 810.4 + CR 810.9, `players::life_change_total`) — and saturates it
+    /// at the `i32` limit the change moves toward
+    /// (`arithmetic::saturating_life_total`). It stores the result across the
+    /// team's fields (`players::spread_life_change`) and adds the reported
+    /// magnitude to the acting player's per-turn gained/lost counter,
+    /// saturating at `u32::MAX`. Energy and player counters keep the checked
+    /// edit. Replaying a recorded command on the same prefix reproduces the
+    /// same result, the spread included.
     pub fn apply_resolved_player_edit(
         &mut self,
         command: &ResolvedPlayerEditCommand,
     ) -> Result<(), ResolvedPlayerEditReplayInvariantError> {
-        let player = self
+        let index = self
             .players
-            .iter_mut()
-            .find(|candidate| candidate.id == command.player)
+            .iter()
+            .position(|candidate| candidate.id == command.player)
             .ok_or(ResolvedPlayerEditReplayInvariantError::UnknownPlayer(
                 command.player,
             ))?;
+        let player = &mut self.players[index];
 
         match &command.edit {
             ResolvedPlayerEdit::Life { delta } => {
-                let rules = nonzero_delta_magnitude(*delta)?;
-                let current = i64::from(player.life);
+                let rules = delta.unsigned_abs();
+                if rules == 0 {
+                    return Err(ResolvedPlayerEditReplayInvariantError::ZeroDelta);
+                }
+                // CR 810.4 + CR 810.9: the change adjusts the player's shared
+                // life total (its own life outside a shared-life format).
+                let current = crate::game::players::life_change_total(self, command.player);
                 // CR 119.3 + CR 107.1b: the gain or loss adjusts the total,
                 // which stops at the `i32` limit the change moves toward.
-                let total = arithmetic::saturating_life_total(current, i64::from(*delta));
-                // A saturating total never leaves `i32` for a player's own
-                // field. This checked narrowing is where a refusing answer at a
-                // limit would surface, through the settle's retained refusal
-                // routing.
-                let life = i32::try_from(total)
-                    .map_err(|_| ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
+                let total = arithmetic::saturating_life_total(current, *delta);
+                // CR 810.9 + CR 810.9a: the adjusted total is stored across the
+                // team's fields, the acting player's own field first.
+                crate::game::players::spread_life_change(self, command.player, total - current);
                 // The per-turn counters add the reported magnitude, saturating.
                 let counted = arithmetic::u64_to_u32_saturating(
-                    arithmetic::reported_life_magnitude(u64::from(rules), total.abs_diff(current)),
+                    arithmetic::reported_life_magnitude(rules, total.abs_diff(current)),
                 );
-                player.life = life;
+                let player = &mut self.players[index];
                 if delta.is_positive() {
                     player.life_gained_this_turn =
                         player.life_gained_this_turn.saturating_add(counted);

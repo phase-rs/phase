@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ResolvedPlayerEdit::Life.delta (GameState.resolved_rules_journal) and PendingLifeTotalAssignment.remaining (paused life-total assignments in the resolution stack) widen from i32 to i64, so a life gain or loss beyond the i32 range and a set/exchange/redistribute difference across the whole life range are recorded exactly while life totals (and a Two-Headed Giant team's shared total) saturate at the i32 limits (#10416). Values in the i32 range serialize byte-identically; a previous-version full-game or P2P peer cannot parse a delta outside that range and would also refuse the change this engine applies. Full-game and P2P move in lockstep; no lobby, draft or directory carrier names either type."
+}

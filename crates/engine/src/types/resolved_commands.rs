@@ -97,8 +97,11 @@ pub struct ResolvedManaSpendCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolvedPlayerEdit {
     /// CR 119.2 + CR 119.3 + CR 119.4 + CR 119.5: A final gain/loss delta
-    /// applied after any replacement.
-    Life { delta: i32 },
+    /// applied after any replacement. `i64` so every rules amount (up to
+    /// `u32::MAX`) and every set/exchange difference is recorded exactly; the
+    /// edit authority saturates the total it adjusts (CR 119.3 + CR 107.1b),
+    /// in Two-Headed Giant the team's shared total (CR 810.9).
+    Life { delta: i64 },
     /// CR 122.1 + CR 107.14: A final energy-counter delta.
     Energy { delta: i32 },
     /// CR 122.1: A final delta for one exact player counter kind.
@@ -3762,9 +3765,10 @@ fn exact_mana_unit_eq(left: &ManaUnit, right: &ManaUnit) -> bool {
 
 fn player_edit_is_empty(edit: &ResolvedPlayerEdit) -> bool {
     match edit {
-        ResolvedPlayerEdit::Life { delta }
-        | ResolvedPlayerEdit::Energy { delta }
-        | ResolvedPlayerEdit::Counter { delta, .. } => *delta == 0,
+        ResolvedPlayerEdit::Life { delta } => *delta == 0,
+        ResolvedPlayerEdit::Energy { delta } | ResolvedPlayerEdit::Counter { delta, .. } => {
+            *delta == 0
+        }
         ResolvedPlayerEdit::Speed { old, new } => old == new,
     }
 }
@@ -4229,6 +4233,34 @@ mod tests {
             serde_json::to_value(unrelated_cause).unwrap()
         )
         .is_err());
+    }
+
+    /// CR 119.3 + CR 119.5: a life edit records any gain, loss or set/exchange
+    /// difference exactly in an `i64` delta. A delta in the `i32` range
+    /// serializes exactly as before, a delta past it round-trips, and a zero
+    /// delta is still the one empty life edit.
+    #[test]
+    fn life_edit_carries_an_i64_delta_and_in_range_json_is_unchanged() {
+        assert_eq!(
+            serde_json::to_string(&ResolvedPlayerEdit::Life { delta: -3 }).unwrap(),
+            r#"{"Life":{"delta":-3}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ResolvedPlayerEdit>(r#"{"Life":{"delta":-3}}"#).unwrap(),
+            ResolvedPlayerEdit::Life { delta: -3 }
+        );
+        let wide = ResolvedPlayerEdit::Life {
+            delta: 3_000_000_000,
+        };
+        assert_eq!(
+            serde_json::from_str::<ResolvedPlayerEdit>(&serde_json::to_string(&wide).unwrap())
+                .unwrap(),
+            wide
+        );
+        assert!(player_edit_is_empty(&ResolvedPlayerEdit::Life { delta: 0 }));
+        assert!(!player_edit_is_empty(&ResolvedPlayerEdit::Life {
+            delta: 1 << 40
+        }));
     }
 
     #[test]

@@ -2357,12 +2357,6 @@ pub(super) fn handle_resolution_choice(
                 effects::life::LifeAssignmentOutcome::Deferred => {
                     ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
                 }
-                // The difference was unrepresentable: nothing was assigned. The
-                // open ingress window rejects the action at the boundary, which
-                // restores this prompt.
-                effects::life::LifeAssignmentOutcome::Unrepresentable => {
-                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
-                }
                 effects::life::LifeAssignmentOutcome::Applied => {
                     ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
                         state, player, events,
@@ -3787,9 +3781,11 @@ pub(super) fn handle_resolution_choice(
                                 // firewall rejected any life-gain replacement/observer
                                 // (`apply_life_gain` re-runs the replacement pipeline, so a
                                 // lump gain would fire an observer ONCE not N×).
-                                // The shortcut is an action-ingress edit: a gain the engine
-                                // cannot represent (the saturated amount never fits an `i32`
-                                // delta) rejects the action through the boundary rollback.
+                                // The shortcut is an action-ingress edit: the lump gain (up to
+                                // `u32::MAX`) is carried exactly and the life total saturates at
+                                // `i32::MAX`, so the gain itself is always representable; the
+                                // `Unrepresentable` arm stays as the shared ingress routing and
+                                // would reject the action through the boundary rollback.
                                 // A deferral stays ignored — the firewall excludes life
                                 // replacements, so none can be pending here.
                                 if let Err(effects::life::LifeChangeError::Unrepresentable(
@@ -9957,7 +9953,8 @@ pub(crate) fn finish_pay_amount_choice(
     total: u32,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    state.last_effect_count = Some(total as i32);
+    // CR 118.11: the declared payment, clamped to the `i32` quantity range.
+    state.last_effect_count = Some(crate::game::arithmetic::u32_to_i32_saturating(total));
     stamp_paused_payment_rider_x(state, ContinuationXAnnouncement::PaidAmount, total);
     let mut waiting_for = finish_with_continuation(state, player, events);
     if let WaitingFor::PayAmountChoice {

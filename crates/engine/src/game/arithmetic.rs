@@ -110,10 +110,12 @@ pub enum LifeDirection {
 /// CR 119.3 + CR 107.1b: a gain or loss adjusts the life total, which may be
 /// negative; the total is stored as `i32`, so the result stops at the limit
 /// the change moves toward and never moves against the change. This is the one
-/// place a life total is computed. To refuse at a limit instead of saturating,
-/// return `moved` unclamped from that direction's arm: the Life arm's checked
-/// `i32` narrowing then reports `ResourceOverflow`, which the settle's retained
-/// refusal routing turns into the refusal.
+/// place a life total is computed. `current` is the total the change adjusts:
+/// the player's own life, or in Two-Headed Giant the team's exact shared total,
+/// which a state this function never wrote may hold outside `i32`. To refuse at
+/// a limit instead of saturating, return `None` past it (`Option<i64>`) and
+/// have the Life arm, its only caller, map `None` to `ResourceOverflow`; the
+/// settle's retained refusal routing turns that into the refusal.
 #[inline]
 pub fn saturating_life_total(current: i64, delta: i64) -> i64 {
     let moved = current.saturating_add(delta);

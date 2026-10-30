@@ -498,9 +498,7 @@ pub fn apply_debug_action(
                 .expect("the validated debug player must remain present")
                 .life;
             if current_life != life {
-                let delta = life.checked_sub(current_life).ok_or_else(|| {
-                    EngineError::InvalidAction("Debug: life delta is not representable".to_string())
-                })?;
+                let delta = i64::from(life) - i64::from(current_life);
                 state
                     .resolve_and_apply_player_edit(player_id, ResolvedPlayerEdit::Life { delta })
                     .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
@@ -815,9 +813,9 @@ fn apply_debug_life_change(
     let event_start = events.len();
     // The settle step is the single authority: a life total and its per-turn
     // counters saturate at their limits, and a result that is still
-    // unrepresentable (a final amount past an `i32` delta, an overflowed
-    // replacement quantity, or a nested counter/energy settlement) rejects the
-    // action and the action boundary restores its snapshot — nothing wraps.
+    // unrepresentable (an overflowed replacement quantity, or a nested
+    // counter/energy settlement) rejects the action and the action boundary
+    // restores its snapshot — nothing wraps.
     let outcome = match change {
         LifeDirection::Gain => try_apply_life_gain(state, player_id, amount, events),
         LifeDirection::Loss => try_apply_life_loss(state, player_id, amount, events),
@@ -3332,17 +3330,37 @@ mod tests {
             accepted
         }
 
-        /// Answers any open ordering prompts with index 0 until none remains.
-        fn answer_to_completion(runner: &mut GameRunner) {
+        /// Answers any open ordering prompts with index 0 until none remains,
+        /// returning the events of every answer.
+        fn answer_to_completion(runner: &mut GameRunner) -> Vec<GameEvent> {
+            let mut events = Vec::new();
             for _ in 0..16 {
                 if !replacement_prompt_open(runner) {
-                    return;
+                    return events;
                 }
-                runner
-                    .act(GameAction::ChooseReplacement { index: 0 })
-                    .expect("a representable control answer must be accepted");
+                events.extend(
+                    runner
+                        .act(GameAction::ChooseReplacement { index: 0 })
+                        .expect("a representable control answer must be accepted")
+                        .events,
+                );
             }
             panic!("the replacement prompts never completed");
+        }
+
+        /// Every `LifeChanged` event as `(player, amount, new_total)`.
+        fn life_changes(events: &[GameEvent]) -> Vec<(PlayerId, i32, Option<i32>)> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::LifeChanged {
+                        player_id,
+                        amount,
+                        new_total,
+                    } => Some((*player_id, *amount, new_total.0)),
+                    _ => None,
+                })
+                .collect()
         }
 
         /// Submits `action` expecting an unrepresentable final result: either the
@@ -4546,11 +4564,12 @@ mod tests {
         /// Bloodletter of Aclazotz ("If an opponent would lose life during your
         /// turn, they lose twice that much life instead.") parsed from its
         /// Oracle text: eleven copies turn a requested 1,000,000 into
-        /// 1,000,000 x 2^11 = 2,048,000,000, which fits (accepted control); the
-        /// twelfth makes 4,096,000,000, which fits a `u32` but not an `i32` delta
-        /// and is rejected unchanged.
+        /// 1,000,000 x 2^11 = 2,048,000,000 (control); the twelfth makes
+        /// 4,096,000,000, past `i32::MAX`: the loss is carried exactly, P1's
+        /// total stops at `i32::MIN` and the event reports `i32::MIN`. CR 704.5a:
+        /// P1 at or below 0 loses the game.
         #[test]
-        fn debug_lose_parsed_doublers_accept_the_representable_and_reject_the_i32_overflow() {
+        fn debug_lose_parsed_doublers_carry_a_loss_past_i32_and_saturate() {
             let mut scenario = scenario();
             let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
             let mut runner = debug_runner(scenario);
@@ -4569,8 +4588,117 @@ mod tests {
             let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
             let mut runner = debug_runner(scenario);
             add_bloodletters(&mut runner, 12);
-            submit_expecting_rejection(&mut runner, mate, lose(P1, MAX_DEBUG_LIFE_AMOUNT));
-            assert_eq!(life(&runner, P1), 20);
+            let mut events = act_ok(&mut runner, lose(P1, MAX_DEBUG_LIFE_AMOUNT)).events;
+            events.extend(answer_to_completion(&mut runner));
+            assert_eq!(life(&runner, P1), i32::MIN);
+            assert_eq!(runner.state().players[1].life_lost_this_turn, 4_096_000_000);
+            assert_eq!(life_changes(&events), vec![(P1, i32::MIN, Some(i32::MIN))]);
+            assert_eq!(p1p1(&runner, mate), 0);
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::GameOver { winner: Some(winner) } if winner == P0
+                ),
+                "got {:?}",
+                runner.state().waiting_for
+            );
+        }
+
+        /// Exquisite Blood ("Whenever an opponent loses life, you gain that much
+        /// life.") reads the loss through its `LifeChanged` event. Twelve parsed
+        /// Bloodletters turn P1's requested 1,000,000 into 4,096,000,000: the
+        /// event reports `i32::MIN` (CR 119.3, the rules amount clamped to the
+        /// event field), so "that much" is 2,147,483,647 and P0's total stops at
+        /// `i32::MAX`. Eleven copies are the in-range control (2,048,000,000).
+        /// Platinum Angel keeps P1 in the game so the trigger resolves.
+        #[test]
+        fn a_loss_past_i32_reports_i32_min_and_that_much_reads_its_magnitude() {
+            // (Bloodletters, P1 lost, LifeChanged amount, P1 life, P0 life,
+            // P0 gained)
+            type Case = (usize, u32, i32, i32, i32, u32);
+            let cases: [Case; 2] = [
+                (
+                    11,
+                    2_048_000_000,
+                    -2_048_000_000,
+                    20 - 2_048_000_000,
+                    2_048_000_020,
+                    2_048_000_000,
+                ),
+                (
+                    12,
+                    4_096_000_000,
+                    i32::MIN,
+                    i32::MIN,
+                    i32::MAX,
+                    2_147_483_647,
+                ),
+            ];
+            for (copies, lost, amount, p1_life, p0_life, p0_gained) in cases {
+                let mut scenario = scenario();
+                add_card(&mut scenario, P0, "Exquisite Blood");
+                add_card(&mut scenario, P1, "Platinum Angel");
+                let mut runner = debug_runner(scenario);
+                add_bloodletters(&mut runner, copies);
+                let mut events = act_ok(&mut runner, lose(P1, MAX_DEBUG_LIFE_AMOUNT)).events;
+                events.extend(answer_to_completion(&mut runner));
+                assert_eq!(
+                    life_changes(&events),
+                    vec![(P1, amount, Some(p1_life))],
+                    "{copies} copies"
+                );
+                assert_eq!(life(&runner, P1), p1_life, "{copies} copies");
+                assert_eq!(runner.state().players[1].life_lost_this_turn, lost);
+                assert!(
+                    !runner.state().players[1].is_eliminated,
+                    "reach guard: Platinum Angel keeps P1 in the game"
+                );
+                assert_eq!(
+                    runner.state().stack.len(),
+                    1,
+                    "{copies} copies: Exquisite Blood's trigger is on the stack"
+                );
+
+                runner.advance_until_stack_empty();
+                assert_eq!(life(&runner, P0), p0_life, "{copies} copies");
+                assert_eq!(
+                    runner.state().players[0].life_gained_this_turn,
+                    p0_gained,
+                    "{copies} copies"
+                );
+                assert!(runner.state().stack.is_empty());
+                assert!(
+                    matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                    "{copies} copies: got {:?}",
+                    runner.state().waiting_for
+                );
+            }
+        }
+
+        /// CR 119.5: debug `SetLife` gains or loses the exact difference, so it
+        /// lands on the target across the whole `i32` range (from `i32::MIN` to
+        /// `i32::MAX` is a gain of `u32::MAX`). In-range control: 20 to 25.
+        #[test]
+        fn debug_set_life_lands_exactly_from_i32_min_to_i32_max() {
+            for (start, target, gained) in [(i32::MIN, i32::MAX, u32::MAX), (20, 25, 5)] {
+                let mut scenario = scenario();
+                scenario.with_life(P0, start);
+                let mut runner = debug_runner(scenario);
+                act_ok(
+                    &mut runner,
+                    GameAction::Debug(DebugAction::SetLife {
+                        player_id: P0,
+                        life: target,
+                    }),
+                );
+                assert_eq!(life(&runner, P0), target);
+                assert_eq!(runner.state().players[0].life_gained_this_turn, gained);
+                assert!(
+                    matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                    "got {:?}",
+                    runner.state().waiting_for
+                );
+            }
         }
 
         /// Engine numeric capacity: the loss twin of the large-multiplier gain row. Three

@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use crate::game::arithmetic::{self, LifeDirection};
@@ -38,10 +39,11 @@ pub enum ReplacementDeferred {
 }
 
 /// A player-resource change (life, a player counter, or energy) whose final
-/// result the engine cannot represent: the final amount does not fit an `i32`
-/// delta, or a counter total or energy total would overflow (a life total and
-/// its per-turn gained/lost counters saturate at their limits instead). Nothing
-/// was mutated.
+/// result the engine cannot represent: a player-counter or energy amount does
+/// not fit an `i32` delta or its total would pass `u32::MAX`, or a replacement
+/// quantity overflowed while the event was replaced (a life change carries any
+/// `u32` amount exactly; its total and per-turn gained/lost counters saturate
+/// at their limits instead). Nothing was mutated.
 ///
 /// Representability is an engine limit, not a game rule: how the change is
 /// then treated is chosen by the caller's [`UnrepresentablePolicy`].
@@ -479,15 +481,16 @@ fn drain_substitution_continuation(
 /// place the final gain edit is made and the gain is reported.
 ///
 /// Order before anything observable: a recorded replacement-quantity overflow,
-/// then the amount must fit an `i32` delta, then the edit authority applies it,
-/// saturating the life total at `i32::MAX` and the gained-this-turn counter at
-/// `u32::MAX`; the `LifeChanged` amount and the returned amount are the rules
-/// amount (`arithmetic::reported_life_magnitude`), even when the total moved
-/// less. An unrepresentable result is handled per `policy`: `Reject` returns
-/// the typed error; `IgnoreImpossible` reports `Ok(0)` without a
-/// `LifeChanged`. An open ingress window records the failure for the owning
-/// public boundary to reject and restore; without one, ordinary resolution and
-/// legacy parked records use the logged compatibility skip.
+/// then the edit authority applies the whole amount as an exact `i64` delta,
+/// saturating the total it adjusts (the player's own life, or in Two-Headed
+/// Giant the team's shared total, CR 810.9) at `i32::MAX` and the
+/// gained-this-turn counter at `u32::MAX`; the `LifeChanged` amount and the
+/// returned amount are the rules amount (`arithmetic::reported_life_magnitude`),
+/// even when the total moved less. An unrepresentable result is handled per
+/// `policy`: `Reject` returns the typed error; `IgnoreImpossible` reports
+/// `Ok(0)` without a `LifeChanged`. An open ingress window records the failure
+/// for the owning public boundary to reject and restore; without one, ordinary
+/// resolution and legacy parked records use the logged compatibility skip.
 fn settle_life_gain(
     state: &mut GameState,
     event: ProposedEvent,
@@ -518,14 +521,13 @@ fn settle_life_gain(
     let applied = if gain_amount == 0 {
         0
     } else {
-        let before = stored_life(state, pid);
-        let edit = i32::try_from(gain_amount)
-            .map_err(|_| LifeChangeUnrepresentable { player: pid })
-            .and_then(|delta| apply_final_life_edit(state, pid, delta));
-        if let Err(unrepresentable) = edit {
+        // The applied amount is how far the total the change adjusts moved
+        // (CR 810.9: in Two-Headed Giant, the team's shared total).
+        let before = crate::game::players::life_change_total(state, pid);
+        if let Err(unrepresentable) = apply_final_life_edit(state, pid, i64::from(gain_amount)) {
             return settle_unrepresentable(state, unrepresentable, policy, "life gain");
         }
-        applied_life_change(state, pid, before)
+        before.abs_diff(crate::game::players::life_change_total(state, pid))
     };
     let reported = arithmetic::reported_life_magnitude(u64::from(gain_amount), applied);
     // CR 611.3a + CR 119: gate escalation on a live life-reading static.
@@ -549,20 +551,12 @@ fn stored_life(state: &GameState, player: PlayerId) -> Option<i32> {
         .map(|candidate| candidate.life)
 }
 
-/// How far the player's stored life field moved since `before` — the applied
-/// amount a saturating edit may make smaller than the rules amount.
-fn applied_life_change(state: &GameState, player: PlayerId, before: Option<i32>) -> u64 {
-    before
-        .zip(stored_life(state, player))
-        .map_or(0, |(before, after)| u64::from(before.abs_diff(after)))
-}
-
 /// Applies the final signed life delta through the edit authority, whose life
 /// arm saturates the total and the per-turn counters instead of refusing.
 fn apply_final_life_edit(
     state: &mut GameState,
     player: PlayerId,
-    delta: i32,
+    delta: i64,
 ) -> Result<(), LifeChangeUnrepresentable> {
     apply_final_player_resource_edit(state, player, ResolvedPlayerEdit::Life { delta })
 }
@@ -809,14 +803,11 @@ fn settle_life_loss(
     let applied = if loss_amount == 0 {
         0
     } else {
-        let own_before = stored_life(state, pid);
+        // The applied amount is how far the total the change adjusts moved
+        // (CR 810.9: in Two-Headed Giant, the team's shared total).
+        let shared_before = crate::game::players::life_change_total(state, pid);
         let before = crate::game::players::team_life_total(state, pid);
-        // A loss negates a value that already fit an `i32`, so the negation
-        // itself cannot overflow.
-        let edit = i32::try_from(loss_amount)
-            .map_err(|_| LifeChangeUnrepresentable { player: pid })
-            .and_then(|magnitude| apply_final_life_edit(state, pid, -magnitude));
-        if let Err(unrepresentable) = edit {
+        if let Err(unrepresentable) = apply_final_life_edit(state, pid, -i64::from(loss_amount)) {
             return settle_unrepresentable(state, unrepresentable, policy, "life loss");
         }
         let after = crate::game::players::team_life_total(state, pid);
@@ -829,7 +820,7 @@ fn settle_life_loss(
             after,
             loss_amount,
         );
-        applied_life_change(state, pid, own_before)
+        shared_before.abs_diff(crate::game::players::life_change_total(state, pid))
     };
     let reported = arithmetic::reported_life_magnitude(u64::from(loss_amount), applied);
     // CR 611.3a + CR 119 + CR 120.3a: gate escalation on a live life-reading
@@ -887,41 +878,28 @@ pub(crate) fn settle_life_loss_after_choice(
 pub enum LifeAssignmentOutcome {
     Applied,
     Deferred,
-    /// A receiver's current-to-resulting difference does not fit an `i32`.
-    /// Nothing was mutated (every delta is computed before the first edit) and
-    /// the failure is recorded in the open ingress window, so the action
-    /// boundary rejects the whole action.
-    Unrepresentable,
 }
 
-/// The signed life change that takes `current` to `target`, or `None` when the
-/// difference is not representable as an `i32`.
-///
-/// `Some(0)` is a real no-op; `None` is a failure. The failure is recorded in
-/// the open ingress life window (so an action boundary rejects the whole
-/// action), or logged as a discarded change when no window is open. Callers
-/// must stop mutating on `None` rather than substituting zero: a partial
-/// assignment would be observable if no boundary rolled it back. Shared by
-/// every site that feeds the life authority a difference.
-pub(super) fn life_total_difference(
+/// CR 119.5 + CR 701.12c + CR 701.12g: The exact signed life change that takes
+/// `current` to `target`. Never refuses.
+pub(super) fn life_total_difference(target: i32, current: i64) -> i64 {
+    i64::from(target) - current
+}
+
+/// CR 119.5 + CR 701.12c + CR 701.12g: The player gains or loses `difference`
+/// as one life-gain or life-loss event through the replacement pipeline.
+/// Returns the deferral when the pipeline paused.
+pub(super) fn apply_life_difference(
     state: &mut GameState,
     player: PlayerId,
-    target: i32,
-    current: i32,
-    site: &'static str,
-) -> Option<i32> {
-    match target.checked_sub(current) {
-        Some(diff) => Some(diff),
-        None => {
-            let unrepresentable = LifeChangeUnrepresentable { player };
-            let _ = settle_unrepresentable(
-                state,
-                unrepresentable,
-                UnrepresentablePolicy::IgnoreImpossible,
-                site,
-            );
-            None
-        }
+    difference: i64,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, ReplacementDeferred> {
+    let amount = arithmetic::u64_to_u32_saturating(difference.unsigned_abs());
+    match difference.cmp(&0) {
+        Ordering::Greater => apply_life_gain(state, player, amount, events),
+        Ordering::Less => apply_life_loss(state, player, amount, events),
+        Ordering::Equal => Ok(0),
     }
 }
 
@@ -948,10 +926,9 @@ pub fn apply_life_totals_assignment(
     events: &mut Vec<GameEvent>,
 ) -> Result<LifeAssignmentOutcome, EffectError> {
     // CR 701.12c: snapshot every receiver's current life BEFORE any mutation so
-    // each delta is measured against the pre-permutation total. A difference
-    // that does not fit an `i32` fails the whole assignment before the first
-    // edit, so no receiver's change is partially committed.
-    let mut deltas: Vec<(PlayerId, i32)> = Vec::with_capacity(assignment.len());
+    // each delta is measured against the pre-permutation total. Every
+    // difference is exact (`i64`), so no receiver's change can fail part-way.
+    let mut deltas: Vec<(PlayerId, i64)> = Vec::with_capacity(assignment.len());
     for &(pid, new_life) in assignment {
         let old = state
             .players
@@ -959,21 +936,11 @@ pub fn apply_life_totals_assignment(
             .find(|p| p.id == pid)
             .map(|p| p.life)
             .ok_or(EffectError::PlayerNotFound)?;
-        let Some(diff) = life_total_difference(state, pid, new_life, old, "life-total assignment")
-        else {
-            return Ok(LifeAssignmentOutcome::Unrepresentable);
-        };
-        deltas.push((pid, diff));
+        deltas.push((pid, life_total_difference(new_life, i64::from(old))));
     }
 
     for (index, (pid, diff)) in deltas.iter().copied().enumerate() {
-        let deferred = match diff.signum() {
-            1 => apply_life_gain(state, pid, diff as u32, events).err(),
-            // `unsigned_abs`: a stored difference may be `i32::MIN`.
-            -1 => apply_life_loss(state, pid, diff.unsigned_abs(), events).err(),
-            _ => None,
-        };
-        if deferred.is_some() {
+        if apply_life_difference(state, pid, diff, events).is_err() {
             // CR 616.1: a competing replacement required a player choice; the
             // helper installed the WaitingFor and the resume path completes the
             // remaining assignments.
@@ -1008,13 +975,9 @@ pub(crate) fn drain_pending_life_total_assignment(
         pending.remaining.remove(0);
         state.push_life_total_assignment(pending);
 
-        let deferred = match diff.signum() {
-            1 => apply_life_gain(state, pid, diff as u32, events).err(),
-            // `unsigned_abs`: a stored difference may be `i32::MIN`.
-            -1 => apply_life_loss(state, pid, diff.unsigned_abs(), events).err(),
-            _ => None,
-        };
-        if deferred.is_some() || !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        if apply_life_difference(state, pid, diff, events).is_err()
+            || !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        {
             return;
         }
     }
@@ -1187,32 +1150,16 @@ pub fn resolve_set_life_total(
         // CR 810.9a: "If a cost or effect needs to know the value of an
         // individual player's life total, that cost or effect uses the
         // team's life total instead" — degenerates to `Player::life` outside
-        // team-based formats. CR 810.9c: the diff is still applied to only
-        // `target_player_id`'s own life, so the team total moves by exactly
-        // the gained/lost amount.
+        // team-based formats. CR 810.9c: the player gains or loses the
+        // difference and the team's total moves by exactly that amount (the
+        // edit authority adjusts the shared total, CR 810.9), so the team lands
+        // on the new total.
         if !state.players.iter().any(|p| p.id == target_player_id) {
             return Err(EffectError::PlayerNotFound);
         }
-        let current_life = crate::game::players::team_life_total(state, target_player_id);
-        let Some(diff) = life_total_difference(
-            state,
-            target_player_id,
-            amount,
-            current_life,
-            "set life total",
-        ) else {
-            // The failure is recorded in the ingress window (or logged when no
-            // window is open). Stop before any later player's life is set.
-            return Ok(());
-        };
-
-        let deferred = match diff.signum() {
-            1 => apply_life_gain(state, target_player_id, diff as u32, events).err(),
-            // `unsigned_abs`: the difference may be `i32::MIN`.
-            -1 => apply_life_loss(state, target_player_id, diff.unsigned_abs(), events).err(),
-            _ => None,
-        };
-        if deferred.is_some() {
+        let current_life = crate::game::players::team_life_sum(state, target_player_id);
+        let diff = life_total_difference(amount, current_life);
+        if apply_life_difference(state, target_player_id, diff, events).is_err() {
             // CR 616.1: A competing replacement required a player choice; the
             // helper already installed the WaitingFor state. Return without
             // emitting EffectResolved — the resume path completes resolution.
@@ -1769,6 +1716,135 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// CR 701.12c + CR 616.1: a parked life-total assignment carries a
+    /// difference past the `i32` range exactly through serialization, and the
+    /// resume lands every receiver on the other's previous total.
+    #[test]
+    fn life_total_assignment_parks_and_resumes_a_difference_past_i32_exactly() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{ReplacementDefinition, ReplacementMode};
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = i32::MAX;
+        state.players[1].life = i32::MIN;
+
+        let shield = create_object(
+            &mut state,
+            CardId(950),
+            PlayerId(0),
+            "Life Shield".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&shield)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::LifeReduced)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .description("Life Shield".to_string()),
+            );
+
+        let mut events = Vec::new();
+        let outcome = apply_life_totals_assignment(
+            &mut state,
+            &[(PlayerId(0), i32::MIN), (PlayerId(1), i32::MAX)],
+            PlayerId(0),
+            Some(PendingEffectResolved::new(
+                EffectKind::ExchangeLifeTotals,
+                ObjectId(100),
+            )),
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, LifeAssignmentOutcome::Deferred);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert_eq!(state.players[0].life, i32::MAX);
+        assert_eq!(state.players[1].life, i32::MIN);
+        assert_eq!(
+            state
+                .active_life_total_assignment()
+                .map(|pending| pending.remaining.clone()),
+            Some(vec![(PlayerId(1), i64::from(u32::MAX))]),
+            "the tail holds the exact difference from i32::MIN to i32::MAX"
+        );
+
+        let WaitingFor::ReplacementChoice { player, .. } = state.waiting_for.clone() else {
+            panic!("expected replacement choice");
+        };
+        let serialized = serde_json::to_string(
+            &crate::types::resolution::ResolutionStateWire::from_game_state(state),
+        )
+        .expect("life-total assignment prompt serializes as v2 frames");
+        assert!(
+            serialized.contains("4294967295"),
+            "the parked difference serializes exactly"
+        );
+        let mut state =
+            serde_json::from_str::<crate::types::resolution::ResolutionStateWire>(&serialized)
+                .expect("life-total assignment prompt restores from v2 frames")
+                .into_game_state();
+        state.rehydrate_rng();
+        state.active_player = player;
+        state.priority_player = player;
+
+        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept life-loss replacement");
+
+        let life_changes: Vec<(PlayerId, i32, Option<i32>)> = result
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::LifeChanged {
+                    player_id,
+                    amount,
+                    new_total,
+                } => Some((*player_id, *amount, new_total.0)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            life_changes,
+            vec![
+                (PlayerId(0), i32::MIN, Some(i32::MIN)),
+                (PlayerId(1), i32::MAX, Some(i32::MAX)),
+            ]
+        );
+        assert_eq!(state.players[0].life, i32::MIN);
+        assert_eq!(state.players[1].life, i32::MAX);
+        assert_eq!(state.players[0].life_lost_this_turn, u32::MAX);
+        assert_eq!(state.players[1].life_gained_this_turn, u32::MAX);
+        assert!(state.active_life_total_assignment().is_none());
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::ExchangeLifeTotals,
+                source_id: ObjectId(100),
+                ..
+            }
+        )));
+        // CR 704.5a: the player now at i32::MIN loses the game.
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::GameOver {
+                    winner: Some(PlayerId(1)),
+                    ..
+                }
+            ),
+            "expected P1 to win, got {:?}",
+            state.waiting_for
+        );
     }
 
     /// CR 119.8: `resolve_lose` suppresses life loss for CantLoseLife player.
@@ -2508,11 +2584,11 @@ mod tests {
 
         /// Through both the ordinary and the `try_*` entries a life total
         /// saturates at the `i32` limit it moves toward and the per-turn
-        /// counters count the rules amount. An amount beyond the `i32` delta is
-        /// still skipped by the ordinary entry and reported by the `try_*` entry.
-        /// One below the limit both apply.
+        /// counters count the rules amount. An amount past `i32::MAX` is carried
+        /// exactly and reports `i32::MAX` / `i32::MIN` on the event. One below
+        /// the limit both apply.
         #[test]
-        fn ordinary_entries_skip_and_try_entries_reject_unrepresentable_results() {
+        fn ordinary_and_try_entries_saturate_at_the_life_limits() {
             let mut state = GameState::new_two_player(42);
             let player = PlayerId(0);
 
@@ -2547,17 +2623,46 @@ mod tests {
             assert_eq!(state.players[0].life_lost_this_turn, 4);
             assert_eq!(life_changed_count(&events), 4);
 
-            // An amount beyond the i32 delta is unrepresentable on its own.
+            // CR 119.3: an amount past i32::MAX is carried exactly through both
+            // entries; the total stops at the limit and the event reports the
+            // rules amount clamped to its field.
+            let wide_start = events.len();
             state.players[0].life = 0;
             assert_eq!(
                 apply_life_gain(&mut state, player, u32::MAX, &mut events),
-                Ok(0)
+                Ok(u32::MAX)
             );
+            assert_eq!(state.players[0].life, i32::MAX);
+            state.players[0].life = 0;
             assert_eq!(
                 try_apply_life_gain(&mut state, player, u32::MAX, &mut events),
-                Err(unrepresentable(player))
+                Ok(u32::MAX)
             );
-            assert_eq!(state.players[0].life, 0);
+            assert_eq!(state.players[0].life, i32::MAX);
+            assert_eq!(state.players[0].life_gained_this_turn, u32::MAX);
+            state.players[0].life = 0;
+            assert_eq!(
+                apply_life_loss(&mut state, player, u32::MAX, &mut events),
+                Ok(u32::MAX)
+            );
+            assert_eq!(state.players[0].life, i32::MIN);
+            state.players[0].life = 0;
+            assert_eq!(
+                try_apply_life_loss(&mut state, player, u32::MAX, &mut events),
+                Ok(u32::MAX)
+            );
+            assert_eq!(state.players[0].life, i32::MIN);
+            assert_eq!(state.players[0].life_lost_this_turn, u32::MAX);
+            assert_eq!(state.ingress_life_window, None, "the window closes");
+            assert_eq!(
+                life_changed_amounts(&events[wide_start..]),
+                vec![i32::MAX, i32::MAX, i32::MIN, i32::MIN]
+            );
+            assert!(events[wide_start..].iter().all(|event| !matches!(
+                event,
+                GameEvent::LifeChanged { player_id, .. } if *player_id != player
+            )));
+            assert_eq!(life_changed_count(&events), 8);
 
             // One below the limit both apply.
             state.players[0].life = i32::MAX - 2;
@@ -2569,7 +2674,7 @@ mod tests {
                 Ok(2)
             );
             assert_eq!(state.players[0].life, i32::MAX);
-            assert_eq!(life_changed_count(&events), 6);
+            assert_eq!(life_changed_count(&events), 10);
         }
 
         /// Windows nest: a `try_*` entry opened inside an outer window reports
@@ -3125,35 +3230,24 @@ mod tests {
             ));
         }
 
-        /// The sibling difference helper: an `i32` overflow is the receiver's
-        /// unrepresentable change and reports `None` (never a substitute zero), while
-        /// a representable difference — including `i32::MIN` — passes through.
+        /// CR 119.5 + CR 701.12c: the difference helper is exact across the
+        /// whole `i32` range of targets and the `i64` range of current totals.
         #[test]
-        fn life_total_difference_reports_overflow_as_failure() {
-            let mut state = GameState::new_two_player(42);
+        fn life_total_difference_is_exact_across_the_range() {
+            assert_eq!(life_total_difference(7, 20), -13);
+            assert_eq!(life_total_difference(20, 7), 13);
+            assert_eq!(life_total_difference(i32::MAX, -1), 1 << 31);
+            assert_eq!(life_total_difference(i32::MIN, 1), -(1 << 31) - 1);
             assert_eq!(
-                life_total_difference(&mut state, P0, 7, 20, "test"),
-                Some(-13)
+                life_total_difference(i32::MAX, i64::from(i32::MIN)),
+                i64::from(u32::MAX)
             );
             assert_eq!(
-                life_total_difference(&mut state, P0, 20, 7, "test"),
-                Some(13)
+                life_total_difference(i32::MIN, i64::from(i32::MAX)),
+                -i64::from(u32::MAX)
             );
-            assert_eq!(
-                life_total_difference(&mut state, P0, i32::MAX, -1, "test"),
-                None
-            );
-            assert_eq!(
-                life_total_difference(&mut state, P0, i32::MIN, 1, "test"),
-                None
-            );
-            assert_eq!(
-                life_total_difference(&mut state, P0, i32::MIN, 0, "test")
-                    .expect("i32::MIN stays representable as a difference")
-                    .unsigned_abs(),
-                1 << 31,
-                "its magnitude needs unsigned_abs"
-            );
+            // A Two-Headed Giant team's exact total may lie outside `i32`.
+            assert_eq!(life_total_difference(10, 4_294_967_294), -4_294_967_284);
         }
     }
 }
