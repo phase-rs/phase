@@ -5505,7 +5505,11 @@ mod tests {
                         count: 1,
                     })
                     .unwrap_err();
-                assert!(format!("{error:?}").contains("process owner mismatch"));
+                assert!(
+                    format!("{error:?}")
+                        .contains("instruction-result admitted program declaration mismatch"),
+                    "{error:?}"
+                );
                 assert_eq!(serde_json::to_value(bad.state()).unwrap(), before);
                 let saved = serde_json::to_value(runner.state()).unwrap();
                 *runner.state_mut() = serde_json::from_value(saved).expect("the real next-seat/next-instruction owner keeps the same checked result through reload");

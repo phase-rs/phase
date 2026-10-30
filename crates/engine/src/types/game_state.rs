@@ -17018,6 +17018,18 @@ fn validate_retained_counter_result_owners(state: &GameState) -> Result<(), Stri
 pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<(), String> {
     validate_retained_counter_result_owners(state)?;
     validate_present_instruction_result_programs(state)?;
+    // Validate held operations even when a selected child is the active wait.
+    // This narrow boundary is shared by save admission and public actions.
+    if let Some(pending) = &state.pending_die_roll_instruction {
+        crate::game::effects::roll_die::validate_die_instruction_result_owner(state, pending)
+            .map_err(|error| error.to_string())?;
+    }
+    for frame in state.resolution_stack.iter() {
+        if let ResolutionFrame::DieRoll(pending) = frame {
+            crate::game::effects::roll_die::validate_pending_die_result_owner(state, pending)
+                .map_err(|error| error.to_string())?;
+        }
+    }
     state
         .resolution_stack
         .validate_independent_departure_scopes()?;
@@ -17838,8 +17850,6 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
         _ => {}
     }
     if let Some(pending) = &state.pending_die_roll_instruction {
-        crate::game::effects::roll_die::validate_die_instruction_result_owner(state, pending)
-            .map_err(|error| error.to_string())?;
         validate_carrier(pending.return_result_occurrence, None)?;
     }
     if let Some(pending) = &state.pending_scoped_library_search {
@@ -18006,8 +18016,6 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                 validate_carrier(pending.return_result_occurrence, Some(&pending.ability))?
             }
             ResolutionFrame::DieRoll(pending) => {
-                crate::game::effects::roll_die::validate_pending_die_result_owner(state, pending)
-                    .map_err(|error| error.to_string())?;
                 validate_carrier(pending.return_result_occurrence, None)?
             }
             ResolutionFrame::CoinFlip(pending) => {
@@ -51200,9 +51208,43 @@ mod tests {
                 );
                 let original = value.clone();
                 let mut malformed = value;
+                fn rewrite_inline(
+                    value: &mut serde_json::Value,
+                    expected: &serde_json::Value,
+                ) -> usize {
+                    match value {
+                        serde_json::Value::Object(fields) => {
+                            let here = if let Some(slot) = fields.get_mut("runtime_execute") {
+                                if slot == expected {
+                                    assert!(
+                                        slot.is_object(),
+                                        "the first rewrite installed the exact inline rider"
+                                    );
+                                    *slot = serde_json::json!("bad rider");
+                                    1
+                                } else {
+                                    0
+                                }
+                            } else {
+                                0
+                            };
+                            here + fields
+                                .iter_mut()
+                                .filter(|(key, _)| *key != "runtime_execute")
+                                .map(|(_, child)| rewrite_inline(child, expected))
+                                .sum::<usize>()
+                        }
+                        serde_json::Value::Array(values) => values
+                            .iter_mut()
+                            .map(|child| rewrite_inline(child, expected))
+                            .sum(),
+                        _ => 0,
+                    }
+                }
                 assert_eq!(
-                    rewrite_runtime_execute(&mut malformed, serde_json::json!("bad rider")),
-                    1
+                    rewrite_inline(&mut malformed, &inline),
+                    1,
+                    "exactly one guarded already-inline rider is corrupted"
                 );
                 assert!(
                     ingress.decode(malformed).is_err(),
@@ -66330,12 +66372,12 @@ mod damage_source_canonical_admission_tests {
                 erase_only_legacy_chooser_tags(&mut saved);
                 let input = serde_json::to_string(&saved).unwrap();
                 *runner.state_mut() = match ingress {
-                    0 => serde_json::from_str::<GameState>(&input).unwrap(),
+                    0 => serde_json::from_str::<GameState>(&input).unwrap_or_else(|error| panic!("ingress={ingress}, flip={ordinal}: {error}; saved={saved}; current continuation={:?}; held flip={:?}", runner.state().active_ability_continuation(), runner.state().active_coin_flip_frame())),
                     1 => serde_json::from_str::<ResolutionStateWire>(&input)
-                        .unwrap()
+                        .unwrap_or_else(|error| panic!("ingress={ingress}, flip={ordinal}: {error}; saved={saved}; current continuation={:?}; held flip={:?}", runner.state().active_ability_continuation(), runner.state().active_coin_flip_frame()))
                         .into_game_state(),
                     _ => serde_json::from_str::<PersistedGameState>(&input)
-                        .unwrap()
+                        .unwrap_or_else(|error| panic!("ingress={ingress}, flip={ordinal}: {error}; saved={saved}; current continuation={:?}; held flip={:?}", runner.state().active_ability_continuation(), runner.state().active_coin_flip_frame()))
                         .into_game_state_unchecked(),
                 };
                 assert_eq!(
@@ -66463,6 +66505,28 @@ mod damage_source_canonical_admission_tests {
             .1
             .context
             .cast_from_zone = None;
+        let pending = malformed.active_coin_flip_frame().unwrap();
+        assert_eq!(pending.branch_context.coin_branch_target_abilities.len(), 2);
+        assert_eq!(
+            pending.branch_context.coin_branch_target_abilities[1]
+                .1
+                .context
+                .cast_from_zone,
+            Some(Zone::Hand)
+        );
+        // Shared preflight validates complete branch inputs before the public
+        // flip handler reaches its narrower parked-custody wrapper.
+        let expected_category = "coin target custody read inputs disagree with their owner";
+        assert_eq!(
+            pending
+                .branch_context
+                .validate_branches(&[
+                    pending.win_effect.as_deref(),
+                    pending.lose_effect.as_deref(),
+                ])
+                .unwrap_err(),
+            expected_category
+        );
         let before = malformed.clone();
         let error = crate::game::engine::apply(
             &mut malformed,
@@ -66472,7 +66536,10 @@ mod damage_source_canonical_admission_tests {
             },
         )
         .unwrap_err();
-        assert!(error.to_string().contains("parked coin target custody"));
+        assert!(
+            error.to_string().contains(expected_category),
+            "malformed current announcement: {error}"
+        );
         assert_eq!(
             malformed, before,
             "changed announcement input cannot be reconstructed from the live source"

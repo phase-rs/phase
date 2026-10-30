@@ -825,6 +825,7 @@ pub(crate) fn build_vote_outcome(
         ability.scoped_player = Some(voter);
         ability.original_controller = Some(controller);
     }
+    super::reset_fresh_producer_entry(&mut ability);
     ability
 }
 
@@ -1116,19 +1117,33 @@ mod admitted_ballot_public_tests {
         }
     }
 
-    fn omit_old_vote_input(value: &mut serde_json::Value) {
+    fn omit_old_vote_input(value: &mut serde_json::Value) -> Vec<serde_json::Value> {
+        let mut removed = Vec::new();
         match value {
             serde_json::Value::Object(fields) => {
                 if fields.get("type").and_then(serde_json::Value::as_str) == Some("VoteChoice") {
-                    fields.remove("retained_input");
+                    removed.push(
+                        fields
+                            .get_mut("data")
+                            .unwrap()
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("retained_input")
+                            .expect("actual complete Vote input"),
+                    );
                 }
                 for child in fields.values_mut() {
-                    omit_old_vote_input(child);
+                    removed.extend(omit_old_vote_input(child));
                 }
             }
-            serde_json::Value::Array(values) => values.iter_mut().for_each(omit_old_vote_input),
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    removed.extend(omit_old_vote_input(child));
+                }
+            }
             _ => {}
         }
+        removed
     }
 
     fn input_vote(outcome: AbilityDefinition, visibility: VoteVisibility) -> Effect {
@@ -1208,6 +1223,7 @@ mod admitted_ballot_public_tests {
                 assert!(paused.return_result_frames.is_empty());
                 assert!(paused.resolution_stack.is_empty());
                 assert!(paused.stack.is_empty());
+                assert!(paused.resolving_stack_entry.is_none());
                 let WaitingFor::VoteChoice {
                     retained_input: Some(held),
                     return_result_occurrence: None,
@@ -1295,10 +1311,15 @@ mod admitted_ballot_public_tests {
                 }
                 assert_eq!(runner.state(), &paused, "views never mutate authority");
                 let mut erased = serde_json::to_value(&paused).unwrap();
-                erased["waiting_for"]
+                let removed = erased["waiting_for"]["data"]
                     .as_object_mut()
                     .unwrap()
                     .remove("retained_input");
+                assert_eq!(
+                    removed,
+                    Some(serde_json::to_value(held).unwrap()),
+                    "erase precisely the guarded full Vote input"
+                );
                 let original = erased.clone();
                 assert!(serde_json::from_value::<GameState>(erased.clone()).is_err());
                 assert_eq!(erased, original);
@@ -1851,7 +1872,18 @@ mod admitted_ballot_public_tests {
                         )
                         .unwrap(),
                     };
-                    omit_old_vote_input(&mut value);
+                    let WaitingFor::VoteChoice {
+                        retained_input: Some(input),
+                        ..
+                    } = &runner.state().waiting_for
+                    else {
+                        unreachable!()
+                    };
+                    assert_eq!(
+                        omit_old_vote_input(&mut value),
+                        vec![serde_json::to_value(input).unwrap()],
+                        "ingress={ingress}: erase exactly one complete original Vote input"
+                    );
                     let restored =
                         match ingress {
                             0 => serde_json::from_value(value).unwrap(),

@@ -775,7 +775,10 @@ mod tests {
             )
             .map(crate::types::resolution::ResolutionStateWire::into_game_state),
         }
-        .unwrap_or_else(|error| panic!("counter restore ingress {ingress}: {error}"))
+        .unwrap_or_else(|error| panic!(
+            "counter restore ingress {ingress}: {error}; full admitted frames={:?}; resolving_stack_entry={:?}; pending wait={:?}; targets are retained on those complete inputs",
+            state.return_result_frames, state.resolving_stack_entry, state.waiting_for,
+        ))
     }
 
     fn counter_prompt_root(state: &GameState) -> &ResolvedAbility {
@@ -1174,6 +1177,16 @@ mod tests {
                 .act(GameAction::DecideOptionalEffect { accept: true })
                 .unwrap();
             assert_complete_counter_prompt(runner.state(), actor, source, recipient);
+            if !scoped {
+                let WaitingFor::ChooseOneOfBranch { context, .. } = &runner.state().waiting_for
+                else {
+                    unreachable!()
+                };
+                assert!(
+                    !context.optional_effect_performed,
+                    "completed empty wrapper performed no action"
+                );
+            }
             let mut hostile = runner.state().clone();
             let WaitingFor::ChooseOneOfBranch { context, .. } = &mut hostile.waiting_for else {
                 unreachable!()
@@ -1181,7 +1194,7 @@ mod tests {
             if scoped {
                 context.accepting_player = Some(P1);
             } else {
-                context.optional_effect_performed = false;
+                context.optional_effect_performed = true;
             }
             assert_counter_refuses_intact(
                 hostile,
@@ -1906,7 +1919,7 @@ mod tests {
                 scenario.with_counter(recipient, CounterType::Generic("charge".into()), 5);
                 let mut runner = scenario.build();
                 runner.state_mut().debug_mode = true;
-                runner
+                let draw_response = runner
                     .act(GameAction::Debug(DebugAction::DrawCards {
                         player_id: P1,
                         count: 1,
@@ -1922,7 +1935,10 @@ mod tests {
                 assert!(matches!(
                     runner.state().waiting_for,
                     WaitingFor::OpponentMayChoice { player: P0, .. }
-                ));
+                ), "local={local}, acceptor={acceptor:?}; actual wait={:?}; draw response={draw_response:?}; drains={:?}; event_target={:?}; event_source={:?}; replacement_source={:?}; replacement_controller={:?}",
+                    runner.state().waiting_for, runner.state().active_post_replacement_drains(),
+                    runner.state().post_replacement_event_target(), runner.state().post_replacement_event_source(),
+                    runner.state().post_replacement_source(), runner.state().post_replacement_controller());
                 let before = runner.state().clone();
                 assert!(apply(
                     runner.state_mut(),

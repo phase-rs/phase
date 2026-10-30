@@ -35,6 +35,7 @@ pub(crate) fn build_die_result(
     row.inherit_coin_target_inputs(input);
     row.replace_target_occurrences(input.target_occurrences());
     row.bind_return_result_process(input.return_result_process);
+    super::reset_fresh_producer_entry(&mut row);
     row
 }
 
@@ -1256,6 +1257,175 @@ mod tests {
             )
             .unwrap()
             .into_game_state(),
+        }
+    }
+
+    #[test]
+    fn public_selected_die_and_vote_heads_make_fresh_source_choices() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::ability::*;
+        use crate::types::actions::GameAction;
+        use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        for vote in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let a = scenario
+                .add_artifact_from_oracle(P1, "Original selected source", "")
+                .id();
+            let b = scenario
+                .add_artifact_from_oracle(P1, "Fresh selected source", "")
+                .id();
+            let filter = TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent),
+            );
+            // Supplemental typed activation: choose A, then the selected row
+            // starts its own source choice before its complete life-gain tail.
+            let child = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseDamageSource {
+                    source_filter: filter.clone(),
+                },
+            )
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    player: TargetFilter::Controller,
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+            ));
+            let selection = if vote {
+                Effect::Vote {
+                    choices: vec!["read".into()],
+                    per_choice_effect: vec![Box::new(child)],
+                    starting_with: ControllerRef::You,
+                    voter_scope: VoterScope::AnOpponent,
+                    tally_mode: VoteTally::TopVotes {
+                        tie: TieResolution::Breaker(0),
+                    },
+                    subject: VoteSubject::Named,
+                    visibility: VoteVisibility::Open,
+                }
+            } else {
+                Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides: 1,
+                    results: vec![DieResultBranch {
+                        min: 1,
+                        max: 1,
+                        effect: Box::new(child),
+                    }],
+                    modifier: None,
+                }
+            };
+            let definition = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::ChooseDamageSource {
+                    source_filter: filter,
+                },
+            )
+            .cost(AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            })
+            .sub_ability(AbilityDefinition::new(AbilityKind::Spell, selection));
+            let source = scenario
+                .add_artifact_from_oracle(P0, "Supplemental selected entry", "")
+                .with_ability_definition(definition)
+                .id();
+            scenario.with_mana_pool(
+                P0,
+                vec![ManaUnit::new(ManaType::Black, source, false, vec![])],
+            );
+            let mut runner = scenario.build();
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                })
+                .unwrap();
+            for _ in 0..8 {
+                if matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::DamageSourceChoice { .. }
+                ) {
+                    break;
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+                panic!("vote={vote}: original source choice");
+            };
+            let selected = options
+                .iter()
+                .find(|option| option.identity.reference.object_id == a)
+                .unwrap()
+                .identity
+                .reference;
+            runner
+                .act(GameAction::ChooseDamageSource { source: selected })
+                .unwrap();
+            if vote {
+                let WaitingFor::VoteChoice {
+                    player: P1,
+                    retained_input: Some(input),
+                    ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!("required real ballot");
+                };
+                assert_eq!(
+                    input
+                        .context
+                        .damage_source_choice
+                        .as_ref()
+                        .unwrap()
+                        .source
+                        .as_ref()
+                        .unwrap()
+                        .identity
+                        .reference,
+                    selected
+                );
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: "read".into(),
+                    })
+                    .unwrap();
+            }
+            // CR 608.2d: the new row's choice is made when that row is applied.
+            let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+                panic!("vote={vote}: selected fresh producer must ask for B");
+            };
+            let fresh = options
+                .iter()
+                .find(|option| option.identity.reference.object_id == b)
+                .unwrap()
+                .identity
+                .reference;
+            assert_ne!(fresh, selected);
+            assert_eq!(runner.state().players[0].life, 20);
+            let paused = runner.state().clone();
+            for ingress in 0..3 {
+                let mut resumed = GameRunner::from_state(restored_roll(&paused, ingress));
+                resumed
+                    .act(GameAction::ChooseDamageSource { source: fresh })
+                    .unwrap();
+                resumed.advance_until_stack_empty();
+                assert_eq!(resumed.state().players[0].life, 22);
+                assert!(matches!(
+                    resumed.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(resumed.state().stack.is_empty());
+                assert!(resumed.state().resolution_stack.is_empty());
+                assert!(resumed.state().return_result_frames.is_empty());
+                assert!(resumed.state().owed_spell_final_part().is_none());
+            }
         }
     }
 

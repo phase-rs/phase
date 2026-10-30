@@ -348,6 +348,7 @@ pub(crate) fn project_selected_branch(
         resolved.push_target(TargetRef::Player(player));
     }
 
+    super::reset_fresh_producer_entry(&mut resolved);
     resolved
 }
 

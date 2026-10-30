@@ -3007,6 +3007,17 @@ fn visit_instruction_result_program_projections_inner(
     if let Some(state) = generated_state {
         // Discharge the enclosing control before exposing any dependent child.
         if let Some(scope) = &program.player_scope {
+            if visit_scoped_remaining_queues(state, program, scope, &mut |queue| {
+                visit_instruction_result_program_projections_inner(
+                    queue,
+                    scoped_player,
+                    current,
+                    generated_state,
+                    visit,
+                )
+            }) {
+                return true;
+            }
             let (template, after_scope) = split_player_scope_chain(program, scope);
             if let Some(seat) = scoped_player {
                 let bound = bind_scoped_seat(&template, program.controller, seat);
@@ -3364,6 +3375,31 @@ fn visit_instruction_result_program_projections_inner(
             }
         }
     }
+    if matches!(program.effect, Effect::NoOp)
+        && !program.optional
+        && program.optional_for.is_none()
+        && program.unless_pay.is_none()
+    {
+        // NoOp's completed verdict is deterministic, independent of events.
+        // Enumerate its children directly so the completed root is not visited
+        // recursively as another prospective completion of itself.
+        let mut completed = stamp_resolver_performed_outcome(program, false, None);
+        if completed.sub_ability.as_ref().is_some_and(|sub| {
+            sub.sub_link == SubAbilityLink::ContinuationStep && sub.condition.is_none()
+        }) {
+            completed.context.unperformed_compound_instruction = Some(EffectKind::NoOp);
+        }
+        return visit(&completed)
+            || visit_instruction_result_child_projections(&completed, &mut |child| {
+                visit_instruction_result_program_projections_inner(
+                    child,
+                    scoped_player,
+                    current,
+                    generated_state,
+                    visit,
+                )
+            });
+    }
     if visit_instruction_result_child_projections(program, &mut |child| {
         visit_instruction_result_program_projections_inner(
             child,
@@ -3600,6 +3636,17 @@ fn instruction_result_execution_program_projects_to(
     current: &ResolvedAbility,
 ) -> bool {
     instruction_result_program_projects_to(program, current)
+        || visit_instruction_result_program_projections_for_cursor(
+            program,
+            current,
+            &mut |candidate| {
+                candidate.player_scope.as_ref().is_some_and(|scope| {
+                    visit_scoped_remaining_queues(state, candidate, scope, &mut |queue| {
+                        instruction_result_program_projects_to(queue, current)
+                    })
+                })
+            },
+        )
         || instruction_result_opponent_target_split_projects_to(state, occurrence, program, current)
         || visit_instruction_result_program_projections_for_cursor(
             program,
@@ -4149,6 +4196,17 @@ pub(crate) fn validate_definition_waiting_for_result_owner(
                 state, waiting,
             );
         }
+        WaitingFor::MultiTargetSelection {
+            return_result_occurrence,
+            pending_ability,
+            ..
+        } => {
+            if return_result_occurrence.is_some() {
+                owned_cursor_declarations(state, *return_result_occurrence, pending_ability)?;
+                return Ok(());
+            }
+            return validate_selected_instruction_result_owner(state, pending_ability, None);
+        }
         WaitingFor::ExploreChoice {
             return_result_occurrence,
             pending_effect: body,
@@ -4162,11 +4220,6 @@ pub(crate) fn validate_definition_waiting_for_result_owner(
         | WaitingFor::ChooseFromZoneOpponentChooser {
             return_result_occurrence,
             ability: body,
-            ..
-        }
-        | WaitingFor::MultiTargetSelection {
-            return_result_occurrence,
-            pending_ability: body,
             ..
         }
         | WaitingFor::ChooseTokenHost {
@@ -4300,6 +4353,33 @@ pub(crate) fn retained_operation_admitted_program(
         return Err(EffectError::InvalidParam(
             "retained operation process mismatch".into(),
         ));
+    }
+    if occurrence.is_some() {
+        // A readerless current instruction can still belong to a producing
+        // invocation. Authenticate the complete namespace before classifying it.
+        let (program, declarations) = instruction_result_cursor_origin(state, input, occurrence)?;
+        if !crate::types::game_state::is_retained_instruction_result_carrier(
+            state, occurrence, input,
+        ) {
+            return Err(EffectError::InvalidParam(
+                "retained operation has no actual typed carrier".into(),
+            ));
+        }
+        let summary = validate_owned_instruction_result_cursor(
+            state,
+            input,
+            occurrence,
+            (program, declarations),
+        )?;
+        if matches!(
+            summary,
+            crate::types::ability::InstructionResultProcess::Unused
+        ) {
+            return Err(EffectError::InvalidParam(
+                "unused retained operation has a foreign owner".into(),
+            ));
+        }
+        return Ok(Some((program.clone(), declarations.clone())));
     }
     if !crate::types::game_state::has_return_result_metadata(input) {
         let (summary, _) = crate::types::ability::classify_instruction_result_invocation(
@@ -8572,6 +8652,14 @@ pub(crate) fn apply_parent_chain_context(
     );
 }
 
+/// CR 608.2d: a newly entered producer makes its own resolution choice.
+/// Retained/current inputs and reader nodes keep their completed selection.
+pub(crate) fn reset_fresh_producer_entry(ability: &mut ResolvedAbility) {
+    if ability.effect.is_fresh_damage_source_producer() {
+        ability.context.damage_source_choice = None;
+    }
+}
+
 /// The context handoff itself is pure. Admission/recovery can construct the
 /// same child without consuming a relay or executing its preceding effect.
 pub(crate) fn project_parent_chain_context(
@@ -8604,10 +8692,7 @@ pub(crate) fn project_parent_chain_context(
     // Only explicitly marked remaining members inherit this operation.
     child.context.damage_opportunity = child_damage_opportunity
         .and_then(|owned| parent.context.damage_opportunity.clone().or(Some(owned)));
-    // A fresh producer cannot consume its parent's completed selection.
-    if child.effect.is_fresh_damage_source_producer() {
-        child.context.damage_source_choice = None;
-    }
+    reset_fresh_producer_entry(child);
     // An instruction's ticket belongs only to its generated concrete branch;
     // ordinary descendants cannot spend that producer's capability.
     child.context.counter_removal_result = None;
@@ -14886,6 +14971,21 @@ fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
             // operation result and propagates that boolean to its printed tail.
             | Effect::CompletePlayerAction { .. }
     )
+}
+
+fn stamp_resolver_performed_outcome(
+    ability: &ResolvedAbility,
+    performed: bool,
+    payment_choice: Option<AutoMayChoice>,
+) -> ResolvedAbility {
+    let mut owned = ability.clone();
+    if payment_choice.is_some() {
+        // CR 118.12 + CR 118.12a: payment owns only this root's verdict.
+        owned.context.optional_effect_performed = performed;
+    } else {
+        owned.set_optional_effect_performed_recursive(performed);
+    }
+    owned
 }
 
 /// CR 608.2c: the resolver's own verdict on whether its instruction was
@@ -26629,66 +26729,18 @@ fn resolve_owned_chain_body_with_completion(
                     // would publish a truncated table first.
                     return Ok(progress);
                 }
-                let remaining = &matching_players[i + 1..];
-                // The unscoped tail is owned explicitly by the continuation
-                // sidecar below. Only generated per-seat nodes are linearized
-                // here, so no ordinary scoped sibling can impersonate them.
-                let mut tail = if after_scope_owned_by_sidecar {
-                    None
-                } else {
-                    // CR 608.2c: linearized after the per-seat legs, the
-                    // instruction printed after the clause depends on no seat's
-                    // gate (the synchronous path resolves `after_scope`
-                    // unconditionally after the last seat), so it starts an
-                    // independent instruction whatever link it was parsed with;
-                    // a false gate's forward walk and a declined "may" then
-                    // reach it on every leg.
-                    after_scope.clone().map(|mut next| {
-                        next.sub_link = SubAbilityLink::SequentialSibling;
-                        next
-                    })
-                };
-                // Build continuation chain for remaining players in APNAP order.
-                // Each remaining player gets the scoped instruction only; the
-                // unscoped tail runs once after the final scoped iteration.
-                for &remaining_pid in remaining.iter().rev() {
-                    // Each pending leg carries its own binding, so a pause in
-                    // this action (e.g. a counter-replacement order, CR 616.1)
-                    // resumes against the same objects.
-                    let bound_leg = bind_seat_created_referent(
-                        state,
-                        bind_scoped_seat(&scoped_template, controller, remaining_pid),
-                        remaining_pid,
-                        created_referent.as_ref(),
-                    );
-                    let closes_every_route =
-                        matches!(bound_leg, SeatCreatedReferent::NoReferent(_));
-                    let Some(mut remaining_scoped) = bound_leg.into_leg() else {
-                        continue;
-                    };
-                    // CR 608.2c: each remaining player's clause is an INDEPENDENT
-                    // following instruction, not a continuation of the prior
-                    // player's. When the scoped template carries a conditional
-                    // rider (e.g. Momentum Breaker's "each opponent who can't
-                    // discards a card"), this clause gets appended after the
-                    // first player's stashed rider; marking it `SequentialSibling`
-                    // ensures it still resolves when that rider's condition is
-                    // false (it ran for a player who DID perform the action), so
-                    // the per-opponent fan-out is not truncated after the first.
-                    remaining_scoped.sub_link = SubAbilityLink::SequentialSibling;
-                    // CR 608.2c: a `NoReferent` leg replaces a seat that would
-                    // otherwise be skipped (so what follows always ran); every
-                    // route through it, the "otherwise" leg included, ends at the
-                    // next seat's independent instruction.
-                    if let Some(prev) = tail {
-                        if closes_every_route {
-                            append_after_every_route(&mut remaining_scoped, *prev);
-                        } else {
-                            super::ability_utils::append_to_sub_chain(&mut remaining_scoped, *prev);
-                        }
-                    }
-                    tail = Some(Box::new(remaining_scoped));
-                }
+                let tail = remaining_scoped_queue(
+                    state,
+                    &scoped_template,
+                    controller,
+                    &matching_players[i + 1..],
+                    if after_scope_owned_by_sidecar {
+                        None
+                    } else {
+                        after_scope.clone()
+                    },
+                    created_referent.as_ref(),
+                );
                 // CR 608.2e: do NOT clear the clause snapshot here — the
                 // remaining clause-N players resume via `pending_continuation`
                 // as bare single-scoped effects (no `player_scope`, so they do
@@ -28636,16 +28688,8 @@ fn resolve_owned_chain_body_with_completion(
         .map(|choice| choice == AutoMayChoice::Accept)
         .or_else(|| resolver_performed_outcome(ability, &events[events_before..]))
     {
-        let mut owned = ability.clone();
-        if payment_choice.is_some() {
-            // CR 118.12 + CR 118.12a: Counter delivery is not payment, and
-            // declining payment cannot undo Flash's preceding optional put.
-            // Publish only after this root's incoming gate and effect.
-            owned.context.optional_effect_performed = performed;
-        } else {
-            owned.set_optional_effect_performed_recursive(performed);
-        }
-        performed_outcome_owned = owned;
+        performed_outcome_owned =
+            stamp_resolver_performed_outcome(ability, performed, payment_choice);
         &performed_outcome_owned
     } else {
         ability
@@ -30732,6 +30776,102 @@ fn mark_co_scoped_created_referent_consumer(
             *filter = seat_created_referent_filter();
         }
     }
+}
+
+/// Enumerate only queues constructed from a complete original scope and an
+/// APNAP suffix. Current cursor fields supply neither seats nor links.
+fn visit_scoped_remaining_queues(
+    state: &GameState,
+    program: &ResolvedAbility,
+    scope: &PlayerFilter,
+    visit: &mut impl FnMut(&ResolvedAbility) -> bool,
+) -> bool {
+    let (template, mut after_scope) = split_player_scope_chain(program, scope);
+    mark_co_scoped_created_referent_consumer(&template, scope, &mut after_scope);
+    let apnap = crate::game::players::apnap_order_from(
+        state,
+        program.starting_with.clone(),
+        program.controller,
+    );
+    let players = player_scope_members(state, scope, program, apnap);
+    let created_referent = seat_created_referent_snapshot(state, &template);
+    let queued_tail = if after_scope.as_deref().is_some_and(|tail| {
+        crate::game::exile_links::ability_contains_linked_exile_consumer(tail)
+            || (template.effect.is_token_creator() && tail_reads_created_referent(tail))
+    }) {
+        None
+    } else {
+        after_scope
+    };
+    (1..players.len()).any(|first_remaining| {
+        remaining_scoped_queue(
+            state,
+            &template,
+            program.controller,
+            &players[first_remaining..],
+            queued_tail.clone(),
+            created_referent.as_ref(),
+        )
+        .as_ref()
+        .is_some_and(|queue| visit(queue))
+    })
+}
+
+/// CR 608.2c + CR 608.2e: the exact ordered future-seat queue used when a
+/// scoped instruction pauses. The caller excludes any separately owned tail.
+fn remaining_scoped_queue(
+    state: &GameState,
+    scoped_template: &ResolvedAbility,
+    controller: PlayerId,
+    remaining: &[PlayerId],
+    after_scope: Option<Box<ResolvedAbility>>,
+    created_referent: Option<&SeatCreatedReferentSnapshot>,
+) -> Option<Box<ResolvedAbility>> {
+    let mut tail = after_scope.map(|mut next| {
+        next.sub_link = SubAbilityLink::SequentialSibling;
+        next
+    });
+    // Build continuation chain for remaining players in APNAP order.
+    // Each remaining player gets the scoped instruction only; the
+    // unscoped tail runs once after the final scoped iteration.
+    for &remaining_pid in remaining.iter().rev() {
+        // Each pending leg carries its own binding, so a pause in
+        // this action (e.g. a counter-replacement order, CR 616.1)
+        // resumes against the same objects.
+        let bound_leg = bind_seat_created_referent(
+            state,
+            bind_scoped_seat(scoped_template, controller, remaining_pid),
+            remaining_pid,
+            created_referent,
+        );
+        let closes_every_route = matches!(bound_leg, SeatCreatedReferent::NoReferent(_));
+        let Some(mut remaining_scoped) = bound_leg.into_leg() else {
+            continue;
+        };
+        // CR 608.2c: each remaining player's clause is an INDEPENDENT
+        // following instruction, not a continuation of the prior
+        // player's. When the scoped template carries a conditional
+        // rider (e.g. Momentum Breaker's "each opponent who can't
+        // discards a card"), this clause gets appended after the
+        // first player's stashed rider; marking it `SequentialSibling`
+        // ensures it still resolves when that rider's condition is
+        // false (it ran for a player who DID perform the action), so
+        // the per-opponent fan-out is not truncated after the first.
+        remaining_scoped.sub_link = SubAbilityLink::SequentialSibling;
+        // CR 608.2c: a `NoReferent` leg replaces a seat that would
+        // otherwise be skipped (so what follows always ran); every
+        // route through it, the "otherwise" leg included, ends at the
+        // next seat's independent instruction.
+        if let Some(prev) = tail {
+            if closes_every_route {
+                append_after_every_route(&mut remaining_scoped, *prev);
+            } else {
+                super::ability_utils::append_to_sub_chain(&mut remaining_scoped, *prev);
+            }
+        }
+        tail = Some(Box::new(remaining_scoped));
+    }
+    tail
 }
 
 /// The binder's typed outcome for one seat of a co-scoped second action.

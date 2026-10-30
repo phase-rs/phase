@@ -506,7 +506,7 @@ fn open_private_zone_cast_selection(
     let return_result_occurrence =
         super::retained_return_result_occurrence(state, &stash, declarations)?;
     let return_result_process = stash.return_result_process;
-    crate::game::effects::append_to_pending_continuation(state, Some(Box::new(stash)));
+    super::append_to_pending_continuation_owned(state, Some(Box::new(stash)), declarations)?;
     state.waiting_for = WaitingFor::EffectZoneChoice {
         return_result_occurrence,
         return_result_process,
@@ -781,7 +781,7 @@ fn open_linked_exile_cast_selection(
     let return_result_occurrence =
         super::retained_return_result_occurrence(state, &stash, declarations)?;
     let return_result_process = stash.return_result_process;
-    crate::game::effects::append_to_pending_continuation(state, Some(Box::new(stash)));
+    super::append_to_pending_continuation_owned(state, Some(Box::new(stash)), declarations)?;
     state.waiting_for = WaitingFor::EffectZoneChoice {
         return_result_occurrence,
         return_result_process,
@@ -5769,8 +5769,10 @@ mod tests {
                 let rng = hostile.rng.get_word_pos();
                 if fault == 1 {
                     assert!(
-                        crate::types::resolution::canonicalize_legacy_resolution_state(&hostile)
-                            .is_err()
+                        crate::types::game_state::validate_return_result_occurrence_coherence(
+                            &hostile
+                        )
+                        .is_err()
                     );
                     assert_eq!(serde_json::to_value(&hostile).unwrap(), serialized);
                 }

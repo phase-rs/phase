@@ -9214,7 +9214,28 @@ mod damage_opportunity_public_remainder_tests {
                     let object = runner.state_mut().objects.get_mut(&source).unwrap();
                     object.controller = P1;
                     object.owner = P1;
+                    object.base_controller = Some(P1);
                 }
+                // CR 109.5 + CR 113.7a: the live source and its already
+                // activated ability have independent controller axes.
+                runner.state_mut().layers_dirty.mark_full();
+                crate::game::layers::flush_layers(runner.state_mut());
+                assert_eq!(
+                    runner.state().objects[&source].controller,
+                    if diverged { P1 } else { P0 }
+                );
+                assert_eq!(runner.state().stack.last().unwrap().controller, P0);
+                assert_eq!(
+                    runner
+                        .state()
+                        .stack
+                        .last()
+                        .unwrap()
+                        .ability()
+                        .unwrap()
+                        .controller,
+                    P0
+                );
                 for _ in 0..8 {
                     if matches!(
                         runner.state().waiting_for,

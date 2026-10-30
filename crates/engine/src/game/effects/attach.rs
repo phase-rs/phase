@@ -4270,8 +4270,10 @@ mod tests {
                 let rng = hostile.rng.get_word_pos();
                 if fault == 1 {
                     assert!(
-                        crate::types::resolution::canonicalize_legacy_resolution_state(&hostile)
-                            .is_err()
+                        crate::types::game_state::validate_return_result_occurrence_coherence(
+                            &hostile
+                        )
+                        .is_err()
                     );
                     assert_eq!(serde_json::to_value(&hostile).unwrap(), serialized);
                 }
