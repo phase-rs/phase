@@ -253,7 +253,7 @@ fn kharn_reversion_trigger_is_stacked_in_the_cleanup_step() {
     assert_eq!(
         hand_size(&runner, P1),
         7,
-        "eight minus the discard, then two drawn: seven"
+        "seven, plus Khârn's two, minus the two-card repeated-cleanup discard: seven"
     );
 }
 
