@@ -6,9 +6,11 @@
 //! builds it (`build_state_update_message`, which runs
 //! `server_core::filter_state_for_player` and the derived/interaction views),
 //! wrapped in the `Envelope` the socket writer serializes, and passed through
-//! the gzip wire envelope (`wire::encode_json_message_sync`). The test then
-//! compares each seat's update count, serialized JSON bytes and wire bytes with
-//! the checked-in budget in `bandwidth_budget.json`.
+//! the gzip wire envelope (`wire::encode_json_message_sync`). The exact same
+//! serialized messages also feed forced-FULL and selected FULL/DELTA codec lanes,
+//! each measured with that production gzip/raw-prefix encoder. Separate sender
+//! and receiver baselines per seat advance only after delivery and exact byte
+//! reconstruction of the complete original message.
 //!
 //! What the budget covers: every byte of the per-recipient `StateUpdate` --
 //! `GameState`/`GameObject`/`ServerMessage` field growth (including definitions
@@ -24,6 +26,13 @@
 //! sends none), `command_id` is `None`, only seat `StateUpdate`s are measured
 //! (no `GameStarted`, no spectator frames), and no deck pools are attached.
 //!
+//! The codec lanes are test-only modelling before #90: production transports and
+//! protocol are unchanged, so these numbers do not claim deployed savings.
+//! Initial FULL frames count in both codec lanes. Every selected serialized frame
+//! must be no larger than forced FULL; every seat must reach DELTA and save wire
+//! bytes. A separate completion-envelope regression checks top-level `command_id`
+//! removal through DELTA at an unchanged revision; it is outside this scenario.
+//!
 //! Tolerances are two-sided: `json_bytes` must stay within
 //! `tolerance_pct.json_bytes` and `wire_bytes` within `tolerance_pct.wire_bytes`
 //! of the budget in either direction, so a large reduction also forces a
@@ -36,13 +45,49 @@
 //!     bandwidth_budget -- --nocapture
 //! ```
 //!
-//! rewrites `bandwidth_budget.json` (keeping `schema`, `scenario` and the
-//! tolerances) from the measured table and skips the comparison; re-run without
-//! the variable to confirm. Policy: a commit that updates the budget says why
-//! the size moved and links the field or PR responsible. An unexplained
-//! increase is a regression to be fixed, not a reason to re-baseline. A change
-//! that alters the scripted game itself (cards, script, seats) is a new
-//! scenario: bump `scenario` in the JSON by hand and re-baseline.
+//! validates the legacy `seats` lane against its existing tolerances first, then
+//! rewrites only measured `codec_seats`, preserving schema, scenario, tolerances
+//! and legacy pins. Re-run without the variable and with `--locked` to confirm.
+//! Policy: a commit updating the budget explains why the size moved, links the
+//! responsible field or PR, and includes a measured before/after table for all
+//! seats (legacy actual/pin, forced FULL and selected raw/wire totals and ratios).
+//! An unexplained increase is a regression, not a reason to re-baseline. Changes
+//! to cards, script or seats require a new scenario; do not adjust tolerances to
+//! hide a regression. Legacy rebaselines require a separate explained decision.
+//!
+//! # Schema 2 measurement (#89)
+//!
+//! Captured on base `b59aeaac1` plus this test-only change, macOS arm64, Cargo
+//! test profile (unoptimized + debuginfo), using the update command above.
+//! Scenario and 187 publications per seat are unchanged. Each cell below is
+//! raw JSON bytes / production gzip-or-raw-prefix wire bytes.
+//!
+//! | Seat | Legacy pin (unchanged) | Legacy actual | Forced FULL codec | Selected codec | Selected/legacy actual wire |
+//! | --- | ---: | ---: | ---: | ---: | ---: |
+//! | 0 | 13991377 / 1152328 | 14065400 / 1162680 | 14074268 / 1165899 | 827647 / 244075 | 20.9924% |
+//! | 1 | 14149300 / 1175503 | 14227607 / 1184971 | 14236475 / 1188181 | 833127 / 246996 | 20.8441% |
+//! | 2 | 14072275 / 1159534 | 14148644 / 1169176 | 14157512 / 1172410 | 842634 / 247130 | 21.1371% |
+//! | 3 | 14206232 / 1166140 | 14282550 / 1175318 | 14291418 / 1178566 | 870872 / 250230 | 21.2904% |
+//! | Total | 56419184 / 4653505 | 56724201 / 4692145 | 56759673 / 4705056 | 3374280 / 988431 | 21.0657% |
+//!
+//! Pre-existing legacy drift was admitted explicitly, not refreshed: the
+//! unchanged pre-edit run had the same raw totals and wire totals of 1162672,
+//! 1184970, 1169191 and 1175304. Those are +0.53--0.55% raw and +0.79--0.90%
+//! wire against the old pins, within the unchanged 1%/2% tolerances. Subsequent
+//! runs vary slightly; pin only actual measured codec output, never a target.
+//!
+//! Savings target REFER: 988431 wire bytes is 21.0657% of legacy actual
+//! (21.2406% of legacy pinned), materially above the intended 5--6%. Raw codec
+//! bytes are 5.9486% of legacy actual; that is not the wire acceptance metric.
+//! Every seat emitted one initial FULL and 186 DELTAs, with no later FULL
+//! fallback. A subsequent locked run's exact raw-span profile across all seats
+//! was: initial FULL 269912, DELTA metadata (including hashes) 169520, set values
+//! 2387376, remove values 11618, object upserts 179468, order vectors 310152 and
+//! patch syntax 46008 bytes. Whole-field set payloads dominate; order and hashes
+//! also contribute. Compression is per frame, not across the stream. These
+//! are byte measurements, not optimized CPU benchmarks. The harness reports
+//! the profile on every run; no tolerances, script, protocol or codec semantics
+//! were changed to force the savings target.
 //!
 //! # Manual release check
 //!
@@ -85,6 +130,7 @@ use engine::types::InteractionSessionId;
 use serde::{Deserialize, Serialize};
 use server_core::session::ActionResult;
 use server_core::FullSessionKey;
+use state_codec::{decode, encode, state_hash, Frame, FrameKind, WireState};
 
 use super::StateUpdateSource;
 use crate::socket_mailbox::Envelope;
@@ -145,6 +191,7 @@ struct Budget {
     update_procedure: String,
     tolerance_pct: Tolerances,
     seats: Vec<SeatBudget>,
+    codec_seats: Vec<SeatBudget>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -163,6 +210,28 @@ struct SeatBudget {
     wire_bytes: u64,
 }
 
+impl SeatBudget {
+    fn new(seat: usize) -> Self {
+        Self {
+            seat,
+            updates: 0,
+            json_bytes: 0,
+            wire_bytes: 0,
+        }
+    }
+
+    fn record(&mut self, json: String) {
+        self.updates += 1;
+        self.json_bytes += json.len() as u64;
+        self.wire_bytes += match crate::wire::encode_json_message_sync(json, true)
+            .expect("wire envelope encodes")
+        {
+            Message::Binary(bytes) => bytes.len() as u64,
+            other => panic!("expected a binary wire envelope, got {other:?}"),
+        };
+    }
+}
+
 fn load_budget() -> Budget {
     serde_json::from_str(BUDGET_JSON).unwrap_or_else(|error| {
         panic!(
@@ -178,12 +247,12 @@ fn delta_pct(actual: u64, budget: u64) -> f64 {
     (actual as f64 - budget as f64) / budget as f64 * 100.0
 }
 
-fn measured_table(measured: &[SeatBudget], budget: &Budget) -> String {
+fn measured_table(measured: &[SeatBudget], expected: &[SeatBudget]) -> String {
     let mut table = String::from(
         "seat | updates (actual/budget) | json_bytes (actual/budget, delta%) | wire_bytes (actual/budget, delta%)\n",
     );
     for actual in measured {
-        let expected = budget.seats.iter().find(|s| s.seat == actual.seat);
+        let expected = expected.iter().find(|s| s.seat == actual.seat);
         let (updates, json, wire) = match expected {
             Some(b) => (
                 b.updates.to_string(),
@@ -208,32 +277,36 @@ fn measured_table(measured: &[SeatBudget], budget: &Budget) -> String {
     table
 }
 
-fn rewrite_budget(measured: &[SeatBudget]) {
-    let existing = load_budget();
+fn rewrite_budget(measured: &[SeatBudget], existing: Budget) {
     let rewritten = Budget {
-        seats: measured.to_vec(),
+        codec_seats: measured.to_vec(),
         ..existing
     };
     let mut text = serde_json::to_string_pretty(&rewritten).expect("budget serializes");
     text.push('\n');
     std::fs::write(BUDGET_PATH, text).expect("write bandwidth_budget.json");
-    eprintln!("budget rewritten at {BUDGET_PATH}; re-run without {UPDATE_ENV_VAR}");
+    eprintln!("codec budget rewritten at {BUDGET_PATH}; legacy pins retained; re-run without {UPDATE_ENV_VAR}");
 }
 
-fn assert_within_budget(measured: &[SeatBudget], budget: &Budget) {
+fn assert_within_budget(
+    measured: &[SeatBudget],
+    expected: &[SeatBudget],
+    budget: &Budget,
+    lane: &str,
+) {
     let mut failures = Vec::new();
-    if budget.schema != 1 {
+    if budget.schema != 2 {
         failures.push(format!("unsupported budget schema {}", budget.schema));
     }
-    if budget.seats.len() != measured.len() {
+    if expected.len() != measured.len() {
         failures.push(format!(
             "budget has {} seats, scenario has {}",
-            budget.seats.len(),
+            expected.len(),
             measured.len()
         ));
     }
     for actual in measured {
-        let Some(expected) = budget.seats.iter().find(|s| s.seat == actual.seat) else {
+        let Some(expected) = expected.iter().find(|s| s.seat == actual.seat) else {
             failures.push(format!("seat {} has no budget entry", actual.seat));
             continue;
         };
@@ -268,11 +341,11 @@ fn assert_within_budget(measured: &[SeatBudget], budget: &Budget) {
     }
     assert!(
         failures.is_empty(),
-        "StateUpdate bandwidth is outside the checked-in budget (scenario {}):\n{}\n{}\n\
+        "{lane} StateUpdate bandwidth is outside the checked-in budget (scenario {}):\n{}\n{}\n\
          If the size change is intended and explained, re-baseline and say why in the commit:\n  {UPDATE_COMMAND}",
         budget.scenario,
         failures.join("\n"),
-        measured_table(measured, budget),
+        measured_table(measured, expected),
     );
 }
 
@@ -641,6 +714,143 @@ impl ScriptedGame {
 // Measurement
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Default)]
+struct Baselines {
+    sender: Option<WireState>,
+    receiver: Option<WireState>,
+}
+
+struct CodecFrames {
+    full: Vec<u8>,
+    selected: Vec<u8>,
+    kind: FrameKind,
+}
+
+/// Exact raw JSON value spans; operation names, braces and layout are syntax.
+#[derive(Debug, Default)]
+struct CodecProfile {
+    full_bytes: u64,
+    metadata_bytes: u64,
+    set_bytes: u64,
+    remove_bytes: u64,
+    upsert_bytes: u64,
+    order_bytes: u64,
+    patch_syntax_bytes: u64,
+}
+
+impl CodecProfile {
+    fn record(&mut self, frames: &CodecFrames) {
+        use std::collections::BTreeMap;
+
+        use serde_json::value::RawValue;
+
+        if frames.kind == FrameKind::Full {
+            self.full_bytes += frames.selected.len() as u64;
+            return;
+        }
+        type RawMap<'a> = BTreeMap<&'a str, &'a RawValue>;
+        let envelope: RawMap<'_> = serde_json::from_slice(&frames.selected).unwrap();
+        let data: RawMap<'_> = serde_json::from_str(envelope["data"].get()).unwrap();
+        let patch = data["patch"];
+        self.metadata_bytes += (frames.selected.len() - patch.get().len()) as u64;
+        let sections: RawMap<'_> = serde_json::from_str(patch.get()).unwrap();
+        let mut payload_bytes = 0;
+        for section in ["message", "data", "state", "objects"] {
+            let Some(raw) = sections.get(section) else {
+                continue;
+            };
+            let operations: RawMap<'_> = serde_json::from_str(raw.get()).unwrap();
+            for (operation, raw) in operations {
+                let bytes = raw.get().len() as u64;
+                match operation {
+                    "set" => self.set_bytes += bytes,
+                    "remove" => self.remove_bytes += bytes,
+                    "upsert" => self.upsert_bytes += bytes,
+                    "order" => self.order_bytes += bytes,
+                    other => panic!("unexpected patch operation {other}"),
+                }
+                payload_bytes += bytes;
+            }
+        }
+        self.patch_syntax_bytes += patch.get().len() as u64 - payload_bytes;
+    }
+
+    fn total_bytes(&self) -> u64 {
+        self.full_bytes
+            + self.metadata_bytes
+            + self.set_bytes
+            + self.remove_bytes
+            + self.upsert_bytes
+            + self.order_bytes
+            + self.patch_syntax_bytes
+    }
+}
+
+impl Baselines {
+    fn deliver(&mut self, json: &str, revision: u64) -> CodecFrames {
+        let current = WireState::from_json(json.as_bytes())
+            .expect("production Envelope is JSON")
+            .with_revision(revision);
+        let full = encode(None, &current)
+            .expect("FULL encodes")
+            .to_bytes()
+            .expect("FULL serializes");
+        let frame = encode(self.sender.as_ref(), &current).expect("codec encodes");
+        let kind = frame.kind();
+        let selected = frame.to_bytes().expect("codec frame serializes");
+        assert!(
+            selected.len() <= full.len(),
+            "selected frame {} exceeds FULL {} at revision {revision}",
+            selected.len(),
+            full.len()
+        );
+        let frame = Frame::from_bytes(&selected).expect("serialized frame parses");
+        assert_eq!(frame.kind(), kind, "serialized frame preserves its kind");
+        let reconstructed =
+            decode(self.receiver.as_ref(), &frame).expect("delivered frame decodes");
+        assert_eq!(
+            reconstructed.as_bytes(),
+            json.as_bytes(),
+            "complete production Envelope differs at revision {revision}"
+        );
+        assert_eq!(reconstructed.revision(), Some(revision));
+        assert_eq!(state_hash(&reconstructed), state_hash(&current));
+        // Advance independently only after simulated delivery and successful decode.
+        self.sender = Some(current);
+        self.receiver = Some(reconstructed);
+        CodecFrames {
+            full,
+            selected,
+            kind,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SeatMeasurements {
+    legacy: SeatBudget,
+    forced_full: SeatBudget,
+    codec: SeatBudget,
+    full_updates: u64,
+    delta_updates: u64,
+    baselines: Baselines,
+    profile: CodecProfile,
+}
+
+impl SeatMeasurements {
+    fn new(index: usize) -> Self {
+        Self {
+            legacy: SeatBudget::new(index),
+            forced_full: SeatBudget::new(index),
+            codec: SeatBudget::new(index),
+            full_updates: 0,
+            delta_updates: 0,
+            baselines: Baselines::default(),
+            profile: CodecProfile::default(),
+        }
+    }
+}
+
 /// Mirrors the tail of `GameSession::handle_action_with_card_db_outcome`
 /// (server-core `session.rs`): the raw post-action state, the engine's events and
 /// log entries, and the legal-action bundle recomputed from that state.
@@ -664,7 +874,7 @@ fn server_action_result(
 /// Mirrors the per-seat loop of `StateUpdatePublisher::publish` and the frame
 /// encode of `socket_io::encode_application`: build the seat's `StateUpdate`,
 /// wrap it in the writer's `Envelope`, serialize, then gzip-envelope it.
-fn measure_publication(result: &ActionResult, revision: u64, totals: &mut [SeatBudget]) {
+fn measure_publication(result: &ActionResult, revision: u64, totals: &mut [SeatMeasurements]) {
     let source = StateUpdateSource::from_result(result, revision);
     source
         .guard()
@@ -687,29 +897,25 @@ fn measure_publication(result: &ActionResult, revision: u64, totals: &mut [SeatB
             quota_refusal: None,
         })
         .expect("StateUpdate serializes");
-        let json_len = json.len() as u64;
-        let wire_len = match crate::wire::encode_json_message_sync(json, true)
-            .expect("wire envelope encodes")
-        {
-            Message::Binary(bytes) => bytes.len() as u64,
-            other => panic!("expected a binary wire envelope, got {other:?}"),
-        };
-        total.updates += 1;
-        total.json_bytes += json_len;
-        total.wire_bytes += wire_len;
+        let frames = total.baselines.deliver(&json, revision);
+        total.profile.record(&frames);
+        match frames.kind {
+            FrameKind::Full => total.full_updates += 1,
+            FrameKind::Delta => total.delta_updates += 1,
+        }
+        total.legacy.record(json);
+        total
+            .forced_full
+            .record(String::from_utf8(frames.full).expect("FULL frame is UTF-8 JSON"));
+        total
+            .codec
+            .record(String::from_utf8(frames.selected).expect("selected frame is UTF-8 JSON"));
     }
 }
 
-fn play_round() -> Vec<SeatBudget> {
+fn play_round() -> Vec<SeatMeasurements> {
     let mut game = build_game();
-    let mut totals: Vec<SeatBudget> = (0..SEATS)
-        .map(|index| SeatBudget {
-            seat: index,
-            updates: 0,
-            json_bytes: 0,
-            wire_bytes: 0,
-        })
-        .collect();
+    let mut totals: Vec<SeatMeasurements> = (0..SEATS).map(SeatMeasurements::new).collect();
 
     let mut revision = 0u64;
     let mut reached_end = false;
@@ -783,8 +989,8 @@ fn play_round() -> Vec<SeatBudget> {
     assert!(
         totals
             .iter()
-            .all(|t| t.updates > 0 && t.updates == totals[0].updates),
-        "every seat receives the same positive number of updates: {totals:?}"
+            .all(|t| t.legacy.updates > 0 && t.legacy.updates == totals[0].legacy.updates),
+        "every seat receives the same positive number of updates"
     );
     totals
 }
@@ -793,14 +999,107 @@ fn play_round() -> Vec<SeatBudget> {
 fn state_update_bandwidth_stays_within_budget() {
     let measured = play_round();
     let budget = load_budget();
+    let legacy: Vec<_> = measured.iter().map(|s| s.legacy).collect();
+    let forced_full: Vec<_> = measured.iter().map(|s| s.forced_full).collect();
+    let codec: Vec<_> = measured.iter().map(|s| s.codec).collect();
     eprintln!(
-        "measured StateUpdate bandwidth (scenario {}):\n{}",
+        "measured StateUpdate bandwidth (scenario {}):\nlegacy:\n{}forced FULL codec:\n{}selected codec:\n{}",
         budget.scenario,
-        measured_table(&measured, &budget)
+        measured_table(&legacy, &budget.seats),
+        measured_table(&forced_full, &[]),
+        measured_table(&codec, &budget.codec_seats),
     );
+    // Always validate legacy, including rebaseline runs; never refresh its pins.
+    assert_within_budget(&legacy, &budget.seats, &budget, "legacy");
+    for seat in &measured {
+        eprintln!(
+            "seat {}: FULL={} DELTA={} selected/legacy wire={:.4}% selected/forced-FULL wire={:.4}%",
+            seat.legacy.seat,
+            seat.full_updates,
+            seat.delta_updates,
+            seat.codec.wire_bytes as f64 / seat.legacy.wire_bytes as f64 * 100.0,
+            seat.codec.wire_bytes as f64 / seat.forced_full.wire_bytes as f64 * 100.0,
+        );
+        eprintln!(
+            "seat {} raw codec profile: {:?}",
+            seat.legacy.seat, seat.profile
+        );
+        assert_eq!(seat.profile.total_bytes(), seat.codec.json_bytes);
+        assert!(
+            seat.codec.wire_bytes < seat.legacy.wire_bytes
+                && seat.codec.wire_bytes < seat.forced_full.wire_bytes,
+            "seat {}: codec must save wire bytes against legacy and forced FULL",
+            seat.legacy.seat,
+        );
+        assert!(seat.delta_updates > 0, "each seat must receive DELTA");
+        assert!(seat.full_updates > 0, "each seat starts with FULL");
+        assert_eq!(seat.codec.updates, seat.legacy.updates);
+        assert_eq!(seat.forced_full.updates, seat.legacy.updates);
+        assert_eq!(seat.full_updates + seat.delta_updates, seat.legacy.updates);
+    }
     if std::env::var_os(UPDATE_ENV_VAR).is_some() {
-        rewrite_budget(&measured);
+        rewrite_budget(&codec, budget);
         return;
     }
-    assert_within_budget(&measured, &budget);
+    assert_within_budget(&codec, &budget.codec_seats, &budget, "codec");
+}
+
+#[test]
+fn completion_envelope_removes_command_id_through_delta() {
+    use server_core::protocol::CommandId;
+
+    let mut game = build_game();
+    let action = game.next_action();
+    let applied = game.runner.act(action).expect("scripted action succeeds");
+    let result = server_action_result(game.runner.state(), applied);
+    let revision = 1;
+    let source = StateUpdateSource::from_result(&result, revision);
+    source.guard().expect("scripted snapshot is admitted");
+    let full_key = FullSessionKey {
+        game_code: "COMPLETION".into(),
+        generation: 1,
+    };
+    let mut baselines = Baselines::default();
+    for command_id in [Some(CommandId(37)), None] {
+        let message = crate::build_state_update_message(
+            &source,
+            &full_key,
+            seat(0),
+            Vec::new(),
+            &source.state.eliminated_players,
+        );
+        let json = serde_json::to_string(&Envelope {
+            message,
+            command_id,
+            quota_refusal: None,
+        })
+        .expect("completion Envelope serializes");
+        let original: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let frames = baselines.deliver(&json, revision);
+        let decoded: serde_json::Value =
+            serde_json::from_str(baselines.receiver.as_ref().unwrap().as_json()).unwrap();
+        match command_id {
+            Some(id) => {
+                assert_eq!(original.get("command_id"), Some(&serde_json::json!(id.0)));
+                assert_eq!(decoded.get("command_id"), original.get("command_id"));
+                assert_eq!(
+                    frames.kind,
+                    FrameKind::Full,
+                    "completion establishes a FULL baseline"
+                );
+            }
+            None => {
+                assert!(original.get("command_id").is_none());
+                assert_eq!(
+                    frames.kind,
+                    FrameKind::Delta,
+                    "key removal must reach DELTA"
+                );
+                assert!(
+                    decoded.get("command_id").is_none(),
+                    "no stale completion key"
+                );
+            }
+        }
+    }
 }
