@@ -1552,6 +1552,10 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layer1_copy_effect: Option<crate::types::ability::CopyEffectInstanceRef>,
 
+    /// Pending entry input is independent of the object's copiable characteristics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinary_entry_counter_work: Option<crate::types::game_state::OrdinaryEntryCounterWork>,
+
     /// CR 707.9b: the BASE name's origin for a MATERIALIZED object (duplicate
     /// conjure / copy-token creation of an exception-named copy) — persistent,
     /// unlike the layer-derived marker above. The Step-1 seed restores the
@@ -1902,6 +1906,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         layer1_name_origin: _,
         granted_abilities_from: _,
         layer1_copy_effect: _,
+        ordinary_entry_counter_work: _,
         base_name_origin: _,
         class_level: _,
         cast_from_zone: _,
@@ -3234,6 +3239,7 @@ impl GameObject {
             layer1_name_origin: None,
             granted_abilities_from: None,
             layer1_copy_effect: None,
+            ordinary_entry_counter_work: None,
             base_name_origin: None,
             class_level: None,
             cast_from_zone: None,
@@ -3412,6 +3418,7 @@ impl GameObject {
     /// incarnation no longer matches the new object.
     pub fn bump_incarnation(&mut self) {
         self.incarnation += 1;
+        self.ordinary_entry_counter_work = None;
     }
 
     /// CR 400.7: Reset transient battlefield state when a permanent enters the battlefield.

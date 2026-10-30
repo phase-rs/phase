@@ -12,7 +12,7 @@ use crate::game::zones;
 use crate::types::ability::{
     AdditionalCostInstancePayment, AttachCardinality, AttachSelection, CastTimingPermission,
     CostPaidObjectSnapshot, Duration, Effect, EffectKind, ExileConcealment, KickerVariant,
-    LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    LibraryPosition, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -2368,16 +2368,44 @@ fn run_zone_delivery_tail_context(
 /// Returns an aggregated `(CounterType, count)` list so multiple active sources
 /// stack additively (CR 616.1f: repeat the replacement process until none apply).
 /// The caller folds this through the shared `apply_etb_counters` resolver.
+/// Capture indexed definitions through the existing functioning-static authority.
+pub(crate) fn capture_entry_counter_statics(
+    state: &GameState,
+    sources: impl IntoIterator<Item = ObjectId>,
+) -> Vec<crate::types::game_state::EntryCounterStaticSnapshot> {
+    sources
+        .into_iter()
+        .filter_map(|id| state.objects.get(&id))
+        .flat_map(|source| {
+            crate::game::functioning_abilities::active_static_definitions_indexed(
+                state, source, None,
+            )
+            .filter(|(_, definition)| {
+                matches!(
+                    definition.mode,
+                    crate::types::statics::StaticMode::EntersWithAdditionalCounters { .. }
+                )
+            })
+            .map(move |(definition_index, definition)| {
+                crate::types::game_state::EntryCounterStaticSnapshot {
+                    source: crate::game::triggers::trigger_source_context_for_latch(state, source),
+                    definition_index,
+                    source_copy: source.layer1_copy_effect,
+                    definition: definition.clone(),
+                }
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn enters_with_additional_counters_for_entry(
     state: &GameState,
     object_id: ObjectId,
-    static_defs: &[(ObjectId, StaticDefinition)],
+    static_defs: &[crate::types::game_state::EntryCounterStaticSnapshot],
 ) -> Vec<(CounterType, u32)> {
     let mut additional: Vec<(CounterType, u32)> = Vec::new();
-    for (source_id, def) in static_defs {
-        let Some(source_obj) = state.objects.get(source_id) else {
-            continue;
-        };
+    for snapshot in static_defs {
+        let def = &snapshot.definition;
         let crate::types::statics::StaticMode::EntersWithAdditionalCounters {
             counter_type,
             count,
@@ -2390,7 +2418,7 @@ pub(crate) fn enters_with_additional_counters_for_entry(
         };
         // CR 109.5: evaluate the "you control" + Other/Legendary/Nontoken filter
         // with the static's source as the context anchor.
-        let ctx = crate::game::filter::FilterContext::from_source(state, source_obj.id);
+        let ctx = crate::game::filter::FilterContext::from_trigger_source(&snapshot.source);
         // CR 614.12: an entrant whose as-enters choices were made before it
         // entered is matched as it exists with its own statics applied — the
         // layer pass hasn't run on it yet — when that's proven for this filter.
@@ -4224,15 +4252,14 @@ pub(crate) fn deliver_replaced_zone_change_with_primary_delivery(
         // definitions before `move_to_zone` so a newly-entered permanent cannot
         // retroactively supply its own replacement effect.
         let enters_with_additional_counter_statics: Vec<_> = if to == Zone::Battlefield {
-            crate::game::functioning_abilities::game_active_statics(state)
-                .filter(|(_, def)| {
-                    matches!(
-                        def.mode,
-                        crate::types::statics::StaticMode::EntersWithAdditionalCounters { .. }
-                    )
-                })
-                .map(|(source_obj, def)| (source_obj.id, def.clone()))
-                .collect()
+            capture_entry_counter_statics(
+                state,
+                state
+                    .battlefield
+                    .iter()
+                    .chain(state.command_zone.iter())
+                    .copied(),
+            )
         } else {
             Vec::new()
         };
@@ -4688,12 +4715,28 @@ pub(crate) fn deliver_replaced_zone_change_with_primary_delivery(
             // matches the entering object; folded through the shared resolver so
             // counter-doubling replacements (Doubling Season, Hardened Scales)
             // see them too.
-            let additional = enters_with_additional_counters_for_entry(
-                state,
-                object_id,
-                &enters_with_additional_counter_statics,
-            );
-            counters_to_apply.extend(additional);
+            if crate::game::engine_replacement::ordinary_copy_continuation_pending(state) {
+                let entrant = state
+                    .objects
+                    .get_mut(&object_id)
+                    .expect("delivered entrant");
+                entrant.ordinary_entry_counter_work =
+                    Some(crate::types::game_state::OrdinaryEntryCounterWork {
+                        entrant: crate::types::identifiers::ObjectIncarnationRef::from_object(
+                            entrant,
+                        ),
+                        external_sources: enters_with_additional_counter_statics,
+                        dispatch_frame: None,
+                        installed_copy_counters: None,
+                        completed_dispatch: None,
+                    });
+            } else {
+                counters_to_apply.extend(enters_with_additional_counters_for_entry(
+                    state,
+                    object_id,
+                    &enters_with_additional_counter_statics,
+                ));
+            }
             // CR 614.1c: Apply pending ETB counters from delayed triggers
             // (e.g., "that creature enters with an additional +1/+1 counter").
             let pending: Vec<_> = state

@@ -1538,6 +1538,15 @@ fn apply_create_token_batch(
         let ch = &spec.characteristics;
         let token_image_ref =
             crate::game::token_presets::find_exact_token_ref(state, spec.source_id, ch);
+        // CR 614.12: admit external sources before this actual entrant exists.
+        let external_sources = crate::game::zone_pipeline::capture_entry_counter_statics(
+            state,
+            state
+                .battlefield
+                .iter()
+                .chain(state.command_zone.iter())
+                .copied(),
+        );
         let obj_id = zones::create_object(
             state,
             CardId(0),
@@ -1588,6 +1597,18 @@ fn apply_create_token_batch(
             continue;
         }
 
+        // CR 122.6a + CR 614.12: one prepared vector belongs to this entrant;
+        // the original spec remains pristine for the remaining batch.
+        let counters_to_apply = super::counters::coalesce_entry_counters(
+            spec.enter_with_counters.iter().cloned().chain(
+                crate::game::zone_pipeline::enters_with_additional_counters_for_entry(
+                    state,
+                    obj_id,
+                    &external_sources,
+                ),
+            ),
+        );
+
         // CR 733: journal the settled creation, after the body borrow ends.
         // Counters, the attacking entry, and any later status change journal
         // through their OWN families, so this command covers the birth only.
@@ -1626,8 +1647,7 @@ fn apply_create_token_batch(
                 .for_entrant(created_ids.len() - prefix_len),
         ) {
             state.last_created_token_ids = created_ids.clone();
-            let remaining_counters = spec
-                .enter_with_counters
+            let remaining_counters = counters_to_apply
                 .iter()
                 .filter(|(_, count)| *count > 0)
                 .map(|(counter_type, count)| {
@@ -1677,9 +1697,7 @@ fn apply_create_token_batch(
         }
 
         // CR 122.6a: Place counters on the token as it enters the battlefield.
-        for (counter_index, (counter_type, counter_count)) in
-            spec.enter_with_counters.iter().enumerate()
-        {
+        for (counter_index, (counter_type, counter_count)) in counters_to_apply.iter().enumerate() {
             if *counter_count > 0
                 && !super::counters::add_counter_with_replacement(
                     state,
@@ -1691,7 +1709,7 @@ fn apply_create_token_batch(
                 )
             {
                 state.last_created_token_ids = created_ids.clone();
-                let remaining_counters = spec.enter_with_counters[counter_index + 1..]
+                let remaining_counters = counters_to_apply[counter_index + 1..]
                     .iter()
                     .filter(|(_, count)| *count > 0)
                     .map(|(counter_type, count)| {
@@ -2642,15 +2660,10 @@ fn commit_liminal_token_entry_with_continuation(
         }
     });
 
-    let static_defs: Vec<_> = crate::game::functioning_abilities::battlefield_active_statics(state)
-        .filter(|(_, definition)| {
-            matches!(
-                definition.mode,
-                crate::types::statics::StaticMode::EntersWithAdditionalCounters { .. }
-            )
-        })
-        .map(|(source, definition)| (source.id, definition.clone()))
-        .collect();
+    let static_defs = crate::game::zone_pipeline::capture_entry_counter_statics(
+        state,
+        state.battlefield.iter().copied(),
+    );
     if let Some((owner, contribution)) = &entry.copy_exception_counters {
         assert_eq!(entry.object.projected().layer1_copy_effect, Some(*owner));
         counters_to_apply.extend(contribution.iter().cloned());
@@ -10064,6 +10077,150 @@ mod tests {
             1,
             "the token effect should resolve once after the paused batch finishes"
         );
+    }
+
+    #[test]
+    fn native_attacking_batch_preserves_explicit_and_external_counter_suffix_through_reload() {
+        use crate::types::ability::{
+            ControllerRef, QuantityModification, ReplacementDefinition, ReplacementMode,
+            StaticDefinition, TypedFilter,
+        };
+        use crate::types::game_state::{PersistedGameState, TrustedGameStateEnvelope};
+        use crate::types::resolution::ResolutionStateWire;
+        let (mut state, source) = attacking_token_board();
+        let static_def = StaticDefinition::new(
+            crate::types::statics::StaticMode::EntersWithAdditionalCounters {
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+            },
+        )
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        {
+            let object = state.objects.get_mut(&source).unwrap();
+            object.static_definitions.push(static_def.clone());
+            Arc::make_mut(&mut object.base_static_definitions).push(static_def);
+        }
+        let mut replacement =
+            ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::AddCounter)
+                .valid_card(TargetFilter::Any)
+                .quantity_modification(QuantityModification::Prevent);
+        replacement.mode = ReplacementMode::Optional { decline: None };
+        let replacement_source = create_object(
+            &mut state,
+            CardId(9002),
+            PlayerId(0),
+            "Optional counter prevention".into(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&replacement_source).unwrap();
+            object.replacement_definitions.push(replacement.clone());
+            object.base_replacement_definitions = Arc::new(vec![replacement]);
+        }
+        let mut effect =
+            goblin_token_effect(crate::types::ability::TokenAttackDestination::ControllerChooses);
+        if let Effect::Token {
+            count,
+            enter_with_counters,
+            ..
+        } = &mut effect
+        {
+            *count = QuantityExpr::Fixed { value: 2 };
+            *enter_with_counters = vec![(CounterType::Time, QuantityExpr::Fixed { value: 2 })];
+        }
+        let ability = ResolvedAbility::new(effect, vec![], source, PlayerId(0));
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 1).unwrap();
+        assert!(
+            matches!(&state.waiting_for, WaitingFor::EntryAttackTargetChoice { player: PlayerId(0), valid_targets, .. } if valid_targets.len() == 2)
+        );
+        let initial = state.clone();
+        for reader in 0..5 {
+            let mut restored = match reader {
+                0 => initial.clone(),
+                1 => serde_json::from_value(serde_json::to_value(&initial).unwrap()).unwrap(),
+                2 => serde_json::from_value::<TrustedGameStateEnvelope>(
+                    serde_json::to_value(TrustedGameStateEnvelope::capture(initial.clone()))
+                        .unwrap(),
+                )
+                .unwrap()
+                .into_game_state(),
+                3 => PersistedGameState::capture(initial.clone())
+                    .into_game_state()
+                    .unwrap(),
+                _ => serde_json::from_value::<ResolutionStateWire>(
+                    serde_json::to_value(ResolutionStateWire::from_game_state(initial.clone()))
+                        .unwrap(),
+                )
+                .unwrap()
+                .into_game_state(),
+            };
+            let mut attacks = 0;
+            let mut counter_choices = 0;
+            let mut all_events = Vec::new();
+            for _ in 0..12 {
+                let action = match &restored.waiting_for {
+                    WaitingFor::EntryAttackTargetChoice {
+                        player: PlayerId(0),
+                        valid_targets,
+                        ..
+                    } => {
+                        assert_eq!(valid_targets.len(), 2);
+                        attacks += 1;
+                        GameAction::ChooseEntryAttackTarget {
+                            target: valid_targets[1],
+                        }
+                    }
+                    WaitingFor::ReplacementChoice {
+                        player: PlayerId(0),
+                        ..
+                    } => {
+                        assert!(restored.pending_replacement.as_ref().unwrap().is_optional);
+                        counter_choices += 1;
+                        let old_prefix: Vec<_> = restored
+                            .last_created_token_ids
+                            .iter()
+                            .map(|id| (*id, restored.objects[id].counters.clone()))
+                            .collect();
+                        restored = serde_json::from_value::<ResolutionStateWire>(
+                            serde_json::to_value(ResolutionStateWire::from_game_state(restored))
+                                .unwrap(),
+                        )
+                        .unwrap()
+                        .into_game_state();
+                        for (id, counters) in old_prefix {
+                            assert_eq!(restored.objects[&id].counters, counters);
+                        }
+                        GameAction::ChooseReplacement { index: 1 }
+                    }
+                    WaitingFor::Priority { .. } => break,
+                    waiting => panic!("unexpected native entry wait: {waiting:?}"),
+                };
+                all_events.extend(apply_as_current(&mut restored, action).unwrap().events);
+            }
+            assert_eq!(attacks, 2);
+            assert_eq!(counter_choices, 4);
+            assert_eq!(restored.last_created_token_ids.len(), 2);
+            for id in &restored.last_created_token_ids {
+                let object = &restored.objects[id];
+                assert_eq!(object.counters.get(&CounterType::Time).copied(), Some(2));
+                assert_eq!(
+                    object.counters.get(&CounterType::Plus1Plus1).copied(),
+                    Some(1)
+                );
+            }
+            assert_eq!(
+                all_events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::TokenCreated { .. }))
+                    .count(),
+                2
+            );
+            assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
+            assert!(restored.stack.is_empty() && restored.resolution_stack.is_empty());
+        }
     }
 
     /// A Rest in Peace-class board-wide `Moved` graveyard→exile redirect,

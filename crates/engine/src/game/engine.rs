@@ -1435,6 +1435,10 @@ fn apply_action_boundary_core(
         lifecycle.discard();
         return Err(EngineError::InvalidAction(error));
     }
+    if let Err(error) = crate::types::game_state::validate_ordinary_entry_counter_work(state) {
+        lifecycle.discard();
+        return Err(EngineError::InvalidAction(error));
+    }
     for entry in state.stack.iter().chain(state.resolving_stack_entry.iter()) {
         if let Some(ability) = entry.ability() {
             if let Err(error) = state.validate_replacement_program(ability) {
@@ -9511,6 +9515,7 @@ fn resume_pending_continuation_pass(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    super::engine_replacement::resume_prepared_ordinary_entries(state, events)?;
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         // CR 118.3b + CR 119.4 + CR 616.1: A life-payment replacement child
         // drains to its recorded resolution boundary before the paid outer
@@ -9524,6 +9529,7 @@ fn resume_pending_continuation_pass(
             super::life_safety::observe_boundary_carrier(state);
             effects::drain_pending_continuation(state, events);
             effects::counters::resume_copy_target_entry_completions(state, events)?;
+            super::engine_replacement::resume_prepared_ordinary_entries(state, events)?;
         }
         resume_due_counter_cost_root(state, events)?;
         if matches!(state.waiting_for, WaitingFor::Priority { .. })
@@ -9532,6 +9538,7 @@ fn resume_pending_continuation_pass(
             super::life_safety::observe_boundary_carrier(state);
             effects::resume_resolution_frames(state, events);
             effects::counters::resume_copy_target_entry_completions(state, events)?;
+            super::engine_replacement::resume_prepared_ordinary_entries(state, events)?;
         }
         resume_due_counter_cost_root(state, events)?;
         let mut drained_deferred_life = false;
@@ -9555,10 +9562,12 @@ fn resume_pending_continuation_pass(
             super::life_safety::observe_boundary_carrier(state);
             effects::drain_pending_continuation(state, events);
             effects::counters::resume_copy_target_entry_completions(state, events)?;
+            super::engine_replacement::resume_prepared_ordinary_entries(state, events)?;
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 super::life_safety::observe_boundary_carrier(state);
                 effects::resume_resolution_frames(state, events);
                 effects::counters::resume_copy_target_entry_completions(state, events)?;
+                super::engine_replacement::resume_prepared_ordinary_entries(state, events)?;
             }
         }
         // CR 614.12a + CR 111.1: An entry replacement's required choices are made

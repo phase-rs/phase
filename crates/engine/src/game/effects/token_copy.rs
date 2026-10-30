@@ -9495,47 +9495,68 @@ pub(crate) mod tests {
             .unwrap()
             .into_game_state(),
         ];
-        let mut legacy = serde_json::to_value(state).unwrap();
-        legacy.as_object_mut().unwrap().remove("resolution_stack");
-        legacy["resolution_state_version"] = serde_json::json!(1);
-        for frame in state.resolution_stack.iter() {
-            let (field, payload) = match frame {
-                ResolutionFrame::CopyToken(pending) => (
-                    "pending_copy_token_resolution",
-                    serde_json::to_value(pending).unwrap(),
-                ),
-                ResolutionFrame::PostReplacement(pending) => (
-                    "post_replacement_drains",
-                    serde_json::to_value(pending).unwrap(),
-                ),
-                ResolutionFrame::AbilityContinuation(pending) => (
-                    "pending_continuation",
-                    serde_json::to_value(&pending.pending).unwrap(),
-                ),
-                ResolutionFrame::CounterAdditions(pending) => (
-                    "pending_counter_additions",
-                    serde_json::to_value(pending).unwrap(),
-                ),
-                ResolutionFrame::SpellResolution(pending) => (
-                    "pending_spell_resolution",
-                    serde_json::to_value(pending).unwrap(),
-                ),
-                other => panic!(
-                    "this bounded copy fixture must retain an authentic v1 carrier for {:?}",
-                    other.kind()
-                ),
-            };
-            assert!(
-                legacy.get(field).is_none_or(serde_json::Value::is_null),
-                "v1 has exactly one owning {field}"
+        let nested = state
+            .resolution_stack
+            .iter()
+            .any(|frame| matches!(frame, ResolutionFrame::MultiDraw(_)))
+            || state.resolution_stack.ability_continuations().count() > 1
+            || state.objects.values().any(|object| {
+                object
+                    .ordinary_entry_counter_work
+                    .as_ref()
+                    .is_some_and(|work| work.dispatch_frame.is_none())
+            });
+        if nested {
+            let mut retained = serde_json::to_value(state).unwrap();
+            retained["resolution_state_version"] = serde_json::json!(1);
+            forms.push(
+                serde_json::from_value::<ResolutionStateWire>(retained)
+                    .unwrap()
+                    .into_game_state(),
             );
-            legacy[field] = payload;
+        } else {
+            let mut legacy = serde_json::to_value(state).unwrap();
+            legacy.as_object_mut().unwrap().remove("resolution_stack");
+            legacy["resolution_state_version"] = serde_json::json!(1);
+            for frame in state.resolution_stack.iter() {
+                let (field, payload) = match frame {
+                    ResolutionFrame::CopyToken(pending) => (
+                        "pending_copy_token_resolution",
+                        serde_json::to_value(pending).unwrap(),
+                    ),
+                    ResolutionFrame::PostReplacement(pending) => (
+                        "post_replacement_drains",
+                        serde_json::to_value(pending).unwrap(),
+                    ),
+                    ResolutionFrame::AbilityContinuation(pending) => (
+                        "pending_continuation",
+                        serde_json::to_value(&pending.pending).unwrap(),
+                    ),
+                    ResolutionFrame::CounterAdditions(pending) => (
+                        "pending_counter_additions",
+                        serde_json::to_value(pending).unwrap(),
+                    ),
+                    ResolutionFrame::SpellResolution(pending) => (
+                        "pending_spell_resolution",
+                        serde_json::to_value(pending).unwrap(),
+                    ),
+                    other => panic!(
+                        "this bounded copy fixture must retain an authentic v1 carrier for {:?}",
+                        other.kind()
+                    ),
+                };
+                assert!(
+                    legacy.get(field).is_none_or(serde_json::Value::is_null),
+                    "v1 has exactly one owning {field}"
+                );
+                legacy[field] = payload;
+            }
+            forms.push(
+                serde_json::from_value::<ResolutionStateWire>(legacy)
+                    .unwrap()
+                    .into_game_state(),
+            );
         }
-        forms.push(
-            serde_json::from_value::<ResolutionStateWire>(legacy)
-                .unwrap()
-                .into_game_state(),
-        );
         for version in [2, 3, 4] {
             let mut wire =
                 serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap();
@@ -9897,6 +9918,129 @@ pub(crate) mod tests {
                 runner.state().pending_liminal_entry_resume, runner.state().liminal_entries,
                 runner.state().resolution_stack, runner.state().objects[&mirror],
                 runner.state().battlefield.iter().map(|id| (*id, &runner.state().objects[id].static_definitions)).collect::<Vec<_>>());
+            let work = runner.state().objects[&mirror]
+                .ordinary_entry_counter_work
+                .as_ref()
+                .expect("modern ordinary prompt owns deferred work, even for an empty bundle");
+            assert_eq!(work.external_sources.len(), usize::from(extra_static));
+            assert_eq!(work.completed_dispatch, None);
+            for projected in [
+                crate::game::visibility::filter_state_for_viewer(runner.state(), P0),
+                crate::game::visibility::filter_state_for_viewer(runner.state(), P1),
+                crate::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+                crate::game::visibility::project_paid_cast_cleanup_authority(runner.state()),
+            ] {
+                assert!(projected.objects[&mirror]
+                    .ordinary_entry_counter_work
+                    .is_none());
+                assert!(!serde_json::to_string(&projected)
+                    .unwrap()
+                    .contains("ordinary_entry_counter_work"));
+            }
+            let normalized = runner.state().normalize_for_loop();
+            let normalized_again = normalized.normalize_for_loop();
+            assert_eq!(
+                normalized.objects[&mirror].ordinary_entry_counter_work,
+                normalized_again.objects[&mirror].ordinary_entry_counter_work
+            );
+            if ghave && extra_static {
+                for corruption in 0..3 {
+                    let mut hostile = runner.state().clone();
+                    let work = hostile
+                        .objects
+                        .get_mut(&mirror)
+                        .unwrap()
+                        .ordinary_entry_counter_work
+                        .as_mut()
+                        .unwrap();
+                    match corruption {
+                        0 => work.entrant.incarnation += 1,
+                        1 => work.dispatch_frame.as_mut().unwrap().0 += 1,
+                        2 => {
+                            work.completed_dispatch =
+                                Some(crate::types::game_state::PostReplacementFrameId(
+                                    work.dispatch_frame.unwrap().0 + 1,
+                                ))
+                        }
+                        _ => unreachable!(),
+                    }
+                    let before = serde_json::to_value(&hostile).unwrap();
+                    assert!(serde_json::from_value::<GameState>(before.clone()).is_err());
+                    assert!(
+                        crate::types::game_state::PersistedGameState::capture(hostile.clone())
+                            .into_game_state()
+                            .is_err()
+                    );
+                    assert!(apply_as_current(
+                        &mut hostile,
+                        GameAction::ChooseTarget {
+                            target: Some(TargetRef::Object(donor))
+                        }
+                    )
+                    .is_err());
+                    assert_eq!(serde_json::to_value(&hostile).unwrap(), before);
+                }
+            }
+            for mut restored in liminal_copy_reader_forms(runner.state()) {
+                assert!(restored.objects[&mirror]
+                    .ordinary_entry_counter_work
+                    .is_some());
+                apply_as_current(
+                    &mut restored,
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(donor)),
+                    },
+                )
+                .unwrap();
+                crate::game::layers::flush_layers(&mut restored);
+                let entrant = &restored.objects[&mirror];
+                assert_eq!(entrant.zone, Zone::Battlefield);
+                assert_eq!(
+                    entrant
+                        .counters
+                        .get(&CounterType::Plus1Plus1)
+                        .copied()
+                        .unwrap_or(0),
+                    (if ghave { 5 } else { 0 }) + if extra_static { 1 } else { 0 }
+                );
+                assert_eq!(
+                    entrant.power,
+                    Some((if ghave { 5 } else { 1 }) + if extra_static { 1 } else { 0 })
+                );
+                assert!(entrant.has_keyword(&Keyword::Haste));
+                assert!(entrant.ordinary_entry_counter_work.is_none());
+                assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
+                assert!(restored.stack.is_empty() && restored.resolution_stack.is_empty());
+            }
+            if !extra_static {
+                // An authentic old prompt already performed its external phase.
+                // With no external source that completed phase has no placements.
+                let mut old = serde_json::to_value(runner.state()).unwrap();
+                old["objects"][mirror.0.to_string()]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("ordinary_entry_counter_work");
+                let old: GameState = serde_json::from_value(old).unwrap();
+                for mut restored in liminal_copy_reader_forms(&old) {
+                    apply_as_current(
+                        &mut restored,
+                        GameAction::ChooseTarget {
+                            target: Some(TargetRef::Object(donor)),
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        restored.objects[&mirror]
+                            .counters
+                            .get(&CounterType::Plus1Plus1)
+                            .copied()
+                            .unwrap_or(0),
+                        if ghave { 5 } else { 0 }
+                    );
+                    assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
+                    assert!(restored.resolution_stack.is_empty());
+                }
+            }
             runner
                 .act(GameAction::ChooseTarget {
                     target: Some(TargetRef::Object(donor)),
@@ -9942,6 +10086,483 @@ pub(crate) mod tests {
             );
             assert_eq!(object.card_types.core_types, vec![CoreType::Artifact]);
             assert!(!object.has_keyword(&Keyword::Haste));
+        }
+    }
+
+    #[test]
+    fn ordinary_mirror_matches_final_body_once_and_resumes_only_counter_suffix() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::ability::QuantityModification;
+        for (ghave, artifact_filter, amounts, pause, expected) in [
+            (true, true, vec![1], false, 5),
+            (false, true, vec![1], false, 1),
+            (false, true, vec![1, 2], false, 3),
+            (true, false, vec![1], true, 6),
+        ] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let mirror = scenario
+                .add_artifact_to_hand_from_oracle(P0, "Cursed Mirror", PRINTED_CURSED_MIRROR)
+                .id();
+            let donor = if ghave {
+                let id = scenario
+                    .add_creature_from_oracle(P1, "Ghave, Guru of Spores", 0, 0, PRINTED_GHAVE)
+                    .id();
+                scenario.with_counter(id, CounterType::Plus1Plus1, 5);
+                id
+            } else {
+                scenario
+                    .add_creature_from_oracle(P1, "Silver Myr", 1, 1, "{T}: Add {U}.")
+                    .as_artifact_creature()
+                    .id()
+            };
+            for amount in amounts {
+                let filter = if artifact_filter {
+                    TypedFilter::new(crate::types::ability::TypeFilter::Artifact)
+                } else {
+                    TypedFilter::creature()
+                };
+                scenario
+                    .add_artifact_from_oracle(P0, "Synthetic independent entry source", "")
+                    .with_static_definition(
+                        StaticDefinition::new(
+                            crate::types::statics::StaticMode::EntersWithAdditionalCounters {
+                                counter_type: CounterType::Plus1Plus1,
+                                count: amount,
+                            },
+                        )
+                        .affected(TargetFilter::Typed(filter.controller(ControllerRef::You))),
+                    );
+            }
+            if pause {
+                let mut replacement = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .valid_card(TargetFilter::SpecificObject { id: mirror })
+                    .quantity_modification(QuantityModification::Prevent);
+                replacement.mode = ReplacementMode::Optional { decline: None };
+                scenario
+                    .add_artifact_from_oracle(P0, "Synthetic optional entry-counter prevention", "")
+                    .with_replacement_definition(replacement);
+            }
+            let mut runner = scenario.build();
+            runner.cast(mirror).commit();
+            for _ in 0..8 {
+                if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { player: P0, .. }
+            ));
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .unwrap();
+            assert!(
+                matches!(&runner.state().waiting_for, WaitingFor::CopyTargetChoice { player: P0, valid_targets, .. } if valid_targets.contains(&donor))
+            );
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(donor)),
+                })
+                .unwrap();
+            if pause {
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { player: P0, .. }
+                ));
+                assert!(
+                    runner.state().objects[&mirror]
+                        .ordinary_entry_counter_work
+                        .is_none(),
+                    "numeric preparation was taken before its counter child"
+                );
+                for state in liminal_copy_reader_forms(runner.state()) {
+                    let mut restored = GameRunner::from_state(state);
+                    restored
+                        .act(GameAction::ChooseReplacement { index: 1 })
+                        .unwrap();
+                    crate::game::layers::flush_layers(restored.state_mut());
+                    assert_eq!(
+                        restored.state().objects[&mirror]
+                            .counters
+                            .get(&CounterType::Plus1Plus1)
+                            .copied(),
+                        Some(expected)
+                    );
+                    assert_eq!(
+                        restored.state().objects[&mirror].power,
+                        Some(expected as i32)
+                    );
+                    assert!(matches!(
+                        restored.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(
+                        restored.state().stack.is_empty()
+                            && restored.state().resolution_stack.is_empty()
+                    );
+                }
+            } else {
+                crate::game::layers::flush_layers(runner.state_mut());
+                assert_eq!(
+                    runner.state().objects[&mirror]
+                        .counters
+                        .get(&CounterType::Plus1Plus1)
+                        .copied(),
+                    Some(expected)
+                );
+                assert!(runner.state().objects[&mirror].has_keyword(&Keyword::Haste));
+                assert!(runner.state().objects[&mirror]
+                    .ordinary_entry_counter_work
+                    .is_none());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(
+                    runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_entry_external_work_completes_direct_empty_and_declined_copy() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        for mode in ["direct", "empty", "decline"] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let donor = if mode == "direct" {
+                let id = scenario
+                    .add_creature_from_oracle(P1, "Ghave, Guru of Spores", 0, 0, PRINTED_GHAVE)
+                    .id();
+                scenario.with_counter(id, CounterType::Plus1Plus1, 5);
+                Some(id)
+            } else {
+                None
+            };
+            let entrant = if let Some(donor) = donor {
+                scenario
+                    .add_artifact_to_hand_from_oracle(P0, "Synthetic specified entry copy", "")
+                    .with_replacement_definition(
+                        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+                            .valid_card(TargetFilter::SelfRef)
+                            .destination_zone(Zone::Battlefield)
+                            .execute(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::BecomeCopy {
+                                    target: TargetFilter::SpecificObject { id: donor },
+                                    recipient: crate::types::ability::CopyRecipient::Source,
+                                    duration: None,
+                                    mana_value_limit: None,
+                                    additional_modifications: vec![],
+                                },
+                            )),
+                    )
+                    .id()
+            } else {
+                scenario
+                    .add_artifact_to_hand_from_oracle(P0, "Cursed Mirror", PRINTED_CURSED_MIRROR)
+                    .id()
+            };
+            scenario
+                .add_artifact_from_oracle(P0, "Synthetic all-entry counter source", "")
+                .with_static_definition(
+                    StaticDefinition::new(
+                        crate::types::statics::StaticMode::EntersWithAdditionalCounters {
+                            counter_type: CounterType::Plus1Plus1,
+                            count: 1,
+                        },
+                    )
+                    .affected(TargetFilter::Any),
+                );
+            let mut runner = scenario.build();
+            runner.cast(entrant).commit();
+            for _ in 0..8 {
+                if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                    break;
+                }
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            if mode != "direct" {
+                assert!(
+                    !runner
+                        .state()
+                        .battlefield
+                        .iter()
+                        .any(|id| runner.state().objects[id]
+                            .card_types
+                            .core_types
+                            .contains(&CoreType::Creature)),
+                    "the source population has no legal copy donor"
+                );
+                if matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ) {
+                    runner
+                        .act(GameAction::ChooseReplacement {
+                            index: if mode == "decline" { 1 } else { 0 },
+                        })
+                        .unwrap();
+                }
+            }
+            assert!(!matches!(
+                runner.state().waiting_for,
+                WaitingFor::CopyTargetChoice { .. }
+            ));
+            let object = &runner.state().objects[&entrant];
+            assert_eq!(object.zone, Zone::Battlefield);
+            assert_eq!(
+                object.counters.get(&CounterType::Plus1Plus1).copied(),
+                Some(if mode == "direct" { 6 } else { 1 })
+            );
+            assert!(object.ordinary_entry_counter_work.is_none());
+            assert_eq!(
+                object.name,
+                if mode == "direct" {
+                    "Ghave, Guru of Spores"
+                } else {
+                    "Cursed Mirror"
+                }
+            );
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+        }
+    }
+
+    #[test]
+    fn ordinary_entry_child_draw_before_or_after_direct_copy_finishes_before_outer_counter_reader()
+    {
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::ability::{ObjectScope, QuantityModification, QuantityRef};
+        for copy_first in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let donor = scenario
+                .add_creature_from_oracle(P1, "Ghave, Guru of Spores", 0, 0, PRINTED_GHAVE)
+                .id();
+            scenario.with_counter(donor, CounterType::Plus1Plus1, 5);
+            let mut draw = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    target: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+            );
+            let mut copy = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::BecomeCopy {
+                    target: TargetFilter::SpecificObject { id: donor },
+                    recipient: crate::types::ability::CopyRecipient::Source,
+                    duration: Some(Duration::UntilEndOfTurn),
+                    mana_value_limit: None,
+                    additional_modifications: vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }],
+                },
+            );
+            let selected = if copy_first {
+                copy.sub_ability = Some(Box::new(draw));
+                copy
+            } else {
+                draw.sub_ability = Some(Box::new(copy));
+                draw
+            };
+            let entrant = scenario
+                .add_artifact_to_hand_from_oracle(P0, "Synthetic original artifact", "")
+                .with_replacement_definition(
+                    ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+                        .valid_card(TargetFilter::SelfRef)
+                        .destination_zone(Zone::Battlefield)
+                        .execute(selected),
+                )
+                .id();
+            scenario
+                .add_artifact_from_oracle(P0, "Synthetic creature entry bonus", "")
+                .with_static_definition(
+                    StaticDefinition::new(
+                        crate::types::statics::StaticMode::EntersWithAdditionalCounters {
+                            counter_type: CounterType::Plus1Plus1,
+                            count: 1,
+                        },
+                    )
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    )),
+                );
+            for modification in [
+                QuantityModification::Times { factor: 2 },
+                QuantityModification::Plus { value: 1 },
+            ] {
+                let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
+                    .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
+                replacement.quantity_modification = Some(modification);
+                replacement.consume_on_apply = true;
+                scenario
+                    .add_artifact_from_oracle(P0, "Synthetic draw replacement", "")
+                    .with_replacement_definition(replacement);
+            }
+            let mut counter_choice = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .valid_card(TargetFilter::SpecificObject { id: entrant })
+                .quantity_modification(QuantityModification::Prevent);
+            counter_choice.mode = ReplacementMode::Optional { decline: None };
+            scenario
+                .add_artifact_from_oracle(P0, "Synthetic entrant counter prevention", "")
+                .with_replacement_definition(counter_choice);
+            for _ in 0..8 {
+                scenario.add_card_to_library_top(P0, "Library card");
+            }
+            let mut outer = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Hand),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::SpecificObject { id: entrant },
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![(
+                        CounterType::Time,
+                        QuantityExpr::Fixed { value: 2 },
+                    )],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            );
+            outer.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::CountersOn {
+                            scope: ObjectScope::Target,
+                            counter_type: Some(CounterType::Plus1Plus1),
+                        },
+                    },
+                    player: TargetFilter::Controller,
+                },
+            )));
+            let spell = scenario
+                .add_spell_to_hand(P0, "Synthetic entry then counter reader", false)
+                .with_ability_definition(outer)
+                .id();
+            let mut runner = scenario.build();
+            let life = runner.state().players[0].life;
+            runner.cast(spell).target_object(entrant).commit();
+            for _ in 0..8 {
+                if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { player: P0, .. }
+            ));
+            assert!(matches!(
+                runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .map(|pending| &pending.proposed),
+                Some(crate::types::proposed_event::ProposedEvent::AddCounter { count: 2, .. })
+            ));
+            assert_eq!(
+                runner.state().objects[&entrant]
+                    .ordinary_entry_counter_work
+                    .as_ref()
+                    .unwrap()
+                    .dispatch_frame,
+                None
+            );
+            let initial_readers = liminal_copy_reader_forms(runner.state());
+            for (reader, initial) in initial_readers.into_iter().enumerate() {
+                let mut runner = GameRunner::from_state(initial);
+                runner
+                    .act(GameAction::ChooseReplacement { index: 1 })
+                    .unwrap();
+                assert!(runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .is_some_and(|pending| pending.candidates.len() >= 2));
+                let marked = runner
+                    .state()
+                    .resolution_stack
+                    .ability_continuations()
+                    .find(|pending| pending.ordinary_entry_counter_completion.is_some())
+                    .expect(
+                        "the selected copy tail owns its terminal product outside the draw pair",
+                    );
+                if copy_first {
+                    assert!(
+                        matches!(marked.chain.effect, Effect::NoOp),
+                        "the already-owned draw child has one completion-only ordinary tail"
+                    );
+                    assert_eq!(runner.state().objects[&entrant].power, Some(0));
+                } else {
+                    assert!(matches!(marked.chain.effect, Effect::BecomeCopy { .. }));
+                    assert_eq!(runner.state().objects[&entrant].power, None);
+                }
+                assert_eq!(runner.state().players[0].life, life);
+                let state = liminal_copy_reader_forms(runner.state()).swap_remove(reader);
+                let mut restored = GameRunner::from_state(state);
+                restored
+                    .act(GameAction::ChooseReplacement { index: 1 })
+                    .unwrap();
+                assert!(matches!(
+                    restored
+                        .state()
+                        .pending_replacement
+                        .as_ref()
+                        .map(|pending| &pending.proposed),
+                    Some(crate::types::proposed_event::ProposedEvent::AddCounter { count: 6, .. })
+                ));
+                assert!(restored.state().objects[&entrant]
+                    .ordinary_entry_counter_work
+                    .is_none());
+                assert_eq!(restored.state().players[0].life, life);
+                let state = liminal_copy_reader_forms(restored.state()).swap_remove(reader);
+                let mut restored = GameRunner::from_state(state);
+                restored
+                    .act(GameAction::ChooseReplacement { index: 1 })
+                    .unwrap();
+                crate::game::layers::flush_layers(restored.state_mut());
+                let object = &restored.state().objects[&entrant];
+                assert_eq!(object.counters.get(&CounterType::Time).copied(), Some(2));
+                assert_eq!(object.zone, Zone::Battlefield);
+                assert_eq!(
+                    object.counters.get(&CounterType::Plus1Plus1).copied(),
+                    Some(6)
+                );
+                assert_eq!(object.power, Some(6));
+                assert!(object.has_keyword(&Keyword::Haste));
+                assert!(object.ordinary_entry_counter_work.is_none());
+                assert_eq!(
+                    restored.state().players[0].life,
+                    life + 6,
+                    "the unmarked enclosing reader runs once after numeric preparation"
+                );
+                assert!(matches!(
+                    restored.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(
+                    restored.state().stack.is_empty()
+                        && restored.state().resolution_stack.is_empty()
+                );
+            }
         }
     }
 

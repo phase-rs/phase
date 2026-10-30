@@ -1392,6 +1392,17 @@ fn dragonstorm_globe_counters_created_dragon_token() {
         state.objects[&globe].abilities, state.objects[&globe].base_abilities,
         state.objects[&globe].replacement_definitions, state.objects[&globe].base_replacement_definitions);
 
+    assert!(parsed.statics.iter().any(|definition| matches!(
+        definition.mode,
+        crate::types::statics::StaticMode::EntersWithAdditionalCounters { .. }
+    )));
+    assert!(state.objects[&globe]
+        .static_definitions
+        .iter_all()
+        .any(|definition| matches!(
+            definition.mode,
+            crate::types::statics::StaticMode::EntersWithAdditionalCounters { .. }
+        )));
     let token_spell = create_object(
         &mut state,
         CardId(9171),
@@ -1467,6 +1478,8 @@ fn dragonstorm_globe_counters_created_dragon_token() {
         crate::types::identifiers::ObjectIncarnationRef::from_object(dragon),
         state.waiting_for, state.pending_replacement, state.resolution_stack, state.objects[&globe].replacement_definitions
     );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty() && state.resolution_stack.is_empty());
 }
 
 /// CR 603.6c + CR 614.1c: Cathars' Crusade triggers on any creature you

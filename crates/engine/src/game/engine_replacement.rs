@@ -3051,6 +3051,8 @@ pub(super) fn handle_copy_target_choice(
     target: Option<TargetRef>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    crate::types::game_state::validate_ordinary_entry_counter_work(state)
+        .map_err(EngineError::InvalidAction)?;
     let WaitingFor::CopyTargetChoice {
         player,
         source_id,
@@ -3394,22 +3396,42 @@ pub(super) fn handle_copy_target_choice(
     // Keep the copy and its entire rider chain on the ordinary resolver path;
     // the finisher combines these with the realized copy's own entry counters.
     let mut entry_counter_exceptions = Vec::new();
-    if let Effect::BecomeCopy {
-        additional_modifications,
-        ..
-    } = &mut ability.effect
-    {
-        let (held, remaining) = effects::become_copy::partition_entry_counter_exceptions(
-            std::mem::take(additional_modifications),
-        );
-        *additional_modifications = remaining;
-        entry_counter_exceptions = held;
+    let modern_completion = bound_ordinary_entry_completion(state, source_id);
+    if modern_completion.is_none() {
+        if let Effect::BecomeCopy {
+            additional_modifications,
+            ..
+        } = &mut ability.effect
+        {
+            let (held, remaining) = effects::become_copy::partition_entry_counter_exceptions(
+                std::mem::take(additional_modifications),
+            );
+            *additional_modifications = remaining;
+            entry_counter_exceptions = held;
+        }
     }
     let entrant_pin = state
         .objects
         .get(&source_id)
         .map(crate::types::identifiers::ObjectIncarnationRef::from_object);
-    let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+    if modern_completion.is_some() {
+        effects::resolve_ordinary_entry_ability_chain(
+            state,
+            &ability,
+            events,
+            0,
+            modern_completion,
+        )
+        .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+        if !ordinary_entry_counter_work_is_due(state) {
+            return Ok(state.waiting_for.clone());
+        }
+        resume_prepared_ordinary_entries(state, events)?;
+        super::engine::resume_pending_continuation_if_priority(state, events)?;
+        return Ok(state.waiting_for.clone());
+    } else {
+        let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+    }
     // CR 707.9f: the held exceptions' type gates read the realized copy. When
     // the copy effect did not apply (its source is gone), the entrant is still
     // the uncopied object, so no held exception may be evaluated against it.
@@ -3483,27 +3505,63 @@ pub(crate) enum CopyEntryResumption {
     Paused,
 }
 
-fn finish_copy_target_choice_entry(
+/// CR 614.12 + CR 616.1c + CR 122.6: compose against the final entrant once.
+fn prepare_copy_entry_counters(
     state: &mut GameState,
     source_id: ObjectId,
-    events: &mut Vec<GameEvent>,
-    mut counter_pause_post_actions: Vec<PendingCounterPostAction>,
-    replay_entry_events: bool,
     entry_counters: CopyEntryCounters<'_>,
-) -> Result<Option<WaitingFor>, EngineError> {
-    // Force a full layer pass after the copy chain so the realized
-    // characteristics below (enter-tapped, ETB counters) read post-copy state.
-    crate::game::layers::mark_layers_full(state);
-    crate::game::layers::flush_layers(state);
-    let enter_modifiers =
-        super::replacement::current_self_enter_replacement_modifiers(state, source_id);
-    if let Some(tapped) = enter_modifiers.enter_tapped {
-        if let Some(obj) = state.objects.get_mut(&source_id) {
-            obj.tapped = tapped;
+    enter_counters: Vec<(CounterType, u32)>,
+    completion: Option<crate::types::game_state::OrdinaryEntryCounterCompletion>,
+) -> Result<(Vec<(CounterType, u32)>, Option<ObjectIncarnationRef>), EngineError> {
+    if let Some(work) = state
+        .objects
+        .get(&source_id)
+        .and_then(|object| object.ordinary_entry_counter_work.as_ref())
+    {
+        let admitted = work.dispatch_frame.map(|dispatch_frame| {
+            crate::types::game_state::OrdinaryEntryCounterCompletion {
+                entrant: work.entrant,
+                dispatch_frame,
+            }
+        });
+        if !work.entrant.is_current(state)
+            || admitted != completion
+            || work.completed_dispatch != work.dispatch_frame
+        {
+            return Err(EngineError::InvalidAction(
+                "Entry counters await their selected invocation".into(),
+            ));
         }
+        // Take before replacement-aware placement can park its numeric suffix.
+        let work = state
+            .objects
+            .get_mut(&source_id)
+            .expect("ordinary entrant")
+            .ordinary_entry_counter_work
+            .take()
+            .expect("checked ordinary entry work");
+        let mut counters = crate::game::zone_pipeline::enters_with_additional_counters_for_entry(
+            state,
+            source_id,
+            &work.external_sources,
+        );
+        if let Some((owner, contribution)) = work.installed_copy_counters {
+            if state
+                .objects
+                .get(&source_id)
+                .is_some_and(|object| object.layer1_copy_effect == Some(owner))
+            {
+                counters.extend(enter_counters);
+                counters.extend(contribution);
+            }
+        }
+        return Ok((
+            effects::counters::coalesce_entry_counters(counters),
+            Some(work.entrant),
+        ));
     }
-    let (counters, completion_witness) = match entry_counters {
-        CopyEntryCounters::ReplacementsOnly => (enter_modifiers.counters, None),
+    let result = match entry_counters {
+        CopyEntryCounters::ReplacementsOnly => (enter_counters, None),
         CopyEntryCounters::Ordinary { exceptions } => {
             let entrant = state
                 .objects
@@ -3535,7 +3593,7 @@ fn finish_copy_target_choice_entry(
                 Vec::new()
             };
             let merged = effects::counters::coalesce_entry_counters(
-                enter_modifiers.counters.into_iter().chain(intrinsic).chain(
+                enter_counters.into_iter().chain(intrinsic).chain(
                     effects::become_copy::entry_exception_counters(
                         state, source_id, controller, source_id, exceptions,
                     ),
@@ -3544,6 +3602,58 @@ fn finish_copy_target_choice_entry(
             (merged, Some(witness))
         }
     };
+    Ok(result)
+}
+
+pub(crate) fn prepare_unbound_ordinary_entry_counters(
+    state: &mut GameState,
+    source_id: ObjectId,
+) -> Vec<(CounterType, u32)> {
+    prepare_copy_entry_counters(
+        state,
+        source_id,
+        CopyEntryCounters::Ordinary { exceptions: &[] },
+        Vec::new(),
+        None,
+    )
+    .expect("original delivery boundary admitted unbound external work")
+    .0
+}
+
+fn finish_copy_target_choice_entry(
+    state: &mut GameState,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+    mut counter_pause_post_actions: Vec<PendingCounterPostAction>,
+    replay_entry_events: bool,
+    entry_counters: CopyEntryCounters<'_>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    if state
+        .objects
+        .get(&source_id)
+        .is_some_and(|object| object.ordinary_entry_counter_work.is_none())
+    {
+        state.finish_active_paused_post_replacement_dispatch();
+    }
+    // Force a full layer pass after the copy chain so the realized
+    // characteristics below (enter-tapped, ETB counters) read post-copy state.
+    crate::game::layers::mark_layers_full(state);
+    crate::game::layers::flush_layers(state);
+    let enter_modifiers =
+        super::replacement::current_self_enter_replacement_modifiers(state, source_id);
+    if let Some(tapped) = enter_modifiers.enter_tapped {
+        if let Some(obj) = state.objects.get_mut(&source_id) {
+            obj.tapped = tapped;
+        }
+    }
+    let completion = bound_ordinary_entry_completion(state, source_id);
+    let (counters, completion_witness) = prepare_copy_entry_counters(
+        state,
+        source_id,
+        entry_counters,
+        enter_modifiers.counters,
+        completion,
+    )?;
     if !apply_etb_counters(state, source_id, &counters, events) {
         // Only the ordinary caller has a witness. Meld and liminal entries
         // retain their existing, structurally different completions.
@@ -3608,6 +3718,45 @@ fn finish_copy_target_choice_entry_after_counters(
     counter_pause_post_actions: Vec<PendingCounterPostAction>,
     replay_entry_events: bool,
 ) -> Result<Option<WaitingFor>, EngineError> {
+    if let Some(waiting) =
+        prepare_copy_entry_tail(state, source_id, events, &counter_pause_post_actions)
+    {
+        return Ok(Some(waiting));
+    }
+    if replay_entry_events {
+        let delivery_start = events.len();
+        if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
+            state.capture_paused_zone_change_delivery_for_member(
+                source_id,
+                &events[delivery_start..],
+            );
+            // CR 603.3b + CR 608.2c: the entry has completed before its ETB
+            // trigger's target-selection prompt is exposed. Retire the parent
+            // carrier now; otherwise the selected trigger would later try to
+            // resolve while this completed spell or ability still owns it.
+            // The paused post-replacement drain is part of that parent
+            // completion. Retire its exact top dispatch before asking the
+            // carrier predicate whether the source resolution can settle.
+            super::engine::settle_resolving_stack_entry_before_trigger_selection(state);
+            return Ok(Some(waiting_for));
+        }
+        state.capture_paused_zone_change_delivery_for_member(source_id, &events[delivery_start..]);
+    }
+    Ok(finish_copy_entry_tail(
+        state,
+        source_id,
+        events,
+        counter_pause_post_actions,
+        replay_entry_events,
+    ))
+}
+
+fn prepare_copy_entry_tail(
+    state: &mut GameState,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+    counter_pause_post_actions: &[PendingCounterPostAction],
+) -> Option<WaitingFor> {
     // CR 614.12 + CR 707.9: Surface any mandatory "as this enters, choose ..."
     // replacement choice acquired from entering as a copy before replaying the entry.
     if let Some(choice) =
@@ -3625,7 +3774,7 @@ fn finish_copy_target_choice_entry_after_counters(
             HashSet::new(),
             events,
         ) {
-            return Ok(Some(waiting_for));
+            return Some(waiting_for);
         }
     }
     // CR 614.12a + CR 707.2: surface a copied as-enters life payment (Clone
@@ -3649,10 +3798,10 @@ fn finish_copy_target_choice_entry_after_counters(
                 state,
                 crate::types::ability::EffectKind::CopyTokenOf,
                 source_id,
-                counter_pause_post_actions,
+                counter_pause_post_actions.to_vec(),
             );
         }
-        return Ok(Some(waiting_for));
+        return Some(waiting_for);
     }
     // CR 400.7 + CR 403.3 + CR 614.12a: the copy is realized and every mandatory as-enters
     // choice is answered — the first instant the token IS the thing that entered. Placed before
@@ -3671,14 +3820,14 @@ fn finish_copy_target_choice_entry_after_counters(
         );
         let mut post_actions =
             vec![PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant }];
-        post_actions.extend(counter_pause_post_actions);
+        post_actions.extend_from_slice(counter_pause_post_actions);
         effects::counters::stash_pending_counter_post_actions(
             state,
             crate::types::ability::EffectKind::CopyTokenOf,
             source_id,
             post_actions,
         );
-        return Ok(Some(state.waiting_for.clone()));
+        return Some(state.waiting_for.clone());
     }
     crate::game::layers::mark_layers_full(state);
     // CR 614.12a + CR 707.9: The battlefield-entry `ZoneChanged` event was
@@ -3695,39 +3844,28 @@ fn finish_copy_target_choice_entry_after_counters(
     // on the battlefield — concede / error / chained-replacement paths can
     // leave a stale event in the vec, and we discard rather than fire a
     // phantom entry trigger.
-    if replay_entry_events {
-        let delivery_start = events.len();
-        if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
-            state.capture_paused_zone_change_delivery_for_member(
-                source_id,
-                &events[delivery_start..],
-            );
-            // CR 603.3b + CR 608.2c: the entry has completed before its ETB
-            // trigger's target-selection prompt is exposed. Retire the parent
-            // carrier now; otherwise the selected trigger would later try to
-            // resolve while this completed spell or ability still owns it.
-            // The paused post-replacement drain is part of that parent
-            // completion. Retire its exact top dispatch before asking the
-            // carrier predicate whether the source resolution can settle.
-            state.finish_active_paused_post_replacement_dispatch();
-            super::engine::settle_resolving_stack_entry_before_trigger_selection(state);
-            return Ok(Some(waiting_for));
-        }
-        state.capture_paused_zone_change_delivery_for_member(source_id, &events[delivery_start..]);
-    }
+    None
+}
+
+fn finish_copy_entry_tail(
+    state: &mut GameState,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+    counter_pause_post_actions: Vec<PendingCounterPostAction>,
+    replay_entry_events: bool,
+) -> Option<WaitingFor> {
     // CR 615.5: a CopyTargetChoice raised by a general post-replacement
     // continuation has now completed its own copy work. Retire only that
     // active paused drain before exposing the outer batch-delivery completion;
     // a later nested choice returned above and therefore keeps the drain
     // resident with its event context intact.
-    state.finish_active_paused_post_replacement_dispatch();
     // CR 702.49c: a ninjutsu entry that deferred `BatchCompletion::NinjutsuPlacement`
     // while paused on `CopyTargetChoice` must run combat placement after the copy
     // resolves (mirrors the `ReturnAsAuraTarget` batch drain in engine.rs).
     if replay_entry_events && state.active_batch_delivery().is_some() {
         crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            return Ok(Some(state.waiting_for.clone()));
+            return Some(state.waiting_for.clone());
         }
     }
     // CR 303.4f + CR 303.4g: Copy Enchantment (and any "enter as a copy of an
@@ -3809,10 +3947,10 @@ fn finish_copy_target_choice_entry_after_counters(
                     controller,
                 )),
             };
-            return Ok(Some(state.waiting_for.clone()));
+            return Some(state.waiting_for.clone());
         }
     }
-    Ok(None)
+    None
 }
 
 /// CR 603.2 + CR 614.12a: Replay the deferred battlefield-entry `ZoneChanged`
@@ -4259,6 +4397,15 @@ fn resolve_post_replacement_chain(
     resolved: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    resolve_post_replacement_chain_with_completion(state, resolved, events, None)
+}
+
+fn resolve_post_replacement_chain_with_completion(
+    state: &mut GameState,
+    resolved: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    completion: Option<crate::types::game_state::OrdinaryEntryCounterCompletion>,
+) -> Option<WaitingFor> {
     // CR 117.2e: this is an internal execution sentinel, not a priority grant.
     // Isolate before running the chain: an inherited resolution choice would
     // otherwise park its synchronous tail, even if the first effect completed.
@@ -4268,7 +4415,7 @@ fn resolve_post_replacement_chain(
             player: state.priority_player,
         },
     );
-    let _ = effects::resolve_ability_chain(state, resolved, events, 0);
+    let _ = effects::resolve_ordinary_entry_ability_chain(state, resolved, events, 0, completion);
 
     match &state.waiting_for {
         WaitingFor::Priority { .. } => {
@@ -4385,7 +4532,7 @@ fn prepare_selected_post_replacement_continuation(
             stamp(child, parent);
         }
     }
-    if matches!(resolved.effect, Effect::BecomeCopy { .. }) {
+    if ordinary_copy_resolved(&resolved) {
         fn bind_recipient(node: &mut ResolvedAbility, source: ObjectId) {
             node.source_id = source;
             if let Some(child) = node.sub_ability.as_deref_mut() {
@@ -4399,7 +4546,7 @@ fn prepare_selected_post_replacement_continuation(
             bind_recipient(&mut resolved, source);
         }
     }
-    if !matches!(resolved.effect, Effect::BecomeCopy { .. }) && parent.is_none() {
+    if !ordinary_copy_resolved(&resolved) && parent.is_none() {
         return None;
     }
     if let Some(parent) = parent {
@@ -4412,6 +4559,242 @@ fn prepare_selected_post_replacement_continuation(
     );
     resolved.set_replacement_applied_recursive(replacement_applied);
     Some(resolved)
+}
+
+// CR 614.12 + CR 616.1c: identify the selected entrant-copy program before other entry replacements.
+fn ordinary_copy_effect(effect: &Effect) -> bool {
+    match effect {
+        Effect::BecomeCopy {
+            recipient: crate::types::ability::CopyRecipient::Source,
+            ..
+        } => true,
+        Effect::ChooseOneOf { branches, .. } => branches.iter().any(ordinary_copy_definition),
+        _ => false,
+    }
+}
+
+fn ordinary_copy_definition(definition: &AbilityDefinition) -> bool {
+    let Some(definition) =
+        super::replacement::EventModifiers::first_non_modifier_ability(Some(definition))
+    else {
+        return false;
+    };
+    ordinary_copy_effect(&definition.effect)
+        || definition
+            .sub_ability
+            .as_deref()
+            .is_some_and(ordinary_copy_definition)
+        || definition
+            .else_ability
+            .as_deref()
+            .is_some_and(ordinary_copy_definition)
+}
+
+fn ordinary_copy_resolved(ability: &ResolvedAbility) -> bool {
+    ordinary_copy_effect(&ability.effect)
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(ordinary_copy_resolved)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ordinary_copy_resolved)
+}
+
+pub(crate) fn ordinary_copy_continuation_pending(state: &GameState) -> bool {
+    state
+        .active_post_replacement_drains()
+        .and_then(|drains| drains.resident())
+        .and_then(|drain| drain.ready_continuation())
+        .is_some_and(|continuation| match continuation {
+            PostReplacementContinuation::Template(definition) => {
+                ordinary_copy_definition(definition)
+            }
+            PostReplacementContinuation::Resolved(ability) => ordinary_copy_resolved(ability),
+        })
+}
+
+fn bound_ordinary_entry_completion(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Option<crate::types::game_state::OrdinaryEntryCounterCompletion> {
+    let work = state
+        .objects
+        .get(&source_id)?
+        .ordinary_entry_counter_work
+        .as_ref()?;
+    Some(crate::types::game_state::OrdinaryEntryCounterCompletion {
+        entrant: work.entrant,
+        dispatch_frame: work.dispatch_frame?,
+    })
+}
+
+/// Acknowledgement only: counter preparation belongs to the fallible engine boundary.
+pub(crate) fn acknowledge_ordinary_entry_completion(
+    state: &mut GameState,
+    completion: crate::types::game_state::OrdinaryEntryCounterCompletion,
+) {
+    if !completion.entrant.is_current(state) {
+        return;
+    }
+    if let Some(work) = state
+        .objects
+        .get_mut(&completion.entrant.object_id)
+        .and_then(|object| object.ordinary_entry_counter_work.as_mut())
+        .filter(|work| {
+            work.entrant == completion.entrant
+                && work.dispatch_frame == Some(completion.dispatch_frame)
+        })
+    {
+        work.completed_dispatch = Some(completion.dispatch_frame);
+    }
+}
+
+pub(crate) fn ordinary_entry_counter_work_is_due(state: &GameState) -> bool {
+    state.objects.values().any(|object| {
+        object
+            .ordinary_entry_counter_work
+            .as_ref()
+            .is_some_and(|work| {
+                work.entrant == ObjectIncarnationRef::from_object(object)
+                    && object.zone == Zone::Battlefield
+                    && work.dispatch_frame.is_some()
+                    && work.completed_dispatch == work.dispatch_frame
+            })
+    })
+}
+fn settle_ordinary_entry_dispatch_and_spell(
+    state: &mut GameState,
+    completion: crate::types::game_state::OrdinaryEntryCounterCompletion,
+    events: &mut Vec<GameEvent>,
+) {
+    state.finish_active_paused_ordinary_entry_dispatch(completion.dispatch_frame);
+    if state
+        .active_spell_resolution()
+        .is_some_and(|context| context.object_id == completion.entrant.object_id)
+    {
+        let context = state
+            .take_active_spell_resolution()
+            .expect("exposed exact entrant spell");
+        apply_pending_spell_resolution(state, &context, events);
+    }
+}
+
+fn prepare_acknowledged_ordinary_entry(
+    state: &mut GameState,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> (bool, Option<WaitingFor>) {
+    let completion =
+        bound_ordinary_entry_completion(state, source_id).expect("bound completed entry");
+    settle_ordinary_entry_dispatch_and_spell(state, completion, events);
+    crate::game::layers::mark_layers_full(state);
+    crate::game::layers::flush_layers(state);
+    let copied = state.objects.get(&source_id).is_some_and(|object| {
+        object
+            .ordinary_entry_counter_work
+            .as_ref()
+            .and_then(|work| work.installed_copy_counters.as_ref())
+            .is_some_and(|(owner, _)| object.layer1_copy_effect == Some(*owner))
+    });
+    let modifiers = super::replacement::current_self_enter_replacement_modifiers(state, source_id);
+    if copied {
+        if let Some(tapped) = modifiers.enter_tapped {
+            state
+                .objects
+                .get_mut(&source_id)
+                .expect("current entrant")
+                .tapped = tapped;
+        }
+    }
+    let (counters, _) = prepare_copy_entry_counters(
+        state,
+        source_id,
+        CopyEntryCounters::Ordinary { exceptions: &[] },
+        modifiers.counters,
+        Some(completion),
+    )
+    .expect("terminal acknowledgement authenticates this numeric preparation");
+    if !apply_etb_counters(state, source_id, &counters, events) {
+        if copied {
+            effects::counters::append_pending_counter_post_actions(
+                state,
+                vec![PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+                    entrant: completion.entrant,
+                }],
+            );
+        }
+        return (copied, Some(state.waiting_for.clone()));
+    }
+    (copied, None)
+}
+
+/// Fallible completion boundary, before an enclosing reader or other observer.
+pub(crate) fn resume_prepared_ordinary_entries(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    while matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        let due = state.objects.iter().find_map(|(id, object)| {
+            object
+                .ordinary_entry_counter_work
+                .as_ref()
+                .filter(|work| {
+                    work.entrant.is_current(state)
+                        && work.dispatch_frame.is_some()
+                        && work.completed_dispatch == work.dispatch_frame
+                })
+                .map(|_| *id)
+        });
+        let Some(source_id) = due else {
+            break;
+        };
+        let (copied, waiting) = prepare_acknowledged_ordinary_entry(state, source_id, events);
+        if let Some(waiting) = waiting {
+            state.waiting_for = waiting;
+            break;
+        }
+        if copied {
+            if let Some(waiting) = finish_copy_target_choice_entry_after_counters(
+                state,
+                source_id,
+                events,
+                Vec::new(),
+                true,
+            )? {
+                state.waiting_for = waiting;
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn finish_synchronous_ordinary_entry(
+    state: &mut GameState,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    let caller_wait = std::mem::replace(
+        &mut state.waiting_for,
+        WaitingFor::Priority {
+            player: state.active_player,
+        },
+    );
+    let (copied, waiting) = prepare_acknowledged_ordinary_entry(state, source_id, events);
+    let waiting = if waiting.is_some() {
+        waiting
+    } else if copied {
+        prepare_copy_entry_tail(state, source_id, events, &[])
+            .or_else(|| finish_copy_entry_tail(state, source_id, events, Vec::new(), false))
+    } else {
+        None
+    };
+    if waiting.is_none() {
+        state.waiting_for = caller_wait;
+    }
+    waiting
 }
 
 pub(crate) fn apply_pending_post_replacement_effect(
@@ -4508,6 +4891,31 @@ pub(crate) fn apply_pending_post_replacement_effect(
     let (continuation, dispatch) = state
         .resolution_stack
         .begin_active_post_replacement_dispatch_with_recipients(recipients)?;
+    let ordinary_selected = prepared.as_ref().is_some_and(|resolved| {
+        ordinary_copy_resolved(resolved) && resolved.context.token_creation_parent.is_none()
+    }) && event.as_ref().is_none_or(|event| {
+        matches!(
+            event,
+            ReplacementEvent::Moved | ReplacementEvent::ChangeZone
+        )
+    });
+    let ordinary_completion = source.filter(|_| ordinary_selected).and_then(|source_id| {
+        let object = state.objects.get_mut(&source_id)?;
+        let pin = ObjectIncarnationRef::from_object(object);
+        let work = object.ordinary_entry_counter_work.as_mut()?;
+        if work.entrant != pin
+            || work
+                .dispatch_frame
+                .is_some_and(|frame| frame != dispatch.frame())
+        {
+            return None;
+        }
+        work.dispatch_frame = Some(dispatch.frame());
+        Some(crate::types::game_state::OrdinaryEntryCounterCompletion {
+            entrant: pin,
+            dispatch_frame: dispatch.frame(),
+        })
+    });
     // CR 603.3b + CR 608.2c: this dispatch is now live on this thread's call
     // stack. Constructed AFTER the mint so the `?` early-return path never
     // enters it, and dropped by RAII at every exit — the
@@ -4518,7 +4926,7 @@ pub(crate) fn apply_pending_post_replacement_effect(
     let current_substitution = prepared
         .as_ref()
         .is_some_and(|resolved| resolved.context.token_creation_parent.is_some());
-    let waiting_for = if let Some(mut resolved) = prepared {
+    let mut waiting_for = if let Some(mut resolved) = prepared {
         if let Effect::BecomeCopy { target, .. } = &resolved.effect {
             let stamp = state
                 .entering_or_live_object(resolved.source_id)
@@ -4539,6 +4947,9 @@ pub(crate) fn apply_pending_post_replacement_effect(
                 max_mana_value,
             );
             if valid_targets.is_empty() {
+                if let Some(completion) = ordinary_completion {
+                    acknowledge_ordinary_entry_completion(state, completion);
+                }
                 None
             } else if matches!(target, TargetFilter::ExiledCardByIndex { .. })
                 || (matches!(target, TargetFilter::SpecificObject { .. })
@@ -4558,7 +4969,12 @@ pub(crate) fn apply_pending_post_replacement_effect(
                         })
                         .collect(),
                 );
-                resolve_post_replacement_chain(state, &resolved, events)
+                resolve_post_replacement_chain_with_completion(
+                    state,
+                    &resolved,
+                    events,
+                    ordinary_completion,
+                )
             } else {
                 Some(WaitingFor::CopyTargetChoice {
                     player: resolved.controller,
@@ -4597,8 +5013,14 @@ pub(crate) fn apply_pending_post_replacement_effect(
                     player: state.active_player,
                 },
             );
-            effects::resolve_ability_chain(state, &resolved, events, 1)
-                .expect("selected replacement continuation");
+            effects::resolve_ordinary_entry_ability_chain(
+                state,
+                &resolved,
+                events,
+                1,
+                ordinary_completion,
+            )
+            .expect("selected replacement continuation");
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 state.waiting_for = caller_wait;
                 None
@@ -4694,6 +5116,17 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // single producer site so both the stack-resolution path (non-optional
     // copy replacements) and the `handle_replacement_choice` path (optional
     // "you may have this enter as a copy" replacements) defer uniformly.
+    if let Some(completion) = ordinary_completion {
+        if state
+            .objects
+            .get(&completion.entrant.object_id)
+            .and_then(|object| object.ordinary_entry_counter_work.as_ref())
+            .is_some_and(|work| work.completed_dispatch == Some(completion.dispatch_frame))
+        {
+            waiting_for =
+                finish_synchronous_ordinary_entry(state, completion.entrant.object_id, events);
+        }
+    }
     capture_deferred_entry_events_if_mid_entry_choice(state, waiting_for.as_ref(), events);
     waiting_for
 }

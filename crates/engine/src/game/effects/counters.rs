@@ -1298,6 +1298,41 @@ fn apply_pending_counter_post_action(
             enters_attacking,
             drain,
         } => {
+            // CR 614.12: this original delivery boundary may settle an unbound
+            // external bundle only when no selected copy continuation remains.
+            if to == Zone::Battlefield
+                && !crate::game::engine_replacement::ordinary_copy_continuation_pending(state)
+                && state
+                    .objects
+                    .get(&object_id)
+                    .and_then(|object| object.ordinary_entry_counter_work.as_ref())
+                    .is_some_and(|work| work.dispatch_frame.is_none())
+            {
+                let counters =
+                    crate::game::engine_replacement::prepare_unbound_ordinary_entry_counters(
+                        state, object_id,
+                    );
+                if !crate::game::engine_replacement::apply_etb_counters(
+                    state, object_id, &counters, events,
+                ) {
+                    append_pending_counter_post_actions(
+                        state,
+                        vec![PendingCounterPostAction::ContinueZoneDeliveryTail {
+                            object_id,
+                            from,
+                            to,
+                            cause,
+                            source_id,
+                            duration,
+                            exile_controller,
+                            exile_tracking,
+                            enters_attacking,
+                            drain,
+                        }],
+                    );
+                    return false;
+                }
+            }
             // CR 614.12a: the delivery tail may surface a Devour as-enters
             // sacrifice `EffectZoneChoice`. On that pause, return `false` so the
             // drain stashes the remaining post-actions and pauses; the tail's

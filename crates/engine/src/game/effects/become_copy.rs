@@ -214,6 +214,15 @@ pub(crate) fn apply_precomputed_copy_values(
             &state.all_creature_types,
         );
 
+    // CR 306.5b + CR 707.2: capture printed intrinsic
+    // counters from the supplied copiable values, never the donor's counters.
+    let intrinsic_entry_counters = crate::game::printed_cards::intrinsic_face_entry_counters(
+        values.printed_loyalty,
+        values.loyalty,
+        None,
+        None,
+    );
+
     let mut modifications = vec![ContinuousModification::CopyValues {
         values: Box::new(values),
         display,
@@ -282,6 +291,37 @@ pub(crate) fn apply_precomputed_copy_values(
     // placed via the shared replacement-aware primitive (Doubling Season etc.
     // apply normally).
     crate::game::layers::flush_layers(state);
+
+    if state
+        .objects
+        .get(&recipient_id)
+        .is_some_and(|object| object.ordinary_entry_counter_work.is_some())
+    {
+        if let Some(installed_id) = installed_id {
+            let owner = crate::types::ability::CopyEffectInstanceRef {
+                continuous_effect_id: installed_id,
+                modification_index: 0,
+            };
+            let counters = super::counters::coalesce_entry_counters(
+                intrinsic_entry_counters
+                    .into_iter()
+                    .chain(entry_exception_counters(
+                        state,
+                        source_id,
+                        controller,
+                        recipient_id,
+                        &additional_modifications,
+                    )),
+            );
+            state
+                .objects
+                .get_mut(&recipient_id)
+                .and_then(|object| object.ordinary_entry_counter_work.as_mut())
+                .expect("ordinary copy work remains on its recipient")
+                .installed_copy_counters = Some((owner, counters));
+        }
+        return Ok(());
+    }
 
     if !classified_modifications.is_empty() {
         let additions: Vec<_> = entry_exception_counters(

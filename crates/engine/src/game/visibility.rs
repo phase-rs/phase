@@ -57,6 +57,32 @@ fn redact_waiting_for_iteration_members(waiting_for: &mut WaitingFor) {
 /// `state`.
 pub(crate) fn project_paid_cast_cleanup_authority(state: &GameState) -> GameState {
     let mut projected = state.clone();
+    for object in projected.objects.values_mut() {
+        object.ordinary_entry_counter_work = None;
+    }
+    for entries in projected.departed_stack_spells.values_mut() {
+        for departed in entries.values_mut() {
+            departed.object.ordinary_entry_counter_work = None;
+        }
+    }
+    for entry in projected.liminal_entries.values_mut() {
+        if entry
+            .object
+            .projected()
+            .ordinary_entry_counter_work
+            .is_some()
+        {
+            let mut object = entry.object.projected().clone();
+            object.ordinary_entry_counter_work = None;
+            entry.object.install_copy_projection(object);
+        }
+    }
+    projected
+        .resolution_stack
+        .for_each_entry_counter_continuation_mut(|pending| {
+            pending.ordinary_entry_counter_completion = None;
+        });
+
     if let Some(pending) = projected.pending_replacement.as_mut() {
         pending.damage_source_context = None;
         pending.damage_opportunity.clear();

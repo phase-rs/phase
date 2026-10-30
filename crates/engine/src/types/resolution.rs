@@ -2283,6 +2283,50 @@ impl ResolutionStack {
         self.frames.last()
     }
 
+    pub(crate) fn entry_counter_continuations(&self) -> impl Iterator<Item = &PendingContinuation> {
+        self.frames.iter().filter_map(|frame| match frame {
+            ResolutionFrame::AbilityContinuation(frame) => Some(&frame.pending),
+            ResolutionFrame::CopyToken(frame) => frame.continuation.as_deref(),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn for_each_entry_counter_continuation_mut(
+        &mut self,
+        mut visit: impl FnMut(&mut PendingContinuation),
+    ) {
+        for frame in self.frames.iter_mut() {
+            match frame {
+                ResolutionFrame::AbilityContinuation(frame) => visit(&mut frame.pending),
+                ResolutionFrame::CopyToken(frame) => {
+                    if let Some(continuation) = frame.continuation.as_deref_mut() {
+                        visit(continuation);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub(crate) fn normalize_entry_counter_dispatches_for_loop(
+        &mut self,
+        refs: &mut Vec<PostReplacementFrameId>,
+    ) {
+        for frame in self.frames.iter() {
+            if let ResolutionFrame::PostReplacement(drains) = frame {
+                refs.extend(drains.frame_id());
+            }
+        }
+        refs.sort_unstable_by_key(|id| id.0);
+        refs.dedup();
+        for frame in self.frames.iter_mut() {
+            if let ResolutionFrame::PostReplacement(drains) = frame {
+                drains.normalize_frame_id_for_loop(refs);
+            }
+        }
+        self.last_post_replacement_frame_id = refs.len() as u64;
+    }
+
     pub(crate) fn ability_continuations(&self) -> impl Iterator<Item = &PendingContinuation> {
         self.frames.iter().filter_map(|frame| match frame {
             ResolutionFrame::AbilityContinuation(frame) => Some(&frame.pending),
@@ -7345,6 +7389,7 @@ impl ResolutionStateWire {
                     .resolution_stack
                     .recover_post_replacement_frame_id_allocator();
                 crate::types::game_state::normalize_saved_liminal_copy_authority(&mut legacy)?;
+                crate::types::game_state::validate_ordinary_entry_counter_work(&legacy)?;
                 normalize_logical_zone_instruction_owners(&mut legacy)?;
                 crate::types::game_state::normalize_resolution_cast_offer_allocator(&mut legacy)?;
                 let frames = canonicalize_legacy_resolution_state(&legacy)?;
@@ -7412,6 +7457,7 @@ impl ResolutionStateWire {
                 let mut state = GameStateDecode::materialize_prepared(state_value)?;
                 state.resolution_stack = Box::new(frames);
                 crate::types::game_state::normalize_saved_liminal_copy_authority(&mut state)?;
+                crate::types::game_state::validate_ordinary_entry_counter_work(&state)?;
                 normalize_logical_zone_instruction_owners(&mut state)?;
                 frames = *state.resolution_stack.clone();
                 frames

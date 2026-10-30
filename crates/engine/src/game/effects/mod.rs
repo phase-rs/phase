@@ -1913,6 +1913,9 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
     // replacement subtree has retired resumes before any further resolution
     // work; every frame left on top of it is outer work.
+    if crate::game::engine_replacement::ordinary_entry_counter_work_is_due(state) {
+        return;
+    }
     if state.counter_cost_root_is_due() {
         return;
     }
@@ -2110,6 +2113,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             player_scope_queue_end,
             // Consumed by the payment answer that announced X, before this drain.
             x_announcement: _,
+            mut ordinary_entry_counter_completion,
         } = cont;
         debug_assert!(
             pending_return_result_producer.is_none(),
@@ -2156,12 +2160,13 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                         chain.context.forwarded_result_context.clone();
                     // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
                     settle_entries_before_instruction(state, events, &remaining, None);
-                    let resolved = resolve_owned_ability_chain_step(
+                    let resolved = resolve_owned_ability_chain_step_with_completion(
                         state,
                         &remaining,
                         events,
                         1,
                         (&declarations.0, &declarations.1),
+                        &mut ordinary_entry_counter_completion,
                     );
                     #[cfg(test)]
                     let resolved = resolved.inspect_err(|error| {
@@ -2179,12 +2184,13 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             } else {
                 // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
                 settle_entries_before_instruction(state, events, &chain, None);
-                let resolved = resolve_owned_ability_chain_step(
+                let resolved = resolve_owned_ability_chain_step_with_completion(
                     state,
                     &chain,
                     events,
                     1,
                     (&declarations.0, &declarations.1),
+                    &mut ordinary_entry_counter_completion,
                 );
                 #[cfg(test)]
                 let resolved = resolved.inspect_err(|error| {
@@ -2274,11 +2280,14 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 let mut completion =
                     ResolvedAbility::new(Effect::NoOp, Vec::new(), source_id, chain.controller);
                 completion.context = chain.context.clone();
+                completion.source_incarnation = chain.source_incarnation;
                 completion.return_result_process = chain.return_result_process;
                 completion.trigger_source = chain.trigger_source.clone();
                 let mut pending =
                     PendingContinuation::player_scope_queue_end(Box::new(completion), state);
                 pending.parent_kind = Some(kind);
+                pending.ordinary_entry_counter_completion =
+                    ordinary_entry_counter_completion.take();
                 pending.return_result_occurrence = return_result_occurrence;
                 pending.trigger_context = trigger_context;
                 pending.trigger_firing = trigger_firing;
@@ -2302,12 +2311,40 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 });
             }
         }
+        if chain_progress.is_some_and(ResolutionProgress::is_pending) {
+            if let Some(completion) = ordinary_entry_counter_completion.take() {
+                park_ordinary_entry_completion(
+                    state,
+                    &chain,
+                    (&declarations.0, &declarations.1),
+                    child_boundary,
+                    completion,
+                )
+                .expect("admitted selected invocation retains terminal custody");
+            }
+        }
+        if chain_progress == Some(ResolutionProgress::Complete) || player_scope_queue_end {
+            if let Some(completion) = ordinary_entry_counter_completion.take() {
+                crate::game::engine_replacement::acknowledge_ordinary_entry_completion(
+                    state, completion,
+                );
+            }
+        }
         state.active_return_result_occurrence = prior_occurrence;
         retire_unreferenced_return_result_frames(state);
+        if crate::game::engine_replacement::ordinary_entry_counter_work_is_due(state) {
+            return;
+        }
         if chain_progress == Some(ResolutionProgress::Queued) {
             // CR 608.2c + CR 117.2e: ready child work must settle in this action.
             drain_pending_continuation(state, events);
+            if crate::game::engine_replacement::ordinary_entry_counter_work_is_due(state) {
+                return;
+            }
             resume_resolution_frames(state, events);
+            if crate::game::engine_replacement::ordinary_entry_counter_work_is_due(state) {
+                return;
+            }
         }
         // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
         // replacement subtree has retired resumes before any further resolution
@@ -2325,6 +2362,9 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 && state.active_ability_continuation().is_some()
             {
                 drain_pending_continuation(state, events);
+                if crate::game::engine_replacement::ordinary_entry_counter_work_is_due(state) {
+                    return;
+                }
             }
         }
     }
@@ -5430,6 +5470,9 @@ pub(crate) fn sweep_ownerless_post_replacement_strand(state: &mut GameState) {
 /// frames are independent roots. Both delegate to `draw::resume_draw_sequence`,
 /// which retires only its exact completed child and paired paused parent.
 pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    if crate::game::engine_replacement::ordinary_entry_counter_work_is_due(state) {
+        return;
+    }
     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         if waits_for_resolution_choice(&state.waiting_for) {
             state.resolution_stack.note_repeat_until_descendant_choice();
@@ -5474,6 +5517,9 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                 && state.active_ability_continuation().is_some()
             {
                 drain_pending_continuation(state, events);
+                if crate::game::engine_replacement::ordinary_entry_counter_work_is_due(state) {
+                    return;
+                }
             }
         }
         ResolutionFrame::CounterMoves(_) => counters::drain_pending_counter_moves(state, events),
@@ -5494,6 +5540,9 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                 && matches!(state.waiting_for, WaitingFor::Priority { .. })
             {
                 drain_pending_continuation(state, events);
+                if crate::game::engine_replacement::ordinary_entry_counter_work_is_due(state) {
+                    return;
+                }
                 resume_resolution_frames(state, events);
             }
         }
@@ -5560,6 +5609,9 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                 && state.active_ability_continuation().is_some()
             {
                 drain_pending_continuation(state, events);
+                if crate::game::engine_replacement::ordinary_entry_counter_work_is_due(state) {
+                    return;
+                }
             }
         }
         ResolutionFrame::ConniveReentry(_) => {
@@ -5622,6 +5674,9 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                     .is_some_and(|continuation| continuation.attachment_choice.is_none())
             {
                 drain_pending_continuation(state, events);
+                if crate::game::engine_replacement::ordinary_entry_counter_work_is_due(state) {
+                    return;
+                }
             }
             // CR 614.6 + CR 608.2c: a completed substitution returns to the
             // exact original creation instruction, including its zero-token
@@ -6708,11 +6763,13 @@ fn append_prepared_continuation(state: &mut GameState, pending: PendingContinuat
             return;
         }
     }
-    if pending.return_result_occurrence.is_none()
+    if pending.ordinary_entry_counter_completion.is_none()
+        && pending.return_result_occurrence.is_none()
         && pending.pending_return_result_producer.is_none()
         && is_unused_instruction_result_program(&pending.chain)
         && state.active_ability_continuation().is_some_and(|active| {
-            active.return_result_occurrence.is_none()
+            active.ordinary_entry_counter_completion.is_none()
+                && active.return_result_occurrence.is_none()
                 && active.pending_return_result_producer.is_none()
                 && is_unused_instruction_result_program(&active.chain)
         })
@@ -6784,7 +6841,7 @@ pub(crate) fn active_player_action_completion_requires(
 }
 
 pub(crate) fn prepend_to_pending_continuation(state: &mut GameState, head: ResolvedAbility) {
-    prepend_to_pending_continuation_with_producer(state, head, None, None, None)
+    prepend_to_pending_continuation_with_producer(state, head, None, None, None, None)
         .expect("independent continuation has no instruction-result owner");
 }
 
@@ -6793,7 +6850,7 @@ pub(crate) fn prepend_to_pending_continuation_owned(
     head: ResolvedAbility,
     declarations: AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
-    prepend_to_pending_continuation_with_producer(state, head, None, None, Some(declarations))
+    prepend_to_pending_continuation_with_producer(state, head, None, None, Some(declarations), None)
 }
 
 /// `x_announcement` marks `head` as the rider of a paused payment (see
@@ -6812,6 +6869,7 @@ fn prepend_to_pending_continuation_with_producer(
     )>,
     x_announcement: Option<ContinuationXAnnouncement>,
     declarations: Option<AdmittedInstructionResult<'_>>,
+    ordinary_completion: Option<crate::types::game_state::OrdinaryEntryCounterCompletion>,
 ) -> Result<(), EffectError> {
     let owner = match declarations {
         Some(declarations) => retained_return_result_occurrence(state, &head, declarations)?,
@@ -6821,6 +6879,7 @@ fn prepend_to_pending_continuation_with_producer(
         let mut pending = PendingContinuation::new(chain, state);
         pending.return_result_occurrence = owner;
         pending.pending_return_result_producer = pending_return_result_producer;
+        pending.ordinary_entry_counter_completion = ordinary_completion;
         pending
     };
     if state
@@ -6845,12 +6904,14 @@ fn prepend_to_pending_continuation_with_producer(
     // Result-bearing operations keep independent typed custody. Preserve the
     // ordinary no-result concatenation only when both complete bodies have no
     // invocation namespace and neither transports a pending publisher.
-    if x_announcement.is_none()
+    if ordinary_completion.is_none()
+        && x_announcement.is_none()
         && owner.is_none()
         && pending_return_result_producer.is_none()
         && is_unused_instruction_result_program(&head)
         && state.active_ability_continuation().is_some_and(|active| {
-            active.x_announcement.is_none()
+            active.ordinary_entry_counter_completion.is_none()
+                && active.x_announcement.is_none()
                 && active.return_result_occurrence.is_none()
                 && active.pending_return_result_producer.is_none()
                 && is_unused_instruction_result_program(&active.chain)
@@ -6875,6 +6936,7 @@ fn prepend_to_pending_continuation_with_producer(
             player_scope_tail,
             player_scope_queue_end,
             x_announcement: existing_x_announcement,
+            ordinary_entry_counter_completion,
         } = existing;
         assert!(
             pending_return_result_producer.is_none() || existing_return_result_producer.is_none(),
@@ -6904,6 +6966,7 @@ fn prepend_to_pending_continuation_with_producer(
                 player_scope_tail,
                 player_scope_queue_end,
                 x_announcement: None,
+                ordinary_entry_counter_completion,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
@@ -24753,6 +24816,88 @@ fn resolve_owned_ability_chain_step(
     resolve_ability_chain_with_payment_choice(state, ability, events, depth, None, declarations)
 }
 
+fn resolve_owned_ability_chain_step_with_completion(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    declarations: AdmittedInstructionResult<'_>,
+    ordinary_completion: &mut Option<crate::types::game_state::OrdinaryEntryCounterCompletion>,
+) -> Result<ResolutionProgress, EffectError> {
+    resolve_ability_chain_with_root_result_and_completion(
+        state,
+        ability,
+        events,
+        depth,
+        None,
+        RootForwardedResult::Discard,
+        declarations,
+        ordinary_completion,
+    )
+}
+
+/// Enter the same admitted walker with custody of this exact selected entry.
+pub(crate) fn resolve_ordinary_entry_ability_chain(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    mut completion: Option<crate::types::game_state::OrdinaryEntryCounterCompletion>,
+) -> Result<(), EffectError> {
+    let progress = with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| {
+            resolve_owned_ability_chain_step_with_completion(
+                state,
+                executable,
+                events,
+                depth,
+                declarations,
+                &mut completion,
+            )
+        },
+    )?;
+    if progress == ResolutionProgress::Complete {
+        if let Some(completion) = completion {
+            crate::game::engine_replacement::acknowledge_ordinary_entry_completion(
+                state, completion,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn park_ordinary_entry_completion(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    declarations: AdmittedInstructionResult<'_>,
+    boundary: crate::types::resolution::ChildStackDepth,
+    completion: crate::types::game_state::OrdinaryEntryCounterCompletion,
+) -> Result<(), EffectError> {
+    let mut terminal = ResolvedAbility::new(
+        Effect::NoOp,
+        Vec::new(),
+        ability.source_id,
+        ability.controller,
+    );
+    terminal.context = ability.context.clone();
+    terminal.source_incarnation = Some(completion.entrant.incarnation);
+    terminal.return_result_process = ability.return_result_process;
+    terminal.trigger_source = ability.trigger_source.clone();
+    let mut pending = PendingContinuation::new_owned(Box::new(terminal), state, declarations)?;
+    pending.ordinary_entry_counter_completion = Some(completion);
+    if state.resolution_stack.capture_child_boundary() > boundary {
+        state
+            .insert_ability_continuation_parent_at_child_boundary(pending, boundary)
+            .expect("entry terminal follows its complete selected child");
+    } else {
+        state.park_ability_continuation(pending);
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_carrier_owned_ability_chain(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -24901,10 +25046,33 @@ fn resolve_ability_chain_with_root_result(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
     depth: u32,
-    mut payment_choice: Option<AutoMayChoice>,
+    payment_choice: Option<AutoMayChoice>,
     root_result: RootForwardedResult,
     declarations: AdmittedInstructionResult<'_>,
 ) -> Result<ResolutionProgress, EffectError> {
+    resolve_ability_chain_with_root_result_and_completion(
+        state,
+        ability,
+        events,
+        depth,
+        payment_choice,
+        root_result,
+        declarations,
+        &mut None,
+    )
+}
+
+fn resolve_ability_chain_with_root_result_and_completion(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    mut payment_choice: Option<AutoMayChoice>,
+    root_result: RootForwardedResult,
+    declarations: AdmittedInstructionResult<'_>,
+    ordinary_completion: &mut Option<crate::types::game_state::OrdinaryEntryCounterCompletion>,
+) -> Result<ResolutionProgress, EffectError> {
+    let ordinary_child_boundary = state.resolution_stack.capture_child_boundary();
     validate_owned_instruction_result_cursor(
         state,
         ability,
@@ -25030,13 +25198,14 @@ fn resolve_ability_chain_with_root_result(
             "repeat_for (count) and repeat_until (predicate) are mutually exclusive"
         );
         match ability.repeat_until.clone() {
-            None => resolve_owned_chain_body(
+            None => resolve_owned_chain_body_with_completion(
                 state,
                 ability,
                 events,
                 depth,
                 payment_choice,
                 declarations,
+                ordinary_completion,
             ),
             Some(RepeatContinuation::ControllerChoice) => {
                 let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
@@ -25044,13 +25213,14 @@ fn resolve_ability_chain_with_root_result(
                     state,
                     ability,
                     |state, executable, declarations| {
-                        let progress = resolve_owned_chain_body(
+                        let progress = resolve_owned_chain_body_with_completion(
                             state,
                             executable,
                             events,
                             depth,
                             payment_choice.take(),
                             declarations,
+                            ordinary_completion,
                         )?;
                         if progress.is_pending() {
                             park_repeat_until_after_inner_pause(
@@ -25100,13 +25270,14 @@ fn resolve_ability_chain_with_root_result(
                     state,
                     ability,
                     |state, executable, declarations| {
-                        let progress = resolve_owned_chain_body(
+                        let progress = resolve_owned_chain_body_with_completion(
                             state,
                             executable,
                             events,
                             depth,
                             payment_choice.take(),
                             declarations,
+                            ordinary_completion,
                         )?;
                         if progress.is_pending() {
                             park_repeat_until_after_inner_pause(
@@ -25203,13 +25374,14 @@ fn resolve_ability_chain_with_root_result(
                         state,
                         &body,
                         |state, executable, declarations| {
-                            let progress = resolve_owned_chain_body(
+                            let progress = resolve_owned_chain_body_with_completion(
                                 state,
                                 executable,
                                 events,
                                 depth,
                                 payment_choice.take(),
                                 declarations,
+                                ordinary_completion,
                             )?;
                             if progress.is_pending() {
                                 let mut paused = executable.clone();
@@ -25247,6 +25419,17 @@ fn resolve_ability_chain_with_root_result(
             }
         }
     })();
+    if result.as_ref().is_ok_and(|progress| progress.is_pending()) {
+        if let Some(completion) = ordinary_completion.take() {
+            park_ordinary_entry_completion(
+                state,
+                ability,
+                declarations,
+                ordinary_child_boundary,
+                completion,
+            )?;
+        }
+    }
     if matches!(result, Ok(ResolutionProgress::Waiting)) {
         state.resolution_stack.note_repeat_until_descendant_choice();
     }
@@ -25623,6 +25806,26 @@ fn resolve_owned_chain_body(
     depth: u32,
     payment_choice: Option<AutoMayChoice>,
     declarations: AdmittedInstructionResult<'_>,
+) -> Result<ResolutionProgress, EffectError> {
+    resolve_owned_chain_body_with_completion(
+        state,
+        ability,
+        events,
+        depth,
+        payment_choice,
+        declarations,
+        &mut None,
+    )
+}
+
+fn resolve_owned_chain_body_with_completion(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    payment_choice: Option<AutoMayChoice>,
+    declarations: AdmittedInstructionResult<'_>,
+    ordinary_completion: &mut Option<crate::types::game_state::OrdinaryEntryCounterCompletion>,
 ) -> Result<ResolutionProgress, EffectError> {
     // CR 702.185a: old typed delayed roots acquire the same selected-result
     // dependency before they attempt the move. No historical move is inferred.
@@ -29606,6 +29809,7 @@ fn resolve_owned_chain_body(
                 let mut pending =
                     PendingContinuation::new_owned(Box::new(sub_clone), state, declarations)?;
                 pending.pending_return_result_producer = pending_return_result_producer;
+                pending.ordinary_entry_counter_completion = ordinary_completion.take();
                 state
                     .insert_ability_continuation_parent_at_child_boundary(
                         pending,
@@ -29622,6 +29826,7 @@ fn resolve_owned_chain_body(
                 let mut pending =
                     PendingContinuation::new_owned(Box::new(sub_clone), state, declarations)?;
                 pending.pending_return_result_producer = pending_return_result_producer;
+                pending.ordinary_entry_counter_completion = ordinary_completion.take();
                 pending.x_announcement = x_announcement;
                 state.park_ability_continuation(pending);
             } else {
@@ -29631,6 +29836,7 @@ fn resolve_owned_chain_body(
                     pending_return_result_producer,
                     x_announcement,
                     Some(declarations),
+                    ordinary_completion.take(),
                 )?;
             }
             // CR 701.57c + CR 608.2h: a Discover follow-up stashed
@@ -29768,12 +29974,13 @@ fn resolve_owned_chain_body(
                     )? {
                         return Ok(ResolutionProgress::Waiting);
                     }
-                    progress = resolve_owned_ability_chain_step(
+                    progress = resolve_owned_ability_chain_step_with_completion(
                         state,
                         &else_resolved,
                         events,
                         depth + 1,
                         declarations,
+                        ordinary_completion,
                     )?;
                 } else if let Some(ref next) = sub.sub_ability {
                     // CR 608.2c: A separate-sentence sibling after the gated sub is
@@ -29821,12 +30028,13 @@ fn resolve_owned_chain_body(
                                 current = sibling.sub_ability.as_ref();
                                 continue;
                             }
-                            progress = resolve_owned_ability_chain_step(
+                            progress = resolve_owned_ability_chain_step_with_completion(
                                 state,
                                 &sibling_resolved,
                                 events,
                                 depth + 1,
                                 declarations,
+                                ordinary_completion,
                             )?;
                             break;
                         }
@@ -29933,12 +30141,13 @@ fn resolve_owned_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            progress = resolve_owned_ability_chain_step(
+            progress = resolve_owned_ability_chain_step_with_completion(
                 state,
                 &prepared,
                 events,
                 depth + 1,
                 declarations,
+                ordinary_completion,
             )?;
             return Ok(progress);
         }
@@ -29974,12 +30183,13 @@ fn resolve_owned_chain_body(
                     effect_context_object.as_ref(),
                     state,
                 );
-                progress = resolve_owned_ability_chain_step(
+                progress = resolve_owned_ability_chain_step_with_completion(
                     state,
                     &sub_with_sources,
                     events,
                     depth + 1,
                     declarations,
+                    ordinary_completion,
                 )?;
                 return Ok(progress);
             }
@@ -30048,8 +30258,14 @@ fn resolve_owned_chain_body(
             // validation already removed illegal occurrences from the child.
             let mut child = sub.as_ref().clone();
             apply_parent_chain_context(&mut child, ability, effect_context_object.as_ref(), state);
-            progress =
-                resolve_owned_ability_chain_step(state, &child, events, depth + 1, declarations)?;
+            progress = resolve_owned_ability_chain_step_with_completion(
+                state,
+                &child,
+                events,
+                depth + 1,
+                declarations,
+                ordinary_completion,
+            )?;
         } else if ability.forward_result
             && forwarded_objects.is_empty()
             && matches!(
@@ -30082,12 +30298,13 @@ fn resolve_owned_chain_body(
                 trailing_resolved.context.forwarded_result_context = Some(Box::new(
                     ForwardedResultContext::from_object_ids(state, &forwarded_objects),
                 ));
-                progress = resolve_owned_ability_chain_step(
+                progress = resolve_owned_ability_chain_step_with_completion(
                     state,
                     &trailing_resolved,
                     events,
                     depth + 1,
                     declarations,
+                    ordinary_completion,
                 )?;
             }
         } else if ability.forward_result
@@ -30135,12 +30352,13 @@ fn resolve_owned_chain_body(
                 ForwardedResultContext::from_object_ids(state, &forwarded_objects),
                 attachment_candidates,
             );
-            progress = resolve_owned_ability_chain_step(
+            progress = resolve_owned_ability_chain_step_with_completion(
                 state,
                 &sub_with_context,
                 events,
                 depth + 1,
                 declarations,
+                ordinary_completion,
             )?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
@@ -30172,12 +30390,13 @@ fn resolve_owned_chain_body(
                 state,
             );
             stamp_parent_target_iteration_members(&mut sub_with_targets);
-            progress = resolve_owned_ability_chain_step(
+            progress = resolve_owned_ability_chain_step_with_completion(
                 state,
                 &sub_with_targets,
                 events,
                 depth + 1,
                 declarations,
+                ordinary_completion,
             )?;
         } else if sub.targets.is_empty()
             && !state.last_zone_changed_ids.is_empty()
@@ -30202,12 +30421,13 @@ fn resolve_owned_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            progress = resolve_owned_ability_chain_step(
+            progress = resolve_owned_ability_chain_step_with_completion(
                 state,
                 &sub_with_targets,
                 events,
                 depth + 1,
                 declarations,
+                ordinary_completion,
             )?;
         } else if sub.targets.is_empty()
             && !state.last_zone_changed_ids.is_empty()
@@ -30234,12 +30454,13 @@ fn resolve_owned_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            progress = resolve_owned_ability_chain_step(
+            progress = resolve_owned_ability_chain_step_with_completion(
                 state,
                 &sub_with_targets,
                 events,
                 depth + 1,
                 declarations,
+                ordinary_completion,
             )?;
         } else if sub.targets.is_empty() && effect_uses_implicit_tracked_set_targets(&sub.effect) {
             let mut sub_with_context = sub.as_ref().clone();
@@ -30249,12 +30470,13 @@ fn resolve_owned_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            progress = resolve_owned_ability_chain_step(
+            progress = resolve_owned_ability_chain_step_with_completion(
                 state,
                 &sub_with_context,
                 events,
                 depth + 1,
                 declarations,
+                ordinary_completion,
             )?;
         } else if sub.targets.is_empty() && !ability.targets.is_empty() {
             let mut sub_with_targets = sub.as_ref().clone();
@@ -30347,12 +30569,13 @@ fn resolve_owned_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            progress = resolve_owned_ability_chain_step(
+            progress = resolve_owned_ability_chain_step_with_completion(
                 state,
                 &sub_with_targets,
                 events,
                 depth + 1,
                 declarations,
+                ordinary_completion,
             )?;
         } else if sub.targets.is_empty()
             && ability.targets.is_empty()
@@ -30374,12 +30597,13 @@ fn resolve_owned_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            progress = resolve_owned_ability_chain_step(
+            progress = resolve_owned_ability_chain_step_with_completion(
                 state,
                 &sub_with_referent,
                 events,
                 depth + 1,
                 declarations,
+                ordinary_completion,
             )?;
         } else if sub.targets.is_empty()
             && ability.targets.is_empty()
@@ -30399,12 +30623,13 @@ fn resolve_owned_chain_body(
                     effect_context_object.as_ref(),
                     state,
                 );
-                progress = resolve_owned_ability_chain_step(
+                progress = resolve_owned_ability_chain_step_with_completion(
                     state,
                     &trailing_resolved,
                     events,
                     depth + 1,
                     declarations,
+                    ordinary_completion,
                 )?;
             }
         } else {
@@ -30418,12 +30643,13 @@ fn resolve_owned_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            progress = resolve_owned_ability_chain_step(
+            progress = resolve_owned_ability_chain_step_with_completion(
                 state,
                 &sub_with_context,
                 events,
                 depth + 1,
                 declarations,
+                ordinary_completion,
             )?;
         }
     }

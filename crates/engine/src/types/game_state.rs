@@ -3244,8 +3244,39 @@ fn default_next_return_result_occurrence_id() -> u64 {
     1
 }
 
+/// A functioning external entry replacement admitted before the entrant moves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntryCounterStaticSnapshot {
+    pub source: TriggerSourceContext,
+    pub definition_index: usize,
+    pub source_copy: Option<crate::types::ability::CopyEffectInstanceRef>,
+    pub definition: crate::types::ability::StaticDefinition,
+}
+
+/// Noncopiable input owed by one ordinary entrant's selected copy invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrdinaryEntryCounterWork {
+    pub entrant: ObjectIncarnationRef,
+    pub external_sources: Vec<EntryCounterStaticSnapshot>,
+    pub dispatch_frame: Option<PostReplacementFrameId>,
+    pub installed_copy_counters: Option<(
+        crate::types::ability::CopyEffectInstanceRef,
+        Vec<(CounterType, u32)>,
+    )>,
+    pub completed_dispatch: Option<PostReplacementFrameId>,
+}
+
+/// Terminal custody of the selected invocation, independent of its retired drain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrdinaryEntryCounterCompletion {
+    pub entrant: ObjectIncarnationRef,
+    pub dispatch_frame: PostReplacementFrameId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingContinuation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ordinary_entry_counter_completion: Option<OrdinaryEntryCounterCompletion>,
     /// Full private authority for the exact public source options of this pause.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub damage_source_candidates: Vec<TriggerSourceContext>,
@@ -3395,6 +3426,7 @@ impl PendingContinuation {
             player_scope_tail: state.resolving_player_scope_tail.clone(),
             player_scope_queue_end: false,
             x_announcement: None,
+            ordinary_entry_counter_completion: None,
         }
     }
 
@@ -3421,6 +3453,7 @@ impl PendingContinuation {
             player_scope_tail: state.resolving_player_scope_tail.clone(),
             player_scope_queue_end: false,
             x_announcement: None,
+            ordinary_entry_counter_completion: None,
         }
     }
 }
@@ -33980,6 +34013,97 @@ fn normalize_replacement_occurrence_authority(value: &mut serde_json::Value) -> 
     Ok(())
 }
 
+/// Validate present pending input; absence retains the already-performed legacy phase.
+pub(crate) fn validate_ordinary_entry_counter_work(state: &GameState) -> Result<(), String> {
+    for pending in state.resolution_stack.entry_counter_continuations() {
+        if let Some(completion) = pending.ordinary_entry_counter_completion {
+            if pending.chain.source_id != completion.entrant.object_id
+                || pending.chain.source_incarnation != Some(completion.entrant.incarnation)
+            {
+                return Err("ordinary entry terminal is on a foreign selected remainder".into());
+            }
+        }
+    }
+    let completions: Vec<_> = state
+        .resolution_stack
+        .entry_counter_continuations()
+        .filter_map(|pending| pending.ordinary_entry_counter_completion)
+        .collect();
+    for (id, object) in state.objects.iter() {
+        let Some(work) = object.ordinary_entry_counter_work.as_ref() else {
+            continue;
+        };
+        if work.entrant != ObjectIncarnationRef::from_object(object)
+            || object.zone != Zone::Battlefield
+        {
+            return Err("ordinary entry work has a foreign or stale entrant".into());
+        }
+        if work.external_sources.iter().any(|source| {
+            !matches!(
+                source.definition.mode,
+                crate::types::statics::StaticMode::EntersWithAdditionalCounters { .. }
+            )
+        }) {
+            return Err("ordinary entry work has a foreign static definition".into());
+        }
+        if let Some((owner, _)) = &work.installed_copy_counters {
+            if object.layer1_copy_effect != Some(*owner) {
+                return Err("ordinary entry work has a foreign installed copy owner".into());
+            }
+        }
+        let owned: Vec<_> = completions
+            .iter()
+            .filter(|completion| completion.entrant == work.entrant)
+            .collect();
+        match work.dispatch_frame {
+            None => {
+                if work.completed_dispatch.is_some() || work.installed_copy_counters.is_some() || !owned.is_empty()
+                    || !(crate::game::engine_replacement::ordinary_copy_continuation_pending(state)
+                        || state.resolution_stack.iter().any(|frame| matches!(frame,
+                            crate::types::resolution::ResolutionFrame::CounterAdditions(queue)
+                            if queue.completion.as_ref().is_some_and(|completion| completion.post_actions.iter().any(|action|
+                                matches!(action, PendingCounterPostAction::ContinueZoneDeliveryTail { object_id, .. } if object_id == id)))))) {
+                    return Err("ordinary entry work has no selected pre-dispatch owner".into());
+                }
+            }
+            Some(frame) => {
+                if work.completed_dispatch.is_some_and(|completed| completed != frame)
+                    || owned.iter().any(|completion| completion.dispatch_frame != frame) || owned.len() > 1 {
+                    return Err("ordinary entry terminal has a foreign dispatch owner".into());
+                }
+                if work.completed_dispatch.is_some() {
+                    if !owned.is_empty() { return Err("completed ordinary entry retains terminal custody".into()); }
+                } else {
+                    let prompt = matches!(&state.waiting_for,
+                        WaitingFor::CopyTargetChoice { source_id, purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy { continuation: Some(selected) }, .. }
+                        if source_id == id && selected.source_id == *id
+                            && selected.source_incarnation == Some(work.entrant.incarnation));
+                    let prompt_frame = state.active_post_replacement_drains().and_then(|drains| drains.frame_id()) == Some(frame);
+                    if owned.is_empty() && !(prompt && prompt_frame) {
+                        return Err("ordinary entry has lost its exact selected terminal custody".into());
+                    }
+                }
+            }
+        }
+    }
+    for completion in completions {
+        let Some(work) = state
+            .objects
+            .get(&completion.entrant.object_id)
+            .and_then(|object| object.ordinary_entry_counter_work.as_ref())
+        else {
+            return Err("entry terminal has no pending entrant work".into());
+        };
+        if work.entrant != completion.entrant
+            || work.dispatch_frame != Some(completion.dispatch_frame)
+            || work.completed_dispatch.is_some()
+        {
+            return Err("entry terminal is foreign, stale, or already acknowledged".into());
+        }
+    }
+    Ok(())
+}
+
 impl GameStateDecode {
     pub(crate) fn decode_persisted_resolution_state(
         mut value: serde_json::Value,
@@ -34047,6 +34171,7 @@ impl GameStateDecode {
         crate::types::resolution::normalize_logical_zone_instruction_owners(&mut state)?;
         recover_return_result_programs(&mut state)?;
         normalize_saved_liminal_copy_authority(&mut state)?;
+        validate_ordinary_entry_counter_work(&state)?;
         freeze_stored_created_token_referents(&mut state);
         validate_token_creation_authorities(&state)?;
         // The PERSISTED half of the projection gate; `decode` below carries the other.
@@ -34097,6 +34222,7 @@ impl GameStateDecode {
         reject_dangling_state_handles(&state, &state_handles)?;
         state.validate_replacement_continuation_arena()?;
         normalize_saved_liminal_copy_authority(&mut state)?;
+        validate_ordinary_entry_counter_work(&state)?;
         freeze_stored_created_token_referents(&mut state);
         validate_token_creation_authorities(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
@@ -34837,6 +34963,17 @@ impl PostReplacementDrainStack {
     /// "Unstamped" is carried by the type, not by a reserved value: a legacy
     /// payload, a freshly minted sibling frame, and a journal-replayed frame are
     /// all `None`, and `None` can never equal a handle's `Some(id)`.
+    pub(super) fn normalize_frame_id_for_loop(&mut self, refs: &[PostReplacementFrameId]) {
+        if let Some(id) = self.id.as_mut() {
+            *id = PostReplacementFrameId(
+                refs.iter()
+                    .position(|reference| reference == id)
+                    .expect("collected retained dispatch") as u64
+                    + 1,
+            );
+        }
+    }
+
     pub(super) fn frame_id(&self) -> Option<PostReplacementFrameId> {
         self.id
     }
@@ -37514,6 +37651,18 @@ impl GameState {
     /// interrupted instruction completes. An empty Attach replacement pair
     /// also retires its marked child before generic continuation draining can
     /// replay that instruction.
+    pub(crate) fn finish_active_paused_ordinary_entry_dispatch(
+        &mut self,
+        frame: PostReplacementFrameId,
+    ) {
+        if self
+            .active_post_replacement_drains()
+            .is_some_and(|drains| drains.frame_id() == Some(frame))
+        {
+            self.finish_active_paused_post_replacement_dispatch();
+        }
+    }
+
     pub fn finish_active_paused_post_replacement_dispatch(&mut self) {
         let finished = self
             .active_post_replacement_drains_mut()
@@ -41353,6 +41502,82 @@ impl GameState {
                     (!history.is_empty()).then_some((object_id, history))
                 })
                 .collect();
+        if clone
+            .objects
+            .values()
+            .any(|object| object.ordinary_entry_counter_work.is_some())
+        {
+            let mut dispatches = Vec::new();
+            let mut copies: Vec<_> = clone
+                .transient_continuous_effects
+                .iter()
+                .map(|effect| effect.id)
+                .collect();
+            for object in clone.objects.values() {
+                if let Some(work) = object.ordinary_entry_counter_work.as_ref() {
+                    dispatches.extend(work.dispatch_frame);
+                    dispatches.extend(work.completed_dispatch);
+                    copies.extend(
+                        work.installed_copy_counters
+                            .as_ref()
+                            .map(|(owner, _)| owner.continuous_effect_id),
+                    );
+                    copies.extend(work.external_sources.iter().filter_map(|source| {
+                        source.source_copy.map(|owner| owner.continuous_effect_id)
+                    }));
+                }
+            }
+            for pending in clone.resolution_stack.entry_counter_continuations() {
+                dispatches.extend(
+                    pending
+                        .ordinary_entry_counter_completion
+                        .map(|completion| completion.dispatch_frame),
+                );
+            }
+            clone
+                .resolution_stack
+                .normalize_entry_counter_dispatches_for_loop(&mut dispatches);
+            copies.sort_unstable();
+            copies.dedup();
+            let dispatch = |id: PostReplacementFrameId| {
+                PostReplacementFrameId(
+                    dispatches
+                        .iter()
+                        .position(|named| *named == id)
+                        .expect("collected entry dispatch") as u64
+                        + 1,
+                )
+            };
+            let copy = |owner: &mut crate::types::ability::CopyEffectInstanceRef| {
+                owner.continuous_effect_id = copies
+                    .iter()
+                    .position(|id| *id == owner.continuous_effect_id)
+                    .expect("collected entry copy")
+                    as u64
+                    + 1;
+            };
+            for object in clone.objects.values_mut() {
+                if let Some(work) = object.ordinary_entry_counter_work.as_mut() {
+                    work.dispatch_frame = work.dispatch_frame.map(dispatch);
+                    work.completed_dispatch = work.completed_dispatch.map(dispatch);
+                    if let Some((owner, _)) = work.installed_copy_counters.as_mut() {
+                        copy(owner);
+                    }
+                    for source in &mut work.external_sources {
+                        if let Some(owner) = source.source_copy.as_mut() {
+                            copy(owner);
+                        }
+                    }
+                }
+            }
+            clone
+                .resolution_stack
+                .for_each_entry_counter_continuation_mut(|pending| {
+                    if let Some(completion) = pending.ordinary_entry_counter_completion.as_mut() {
+                        completion.dispatch_frame = dispatch(completion.dispatch_frame);
+                    }
+                });
+        }
         clone.canonicalize_loop_identities();
         clone
     }
@@ -41693,6 +41918,38 @@ impl GameState {
                 present.entry(object_id).or_default().push(*incarnation);
             }
         });
+        let mut pending_entry_sources = HashSet::new();
+        for object in self.objects.values() {
+            if let Some(work) = object.ordinary_entry_counter_work.as_ref() {
+                pending_entry_sources.insert(work.entrant.object_id);
+                present
+                    .entry(work.entrant.object_id)
+                    .or_default()
+                    .push(work.entrant.incarnation);
+                for source in &work.external_sources {
+                    let pin = source.source.identity.reference;
+                    pending_entry_sources.insert(pin.object_id);
+                    present
+                        .entry(pin.object_id)
+                        .or_default()
+                        .push(pin.incarnation);
+                    if let Some(live) = self.objects.get(&pin.object_id) {
+                        present
+                            .entry(pin.object_id)
+                            .or_default()
+                            .push(live.incarnation);
+                    }
+                }
+            }
+        }
+        for pending in self.resolution_stack.entry_counter_continuations() {
+            if let Some(completion) = pending.ordinary_entry_counter_completion {
+                present
+                    .entry(completion.entrant.object_id)
+                    .or_default()
+                    .push(completion.entrant.incarnation);
+            }
+        }
         for incarnations in present.values_mut() {
             incarnations.sort_unstable();
             incarnations.dedup();
@@ -41703,6 +41960,30 @@ impl GameState {
                 .expect("every incarnation was collected above");
             rank as u64 + 1
         };
+        for object in self.objects.values_mut() {
+            if pending_entry_sources.contains(&object.id) {
+                object.incarnation = canonical(object.id, object.incarnation);
+            }
+            if let Some(work) = object.ordinary_entry_counter_work.as_mut() {
+                work.entrant.incarnation =
+                    canonical(work.entrant.object_id, work.entrant.incarnation);
+                for source in &mut work.external_sources {
+                    let pin = &mut source.source.identity.reference;
+                    pin.incarnation = canonical(pin.object_id, pin.incarnation);
+                    source.source.timestamp = 0;
+                }
+            }
+        }
+        self.resolution_stack
+            .for_each_entry_counter_continuation_mut(|pending| {
+                if let Some(completion) = pending.ordinary_entry_counter_completion.as_mut() {
+                    completion.entrant.incarnation =
+                        canonical(completion.entrant.object_id, completion.entrant.incarnation);
+                    pending
+                        .chain
+                        .set_source_incarnation_recursive(Some(completion.entrant.incarnation));
+                }
+            });
         self.lki_by_incarnation = std::mem::take(&mut self.lki_by_incarnation)
             .into_iter()
             .map(|(object_id, history)| {
@@ -42674,6 +42955,7 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         && x.attached_to == y.attached_to
         && x.attachments == y.attachments
         && x.paired_with == y.paired_with
+        && x.ordinary_entry_counter_work == y.ordinary_entry_counter_work
         && x.counters == y.counters
         && x.power == y.power
         && x.toughness == y.toughness
