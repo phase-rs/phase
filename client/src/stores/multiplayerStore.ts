@@ -127,9 +127,9 @@ import {
   type DraftPhase,
 } from "../adapter/server-draft-adapter";
 import type { DraftPlayerView } from "../adapter/draft-adapter";
-import type { CommanderBracketTier } from "../types/bracketEstimate";
 import type {
   DeckChoice,
+  DeckListData,
   PlayerSlot,
   SeatMutation,
 } from "../multiplayer/seatTypes";
@@ -169,20 +169,21 @@ let serverHostAttempt = 0;
 // A host socket acts only while no `GameStarted` has handed the page off since it was dialed.
 let hostHandoffs = 0;
 
-function asDeckPayload(deck: HostingDeck): {
-  main_deck: string[];
-  sideboard: string[];
-  commander: string[];
-  planar_deck: string[];
-  scheme_deck: string[];
-  bracket_tier?: CommanderBracketTier;
-} {
+function asDeckPayload(deck: HostingDeck): DeckListData {
   return {
     main_deck: deck.main_deck,
     sideboard: deck.sideboard,
     commander: deck.commander,
     planar_deck: deck.planar_deck ?? [],
     scheme_deck: deck.scheme_deck ?? [],
+    // The engine reads an absent list as empty (`#[serde(default)]`), so each
+    // remaining `DeckData` list rides only when it holds cards: a deck without
+    // them is handed off byte-for-byte as before.
+    ...(deck.companion?.length ? { companion: deck.companion } : {}),
+    ...(deck.attraction_deck?.length ? { attraction_deck: deck.attraction_deck } : {}),
+    ...(deck.contraption_deck?.length ? { contraption_deck: deck.contraption_deck } : {}),
+    ...(deck.sticker_sheets?.length ? { sticker_sheets: deck.sticker_sheets } : {}),
+    ...(deck.signature_spell?.length ? { signature_spell: deck.signature_spell } : {}),
     ...(deck.bracket_tier ? { bracket_tier: deck.bracket_tier } : {}),
   };
 }
@@ -1482,15 +1483,8 @@ export interface AiSeatConfig {
   deckId?: AiDeckSelection;
 }
 
-export interface HostingDeck {
-  main_deck: string[];
-  sideboard: string[];
-  commander: string[];
-  planar_deck?: string[];
-  scheme_deck?: string[];
-  /** Declared Commander bracket tier; omitted decks default to Core on the engine. */
-  bracket_tier?: CommanderBracketTier;
-}
+/** The host's deck as handed off: every `DeckData` list the engine accepts. */
+export type HostingDeck = DeckListData;
 
 /** Persisted snapshot of the host-setup form so the lobby remembers the
  *  player's last choices across sessions instead of resetting to defaults.
