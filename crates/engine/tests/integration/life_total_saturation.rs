@@ -1675,9 +1675,9 @@ fn an_optional_life_gain_loop_at_the_cap_is_never_drawn_or_offered() {
 /// `i32::MAX` the stored total cannot move, but every gain still carries its
 /// rules amount, so the loop is drawn exactly as it is at 20, including from
 /// one below the cap and for a Two-Headed Giant team whose shared total is at
-/// the cap (CR 810.4). Residuals: a gained counter pinned at `u32::MAX` gives
-/// the cycle nothing to read, so the loop is not detected and keeps firing; and
-/// with loop detection off nothing is drawn.
+/// the cap (CR 810.4). Residuals: a counter (gained or lost) pinned at
+/// `u32::MAX` gives the cycle nothing to read, so the loop is not detected and
+/// keeps firing; and with loop detection off nothing is drawn.
 #[test]
 fn a_mandatory_life_gain_loop_at_the_cap_is_drawn() {
     // Two players: (start life, life when drawn).
@@ -1747,6 +1747,24 @@ fn a_mandatory_life_gain_loop_at_the_cap_is_drawn() {
         "reach guard: the loop keeps gaining life"
     );
     assert_eq!(runner.state().players[0].life_gained_this_turn, u32::MAX);
+    assert_eq!(runner.life(P0), i32::MAX);
+
+    // Residual: the lost counter is pinned at `u32::MAX` while the gained counter
+    // moves.
+    let (mut runner, kickoff) = mandatory_life_gain_loop(two_player(), &[(P0, i32::MAX)], 0);
+    runner.state_mut().players[0].life_lost_this_turn = u32::MAX;
+    runner.cast(kickoff).resolve();
+    pass_beats(&mut runner, 100);
+    assert!(
+        is_priority(runner.state()),
+        "the pinned lost counter is not drawn, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().players[0].life_gained_this_turn > 2,
+        "reach guard: the loop keeps gaining life past the drawn beat"
+    );
+    assert_eq!(runner.state().players[0].life_lost_this_turn, u32::MAX);
     assert_eq!(runner.life(P0), i32::MAX);
 
     // Loop detection off: nothing is drawn.

@@ -11118,7 +11118,8 @@ pub(crate) fn resume_auto_pass_after_resolve_all(
     let before = state.clone();
     let batch_before = batch.clone();
     // This seam bypasses `finish_action_boundary`, so it owns its own life
-    // window: a life change settled by its drive must reject the resume rather
+    // window: an unrepresentable player-counter or energy change settled by its
+    // drive (a life change saturates instead) must reject the resume rather
     // than be reported as a successful (or unchanged) outcome.
     let prior_window = state.ingress_life_window.take();
     state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());

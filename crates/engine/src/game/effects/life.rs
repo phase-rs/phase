@@ -394,10 +394,12 @@ fn apply_life_change_core(
 /// Returns `Err(ReplacementDeferred)` when multiple replacement effects compete and
 /// the player must choose which applies first (CR 616.1).
 ///
-/// An engine-unrepresentable result is not a CR 101.3 impossibility. With an
-/// open ingress window, the owning public action rejects and restores its entry
-/// state; outside one, ordinary resolution and legacy parked records retain the
-/// compatibility behavior of logging and skipping the change. Direct action-
+/// The life gain itself is never unrepresentable (its total and per-turn
+/// counter saturate). A nested player-counter or energy result the engine
+/// cannot represent is not a CR 101.3 impossibility: with an open ingress
+/// window, the owning public action rejects and restores its entry state;
+/// outside one, ordinary resolution and legacy parked records retain the
+/// compatibility behavior of logging and skipping that change. Direct action-
 /// ingress callers use [`try_apply_life_gain`] to reject it explicitly.
 pub fn apply_life_gain(
     state: &mut GameState,
@@ -728,10 +730,12 @@ pub(crate) fn ordinary_settlement<T>(
 /// Returns `Err(ReplacementDeferred)` whenever the replacement/substitution
 /// pipeline pauses for player input.
 ///
-/// A final loss beyond the engine's numeric capacity is not a CR 101.3
-/// impossibility. An open ingress window makes the owning public action reject
-/// and restore; without one, ordinary resolution and legacy parked records use
-/// the logged compatibility skip. Direct action-ingress callers use
+/// The loss itself is never unrepresentable: its total saturates at `i32::MIN`
+/// and its per-turn counter at `u32::MAX`. A nested player-counter or energy
+/// result the engine cannot represent is not a CR 101.3 impossibility: an open
+/// ingress window makes the owning public action reject and restore; without
+/// one, ordinary resolution and legacy parked records use the logged
+/// compatibility skip. Direct action-ingress callers use
 /// [`try_apply_life_loss`] to reject explicitly.
 pub fn apply_life_loss(
     state: &mut GameState,

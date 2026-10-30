@@ -2491,11 +2491,12 @@ impl ResourceVector {
     /// veto the draw CR 104.4b gives a mandatory loop that drains it with no way
     /// to stop.
     ///
-    /// A seat across whose cycle a counter fell (a turn boundary reset it) gives
-    /// no reading and keeps the stored delta; a counter pinned at `u32::MAX` moves
-    /// no further, so its reading is the stored 0. A zero reading has no entry, as
-    /// in [`map_delta`]. Every other seat and every other axis is `self`'s, so a
-    /// cycle with no life total at `i32::MAX` reads exactly as `self`.
+    /// A seat across whose cycle a counter fell (a turn boundary reset it) or that
+    /// ends the cycle with a counter at `u32::MAX` (a saturated counter's change is
+    /// only a bound) gives no reading and keeps the stored delta. A zero reading
+    /// has no entry, as in [`map_delta`]. Every other seat and every other axis is
+    /// `self`'s, so a cycle with no life total at `i32::MAX` reads exactly as
+    /// `self`.
     ///
     /// Read only by Path B (`game::engine::interactive_loop_bridge`'s CR 732.4
     /// draw walk): an optional loop is never drawn (CR 104.4b), and a life axis
@@ -6145,11 +6146,11 @@ pub(crate) fn grown_beneficial_counter_deltas(
 /// CR 810.9a). There the cap can hold the stored gain below what the period gained, so δ is
 /// the rules amount the period carried, read from the player's per-turn counters
 /// ([`life_counter_change`]): each elided cycle's lump gain then reports what performing it
-/// would (`game::arithmetic::reported_life_magnitude`). The stored gain stays the floor,
-/// because a counter that fell or stopped at `u32::MAX` reads less and the lump must still
-/// take the total where performing the cycles would. A total held at the cap across the
-/// whole period grows no stored total, so it offers no growth to collapse; below the cap
-/// every δ is the stored gain, exactly.
+/// would (`game::arithmetic::reported_life_magnitude`). A counter that fell or ends at
+/// `u32::MAX` gives no reading, so δ is the stored gain, which stays the floor: the lump
+/// must still take the total where performing the cycles would. A total held at the cap
+/// across the whole period grows no stored total, so it offers no growth to collapse; below
+/// the cap every δ is the stored gain, exactly.
 pub(crate) fn grown_life_deltas(prior: &GameState, current: &GameState) -> Vec<(PlayerId, u32)> {
     let mut deltas = Vec::new();
     for after in &current.players {
@@ -6177,15 +6178,12 @@ pub(crate) fn grown_life_deltas(prior: &GameState, current: &GameState) -> Vec<(
 /// CR 119.3: the life `after` gained minus the life it lost since `before`, read from the
 /// per-turn counters, which count the rules amount of every gain and loss
 /// (`game::arithmetic::reported_life_magnitude`), saturating at `u32::MAX`, even where the
-/// stored total stops at an `i32` limit. `None` when a counter fell: a turn boundary reset
-/// it in between.
+/// stored total stops at an `i32` limit. `None` when a counter fell (a turn boundary reset
+/// it in between) or ends at `u32::MAX` (a saturated counter's change is only a bound).
 fn life_counter_change(before: &Player, after: &Player) -> Option<i64> {
-    let gained = after
-        .life_gained_this_turn
-        .checked_sub(before.life_gained_this_turn)?;
-    let lost = after
-        .life_lost_this_turn
-        .checked_sub(before.life_lost_this_turn)?;
+    let change = |before: u32, after: u32| after.checked_sub(before).filter(|_| after != u32::MAX);
+    let gained = change(before.life_gained_this_turn, after.life_gained_this_turn)?;
+    let lost = change(before.life_lost_this_turn, after.life_lost_this_turn)?;
     Some(i64::from(gained) - i64::from(lost))
 }
 
@@ -15730,7 +15728,7 @@ mod tests {
         );
 
         // Every other row reads exactly as the stored delta.
-        let unchanged: [(&str, Seat, BTreeMap<PlayerId, i64>); 4] = [
+        let unchanged: [(&str, Seat, BTreeMap<PlayerId, i64>); 5] = [
             (
                 "a counter fell (a turn boundary reset it)",
                 (i32::MAX, i32::MAX, 10, 2, 0, 0),
@@ -15749,6 +15747,11 @@ mod tests {
             (
                 "a counter pinned at u32::MAX",
                 (i32::MAX, i32::MAX, u32::MAX, u32::MAX, 0, 0),
+                BTreeMap::new(),
+            ),
+            (
+                "the gained counter pinned while the lost counter moves",
+                (i32::MAX, i32::MAX, u32::MAX, u32::MAX, 0, 1),
                 BTreeMap::new(),
             ),
         ];
@@ -15821,6 +15824,20 @@ mod tests {
             current.players[0].life_gained_this_turn = gained_after;
             assert_eq!(grown_life_deltas(&prior, &current), expected, "{name}");
         }
+
+        // Crossing with the lost counter pinned while the gained counter moves: the
+        // pinned counter's change is only a bound, so δ is the stored gain.
+        let mut prior = GameState::new_two_player(42);
+        prior.players[0].life = i32::MAX - 1;
+        prior.players[0].life_lost_this_turn = u32::MAX;
+        let mut current = prior.clone();
+        current.players[0].life = i32::MAX;
+        current.players[0].life_gained_this_turn = 5;
+        assert_eq!(
+            grown_life_deltas(&prior, &current),
+            vec![(p0, 1)],
+            "crossing with the lost counter pinned"
+        );
     }
 
     /// A battlefield permanent carrying ONE `TriggerMode::Phase` trigger whose step
