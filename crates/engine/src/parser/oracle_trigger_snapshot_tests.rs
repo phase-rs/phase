@@ -1,6 +1,6 @@
 use crate::parser::oracle_nom::quantity::parse_quantity_ref;
 use crate::types::ability::{AbilityCondition, Duration};
-use crate::types::events::ClashResult;
+use crate::types::event_kinds::ClashResult;
 
 use super::*;
 

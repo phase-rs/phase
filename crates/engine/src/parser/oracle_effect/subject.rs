@@ -23,7 +23,7 @@ use crate::types::ability::{
     PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr, StaticCondition,
     StaticDefinition, TargetFilter, TypedFilter,
 };
-use crate::types::game_state::DayNight;
+use crate::types::game_state_kinds::DayNight;
 use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
 use crate::types::statics::{ProhibitionScope, StaticMode};
@@ -4761,7 +4761,7 @@ pub(super) fn prepared_designation_subject(
 /// `become_copy_copy_source_target_index`). That shift is only sound when the
 /// copy source ITSELF claims a declared slot. Two filter shapes claim none, and
 /// this predicate must mirror BOTH arms of the runtime authority
-/// (`game::triggers::extract_target_filter_from_effect`) or the invariant is
+/// (`types::ability::extract_target_filter_from_effect`) or the invariant is
 /// weaker than it reads:
 ///
 /// - a context ref — Cytoshape's and Polymorphous Rush's `ParentTarget` ("that
@@ -8197,7 +8197,7 @@ pub(super) fn try_parse_each_source_deals_damage(
     // power") rebinds through every wrapper via
     // `rebind_anaphoric_object_scope`. A uniform dynamic amount (no anaphoric
     // pronoun) stays on the prior `None` path — fail-closed unchanged.
-    if crate::game::quantity::quantity_expr_contains_scope(&amount, ObjectScope::Anaphoric) {
+    if crate::types::ability::quantity_expr_contains_scope(&amount, ObjectScope::Anaphoric) {
         super::rebind_anaphoric_object_scope(&mut amount, ObjectScope::BatchSource);
     } else if !matches!(amount, QuantityExpr::Fixed { .. }) {
         return None;
@@ -9305,7 +9305,7 @@ mod tests {
             panic!("expected pairwise EachSourceDealsDamage, got {effect:?}");
         };
         assert_eq!(sources, TargetFilter::ParentTarget);
-        assert!(crate::game::quantity::quantity_expr_contains_scope(
+        assert!(crate::types::ability::quantity_expr_contains_scope(
             &amount,
             ObjectScope::BatchSource,
         ));

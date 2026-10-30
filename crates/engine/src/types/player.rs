@@ -3,7 +3,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::events::BendingType;
+use super::event_kinds::BendingType;
 use super::identifiers::ObjectId;
 use super::mana::{ManaColor, ManaPool};
 

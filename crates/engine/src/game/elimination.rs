@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActiveSearchDecisionAuthority, CostResume, GameEnd, GameState, LeavingGameDeparture,
@@ -507,6 +508,8 @@ fn eliminate_players(
         }
         // CR 104.1: the game is over; no owner arrangement is owed to a finished game.
         state.pending_mass_library_order_choice = None;
+        // CR 104.1: the game is over; no player-scope sacrifice is owed to a finished game.
+        state.pending_player_scope_sacrifice_choice = None;
         state.waiting_for = WaitingFor::GameOver { winner };
     } else {
         // CR 800.4a + CR 608.2m + CR 800.4g/800.4h: once every departure,
@@ -548,7 +551,31 @@ fn eliminate_players(
                         false,
                         "owner library arrangement was not reconciled after a departure: {error}"
                     );
-                    super::engine_resolution_choices::OwnerArrangementDepartureSettlement::NotSettled
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                }
+            };
+
+        // CR 800.4a + CR 101.4 + CR 608.2m (+ CR 616.1): an open player-scope
+        // sacrifice ("each player sacrifices…") is reconciled with the players and
+        // objects still in the game — a departed player chooses and sacrifices
+        // nothing, a collected member that left is not sacrificed, and the current
+        // chooser chooses among what they control now — so the walk goes on, the
+        // collected batch is sacrificed, or a batch whose CR 616.1 chooser left
+        // resumes. Runs after every departure sweep, before
+        // `drain_or_clear_deferred_triggers_after_elimination` (which places the
+        // triggers it queued, CR 603.3) and before the generic dead-actor repoint.
+        let player_scope_sacrifice =
+            match super::engine_resolution_choices::settle_player_scope_sacrifice_after_departure(
+                state, events,
+            ) {
+                Ok(settlement) => settlement,
+                Err(error) => {
+                    tracing::error!(%error, "player-scope sacrifice was not reconciled after a departure");
+                    debug_assert!(
+                        false,
+                        "player-scope sacrifice was not reconciled after a departure: {error}"
+                    );
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
                 }
             };
 
@@ -664,7 +691,8 @@ fn eliminate_players(
         // resolution is still live because the departed player's unanswered
         // question was its last instruction, its carrier is retired here as
         // `Eliminated`, and the spell is never reported resolved. An owner
-        // arrangement the departure itself settled is not that case: the departure
+        // arrangement or player-scope sacrifice the departure itself settled is not
+        // that case: the departure
         // answered the question and the settlement ran the remaining instructions,
         // so the carrier, which still owes its final part, is left to the action
         // boundary's final-part convergence, which reports the spell resolved once
@@ -680,7 +708,11 @@ fn eliminate_players(
             if leaving_set.contains(&controller)
                 && matches!(
                     owner_arrangement,
-                    super::engine_resolution_choices::OwnerArrangementDepartureSettlement::NotSettled
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                && matches!(
+                    player_scope_sacrifice,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
                 )
                 && state
                     .resolving_stack_entry
@@ -1553,7 +1585,9 @@ fn do_eliminate(
     // them correctly requires resuming the interrupted APNAP queue for the
     // remaining players (not field-nulling), tracked as a separate follow-up. This
     // fix deliberately addresses only the CR 704.4 SBA-freeze introduced by the
-    // `pending_replacement` guard.
+    // `pending_replacement` guard. A player-scope sacrifice batch parked on this
+    // choice is the exception: `settle_player_scope_sacrifice_after_departure`
+    // resumes it for the remaining players once every departure has settled.
     // CR 800.4a: Tear down choices and continuations owned by the leaving player.
     // CR 616.1: SearchFound owns an outer per-card batch, and a replacement-
     // selected zone move may own a nested batch completion. The

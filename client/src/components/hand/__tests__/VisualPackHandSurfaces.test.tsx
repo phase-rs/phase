@@ -79,6 +79,7 @@ describe("visual-pack opponent hand boundary", () => {
   });
 
   it("uses projected visible identity and never degrades a failed face into a back", () => {
+    seed({ ...secretOpponent(), display_visible_to_viewer: true });
     const advanceFailedSource = vi.fn();
     mockUseCardImage.mockReturnValue({
       src: "installed-face.png",
@@ -89,7 +90,7 @@ describe("visual-pack opponent hand boundary", () => {
       advanceFailedSource,
     });
 
-    const { rerender } = render(<OpponentHand playerId={1} showCards />);
+    const { rerender } = render(<OpponentHand playerId={1} />);
     expect(mockUseCardImage).toHaveBeenCalledWith("SECRET FACE", expect.objectContaining({
       size: "small",
       oracleId: "secret-oracle",
@@ -107,12 +108,22 @@ describe("visual-pack opponent hand boundary", () => {
       isRotated: false,
       isFlip: false,
     });
-    rerender(<OpponentHand playerId={1} showCards />);
+    rerender(<OpponentHand playerId={1} />);
     expect(screen.getByRole("img", { name: "SECRET FACE" })).toHaveTextContent("SECRET FACE");
     expect(mockUseCardBackImage).not.toHaveBeenCalled();
   });
 
-  it("honors engine-projected visibility independently of debug showCards", () => {
+  it("renders a back for an engine-redacted card instead of its placeholder name", () => {
+    seed({ ...secretOpponent(), name: "Hidden Card", printed_ref: null, display_visible_to_viewer: false });
+
+    render(<OpponentHand playerId={1} />);
+
+    expect(mockUseCardImage).not.toHaveBeenCalled();
+    expect(screen.getByRole("img", { name: "Card back" })).toBeInTheDocument();
+    expect(screen.queryByText("Hidden Card")).toBeNull();
+  });
+
+  it("honors engine-projected visibility", () => {
     const projected = { ...secretOpponent(), display_visible_to_viewer: true };
     seed(projected);
     mockUseCardImage.mockReturnValue({

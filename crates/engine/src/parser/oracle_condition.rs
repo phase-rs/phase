@@ -861,7 +861,7 @@ mod tests {
     };
     use crate::types::card_type::Supertype;
     use crate::types::counter::CounterType;
-    use crate::types::events::PlayerActionKind;
+    use crate::types::event_kinds::PlayerActionKind;
 
     /// Helper: assert the phrase reaches the SHARED grammar and converts.
     fn shared(text: &str) -> ParsedCondition {

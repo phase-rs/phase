@@ -1,13 +1,16 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 #[cfg(test)]
 use crate::types::ability::TapStateChange;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCost, AttachSelection,
-    AttachmentReferent, CardTypeSetSource, CastManaSpentMetric, ChosenTargetSlots,
+    attach_host_filter_needs_target_slot, effect_bound_filter_matches,
+    extract_target_filter_from_effect, filter_binds_player, filter_binds_target_player,
+    mass_all_target_filter, AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCost,
+    AttachSelection, AttachmentReferent, CardTypeSetSource, CastManaSpentMetric, ChosenTargetSlots,
     CombatRelationSubject, ContinuousModification, ControllerRef, CountBinding,
     CounterMoveSelection, DamageSource, EachDamageRecipient, Effect, EffectKind, EffectScope,
     FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
-    MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PreventionAmount, PtValue,
-    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext,
+    MultiTargetSpec, ObjectScope, PlayerBindingAxis, PlayerFilter, PlayerScope, PreventionAmount,
+    PtValue, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext,
     SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TypeFilter,
     TypedFilter,
 };
@@ -31,7 +34,6 @@ use super::players;
 use super::quantity::{quantity_expr_uses_recipient, resolve_quantity_with_targets};
 use super::stack::stack_object_controller;
 use super::targeting;
-use super::triggers;
 
 fn move_counter_stack_target_filters<'a>(
     source: &'a TargetFilter,
@@ -520,7 +522,7 @@ pub(crate) fn append_to_sub_chain(ability: &mut ResolvedAbility, next: ResolvedA
 
 pub fn find_first_target_filter_in_chain(ability: &ResolvedAbility) -> Option<&TargetFilter> {
     if ability.target_choice_timing == TargetChoiceTiming::Stack {
-        if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
+        if let Some(filter) = extract_target_filter_from_effect(&ability.effect) {
             return Some(filter);
         }
     }
@@ -3006,7 +3008,7 @@ fn slot_legal_targets(
     ability: &ResolvedAbility,
 ) -> Vec<TargetRef> {
     let mut legal = match view {
-        Some(view) if crate::game::filter::filter_reads_declared_slot(slot.filter()) => {
+        Some(view) if crate::types::ability::filter_reads_declared_slot(slot.filter()) => {
             targeting::find_legal_targets_for_ability_with_view(
                 state,
                 slot.filter(),
@@ -3041,7 +3043,7 @@ fn validate_single_derived_role(
         || effect_player_filter_is_parent_target_anaphor(&ability.effect)
         || paid_instead_delegate(ability).is_some()
         || ability.multi_target.is_some()
-        || triggers::extract_target_filter_from_effect(&ability.effect).is_some()
+        || extract_target_filter_from_effect(&ability.effect).is_some()
         || effect_needs_parent_target_combat_relation_slot(&ability.effect)
         || become_copy_recipient_slot_filter(&ability.effect).is_some()
     {
@@ -3775,7 +3777,7 @@ fn validate_targets_in_chain_inner(
             .map(legal_or_dropped)
             .collect()
         };
-        let verdicts = match triggers::extract_target_filter_from_effect(&validated.effect) {
+        let verdicts = match extract_target_filter_from_effect(&validated.effect) {
             Some(filter) if matches!(validated.effect, Effect::PairWith { .. }) => {
                 let legal_choices = pair_with_legal_choices(state, &validated, filter);
                 (0..occurrence_count)
@@ -4414,7 +4416,7 @@ fn effect_stack_target_declaration_matching(
             && predicate(&parent_target_combat_relation_slot_filter()))
         || become_copy_recipient_slot_filter(effect).is_some_and(predicate)
         || (!effect_target_filter_references_chosen_player(effect)
-            && triggers::extract_target_filter_from_effect(effect).is_some_and(predicate))
+            && extract_target_filter_from_effect(effect).is_some_and(predicate))
 }
 
 /// CR 115.1 + CR 601.2c: the `Effect::BecomeCopy` RECIPIENT filter that must be
@@ -5064,7 +5066,7 @@ fn collect_target_slots_inner(
         if ability.target_choice_timing == TargetChoiceTiming::Stack
             && !effect_target_filter_references_chosen_player(&ability.effect)
         {
-            if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
+            if let Some(filter) = extract_target_filter_from_effect(&ability.effect) {
                 let legal_targets =
                     legal_choices_for_ability_filter(state, ability, filter, acc.built());
                 // CR 601.2c: An "up to N" ability (`multi_target.min == 0`) — or an
@@ -5384,7 +5386,7 @@ fn ability_target_legality_needs_chosen_x_inner(ability: &ResolvedAbility) -> bo
 /// X-dependent target instruction.
 fn target_slot_construction_needs_chosen_x(ability: &ResolvedAbility) -> bool {
     ability.chosen_x.is_none()
-        && (triggers::extract_target_filter_from_effect(&ability.effect)
+        && (extract_target_filter_from_effect(&ability.effect)
             .is_some_and(|filter| target_filter_needs_chosen_x(ability, filter))
             || ability.multi_target.as_ref().is_some_and(|spec| {
                 quantity_expr_has_unresolved_x(ability, &spec.min)
@@ -5432,9 +5434,9 @@ fn target_filter_contains_chosen_x_ref(filter: &TargetFilter) -> bool {
 }
 
 /// CR 202.3 + CR 608.2: does any quantity threshold inside `filter` reference
-/// `scope`? Structural traversal delegates to `filter::filter_contains` (the
+/// `scope`? Structural traversal delegates to `types::ability::filter_contains` (the
 /// exhaustive containment authority); the quantity leaf delegates to
-/// `quantity::quantity_expr_contains_scope` (the parameterized quantity
+/// `types::ability::quantity_expr_contains_scope` (the parameterized quantity
 /// authority). Only the prop → `QuantityExpr` projection is local, and it is
 /// exactly the set of props `filter_prop_contains` documents as
 /// quantity-carrying leaves.
@@ -5444,7 +5446,7 @@ fn target_filter_contains_chosen_x_ref(filter: &TargetFilter) -> bool {
 /// hand-rolled triple, parameterized by `ObjectScope` instead of hard-coding
 /// `ObjectScope::AmassedArmy`.
 fn target_filter_contains_quantity_scope(filter: &TargetFilter, scope: ObjectScope) -> bool {
-    crate::game::filter::filter_contains(filter, &|inner| match inner {
+    crate::types::ability::filter_contains(filter, &|inner| match inner {
         TargetFilter::Typed(typed) => typed
             .properties
             .iter()
@@ -5461,7 +5463,7 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
         FilterProp::Cmc { value, .. }
         | FilterProp::Counters { count: value, .. }
         | FilterProp::PtComparison { value, .. } => {
-            crate::game::quantity::quantity_expr_contains_scope(value, scope)
+            crate::types::ability::quantity_expr_contains_scope(value, scope)
         }
         // CR 701.3a: the filter-matched host axis boxes a `TargetFilter`; the
         // OUTER `filter_contains` traversal visits it (through
@@ -5615,7 +5617,7 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
 /// the ability-free door already returns, so excluding this arm changes no
 /// behaviour and avoids rerouting 30 corpus slots. See deferral D1.
 fn target_filter_binds_prior_target(filter: &TargetFilter) -> bool {
-    crate::game::filter::filter_contains(filter, &|inner| match inner {
+    crate::types::ability::filter_contains(filter, &|inner| match inner {
         TargetFilter::Typed(typed) => {
             matches!(
                 typed.controller,
@@ -5632,7 +5634,7 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         FilterProp::Cmc { value, .. }
         | FilterProp::Counters { count: value, .. }
         | FilterProp::PtComparison { value, .. } => {
-            crate::game::quantity::quantity_expr_contains_scope(value, ObjectScope::Target)
+            crate::types::ability::quantity_expr_contains_scope(value, ObjectScope::Target)
         }
         FilterProp::SharesQuality { reference, .. } => {
             matches!(reference.as_deref(), Some(TargetFilter::ParentTarget))
@@ -5883,7 +5885,7 @@ fn union_over_prior_object_candidates(
 /// `AttachedTo { to: DeclaredTarget { slot } }` referents name, deduplicated.
 pub(crate) fn declared_slots_read_by(filter: &TargetFilter) -> Vec<usize> {
     let slots = std::cell::RefCell::new(Vec::new());
-    crate::game::filter::filter_contains_filter_prop(filter, &|prop| {
+    crate::types::ability::filter_contains_filter_prop(filter, &|prop| {
         if let FilterProp::AttachedTo {
             to: AttachmentReferent::DeclaredTarget { slot },
         } = prop
@@ -6049,7 +6051,7 @@ fn filter_needs_trigger_source(filter: &TargetFilter) -> bool {
         }
     }
 
-    crate::game::filter::filter_contains(
+    crate::types::ability::filter_contains(
         filter,
         &|inner| matches!(inner, TargetFilter::Typed(typed) if typed.properties.iter().any(prop_needs)),
     )
@@ -6127,95 +6129,6 @@ fn ability_distribution_pool_needs_chosen_x(
     };
     let (inner, _) = amount.peel_up_to();
     quantity_expr_has_unresolved_x(ability, inner)
-}
-
-/// CR 109.4 + CR 115.1: Returns true if `effect` needs a companion
-/// `TargetFilter::Player` target slot. This covers filters that reference
-/// `ControllerRef::TargetPlayer` and restriction effects whose affected player
-/// scope is the declared "target player".
-/// Mass-placement `target` field that is NOT surfaced as a normal target slot
-/// (`PutCounterAll`, `DestroyAll`, …). Their `target_filter()` returns `None`
-/// because the field is a resolution-time population scan, not a targeting filter.
-/// Single authority for the mass-target variant list.
-fn mass_all_target_filter(effect: &Effect) -> Option<&TargetFilter> {
-    match effect {
-        Effect::PutCounterAll { target, .. }
-        | Effect::DestroyAll { target, .. }
-        | Effect::GainControlAll { target, .. }
-        | Effect::PumpAll { target, .. }
-        | Effect::DamageAll { target, .. }
-        | Effect::SetTapState {
-            scope: EffectScope::All,
-            target,
-            ..
-        }
-        | Effect::BounceAll { target, .. }
-        | Effect::CounterAll { target, .. }
-        | Effect::ChangeZoneAll { target, .. }
-        // CR 701.27a + CR 115.10a: mass Transform's `target` is a resolution-time
-        // population scan (`target_filter()`==None), exactly like `TapAll`/`DestroyAll`.
-        | Effect::Transform {
-            scope: EffectScope::All,
-            target,
-            ..
-        }
-        | Effect::DoublePTAll { target, .. }
-        // CR 508.1d + CR 109.4: the mass forced-attack population (Gideon Jura's
-        // "creatures that player controls"). Listed here — not just excluded from
-        // `target_filter()` — so its `ControllerRef::TargetOpponent` still
-        // surfaces the COMPANION PLAYER slot the ability genuinely targets.
-        | Effect::ForceAttack {
-            scope: EffectScope::All,
-            target,
-            ..
-        } => Some(target),
-        _ => None,
-    }
-}
-
-/// Shared walker behind the target-player / target-opponent companion-slot
-/// detectors. Returns true if any filter seam (`Attach` operands, a non-targeted
-/// `GenericEffect`'s static `affected`, the effect's own `target_filter()`, or a
-/// mass-placement `target`) satisfies `pred`.
-pub(crate) fn effect_bound_filter_matches(
-    effect: &Effect,
-    pred: fn(&TargetFilter) -> bool,
-) -> bool {
-    if let Effect::Attach {
-        attachment, target, ..
-    }
-    | Effect::UnattachAll { attachment, target } = effect
-    {
-        if pred(attachment) || pred(target) {
-            return true;
-        }
-    }
-    if let Effect::GenericEffect {
-        static_abilities,
-        target: None,
-        ..
-    } = effect
-    {
-        if static_abilities
-            .iter()
-            .any(|static_def| static_def.affected.as_ref().is_some_and(pred))
-        {
-            return true;
-        }
-    }
-    if let Effect::CopyTokenOf {
-        source_filter: Some(filter),
-        ..
-    } = effect
-    {
-        if pred(filter) {
-            return true;
-        }
-    }
-    if effect.target_filter().is_some_and(pred) {
-        return true;
-    }
-    mass_all_target_filter(effect).is_some_and(pred)
 }
 
 fn effect_references_target_player(effect: &Effect) -> bool {
@@ -6432,22 +6345,6 @@ pub(crate) fn attach_attachment_filter_needs_target_slot(filter: &TargetFilter) 
         TargetFilter::Not { filter } => attach_attachment_filter_needs_target_slot(filter),
         _ => false,
     }
-}
-
-/// Whether the host operand of `Effect::Attach` consumes an explicit target.
-///
-/// Single authority for "would this host filter claim a declared target slot?".
-/// Two consumers share it so they cannot drift: the parser's clause-timing
-/// classifier (`oracle_effect::lower::target_choice_timing_for_clause`, deciding
-/// whether a printed described-host Attach chooses its host while resolving) and
-/// the runtime described-host gate
-/// (`effects::attach::prompt_described_host_choice`).
-pub(crate) fn attach_host_filter_needs_target_slot(filter: &TargetFilter) -> bool {
-    !filter.is_context_ref()
-        && !matches!(
-            filter,
-            TargetFilter::LastCreated | TargetFilter::LastRevealed | TargetFilter::LastZoneChanged
-        )
 }
 
 /// CR 115.1a / CR 115.1c / CR 115.1d / CR 115.1e + CR 608.2d: whether the
@@ -6776,112 +6673,6 @@ fn attach_object_binding(
     ))
 }
 
-/// Which player relation of a `TypedFilter` a player-binding walk reads.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PlayerBindingAxis {
-    /// Only a `FilterProp::Owned` property ("cards target player owns").
-    Owner,
-    /// The filter's `controller` or a `FilterProp::Owned` property.
-    ControllerOrOwner,
-}
-
-/// Tree-walks a `TargetFilter` and returns true if any `TypedFilter` inside it
-/// binds a player through `axis` to a `ControllerRef` satisfying `pred`.
-fn filter_binds_player(
-    filter: &TargetFilter,
-    axis: PlayerBindingAxis,
-    pred: fn(&ControllerRef) -> bool,
-) -> bool {
-    match filter {
-        TargetFilter::Typed(TypedFilter {
-            controller,
-            properties,
-            ..
-        }) => {
-            let controlled = match axis {
-                PlayerBindingAxis::Owner => false,
-                PlayerBindingAxis::ControllerOrOwner => controller.as_ref().is_some_and(pred),
-            };
-            controlled
-                || properties.iter().any(
-                    |prop| matches!(prop, FilterProp::Owned { controller } if pred(controller)),
-                )
-        }
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(|f| filter_binds_player(f, axis, pred))
-        }
-        TargetFilter::Not { filter } => filter_binds_player(filter, axis, pred),
-        TargetFilter::None
-        | TargetFilter::Any
-        | TargetFilter::Player
-        | TargetFilter::Controller
-        | TargetFilter::SourceController
-        | TargetFilter::ControllerAndControlledPermanents { .. }
-        | TargetFilter::Opponent
-        | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject { .. }
-        | TargetFilter::SourceOrPaired
-        | TargetFilter::StackAbility { .. }
-        | TargetFilter::StackSpell
-        | TargetFilter::SpecificObject { .. }
-        | TargetFilter::SpecificPlayer { .. }
-        | TargetFilter::PlayerWhoChoseLabel { .. }
-        | TargetFilter::PlayerMatching { .. }
-        | TargetFilter::Neighbor { .. }
-        | TargetFilter::ScopedPlayer
-        | TargetFilter::AttachedTo
-        | TargetFilter::LastCreated
-        | TargetFilter::LastRevealed
-        | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
-        | TargetFilter::AmassedArmy
-        | TargetFilter::ChosenCard
-        | TargetFilter::TrackedSet { .. }
-        | TargetFilter::TrackedSetFiltered { .. }
-        | TargetFilter::ExiledBySource
-        | TargetFilter::ExiledCardByIndex { .. }
-        | TargetFilter::TriggeringSpellController
-        | TargetFilter::TriggeringSpellOwner
-        | TargetFilter::TriggeringPlayer
-        | TargetFilter::TriggeringSource
-        | TargetFilter::EventTarget
-        | TargetFilter::TriggeringSourceController
-        | TargetFilter::EventTargetController
-        | TargetFilter::ParentTarget
-        | TargetFilter::ParentTargetSlot { .. }
-        | TargetFilter::DeclaredPlayer { .. }
-        | TargetFilter::ParentTargetController
-        | TargetFilter::ParentTargetOwner
-        | TargetFilter::SourceChosenPlayer
-        | TargetFilter::OriginalController
-        | TargetFilter::OriginalSource
-        | TargetFilter::PostReplacementSourceController
-        | TargetFilter::PostReplacementDamageSource
-        | TargetFilter::PostReplacementDamageTarget
-        | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayerOrPlaneswalker
-        | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource { .. }
-        | TargetFilter::Named { .. }
-        | TargetFilter::Owner
-        | TargetFilter::AllPlayers => false,
-    }
-}
-
-/// CR 109.4 + CR 115.1: Returns true if any `TypedFilter` binds, through
-/// `axis`, to a declared-target player scope — `TargetPlayer` (any player) or
-/// `TargetOpponent` (opponent-only). Both surface a companion player slot; they
-/// differ only in that slot's legal targets, so slot *detection* treats them alike.
-pub(crate) fn filter_binds_target_player(filter: &TargetFilter, axis: PlayerBindingAxis) -> bool {
-    filter_binds_player(filter, axis, |c| {
-        matches!(
-            c,
-            ControllerRef::TargetPlayer | ControllerRef::TargetOpponent
-        )
-    })
-}
-
 /// CR 109.4 + CR 115.1: a filter whose controller or owner is a declared target player.
 pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
     filter_binds_target_player(filter, PlayerBindingAxis::ControllerOrOwner)
@@ -7102,11 +6893,10 @@ fn quantity_slot_filter_selects_players(filter: &TargetFilter) -> bool {
 
 /// CR 115.1 + CR 601.2c: the effect's primary target already declares a player
 /// choice, so a player-typed quantity magnitude reads that choice. Mirrors the
-/// generic slot path's authority (`triggers::extract_target_filter_from_effect`)
+/// generic slot path's authority (`types::ability::extract_target_filter_from_effect`)
 /// so "declares a choice" means exactly what slot collection means by it.
 fn effect_primary_target_supplies_player_target(effect: &Effect) -> bool {
-    triggers::extract_target_filter_from_effect(effect)
-        .is_some_and(quantity_slot_filter_selects_players)
+    extract_target_filter_from_effect(effect).is_some_and(quantity_slot_filter_selects_players)
 }
 
 /// CR 608.2c + CR 115.1: Chained riders like Swords to Plowshares ("Exile target
@@ -7128,7 +6918,7 @@ fn sub_ability_inherits_parent_creature_target_only(
     if !chain_has_target_sink(parent) {
         return false;
     }
-    if triggers::extract_target_filter_from_effect(&sub.effect).is_some() {
+    if extract_target_filter_from_effect(&sub.effect).is_some() {
         return false;
     }
     if sub.multi_target.is_some() {
@@ -7296,7 +7086,7 @@ fn filter_references_parent_target_combat_relation(filter: &TargetFilter) -> boo
 }
 
 fn effect_primary_target_supplies_creature_target(effect: &Effect) -> bool {
-    triggers::extract_target_filter_from_effect(effect)
+    extract_target_filter_from_effect(effect)
         .is_some_and(target_filter_can_supply_creature_quantity)
 }
 
@@ -7475,9 +7265,10 @@ fn filter_target_slot_filter(filter: &TargetFilter) -> Option<QuantitySlotDeriva
 /// The first target-slot filter reachable through a [`CardTypeSetSource`]
 /// population.
 ///
-/// Only the object-filter and journal-filter arms carry a `TargetFilter` that
-/// could name a target slot; the zone / linked-exile / tracked-set arms are
-/// fixed-vocabulary. `AnyOf` recurses so a union member's slot is not dropped.
+/// Only the object-filter, journal-filter, and tracked-set-filter arms carry
+/// a `TargetFilter` that could name a target slot; the zone / linked-exile
+/// arms are fixed-vocabulary. `AnyOf` recurses so a union member's slot is not
+/// dropped.
 ///
 /// Deliberately UNCITED. This is a structural query over the AST — which arms
 /// hold a filter — not a rule implementation. It previously cited CR 109.2,
@@ -7502,9 +7293,20 @@ fn characteristic_source_target_slot_filter(
             CardTypeSetSource::TurnJournal { filter, .. } => {
                 filter.as_ref().and_then(filter_target_slot_filter)
             }
+            CardTypeSetSource::TrackedSet { filter, .. } => {
+                filter.as_ref().and_then(filter_target_slot_filter)
+            }
+            // CR 601.2c + CR 115.1: a targeted-objects population READS the
+            // chain's announced targets — it never declares its own slot. The
+            // declaring head surfaces the announcement through the generic
+            // path; a ParentTarget-derived slot here would be unfillable at
+            // announcement (nothing is chosen yet) and wrongly reject
+            // well-formed chains (Command the Dreadhorde). The parser only
+            // emits this population behind a proven target-set publisher, so
+            // no dangling read can reach this arm.
+            CardTypeSetSource::TargetedObjects { .. } => None,
             CardTypeSetSource::Zone { .. }
             | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. }
             | CardTypeSetSource::AnyOf { .. } => None,
         };
     });
@@ -8024,7 +7826,7 @@ fn collect_target_slot_specs(
             }
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack {
-            if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
+            if let Some(filter) = extract_target_filter_from_effect(&ability.effect) {
                 if let Some(spec) = ability.multi_target.as_ref() {
                     let legal_targets =
                         legal_targets_for_ability_filter(state, ability, filter, BuiltSlots::NONE);
@@ -8209,7 +8011,7 @@ fn legal_targets_for_ability_filter_uncapped(
     // over every candidate of the slot it names (no selection exists yet);
     // the interactive walk narrows it to the object actually chosen. CR 109.5:
     // only a bindable shape is enumerated, under the declaring controller.
-    if crate::game::filter::filter_reads_declared_slot(&bound_filter) {
+    if crate::types::ability::filter_reads_declared_slot(&bound_filter) {
         if !declared_slot_filter_is_bindable(&bound_filter) {
             return Vec::new();
         }
@@ -8993,7 +8795,7 @@ fn legal_targets_for_selected_slot(
         //
         // CR 109.5: "you" is the declaring controller; a shape with no binding
         // authority offers nothing.
-        if crate::game::filter::filter_reads_declared_slot(&bound_filter) {
+        if crate::types::ability::filter_reads_declared_slot(&bound_filter) {
             if !declared_slot_filter_is_bindable(&bound_filter) {
                 Vec::new()
             } else {
@@ -10761,7 +10563,7 @@ fn assign_targets_recursive(
         }
     }
     if ability.target_choice_timing == TargetChoiceTiming::Stack
-        && triggers::extract_target_filter_from_effect(&ability.effect).is_some()
+        && extract_target_filter_from_effect(&ability.effect).is_some()
     {
         if let Some(spec) = ability.multi_target.as_ref() {
             // CR 601.2c + issue #3864: An inheriting rider (Solitude's life-gain)
@@ -11245,7 +11047,7 @@ fn assign_selected_slots_recursive(
         *next_slot += 1;
     }
     if ability.target_choice_timing == TargetChoiceTiming::Stack
-        && triggers::extract_target_filter_from_effect(&ability.effect).is_some()
+        && extract_target_filter_from_effect(&ability.effect).is_some()
     {
         if let Some(spec) = ability.multi_target.as_ref() {
             let remaining_after_current = selected_slots.len().saturating_sub(*next_slot);
@@ -11733,7 +11535,7 @@ fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
         return true;
     }
     if ability.target_choice_timing == TargetChoiceTiming::Stack
-        && triggers::extract_target_filter_from_effect(&ability.effect).is_some()
+        && extract_target_filter_from_effect(&ability.effect).is_some()
     {
         return true;
     }
@@ -11775,7 +11577,7 @@ fn chain_has_target_sink_after_deferred_effect(sub_ability: Option<&ResolvedAbil
 ///
 /// FAITHFUL MIRROR, not an approximation. This function reproduces
 /// `collect_target_slot_specs`' per-node arms with the same guards and the SAME
-/// generic authority (`triggers::extract_target_filter_from_effect`, NOT
+/// generic authority (`types::ability::extract_target_filter_from_effect`, NOT
 /// `Effect::target_filter` — the two differ by that function's carve-outs and by
 /// its `!is_context_ref()` projection). Divergence here is not a missing
 /// feature, it is a WRONG FILTER on a real slot: before this mirror,
@@ -11809,7 +11611,7 @@ fn chain_has_target_sink_after_deferred_effect(sub_ability: Option<&ResolvedAbil
 ///   * the target-creature-quantity slot and the parent-target-combat-relation
 ///     slot (both enumerated by `legal_targets_for_ability_filter` over the same
 ///     filter)
-///   * the generic slot -> `triggers::extract_target_filter_from_effect`, which
+///   * the generic slot -> `types::ability::extract_target_filter_from_effect`, which
 ///     bottoms out in an EXHAUSTIVE `Effect::target_filter` match (no top-level
 ///     `_ =>` arm), so a new `Effect` cannot silently become unaddressable
 ///     without a compile error
@@ -11918,7 +11720,7 @@ fn node_slot_filters(ability: &ResolvedAbility) -> NodeSlotFilters {
     }
 
     // Arm 9 — the generic arm, on the cast path's own authority.
-    match triggers::extract_target_filter_from_effect(&ability.effect) {
+    match extract_target_filter_from_effect(&ability.effect) {
         Some(f) if ability.multi_target.is_some() && lead.is_empty() => {
             NodeSlotFilters::UniformRun(f.clone())
         }
@@ -12519,7 +12321,7 @@ pub(crate) fn unchanged_targets_stay_legal(
         // unchanged dependent one.
         let bound = retarget_node_bound_to_prior_object(chain, path, node, filter);
         let judged = bound.as_ref().unwrap_or(node);
-        if crate::game::filter::filter_reads_declared_slot(filter) {
+        if crate::types::ability::filter_reads_declared_slot(filter) {
             let view = retarget_declared_view(pre, chain);
             targeting::find_legal_targets_for_ability_with_view(
                 state,
@@ -12619,7 +12421,7 @@ pub(crate) fn changed_dependent_targets_are_legal(
         };
         let bound =
             retarget_node_bound_to_prior_object(post, &binding.address.path, post_node, filter);
-        let reads_declared_slot = crate::game::filter::filter_reads_declared_slot(filter);
+        let reads_declared_slot = crate::types::ability::filter_reads_declared_slot(filter);
         if !reads_declared_slot && bound.is_none() {
             continue;
         }
@@ -12709,7 +12511,7 @@ pub(crate) fn widen_dependent_retarget_pools(
         // ancestor's slot holds after the edit — its current object or any
         // member of its own addressed pool. A declared-slot read takes
         // precedence, as it does when the targets are announced.
-        if !crate::game::filter::filter_reads_declared_slot(filter) {
+        if !crate::types::ability::filter_reads_declared_slot(filter) {
             if let Some((referent_address, current)) =
                 retarget_prior_object_referent(stack_ability, &bindings[i].address.path, filter)
             {
@@ -13180,7 +12982,7 @@ fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usi
     {
         0
     } else if ability.target_choice_timing == TargetChoiceTiming::Stack
-        && triggers::extract_target_filter_from_effect(&ability.effect).is_some()
+        && extract_target_filter_from_effect(&ability.effect).is_some()
     {
         if let Some(spec) = ability
             .multi_target
@@ -14852,7 +14654,7 @@ mod tests {
     }
 
     /// V18b — the traversal is DELEGATED, so the anaphor is found at every
-    /// nesting depth `filter::filter_contains` knows about, not only at the top
+    /// nesting depth `types::ability::filter_contains` knows about, not only at the top
     /// level where the three unlocked cards happen to put it today.
     ///
     /// Revert-failing: restore the hand-rolled `Typed`/`And`/`Or`/`Not` match
@@ -15271,7 +15073,7 @@ mod tests {
             "reach guard: the companion predicate still fires here and must be gated off"
         );
         assert_eq!(
-            triggers::extract_target_filter_from_effect(&ctx.effect),
+            extract_target_filter_from_effect(&ctx.effect),
             None,
             "reach guard: the GENERIC reservation term contributes 0 for a \
              context-ref recipient — this is what falsifies a hard-coded `surfaced - 1`"
@@ -15359,7 +15161,7 @@ mod tests {
         // Reach guards: every OTHER route to `true` is inert for this shape, so
         // the explicit multi-role arm is the only thing that can supply the sink.
         assert_eq!(
-            triggers::extract_target_filter_from_effect(&solo.effect),
+            extract_target_filter_from_effect(&solo.effect),
             None,
             "reach guard: the generic sink check does NOT fire for a context-ref recipient"
         );
@@ -18716,6 +18518,8 @@ mod tests {
                 owner: TargetFilter::Player,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -19366,6 +19170,8 @@ mod tests {
                 ),
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -19410,6 +19216,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -19449,6 +19257,8 @@ mod tests {
                 ),
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -24153,17 +23963,23 @@ mod tests {
         ]));
         assert!(filter_references_target_creature_quantity(&shares_quality));
 
+        // MED1 admits no threshold-nested target read through `new` (the
+        // parked path cannot evaluate it), so the walker test builds an
+        // admitting aggregate and swaps in the refused shape it must find —
+        // the source kind stays `Objects`, per `source_mut`'s contract.
+        let mut aggregate_inner = crate::types::ability::PropertyAggregate::new(
+            AggregateFunction::Max,
+            ObjectProperty::ManaValue,
+            crate::types::ability::CardTypeSetSource::Objects {
+                filter: fixed_filter(),
+            },
+        )
+        .expect("statically valid property aggregate");
+        *aggregate_inner.source_mut() = crate::types::ability::CardTypeSetSource::Objects {
+            filter: target_power_filter(),
+        };
         let aggregate = QuantityExpr::Ref {
-            qty: QuantityRef::PropertyAggregate(
-                crate::types::ability::PropertyAggregate::new(
-                    AggregateFunction::Max,
-                    ObjectProperty::ManaValue,
-                    crate::types::ability::CardTypeSetSource::Objects {
-                        filter: target_power_filter(),
-                    },
-                )
-                .expect("statically valid property aggregate"),
-            ),
+            qty: QuantityRef::PropertyAggregate(aggregate_inner),
         };
         assert!(quantity_expr_references_target_creature(&aggregate));
 
@@ -24404,6 +24220,27 @@ mod tests {
                 );
             }
         }
+
+        // F10 (CR 601.2c + CR 115.1): a targeted-objects population reads the
+        // chain's announced targets — it never declares its own slot. The
+        // declaring head surfaces the announcement; a ParentTarget-derived
+        // slot here would be unfillable at announcement (nothing chosen yet)
+        // and wrongly reject well-formed chains (Command the Dreadhorde).
+        for slot in [None, Some(0)] {
+            let aggregate = QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    crate::types::ability::AggregateFunction::Sum,
+                    crate::types::ability::ObjectProperty::ManaValue,
+                    CardTypeSetSource::TargetedObjects { slot },
+                )
+                .expect("statically valid property aggregate"),
+            );
+            assert_eq!(
+                quantity_ref_target_slot_spec(&aggregate),
+                None,
+                "TargetedObjects {{ slot: {slot:?} }} must surface NO slot",
+            );
+        }
     }
 
     /// Issue #6856: the target-bound zone-count slot matrix. A magnitude that
@@ -24559,6 +24396,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],

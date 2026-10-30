@@ -52,7 +52,7 @@ use crate::types::ability::{
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
 use crate::types::counter::CounterType;
-use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
+use crate::types::game_state_kinds::{DistributionUnit, TargetSelectionConstraint};
 use crate::types::phase::Phase;
 use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::zones::{EtbTapState, Zone};
@@ -66,7 +66,7 @@ use super::{
     parse_for_each_object_copy_parts, refine_damage_target_remainder, replace_player_anaphor,
     scan_contains_phrase, target_filter_controller_ref, ParsedEffectClause,
 };
-use crate::game::effects::effect::generic_effect_population_filter;
+use crate::types::ability::generic_effect_population_filter;
 
 pub(super) fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
     replace_player_anaphor(def.effect.as_mut(), || TargetFilter::ParentTarget);
@@ -2437,7 +2437,7 @@ pub(super) fn target_choice_timing_for_parsed(
             target,
             selection: _,
         } if attachment.is_context_ref()
-            && crate::game::ability_utils::attach_host_filter_needs_target_slot(target)
+            && crate::types::ability::attach_host_filter_needs_target_slot(target)
             && target.denotes_battlefield_objects()
             && nom_primitives::scan_contains(&lower, "attach ") =>
         {
@@ -2505,7 +2505,7 @@ pub(super) fn target_choice_timing_for_parsed(
             && parsed.multi_target.is_none()
             && parsed.distribute.is_none()
             && !nom_primitives::scan_contains(&lower, "target ")
-            && crate::game::effects::deal_damage::names_resolution_chosen_recipient(target)
+            && crate::types::ability::names_resolution_chosen_recipient(target)
         {
             return TargetChoiceTiming::Resolution;
         }
@@ -3720,6 +3720,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             target,
             owner,
             enters_attacking,
+            attack_destination,
             tapped,
             extra_keywords,
             additional_modifications,
@@ -3729,6 +3730,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             owner: owner.clone(),
             source_filter: None,
             enters_attacking: *enters_attacking,
+            attack_destination: attack_destination.clone(),
             tapped: *tapped,
             count: count.clone(),
             extra_keywords: extra_keywords.clone(),
@@ -3745,6 +3747,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             owner,
             attach_to,
             enters_attacking,
+            attack_destination,
             supertypes,
             static_abilities,
             enter_with_counters,
@@ -3761,6 +3764,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             owner: owner.clone(),
             attach_to: attach_to.clone(),
             enters_attacking: *enters_attacking,
+            attack_destination: attack_destination.clone(),
             supertypes: supertypes.clone(),
             static_abilities: static_abilities.clone(),
             enter_with_counters: enter_with_counters.clone(),
@@ -14249,6 +14253,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -14968,7 +14974,7 @@ mod tests {
     #[test]
     fn distribute_damage_power_equal_pattern() {
         // Gap 1: "damage equal to its power" — Pattern B where qty follows "damage equal to"
-        use crate::types::game_state::DistributionUnit;
+        use crate::types::game_state_kinds::DistributionUnit;
         let text = "deal damage equal to its power divided as you choose among any number of target creatures and/or players";
         let lower = text.to_lowercase();
         let clause = super::try_parse_distribute_damage(&lower, text).expect("Gap 1 should parse");
@@ -14983,7 +14989,7 @@ mod tests {
     #[test]
     fn distribute_counters_third_person_predicate() {
         // Gap 2: "distributes" (3rd-person) verb after subject stripping
-        use crate::types::game_state::DistributionUnit;
+        use crate::types::game_state_kinds::DistributionUnit;
         let text = "distributes 3 +1/+1 counters among any number of target creatures you control";
         let lower = text.to_lowercase();
         let clause =
@@ -15000,7 +15006,7 @@ mod tests {
     fn distribute_prevent_damage_fixed() {
         // Gap 3: fixed-N prevent-divide
         use crate::types::ability::PreventionAmount;
-        use crate::types::game_state::DistributionUnit;
+        use crate::types::game_state_kinds::DistributionUnit;
         let text =
             "prevent the next 5 damage divided as you choose among any number of target creatures";
         let clause = super::try_parse_prevent_distribute(text).expect("Gap 3 should parse");
@@ -15512,6 +15518,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: true,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -16520,7 +16528,7 @@ mod where_x_tests {
     #[test]
     fn apply_where_x_to_target_constraint_binds_total_mana_value_cap() {
         use crate::types::ability::Comparator;
-        use crate::types::game_state::TargetSelectionConstraint;
+        use crate::types::game_state_kinds::TargetSelectionConstraint;
 
         let mut constraint = TargetSelectionConstraint::TotalManaValue {
             comparator: Comparator::LE,
@@ -16552,7 +16560,7 @@ mod where_x_tests {
     #[test]
     fn parse_total_mana_value_target_constraint_preserves_fixed_cap() {
         use crate::types::ability::Comparator;
-        use crate::types::game_state::TargetSelectionConstraint;
+        use crate::types::game_state_kinds::TargetSelectionConstraint;
 
         assert_eq!(
             super::parse_total_mana_value_target_constraint(
@@ -16580,7 +16588,7 @@ mod where_x_tests {
     /// Constraints without a quantity bound are left untouched.
     #[test]
     fn apply_where_x_to_target_constraint_leaves_non_quantity_unchanged() {
-        use crate::types::game_state::TargetSelectionConstraint;
+        use crate::types::game_state_kinds::TargetSelectionConstraint;
 
         let mut constraint = TargetSelectionConstraint::DifferentObjectControllers;
         let mut unbound = None;
@@ -16848,6 +16856,7 @@ mod where_x_tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -17176,6 +17185,89 @@ mod token_anaphor_rewrite_tests {
             }
             other => panic!("expected GenericEffect, got {other:?}"),
         }
+    }
+
+    /// CR 508.4: "create two of those tokens" rebuilds the antecedent token
+    /// with the new count and keeps the defender the antecedent named.
+    #[test]
+    fn those_tokens_rewrite_keeps_the_antecedent_attack_destination() {
+        use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
+
+        let destination = TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope: NamedDefenderScope::Player,
+        };
+        let antecedent = Effect::Token {
+            name: "Goblin".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), "Goblin".to_string()],
+            colors: Vec::new(),
+            keywords: Vec::new(),
+            tapped: true,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: true,
+            attack_destination: destination.clone(),
+            supertypes: Vec::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+        };
+        let mut cur = Effect::unimplemented("create", "create two of those tokens");
+        rewrite_those_tokens_from_antecedent(&mut cur, &antecedent);
+        let Effect::Token {
+            count,
+            attack_destination,
+            ..
+        } = cur
+        else {
+            panic!("the rewrite builds a Token, got {cur:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Fixed { value: 2 },
+            "reach guard: the rewrite ran"
+        );
+        assert_eq!(attack_destination, destination);
+    }
+
+    /// CR 508.4: the same rewrite over a copy-token antecedent.
+    #[test]
+    fn those_tokens_rewrite_keeps_the_copy_antecedent_attack_destination() {
+        use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
+
+        let destination = TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope: NamedDefenderScope::Player,
+        };
+        let antecedent = Effect::CopyTokenOf {
+            target: TargetFilter::ParentTarget,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: true,
+            attack_destination: destination.clone(),
+            tapped: true,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: Vec::new(),
+            additional_modifications: Vec::new(),
+        };
+        let mut cur = Effect::unimplemented("create", "create two of those tokens");
+        rewrite_those_tokens_from_antecedent(&mut cur, &antecedent);
+        let Effect::CopyTokenOf {
+            count,
+            attack_destination,
+            ..
+        } = cur
+        else {
+            panic!("the rewrite builds a CopyTokenOf, got {cur:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Fixed { value: 2 },
+            "reach guard: the rewrite ran"
+        );
+        assert_eq!(attack_destination, destination);
     }
 }
 

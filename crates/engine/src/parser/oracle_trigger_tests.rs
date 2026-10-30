@@ -1,6 +1,5 @@
+use super::test_helpers::{drake_shaped_trigger_execute, GILDED_DRAKE_TEXT};
 use super::*;
-use crate::game::ability_utils::ability_definition_supported;
-use crate::game::scenario::{GameScenario, P0, P1};
 use crate::parser::oracle::{has_unimplemented, parse_oracle_text};
 use crate::parser::oracle_classifier::has_trigger_prefix;
 use crate::parser::oracle_effect::gap_diagnosis::diagnose_clause_gap;
@@ -12,26 +11,24 @@ use crate::parser::test_support::assert_no_unimplemented;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource, CastingPermission,
-    ChooseOneOfKind, ChosenAttribute, CoinFlipRun, CombatHistoryScope, Comparator,
-    ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission, CountScope,
-    CounterTransferMode, DamageAmountScope, DamageAmountThreshold, DamageChannel,
-    DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
-    EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice,
-    ObjectProperty, ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerScope,
+    ChooseOneOfKind, CoinFlipRun, CombatHistoryScope, Comparator, ContinuousModification,
+    ControllerRef, CopyChooseScope, CopyRetargetPermission, CountScope, CounterTransferMode,
+    DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageModification, DamageSource,
+    DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
+    ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectProperty,
+    ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerScope,
     PropertyAggregate, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RoundingMode,
     SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
     TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, XModification,
     ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner, ZoneRef,
 };
 use crate::types::ability::{
-    EffectOutcomeSignal, IllegalTargetsDisposition, MultiTargetSpec, NumberQuality, Parity,
-    SpentColor, StaticCondition, StaticDefinition,
+    IllegalTargetsDisposition, NumberQuality, Parity, SpentColor, StaticCondition, StaticDefinition,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::game_state::WaitingFor;
 use crate::types::keywords::Keyword;
-use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CastFrequency, StaticMode};
@@ -545,6 +542,7 @@ fn count_gate_rebind_reaches_token_entry_counters_but_not_granted_statics() {
     let mut execute = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Fractal".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -1542,7 +1540,8 @@ fn palantir_life_loss_uses_milled_chain_set_and_targeted_opponent() {
                     crate::types::ability::ObjectProperty::ManaValue,
                     crate::types::ability::CardTypeSetSource::TrackedSet {
                         set: crate::types::ability::TrackedAnaphorSource::ChainSet,
-                        caused_by: None
+                        caused_by: None,
+                        filter: None
                     }
                 )
                 .expect("statically valid property aggregate")
@@ -1936,7 +1935,8 @@ fn combustible_gearhulk_damage_uses_milled_chain_set() {
         aggregate.source(),
         crate::types::ability::CardTypeSetSource::TrackedSet {
             set: crate::types::ability::TrackedAnaphorSource::ChainSet,
-            caused_by: None
+            caused_by: None,
+            filter: None
         }
     ));
     assert!(matches!(target, TargetFilter::ScopedPlayer));
@@ -6936,6 +6936,7 @@ fn trigger_pack_tactics() {
                         CardTypeSetSource::TrackedSet {
                             set: crate::types::ability::TrackedAnaphorSource::TriggeringBatch,
                             caused_by: None,
+                            filter: None,
                         },
                     )
                     .expect("statically valid property aggregate"),
@@ -15210,6 +15211,179 @@ fn bubbling_muck_delayed_trigger_taps_for_mana_class_general() {
 }
 
 #[test]
+fn molten_tide_delayed_trigger_you_tap_mountain_for_mana() {
+    // CR 603.7b + CR 106.12a: Molten Tide's real Oracle text is an instant
+    // that creates an until-end-of-turn delayed trigger. The inner condition
+    // is keyword-stripped by `try_parse_whenever_this_turn` before
+    // `parse_trigger_condition` runs, so the "you tap " actor arm of
+    // `parse_taps_for_mana_actor_line` must accept the missing "whenever "
+    // keyword. Reverting that arm reproduces `TriggerMode::Unknown`, which
+    // has no matcher and never fires.
+    let parsed = parse_oracle_text(
+        "Until end of turn, whenever you tap a Mountain for mana, add an additional {R}.",
+        "Molten Tide",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    for ability in &parsed.abilities {
+        assert_no_unimplemented(ability);
+    }
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(*a.effect, Effect::CreateDelayedTrigger { .. }))
+        .expect("Molten Tide must parse a CreateDelayedTrigger");
+
+    // Outer window is the until-end-of-turn cleanup purge (CR 603.7b).
+    assert_eq!(ability.duration, Some(Duration::UntilEndOfTurn));
+
+    let Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::WheneverEvent { trigger, .. },
+        effect,
+        ..
+    } = &*ability.effect
+    else {
+        panic!(
+            "expected WheneverEvent delayed trigger, got {:?}",
+            ability.effect
+        );
+    };
+
+    // Inner trigger must be a real TapsForMana matcher, NOT the Unknown fallback.
+    assert_eq!(trigger.mode, TriggerMode::TapsForMana);
+    assert!(
+        !matches!(trigger.mode, TriggerMode::Unknown(_)),
+        "inner trigger must not be Unknown (Unknown has no matcher and never fires)"
+    );
+
+    // valid_card is the Mountain subtype filter scoped to lands the trigger
+    // source's controller tapped ("you tap" = ControllerRef::You).
+    match &trigger.valid_card {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype("Mountain".to_string())),
+                "valid_card must filter on Subtype(Mountain), got {:?}",
+                tf.type_filters
+            );
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "\"you tap\" imposes a You controller constraint on the tapped land"
+            );
+        }
+        other => panic!("expected Typed Mountain filter, got {other:?}"),
+    }
+    assert_eq!(
+        trigger.valid_target,
+        Some(TargetFilter::Controller),
+        "\"you tap\" binds the tapper to the trigger source's controller"
+    );
+    assert_eq!(
+        trigger.taps_for_mana_produced, None,
+        "\"for mana\" with no color constraint imposes no produced-mana filter"
+    );
+
+    // CR 106.4 + CR 603.7d: subjectless body — implicit controller deposit;
+    // tapper == controller on every firing, unlike High Tide's subject-led
+    // Recipient{TriggeringPlayer}.
+    assert!(
+        matches!(
+            &*effect.effect,
+            Effect::Mana {
+                produced: ManaProduction::Fixed { colors, contribution: ManaContribution::Additional },
+                target: None,
+                ..
+            } if colors == &vec![ManaColor::Red]
+        ),
+        "inner effect must be subjectless additional red mana, got {:?}",
+        effect.effect
+    );
+}
+
+#[test]
+fn selesnya_loft_gardens_chaos_delayed_echo_is_taps_for_mana() {
+    // CR 603.7b + CR 106.12a: Selesnya Loft Gardens' chaos ability creates an
+    // until-end-of-turn delayed trigger over the shared you-tap actor ("you
+    // tap a land for mana" — same arm as Molten Tide). Its body is the
+    // mana-echo production ("add one mana of any type that land produced"),
+    // which the choice contract resolves to exactly one chosen mana at
+    // runtime; the parser pins the shape here so the runtime regression in
+    // `selesnya_loft_gardens_mixed_mana_choice.rs` cannot pass on a fallback.
+    // Reverting the you-tap arm reproduces `TriggerMode::Unknown` inside.
+    let parsed = parse_oracle_text(
+        "If an effect would create one or more tokens, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent, it puts twice that many of those counters on that permanent instead.\nWhenever chaos ensues, until end of turn, whenever you tap a land for mana, add one mana of any type that land produced.",
+        "Selesnya Loft Gardens",
+        &[],
+        &["Plane".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChaosEnsues)
+        .expect("Selesnya must parse a ChaosEnsues trigger");
+    let delayed = trigger
+        .execute
+        .as_ref()
+        .expect("chaos trigger must carry its delayed-creation body");
+    let Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::WheneverEvent { trigger: inner, .. },
+        effect,
+        ..
+    } = &*delayed.effect
+    else {
+        panic!(
+            "expected WheneverEvent delayed trigger, got {:?}",
+            delayed.effect
+        );
+    };
+    assert_eq!(inner.mode, TriggerMode::TapsForMana);
+    assert!(
+        !matches!(inner.mode, TriggerMode::Unknown(_)),
+        "inner trigger must not be Unknown (Unknown has no matcher and never fires)"
+    );
+    match &inner.valid_card {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Land),
+                "valid_card must filter on Land, got {:?}",
+                tf.type_filters
+            );
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "\"you tap\" imposes a You controller constraint on the tapped land"
+            );
+        }
+        other => panic!("expected Typed Land filter, got {other:?}"),
+    }
+    assert_eq!(
+        inner.valid_target,
+        Some(TargetFilter::Controller),
+        "\"you tap\" binds the tapper to the trigger source's controller"
+    );
+    assert!(
+        matches!(
+            &*effect.effect,
+            Effect::Mana {
+                produced: ManaProduction::TriggerEventManaType,
+                target: None,
+                ..
+            }
+        ),
+        "inner effect must be subjectless mana-echo production, got {:?}",
+        effect.effect
+    );
+    assert_eq!(
+        delayed.duration,
+        Some(Duration::UntilEndOfTurn),
+        "outer window is the until-end-of-turn cleanup purge (CR 603.7b)"
+    );
+}
+
+#[test]
 fn trigger_you_tap_land_for_mana_vorinclex_first_half() {
     // CR 603.2 + CR 106.12a: "you tap a land" arm scopes the source filter to
     // ControllerRef::You — the trigger fires only on lands the controller taps.
@@ -16991,62 +17165,6 @@ fn talion_kindly_lord_full_oracle_no_swallowed_clause() {
         swallowed.is_empty(),
         "Talion should parse without swallowed-clause warnings: {swallowed:?}"
     );
-}
-
-#[test]
-fn talion_runtime_triggers_only_for_matching_spell_quality() {
-    let run = |name: &str, creature_pt: Option<(i32, i32)>, mana_value: u32| {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        scenario.with_library_top(P0, &["Drawn Card"]);
-        let talion = scenario
-                .add_creature_from_oracle(
-                    P0,
-                    "Talion, the Kindly Lord",
-                    3,
-                    4,
-                    "Flying\nAs Talion, the Kindly Lord enters the battlefield, choose a number between 1 and 10.\nWhenever an opponent casts a spell with mana value, power, or toughness equal to the chosen number, that player loses 2 life and you draw a card.",
-                )
-                .id();
-        let spell = if let Some((power, toughness)) = creature_pt {
-            scenario
-                .add_creature_to_hand_from_oracle(P1, name, power, toughness, "")
-                .with_mana_cost(ManaCost::generic(mana_value))
-                .id()
-        } else {
-            scenario
-                .add_spell_to_hand_from_oracle(P1, name, true, "")
-                .with_mana_cost(ManaCost::generic(mana_value))
-                .id()
-        };
-        scenario.with_mana_pool(
-            P1,
-            (0..mana_value)
-                .map(|_| ManaUnit::new(ManaType::Colorless, talion, false, Vec::new()))
-                .collect(),
-        );
-        let mut runner = scenario.build();
-        {
-            let state = runner.state_mut();
-            state
-                .objects
-                .get_mut(&talion)
-                .expect("Talion source exists")
-                .chosen_attributes
-                .push(ChosenAttribute::Number(3));
-            state.active_player = P1;
-            state.priority_player = P1;
-            state.waiting_for = WaitingFor::Priority { player: P1 };
-        }
-
-        let outcome = runner.cast(spell).resolve();
-        (outcome.life_delta(P1), outcome.hand_drawn(P0))
-    };
-
-    assert_eq!(run("Three-Mana Instant", None, 3), (-2, 1));
-    assert_eq!(run("Three-Power Creature", Some((3, 1)), 1), (-2, 1));
-    assert_eq!(run("Three-Toughness Creature", Some((1, 3)), 1), (-2, 1));
-    assert_eq!(run("One-One Creature", Some((1, 1)), 1), (0, 0));
 }
 
 #[test]
@@ -29542,115 +29660,6 @@ fn state_trigger_control_a_creature_with_toughness() {
     );
 }
 
-/// CR 603.8: Endangered Armodon's state trigger fires at runtime when its
-/// controller controls a creature with toughness 2 or less, sacrificing
-/// Endangered Armodon. Drives the real `check_state_triggers` →
-/// `GameRunner` resolution path (not just the parsed AST): the
-/// `ControlsType` condition is evaluated against the live battlefield and
-/// the `Sacrifice` effect resolves. Discriminates against reverting the new
-/// parser arm — without it the text produces no StateCondition trigger, so
-/// the pre-assertion fails and Endangered Armodon is never sacrificed.
-#[test]
-fn endangered_armodon_state_trigger_fires_and_sacrifices_self() {
-    use crate::game::scenario::GameRunner;
-    use crate::game::triggers::check_state_triggers;
-    use crate::game::zones::create_object;
-    use crate::parser::oracle::parse_oracle_text;
-    use crate::types::card_type::CoreType;
-    use crate::types::identifiers::CardId;
-    use crate::types::phase::Phase;
-    use crate::types::zones::Zone;
-    use crate::types::PlayerId;
-    use std::sync::Arc;
-
-    const ORACLE: &str =
-        "When you control a creature with toughness 2 or less, sacrifice this creature.";
-
-    let parsed = parse_oracle_text(
-        ORACLE,
-        "Endangered Armodon",
-        &[],
-        &["Creature".to_string()],
-        &[],
-    );
-
-    // Confirm the state trigger was parsed — shape check before the runtime test.
-    assert!(
-        parsed
-            .triggers
-            .iter()
-            .any(|t| t.mode == TriggerMode::StateCondition),
-        "Endangered Armodon must parse a StateCondition trigger; got {:?}",
-        parsed.triggers,
-    );
-
-    let mut state = crate::types::game_state::GameState::new_two_player(7);
-    state.phase = Phase::PreCombatMain;
-    state.turn_number = 2;
-    state.active_player = PlayerId(0);
-    state.priority_player = PlayerId(0);
-
-    // Endangered Armodon (3/3) — its own toughness (3) does NOT satisfy the
-    // "toughness 2 or less" filter, so the trigger fires only because of the
-    // separate small creature below, not self-reference.
-    let armodon_id = create_object(
-        &mut state,
-        CardId(7),
-        PlayerId(0),
-        "Endangered Armodon".to_string(),
-        Zone::Battlefield,
-    );
-    {
-        let obj = state.objects.get_mut(&armodon_id).unwrap();
-        obj.controller = PlayerId(0);
-        obj.power = Some(3);
-        obj.toughness = Some(3);
-        obj.card_types.core_types.push(CoreType::Creature);
-        obj.base_card_types.core_types.push(CoreType::Creature);
-        obj.base_trigger_definitions = Arc::new(parsed.triggers.clone());
-        obj.trigger_definitions = parsed.triggers.clone().into();
-    }
-
-    // A 1/1 creature under the same controller satisfies "a creature with
-    // toughness 2 or less", making the state condition true.
-    let token_id = create_object(
-        &mut state,
-        CardId(8),
-        PlayerId(0),
-        "Goblin".to_string(),
-        Zone::Battlefield,
-    );
-    {
-        let obj = state.objects.get_mut(&token_id).unwrap();
-        obj.controller = PlayerId(0);
-        obj.power = Some(1);
-        obj.toughness = Some(1);
-        obj.card_types.core_types.push(CoreType::Creature);
-        obj.base_card_types.core_types.push(CoreType::Creature);
-    }
-
-    // CR 603.8: the state trigger detects the small creature and enqueues the
-    // sacrifice.
-    check_state_triggers(&mut state);
-    assert!(
-        state.pending_trigger.is_some() || !state.stack.is_empty(),
-        "state trigger must be pending or on the stack after check_state_triggers",
-    );
-
-    // Resolve the sacrifice and confirm Endangered Armodon left the battlefield.
-    let mut runner = GameRunner::from_state(state);
-    runner.advance_until_stack_empty();
-    let state = runner.state();
-    assert!(
-        !state.battlefield.iter().any(|id| *id == armodon_id),
-        "Endangered Armodon must be sacrificed once a toughness-≤2 creature is controlled",
-    );
-    assert!(
-        state.battlefield.iter().any(|id| *id == token_id),
-        "the toughness-≤2 creature is unaffected by the sacrifice",
-    );
-}
-
 #[test]
 fn state_trigger_has_no_ice_counters() {
     // Dark Depths: "When Dark Depths has no ice counters on it, sacrifice it."
@@ -29780,97 +29789,6 @@ fn upkeep_trigger_may_put_charge_counter() {
         ),
         "expected PutCounter(charge) on SelfRef, got {:?}",
         execute.effect,
-    );
-}
-
-/// CR 603.8: Darksteel Reactor's state trigger fires when the reactor reaches
-/// 20 charge counters and resolves the WinTheGame effect, ending the game.
-/// Discriminates against guard-reversion regressions: reverting the
-/// `minimum: 1..` arm causes the pre-assertion (StateCondition trigger exists)
-/// to fail because the oracle text no longer produces a StateCondition trigger.
-#[test]
-fn darksteel_reactor_state_trigger_fires_and_wins_game_at_twenty_counters() {
-    use crate::game::scenario::GameRunner;
-    use crate::game::triggers::check_state_triggers;
-    use crate::game::zones::create_object;
-    use crate::parser::oracle::parse_oracle_text;
-    use crate::types::game_state::WaitingFor;
-    use crate::types::identifiers::CardId;
-    use crate::types::phase::Phase;
-    use crate::types::zones::Zone;
-    use crate::types::PlayerId;
-    use std::sync::Arc;
-
-    const ORACLE: &str = "Indestructible\n\
-            At the beginning of your upkeep, you may put a charge counter on Darksteel Reactor.\n\
-            When Darksteel Reactor has twenty or more charge counters on it, you win the game.";
-
-    let parsed = parse_oracle_text(
-        ORACLE,
-        "Darksteel Reactor",
-        &[],
-        &["Artifact".to_string()],
-        &[],
-    );
-
-    // Confirm the state trigger was parsed — shape check before the runtime test.
-    assert!(
-        parsed
-            .triggers
-            .iter()
-            .any(|t| t.mode == TriggerMode::StateCondition),
-        "Darksteel Reactor must parse a StateCondition trigger; got {:?}",
-        parsed.triggers,
-    );
-
-    let mut state = crate::types::game_state::GameState::new_two_player(42);
-    state.phase = Phase::PreCombatMain;
-    state.turn_number = 2;
-    state.active_player = PlayerId(0);
-    state.priority_player = PlayerId(0);
-
-    // Place Darksteel Reactor on the battlefield for player 0.
-    let reactor_id = create_object(
-        &mut state,
-        CardId(42),
-        PlayerId(0),
-        "Darksteel Reactor".to_string(),
-        Zone::Battlefield,
-    );
-
-    // Install the parsed trigger definitions and add 20 charge counters.
-    {
-        let obj = state.objects.get_mut(&reactor_id).unwrap();
-        obj.base_trigger_definitions = Arc::new(parsed.triggers.clone());
-        obj.trigger_definitions = parsed.triggers.clone().into();
-        obj.controller = PlayerId(0);
-        obj.counters
-            .insert(CounterType::Generic("charge".to_string()), 20);
-    }
-
-    // CR 603.8: call check_state_triggers, which sees the reactor has 20 charge
-    // counters and enqueues the WinTheGame trigger.
-    check_state_triggers(&mut state);
-
-    assert!(
-        state.pending_trigger.is_some() || !state.stack.is_empty(),
-        "state trigger must be pending or on the stack after check_state_triggers",
-    );
-
-    // Drain the stack: the WinTheGame effect resolves, eliminating all opponents.
-    let mut runner = GameRunner::from_state(state);
-    runner.advance_until_stack_empty();
-    let state = runner.state();
-
-    assert!(
-        matches!(
-            state.waiting_for,
-            WaitingFor::GameOver {
-                winner: Some(PlayerId(0))
-            }
-        ),
-        "game must end with player 0 as winner after Darksteel Reactor fires; got {:?}",
-        state.waiting_for,
     );
 }
 
@@ -33726,158 +33644,6 @@ fn triggered_additional_combat_folds_land_creature_attacker_restriction() {
     );
 }
 
-#[test]
-fn high_tide_runtime_bonus_mana_routes_to_triggering_player_and_expires_at_eot() {
-    // CR 603.7b + CR 106.12a + CR 605.1a (issue #4673): End-to-end runtime proof
-    // for High Tide's real Oracle text. The instant creates an until-end-of-turn
-    // multi-fire delayed trigger. Whenever ANY player taps an Island for mana,
-    // THAT player (TriggeringPlayer, not the caster) gets an additional {U}.
-    // The delayed trigger is purged at end-of-turn cleanup (CR 603.7b).
-    use crate::game::scenario::GameScenario;
-    use crate::game::triggers::check_delayed_triggers;
-    use crate::game::turns::execute_cleanup;
-    use crate::types::events::{GameEvent, ManaTapState};
-    use crate::types::identifiers::ObjectId;
-    use crate::types::phase::Phase;
-    use crate::types::player::PlayerId;
-
-    fn blue(runner: &crate::game::scenario::GameRunner, p: PlayerId) -> usize {
-        runner
-            .state()
-            .players
-            .iter()
-            .find(|ps| ps.id == p)
-            .unwrap()
-            .mana_pool
-            .count_color(ManaType::Blue)
-    }
-
-    let mut scenario = GameScenario::new_n_player(2, 42);
-    scenario.at_phase(Phase::PreCombatMain);
-    let hi = scenario
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "High Tide",
-            true,
-            "Until end of turn, whenever a player taps an Island for mana, that player adds an additional {U}.",
-        )
-        .id();
-    let isl0 = scenario.add_basic_land(P0, ManaColor::Blue);
-    let isl1 = scenario.add_basic_land(P1, ManaColor::Blue);
-    // Fund P0's {U} to cast High Tide through the real pipeline (registers the
-    // delayed trigger authentically).
-    scenario.with_mana_pool(
-        P0,
-        vec![ManaUnit::new(ManaType::Blue, ObjectId(9999), false, vec![])],
-    );
-    let mut runner = scenario.build();
-    runner.cast(hi).resolve();
-
-    // The instant registered exactly one until-end-of-turn delayed trigger.
-    assert_eq!(
-        runner.state().delayed_triggers.len(),
-        1,
-        "High Tide must register its delayed trigger on resolution"
-    );
-    // Clear any residual pool mana from the cast so bonus deltas read cleanly.
-    for p in [P0, P1] {
-        runner
-            .state_mut()
-            .players
-            .iter_mut()
-            .find(|ps| ps.id == p)
-            .unwrap()
-            .mana_pool
-            .clear();
-    }
-
-    // (1) P0 taps its own Island for mana. Simulate the base {U} the land
-    // produced (CR 106.12a) and fire the delayed trigger; P0 must gain the
-    // ADDITIONAL {U} on top (net +2 blue in the pool: base + bonus).
-    let _ = runner
-        .state_mut()
-        .add_mana_to_pool(P0, ManaUnit::new(ManaType::Blue, isl0, false, vec![]));
-    check_delayed_triggers(
-        runner.state_mut(),
-        &[GameEvent::TappedForMana {
-            player_id: PlayerId(0),
-            source_id: isl0,
-            produced: vec![ManaType::Blue],
-            tap_state: ManaTapState::FromTap,
-        }],
-    );
-    assert_eq!(
-        blue(&runner, P0),
-        2,
-        "P0 taps its own Island: base {{U}} + additional {{U}} = 2 blue"
-    );
-    assert_eq!(blue(&runner, P1), 0, "P1 gets nothing when P0 taps");
-
-    // (2) P1 (a DIFFERENT player, not the caster) taps THEIR Island. The bonus
-    // must go to P1's pool — proving the recipient is TriggeringPlayer, not the
-    // caster P0.
-    let _ = runner
-        .state_mut()
-        .add_mana_to_pool(P1, ManaUnit::new(ManaType::Blue, isl1, false, vec![]));
-    check_delayed_triggers(
-        runner.state_mut(),
-        &[GameEvent::TappedForMana {
-            player_id: PlayerId(1),
-            source_id: isl1,
-            produced: vec![ManaType::Blue],
-            tap_state: ManaTapState::FromTap,
-        }],
-    );
-    assert_eq!(
-        blue(&runner, P1),
-        2,
-        "P1 taps their Island: bonus routes to P1 (TriggeringPlayer), not caster P0"
-    );
-    assert_eq!(
-        blue(&runner, P0),
-        2,
-        "P0's pool is unchanged when P1 taps — bonus is NOT the caster's"
-    );
-
-    // (3) End-of-turn cleanup purges the multi-fire delayed trigger (CR 603.7b).
-    let mut cleanup_events = Vec::new();
-    execute_cleanup(runner.state_mut(), &mut cleanup_events);
-    assert_eq!(
-        runner.state().delayed_triggers.len(),
-        0,
-        "the until-end-of-turn delayed trigger must be purged at cleanup"
-    );
-
-    // A subsequent Island tap yields NO bonus (the WheneverEvent is gone).
-    for p in [P0, P1] {
-        runner
-            .state_mut()
-            .players
-            .iter_mut()
-            .find(|ps| ps.id == p)
-            .unwrap()
-            .mana_pool
-            .clear();
-    }
-    let _ = runner
-        .state_mut()
-        .add_mana_to_pool(P0, ManaUnit::new(ManaType::Blue, isl0, false, vec![]));
-    check_delayed_triggers(
-        runner.state_mut(),
-        &[GameEvent::TappedForMana {
-            player_id: PlayerId(0),
-            source_id: isl0,
-            produced: vec![ManaType::Blue],
-            tap_state: ManaTapState::FromTap,
-        }],
-    );
-    assert_eq!(
-        blue(&runner, P0),
-        1,
-        "after cleanup: only the base {{U}}, no bonus — the delayed trigger expired"
-    );
-}
-
 /// CR 614.12: Summoner's Grimoire's granted ability — the leading
 /// "if that card is an enchantment card" must materialize an
 /// `enters_modified_if` gate on the absorbed ChangeZone (via `parse_type_phrase_folding`),
@@ -37387,80 +37153,6 @@ fn possessive_their_hand_binds_to_the_clause_subject_not_the_trigger() {
         "\"that player reveals their hand\" must still bind to the triggering player"
     );
 }
-
-/// Runtime half of the issue #8428 fix: the corrected AST must actually put the
-/// TARGET OPPONENT's cards in front of the controller. Drives Brain Maggot's
-/// verbatim Oracle text through the real cast pipeline (CR 601.2 cast → ETB
-/// trigger per CR 603.2 → CR 603.3d target choice → CR 701.20a reveal) and
-/// asserts on the hand the engine offers for the choose clause.
-///
-/// A parse-only assertion cannot see this: the reveal resolver reads its player
-/// from `ability.targets` first, and a `TriggeringPlayer` effect target builds
-/// NO player slot at all, so the wrong-hand behavior only becomes visible once
-/// the trigger reaches the stack.
-#[test]
-fn brain_maggot_reveals_the_target_opponents_hand_at_runtime() {
-    use crate::types::phase::Phase;
-
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_mana_pool(
-        P0,
-        vec![
-            crate::types::mana::ManaUnit::new(
-                crate::types::mana::ManaType::Black,
-                crate::types::identifiers::ObjectId(98_420),
-                false,
-                Vec::new(),
-            ),
-            crate::types::mana::ManaUnit::new(
-                crate::types::mana::ManaType::Black,
-                crate::types::identifiers::ObjectId(98_421),
-                false,
-                Vec::new(),
-            ),
-        ],
-    );
-
-    let maggot = scenario
-        .add_creature_to_hand_from_oracle(
-            P0,
-            "Brain Maggot",
-            1,
-            1,
-            "When this creature enters, target opponent reveals their hand and you choose a nonland card from it. Exile that card until this creature leaves the battlefield.",
-        )
-        .id();
-
-    // Distinct hands so the revealed set identifies its owner unambiguously.
-    let mine = scenario.add_card_to_hand(P0, "Duress");
-    let theirs_a = scenario.add_card_to_hand(P1, "Llanowar Elves");
-    let theirs_b = scenario.add_card_to_hand(P1, "Giant Growth");
-
-    let mut runner = scenario.build();
-    let outcome = runner.cast(maggot).target_player(P1).resolve();
-
-    let WaitingFor::RevealChoice { player, cards, .. } = outcome.final_waiting_for() else {
-        panic!(
-            "expected the reveal's choose prompt, got {:?}",
-            outcome.final_waiting_for()
-        );
-    };
-    assert_eq!(
-        *player, P0,
-        "CR 109.5: \"you choose\" is the ability's controller, not the revealing player"
-    );
-
-    let revealed: std::collections::HashSet<_> = cards.iter().copied().collect();
-    assert!(
-        revealed.contains(&theirs_a) && revealed.contains(&theirs_b),
-        "the TARGET OPPONENT's hand must be revealed, got {revealed:?}"
-    );
-    assert!(
-        !revealed.contains(&mine),
-        "the controller's own hand must NOT be revealed (issue #8428), got {revealed:?}"
-    );
-}
 /// Issue #7724 (CR 707.9a + CR 707.10 + CR 704.5j): Iron Man, Bleeding Edge —
 /// "Whenever you cast an artifact spell, you may copy it, except the copy isn't
 /// legendary."
@@ -38644,7 +38336,7 @@ fn a_perpetual_zone_list_subject_in_a_trigger_never_lowers_to_a_pump() {
 /// `TriggeringSource`, so Valki exiles itself and its ETB re-fires.
 #[test]
 fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lift() {
-    use crate::game::effects::reveal_hand::effect_parks_reveal_card_choice;
+    use crate::types::ability::effect_parks_reveal_card_choice;
 
     // (i) Valki, God of Lies — verbatim ETB.
     let valki = parse_trigger_line(
@@ -39278,121 +38970,6 @@ fn count_qualified_blocks_preserves_article_qualified_shapes() {
     }
 }
 
-/// Verbatim from Scryfall (`cards/named?exact=Gilded%20Drake`).
-const GILDED_DRAKE_TEXT: &str = "Flying\nWhen this creature enters, exchange control of this \
-    creature and up to one target creature an opponent controls. If you don't or can't make an \
-    exchange, sacrifice this creature. This ability still resolves if its target becomes illegal.";
-
-/// Gilded Drake's trigger body as printed (the text after "When this creature enters, ").
-const GILDED_DRAKE_BODY: &str = "exchange control of this creature and up to one target creature \
-    an opponent controls. If you don't or can't make an exchange, sacrifice this creature. This \
-    ability still resolves if its target becomes illegal.";
-
-/// Parse `text` through the whole-card pipeline as a Drake creature and return
-/// its single trigger's execute.
-fn drake_shaped_trigger_execute(text: &str) -> AbilityDefinition {
-    let parsed = parse_oracle_text(
-        text,
-        "Gilded Drake",
-        &[],
-        &["Creature".to_string()],
-        &["Drake".to_string()],
-    );
-    let [trigger] = parsed.triggers.as_slice() else {
-        panic!("expected exactly one trigger, got {:?}", parsed.triggers);
-    };
-    trigger
-        .execute
-        .as_deref()
-        .cloned()
-        .expect("the trigger has an execute")
-}
-
-/// Every node reachable through `sub_ability` / `else_ability`, root first.
-fn chain_nodes(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {
-    let mut nodes = vec![root];
-    let mut index = 0;
-    while let Some(node) = nodes.get(index).copied() {
-        nodes.extend(node.sub_ability.as_deref());
-        nodes.extend(node.else_ability.as_deref());
-        index += 1;
-    }
-    nodes
-}
-
-fn has_unbound_subject_node(root: &AbilityDefinition) -> bool {
-    chain_nodes(root).iter().any(|node| {
-        matches!(&*node.effect, Effect::Unimplemented { name, .. } if name == "unbound_subject")
-    })
-}
-
-/// PU3 (CR 101.1 + CR 608.2b): Gilded Drake's verbatim text parses fully. The
-/// trailing override sentence becomes the execute root's disposition instead of
-/// a strict-failure node; the exchange and its rider are unchanged.
-///
-/// Fails on revert: the sentence stays an `unbound_subject` node and the root
-/// keeps the default disposition.
-#[test]
-fn gilded_drake_trailing_still_resolves_sentence_stamps_the_execute_root() {
-    let execute = drake_shaped_trigger_execute(GILDED_DRAKE_TEXT);
-
-    let opponent_creature =
-        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
-    assert_eq!(
-        *execute.effect,
-        Effect::ExchangeControl {
-            target_a: TargetFilter::SelfRef,
-            target_b: opponent_creature,
-        },
-        "REACH GUARD: the execute is the paired exchange"
-    );
-    assert_eq!(
-        execute.multi_target,
-        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
-        "phase 1's up-to-one slot is preserved"
-    );
-    assert!(
-        !has_unimplemented(&execute),
-        "no strict-failure node remains anywhere in the chain: {execute:?}"
-    );
-    assert!(ability_definition_supported(&execute));
-    assert_eq!(
-        execute.illegal_targets_disposition,
-        IllegalTargetsDisposition::StillResolves
-    );
-
-    let rider = execute
-        .sub_ability
-        .as_deref()
-        .expect("the sacrifice rider follows the exchange");
-    assert!(
-        matches!(
-            &*rider.effect,
-            Effect::Sacrifice {
-                target: TargetFilter::SelfRef,
-                ..
-            }
-        ),
-        "expected the rider to sacrifice the Drake, got {:?}",
-        rider.effect
-    );
-    assert_eq!(
-        rider.condition,
-        Some(AbilityCondition::Not {
-            condition: Box::new(AbilityCondition::EffectOutcome {
-                signal: EffectOutcomeSignal::OptionalEffectPerformed,
-            }),
-        }),
-        "CR 608.2c: \"If you don't or can't make an exchange\" gates the rider"
-    );
-    assert_eq!(
-        rider.illegal_targets_disposition,
-        IllegalTargetsDisposition::DoesNotResolve,
-        "the disposition is stamped on the root only"
-    );
-    assert!(rider.sub_ability.is_none(), "nothing follows the rider");
-}
-
 /// PU4: the same text without the override sentence parses to the same chain
 /// with the CR 608.2b default disposition. Paired positive: PU3.
 #[test]
@@ -39413,95 +38990,6 @@ fn gilded_drake_text_without_the_override_keeps_the_default_disposition() {
         execute, with_override,
         "the override sentence changes nothing but the root's disposition"
     );
-}
-
-/// PU5 (CR 101.1 + CR 608.2b): the override is detached only when it is the
-/// last sentence of the body and an effect precedes it. Any other placement
-/// returns the text unchanged with the default, so the sentence stays a strict
-/// failure. Paired positives: the verbatim-body leg below and PU3.
-#[test]
-fn still_resolves_sentence_is_detached_only_as_the_last_sentence() {
-    let (kept, disposition) = extract_illegal_targets_disposition(GILDED_DRAKE_BODY);
-    assert_eq!(disposition, IllegalTargetsDisposition::StillResolves);
-    assert_eq!(
-        kept,
-        "exchange control of this creature and up to one target creature an opponent controls. \
-         If you don't or can't make an exchange, sacrifice this creature.",
-        "the previous sentence keeps its period"
-    );
-
-    for unchanged in [
-        // Not the last sentence.
-        "exchange control of this creature and up to one target creature an opponent controls. \
-         This ability still resolves if its target becomes illegal. Draw a card.",
-        // Inside a longer sentence, not a sentence of its own.
-        "exchange control of this creature and up to one target creature an opponent controls. \
-         If you don't or can't make an exchange, sacrifice this creature; this ability still \
-         resolves if its target becomes illegal.",
-        // The whole body: no effect for the override to govern.
-        "This ability still resolves if its target becomes illegal.",
-    ] {
-        let (kept, disposition) = extract_illegal_targets_disposition(unchanged);
-        assert_eq!(kept, unchanged);
-        assert_eq!(disposition, IllegalTargetsDisposition::DoesNotResolve);
-    }
-
-    // Full pipeline: the sentence placed before the rider is not detached.
-    let not_trailing = drake_shaped_trigger_execute(
-        "Flying\nWhen this creature enters, exchange control of this creature and up to one \
-         target creature an opponent controls. This ability still resolves if its target becomes \
-         illegal. If you don't or can't make an exchange, sacrifice this creature.",
-    );
-    assert!(
-        matches!(&*not_trailing.effect, Effect::ExchangeControl { .. }),
-        "REACH GUARD: the body parsed past the exchange, got {:?}",
-        not_trailing.effect
-    );
-    assert!(has_unbound_subject_node(&not_trailing));
-    assert!(chain_nodes(&not_trailing)
-        .iter()
-        .all(|node| node.illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve));
-
-    // Full pipeline: a body that is only the sentence stays a strict failure.
-    let only_override = drake_shaped_trigger_execute(
-        "When this creature enters, this ability still resolves if its target becomes illegal.",
-    );
-    assert!(has_unbound_subject_node(&only_override));
-    assert!(!ability_definition_supported(&only_override));
-    assert_eq!(
-        only_override.illegal_targets_disposition,
-        IllegalTargetsDisposition::DoesNotResolve
-    );
-}
-
-/// PU6 (CR 603.12 + CR 608.2b): a shape fixture, not a printed card. When the
-/// targeted exchange sits on a reflexive "When you do" node, that node is a
-/// separate triggered ability with its own targets, so a stamp on the chain's
-/// root could not govern "its target". The override fails closed: the sentence
-/// stays a strict failure and no node carries the override.
-///
-/// Fails on revert of the fail-close: the root is stamped and the card reports
-/// supported while the reflexive ability would still fizzle. Paired positive: PU3.
-#[test]
-fn still_resolves_sentence_fails_closed_beside_a_reflexive_when_you_do_node() {
-    let execute = drake_shaped_trigger_execute(
-        "When this creature enters, you may pay {1}. When you do, exchange control of this \
-         creature and up to one target creature an opponent controls. This ability still \
-         resolves if its target becomes illegal.",
-    );
-    let nodes = chain_nodes(&execute);
-    assert!(
-        nodes.iter().any(|node| node
-            .condition
-            .as_ref()
-            .is_some_and(AbilityCondition::has_when_you_do_marker)),
-        "REACH GUARD: the chain carries the reflexive marker the fail-close reads: {execute:?}"
-    );
-    assert!(nodes
-        .iter()
-        .all(|node| node.illegal_targets_disposition == IllegalTargetsDisposition::DoesNotResolve));
-    assert!(has_unimplemented(&execute));
-    assert!(!ability_definition_supported(&execute));
 }
 
 /// PU7 (CR 603.12): the reflexive-node predicate descends effect-carried
@@ -39721,6 +39209,368 @@ fn becomes_target_object_controller_antecedent_fails_closed() {
             "{name}: stays supported: {json}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// CR 508.4: the defender a token instruction names ("attacking that player",
+// "attacking that opponent") is carried on the parsed effect.
+// ---------------------------------------------------------------------------
+
+/// Every token-creating definition along `def`'s `sub_ability` chain, in order.
+fn token_definitions_in_chain(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    let mut found = Vec::new();
+    let mut cursor = Some(def);
+    while let Some(link) = cursor {
+        if matches!(
+            &*link.effect,
+            Effect::Token { .. } | Effect::CopyTokenOf { .. }
+        ) {
+            found.push(link);
+        }
+        cursor = link.sub_ability.as_deref();
+    }
+    found
+}
+
+/// The one token-creating effect of a trigger line, with its definition.
+fn only_token_definition(line: &str, card_name: &str) -> AbilityDefinition {
+    let trigger = parse_trigger_line(line, card_name);
+    let execute = trigger.execute.as_deref().expect("trigger has an execute");
+    assert_no_unimplemented(execute);
+    let tokens = token_definitions_in_chain(execute);
+    assert_eq!(tokens.len(), 1, "reach guard: one token effect in {line}");
+    tokens[0].clone()
+}
+
+fn token_attack_fields(
+    def: &AbilityDefinition,
+) -> (bool, bool, crate::types::ability::TokenAttackDestination) {
+    match &*def.effect {
+        Effect::Token {
+            tapped,
+            enters_attacking,
+            attack_destination,
+            ..
+        }
+        | Effect::CopyTokenOf {
+            tapped,
+            enters_attacking,
+            attack_destination,
+            ..
+        } => (*tapped, *enters_attacking, attack_destination.clone()),
+        other => panic!("expected a token effect, got {other:?}"),
+    }
+}
+
+fn names_that_player() -> crate::types::ability::TokenAttackDestination {
+    crate::types::ability::TokenAttackDestination::Player {
+        player: ControllerRef::DefendingPlayer,
+        scope: crate::types::ability::NamedDefenderScope::Player,
+    }
+}
+
+fn opponent_count() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::PlayerCount {
+            filter: PlayerFilter::Opponent,
+        },
+    }
+}
+
+#[test]
+fn token_trigger_names_that_player_as_its_attack_destination() {
+    for (card, line) in [
+        (
+            "Soaring Lightbringer",
+            "Whenever you attack a player, create a 1/1 white Glimmer enchantment creature token that's tapped and attacking that player.",
+        ),
+        (
+            "Seraphic Greatsword",
+            "Whenever equipped creature attacks the player with the most life or tied for most life, create a 4/4 white Angel creature token with flying that's tapped and attacking that player.",
+        ),
+    ] {
+        let def = only_token_definition(line, card);
+        let (tapped, enters_attacking, destination) = token_attack_fields(&def);
+        assert!(tapped && enters_attacking, "{card}: reach guard");
+        assert_eq!(destination, names_that_player(), "{card}");
+    }
+}
+
+#[test]
+fn token_trigger_names_that_opponent_as_its_attack_destination() {
+    for (card, line) in [
+        (
+            "Ellie, Brick Master",
+            "Whenever a player attacks one of your opponents, that attacking player creates a tapped 1/1 black Fungus Zombie creature token named Cordyceps Infected that's attacking that opponent.",
+        ),
+        (
+            "Combat Calligrapher",
+            "Whenever a player attacks one of your opponents, that attacking player creates a tapped 2/1 white and black Inkling creature token with flying that's attacking that opponent.",
+        ),
+    ] {
+        let def = only_token_definition(line, card);
+        let (tapped, enters_attacking, destination) = token_attack_fields(&def);
+        assert!(tapped && enters_attacking, "{card}: reach guard");
+        assert_eq!(destination, names_that_player(), "{card}");
+    }
+}
+
+#[test]
+fn copy_token_continuation_sentence_names_that_player_as_its_attack_destination() {
+    let line = "Whenever you attack a player, choose target nontoken creature that's attacking that player. Create a token that's a copy of that creature, except it's 1/1. The token enters tapped and attacking that player. Sacrifice it at the beginning of the next end step.";
+    let trigger = parse_trigger_line(line, "Echoing Assault");
+    let execute = trigger.execute.as_deref().expect("trigger has an execute");
+    assert_no_unimplemented(execute);
+
+    let Effect::TargetOnly { target } = &*execute.effect else {
+        panic!(
+            "the chain opens with the choose clause, got {:?}",
+            execute.effect
+        );
+    };
+    assert!(
+        matches!(
+            target,
+            TargetFilter::Typed(typed) if typed.properties.iter().any(|prop| matches!(
+                prop,
+                FilterProp::Attacking { defender: Some(ControllerRef::DefendingPlayer) }
+            ))
+        ),
+        "the choose clause still reads the defending player: {target:?}"
+    );
+
+    let tokens = token_definitions_in_chain(execute);
+    assert_eq!(tokens.len(), 1, "reach guard: one copy effect");
+    let (tapped, enters_attacking, destination) = token_attack_fields(tokens[0]);
+    assert!(
+        tapped && enters_attacking,
+        "reach guard: the sentence applied"
+    );
+    assert_eq!(destination, names_that_player());
+}
+
+#[test]
+fn plural_token_clauses_name_that_player_as_their_attack_destination() {
+    for text in [
+        "Whenever you attack a player, create two 1/1 red Goblin creature tokens that are tapped and attacking that player.",
+        "Whenever you attack a player, create two 1/1 red Goblin creature tokens. They enter tapped and attacking that player.",
+    ] {
+        let parsed = parse_oracle_text(
+            text,
+            "Synthetic Goblin Raider",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("trigger has an execute");
+        assert_no_unimplemented(execute);
+        let tokens = token_definitions_in_chain(execute);
+        assert_eq!(tokens.len(), 1, "reach guard: one token effect in {text}");
+        let Effect::Token { count, .. } = &*tokens[0].effect else {
+            panic!("expected a Token effect");
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 2 }, "{text}");
+        let (_, enters_attacking, destination) = token_attack_fields(tokens[0]);
+        assert!(enters_attacking, "{text}");
+        assert_eq!(destination, names_that_player(), "{text}");
+    }
+}
+
+/// "that player" inside "for each opponent" names the iterated opponent rather
+/// than the defending player, so the token names each opponent the count lists.
+#[test]
+fn per_opponent_token_clauses_name_each_opponent_as_the_destination() {
+    use crate::types::ability::NamedDefenderScope;
+
+    for (card, line, scope) in [
+        (
+            "Ainok Strike Leader",
+            "Whenever you attack with this creature and/or your commander, for each opponent, create a 1/1 red Goblin creature token that's tapped and attacking that player.",
+            NamedDefenderScope::Player,
+        ),
+        (
+            "Endless Foot Assault",
+            "Whenever you attack, for each opponent, create a 1/1 black Ninja creature token that's tapped and attacking that player.",
+            NamedDefenderScope::Player,
+        ),
+        (
+            "Stampede Surfer",
+            "Whenever this creature attacks, for each opponent, you create a 2/2 green Boar creature token that's tapped and attacking that opponent.",
+            NamedDefenderScope::Player,
+        ),
+        (
+            "Adeline, Resplendent Cathar",
+            "Whenever you attack, for each opponent, create a 1/1 white Human creature token that's tapped and attacking that player or a planeswalker they control.",
+            NamedDefenderScope::PlayerOrPlaneswalker,
+        ),
+        (
+            "Veteran Soldier",
+            "Whenever this creature attacks a player, if no opponent has more life than that player, for each opponent, create a 1/1 white Soldier creature token that's tapped and attacking that opponent.",
+            NamedDefenderScope::Player,
+        ),
+    ] {
+        let def = only_token_definition(line, card);
+        let (_, enters_attacking, destination) = token_attack_fields(&def);
+        assert!(enters_attacking, "{card}: reach guard");
+        let Effect::Token { count, .. } = &*def.effect else {
+            panic!("{card}: expected a Token effect");
+        };
+        assert_eq!(*count, opponent_count(), "{card}: reach guard");
+        assert!(
+            def.repeat_for.is_none(),
+            "{card}: reach guard: the iteration was folded into the count"
+        );
+        assert_eq!(
+            destination,
+            crate::types::ability::TokenAttackDestination::EachPlayer {
+                filter: PlayerFilter::Opponent,
+                scope,
+            },
+            "{card}"
+        );
+    }
+}
+
+/// The iteration is held on the definition rather than folded into the count.
+#[test]
+fn unfolded_per_opponent_token_clause_does_not_keep_the_defending_player_destination() {
+    let parsed = parse_oracle_text(
+        "Whenever you attack, for each opponent, create a 1/1 red Goblin creature token that's tapped and attacking that player. You gain 1 life.",
+        "Synthetic Goblin Raider",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let execute = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("trigger has an execute");
+    assert_no_unimplemented(execute);
+    let tokens = token_definitions_in_chain(execute);
+    assert_eq!(tokens.len(), 1, "reach guard: one token effect");
+    assert_eq!(
+        tokens[0].repeat_for,
+        Some(opponent_count()),
+        "reach guard: the iteration stayed on the definition"
+    );
+    let (_, enters_attacking, destination) = token_attack_fields(tokens[0]);
+    assert!(enters_attacking);
+    assert_eq!(
+        destination,
+        crate::types::ability::TokenAttackDestination::ControllerChooses
+    );
+}
+
+/// The destination sentence follows the iterated creation clause, so it is
+/// applied after the iteration is attached to the definition.
+#[test]
+fn continuation_sentence_in_a_per_opponent_iteration_does_not_keep_the_defending_player_destination(
+) {
+    let mut keeping_the_defending_player = Vec::new();
+    for text in [
+        "Whenever you attack, for each opponent, create a 1/1 red Goblin creature token. It enters tapped and attacking that player.",
+        "Whenever you attack, for each opponent, create a 1/1 red Goblin creature token. It enters tapped and attacking that player. You gain 1 life.",
+        "Whenever you attack, for each opponent, create a token that's a copy of target creature you control. The token enters tapped and attacking that player.",
+    ] {
+        let parsed = parse_oracle_text(
+            text,
+            "Synthetic Goblin Raider",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("trigger has an execute");
+        assert_no_unimplemented(execute);
+        let tokens = token_definitions_in_chain(execute);
+        assert_eq!(tokens.len(), 1, "reach guard: one token effect in {text}");
+        assert_eq!(
+            tokens[0].repeat_for,
+            Some(opponent_count()),
+            "reach guard: the iteration stayed on the definition in {text}"
+        );
+        let (_, enters_attacking, destination) = token_attack_fields(tokens[0]);
+        assert!(enters_attacking, "reach guard: the sentence applied: {text}");
+        if !destination.is_controller_chooses() {
+            keeping_the_defending_player.push(text);
+        }
+    }
+    assert!(
+        keeping_the_defending_player.is_empty(),
+        "{keeping_the_defending_player:#?}"
+    );
+}
+
+#[test]
+fn suffix_per_opponent_token_clause_does_not_keep_the_defending_player_destination() {
+    let parsed = parse_oracle_text(
+        "Whenever you attack, create a 1/1 red Goblin creature token that's tapped and attacking that player for each opponent you have.",
+        "Synthetic Goblin Raider",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let execute = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("trigger has an execute");
+    assert_no_unimplemented(execute);
+    let tokens = token_definitions_in_chain(execute);
+    assert_eq!(tokens.len(), 1, "reach guard: one token effect");
+    let Effect::Token { count, .. } = &*tokens[0].effect else {
+        panic!("expected a Token effect");
+    };
+    assert_eq!(*count, opponent_count(), "reach guard: the suffix counted");
+    let (_, enters_attacking, destination) = token_attack_fields(tokens[0]);
+    assert!(enters_attacking);
+    assert_eq!(
+        destination,
+        crate::types::ability::TokenAttackDestination::ControllerChooses
+    );
+}
+
+/// An attacking token whose instruction names no defender stays unspecified.
+#[test]
+fn token_clauses_naming_no_defender_keep_the_unspecified_destination() {
+    for (card, line) in [
+        (
+            "Hero of Bladehold",
+            "Whenever this creature attacks, create two 1/1 white Soldier creature tokens that are tapped and attacking.",
+        ),
+        (
+            "Kari Zev, Skyship Raider",
+            "Whenever Kari Zev attacks, create Ragavan, a legendary 2/1 red Monkey creature token. Ragavan enters tapped and attacking. Exile that token at end of combat.",
+        ),
+    ] {
+        let def = only_token_definition(line, card);
+        let (_, enters_attacking, destination) = token_attack_fields(&def);
+        assert!(enters_attacking, "{card}: reach guard");
+        assert_eq!(
+            destination,
+            crate::types::ability::TokenAttackDestination::ControllerChooses,
+            "{card}"
+        );
+    }
+}
+
+/// A possessive after "that player" is a different phrase and names no player.
+#[test]
+fn possessive_after_that_player_does_not_name_a_destination() {
+    let def = only_token_definition(
+        "Whenever you attack a player, create a 1/1 red Goblin creature token that's tapped and attacking that player's planeswalker.",
+        "Synthetic Goblin Raider",
+    );
+    let (_, enters_attacking, destination) = token_attack_fields(&def);
+    assert!(enters_attacking, "reach guard");
+    assert_eq!(
+        destination,
+        crate::types::ability::TokenAttackDestination::ControllerChooses
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -40396,7 +40246,7 @@ fn parse_card(
 fn blocked_by_source_creatures(scope: CombatHistoryScope) -> TargetFilter {
     TargetFilter::Typed(
         TypedFilter::creature().properties(vec![FilterProp::CombatRelation {
-            relation: CombatRelation::BlockedBySubject { scope },
+            relation: CombatRelation::BlockedBySubject { scope: Some(scope) },
             subject: CombatRelationSubject::Source,
         }]),
     )

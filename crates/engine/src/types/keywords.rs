@@ -19,6 +19,8 @@ use super::ability::{
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
 
+pub use super::text_grammar::craft_materials_default;
+
 /// CR 702.34a: Flashback cost — either a mana cost or a non-mana cost
 /// (e.g., "Tap three untapped white creatures you control").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +102,46 @@ pub enum EchoCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.42a: Entwine cost — pay additional cost to choose all modes of a modal spell.
+/// Most Entwine cards use a pure mana cost (e.g., Journey of Discovery "Entwine {2}{G}"),
+/// but some use non-mana costs (e.g., Solar Tide "Entwine—Sacrifice two lands.").
+/// Mirrors `EvokeCost`/`FlashbackCost`/`CyclingCost` so the non-mana portion
+/// composes through the existing `AbilityCost` / `pay_additional_cost` pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", from = "EntwineCostWire")]
+pub enum EntwineCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
+/// Deserialization shape for `EntwineCost`. Entwine was previously stored as a
+/// bare `ManaCost`; previously exported card data (and fixtures) still carry
+/// that form, so it is read as `EntwineCost::Mana`. Serialization always emits
+/// the tagged `Mana`/`NonMana` wrapper.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EntwineCostWire {
+    Tagged(EntwineCostTagged),
+    LegacyMana(ManaCost),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "data")]
+enum EntwineCostTagged {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
+impl From<EntwineCostWire> for EntwineCost {
+    fn from(wire: EntwineCostWire) -> Self {
+        match wire {
+            EntwineCostWire::Tagged(EntwineCostTagged::Mana(cost))
+            | EntwineCostWire::LegacyMana(cost) => EntwineCost::Mana(cost),
+            EntwineCostWire::Tagged(EntwineCostTagged::NonMana(cost)) => EntwineCost::NonMana(cost),
+        }
+    }
+}
+
 /// CR 702.37a + CR 702.37e: Morph cost — either a mana cost (most morph cards,
 /// e.g. Exalted Angel "{2}{W}{W}") or a non-mana cost (Fathom Seer "Return two
 /// Islands you control to their owner's hand", Gathan Raiders "Discard a card",
@@ -143,15 +185,30 @@ impl MorphCost {
 pub fn is_ability_cost_supported_for_morph(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::ReturnToHand { .. } => true,
+        // CR 107.3d: a morph cost's X is chosen immediately before paying it, but
+        // variable non-mana morph costs are not supported yet, so only fixed
+        // counts are accepted.
         AbilityCost::Discard {
+            count,
             selection,
             self_scope,
             ..
-        } => !self_scope.is_source_card() && *selection != CardSelectionMode::Random,
-        AbilityCost::PayLife { .. } => true,
-        AbilityCost::Reveal { .. } => true,
+        } => {
+            matches!(count, QuantityExpr::Fixed { .. })
+                && !self_scope.is_source_card()
+                && *selection != CardSelectionMode::Random
+        }
+        AbilityCost::PayLife { amount } => matches!(amount, QuantityExpr::Fixed { .. }),
+        // CR 107.3d: variable non-mana morph costs are not supported yet (the
+        // turn-face-up flow has no X choice for non-mana counts), so a symbolic
+        // reveal count is unsupported rather than read as 0.
+        AbilityCost::Reveal { count, .. } => matches!(count, QuantityExpr::Fixed { .. }),
         AbilityCost::Sacrifice(cost) => {
-            matches!(cost.requirement, SacrificeRequirement::Count { .. })
+            // `u32::MAX` is the parser sentinel for "X" / "any number of".
+            matches!(
+                cost.requirement,
+                SacrificeRequirement::Count { count } if count != u32::MAX
+            )
         }
         AbilityCost::Mana { .. } => true,
         AbilityCost::ManaDynamic { .. }
@@ -999,7 +1056,7 @@ pub enum Keyword {
     /// `EchoCost::NonMana(AbilityCost::Discard { .. })`.
     Echo(EchoCost),
     /// CR 702.42a: Entwine — pay additional cost to choose all modes of a modal spell.
-    Entwine(ManaCost),
+    Entwine(EntwineCost),
     Outlast(ManaCost),
     Scavenge(ManaCost),
     /// CR 702.77a: Reinforce N—[cost] means "[Cost], Discard this card:
@@ -2408,20 +2465,12 @@ fn extract_companion_subtypes(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// CR 702.167b: Public re-export of the default craft materials filter (the
-/// creature class) so keyword deserializers can request it without reaching into the
-/// `pub(crate)` parser module. The single authority remains
-/// `parser::oracle_keyword::craft_materials_filter`.
-pub fn craft_materials_default() -> TargetFilter {
-    crate::parser::oracle_keyword::craft_materials_default()
-}
-
 /// Parse a mana cost string into ManaCost. Supports both MTGJSON format ({1}{W})
 /// and simple format (1W, 2, W, etc.) for keyword parameters.
 fn parse_keyword_mana_cost(s: &str) -> ManaCost {
     // If it contains braces, delegate to the MTGJSON parser
     if s.contains('{') {
-        return crate::database::mtgjson::parse_mtgjson_mana_cost(s);
+        return crate::types::mana::parse_mtgjson_mana_cost(s);
     }
 
     // Simple format: try to parse as pure generic (e.g. "3"), or as mana symbols
@@ -2529,7 +2578,7 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
             // subtype parser first so irregular plurals such as "Elves" are
             // canonicalized to their rules name ("Elf"). Unknown names are still
             // valid subtypes (for example, Daleks), so retain the generic fallback.
-            let subtype = crate::parser::oracle_util::parse_subtype(s)
+            let subtype = super::text_grammar::parse_subtype(s)
                 .filter(|(_, consumed)| *consumed == s.len())
                 .map(|(subtype, _)| subtype)
                 .unwrap_or_else(|| {
@@ -2567,12 +2616,12 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
 /// `Keyword::Unknown` fallthrough rather than silently dumping the raw text
 /// into a `TypeFilter::Subtype` (the bug fixed by issue #537).
 fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
-    use crate::parser::oracle_nom::enchant::{
+    use super::text_grammar::parse_zone_filter;
+    use super::text_grammar::OracleResult;
+    use super::text_grammar::{
         parse_enchant_attachment_qualifier, parse_enchant_controller_suffix,
         parse_enchant_player_base, parse_enchant_qualified_type_leg,
     };
-    use crate::parser::oracle_nom::error::OracleResult;
-    use crate::parser::oracle_nom::filter::parse_zone_filter;
     use nom::bytes::complete::tag;
     use nom::combinator::opt;
     use nom::sequence::preceded;
@@ -2581,22 +2630,17 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     // Typed sub-combinator: optional " card" word with optional leading space
     // (the space is only required when a preceding type leg was consumed).
     fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
-        let (rest, _) = opt(tag::<
-            &str,
-            &str,
-            crate::parser::oracle_nom::error::OracleError<'_>,
-        >(" "))
-        .parse(input)?;
         let (rest, _) =
-            tag::<&str, &str, crate::parser::oracle_nom::error::OracleError<'_>>("card")
-                .parse(rest)?;
+            opt(tag::<&str, &str, super::text_grammar::OracleError<'_>>(" ")).parse(input)?;
+        let (rest, _) =
+            tag::<&str, &str, super::text_grammar::OracleError<'_>>("card").parse(rest)?;
         Ok((rest, ()))
     }
 
     // Typed sub-combinator: " " + zone phrase.
     fn parse_leading_zone(input: &str) -> OracleResult<'_, crate::types::zones::Zone> {
         preceded(
-            tag::<&str, &str, crate::parser::oracle_nom::error::OracleError<'_>>(" "),
+            tag::<&str, &str, super::text_grammar::OracleError<'_>>(" "),
             parse_zone_filter,
         )
         .parse(input)
@@ -2646,11 +2690,10 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     // another Aura attached to it" (Daybreak Coronet) narrows the legal target
     // set to objects that already carry an attachment of the named kind.
     let (rest, attachment) = opt(parse_enchant_attachment_qualifier).parse(rest).ok()?;
-    let (rest, without_keyword) =
-        match crate::parser::oracle_target::parse_without_keyword_suffix(rest) {
-            Some((props, consumed)) => (&rest[consumed..], props),
-            None => (rest, Vec::new()),
-        };
+    let (rest, without_keyword) = match super::text_grammar::parse_without_keyword_suffix(rest) {
+        Some((props, consumed)) => (&rest[consumed..], props),
+        None => (rest, Vec::new()),
+    };
     if !rest.trim().is_empty() {
         return None;
     }
@@ -2909,7 +2952,11 @@ impl FromStr for Keyword {
                     )))
                 }
                 "casualty" => return Ok(Keyword::Casualty(p.parse().unwrap_or(1))),
-                "entwine" => return Ok(Keyword::Entwine(parse_keyword_mana_cost(p))),
+                "entwine" => {
+                    return Ok(Keyword::Entwine(EntwineCost::Mana(
+                        parse_keyword_mana_cost(p),
+                    )))
+                }
                 "affinity" => {
                     if let Some(tf) = parse_affinity_type(p) {
                         return Ok(Keyword::Affinity(tf));
@@ -3448,7 +3495,7 @@ fn parse_protection_color_set(s: &str) -> Option<ProtectionColorSet> {
                     tag("that is not in "),
                     tag("not in "),
                 )),
-                crate::parser::oracle_nom::primitives::parse_your_commanders_color_identity,
+                super::text_grammar::parse_your_commanders_color_identity,
             ),
         ),
         opt(tag(".")),
@@ -3466,7 +3513,7 @@ fn parse_protection_mana_value_filter(s: &str) -> Option<TypedFilter> {
 
     // "mana value N or less" / "mana value N or greater"
     let (rest, _) = tag::<_, _, E<'_>>("mana value ").parse(s).ok()?;
-    let (rest, n) = crate::parser::oracle_nom::primitives::parse_number(rest).ok()?;
+    let (rest, n) = super::text_grammar::parse_number(rest).ok()?;
     let (rest, comparator) = preceded(
         tag::<_, _, E<'_>>(" or "),
         alt((
@@ -3840,7 +3887,16 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         // CR 702.153a
         "Casualty" => Ok(Keyword::Casualty(uint(data))),
         // CR 702.42a
-        "Entwine" => Ok(Keyword::Entwine(mana(data)?)),
+        "Entwine" => {
+            // `EntwineCost`'s `from = "EntwineCostWire"` shim already accepts the
+            // legacy bare `ManaCost` payload (`EntwineCostWire::LegacyMana`), so
+            // this is the single authority for both the legacy and tagged shapes.
+            // A malformed payload surfaces the `EntwineCost` error instead of
+            // being silently re-read as a bare `ManaCost`.
+            serde_json::from_value::<EntwineCost>(data.clone())
+                .map(Keyword::Entwine)
+                .map_err(|e| format!("Entwine: {e}"))
+        }
         // CR 702.120a: accept both legacy ManaCost format and new AbilityCost tagged format.
         "Escalate" => {
             if let Ok(cost) = serde_json::from_value::<AbilityCost>(data.clone()) {
@@ -4166,18 +4222,222 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
     }
 }
 
-/// Check if a game object has a specific keyword, using discriminant-based matching.
-/// For parameterized keywords, checks the base keyword only (ignoring the parameter value).
-pub fn has_keyword(obj: &crate::game::game_object::GameObject, keyword: &Keyword) -> bool {
-    use std::mem::discriminant;
-    obj.keywords
-        .iter()
-        .any(|k| discriminant(k) == discriminant(keyword))
+/// Test helpers shared by this file's tests and the test relocated out of them.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers {
+    use super::*;
+    use crate::types::ability::Effect;
+
+    pub fn mc(s: &str) -> ManaCost {
+        parse_keyword_mana_cost(s)
+    }
+
+    /// A non-mana cost — the payload shape a mana-only fallback silently eats.
+    pub fn pay_life_cost() -> AbilityCost {
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+        }
+    }
+
+    /// One distinctive sample per payload-bearing `Keyword` variant.
+    ///
+    /// Kept in lockstep with `payload_variant_name` below, which fails to
+    /// compile when a variant is added.
+    pub fn payload_bearing_samples() -> Vec<Keyword> {
+        vec![
+            Keyword::HexproofFrom(HexproofFilter::Quality("multicolored".to_string())),
+            Keyword::Afflict(3),
+            Keyword::StartingIntensity(3),
+            Keyword::Dredge(3),
+            Keyword::Modular(3),
+            Keyword::Renown(3),
+            Keyword::Fabricate(3),
+            Keyword::Annihilator(3),
+            Keyword::Bushido(3),
+            Keyword::Frenzy(3),
+            Keyword::Tribute(3),
+            Keyword::Unearth(mc("{2}{R}")),
+            Keyword::Afterlife(3),
+            Keyword::Enchant(TargetFilter::SelfRef),
+            Keyword::EtbCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: 3,
+            },
+            Keyword::Reconfigure(mc("{2}{R}")),
+            Keyword::Bestow(BestowCost::NonMana(pay_life_cost())),
+            Keyword::Embalm(EmbalmCost::NonMana(pay_life_cost())),
+            Keyword::Eternalize(EternalizeCost::NonMana(pay_life_cost())),
+            Keyword::Fading(3),
+            Keyword::Vanishing(3),
+            Keyword::Protection(ProtectionTarget::Multicolored),
+            Keyword::Kicker(mc("{2}{R}")),
+            Keyword::Cycling(CyclingCost::NonMana(pay_life_cost())),
+            Keyword::Flashback(FlashbackCost::NonMana(pay_life_cost())),
+            Keyword::Ward(WardCost::PayLife(3)),
+            Keyword::Equip(mc("{2}{R}")),
+            Keyword::Landwalk("Island".to_string()),
+            Keyword::Rampage(3),
+            Keyword::Absorb(3),
+            Keyword::Crew {
+                power: 3,
+                once_per_turn: Some(Box::new(ActivationRestriction::OnlyOnceEachTurn)),
+            },
+            Keyword::Partner(PartnerType::With("Pir".to_string())),
+            Keyword::Companion(CompanionCondition::MinManaValue(3)),
+            Keyword::Ninjutsu(mc("{2}{R}")),
+            Keyword::CommanderNinjutsu(mc("{2}{R}")),
+            Keyword::Prowl(mc("{2}{R}")),
+            Keyword::morph(pay_life_cost()),
+            Keyword::Megamorph(mc("{2}{R}")),
+            Keyword::Mayhem(mc("{2}{R}")),
+            Keyword::Madness(mc("{2}{R}")),
+            Keyword::Miracle(mc("{2}{R}")),
+            Keyword::Dash(mc("{2}{R}")),
+            Keyword::Emerge(EmergeCost::from_quality(
+                mc("{2}{R}"),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            )),
+            Keyword::Escape(EscapeCost::NonMana(pay_life_cost())),
+            Keyword::Harmonize(mc("{2}{R}")),
+            Keyword::Evoke(EvokeCost::NonMana(pay_life_cost())),
+            Keyword::Foretell(mc("{2}{R}")),
+            Keyword::Mutate(mc("{2}{R}")),
+            Keyword::Disturb(mc("{2}{R}")),
+            Keyword::Disguise(DisguiseCost::Reduced {
+                cost: mc("{2}{R}"),
+                reduction: Box::new(CostReduction {
+                    mode: crate::types::statics::CostModifyMode::Reduce,
+                    amount_per: 1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    condition: None,
+                }),
+            }),
+            Keyword::Blitz(BlitzCost::NonMana(pay_life_cost())),
+            Keyword::Overload(mc("{2}{R}")),
+            Keyword::Spectacle(mc("{2}{R}")),
+            Keyword::Surge(mc("{2}{R}")),
+            Keyword::Encore(mc("{2}{R}")),
+            Keyword::Buyback(BuybackCost::NonMana(pay_life_cost())),
+            Keyword::Casualty(3),
+            Keyword::Echo(EchoCost::NonMana(pay_life_cost())),
+            Keyword::Entwine(EntwineCost::NonMana(pay_life_cost())),
+            Keyword::Outlast(mc("{2}{R}")),
+            Keyword::Scavenge(mc("{2}{R}")),
+            Keyword::Reinforce {
+                count: 3,
+                cost: mc("{2}{G}"),
+            },
+            Keyword::Fortify(mc("{2}{R}")),
+            Keyword::Prototype {
+                cost: mc("{1}{U}"),
+                power: Some(2),
+                toughness: Some(3),
+            },
+            Keyword::Plot(mc("{2}{R}")),
+            Keyword::Craft {
+                cost: mc("{3}{B}"),
+                materials: TypedFilter::new(TypeFilter::Artifact).into(),
+                count: CostObjectCount::exactly(2),
+            },
+            Keyword::Offspring(mc("{2}{R}")),
+            Keyword::Impending {
+                cost: mc("{2}{W}"),
+                counters: 4,
+            },
+            Keyword::LevelUp(mc("{2}{R}")),
+            Keyword::Affinity(TypedFilter::default()),
+            // CR 702.24a: Aboroth pays by putting a -1/-1 counter on itself.
+            Keyword::CumulativeUpkeep(AbilityCost::EffectCost {
+                effect: Box::new(Effect::PutCounter {
+                    counter_type: CounterType::Minus1Minus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                }),
+            }),
+            // Stored form is the normalized singular ("Legends" → "Legend"),
+            // and `normalize_bands_with_other_quality` is idempotent on it.
+            Keyword::BandsWithOther("Legend".to_string()),
+            // Hideaway's bare-payload fallback is 4.
+            Keyword::Hideaway(2),
+            // CR 702.60a: Surging Aether is Ripple 4; the broken arm said 1.
+            Keyword::Ripple(4),
+            // CR 702.62a: the broken arm said `{count: 0, cost: free}`.
+            Keyword::Suspend {
+                count: 2,
+                cost: mc("{1}{R}"),
+            },
+            Keyword::Warp(mc("{2}{R}")),
+            Keyword::Sneak(mc("{2}{R}")),
+            Keyword::WebSlinging(mc("{2}{R}")),
+            Keyword::Mobilize(QuantityExpr::Fixed { value: 3 }),
+            // CR 702.174a: Longstalk Brawl promises a Fish, not a card.
+            Keyword::Gift(GiftKind::TappedFish),
+            // CR 701.57a: the broken arm said 0.
+            Keyword::Discover(3),
+            Keyword::Poisonous(3),
+            Keyword::Bloodthirst(BloodthirstValue::X),
+            Keyword::Amplify(3),
+            Keyword::Graft(3),
+            // CR 702.82c: a non-`Creature` quality — the arm's back-compat
+            // default, so the sample must not be it.
+            Keyword::Devour {
+                n: 3,
+                quality: TypeFilter::Artifact,
+            },
+            Keyword::Toxic(3),
+            Keyword::Saddle(3),
+            Keyword::Teamwork(3),
+            Keyword::Soulshift(3),
+            Keyword::Backup(3),
+            Keyword::Squad(mc("{2}{R}")),
+            Keyword::Typecycling {
+                cost: mc("{2}"),
+                subtype: "Plains".to_string(),
+            },
+            Keyword::Firebending(QuantityExpr::Fixed { value: 3 }),
+            Keyword::Splice {
+                subtype: "Arcane".to_string(),
+                cost: mc("{1}{U}"),
+            },
+            Keyword::Champion("Elf".to_string()),
+            Keyword::Transmute(mc("{2}{R}")),
+            Keyword::Transfigure(mc("{2}{R}")),
+            Keyword::Escalate(pay_life_cost()),
+            Keyword::Recover(mc("{2}{R}")),
+            Keyword::Cleave(mc("{2}{R}")),
+            Keyword::Replicate(mc("{2}{R}")),
+            Keyword::Awaken {
+                count: 4,
+                cost: mc("{5}{W}{W}{W}"),
+            },
+            Keyword::MoreThanMeetsTheEye(mc("{2}{R}")),
+            Keyword::Freerunning(mc("{2}{R}")),
+            Keyword::Specialize(mc("{2}{R}")),
+            Keyword::Offering("Fox".to_string()),
+            Keyword::Unknown("Xyzzy".to_string()),
+        ]
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::test_helpers::{pay_life_cost, payload_bearing_samples};
     use super::*;
+
+    /// Card data exported before `EntwineCost` gained its `Mana`/`NonMana` wrapper
+    /// stored Entwine as a bare `ManaCost`; it must still load as `Mana`.
+    #[test]
+    fn entwine_cost_reads_legacy_bare_mana_cost() {
+        let tagged = EntwineCost::Mana(ManaCost::generic(2));
+        let json = serde_json::to_value(&tagged).unwrap();
+        assert_eq!(json["type"], "Mana");
+        let legacy = serde_json::to_value(ManaCost::generic(2)).unwrap();
+        assert_eq!(
+            serde_json::from_value::<EntwineCost>(legacy).unwrap(),
+            tagged
+        );
+        assert_eq!(serde_json::from_value::<EntwineCost>(json).unwrap(), tagged);
+    }
     use crate::types::ability::Effect;
 
     // SHAPE: CR 702.5a + CR 205.3m: the single-leg adapter must retain the
@@ -5887,194 +6147,30 @@ mod tests {
         let kw: Keyword = "awaken:2\u{2014}{3}{u}".parse().unwrap();
         assert_eq!(kw.kind(), KeywordKind::Awaken);
     }
-    fn mc(s: &str) -> ManaCost {
-        parse_keyword_mana_cost(s)
-    }
 
-    /// A non-mana cost — the payload shape a mana-only fallback silently eats.
-    fn pay_life_cost() -> AbilityCost {
-        AbilityCost::PayLife {
-            amount: QuantityExpr::Fixed { value: 3 },
-        }
-    }
-
-    /// One distinctive sample per payload-bearing `Keyword` variant.
-    ///
-    /// Kept in lockstep with `payload_variant_name` below, which fails to
-    /// compile when a variant is added.
-    fn payload_bearing_samples() -> Vec<Keyword> {
-        vec![
-            Keyword::HexproofFrom(HexproofFilter::Quality("multicolored".to_string())),
-            Keyword::Afflict(3),
-            Keyword::StartingIntensity(3),
-            Keyword::Dredge(3),
-            Keyword::Modular(3),
-            Keyword::Renown(3),
-            Keyword::Fabricate(3),
-            Keyword::Annihilator(3),
-            Keyword::Bushido(3),
-            Keyword::Frenzy(3),
-            Keyword::Tribute(3),
-            Keyword::Unearth(mc("{2}{R}")),
-            Keyword::Afterlife(3),
-            Keyword::Enchant(TargetFilter::SelfRef),
-            Keyword::EtbCounter {
-                counter_type: CounterType::Plus1Plus1,
-                count: 3,
-            },
-            Keyword::Reconfigure(mc("{2}{R}")),
-            Keyword::Bestow(BestowCost::NonMana(pay_life_cost())),
-            Keyword::Embalm(EmbalmCost::NonMana(pay_life_cost())),
-            Keyword::Eternalize(EternalizeCost::NonMana(pay_life_cost())),
-            Keyword::Fading(3),
-            Keyword::Vanishing(3),
-            Keyword::Protection(ProtectionTarget::Multicolored),
-            Keyword::Kicker(mc("{2}{R}")),
-            Keyword::Cycling(CyclingCost::NonMana(pay_life_cost())),
-            Keyword::Flashback(FlashbackCost::NonMana(pay_life_cost())),
-            Keyword::Ward(WardCost::PayLife(3)),
-            Keyword::Equip(mc("{2}{R}")),
-            Keyword::Landwalk("Island".to_string()),
-            Keyword::Rampage(3),
-            Keyword::Absorb(3),
-            Keyword::Crew {
-                power: 3,
-                once_per_turn: Some(Box::new(ActivationRestriction::OnlyOnceEachTurn)),
-            },
-            Keyword::Partner(PartnerType::With("Pir".to_string())),
-            Keyword::Companion(CompanionCondition::MinManaValue(3)),
-            Keyword::Ninjutsu(mc("{2}{R}")),
-            Keyword::CommanderNinjutsu(mc("{2}{R}")),
-            Keyword::Prowl(mc("{2}{R}")),
-            Keyword::morph(pay_life_cost()),
-            Keyword::Megamorph(mc("{2}{R}")),
-            Keyword::Mayhem(mc("{2}{R}")),
-            Keyword::Madness(mc("{2}{R}")),
-            Keyword::Miracle(mc("{2}{R}")),
-            Keyword::Dash(mc("{2}{R}")),
-            Keyword::Emerge(EmergeCost::from_quality(
-                mc("{2}{R}"),
-                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
-            )),
-            Keyword::Escape(EscapeCost::NonMana(pay_life_cost())),
-            Keyword::Harmonize(mc("{2}{R}")),
-            Keyword::Evoke(EvokeCost::NonMana(pay_life_cost())),
-            Keyword::Foretell(mc("{2}{R}")),
-            Keyword::Mutate(mc("{2}{R}")),
-            Keyword::Disturb(mc("{2}{R}")),
-            Keyword::Disguise(DisguiseCost::Reduced {
-                cost: mc("{2}{R}"),
-                reduction: Box::new(CostReduction {
-                    mode: crate::types::statics::CostModifyMode::Reduce,
-                    amount_per: 1,
-                    count: QuantityExpr::Fixed { value: 1 },
-                    condition: None,
-                }),
-            }),
-            Keyword::Blitz(BlitzCost::NonMana(pay_life_cost())),
-            Keyword::Overload(mc("{2}{R}")),
-            Keyword::Spectacle(mc("{2}{R}")),
-            Keyword::Surge(mc("{2}{R}")),
-            Keyword::Encore(mc("{2}{R}")),
-            Keyword::Buyback(BuybackCost::NonMana(pay_life_cost())),
-            Keyword::Casualty(3),
-            Keyword::Echo(EchoCost::NonMana(pay_life_cost())),
-            Keyword::Entwine(mc("{2}{R}")),
-            Keyword::Outlast(mc("{2}{R}")),
-            Keyword::Scavenge(mc("{2}{R}")),
-            Keyword::Reinforce {
-                count: 3,
-                cost: mc("{2}{G}"),
-            },
-            Keyword::Fortify(mc("{2}{R}")),
-            Keyword::Prototype {
-                cost: mc("{1}{U}"),
-                power: Some(2),
-                toughness: Some(3),
-            },
-            Keyword::Plot(mc("{2}{R}")),
-            Keyword::Craft {
-                cost: mc("{3}{B}"),
-                materials: TypedFilter::new(TypeFilter::Artifact).into(),
-                count: CostObjectCount::exactly(2),
-            },
-            Keyword::Offspring(mc("{2}{R}")),
-            Keyword::Impending {
-                cost: mc("{2}{W}"),
-                counters: 4,
-            },
-            Keyword::LevelUp(mc("{2}{R}")),
-            Keyword::Affinity(TypedFilter::default()),
-            // CR 702.24a: Aboroth pays by putting a -1/-1 counter on itself.
-            Keyword::CumulativeUpkeep(AbilityCost::EffectCost {
-                effect: Box::new(Effect::PutCounter {
-                    counter_type: CounterType::Minus1Minus1,
-                    count: QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::SelfRef,
-                }),
-            }),
-            // Stored form is the normalized singular ("Legends" → "Legend"),
-            // and `normalize_bands_with_other_quality` is idempotent on it.
-            Keyword::BandsWithOther("Legend".to_string()),
-            // Hideaway's bare-payload fallback is 4.
-            Keyword::Hideaway(2),
-            // CR 702.60a: Surging Aether is Ripple 4; the broken arm said 1.
-            Keyword::Ripple(4),
-            // CR 702.62a: the broken arm said `{count: 0, cost: free}`.
-            Keyword::Suspend {
-                count: 2,
-                cost: mc("{1}{R}"),
-            },
-            Keyword::Warp(mc("{2}{R}")),
-            Keyword::Sneak(mc("{2}{R}")),
-            Keyword::WebSlinging(mc("{2}{R}")),
-            Keyword::Mobilize(QuantityExpr::Fixed { value: 3 }),
-            // CR 702.174a: Longstalk Brawl promises a Fish, not a card.
-            Keyword::Gift(GiftKind::TappedFish),
-            // CR 701.57a: the broken arm said 0.
-            Keyword::Discover(3),
-            Keyword::Poisonous(3),
-            Keyword::Bloodthirst(BloodthirstValue::X),
-            Keyword::Amplify(3),
-            Keyword::Graft(3),
-            // CR 702.82c: a non-`Creature` quality — the arm's back-compat
-            // default, so the sample must not be it.
-            Keyword::Devour {
-                n: 3,
-                quality: TypeFilter::Artifact,
-            },
-            Keyword::Toxic(3),
-            Keyword::Saddle(3),
-            Keyword::Teamwork(3),
-            Keyword::Soulshift(3),
-            Keyword::Backup(3),
-            Keyword::Squad(mc("{2}{R}")),
-            Keyword::Typecycling {
-                cost: mc("{2}"),
-                subtype: "Plains".to_string(),
-            },
-            Keyword::Firebending(QuantityExpr::Fixed { value: 3 }),
-            Keyword::Splice {
-                subtype: "Arcane".to_string(),
-                cost: mc("{1}{U}"),
-            },
-            Keyword::Champion("Elf".to_string()),
-            Keyword::Transmute(mc("{2}{R}")),
-            Keyword::Transfigure(mc("{2}{R}")),
-            Keyword::Escalate(pay_life_cost()),
-            Keyword::Recover(mc("{2}{R}")),
-            Keyword::Cleave(mc("{2}{R}")),
-            Keyword::Replicate(mc("{2}{R}")),
-            Keyword::Awaken {
-                count: 4,
-                cost: mc("{5}{W}{W}{W}"),
-            },
-            Keyword::MoreThanMeetsTheEye(mc("{2}{R}")),
-            Keyword::Freerunning(mc("{2}{R}")),
-            Keyword::Specialize(mc("{2}{R}")),
-            Keyword::Offering("Fox".to_string()),
-            Keyword::Unknown("Xyzzy".to_string()),
-        ]
+    // CR 107.3d + CR 702.37e: variable non-mana morph costs are not supported
+    // yet, so symbolic or sentinel counts must not be accepted as payable morph
+    // costs (they stay unsupported in coverage).
+    #[test]
+    fn morph_cost_support_requires_fixed_counts() {
+        assert!(is_ability_cost_supported_for_morph(&pay_life_cost()));
+        assert!(!is_ability_cost_supported_for_morph(
+            &AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                },
+            }
+        ));
+        let sacrifice = |count| {
+            AbilityCost::Sacrifice(crate::types::ability::SacrificeCost::new(
+                TargetFilter::Any,
+                crate::types::ability::SacrificeRequirement::Count { count },
+            ))
+        };
+        assert!(is_ability_cost_supported_for_morph(&sacrifice(1)));
+        assert!(!is_ability_cost_supported_for_morph(&sacrifice(u32::MAX)));
     }
 
     /// Classifies every `Keyword` variant as payload-bearing (`Some(name)`) or
@@ -6510,126 +6606,6 @@ mod tests {
             Keyword::CumulativeUpkeep(AbilityCost::Mana {
                 cost: parse_keyword_mana_cost("{1}{W}"),
             })
-        );
-    }
-
-    /// The mana arm of every keyword cost type whose `payload_bearing_samples`
-    /// entry takes a non-mana arm: the `Mana(ManaCost)` side of the
-    /// FlashbackCost family, `DisguiseCost::Mana`, WardCost's mana-bearing
-    /// costs, and `AbilityCost::Mana` for the AbilityCost keywords. Plus the
-    /// "its mana cost reduced by {N}" placeholder, which the parser emits on
-    /// granted keywords (Dream Devourer's foretell) and which is resolved only
-    /// at lookup time, so it is a serialized keyword payload.
-    fn mana_arm_samples() -> Vec<Keyword> {
-        vec![
-            Keyword::Foretell(ManaCost::SelfManaCostReduced { reduction: 2 }),
-            Keyword::Bestow(BestowCost::Mana(mc("{3}{G}{G}"))),
-            Keyword::Embalm(EmbalmCost::Mana(mc("{3}{W}"))),
-            Keyword::Eternalize(EternalizeCost::Mana(mc("{4}{B}{B}"))),
-            Keyword::Cycling(CyclingCost::Mana(mc("{2}"))),
-            Keyword::Flashback(FlashbackCost::Mana(mc("{1}{U}"))),
-            Keyword::Escape(EscapeCost::Mana(mc("{2}{B}"))),
-            Keyword::Evoke(EvokeCost::Mana(mc("{2}{U}"))),
-            Keyword::Buyback(BuybackCost::Mana(mc("{3}"))),
-            Keyword::Echo(EchoCost::Mana(mc("{1}{R}"))),
-            Keyword::Blitz(BlitzCost::Mana(mc("{2}{R}"))),
-            Keyword::Disguise(DisguiseCost::Mana(mc("{1}{W/U}"))),
-            Keyword::morph(mc("{2}{R}")),
-            Keyword::Ward(WardCost::Mana(mc("{2}"))),
-            Keyword::Ward(WardCost::Waterbend(mc("{4}"))),
-            Keyword::Ward(WardCost::Compound(vec![
-                WardCost::Mana(mc("{2}")),
-                WardCost::PayLife(2),
-            ])),
-            Keyword::CumulativeUpkeep(AbilityCost::Mana { cost: mc("{1}") }),
-            Keyword::Escalate(AbilityCost::Mana { cost: mc("{1}{R}") }),
-        ]
-    }
-
-    /// Ward costs parsed from Oracle text (CR 702.21a), keyed by that text. The
-    /// first is Captain Howler, Sea Scourge's printed ward; the other two are
-    /// parser-accepted compound shapes whose non-mana leg the client cannot
-    /// render, which the client must show as no detail rather than as the
-    /// mana leg alone.
-    fn parsed_ward_samples() -> std::collections::BTreeMap<&'static str, Keyword> {
-        [
-            "Ward\u{2014}{2}, Pay 2 life.",
-            "Ward\u{2014}{2}, Pay life equal to this creature's power.",
-            "Ward\u{2014}{1}, Get a poison counter.",
-        ]
-        .into_iter()
-        .map(|oracle| {
-            let lower = oracle.to_lowercase();
-            let (kw, rest) = crate::parser::oracle_keyword::parse_keyword_line_core(&lower)
-                .unwrap_or_else(|| panic!("{oracle} parses as a keyword line"));
-            assert!(rest.is_empty(), "{oracle} left {rest:?} unconsumed");
-            assert!(
-                matches!(&kw, Keyword::Ward(WardCost::Compound(legs)) if legs.len() == 2),
-                "{oracle} parses as a two-leg compound ward, got {kw:?}"
-            );
-            (oracle, kw)
-        })
-        .collect()
-    }
-
-    /// Discard ward costs parsed from Oracle text (CR 702.21a + CR 701.9), keyed
-    /// by that text: the plain and random one-card costs, a counted cost, and a
-    /// card-type-filtered cost (the client shows no detail for the filtered one).
-    fn parsed_ward_discard_samples() -> std::collections::BTreeMap<&'static str, Keyword> {
-        [
-            "Ward\u{2014}Discard a card.",
-            "Ward\u{2014}Discard a card at random.",
-            "Ward\u{2014}Discard two cards.",
-            "Ward\u{2014}Discard an enchantment, instant, or sorcery card.",
-        ]
-        .into_iter()
-        .map(|oracle| {
-            let lower = oracle.to_lowercase();
-            let (kw, rest) = crate::parser::oracle_keyword::parse_keyword_line_core(&lower)
-                .unwrap_or_else(|| panic!("{oracle} parses as a keyword line"));
-            assert!(rest.is_empty(), "{oracle} left {rest:?} unconsumed");
-            assert!(
-                matches!(&kw, Keyword::Ward(WardCost::Discard { .. })),
-                "{oracle} parses as a discard ward, got {kw:?}"
-            );
-            (oracle, kw)
-        })
-        .collect()
-    }
-
-    /// Engine-authored wire golden for the client's keyword-detail formatter
-    /// (`client/src/viewmodel/keywordProps.ts`). The client once formatted a
-    /// hand-written, externally tagged `ManaCost` shape that the engine never
-    /// emits, and its tests agreed with themselves: every keyword mana cost
-    /// rendered blank. Serializing the real payloads here and failing on drift
-    /// keeps the client's fixture the engine's actual output.
-    #[test]
-    fn keyword_payload_wire_golden_matches_the_client_fixture() {
-        let mut samples = payload_bearing_samples();
-        samples.extend(mana_arm_samples());
-        let wire = serde_json::json!({
-            "samples": samples,
-            "parsed_ward": parsed_ward_samples(),
-            "parsed_ward_discard": parsed_ward_discard_samples(),
-        });
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../client/src/test/fixtures/keyword-payload-wire.json"
-        );
-        if std::env::var_os("UPDATE_WIRE_GOLDEN").is_some() {
-            std::fs::write(
-                path,
-                format!("{}\n", serde_json::to_string_pretty(&wire).unwrap()),
-            )
-            .expect("write the keyword payload golden");
-        }
-        let committed: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(path).expect("committed keyword payload golden"),
-        )
-        .expect("the keyword payload golden parses");
-        assert_eq!(
-            wire, committed,
-            "the client's keyword payload golden drifted — re-run with UPDATE_WIRE_GOLDEN=1"
         );
     }
 

@@ -2,6 +2,7 @@ use crate::game::filter::{
     matches_target_filter, matches_target_filter_in_owner_zone, objects_have_common_quality_value,
     FilterContext,
 };
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{
@@ -786,7 +787,7 @@ pub(crate) fn prepare_effective_search(
         })
         .transpose()
         .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
-    let hidden_event = has_hidden_view.then(|| GameEvent::HiddenSearchViewed {
+    let hidden_event = has_hidden_view.then_some(GameEvent::HiddenSearchViewed {
         searcher,
         cards: viewed_cards,
         audience: learned_audience,

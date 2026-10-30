@@ -11,6 +11,11 @@ use crate::types::game_state::{EndEffectPermission, GameState, TransientContinuo
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
+pub use crate::types::ability::{
+    generic_effect_affected_uses_inherited_targets, generic_effect_application_filter,
+    generic_effect_population_filter,
+};
+
 /// Effect handler: creates transient continuous effects from a GenericEffect.
 ///
 /// Resolved GenericEffect definitions are registered as state-level transient
@@ -603,7 +608,7 @@ fn bind_transient_effect(
             .as_ref()
             .is_some_and(crate::game::ability_utils::filter_references_target_player);
     let forwarded_parent_target = ability.context.forwarded_result_context.is_some()
-        && application_filter.is_some_and(crate::game::effects::filter_refs_parent_target);
+        && application_filter.is_some_and(crate::types::ability::filter_refs_parent_target);
     let inherited_object_target = (static_def
         .affected
         .as_ref()
@@ -1167,77 +1172,6 @@ fn forwarded_result_object_targets(
         })
 }
 
-pub fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
-    matches!(
-        filter,
-        TargetFilter::TriggeringSource
-            | TargetFilter::ParentTarget
-            | TargetFilter::ParentTargetSlot { .. }
-            | TargetFilter::CostPaidObject
-            // CR 701.47c: "the amassed Army" is a resolution-local single-object
-            // reference (`ResolvedAbility.amassed_army_object`), not a broadcast
-            // population — mirrors `CostPaidObject` immediately above. This
-            // routes a future "amass N, then the amassed Army gains/gets ..."
-            // continuous grant to the dedicated `amassed_army_object` arm below
-            // (mirroring the `CostPaidObject` arm) and to the matching
-            // early-return guard in the broadcast-scan arm, instead of relying
-            // on the battlefield re-scan happening to narrow to one object.
-            | TargetFilter::AmassedArmy
-    )
-}
-
-/// CR 608.2c: Choose the filter that governs *where modifications land* at
-/// resolution. The outer `GenericEffect.target` slot names what the player
-/// chose; `static_def.affected` names how that choice is bound onto objects.
-/// Inherited-reference `affected` values (`ParentTarget`, …) win over the
-/// targeting descriptor so a `target: Typed(Creature)` + `affected:
-/// ParentTarget` pair binds to the chosen creature, not every creature.
-pub fn generic_effect_application_filter<'a>(
-    target_filter: Option<&'a TargetFilter>,
-    static_affected: Option<&'a TargetFilter>,
-) -> Option<&'a TargetFilter> {
-    if static_affected.is_some_and(generic_effect_affected_uses_inherited_targets) {
-        static_affected
-    } else {
-        target_filter.or(static_affected)
-    }
-}
-
-/// CR 508.1a + CR 608.2c + CR 611.2c: SINGLE AUTHORITY for "which static on this
-/// `GenericEffect` names the population `those creatures` freezes" — shared by the
-/// parser's population-publisher routing (`oracle_effect::lower`) and the runtime's
-/// publish arm (`effects::affected_objects_from_events`) so lowering can never mark
-/// a head a publisher that resolution then declines to publish.
-///
-/// Eligible modes are the ones whose population is FROZEN at resolution rather than
-/// re-evaluated live at each future check: a coercion requirement (`MustAttack` /
-/// `MustAttackDefender`, CR 508.1a/d) or a `Continuous` grant.
-///
-/// Selection is `find_map`, NOT `find`-then-ask: a chain may carry an earlier
-/// eligible static with no application filter (a `Continuous` coercion with neither
-/// an outer `target` nor an `affected`), and taking it would suppress a later
-/// application-bearing broadcast static — so neither routing nor publishing would
-/// see the actual population. Shape mirrors the `any`-quantified sibling
-/// `is_mass_coerce_static` (`oracle_effect/mod.rs`) rather than a first-wins scan.
-pub fn generic_effect_population_filter<'a>(
-    target_filter: Option<&'a TargetFilter>,
-    static_abilities: &'a [StaticDefinition],
-) -> Option<&'a TargetFilter> {
-    static_abilities
-        .iter()
-        .filter(|static_def| {
-            matches!(
-                static_def.mode,
-                crate::types::statics::StaticMode::MustAttack
-                    | crate::types::statics::StaticMode::MustAttackDefender { .. }
-                    | crate::types::statics::StaticMode::Continuous
-            )
-        })
-        .find_map(|static_def| {
-            generic_effect_application_filter(target_filter, static_def.affected.as_ref())
-        })
-}
-
 /// CR 608.2d + CR 611.2c: the pending `Chosen` modification latches to the `Fixed` pair the controller just named, and the answer is taken so a skipped prompt can never latch a stale earlier one.
 fn latch_chosen_text_words(
     state: &mut GameState,
@@ -1610,6 +1544,7 @@ fn defended_scope_uses_source_controller_anchor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         BasicLandType, ChoiceValue, ChosenSubtypeKind, ContinuousModification, ControllerRef,

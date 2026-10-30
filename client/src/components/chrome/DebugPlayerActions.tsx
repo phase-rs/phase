@@ -275,6 +275,57 @@ function ModifyEnergyForm({ onDispatch }: Props) {
   );
 }
 
+function GivePlayerCountersForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [counterKind, setCounterKind] = useState<PlayerCounterKind>("Poison");
+  const [count, setCount] = useState(1);
+
+  return (
+    <>
+      <FieldRow label={t("sandboxTools.player")}>
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label={t("sandboxTools.counter")}>
+        <SelectInput value={counterKind} onChange={setCounterKind} options={PLAYER_COUNTER_KINDS} />
+      </FieldRow>
+      <FieldRow label={t("sandboxTools.amount")}>
+        <NumberInput value={count} onChange={setCount} min={1} />
+      </FieldRow>
+      <SubmitButton
+        onClick={() =>
+          onDispatch({
+            type: "GivePlayerCounters",
+            data: { player_id: playerId, counter_kind: counterKind, count },
+          })
+        }
+      >
+        {t("sandboxTools.givePlayerCounters")}
+      </SubmitButton>
+    </>
+  );
+}
+
+function GiveEnergyForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [count, setCount] = useState(1);
+
+  return (
+    <>
+      <FieldRow label={t("sandboxTools.player")}>
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label={t("sandboxTools.amount")}>
+        <NumberInput value={count} onChange={setCount} min={1} />
+      </FieldRow>
+      <SubmitButton onClick={() => onDispatch({ type: "GiveEnergy", data: { player_id: playerId, count } })}>
+        {t("sandboxTools.giveEnergy")}
+      </SubmitButton>
+    </>
+  );
+}
+
 // Opens the debug library browser for the local (perspective) player. The
 // engine supplies its separately authorized OWN-library debug projection, so
 // this remains scoped to the perspective seat rather than offering a picker
@@ -352,8 +403,22 @@ export function DebugPlayerActions({ onDispatch }: Props) {
       <AccordionItem label={t("sandboxTools.modifyCounters")} expanded={expanded === "counters"} onToggle={() => toggle("counters")}>
         <ModifyPlayerCountersForm onDispatch={onDispatch} />
       </AccordionItem>
+      <AccordionItem
+        label={t("sandboxTools.givePlayerCounters")}
+        expanded={expanded === "giveCounters"}
+        onToggle={() => toggle("giveCounters")}
+      >
+        <GivePlayerCountersForm onDispatch={onDispatch} />
+      </AccordionItem>
       <AccordionItem label={t("sandboxTools.modifyEnergy")} expanded={expanded === "energy"} onToggle={() => toggle("energy")}>
         <ModifyEnergyForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem
+        label={t("sandboxTools.giveEnergy")}
+        expanded={expanded === "giveEnergy"}
+        onToggle={() => toggle("giveEnergy")}
+      >
+        <GiveEnergyForm onDispatch={onDispatch} />
       </AccordionItem>
     </div>
   );

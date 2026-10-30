@@ -3,12 +3,15 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
+use crate::game::cost_payability::AbilityCostPayability;
+use crate::game::filter::ReplacementDefinitionFilterExt;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CastingPermission, ChoiceType, ChosenAttribute, CoinFlipRun,
     CombatDamageScope, ControllerRef, DamageModification, DamageRedirectTarget, DamageTargetFilter,
     DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope,
-    ManaSpendPermission, PermissionGrantee, PostReplacementContinuation, PreventionAmount,
-    PreventionFormula, QuantityExpr, QuantityModification, RedirectionLifetime,
+    EntryAttackDestination, ManaSpendPermission, PermissionGrantee, PostReplacementContinuation,
+    PreventionAmount, PreventionFormula, QuantityExpr, QuantityModification, RedirectionLifetime,
     ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     ResolvedAbility, RoundingMode, ShieldKind, TapStateChange, TargetFilter, TargetRef,
 };
@@ -35,7 +38,8 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
     AppliedReplacementKey, BoundSearchFoundCandidate, BoundSearchFoundDisposition,
     BoundSearchFoundGrant, CopyTokenSpec, CounterMoveStage, CounterPlacement, DrawEventStage,
-    EtbTapState, ProposedEvent, ReplacementId, SearchFoundDisposition, TokenBatch,
+    EtbTapState, ProposedEvent, ReplacementId, SearchFoundDisposition, TokenAttackRequest,
+    TokenBatch,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -2298,7 +2302,7 @@ fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> boo
             .get(&rid.source)
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
-    repl.and_then(|r| r.runtime_execute.as_deref())
+    repl.and_then(|r| state.replacement_rider(r))
         .is_some_and(rider_reflects_per_event_damage_source)
 }
 
@@ -3850,7 +3854,7 @@ fn draw_is_substituted_away(
                     && draw_replacement_count(state, rid, proposed).is_none()
             }
         },
-        None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
+        None => state.replacement_rider(repl_def).is_some_and(|runtime| {
             !matches!(runtime.effect, Effect::Draw { .. })
                 && !EventModifiers::is_event_modifier_effect(&runtime.effect)
         }),
@@ -4490,12 +4494,43 @@ fn try_resolve_event_replacement_quantity(
     }
 }
 
-/// A replacement's computed life quantity exceeds the engine's numeric range.
-/// Record it for life settlement: an open public-action ingress window
-/// rejects and restores that action, while legacy or outside-boundary resolution
-/// uses its compatibility skip. Leave the event unchanged because the pipeline
-/// stops at the loop head, so that value never becomes the final amount.
-fn record_life_quantity_overflow(
+/// The result of applying a `QuantityModification` to an event quantity.
+enum ScaledQuantity {
+    /// The modified quantity (`Half` rounds down; `Minus` floors at zero,
+    /// which is not an overflow).
+    Scaled(u32),
+    /// CR 614.6 + CR 614.7: the modified event never happens.
+    Prevented,
+    /// Engine numeric capacity: a `Times` / `Plus` result past `u32`. Recorded
+    /// for the settle step instead of clamped; not a CR 101.3 impossibility.
+    Unrepresentable,
+}
+
+/// Applies `modification` to `amount` with checked `Times` / `Plus`
+/// arithmetic, shared by the life and player-counter/energy appliers.
+fn scale_event_quantity(amount: u32, modification: &QuantityModification) -> ScaledQuantity {
+    match *modification {
+        QuantityModification::Times { factor } => amount
+            .checked_mul(factor)
+            .map_or(ScaledQuantity::Unrepresentable, ScaledQuantity::Scaled),
+        QuantityModification::Half => ScaledQuantity::Scaled(amount / 2),
+        QuantityModification::Plus { value } => amount
+            .checked_add(value)
+            .map_or(ScaledQuantity::Unrepresentable, ScaledQuantity::Scaled),
+        QuantityModification::Minus { value } => {
+            ScaledQuantity::Scaled(amount.saturating_sub(value))
+        }
+        QuantityModification::Prevent => ScaledQuantity::Prevented,
+    }
+}
+
+/// A replacement's computed life, player-counter or energy quantity exceeds the
+/// engine's numeric range. Record it for the settle step of the same event: an
+/// open public-action ingress window rejects and restores that action, while
+/// legacy or outside-boundary resolution uses its compatibility skip. Leave the
+/// event unchanged because the pipeline stops at the loop head, so that value
+/// never becomes the final amount.
+fn record_quantity_overflow(
     state: &mut GameState,
     rid: ReplacementId,
     event: ProposedEvent,
@@ -4520,7 +4555,6 @@ fn gain_life_applier(
     state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    use crate::types::ability::QuantityModification;
     // Branch 1: structured `quantity_modification` (Double / Plus / Minus).
     // Used by Boon Reflection / Rhox Faithmender (Twice) and
     // Hardened Heart-style "+N" replacements.
@@ -4539,27 +4573,24 @@ fn gain_life_applier(
             // Engine numeric capacity: a `Times` / `Plus` result past `u32`
             // is recorded for the settle step instead of clamped.
             // `Minus` floors at zero, which is not an overflow.
-            let checked = match modification {
-                QuantityModification::Times { factor } => amount.checked_mul(factor),
-                QuantityModification::Half => Some(amount / 2),
-                QuantityModification::Plus { value } => amount.checked_add(value),
-                QuantityModification::Minus { value } => Some(amount.saturating_sub(value)),
+            let new_amount = match scale_event_quantity(amount, &modification) {
+                ScaledQuantity::Scaled(new_amount) => new_amount,
                 // CR 614.6 + CR 614.7: No life-gain replacement uses Prevent
                 // today (Tainted Remedy converts gain → loss via execute chain),
                 // but the variant composes here for symmetry — fully suppress
                 // the gain event.
-                QuantityModification::Prevent => return ApplyResult::Prevented,
-            };
-            let Some(new_amount) = checked else {
-                return record_life_quantity_overflow(
-                    state,
-                    rid,
-                    ProposedEvent::LifeGain {
-                        player_id,
-                        amount,
-                        applied,
-                    },
-                );
+                ScaledQuantity::Prevented => return ApplyResult::Prevented,
+                ScaledQuantity::Unrepresentable => {
+                    return record_quantity_overflow(
+                        state,
+                        rid,
+                        ProposedEvent::LifeGain {
+                            player_id,
+                            amount,
+                            applied,
+                        },
+                    );
+                }
             };
             return ApplyResult::Modified(ProposedEvent::LifeGain {
                 player_id,
@@ -4593,7 +4624,7 @@ fn gain_life_applier(
             return ApplyResult::Modified(event);
         }
         // The computed quantity exceeds the engine's numeric capacity.
-        Err(EventQuantityOverflow) => return record_life_quantity_overflow(state, rid, event),
+        Err(EventQuantityOverflow) => return record_quantity_overflow(state, rid, event),
         Ok(None) => {}
     }
 
@@ -4706,8 +4737,6 @@ fn lose_life_applier(
     state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    use crate::types::ability::QuantityModification;
-
     let definition = state
         .objects
         .get(&rid.source)
@@ -4725,23 +4754,20 @@ fn lose_life_applier(
         // Engine numeric capacity: a `Times` / `Plus` result past `u32` is
         // recorded for the settle step instead of clamped. `Minus`
         // floors at zero, which is not an overflow.
-        let checked = match modification {
-            QuantityModification::Times { factor } => amount.checked_mul(factor),
-            QuantityModification::Half => Some(amount / 2),
-            QuantityModification::Plus { value } => amount.checked_add(value),
-            QuantityModification::Minus { value } => Some(amount.saturating_sub(value)),
-            QuantityModification::Prevent => return ApplyResult::Prevented,
-        };
-        let Some(new_amount) = checked else {
-            return record_life_quantity_overflow(
-                state,
-                rid,
-                ProposedEvent::LifeLoss {
-                    player_id,
-                    amount,
-                    applied,
-                },
-            );
+        let new_amount = match scale_event_quantity(amount, &modification) {
+            ScaledQuantity::Scaled(new_amount) => new_amount,
+            ScaledQuantity::Prevented => return ApplyResult::Prevented,
+            ScaledQuantity::Unrepresentable => {
+                return record_quantity_overflow(
+                    state,
+                    rid,
+                    ProposedEvent::LifeLoss {
+                        player_id,
+                        amount,
+                        applied,
+                    },
+                );
+            }
         };
         return ApplyResult::Modified(ProposedEvent::LifeLoss {
             player_id,
@@ -4778,7 +4804,7 @@ fn lose_life_applier(
                 // Return explicitly so this arm never depends on the later
                 // fall-through checks.
                 Err(EventQuantityError::Overflow) => {
-                    return record_life_quantity_overflow(state, rid, event);
+                    return record_quantity_overflow(state, rid, event);
                 }
                 Err(EventQuantityError::NotStatic) => {}
             }
@@ -4848,8 +4874,38 @@ fn add_counter_applier(
     };
 
     match event {
+        // Engine numeric capacity: a player or energy count (CR 122.1,
+        // CR 107.14) past `u32` is recorded for that placement's settle step
+        // (`player_counter::apply_player_counter_addition` /
+        // `energy::apply_energy_addition`) instead of clamped.
         ProposedEvent::AddCounter {
-            placement,
+            placement:
+                placement @ (CounterPlacement::Player { .. } | CounterPlacement::Energy { .. }),
+            count,
+            applied,
+        } => match scale_event_quantity(count, &modification) {
+            ScaledQuantity::Scaled(count) => ApplyResult::Modified(ProposedEvent::AddCounter {
+                placement,
+                count,
+                applied,
+            }),
+            ScaledQuantity::Prevented => ApplyResult::Prevented,
+            ScaledQuantity::Unrepresentable => record_quantity_overflow(
+                state,
+                rid,
+                ProposedEvent::AddCounter {
+                    placement,
+                    count,
+                    applied,
+                },
+            ),
+        },
+        // Object and MoveCounter placements keep saturating arithmetic: their
+        // settle steps have no consumer for the overflow record, and an untaken
+        // record stops every later replacement pipeline of the same action at
+        // the loop head.
+        ProposedEvent::AddCounter {
+            placement: placement @ CounterPlacement::Object { .. },
             count,
             applied,
         } => ApplyResult::Modified(ProposedEvent::AddCounter {
@@ -5230,6 +5286,7 @@ fn create_entry_copy_spec_for_replacement(
         additional_modifications: additional_modifications.clone(),
         tapped: false,
         enters_attacking: false,
+        attack_request: TokenAttackRequest::Unspecified,
         sacrifice_at: duration.clone(),
         source_id: replacement_source,
         controller,
@@ -8301,6 +8358,7 @@ fn stage_transformed_entry_projection(
             source_id: entrant,
             controller,
             enters_attacking,
+            attack_destination: EntryAttackDestination::AnyDefender,
             attach_to: None,
             sacrifice_at: None,
             remaining_count: 0,
@@ -10183,9 +10241,8 @@ fn apply_single_replacement(
                 // use the total across the chosen source's simultaneous portions.
                 let batched_combat_all_shield = state.combat_prevention_tally.is_some()
                     && repl_def.runtime_execute.is_some()
-                    && !repl_def
-                        .runtime_execute
-                        .as_deref()
+                    && !state
+                        .replacement_rider(repl_def)
                         .is_some_and(rider_reflects_per_event_damage_source)
                     && matches!(
                         repl_def.shield_kind,
@@ -10214,8 +10271,8 @@ fn apply_single_replacement(
                         // apply to Damage events, where there is no `etb_counters`
                         // slot to absorb the counters into.
                         let is_damage = matches!(proposed, ProposedEvent::Damage { .. });
-                        if let Some(runtime) = repl_def.runtime_execute.clone() {
-                            Some(PostReplacementContinuation::Resolved(runtime))
+                        if let Some(runtime) = state.replacement_rider(repl_def).cloned() {
+                            Some(PostReplacementContinuation::Resolved(Box::new(runtime)))
                         } else {
                             repl_def.execute.as_deref().and_then(|def| {
                                 // CR 608.2c + CR 121.6b: the applier replaces the
@@ -10331,7 +10388,7 @@ fn apply_single_replacement(
                         }
                         None => {
                             !declined_without_branch_ability
-                                && repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
+                                && state.replacement_rider(repl_def).is_some_and(|runtime| {
                                     !matches!(runtime.effect, Effect::Token { .. })
                                         && !EventModifiers::is_event_modifier_effect(
                                             &runtime.effect,
@@ -12109,7 +12166,7 @@ fn as_enters_payment_shape(def: &ReplacementDefinition) -> bool {
         Effect::PayCost {
             cost: AbilityCost::PayLife { amount },
             ..
-        } if crate::game::effects::pay::is_pay_any_amount(amount)
+        } if crate::types::ability::is_pay_any_amount(amount)
     )
 }
 
@@ -12671,17 +12728,21 @@ fn auto_choice_identities(
             if entry_controller_choice(state, proposed, *rid).is_some()
                 || branch_can_prompt(execute)
                 || branch_can_prompt(decline)
-                || definition
-                    .runtime_execute
-                    .as_deref()
+                || state
+                    .replacement_rider(definition)
                     .is_some_and(super::resolution_prompt::chain_offers_choice)
             {
                 return None;
             }
+            // CR 616.1 + CR 615.5: identity is the inline definition by value — the
+            // handle cleared and the rider carried — so allocation history never
+            // enters a remembered choice.
+            let (definition, rider) = state.split_replacement_rider(definition);
             Some(ReplacementAutoChoiceIdentity::Definition {
                 source: ObjectIncarnationRef::from_object(object),
                 index: rid.index,
-                definition: Box::new(definition.clone()),
+                definition: Box::new(definition),
+                rider,
             })
         })
         .collect::<Option<_>>()?;
@@ -12906,10 +12967,10 @@ fn pipeline_loop(
     record_proposed_event(&proposed);
 
     loop {
-        // Engine numeric capacity: an applier recorded that the modified life
-        // event is unrepresentable. Stop this pipeline before applying further
-        // replacements or asking another ordering prompt; the life settle step
-        // takes the record and the public action owner rejects and restores.
+        // Engine numeric capacity: an applier recorded that the modified life,
+        // player-counter or energy event is unrepresentable. Stop this pipeline
+        // before applying further replacements or asking another ordering
+        // prompt; that event's settle step takes the record and the public action owner rejects and restores.
         // Outside a public boundary, the existing compatibility policy logs and
         // skips it. This also covers the choice-resumed path, which re-enters
         // this loop through `pipeline_loop`.
@@ -14075,6 +14136,7 @@ mod tests {
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
@@ -15133,6 +15195,7 @@ mod tests {
                 source_id: ObjectId(999),
                 controller: PlayerId(0),
                 enters_attacking: false,
+                attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                 attach_to: None,
                 sacrifice_at: None,
                 remaining_count: 0,
@@ -17186,6 +17249,151 @@ mod tests {
         Some(crate::types::game_state::ReplacementQuantityOverflow { source })
     }
 
+    fn player_counter_event(count: u32) -> ProposedEvent {
+        ProposedEvent::AddCounter {
+            placement: CounterPlacement::Player {
+                actor: PlayerId(0),
+                player_id: PlayerId(0),
+                counter_kind: crate::types::player::PlayerCounterKind::Experience,
+            },
+            count,
+            applied: HashSet::new(),
+        }
+    }
+
+    fn energy_counter_event(count: u32) -> ProposedEvent {
+        ProposedEvent::AddCounter {
+            placement: CounterPlacement::Energy {
+                actor: PlayerId(0),
+                player_id: PlayerId(0),
+            },
+            count,
+            applied: HashSet::new(),
+        }
+    }
+
+    /// Runs a player or energy `AddCounter` through `replace_event` over one
+    /// any-player source (`ObjectId(10)`); returns the resulting count and the
+    /// overflow record.
+    fn replace_counter_count(
+        modification: QuantityModification,
+        event: ProposedEvent,
+    ) -> (
+        u32,
+        Option<crate::types::game_state::ReplacementQuantityOverflow>,
+    ) {
+        let mut state = test_state_with_object(
+            ObjectId(10),
+            Zone::Battlefield,
+            vec![life_qmod_def(ReplacementEvent::AddCounter, modification)],
+        );
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, event, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::AddCounter { count, .. }) = result else {
+            panic!("expected Execute of an AddCounter event, got {result:?}");
+        };
+        (count, state.replacement_quantity_overflow)
+    }
+
+    /// CR 122.1 + CR 107.14: a `Times` / `Plus` count past `u32` on a player or
+    /// energy placement is recorded for the settle step and the event is left
+    /// unchanged (never saturated). An object placement keeps its saturating
+    /// arithmetic and records nothing, because its settle step has no consumer
+    /// for the record.
+    #[test]
+    fn add_counter_applier_player_and_energy_overflow_is_recorded_not_clamped() {
+        let src = ObjectId(10);
+
+        // (a) Player placement, `Times`: 2 x 2^31 does not fit a u32.
+        assert_eq!(
+            replace_counter_count(
+                QuantityModification::Times {
+                    factor: 2_147_483_648
+                },
+                player_counter_event(2),
+            ),
+            (2, overflow_from(src))
+        );
+        // Control: above `i32::MAX` but within `u32`; the settle step decides.
+        assert_eq!(
+            replace_counter_count(
+                QuantityModification::Times {
+                    factor: 2_147_483_647
+                },
+                player_counter_event(2),
+            ),
+            (4_294_967_294, None)
+        );
+
+        // (b) Energy placement, `Plus`.
+        assert_eq!(
+            replace_counter_count(
+                QuantityModification::Plus { value: 1 },
+                energy_counter_event(u32::MAX),
+            ),
+            (u32::MAX, overflow_from(src))
+        );
+        assert_eq!(
+            replace_counter_count(
+                QuantityModification::Plus { value: 1 },
+                energy_counter_event(u32::MAX - 1),
+            ),
+            (u32::MAX, None)
+        );
+
+        // (c) Object placement keeps saturating arithmetic and records nothing.
+        let mut state = test_state_with_object(
+            ObjectId(10),
+            Zone::Battlefield,
+            vec![life_qmod_def(
+                ReplacementEvent::AddCounter,
+                QuantityModification::Plus { value: 1 },
+            )],
+        );
+        let object_event = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(10),
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: u32::MAX,
+            applied: HashSet::new(),
+        };
+        let applied = add_counter_applier(
+            object_event,
+            ReplacementId {
+                source: ObjectId(10),
+                index: 0,
+            },
+            &mut state,
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(
+                applied,
+                ApplyResult::Modified(ProposedEvent::AddCounter {
+                    count: u32::MAX,
+                    ..
+                })
+            ),
+            "object placements saturate: {applied:?}"
+        );
+        assert_eq!(state.replacement_quantity_overflow, None);
+
+        // (d) `Half` and `Minus` cannot overflow.
+        assert_eq!(
+            replace_counter_count(QuantityModification::Half, player_counter_event(u32::MAX)),
+            (u32::MAX / 2, None)
+        );
+        assert_eq!(
+            replace_counter_count(
+                QuantityModification::Minus { value: 5 },
+                energy_counter_event(3),
+            ),
+            (0, None)
+        );
+    }
+
     /// A `Times` / `Plus` or computed gain beyond engine numeric capacity is
     /// recorded for the settle step and the event is left unchanged (never
     /// clamped to `u32::MAX` or wrapped through `i32`).
@@ -18105,6 +18313,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
@@ -20048,6 +20257,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(999),
             controller: owner_controller,
@@ -23622,6 +23832,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: PlayerId(0),
@@ -23650,6 +23861,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: chatterfang,
             controller: PlayerId(0),
@@ -23724,6 +23936,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
@@ -23814,6 +24027,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id,
             controller: PlayerId(0),
@@ -24040,6 +24254,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: PlayerId(0),
@@ -24177,6 +24392,8 @@ mod tests {
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -24300,6 +24517,8 @@ mod tests {
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -24374,6 +24593,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: PlayerId(0),
@@ -24612,6 +24832,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: PlayerId(1),
@@ -25142,6 +25363,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
@@ -25262,6 +25484,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
@@ -25444,6 +25667,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
@@ -26243,6 +26467,8 @@ mod tests {
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -27171,6 +27397,297 @@ mod tests {
         assert!(
             record_proposed_events(|| {}).is_empty(),
             "an armed extent with no pipeline entry records nothing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod auto_choice_identity_tests {
+    use super::*;
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use crate::types::ability::{
+        EffectScope, PreventionAmount, PreventionScope, QuantityModification, QuantityRef,
+        TypedFilter,
+    };
+    use crate::types::actions::GameAction;
+    use crate::types::counter::CounterMatch;
+    use crate::types::phase::Phase;
+
+    const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
+
+    /// The chain Gatta and Luzzu's shield resolves ("If damage would be dealt to that
+    /// creature this turn, prevent that damage and put that many +1/+1 counters on
+    /// it."): an all-damage prevention on `bear` whose `ContinuationStep` rider puts one
+    /// +1/+1 counter per 1 damage prevented on the parent's target (CR 615.5).
+    fn prevention_chain(src: ObjectId, bear: ObjectId) -> ResolvedAbility {
+        let mut rider = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+            },
+            Vec::new(),
+            src,
+            P0,
+        );
+        rider.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+        let mut prevent = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::ParentTarget,
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![TargetRef::Object(bear)],
+            src,
+            P0,
+        )
+        .sub_ability(rider);
+        prevent.duration = Some(crate::types::ability::Duration::UntilEndOfTurn);
+        prevent
+    }
+
+    fn install_prevention(runner: &mut GameRunner, src: ObjectId, bear: ObjectId) {
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(
+            runner.state_mut(),
+            &prevention_chain(src, bear),
+            &mut events,
+            0,
+        )
+        .unwrap();
+    }
+
+    /// Harness shortcut, as in `gatta_and_luzzu_prevents_through_the_real_cast_pipeline`:
+    /// hand P1 priority so it can cast its Lightning Bolt this turn.
+    fn bolt_bear(runner: &mut GameRunner, bolt: ObjectId, bear: ObjectId) {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+        runner.cast(bolt).target_object(bear).resolve();
+    }
+
+    fn handles(
+        state: &GameState,
+        bear: ObjectId,
+    ) -> Vec<Option<crate::types::identifiers::ReplacementContinuationId>> {
+        state.objects[&bear]
+            .replacement_definitions
+            .iter_all()
+            .map(|def| def.runtime_execute)
+            .collect()
+    }
+
+    fn counters(state: &GameState, bear: ObjectId) -> u32 {
+        state.objects[&bear]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// CR 616.1 + CR 615.5: a remembered order is keyed by each shield's definition and
+    /// rider BY VALUE, so a shield re-installed with an `==` rider under a new arena
+    /// handle still matches the saved identity, and the remembered order replays. Base
+    /// identity (inline riders) behaves the same: the second Bolt does not prompt.
+    /// Positive control: a re-installed shield whose rider differs does not match.
+    #[test]
+    fn remembered_order_matches_a_reinstalled_equal_rider_under_a_new_handle() {
+        for differing_rider in [false, true] {
+            let mut scenario = GameScenario::new_n_player(2, 42);
+            scenario.at_phase(Phase::PreCombatMain);
+            let bear = scenario.add_creature(P0, "Bear", 3, 3).id();
+            let src = scenario.add_creature(P0, "Source", 1, 1).id();
+            let src2 = scenario.add_creature(P0, "Other Source", 1, 1).id();
+            let bolts = [0, 1].map(|_| {
+                scenario
+                    .add_spell_to_hand_from_oracle(P1, "Lightning Bolt", true, LIGHTNING_BOLT)
+                    .id()
+            });
+            let mut runner = scenario.build();
+            let arena = runner.state().replacement_continuations.len();
+            install_prevention(&mut runner, src, bear);
+            install_prevention(&mut runner, src, bear);
+            let first = handles(runner.state(), bear);
+            assert!(
+                first.len() == 2 && first[0].is_some() && first[0] != first[1],
+                "reach guard: two shields under distinct handles: {first:?}"
+            );
+            let defs = &runner.state().objects[&bear].replacement_definitions;
+            assert_eq!(
+                runner.state().replacement_rider(&defs[0]),
+                runner.state().replacement_rider(&defs[1]),
+                "reach guard: the two riders are equal"
+            );
+            assert_eq!(runner.state().replacement_continuations.len(), arena + 2);
+
+            bolt_bear(&mut runner, bolts[0], bear);
+            let WaitingFor::ReplacementChoice {
+                remember_identity: Some(key),
+                ..
+            } = runner.state().waiting_for.clone()
+            else {
+                panic!(
+                    "the first Bolt offers a rememberable CR 616.1 choice: {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            let [ReplacementAutoChoiceIdentity::Definition {
+                source: s0,
+                index: i0,
+                definition: d0,
+                rider: r0,
+            }, ReplacementAutoChoiceIdentity::Definition {
+                source: s1,
+                index: i1,
+                definition: d1,
+                rider: r1,
+            }] = key.candidates.as_slice()
+            else {
+                panic!("two definition identities: {:?}", key.candidates);
+            };
+            assert!(
+                s0 == s1 && d0 == d1 && r0 == r1 && r0.is_some() && i0 != i1,
+                "the identities differ only in index"
+            );
+            assert!(d0.runtime_execute.is_none() && d1.runtime_execute.is_none());
+            let proposed = runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .unwrap()
+                .proposed
+                .clone();
+            runner
+                .act(GameAction::ChooseReplacementAndRemember {
+                    choice: ReplacementAutoChoice::Order { order: vec![0, 1] },
+                })
+                .unwrap();
+            runner.advance_until_stack_empty();
+            assert_eq!(runner.state().objects[&bear].damage_marked, 0);
+            assert_eq!(counters(runner.state(), bear), 3);
+            assert_eq!(runner.state().replacement_auto_choices.len(), 1);
+
+            // Remove the index-0 shield and re-install one.
+            let mut position = 0;
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&bear)
+                .unwrap()
+                .replacement_definitions
+                .retain(|_| {
+                    position += 1;
+                    position != 1
+                });
+            let arena = runner.state().replacement_continuations.len();
+            install_prevention(&mut runner, if differing_rider { src2 } else { src }, bear);
+            let second = handles(runner.state(), bear);
+            assert!(
+                second.len() == 2 && second[0] == first[1] && second[1].is_some(),
+                "reach guard: h1 at index 0 and a new handle at index 1: {second:?}"
+            );
+            assert!(
+                !first.contains(&second[1]),
+                "the re-install mints a new handle"
+            );
+            assert_eq!(runner.state().replacement_continuations.len(), arena + 1);
+
+            let record = runner.state().replacement_auto_choices[0].clone();
+            let rebuilt = auto_choice_identities(
+                runner.state(),
+                &proposed,
+                &[
+                    ReplacementId {
+                        source: bear,
+                        index: 0,
+                    },
+                    ReplacementId {
+                        source: bear,
+                        index: 1,
+                    },
+                ],
+            )
+            .expect("the rebuilt shields have identities");
+            if differing_rider {
+                assert!(!same_identity_set(&rebuilt, &record.key.candidates));
+                continue;
+            }
+            assert!(same_identity_set(&rebuilt, &record.key.candidates));
+
+            bolt_bear(&mut runner, bolts[1], bear);
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                "the remembered order replays: {:?}",
+                runner.state().waiting_for
+            );
+            assert_eq!(runner.state().objects[&bear].damage_marked, 0);
+            assert_eq!(counters(runner.state(), bear), 6);
+        }
+    }
+
+    /// CR 616.1: a rider-free object-hosted identity serializes no `rider` key, so its
+    /// saved-preference id is byte-identical to the one recorded at base for this board.
+    #[test]
+    fn rider_free_identity_keeps_its_saved_preference_id() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let target = scenario.add_creature(P0, "Counter recipient", 1, 1).id();
+        for modification in [
+            QuantityModification::Plus { value: 1 },
+            QuantityModification::Minus { value: 1 },
+        ] {
+            scenario
+                .add_creature(P0, "Counter modifier", 1, 1)
+                .with_replacement_definition(
+                    ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                        .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                        .counter_match(CounterMatch::OfType(CounterType::Plus1Plus1))
+                        .quantity_modification(modification),
+                );
+        }
+        let spell = scenario
+            .add_spell_to_hand(P0, "Counter spell", true)
+            .with_ability(Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            })
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(spell).target_object(target).resolve();
+        let WaitingFor::ReplacementChoice {
+            remember_identity: Some(key),
+            ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!("the two modifiers offer a rememberable ordering");
+        };
+        assert_eq!(key.candidates.len(), 2);
+        fn names_rider(value: &serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::Object(object) => {
+                    object.contains_key("rider") || object.values().any(names_rider)
+                }
+                serde_json::Value::Array(values) => values.iter().any(names_rider),
+                _ => false,
+            }
+        }
+        assert!(!names_rider(&serde_json::to_value(&key).unwrap()));
+        runner
+            .act(GameAction::ChooseReplacementAndRemember {
+                choice: ReplacementAutoChoice::Order { order: vec![0, 1] },
+            })
+            .unwrap();
+        assert_eq!(
+            runner.state().replacement_auto_choices[0].id.0,
+            "r5cb2a4e985b2814dbce4d5d4c6521ec5d539b0f90b74feb454e24d0fab0feb74"
         );
     }
 }

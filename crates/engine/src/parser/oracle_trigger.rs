@@ -90,7 +90,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
-use crate::types::events::{ClashResult, PlayerActionKind};
+use crate::types::event_kinds::{ClashResult, PlayerActionKind};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::{Phase, PhaseGroup};
@@ -649,7 +649,7 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
 /// mirror image of the lying green, and just as dishonest.
 fn cost_x_sibling_slot_still_unbound(def: &crate::types::ability::AbilityDefinition) -> bool {
     use crate::types::ability::AbilityCondition;
-    use crate::types::game_state::TargetSelectionConstraint;
+    use crate::types::game_state_kinds::TargetSelectionConstraint;
 
     fn condition_has_bare_x(cond: &AbilityCondition) -> bool {
         match cond {
@@ -737,7 +737,7 @@ fn cost_x_sibling_slot_still_unbound(def: &crate::types::ability::AbilityDefinit
 /// it is correct at both selection time and resolution time.
 fn rewrite_cost_x_in_ability(def: &mut crate::types::ability::AbilityDefinition) {
     use super::oracle_replacement::rewrite_variable_x_to_cost_x_paid;
-    use crate::types::game_state::TargetSelectionConstraint;
+    use crate::types::game_state_kinds::TargetSelectionConstraint;
 
     if let Some(cond) = def.condition.as_mut() {
         rewrite_cost_x_in_condition(cond);
@@ -2805,7 +2805,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         && !trigger_condition_excludes_mana_activations(def.condition.as_ref())
     {
         if let Some(execute) = def.execute.as_deref_mut() {
-            if crate::game::mana_abilities::could_be_triggered_mana_ability_body(execute) {
+            if crate::types::ability::could_be_triggered_mana_ability_body(execute) {
                 *execute.effect = Effect::unimplemented(
                     "activation_triggered_mana_ability",
                     "a mana-producing trigger on activating a mana ability resolves \
@@ -2824,7 +2824,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         TriggerMode::TapsForMana | TriggerMode::ManaAdded | TriggerMode::ManaAbilityProduced
     ) {
         if let Some(execute) = def.execute.as_deref_mut() {
-            if crate::game::mana_abilities::could_be_triggered_mana_ability_body(execute) {
+            if crate::types::ability::could_be_triggered_mana_ability_body(execute) {
                 super::oracle_effect::refuse_linked_paid_cast_in_mana_ability(
                     execute,
                     def.description.as_deref().unwrap_or_default(),
@@ -4094,7 +4094,7 @@ fn lift_filter_shared_quality_parent_target_to_triggering_source(filter: &mut Ta
 /// trigger source must be the entering object).
 ///
 /// A hand reveal that parks a card choice
-/// (`reveal_hand::effect_parks_reveal_card_choice`) also returns `true`: a later
+/// (`types::ability::effect_parks_reveal_card_choice`) also returns `true`: a later
 /// `ParentTarget` binds to the chosen revealed card, whatever player the reveal
 /// targets.
 ///
@@ -4130,7 +4130,7 @@ fn introduces_chosen_object_target(effect: &Effect) -> bool {
     // event. Its player target (`Controller` / `ScopedPlayer` under a per-player
     // scope, `TriggeringPlayer`, …) is not a chosen object filter, so the `Typed`
     // test below cannot see it. Shares the resolver's card-parking authority.
-    if crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(effect) {
+    if crate::types::ability::effect_parks_reveal_card_choice(effect) {
         return true;
     }
     // CR 608.2c + CR 608.2d: a zone choice ("choose a card at random exiled
@@ -4450,7 +4450,7 @@ fn parse_illegal_targets_disposition(input: &str) -> OracleResult<'_, IllegalTar
 /// sentence unit of the body. Any other position returns the text unchanged
 /// with the default disposition (fail closed: the sentence stays in the chain
 /// as a strict failure).
-fn extract_illegal_targets_disposition(text: &str) -> (String, IllegalTargetsDisposition) {
+pub fn extract_illegal_targets_disposition(text: &str) -> (String, IllegalTargetsDisposition) {
     let Some(last_unit) = split_sentence_units(text).pop() else {
         return (text.to_string(), IllegalTargetsDisposition::DoesNotResolve);
     };
@@ -5147,7 +5147,7 @@ fn cost_contains_one_of(cost: &AbilityCost) -> bool {
 }
 
 fn reflexive_optional_cost_payable_by_resolution_prompt(cost: &AbilityCost) -> bool {
-    if !crate::game::costs::supported_at_resolution(cost) {
+    if !crate::types::ability::supported_at_resolution(cost) {
         return false;
     }
     match cost {
@@ -5204,7 +5204,7 @@ fn reflexive_optional_cost_payable_by_resolution_prompt(cost: &AbilityCost) -> b
 /// a typed permanent population. This excludes self/granting-object/any
 /// targets, aggregate requirements, and the `u32::MAX` X/any-number sentinel.
 fn reflexive_optional_direct_cost(cost: &AbilityCost) -> bool {
-    crate::game::costs::is_direct_resolution_optional_payment_branch(cost)
+    crate::types::ability::is_direct_resolution_optional_payment_branch(cost)
         || matches!(
             cost,
             AbilityCost::Sacrifice(cost)
@@ -6167,9 +6167,23 @@ fn substitute_another_in_aggregate_source(source: &CardTypeSetSource) -> CardTyp
                 .collect(),
         )
         .expect("rewriting preserves union arity"),
-        CardTypeSetSource::TrackedSet { .. }
-        | CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource => source.clone(),
+        CardTypeSetSource::TrackedSet {
+            set,
+            caused_by,
+            filter,
+        } => CardTypeSetSource::TrackedSet {
+            set: *set,
+            caused_by: *caused_by,
+            filter: filter.as_ref().map(substitute_another_in_filter),
+        },
+        // CR 608.2c + CR 115.1: the slot axis carries no `Another` — the
+        // substitution above only rewrites `Typed`/`Not`/`And`/`Or` shapes, so
+        // a targeted-objects population passes through unchanged, provably
+        // (no shape exists that `substitute_another_in_filter` could alter
+        // into a different slot).
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TargetedObjects { .. } => source.clone(),
     }
 }
 
@@ -10686,7 +10700,7 @@ fn try_extract_not_completed_dungeon(
     lower: &str,
     text: &str,
 ) -> Option<(String, Option<TriggerCondition>)> {
-    use crate::game::dungeon::DungeonId;
+    use crate::types::dungeon::DungeonId;
 
     let prefix = "if you haven't completed ";
     let pos = tp.find(prefix)?;
@@ -15125,6 +15139,10 @@ fn parse_taps_for_mana_actor_line(
         alt((
             value(Some(ControllerRef::Opponent), tag("an opponent taps ")),
             value(None, tag("a player taps ")),
+            // CR 603.2 + CR 106.12a: "you tap … for mana" taps-for-mana actor —
+            // the trigger event is a tap for mana performed by the trigger
+            // source's controller (Molten Tide class).
+            value(Some(ControllerRef::You), tag("you tap ")),
         )),
     )
     .parse(i)?;
@@ -20218,7 +20236,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             let (mut filter, sub_rem) =
                 parse_trigger_subject(&subject_text, &mut ParseContext::default());
             if sub_rem.trim().is_empty() {
-                if let Some(c) = actor_controller {
+                if let Some(c) = actor_controller.clone() {
                     // Constrain subject to opponent-controlled permanents via the
                     // single `add_controller` authority (shared with the "you tap"
                     // arm above).
@@ -20227,6 +20245,17 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                 let mut def = make_base();
                 def.mode = TriggerMode::TapsForMana;
                 def.valid_card = Some(filter);
+                // CR 603.2 + CR 106.12a: the "you tap …" actor binds the tapper
+                // to the trigger source's controller. Keyworded printed
+                // "whenever/when you tap …" still hits the :19178 loop first
+                // (left byte-identical); keyword-stripped delayed conditions
+                // reach this site; both produce identical
+                // `valid_card = add_controller(filter, You)` +
+                // `valid_target = Controller` + `taps_for_mana_produced`
+                // passthrough.
+                if actor_controller == Some(ControllerRef::You) {
+                    def.valid_target = Some(TargetFilter::Controller);
+                }
                 def.taps_for_mana_produced = produced_filter;
                 return Some((TriggerMode::TapsForMana, def));
             }
@@ -24238,6 +24267,39 @@ fn parse_control_none_filter(text: &str) -> Option<TargetFilter> {
 #[path = "oracle_trigger_tests.rs"]
 mod tests;
 
+/// Test helpers shared by `oracle_trigger_tests.rs` and the tests relocated out of it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers {
+    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
+
+    /// Verbatim from Scryfall (`cards/named?exact=Gilded%20Drake`).
+    pub const GILDED_DRAKE_TEXT: &str =
+        "Flying\nWhen this creature enters, exchange control of this \
+    creature and up to one target creature an opponent controls. If you don't or can't make an \
+    exchange, sacrifice this creature. This ability still resolves if its target becomes illegal.";
+
+    /// Parse `text` through the whole-card pipeline as a Drake creature and return
+    /// its single trigger's execute.
+    pub fn drake_shaped_trigger_execute(text: &str) -> AbilityDefinition {
+        let parsed = parse_oracle_text(
+            text,
+            "Gilded Drake",
+            &[],
+            &["Creature".to_string()],
+            &["Drake".to_string()],
+        );
+        let [trigger] = parsed.triggers.as_slice() else {
+            panic!("expected exactly one trigger, got {:?}", parsed.triggers);
+        };
+        trigger
+            .execute
+            .as_deref()
+            .cloned()
+            .expect("the trigger has an execute")
+    }
+}
+
 /// Snapshot tests locking current trigger parser output before the IR split.
 /// These verify behavioral parity: identical snapshots before and after the
 /// `parse_trigger_line_with_index_ir` / `lower_trigger_ir` refactor.
@@ -25386,36 +25448,6 @@ mod attached_set_trigger_tests {
             FilterProp::AttachedTo {
                 to: AttachmentReferent::Host { filter }
             } if **filter == TargetFilter::Typed(TypedFilter::creature())
-        ));
-    }
-
-    /// CR 109.2: "a creature card" keeps its `Card` qualifier on a
-    /// becomes-target subject, while "a creature" stays a bare permanent type.
-    #[test]
-    fn becomes_target_subject_keeps_card_qualifier() {
-        let card = parse_trigger_line(
-            "Whenever a creature card becomes the target of a spell or ability, draw a card.",
-            "Test",
-        );
-        let Some(TargetFilter::Typed(typed)) = &card.valid_card else {
-            panic!("expected typed subject, got {:?}", card.valid_card);
-        };
-        assert!(typed.type_filters.contains(&TypeFilter::Card));
-        assert!(typed.type_filters.contains(&TypeFilter::Creature));
-        assert!(!crate::game::filter::filter_denotes_battlefield_permanent(
-            card.valid_card.as_ref().unwrap()
-        ));
-
-        let bare = parse_trigger_line(
-            "Whenever a creature becomes the target of a spell or ability, draw a card.",
-            "Test",
-        );
-        let Some(TargetFilter::Typed(typed)) = &bare.valid_card else {
-            panic!("expected typed subject, got {:?}", bare.valid_card);
-        };
-        assert!(!typed.type_filters.contains(&TypeFilter::Card));
-        assert!(crate::game::filter::filter_denotes_battlefield_permanent(
-            bare.valid_card.as_ref().unwrap()
         ));
     }
 }

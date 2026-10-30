@@ -1,4 +1,5 @@
 use super::resolve_player_for_context_ref;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::targeting::{
     resolve_live_declared_player, resolve_live_parent_slot_from_root,
     resolved_object_ids_for_filter,

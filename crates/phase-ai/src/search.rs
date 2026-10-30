@@ -14,6 +14,8 @@ use engine::ai_support::{
     retarget_actions, root_may_yield_adverse_exchange, targeted_exchange_verdict,
     validated_candidate_actions_for_semantic_owner, AiDecisionContract, TargetedExchangeVerdict,
 };
+use engine::game::cost_payability::AbilityCostPayability;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, ContinuousModification, Duration, Effect, ResolvedAbility,
     StaticDefinition, TargetFilter, TargetRef,
@@ -93,7 +95,7 @@ fn first_serum_powder_in_hand(
 /// turn (e.g. 10 counters → 10 pings). None of the registered duel-suite
 /// decks contain such cards; if one is added, revisit this cap or replace
 /// it with structural "source-state-unchanged" detection.
-const MAX_ACTIVATIONS_PER_SOURCE_PER_TURN: u32 = 4;
+pub(crate) const MAX_ACTIVATIONS_PER_SOURCE_PER_TURN: u32 = 4;
 
 /// CR 117.1 + Whitemane Lion loop mitigation (issue #563): AI safety cap on
 /// the number of times the same card can be CAST in a single turn by the AI.
@@ -551,14 +553,25 @@ fn choose_action_with_session_inner(
         return direct(fallback_action(state, config, contract).and_then(&bind_specialist));
     }
 
-    let fast_priority = fast_priority_action(state, ai_player, config, session, Some(contract));
-    // Only an absent shortcut is reusable: a present one may be filtered out or
-    // followed by session writes below, so the scorer recomputes it.
-    let priority_shortcut = match &fast_priority {
+    // One decision, one lethal-reach certification: decided here for the
+    // whole ensemble, inside its information model and its shared budget, and
+    // never again by the scorer below or by any sampled world it runs.
+    let ensemble_deadline = ensemble_deadline(config);
+    let root_domain = RootPriorityDomain::new(state, ai_player);
+    let root_answer =
+        certified_lethal_action(config, ensemble_deadline, &root_domain, Some(contract))
+            .or_else(|| fast_priority_action(&root_domain, config, session, Some(contract)));
+    // Only an absent answer is reusable. `None` means certification declined
+    // and then the priority shortcut ran last on this state and found nothing
+    // (certification takes no session, so it cannot change what the shortcut
+    // reads). A present answer may be filtered out or followed by session
+    // writes below, and a certified one never ran the shortcut at all, so the
+    // scorer recomputes it.
+    let priority_shortcut = match &root_answer {
         None => RootPriorityShortcut::KnownAbsent,
         Some(_) => RootPriorityShortcut::Recompute,
     };
-    if let Some(action) = fast_priority
+    if let Some(action) = root_answer
         .filter(|action| durable_pact_routes || !is_certified_pact_root(state, ai_player, action))
     {
         if durable_pact_routes {
@@ -575,11 +588,11 @@ fn choose_action_with_session_inner(
         }
     }
 
-    let mut scored = score_candidates_for_root(
-        state,
-        ai_player,
+    let mut scored = score_candidates_uncertified(
+        &root_domain,
         config,
         session,
+        ensemble_deadline,
         RootReuse::FromChooser {
             contract,
             priority_shortcut,
@@ -689,13 +702,46 @@ fn random_card_predicate_guess(
     Some(action)
 }
 
-fn fast_priority_action(
-    state: &GameState,
+/// The AI's root priority domain under the pre-cast exchange gate
+/// (`flat_priority_actions` + [`root_action_is_allowed`]) for one decision
+/// state, computed at most once and only when something asks for it. Building
+/// it is a full legal-action generation with its affordability probes, so the
+/// decision's lethal-reach certification, its priority shortcuts and the
+/// scorer it falls through to all read this one copy.
+pub(crate) struct RootPriorityDomain<'a> {
+    state: &'a GameState,
     ai_player: PlayerId,
+    actions: std::cell::OnceCell<Vec<GameAction>>,
+}
+
+impl<'a> RootPriorityDomain<'a> {
+    pub(crate) fn new(state: &'a GameState, ai_player: PlayerId) -> Self {
+        Self {
+            state,
+            ai_player,
+            actions: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn actions(&self) -> &[GameAction] {
+        self.actions.get_or_init(|| {
+            #[cfg(test)]
+            ROOT_DOMAIN_BUILDS.with(|count| count.set(count.get() + 1));
+            engine::ai_support::flat_priority_actions(self.state)
+                .into_iter()
+                .filter(|action| root_action_is_allowed(self.state, self.ai_player, action))
+                .collect()
+        })
+    }
+}
+
+fn fast_priority_action(
+    domain: &RootPriorityDomain<'_>,
     config: &AiConfig,
     session: &Arc<AiSession>,
     issued: Option<&AiDecisionContract>,
 ) -> Option<GameAction> {
+    let (state, ai_player) = (domain.state, domain.ai_player);
     let WaitingFor::Priority { player } = state.waiting_for else {
         return None;
     };
@@ -734,18 +780,214 @@ fn fast_priority_action(
     let action = issued_pass.or_else(|| {
         #[cfg(test)]
         FAST_PRIORITY_DOMAIN_VALIDATIONS.with(|count| count.set(count.get() + 1));
-        let actions: Vec<_> = engine::ai_support::flat_priority_actions(state)
-            .into_iter()
-            .filter(|action| root_action_is_allowed(state, ai_player, action))
-            .collect();
-        low_value_priority_pass_from_actions(state, ai_player, &actions).or_else(|| {
+        let actions = domain.actions();
+        low_value_priority_pass_from_actions(state, ai_player, actions).or_else(|| {
             large_board_main_phase_fast_action_from_actions(
-                state, ai_player, &actions, config, session,
+                state, ai_player, actions, config, session,
             )
         })
     });
     // One fetch-then-cast filter covers both answers.
     action.filter(|_| !has_certified_fetch_then_cast_route(state, ai_player))
+}
+
+/// The certified lethal-reach answer to the AI's decision — the next step of a
+/// lethal line at priority, or the mode/X/target that keeps one alive at the
+/// line's own prompt — or `None`.
+///
+/// This is the ONLY entry to certification from the search, and it runs once
+/// per decision at the ensemble boundary (`choose_action` and
+/// [`score_candidates_with_session`], which the scored and parallel-worker
+/// entry points share). It is deliberately absent from
+/// `fast_priority_action` / `score_candidates_core`, which run once per sampled
+/// world: certification already covers every sampled world itself. With
+/// determinization enabled its sampled worlds share `deadline` with the
+/// scoring ensemble that follows, so the decision's single wall-clock ceiling
+/// stays authoritative.
+fn certified_lethal_action(
+    config: &AiConfig,
+    deadline: engine::util::Deadline,
+    domain: &RootPriorityDomain<'_>,
+    issued: Option<&AiDecisionContract>,
+) -> Option<GameAction> {
+    let (state, ai_player) = (domain.state, domain.ai_player);
+    if !config.play_lookahead {
+        return None;
+    }
+    match state.waiting_for {
+        WaitingFor::Priority { player } if player == ai_player => {
+            // On an empty stack a line opens with a non-mana cast or
+            // activation (`reach_sources`), and the validated domain only
+            // removes issued actions. An issued contract holding none has no
+            // line to certify, so the domain is never built for it.
+            if state.stack.is_empty()
+                && issued.is_some_and(|contract| {
+                    !contract.candidates.iter().any(|candidate| {
+                        matches!(
+                            candidate.action,
+                            GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. }
+                        ) && !candidate.action.is_mana_ability()
+                    })
+                })
+            {
+                return None;
+            }
+            certified_lethal_priority_action(state, ai_player, config, domain.actions(), deadline)
+        }
+        _ => certified_lethal_prompt_action(state, ai_player, config, deadline),
+    }
+}
+
+/// The next step of a reducer-certified lethal line from this priority
+/// decision, certified inside the information model the search uses.
+///
+/// CR 400.2: with determinization enabled (`K > 0`), the certification never
+/// reads the opponent's real hidden hand or library — it runs on each of the
+/// same K sampled worlds the scoring ensemble uses, and a step is taken only
+/// when every sample certifies it. With `K == 0` (every shipped preset) it runs
+/// on the state itself, as the search does.
+pub(crate) fn certified_lethal_priority_action(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    actions: &[GameAction],
+    deadline: engine::util::Deadline,
+) -> Option<GameAction> {
+    // `allowed` is the world's priority domain already under the pre-cast
+    // exchange gate; the loop guards are applied here.
+    let lethal_in = |world: &GameState, allowed: &[GameAction]| {
+        #[cfg(test)]
+        CERTIFICATION_RUNS.with(|runs| runs.set(runs.get() + 1));
+        let issued: Vec<_> = allowed
+            .iter()
+            .filter(|action| priority_action_is_allowed_by_loop_guards(world, ai_player, action))
+            .cloned()
+            .collect();
+        let admission = |state: &GameState, action: &GameAction| {
+            root_action_is_admitted(state, ai_player, action)
+        };
+        crate::reach::lethal_priority_action(world, ai_player, &issued, &admission)
+    };
+    let k = config.search.determinization_samples;
+    if k == 0 {
+        return lethal_in(state, actions);
+    }
+    agreed_across_samples(state, ai_player, k, deadline, |sample| {
+        let allowed: Vec<_> = engine::ai_support::flat_priority_actions(sample)
+            .into_iter()
+            .filter(|action| root_action_is_allowed(sample, ai_player, action))
+            .collect();
+        lethal_in(sample, &allowed)
+    })
+    // The AI's own zones are identical in every sample, so its step is one
+    // the real state issues too; bind it to the real payload.
+    .and_then(|action| crate::reach::issued_counterpart(actions, &action))
+}
+
+/// The answer to the AI's own cast prompt (mode, X, or target) that keeps a
+/// certified lethal line alive, decided inside the same information model as
+/// [`certified_lethal_priority_action`].
+fn certified_lethal_prompt_action(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    deadline: engine::util::Deadline,
+) -> Option<GameAction> {
+    if !config.play_lookahead
+        || !crate::reach::prompt_could_finish(state, ai_player)
+        || !matches!(
+            engine::ai_support::classify_payment_continuation(state),
+            engine::ai_support::PaymentContinuationState::NotAffiliated
+        )
+    {
+        return None;
+    }
+    let answer_in = |world: &GameState| {
+        let issued: Vec<GameAction> = AiDecisionContract::issue(world, ai_player)
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .collect();
+        let admission = |state: &GameState, action: &GameAction| {
+            root_action_is_admitted(state, ai_player, action)
+        };
+        crate::reach::lethal_prompt_action(world, ai_player, &issued, &admission)
+    };
+    match config.search.determinization_samples {
+        0 => answer_in(state),
+        k => agreed_across_samples(state, ai_player, k, deadline, answer_in),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test witness: how many worlds the search has run lethal-reach priority
+    /// certification in, on this thread.
+    pub(crate) static CERTIFICATION_RUNS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Test witness: how many root priority domains have been enumerated on
+    /// this thread.
+    pub(crate) static ROOT_DOMAIN_BUILDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// CR 400.2: the action `decide` takes in every one of the `k` determinized
+/// worlds, or `None` when any world declines or two worlds disagree — a
+/// certificate that holds only in some plausible worlds is not one the AI can
+/// act on without reading the real hidden zones.
+pub(crate) fn agreed_across_samples(
+    state: &GameState,
+    ai_player: PlayerId,
+    k: u32,
+    deadline: engine::util::Deadline,
+    decide: impl Fn(&GameState) -> Option<GameAction>,
+) -> Option<GameAction> {
+    let mut agreed: Option<GameAction> = None;
+    for sample in determinized_samples(state, ai_player, k) {
+        // The decision's shared wall-clock ceiling: a certificate that could
+        // not cover every world in budget is not one to act on.
+        if deadline.expired() {
+            return None;
+        }
+        let action = decide(&sample)?;
+        // A world whose certificate completed past the ceiling was not
+        // covered in budget either.
+        if deadline.expired() {
+            return None;
+        }
+        match &agreed {
+            Some(previous) if *previous != action => return None,
+            Some(_) => {}
+            None => agreed = Some(action),
+        }
+    }
+    agreed
+}
+
+/// The `K` determinized opponent-hidden-zone worlds the scoring ensemble
+/// averages over, in sample order. Seeded from the position, so every caller
+/// sees the same K worlds for the same decision.
+fn determinized_samples(
+    state: &GameState,
+    ai_player: PlayerId,
+    k: u32,
+) -> impl Iterator<Item = GameState> + '_ {
+    // Seed: fixed across K for a given (position, game, worker); per-sample split
+    // by index. `state.rng.clone()` keeps `&state` immutable (RNG purity via
+    // clone). Native runs diverge via distinct `rng_seed`; WASM workers diverge
+    // via the per-worker `state.rng` re-seed.
+    let base_seed = crate::planner::quick_state_hash(state)
+        .wrapping_add(state.rng_seed)
+        .wrapping_add(
+            state
+                .rng
+                .clone()
+                .draw(engine::types::game_state::RandomDraw::Outcome)
+                .next_u64(),
+        );
+    (0..k).map(move |i| {
+        let seed = base_seed.wrapping_add(crate::determinize::splitmix64(i as u64));
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        crate::determinize::determinize_opponents(state, ai_player, &mut rng)
+    })
 }
 
 /// Keep the direct priority shortcuts under the pre-cast exchange gate. The
@@ -781,6 +1023,19 @@ fn root_action_is_allowed(state: &GameState, ai_player: PlayerId, action: &GameA
         // No exact authority is fail-open; the engine preview never authorizes
         // a rejection from a reconstructed actor/owner pair.
         .unwrap_or(true)
+}
+
+/// The full admission rule for an engine-issued root priority action: the
+/// targeted-exchange gate plus the AI loop guards. Shared with the lethal-reach
+/// search so a line priced in a simulated state never relies on an action the
+/// real decision boundary would refuse.
+pub(crate) fn root_action_is_admitted(
+    state: &GameState,
+    ai_player: PlayerId,
+    action: &GameAction,
+) -> bool {
+    root_action_is_allowed(state, ai_player, action)
+        && priority_action_is_allowed_by_loop_guards(state, ai_player, action)
 }
 
 fn large_board_main_phase_has_no_development_sources(
@@ -2722,7 +2977,33 @@ pub(crate) fn score_candidates_with_session(
     config: &AiConfig,
     session: &Arc<AiSession>,
 ) -> Vec<(GameAction, f64)> {
-    score_candidates_for_root(state, ai_player, config, session, RootReuse::Fresh)
+    // A certified lethal line — its next step at priority, or the mode, X, and
+    // target that keep it lethal at its prompts — outranks every candidate
+    // scored in isolation. Decided once for the whole ensemble, inside its
+    // information model and its shared budget.
+    let deadline = ensemble_deadline(config);
+    let root_domain = RootPriorityDomain::new(state, ai_player);
+    if let Some(action) = certified_lethal_action(config, deadline, &root_domain, None) {
+        return vec![(action, 1.0)];
+    }
+    score_candidates_uncertified(&root_domain, config, session, deadline, RootReuse::Fresh)
+}
+
+/// The ensemble's ONE shared wall-clock ceiling across all K sequential
+/// samples (bounds AGGREGATE latency ~time_budget_ms, not K x budget), created
+/// before the decision's lethal-reach certification so that certification
+/// spends from the same budget. Measurement mode is bounded by node cap only —
+/// mirrors `PlannerServices::with_deadline`, so `cargo ai-gate` stays
+/// deterministic and K-bounded solely by nodes. Without determinization there
+/// is no shared ensemble budget: each search builds its own deadline.
+fn ensemble_deadline(config: &AiConfig) -> engine::util::Deadline {
+    if config.search.determinization_samples == 0 || config.execution_mode.is_measurement() {
+        return engine::util::Deadline::none();
+    }
+    match config.search.time_budget_ms {
+        Some(ms) => engine::util::Deadline::after(ms),
+        None => engine::util::Deadline::none(),
+    }
 }
 
 /// Whether the chooser already knows the priority shortcut is unavailable at
@@ -2774,7 +3055,8 @@ thread_local! {
     static ROOT_CONTRACT_ISSUES_IN_CORE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Times the scorer core ran the priority shortcut itself.
     static ROOT_FAST_PRIORITY_RERUNS_IN_CORE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// Times the priority shortcut enumerated and validated the flat priority actions.
+    /// Times the priority shortcut read the validated flat priority actions
+    /// (building them unless the decision's certification already had).
     static FAST_PRIORITY_DOMAIN_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Times the fetch-then-cast route check computed the validated domain.
     static FETCH_ROUTE_DOMAIN_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -2782,64 +3064,38 @@ thread_local! {
     static PACT_DRAFT_DOMAIN_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// [`score_candidates_with_session`] with the caller's knowledge of the root.
-/// `root` is forwarded only to the searches that run on `state` itself; every
-/// determinized sample is a different state and is scored `Fresh`.
-fn score_candidates_for_root(
-    state: &GameState,
-    ai_player: PlayerId,
+/// [`score_candidates_with_session`] after its lethal-reach certification has
+/// declined: shortcuts and scoring only, per sampled world when K > 0.
+/// `root_domain` is the decision state's own priority domain and `root` the
+/// caller's knowledge of that state; both are forwarded only to the search that
+/// runs on the decision state itself, while every determinized sample is a
+/// different state that builds its own domain and is scored `Fresh`.
+fn score_candidates_uncertified(
+    root_domain: &RootPriorityDomain<'_>,
     config: &AiConfig,
     session: &Arc<AiSession>,
+    deadline: engine::util::Deadline,
     root: RootReuse<'_>,
 ) -> Vec<(GameAction, f64)> {
+    let (state, ai_player) = (root_domain.state, root_domain.ai_player);
     // Attacker declarations are public-state tactical choices. Running K hidden
     // information samples cannot improve them, but would multiply the bounded
     // multiplayer comparison and make a singleton support drift.
     if matches!(state.waiting_for, WaitingFor::DeclareAttackers { .. }) {
-        return score_candidates_core_for_root(state, ai_player, config, session, None, root);
+        return score_candidates_core_for_root(root_domain, config, session, None, root);
     }
     let k = config.search.determinization_samples;
     if k == 0 {
         // Unchanged path: no determinization, no shared-deadline override.
-        return score_candidates_core_for_root(state, ai_player, config, session, None, root);
+        return score_candidates_core_for_root(root_domain, config, session, None, root);
     }
-
-    // ONE shared wall-clock ceiling across all K sequential samples (bounds
-    // AGGREGATE latency ~time_budget_ms, not K x budget). Measurement mode is
-    // bounded by node cap only — mirrors `PlannerServices::with_deadline`, so
-    // `cargo ai-gate` stays deterministic and K-bounded solely by nodes.
-    let deadline = if config.execution_mode.is_measurement() {
-        engine::util::Deadline::none()
-    } else {
-        match config.search.time_budget_ms {
-            Some(ms) => engine::util::Deadline::after(ms),
-            None => engine::util::Deadline::none(),
-        }
-    };
-
-    // Seed: fixed across K for a given (position, game, worker); per-sample split
-    // by index. `state.rng.clone()` keeps `&state` immutable (RNG purity via
-    // clone). Native runs diverge via distinct `rng_seed`; WASM workers diverge
-    // via the per-worker `state.rng` re-seed.
-    let base_seed = crate::planner::quick_state_hash(state)
-        .wrapping_add(state.rng_seed)
-        .wrapping_add(
-            state
-                .rng
-                .clone()
-                .draw(engine::types::game_state::RandomDraw::Outcome)
-                .next_u64(),
-        );
 
     let mut acc: Vec<(GameAction, f64)> = Vec::new();
     let mut positions: std::collections::HashMap<GameActionKey, usize> =
         std::collections::HashMap::new();
     let mut counts: std::collections::HashMap<GameActionKey, usize> =
         std::collections::HashMap::new();
-    for i in 0..k {
-        let seed = base_seed.wrapping_add(crate::determinize::splitmix64(i as u64));
-        let mut rng = ChaCha20Rng::seed_from_u64(seed);
-        let sampled = crate::determinize::determinize_opponents(state, ai_player, &mut rng);
+    for sampled in determinized_samples(state, ai_player, k) {
         let scored = score_candidates_core(&sampled, ai_player, config, session, Some(deadline));
         merge_into(&mut acc, &mut positions, &mut counts, scored);
     }
@@ -3476,8 +3732,7 @@ fn score_candidates_core(
     deadline_override: Option<engine::util::Deadline>,
 ) -> Vec<(GameAction, f64)> {
     score_candidates_core_for_root(
-        state,
-        ai_player,
+        &RootPriorityDomain::new(state, ai_player),
         config,
         session,
         deadline_override,
@@ -3504,18 +3759,99 @@ fn root_issued_candidates(
     }
 }
 
-/// [`score_candidates_core`] with the caller's knowledge of the root. Under
-/// [`RootReuse::FromChooser`] the contract's candidates stand in for a second
-/// contract issue, and a priority shortcut the chooser found absent is not run
-/// again; everything else is identical to the `Fresh` path.
+/// Which kind of root decision `score_candidates_core_for_root` is scoring. It selects how
+/// much the root's tactical score (policy verdicts + `should_play_now` + class adjustments
+/// + gate penalty) weighs against the beam's continuation value before softmax selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootDecisionContext {
+    /// Target selection decisions are dominated by the tactical policy
+    /// (anti-self-harm) but benefit from limited search lookahead.
+    /// The 0.7 weight ensures the tactical signal (anti-self-harm penalties
+    /// of -50+) still dominates obvious cases while allowing 30% search
+    /// influence for ambiguous multi-target decisions where the
+    /// continuation matters (e.g., which creature to pump).
+    TargetSelection,
+    /// Stack response decisions (counter/interact with opponent's spell) need
+    /// higher tactical weight because search can't see through the full
+    /// cast-target-pay-resolve chain at typical depths. Policies like
+    /// counterspell_score and stack_awareness guide these reactive decisions.
+    StackResponse,
+    /// The AI's own Upkeep or Draw step, holding priority on an empty stack.
+    /// CR 102.1 + CR 723.3: "own turn" is the active player (a controlled player is still the
+    /// active player). CR 117.1a: absent a flash-style permission (CR 702.8a), no noninstant
+    /// spell can be cast here, so most candidates are a "now vs. in my main phase" choice that
+    /// the short beam rarely sees past. CR 501.1 +
+    /// CR 502.4: the untap step grants no priority, so Upkeep and Draw are the beginning
+    /// phase's only priority windows. Timing policies need their verdict to survive the root
+    /// weight here (phase-rs/phase#10334).
+    OwnUpkeepOrDraw,
+    /// Every other root: main/combat/end priority, any priority on an opponent's turn, priority
+    /// over a stack holding only the AI's own entries, and non-priority, non-target prompts.
+    /// Here the tactical score is a move-ordering / tie-break nudge on the continuation.
+    Ordinary,
+}
+
+impl RootDecisionContext {
+    /// Classify the root decision. Precedence: target selection, then a stack holding an
+    /// entry another player controls, then the AI's own Upkeep/Draw window, then everything else.
+    fn classify(state: &GameState, ai_player: PlayerId) -> Self {
+        if matches!(
+            state.waiting_for,
+            WaitingFor::TargetSelection { .. }
+                | WaitingFor::TriggerTargetSelection { .. }
+                | WaitingFor::MultiTargetSelection { .. }
+        ) {
+            return Self::TargetSelection;
+        }
+        if state
+            .stack
+            .iter()
+            .any(|entry| entry.controller != ai_player)
+        {
+            return Self::StackResponse;
+        }
+        // CR 117.1 + CR 117.1b: timing decisions exist only while the AI holds priority.
+        let own_priority = matches!(
+            state.waiting_for,
+            WaitingFor::Priority { player } if player == ai_player
+        );
+        // CR 503.1 + CR 504.2: the active player receives priority in the upkeep and draw
+        // steps; CR 102.1: the active player is the player whose turn it is.
+        if own_priority
+            && state.active_player == ai_player
+            && state.stack.is_empty()
+            && matches!(state.phase, Phase::Upkeep | Phase::Draw)
+        {
+            return Self::OwnUpkeepOrDraw;
+        }
+        Self::Ordinary
+    }
+
+    /// Root weight on the tactical score in `continuation + score * weight` (and the rung-0
+    /// floor). Interior nodes use their own 0.05 in `planner::BeamContinuationPlanner`; the
+    /// heuristic-only branch is unweighted.
+    const fn tactical_weight(self) -> f64 {
+        match self {
+            Self::TargetSelection => 0.7,
+            Self::StackResponse | Self::OwnUpkeepOrDraw => 0.35,
+            Self::Ordinary => 0.1,
+        }
+    }
+}
+
+/// [`score_candidates_core`] over a decision state whose priority domain may
+/// already have been built for this decision, with the caller's knowledge of
+/// the root. Under [`RootReuse::FromChooser`] the contract's candidates stand
+/// in for a second contract issue, and a priority shortcut the chooser found
+/// absent is not run again; everything else is identical to the `Fresh` path.
 fn score_candidates_core_for_root(
-    state: &GameState,
-    ai_player: PlayerId,
+    domain: &RootPriorityDomain<'_>,
     config: &AiConfig,
     session: &Arc<AiSession>,
     deadline_override: Option<engine::util::Deadline>,
     root: RootReuse<'_>,
 ) -> Vec<(GameAction, f64)> {
+    let (state, ai_player) = (domain.state, domain.ai_player);
     // The scored/parallel-worker path bypasses `choose_action_with_session_inner`.
     // Preserve Resolve All's user-proposed shortcut semantics here as well: Grant
     // is chosen from the engine-issued consent domain without tactical scoring.
@@ -3556,7 +3892,7 @@ fn score_candidates_core_for_root(
             #[cfg(test)]
             ROOT_FAST_PRIORITY_RERUNS_IN_CORE.with(|count| count.set(count.get() + 1));
             if let Some(action) =
-                fast_priority_action(state, ai_player, config, session, root.issued_contract())
+                fast_priority_action(domain, config, session, root.issued_contract())
             {
                 return vec![(action, 1.0)];
             }
@@ -3656,35 +3992,7 @@ fn score_candidates_core_for_root(
     // Score actions via search or heuristics
     if config.search.enabled {
         let branching = config.search.max_branching as usize;
-
-        // Target selection decisions are dominated by the tactical policy
-        // (anti-self-harm) but benefit from limited search lookahead.
-        // The 0.7 weight ensures the tactical signal (anti-self-harm penalties
-        // of -50+) still dominates obvious cases while allowing 30% search
-        // influence for ambiguous multi-target decisions where the
-        // continuation matters (e.g., which creature to pump).
-        let is_target_selection = matches!(
-            state.waiting_for,
-            WaitingFor::TargetSelection { .. }
-                | WaitingFor::TriggerTargetSelection { .. }
-                | WaitingFor::MultiTargetSelection { .. }
-        );
-        // Stack response decisions (counter/interact with opponent's spell) need
-        // higher tactical weight because search can't see through the full
-        // cast-target-pay-resolve chain at typical depths. Policies like
-        // counterspell_score and stack_awareness guide these reactive decisions.
-        let is_stack_response = !state.stack.is_empty()
-            && state
-                .stack
-                .iter()
-                .any(|entry| entry.controller != ai_player);
-        let tactical_weight = if is_target_selection {
-            0.7
-        } else if is_stack_response {
-            0.35
-        } else {
-            0.1
-        };
+        let tactical_weight = RootDecisionContext::classify(state, ai_player).tactical_weight();
 
         // Score and rank directly from `gated`, which already carries penalty
         // alongside each candidate. Previously a `penalty_for` closure did an
@@ -8690,6 +8998,230 @@ mod tests {
             score_candidates_with_session(&state, PlayerId(0), &k3, &mutated_session),
             sampled,
             "attacker comparison reads public combat state, not a hidden opponent identity with unchanged counts"
+        );
+    }
+
+    /// Production declaration path: a lone 2/2 facing a 2-loyalty planeswalker
+    /// attacks the planeswalker, not the player (no race, no blockers).
+    #[test]
+    fn root_attack_declaration_kills_lone_planeswalker() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::standard(), 2, 42);
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let attacker = add_creature(&mut state, PlayerId(0), 2, 2);
+        let pw_card = CardId(state.next_object_id);
+        let pw = create_object(
+            &mut state,
+            pw_card,
+            PlayerId(1),
+            "Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&pw).unwrap();
+        obj.card_types.core_types.push(CoreType::Planeswalker);
+        obj.loyalty = Some(2);
+        obj.entered_battlefield_turn = Some(1);
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(17);
+        let session = AiSession::arc_from_game(&state);
+        let root = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+        assert!(
+            matches!(
+                root.as_slice(),
+                [(GameAction::DeclareAttackers { attacks, .. }, 1.0)]
+                    if attacks.iter().any(|(id, t)| *id == attacker
+                        && *t == engine::game::combat::AttackTarget::Planeswalker(pw))
+            ),
+            "got {root:?}"
+        );
+    }
+
+    fn add_planeswalker(state: &mut GameState, owner: PlayerId, loyalty: u32) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Planeswalker);
+        obj.loyalty = Some(loyalty);
+        obj.entered_battlefield_turn = Some(1);
+        id
+    }
+
+    /// Root-scored attack declaration for player 0 on a prepared board.
+    fn root_attacks(mut state: GameState) -> Vec<(ObjectId, engine::game::combat::AttackTarget)> {
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(17);
+        let session = AiSession::arc_from_game(&state);
+        let root = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+        match root.as_slice() {
+            [(GameAction::DeclareAttackers { attacks, .. }, _)] => attacks.clone(),
+            other => panic!("expected one DeclareAttackers candidate, got {other:?}"),
+        }
+    }
+
+    /// Production declaration path: an untapped blocker that stops the lone
+    /// attacker means the planeswalker cannot be killed, so the attacker is not
+    /// sent at it (CR 509.1b: the defender chooses blocks).
+    #[test]
+    fn root_attack_declaration_skips_planeswalker_behind_blocker() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::standard(), 2, 42);
+        let attacker = add_creature(&mut state, PlayerId(0), 2, 2);
+        add_creature(&mut state, PlayerId(1), 0, 4);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 2);
+        let attacks = root_attacks(state);
+        assert!(
+            attacks.iter().any(|(id, t)| *id == attacker
+                && *t == engine::game::combat::AttackTarget::Player(PlayerId(1))),
+            "attacker must still attack the player: {attacks:?}"
+        );
+        assert!(
+            attacks.iter().all(|(id, t)| {
+                *id != attacker || *t != engine::game::combat::AttackTarget::Planeswalker(pw)
+            }),
+            "got {attacks:?}"
+        );
+    }
+
+    /// Production declaration path: with two equal-loyalty planeswalkers the
+    /// one carrying loyalty abilities is attacked, in either insertion order.
+    #[test]
+    fn root_attack_declaration_picks_planeswalker_with_abilities_in_both_orders() {
+        use engine::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter,
+        };
+        for engine_first in [true, false] {
+            let mut state = GameState::new(engine::types::format::FormatConfig::standard(), 2, 42);
+            let attacker = add_creature(&mut state, PlayerId(0), 5, 5);
+            let (engine_pw, _bare) = if engine_first {
+                let e = add_planeswalker(&mut state, PlayerId(1), 3);
+                (e, add_planeswalker(&mut state, PlayerId(1), 3))
+            } else {
+                let b = add_planeswalker(&mut state, PlayerId(1), 3);
+                (add_planeswalker(&mut state, PlayerId(1), 3), b)
+            };
+            for amount in [1, -2] {
+                let mut ability = AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                );
+                ability.cost = Some(AbilityCost::Loyalty { amount });
+                std::sync::Arc::make_mut(&mut state.objects.get_mut(&engine_pw).unwrap().abilities)
+                    .push(ability);
+            }
+            let attacks = root_attacks(state);
+            assert!(
+                attacks.iter().any(|(id, t)| *id == attacker
+                    && *t == engine::game::combat::AttackTarget::Planeswalker(engine_pw)),
+                "engine_first={engine_first}: got {attacks:?}"
+            );
+        }
+    }
+
+    /// Production declaration path, mixed blocked/unblocked: a flyer the lone
+    /// blocker cannot stop kills the planeswalker, while the ground attacker the
+    /// blocker stops is not counted toward the kill.
+    #[test]
+    fn root_attack_declaration_counts_only_unblocked_attackers_toward_kill() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::standard(), 2, 42);
+        let flyer = add_creature(&mut state, PlayerId(0), 2, 2);
+        state
+            .objects
+            .get_mut(&flyer)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        let ground = add_creature(&mut state, PlayerId(0), 3, 3);
+        add_creature(&mut state, PlayerId(1), 0, 6);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 2);
+        let attacks = root_attacks(state);
+        assert!(
+            attacks.iter().any(|(id, t)| *id == flyer
+                && *t == engine::game::combat::AttackTarget::Planeswalker(pw)),
+            "got {attacks:?}"
+        );
+        assert!(
+            attacks.iter().any(|(id, t)| *id == ground
+                && *t == engine::game::combat::AttackTarget::Player(PlayerId(1))),
+            "blocked ground attacker must still attack the player: {attacks:?}"
+        );
+        assert!(
+            attacks.iter().all(|(id, t)| {
+                *id != ground || *t != engine::game::combat::AttackTarget::Planeswalker(pw)
+            }),
+            "blocked ground attacker must not be sent at the planeswalker: {attacks:?}"
+        );
+    }
+
+    /// Production declaration path: while in Race objective, a kill that empties
+    /// face damage from all damaging attackers is ineligible even if blocked
+    /// attackers also swing. Here the 2/2 flyer connects while the 3/3 ground
+    /// attacker is absorbed by a 0/6 blocker; diverting the flyer to the planeswalker
+    /// would leave zero damage connecting to the player being raced.
+    #[test]
+    fn root_attack_declaration_race_guard_keeps_connecting_attacker_on_player() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::standard(), 2, 42);
+        state.players[0].life = 12;
+        state.players[1].life = 20;
+        let flyer = add_creature(&mut state, PlayerId(0), 2, 2);
+        state
+            .objects
+            .get_mut(&flyer)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        let ground = add_creature(&mut state, PlayerId(0), 3, 3);
+        let blocker = add_creature(&mut state, PlayerId(1), 0, 6);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 2);
+
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        assert_eq!(
+            crate::combat_ai::determine_attack_objective(
+                &state,
+                PlayerId(0),
+                &[PlayerId(1)],
+                &[flyer, ground],
+                &[blocker],
+                &config.profile,
+            ),
+            crate::combat_ai::CombatObjective::Race,
+            "board fixture must actually select CombatObjective::Race"
+        );
+
+        let attacks = root_attacks(state);
+        assert!(
+            attacks.iter().any(|(id, t)| *id == flyer
+                && *t == engine::game::combat::AttackTarget::Player(PlayerId(1))),
+            "connecting flyer must stay on player while racing: {attacks:?}"
+        );
+        assert!(
+            attacks.iter().any(|(id, t)| *id == ground
+                && *t == engine::game::combat::AttackTarget::Player(PlayerId(1))),
+            "blocked ground attacker must still attack player: {attacks:?}"
+        );
+        assert!(
+            attacks.iter().all(|(id, t)| {
+                *id != flyer || *t != engine::game::combat::AttackTarget::Planeswalker(pw)
+            }),
+            "connecting flyer must not be diverted to planeswalker: {attacks:?}"
+        );
+        assert!(
+            attacks.iter().all(|(id, t)| {
+                *id != ground || *t != engine::game::combat::AttackTarget::Planeswalker(pw)
+            }),
+            "blocked ground attacker must not be sent at planeswalker: {attacks:?}"
         );
     }
 
@@ -18553,7 +19085,13 @@ one on the bottom of your library.";
         let config = root_reuse_config();
         let session = AiSession::arc_from_game(&state);
         assert!(
-            fast_priority_action(&state, PlayerId(0), &config, &session, None).is_none(),
+            fast_priority_action(
+                &RootPriorityDomain::new(&state, PlayerId(0)),
+                &config,
+                &session,
+                None
+            )
+            .is_none(),
             "fixture: the priority shortcut is absent, so the decision is scored"
         );
 
@@ -18581,7 +19119,12 @@ one on the bottom of your library.";
 
         FAST_PRIORITY_DOMAIN_VALIDATIONS.with(|count| count.set(0));
         assert_eq!(
-            fast_priority_action(&state, PlayerId(0), &config, &session, Some(&contract)),
+            fast_priority_action(
+                &RootPriorityDomain::new(&state, PlayerId(0)),
+                &config,
+                &session,
+                Some(&contract)
+            ),
             Some(GameAction::PassPriority)
         );
         assert_eq!(
@@ -18594,7 +19137,12 @@ one on the bottom of your library.";
         // from the validated list.
         FAST_PRIORITY_DOMAIN_VALIDATIONS.with(|count| count.set(0));
         assert_eq!(
-            fast_priority_action(&state, PlayerId(0), &config, &session, None),
+            fast_priority_action(
+                &RootPriorityDomain::new(&state, PlayerId(0)),
+                &config,
+                &session,
+                None
+            ),
             Some(GameAction::PassPriority)
         );
         assert_eq!(
@@ -18629,8 +19177,18 @@ one on the bottom of your library.";
 
         FAST_PRIORITY_DOMAIN_VALIDATIONS.with(|count| count.set(0));
         assert_eq!(
-            fast_priority_action(&state, PlayerId(0), &config, &session, Some(&contract)),
-            fast_priority_action(&state, PlayerId(0), &config, &session, None),
+            fast_priority_action(
+                &RootPriorityDomain::new(&state, PlayerId(0)),
+                &config,
+                &session,
+                Some(&contract)
+            ),
+            fast_priority_action(
+                &RootPriorityDomain::new(&state, PlayerId(0)),
+                &config,
+                &session,
+                None
+            ),
         );
         assert_eq!(
             FAST_PRIORITY_DOMAIN_VALIDATIONS.with(std::cell::Cell::get),
@@ -18742,10 +19300,20 @@ one on the bottom of your library.";
         let config = create_config(AiDifficulty::Medium, Platform::Native);
         let session = AiSession::arc_from_game(&state);
 
-        let answer = fast_priority_action(&state, p1, &config, &session, Some(&contract));
+        let answer = fast_priority_action(
+            &RootPriorityDomain::new(&state, p1),
+            &config,
+            &session,
+            Some(&contract),
+        );
         assert_eq!(
             answer,
-            fast_priority_action(&state, p1, &config, &session, None)
+            fast_priority_action(
+                &RootPriorityDomain::new(&state, p1),
+                &config,
+                &session,
+                None
+            )
         );
         assert_ne!(answer, Some(GameAction::PassPriority));
     }
@@ -18758,7 +19326,9 @@ one on the bottom of your library.";
         let state = make_state();
         let config = create_config(AiDifficulty::Medium, Platform::Native);
 
+        assert!(config.play_lookahead, "reach-guard: certification runs");
         FAST_PRIORITY_DOMAIN_VALIDATIONS.with(|count| count.set(0));
+        ROOT_DOMAIN_BUILDS.with(|count| count.set(0));
         assert_eq!(
             choose_action(
                 &state,
@@ -18771,6 +19341,11 @@ one on the bottom of your library.";
         assert_eq!(
             FAST_PRIORITY_DOMAIN_VALIDATIONS.with(std::cell::Cell::get),
             0
+        );
+        assert_eq!(
+            ROOT_DOMAIN_BUILDS.with(std::cell::Cell::get),
+            0,
+            "certification must not enumerate a forced pass's domain"
         );
     }
 
@@ -18785,8 +19360,7 @@ one on the bottom of your library.";
 
         FAST_PRIORITY_DOMAIN_VALIDATIONS.with(|count| count.set(0));
         let scored = score_candidates_core_for_root(
-            &state,
-            PlayerId(0),
+            &RootPriorityDomain::new(&state, PlayerId(0)),
             &config,
             &session,
             None,
@@ -18825,8 +19399,18 @@ one on the bottom of your library.";
 
         FAST_PRIORITY_DOMAIN_VALIDATIONS.with(|count| count.set(0));
         assert_eq!(
-            fast_priority_action(&state, PlayerId(0), &config, &session, Some(&contract)),
-            fast_priority_action(&state, PlayerId(0), &config, &session, None),
+            fast_priority_action(
+                &RootPriorityDomain::new(&state, PlayerId(0)),
+                &config,
+                &session,
+                Some(&contract)
+            ),
+            fast_priority_action(
+                &RootPriorityDomain::new(&state, PlayerId(0)),
+                &config,
+                &session,
+                None
+            ),
         );
         assert_eq!(
             FAST_PRIORITY_DOMAIN_VALIDATIONS.with(std::cell::Cell::get),
@@ -18864,8 +19448,7 @@ one on the bottom of your library.";
         let contract = AiDecisionContract::issue(&state, PlayerId(0));
         reset_root_witnesses();
         let recomputed = score_candidates_core_for_root(
-            &state,
-            PlayerId(0),
+            &RootPriorityDomain::new(&state, PlayerId(0)),
             &config,
             &session,
             None,
@@ -18891,11 +19474,11 @@ one on the bottom of your library.";
         ] {
             let score = |root: RootReuse<'_>| {
                 let session = AiSession::arc_from_game(&state);
-                score_bits(&score_candidates_for_root(
-                    &state,
-                    PlayerId(0),
+                score_bits(&score_candidates_uncertified(
+                    &RootPriorityDomain::new(&state, PlayerId(0)),
                     &config,
                     &session,
+                    ensemble_deadline(&config),
                     root,
                 ))
             };
@@ -18908,7 +19491,13 @@ one on the bottom of your library.";
 
             let session = AiSession::arc_from_game(&state);
             assert!(
-                fast_priority_action(&state, PlayerId(0), &config, &session, None).is_none(),
+                fast_priority_action(
+                    &RootPriorityDomain::new(&state, PlayerId(0)),
+                    &config,
+                    &session,
+                    None
+                )
+                .is_none(),
                 "{name}: the absent shortcut is what the chooser would report"
             );
             let contract = AiDecisionContract::issue(&state, PlayerId(0));
@@ -19112,5 +19701,374 @@ one on the bottom of your library.";
             "a revisited position must be scored again, not answered from a memo"
         );
         assert_eq!(tracked_trace, untracked_trace);
+    }
+
+    // ---- phase-rs/phase#10334: root tactical weight by decision context ----
+
+    /// Every root window `RootDecisionContext::classify` distinguishes, with the
+    /// weight each one feeds into the root score. AI = P0.
+    #[test]
+    fn root_decision_context_classifies_each_window() {
+        use RootDecisionContext::{Ordinary, OwnUpkeepOrDraw, StackResponse, TargetSelection};
+
+        struct Row {
+            label: &'static str,
+            waiting_for: WaitingFor,
+            phase: Phase,
+            active: PlayerId,
+            stack: Option<StackEntry>,
+            turn_decision_controller: Option<PlayerId>,
+            expected: RootDecisionContext,
+            weight: f64,
+        }
+        let priority = |player| WaitingFor::Priority { player };
+        let row = |label, waiting_for, phase, active, stack, expected, weight| Row {
+            label,
+            waiting_for,
+            phase,
+            active,
+            stack,
+            turn_decision_controller: None,
+            expected,
+            weight,
+        };
+        let rows = [
+            row(
+                "a: own upkeep",
+                priority(P0),
+                Phase::Upkeep,
+                P0,
+                None,
+                OwnUpkeepOrDraw,
+                0.35,
+            ),
+            row(
+                "b: own draw",
+                priority(P0),
+                Phase::Draw,
+                P0,
+                None,
+                OwnUpkeepOrDraw,
+                0.35,
+            ),
+            row(
+                "c: own main",
+                priority(P0),
+                Phase::PreCombatMain,
+                P0,
+                None,
+                Ordinary,
+                0.1,
+            ),
+            row(
+                "d: own end step (low_value_empty_stack_phase sibling)",
+                priority(P0),
+                Phase::End,
+                P0,
+                None,
+                Ordinary,
+                0.1,
+            ),
+            row(
+                "e: own untap (CR 502.4: no priority)",
+                priority(P0),
+                Phase::Untap,
+                P0,
+                None,
+                Ordinary,
+                0.1,
+            ),
+            row(
+                "f: opponent's upkeep",
+                priority(P0),
+                Phase::Upkeep,
+                P1,
+                None,
+                Ordinary,
+                0.1,
+            ),
+            row(
+                "g: opponent's draw",
+                priority(P0),
+                Phase::Draw,
+                P1,
+                None,
+                Ordinary,
+                0.1,
+            ),
+            row(
+                "h: own upkeep, opponent holds priority",
+                priority(P1),
+                Phase::Upkeep,
+                P0,
+                None,
+                Ordinary,
+                0.1,
+            ),
+            row(
+                "i: own upkeep, own-entries-only stack",
+                priority(P0),
+                Phase::Upkeep,
+                P0,
+                Some(no_op_stack_entry(10, P0)),
+                Ordinary,
+                0.1,
+            ),
+            row(
+                "j: own upkeep, foreign stack entry",
+                priority(P0),
+                Phase::Upkeep,
+                P0,
+                Some(no_op_stack_entry(10, P1)),
+                StackResponse,
+                0.35,
+            ),
+            row(
+                "k: own main, foreign stack entry",
+                priority(P0),
+                Phase::PreCombatMain,
+                P0,
+                Some(no_op_stack_entry(10, P1)),
+                StackResponse,
+                0.35,
+            ),
+            row(
+                "l: own upkeep, target selection",
+                WaitingFor::MultiTargetSelection {
+                    player: P0,
+                    legal_targets: vec![],
+                    min_targets: 1,
+                    max_targets: 1,
+                    pending_ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        ObjectId(10),
+                        P0,
+                    )),
+                },
+                Phase::Upkeep,
+                P0,
+                None,
+                TargetSelection,
+                0.7,
+            ),
+            row(
+                "m: own upkeep, non-priority prompt",
+                WaitingFor::OrderTriggers {
+                    player: P0,
+                    triggers: Vec::new(),
+                },
+                Phase::Upkeep,
+                P0,
+                None,
+                Ordinary,
+                0.1,
+            ),
+            // CR 723.1 + CR 723.5: P0 controls P1's turn and scores P1's upkeep
+            // root; the controller is neither the active player nor the priority seat.
+            Row {
+                turn_decision_controller: Some(P0),
+                ..row(
+                    "n: P0 controlling P1's upkeep",
+                    priority(P1),
+                    Phase::Upkeep,
+                    P1,
+                    None,
+                    Ordinary,
+                    0.1,
+                )
+            },
+        ];
+
+        for row in rows {
+            let mut state = make_state();
+            state.waiting_for = row.waiting_for;
+            state.phase = row.phase;
+            state.active_player = row.active;
+            state.turn_decision_controller = row.turn_decision_controller;
+            state.stack.extend(row.stack);
+            let context = RootDecisionContext::classify(&state, P0);
+            assert_eq!(context, row.expected, "{}", row.label);
+            assert_eq!(context.tactical_weight(), row.weight, "{}", row.label);
+        }
+    }
+
+    /// A board where P0 holds priority on an empty stack in `phase` of
+    /// `active`'s turn, with a Prodigal Sorcerer-style pinger that reaches
+    /// search (its damage effect is outside the low-value pass shortcut's safe
+    /// set) and an opposing 1/5 the ping cannot kill.
+    fn timing_window_board(phase: Phase, active: PlayerId) -> (GameState, ObjectId) {
+        let mut state = make_state();
+        state.phase = phase;
+        state.active_player = active;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        let pinger = add_creature(&mut state, P0, 1, 1);
+        let abilities = engine::parser::oracle::parse_oracle_text(
+            "{T}: This creature deals 1 damage to any target.",
+            "Prodigal Sorcerer",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        )
+        .abilities;
+        let obj = state.objects.get_mut(&pinger).unwrap();
+        obj.summoning_sick = false;
+        *Arc::make_mut(&mut obj.abilities) = abilities;
+        add_creature(&mut state, P1, 1, 5);
+        for player in &mut state.players {
+            player.life = 20;
+        }
+        (state, pinger)
+    }
+
+    /// Hard, measurement mode, rung 0 only (BeamOnly): each root candidate's
+    /// score is its quiesced child eval plus `tactical_score * weight`, so root
+    /// order cannot reallocate a node budget between paired runs.
+    fn hard_rung0_config() -> AiConfig {
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        config.search.planner_mode = PlannerMode::BeamOnly;
+        config.search.determinization_samples = 0;
+        assert!(config.search.enabled, "reach-guard: Hard searches");
+        config
+    }
+
+    fn score_with(
+        state: &GameState,
+        policies: Vec<Box<dyn TacticalPolicy>>,
+        config: &AiConfig,
+    ) -> Vec<(GameAction, f64)> {
+        let mut session = AiSession::from_game(state);
+        session.policy_registry_override = Some(Arc::new(PolicyRegistry::for_tests(policies)));
+        score_candidates_with_session(state, P0, config, &Arc::new(session))
+    }
+
+    fn ping_action(pinger: ObjectId) -> GameAction {
+        GameAction::ActivateAbility {
+            source_id: pinger,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        }
+    }
+
+    /// Root-only timing verdict on one source's activations: it cannot fire in
+    /// the continuation, so a paired run isolates the root weight.
+    struct RootTimingStub {
+        source: ObjectId,
+    }
+
+    const ROOT_TIMING_STUB_DELTA: f64 = 1.2;
+
+    impl TacticalPolicy for RootTimingStub {
+        fn id(&self) -> PolicyId {
+            PolicyId::ActivationPatience
+        }
+
+        fn decision_kinds(&self) -> &'static [DecisionKind] {
+            &[DecisionKind::ActivateAbility]
+        }
+
+        fn activation(
+            &self,
+            _: &crate::features::DeckFeatures,
+            _: &GameState,
+            _: PlayerId,
+        ) -> Option<f32> {
+            Some(1.0)
+        }
+
+        fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
+            if let GameAction::ActivateAbility { source_id, .. } = &ctx.candidate.action {
+                if ctx.search_depth == SearchDepth::Root && *source_id == self.source {
+                    return PolicyVerdict::preference(
+                        -ROOT_TIMING_STUB_DELTA,
+                        PolicyReason::new("root_timing_stub"),
+                    );
+                }
+            }
+            PolicyVerdict::neutral(PolicyReason::new("root_timing_stub"))
+        }
+    }
+
+    /// phase-rs/phase#10334: a root timing verdict in the AI's own Upkeep or
+    /// Draw step on an empty stack moves the root score at 0.35; main phase,
+    /// End step and the opponent's turn keep 0.1. Driven through
+    /// `score_candidates_with_session`.
+    #[test]
+    fn own_upkeep_and_draw_root_weights_a_timing_verdict_at_0_35_elsewhere_0_1() {
+        let cfg = hard_rung0_config();
+        let rows = [
+            (Phase::Upkeep, P0, 0.35),
+            (Phase::Draw, P0, 0.35),
+            (Phase::PreCombatMain, P0, 0.1),
+            (Phase::End, P0, 0.1),
+            (Phase::Upkeep, P1, 0.1),
+        ];
+        for (phase, active, expected_w) in rows {
+            let (state, pinger) = timing_window_board(phase, active);
+            let ping = ping_action(pinger);
+            let pass = GameAction::PassPriority;
+            let control = score_with(&state, vec![], &cfg);
+            let timed = score_with(
+                &state,
+                vec![Box::new(RootTimingStub { source: pinger })],
+                &cfg,
+            );
+            for scored in [&control, &timed] {
+                assert!(
+                    scored.iter().any(|(action, _)| action == &ping)
+                        && scored.iter().any(|(action, _)| action == &pass),
+                    "{phase:?}/active {active:?}: reach-guard: ping and pass both reach search, got {scored:?}"
+                );
+            }
+            assert_eq!(
+                score_of(&control, &pass),
+                score_of(&timed, &pass),
+                "{phase:?}/active {active:?}: pairing control: the stub must not move Pass"
+            );
+            let delta = score_of(&control, &ping) - score_of(&timed, &ping);
+            assert!(
+                (delta - ROOT_TIMING_STUB_DELTA * expected_w).abs() < 1e-9,
+                "{phase:?}/active {active:?}: root margin moved by {delta}, expected {ROOT_TIMING_STUB_DELTA}x{expected_w}"
+            );
+        }
+    }
+
+    /// phase-rs/phase#10334: the real `ActivationPatiencePolicy` verdict in the
+    /// AI's own Upkeep reaches the searched root score at 0.35 of its raw
+    /// (heuristic-branch, unweighted) contribution.
+    #[test]
+    fn own_upkeep_root_carries_activation_patience_at_0_35() {
+        use crate::policies::activation_patience::ActivationPatiencePolicy;
+        use crate::policies::registry::NUDGE_MAX;
+
+        let (state, pinger) = timing_window_board(Phase::Upkeep, P0);
+        let ping = ping_action(pinger);
+        let pass = GameAction::PassPriority;
+        let with = || -> Vec<Box<dyn TacticalPolicy>> { vec![Box::new(ActivationPatiencePolicy)] };
+
+        let mut heur = hard_rung0_config();
+        heur.search.enabled = false;
+        let heur_without = score_with(&state, vec![], &heur);
+        let heur_with = score_with(&state, with(), &heur);
+        let d_h = score_of(&heur_without, &ping) - score_of(&heur_with, &ping);
+        assert!(
+            d_h > NUDGE_MAX,
+            "reach-guard: activation patience must fire at preference band or higher, got {d_h}"
+        );
+
+        let cfg = hard_rung0_config();
+        let search_without = score_with(&state, vec![], &cfg);
+        let search_with = score_with(&state, with(), &cfg);
+        assert_eq!(
+            score_of(&search_without, &pass),
+            score_of(&search_with, &pass),
+            "pairing control: patience must not move Pass"
+        );
+        let d_s = score_of(&search_without, &ping) - score_of(&search_with, &ping);
+        assert!(
+            (d_s - 0.35 * d_h).abs() < 1e-9,
+            "own-upkeep root margin {d_s} must be 0.35 x raw patience {d_h}"
+        );
     }
 }

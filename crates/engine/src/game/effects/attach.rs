@@ -2,6 +2,7 @@ use crate::game::ability_utils::{resolve_multi_target_bounds, MultiTargetBounds}
 use crate::game::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
     AbilityCondition, AttachCardinality, AttachSelection, AttachmentReferent, Effect, EffectError,
@@ -300,7 +301,7 @@ fn resolve_bound_attachment_operation(
     if ability.optional_targeting
         && ability.attach_host_target().is_none()
         && !host_slot_announced(state, ability, target_filter)
-        && crate::game::ability_utils::attach_host_filter_needs_target_slot(target_filter)
+        && crate::types::ability::attach_host_filter_needs_target_slot(target_filter)
         && target_filter.denotes_battlefield_objects()
     {
         events.push(GameEvent::EffectResolved {
@@ -721,7 +722,7 @@ fn prompt_resolution_attachment_choice(
         if ability.target_choice_timing == TargetChoiceTiming::Resolution
             && ability.attach_host_target().is_none()
             && attachment_filter.is_context_ref()
-            && crate::game::ability_utils::attach_host_filter_needs_target_slot(host_filter)
+            && crate::types::ability::attach_host_filter_needs_target_slot(host_filter)
             && host_filter.denotes_battlefield_objects()
         {
             return prompt_described_host_choice(
@@ -3164,6 +3165,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],

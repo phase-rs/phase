@@ -18,11 +18,11 @@ const CATALOG: LlmProviderCatalogEntry[] = [{
 
 /**
  * End-to-end pick workflow for an LLM-driven draft, exercised through the real
- * store action rather than by calling the breaker helpers directly.
+ * store action rather than by calling the draft helpers directly.
  *
  * What this pins that a unit test cannot: that a status-bearing rejected
  * response actually reaches the engine, that the engine's per-seat verdict is
- * what drives the breaker, and that the pick still completes through the
+ * what is reported, and that the pick still completes through the
  * heuristic bots. The wiring between those three lives in `draftStore`, so it
  * is the thing under test.
  */
@@ -74,7 +74,6 @@ vi.mock("../../services/llm/llmClient", () => ({ executeLlmRequest: transport.ex
 vi.mock("../../services/setCatalog", () => ({ ensureSetCatalog: async () => ({}) }));
 vi.mock("../../game/debugLog", () => ({ debugLog: vi.fn() }));
 
-import { isLlmDraftDisabled, resetLlmDraftBreaker } from "../../services/llm/draftLlm";
 import { useDraftStore } from "../draftStore";
 import { useLlmStore } from "../llmStore";
 
@@ -151,7 +150,6 @@ beforeEach(async () => {
   vi.stubGlobal("fetch", vi.fn(async () => ({ text: async () => "database" })));
   persistence.inspectActiveQuickDraftLifecycle.mockResolvedValue(null);
   useDraftStore.getState().reset();
-  resetLlmDraftBreaker();
 
   useLlmStore.setState({ profiles: [], seatBindings: {}, draftEnabled: false, draftProfileId: null });
   useLlmStore.getState().addProfile({
@@ -168,7 +166,6 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-  resetLlmDraftBreaker();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -234,7 +231,7 @@ describe("LLM draft pick workflow", () => {
     expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalled();
   });
 
-  it("drives the engine, the breaker and the fallback from a rejected status-bearing response", async () => {
+  it("drives the engine and the fallback from a rejected status-bearing response", async () => {
     // The provider answers, but with a 401 — bytes that are NOT a usable pick.
     transport.executeLlmRequest.mockResolvedValue({
       status: 401,
@@ -256,11 +253,9 @@ describe("LLM draft pick workflow", () => {
     // 2. The pick still completed — the player is never blocked by a bad key.
     expect(useDraftStore.getState().view?.pool.map((c) => c.instance_id)).toEqual(["picked"]);
 
-    // 3. The engine's refusal — not the arrival of bytes — drove the breaker.
-    expect(isLlmDraftDisabled(PROFILE_ID)).toBe(false);
   });
 
-  it("trips the breaker after repeated engine refusals and then stops calling the provider", async () => {
+  it("keeps asking the provider after repeated engine refusals", async () => {
     transport.executeLlmRequest.mockResolvedValue({
       status: 429,
       body: JSON.stringify({ error: { message: "rate limited" } }),
@@ -270,21 +265,14 @@ describe("LLM draft pick workflow", () => {
       llmOutcomes: [{ seat: 1, used: false, error: "HTTP 429: rate limited" }],
     }));
 
-    for (let round = 0; round < 3; round += 1) {
-      wasm.submit_pick.mockReturnValue(view([card("picked")]));
+    // Well past the three picks at which the draft used to give up on the LLM.
+    for (let round = 0; round < 6; round += 1) {
       await useDraftStore.getState().pickCard(`pick-${round}`);
     }
 
-    expect(isLlmDraftDisabled(PROFILE_ID)).toBe(true);
-
-    // Once given up on, the provider is not called again and the pick goes
-    // through the ordinary engine-bot path.
-    const callsBefore = transport.executeLlmRequest.mock.calls.length;
-    wasm.submit_pick.mockReturnValue(view([card("picked"), card("after")]));
-    await useDraftStore.getState().pickCard("after");
-
-    expect(transport.executeLlmRequest.mock.calls.length).toBe(callsBefore);
-    expect(wasm.submit_pick).toHaveBeenCalledWith("after");
+    expect(transport.executeLlmRequest).toHaveBeenCalledTimes(6);
+    expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalledTimes(6);
+    expect(wasm.submit_pick).not.toHaveBeenCalled();
   });
 
   it("keeps the profile healthy when the engine uses the pick", async () => {
@@ -299,7 +287,6 @@ describe("LLM draft pick workflow", () => {
 
     await useDraftStore.getState().pickCard("picked");
 
-    expect(isLlmDraftDisabled(PROFILE_ID)).toBe(false);
     expect(wasm.submitPickWithLlmBotPicks).toHaveBeenCalledTimes(1);
     // The ordinary path is not also taken.
     expect(wasm.submit_pick).not.toHaveBeenCalled();
@@ -318,7 +305,6 @@ describe("LLM draft pick workflow", () => {
       expect(await useDraftStore.getState().pickCard(id)).toEqual({ status: "acknowledged" });
       expect(useDraftStore.getState().view?.pool.map((picked) => picked.instance_id))
         .toEqual(pool.map((picked) => picked.instance_id));
-      expect(isLlmDraftDisabled(PROFILE_ID)).toBe(false);
     }
 
     expect(wasm.buildLlmDraftPickRequests).toHaveBeenCalledTimes(4);
@@ -327,7 +313,7 @@ describe("LLM draft pick workflow", () => {
     expect(wasm.submit_pick).not.toHaveBeenCalled();
   });
 
-  it("resets consecutive refusals after a used pick and still calls the provider on round five", async () => {
+  it("keeps calling the provider on round five after refused and used picks", async () => {
     transport.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
     const pool: DraftCardInstance[] = [];
     const usedByRound = [false, false, true, false, false];
@@ -339,7 +325,6 @@ describe("LLM draft pick workflow", () => {
         view: view([...pool]), llmOutcomes: [{ seat: 1, used }],
       });
       expect(await useDraftStore.getState().pickCard(id)).toEqual({ status: "acknowledged" });
-      expect(isLlmDraftDisabled(PROFILE_ID)).toBe(false);
     }
 
     expect(wasm.buildLlmDraftPickRequests).toHaveBeenCalledTimes(5);

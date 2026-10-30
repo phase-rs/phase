@@ -13,11 +13,11 @@ use crate::types::ability::{
     ManaTargetRole, ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue,
     QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetFilter, ThisWayCause, UnloweredGuard,
+    TargetFilter, ThisWayCause, TokenAttackDestination, UnloweredGuard,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
-use crate::types::game_state::DistributionUnit;
+use crate::types::game_state_kinds::DistributionUnit;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::mana::ManaCost;
@@ -124,6 +124,9 @@ pub(crate) struct TokenDescription {
     /// attacking" continuation sentence, which is patched onto the preceding
     /// `Effect::Token` by the sequence-level continuation handler.
     pub(crate) enters_attacking: bool,
+    /// CR 508.4: the defender named by an inline "attacking that player".
+    #[serde(skip_serializing_if = "TokenAttackDestination::is_controller_chooses")]
+    pub(crate) attack_destination: TokenAttackDestination,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
@@ -613,7 +616,13 @@ pub(crate) enum ContinuationAst {
     /// `Effect::ChangeZone.enters_modified_if`. `None` = unconditional
     /// (Stangg / Shark Shredder). Only ChangeZone honors the gate;
     /// CopyTokenOf / Token always enter unconditionally.
-    EntersTappedAttacking { moved_filter: Option<TargetFilter> },
+    EntersTappedAttacking {
+        moved_filter: Option<TargetFilter>,
+        /// CR 508.4: the defender the sentence names ("... attacking that
+        /// player"); only Token and CopyTokenOf honor it.
+        #[serde(skip_serializing_if = "TokenAttackDestination::is_controller_chooses")]
+        destination: TokenAttackDestination,
+    },
     /// CR 122.6 + CR 614.12: an entry-counter rider — "The token enters with X
     /// +1/+1 counters on it, where X is …", or an unconditional "<it | that creature
     /// | each of them> enters with N additional <counter> counter(s) on it" after
@@ -1538,6 +1547,9 @@ pub(crate) enum SearchCreationImperativeAst {
         source_filter: Option<TargetFilter>,
         /// CR 508.4: Whether the copy token enters attacking.
         enters_attacking: bool,
+        /// CR 508.4: the destination the instruction names.
+        #[serde(skip_serializing_if = "TokenAttackDestination::is_controller_chooses")]
+        attack_destination: TokenAttackDestination,
         /// CR 110.5a: Status is not copied; this captures printed token-entry
         /// status from the creating effect.
         tapped: bool,

@@ -59,7 +59,7 @@ mod prelude {
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
     };
     pub(super) use crate::types::counter::{parse_counter_type, CounterMatch};
-    pub(super) use crate::types::events::ActivatedAbilityKind;
+    pub(super) use crate::types::event_kinds::ActivatedAbilityKind;
     pub(super) use crate::types::keywords::{Keyword, KeywordKind};
     pub(super) use crate::types::mana::{ManaColor, ManaCost, ManaType, SpecialAction};
     pub(super) use crate::types::phase::Phase;
@@ -216,7 +216,7 @@ pub(crate) fn parse_flashback_trailing_self_spell_cost_reduction(
     let mut def = static_helpers::try_parse_cost_modification(
         &text,
         &lower,
-        Some(crate::types::game_state::CastingVariant::Flashback),
+        Some(crate::types::game_state_kinds::CastingVariant::Flashback),
     )?;
     shared::populate_active_zones_from_condition(&mut def);
     Some(def)
@@ -260,6 +260,14 @@ pub(crate) fn lower_static_ir(ir: &StaticIr) -> crate::types::ability::StaticDef
 
 #[cfg(test)]
 mod tests;
+
+/// Test helpers shared by `tests.rs` and the tests relocated out of it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers {
+    /// The interposed player class Weathered Sentinels prints, shared by every
+    /// static-side row below so the three-production rows cannot drift from the card.
+    pub const P3_SEG: &str = "players who attacked you during their last turn";
+}
 
 #[cfg(test)]
 mod snapshot_tests;

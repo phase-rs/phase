@@ -1,4 +1,5 @@
 use crate::game::effects;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::layers::evaluate_layers;
 use crate::game::scenario::{GameScenario, P0, P1};
 use crate::game::stickers::{

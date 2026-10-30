@@ -33237,14 +33237,14 @@ set_code = "MDD"
 set_name = "Marvel: Darkhold Destiny"
 collector_number = "9"
 released_at = "2027-04-09"
-type_line = "Token Creature — Missing"
+type_line = "Token Creature — Mindless-One"
 
 [token.body]
 display_name = "Mindless-One"
 power = 3
 toughness = 1
 core_types = ["Creature"]
-subtypes = ["Missing"]
+subtypes = ["Mindless-One"]
 supertypes = []
 colors = ["Black"]
 keywords = []

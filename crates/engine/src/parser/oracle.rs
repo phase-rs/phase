@@ -10,20 +10,18 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
 
-use crate::game::effects::cast_from_zone;
-use crate::game::filter::{
-    filter_contains_filter_prop, retarget_chosen_card_type_to_creature_type,
-};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CardPlayMode,
-    CastManaSpentMetric, CastTimingPermission, CastingPermission, CastingRestriction, ChoiceType,
-    ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction, CounterSourceRider,
-    DamageRedirectTarget, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
-    GuardReading, ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr,
-    QuantityRef, ReplacementDefinition, ReplacementMode, SolveCondition, SpellCastingOption,
-    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
+    filter_contains_filter_prop, graveyard_destination_rider, is_graveyard_exile_rider_subability,
+    retarget_chosen_card_type_to_creature_type, AbilityCondition, AbilityCost, AbilityDefinition,
+    AbilityKind, AbilityTag, ActivationManaPaymentRestriction, ActivationRestriction,
+    AdditionalCost, CardPlayMode, CastManaSpentMetric, CastTimingPermission, CastingPermission,
+    CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification, ControllerRef,
+    CostReduction, CounterSourceRider, DamageRedirectTarget, DelayedTriggerCondition, Duration,
+    Effect, EffectScope, FilterProp, GuardReading, ManaProduction, ModalChoice, ParsedCondition,
+    PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard,
+    VoteSubject,
 };
 use crate::types::ability_visit::{
     granter_symbols, visit_ability_def_scoped, DefinitionNode, ResolutionScope,
@@ -2040,10 +2038,20 @@ fn characteristic_source_uses_filter_prop(
                 CardTypeSetSource::TurnJournal { filter, .. } => filter
                     .as_ref()
                     .is_some_and(|filter| target_filter_uses_filter_prop(filter, pred)),
+                CardTypeSetSource::TrackedSet { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(|filter| target_filter_uses_filter_prop(filter, pred)),
+                // CR 608.2c + CR 115.1: the prop query runs against the canonical
+                // slot filter via the single `targeted_objects_filter`
+                // authority — a targeted-objects population matches exactly
+                // when its slot filter does, never a hardcoded constant.
                 CardTypeSetSource::Zone { .. }
                 | CardTypeSetSource::ExiledBySource
-                | CardTypeSetSource::TrackedSet { .. }
                 | CardTypeSetSource::AnyOf { .. } => false,
+                CardTypeSetSource::TargetedObjects { slot } => target_filter_uses_filter_prop(
+                    &crate::types::ability::CardTypeSetSource::targeted_objects_filter(slot),
+                    pred,
+                ),
             };
         });
     // A truncated walk claims the prop: this feeds parse-time capability
@@ -9009,15 +9017,13 @@ fn guard_owner(body: &AbilityDefinition, parent: Option<&Effect>) -> bool {
     match parent {
         // O1a — CR 614.1a + CR 608.2n.
         Some(Effect::CastFromZone { .. }) => {
-            cast_from_zone::graveyard_destination_rider(&body.effect, body.condition.as_ref())
-                .is_some()
+            graveyard_destination_rider(&body.effect, body.condition.as_ref()).is_some()
         }
         // O1b — CR 608.2c + CR 614.1a. Exile only: the counter path's library/hand
         // redirect rides `countered_spell_zone`, never a sub-ability.
-        Some(Effect::Counter { .. }) => cast_from_zone::is_graveyard_exile_rider_subability(
-            &body.effect,
-            body.condition.as_ref(),
-        ),
+        Some(Effect::Counter { .. }) => {
+            is_graveyard_exile_rider_subability(&body.effect, body.condition.as_ref())
+        }
         // R-a. CR-neutral hygiene, not a rules claim: the parent already records this
         // clause's unsupportedness, and a second gap over the same defect double-counts it
         // — the same per-unit suppression rule `swallow_check` applies via its
@@ -10209,7 +10215,7 @@ fn unsupported_residual(gap: &str, description: &Option<String>) -> AbilityDefin
 fn demote_lifetimes_in_ability(def: &mut AbilityDefinition) {
     let refused = match &*def.effect {
         Effect::AddTargetReplacement { replacement, .. } => {
-            crate::game::effects::add_target_replacement::replacement_install_is_refused(
+            crate::types::ability::replacement_install_is_refused(
                 replacement,
                 def.duration.as_ref(),
             )
@@ -10223,7 +10229,7 @@ fn demote_lifetimes_in_ability(def: &mut AbilityDefinition) {
         Effect::PreventDamage {
             prevention_duration,
             ..
-        } => crate::game::effects::prevent_damage::prevention_shield_is_refused(
+        } => crate::types::ability::prevention_shield_is_refused(
             prevention_duration.as_ref(),
             def.duration.as_ref(),
         ),
@@ -10915,31 +10921,33 @@ fn demote_sweeps_in_ability(def: &mut AbilityDefinition) {
 ///    weaker rule is what previously missed four carriers. The regenerating
 ///    closure script lives in the plan's carrier-enumeration section and is
 ///    named again in the census's failure message.
-/// 4. Two carriers are deliberately NOT descended because they are
-///    PARSE-UNREACHABLE, not because they are description-free:
-///    `Effect::EpicCopy` (`ResolvedAbility.description`; synthesized at
-///    resolution by `game::triggers`) and `ContinuousModification::CopyValues`
+/// 4. One carrier is deliberately NOT descended because it is
+///    PARSE-UNREACHABLE, not because it is description-free:
+///    `ContinuousModification::CopyValues`
 ///    (`CopiableValues.abilities`/`trigger_definitions`/`replacement_definitions`
 ///    /`static_definitions`; constructed only at runtime by `types::layers`,
 ///    `game::derived_views`, `game::merge`). This is the one place the
 ///    superset claim in point 1 breaks (`ability_visit` DOES descend
 ///    `CopyValues`).
 /// 5. `AbilityCost` is an EXCLUDED AXIS, and structurally must be: blocking it
-///    is what keeps the closure at 27 carriers — unblocked, `TargetFilter` ->
-///    `TypedFilter` -> `FilterProp` -> `Keyword` -> `AbilityCost` makes 184 of
-///    `Effect`'s 232 variants "carriers", i.e. the cost axis is reachable from
-///    nearly every `TargetFilter` in the tree rather than being a sidecar on
-///    `def.cost`. Precedent: `ability_visit`'s module doc keeps the cost walk
+///    is what keeps the closure equal to the net's descend set (`RENDER_DESCEND`
+///    in `tests/integration/parser_oracle.rs` `render_net_effect_carrier_census`) — unblocked,
+///    `TargetFilter` -> `TypedFilter` -> `FilterProp` -> `Keyword` ->
+///    `AbilityCost` makes most of `Effect`'s variants "carriers" (184 of the 232
+///    it had when measured; `Effect` has 237 at base, pinned by
+///    `EFFECT_VARIANT_PIN` in the same census), i.e. the cost axis is
+///    reachable from nearly every `TargetFilter` in the tree rather than being
+///    a sidecar on `def.cost`. Precedent: `ability_visit`'s module doc keeps the cost walk
 ///    separate for the same type-level reason. MEASURED: a marker planted in
 ///    `AbilityCost::Unimplemented.description` survives this net; no production
 ///    parse path plants one.
 /// 6. [`render_effect_descriptions`] is NOT wildcard-free over `Effect`
 ///    (duplicating `ability_visit`'s ~206-name leaf list here would be the
-///    duplication CLAUDE.md forbids; `game::coverage::ability_tree_any` is the
+///    duplication CLAUDE.md forbids; `types::ability_visit::ability_tree_any` is the
 ///    in-tree precedent). Completeness therefore rests on named standing
 ///    instruments plus one contributor obligation, across THREE distinct drift
 ///    classes. (a) A new `Effect` VARIANT: caught by
-///    `tests::render_net_effect_carrier_census`. (b) A new VARIANT on an
+///    `parser_oracle::render_net_effect_carrier_census` (integration). (b) A new VARIANT on an
 ///    INTERMEDIATE PAYLOAD ENUM (`ManaSpellGrant`, `CastingPermission`,
 ///    `ExiledSpellRider`, `CounterSourceRider`, `VoteSubject`) — each has
 ///    exactly ONE description-reaching variant today, so a new sibling falls
@@ -10999,7 +11007,7 @@ fn render_granting_self_descriptions(parsed: &mut ParsedAbilities, card_name: &s
 ///
 /// The destructure is EXHAUSTIVE on purpose, in the spirit of traversal-contract
 /// point 7: `ModalChoice` is a struct reached by FIELD, not an `Effect` arm, so
-/// none of `tests::render_net_effect_carrier_census`' three pins can see a new
+/// none of `parser_oracle::render_net_effect_carrier_census`' three pins (integration) can see a new
 /// field on it. Naming every field makes that addition a COMPILE ERROR here —
 /// strictly stronger than a pin, and affordable at twelve fields.
 ///
@@ -13122,7 +13130,7 @@ pub(super) fn lower_unsupported_node(
 /// carrying one was reported clean. Because the visitor's match is exhaustive
 /// and wildcard-free, a newly added definition-carrying `Effect` variant is now
 /// a compile error there rather than a silent miss here.
-pub(super) fn has_unimplemented(def: &AbilityDefinition) -> bool {
+pub fn has_unimplemented(def: &AbilityDefinition) -> bool {
     any_unimplemented(def, &|_| true)
 }
 
@@ -13262,6 +13270,25 @@ pub(crate) fn normalize_activated_mana_instead_delta(def: &mut AbilityDefinition
 #[cfg(test)]
 #[path = "oracle_tests.rs"]
 mod tests;
+
+/// Test helpers shared by `oracle_tests.rs` and the tests relocated out of it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers {
+    use super::*;
+
+    pub fn parse(
+        text: &str,
+        name: &str,
+        kw: &[Keyword],
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> ParsedAbilities {
+        let keyword_names: Vec<String> = kw.iter().map(keyword_display_name).collect();
+        let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
+        parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
+    }
+}
 
 #[cfg(test)]
 #[path = "oracle_pipeline_snapshot_tests.rs"]
