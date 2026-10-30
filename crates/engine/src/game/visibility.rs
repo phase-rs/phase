@@ -13479,6 +13479,7 @@ mod tests {
             predicted_winner: None,
             certificate: crate::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
+                rising: vec![],
                 win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
                 win_kind_at: None,
                 mandatory: false,
@@ -13910,6 +13911,7 @@ mod tests {
                 predicted_winner: None,
                 count: IterationCount::Fixed(3),
                 unbounded: Vec::new(),
+                rising: Vec::new(),
                 win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
                 win_kind_at: None,
                 template: Some(declaration.clone()),

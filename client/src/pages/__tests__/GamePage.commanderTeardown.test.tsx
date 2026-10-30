@@ -392,6 +392,25 @@ describe("GamePage — draft-match teardown on Back to Draft", () => {
   });
 });
 
+describe("GamePage — game-over life summary", () => {
+  afterEach(() => {
+    MotionGlobalConfig.skipAnimations = false;
+    cleanup();
+  });
+
+  it("shows the engine's unbounded life as ∞ and the opponent's finite total", async () => {
+    MotionGlobalConfig.skipAnimations = true;
+    const gameState = gameStateFactory.withPlayers({ id: 0, life: 92 }, { id: 1, life: 20 }).build();
+    storeOverrides.gameState = { ...gameState, derived: { life_magnitude: { 0: "Unbounded" } } };
+    storeOverrides.waitingFor = { type: "GameOver", data: { winner: 0 } };
+    mockMultiplayerState.activePlayerId = 0;
+
+    renderGameOver();
+
+    expect(await screen.findByText(/You:/)).toHaveTextContent("You: ∞ / Opponent: 20");
+  });
+});
+
 function DraftReturnState() {
   const location = useLocation();
   const state = location.state as { draftId?: string; draftStartError?: string } | null;

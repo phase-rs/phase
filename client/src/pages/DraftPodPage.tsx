@@ -188,13 +188,7 @@ function PodSetup() {
     void refreshProcedure();
   }, [effectiveOffline, refreshProcedure, config.kind, config.tournamentFormat]);
   // Total over `DraftKind`: a future kind is a TS2741 at this literal rather than
-  // a blank line under the radios. Values are already-resolved strings, which is
-  // the right shape regardless -- but NOT for the reason this comment used to
-  // give. It claimed `react-i18next.d.ts` types `t`'s key so a `t(variable)`
-  // lookup would not typecheck. Measured: it does not. `t()` keys are unchecked
-  // in this client, which is why the interpolated lookups elsewhere on this page
-  // and in the draft components were replaced with total `Record`s rather than
-  // trusted.
+  // a blank line under the radios. Values are already-resolved strings.
   const kindDescription: Record<Exclude<DraftKind, "Quick">, string> = {
     Premier: t("podSetup.kindPremierDesc"),
     Traditional: t("podSetup.kindTraditionalDesc"),

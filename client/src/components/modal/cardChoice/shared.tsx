@@ -1,4 +1,4 @@
-import type { TFunction } from "i18next";
+import type { ParseKeys, TFunction } from "i18next";
 
 import type { GameObject, ObjectId, WaitingFor } from "../../../adapter/types";
 import { CancelButton } from "../ChoiceOverlay";
@@ -173,7 +173,7 @@ export const EFFECT_ZONE_VISUAL_CLASSES: Record<
   },
 };
 
-export const EFFECT_ZONE_ACTION_LABEL_KEYS: Record<EffectZoneMode, string> = {
+export const EFFECT_ZONE_ACTION_LABEL_KEYS = {
   Sacrifice: "cardChoice.effectZone.labelConfirm",
   Topdeck: "cardChoice.effectZone.labelTop",
   Hand: "cardChoice.effectZone.labelReturn",
@@ -183,9 +183,9 @@ export const EFFECT_ZONE_ACTION_LABEL_KEYS: Record<EffectZoneMode, string> = {
   Tap: "cardChoice.effectZone.labelConfirm",
   Attach: "cardChoice.effectZone.labelAttach",
   Cast: "cardChoice.effectZone.labelCast",
-};
+} as const satisfies Record<EffectZoneMode, ParseKeys<"game">>;
 
-export const EFFECT_ZONE_BADGE_KEYS: Record<EffectZoneMode, string> = {
+export const EFFECT_ZONE_BADGE_KEYS = {
   Sacrifice: "cardChoice.badges.sacrifice",
   Topdeck: "cardChoice.badges.put",
   Hand: "cardChoice.badges.return",
@@ -195,4 +195,4 @@ export const EFFECT_ZONE_BADGE_KEYS: Record<EffectZoneMode, string> = {
   Tap: "cardChoice.badges.tap",
   Attach: "cardChoice.badges.attach",
   Cast: "cardChoice.badges.cast",
-};
+} as const satisfies Record<EffectZoneMode, ParseKeys<"game">>;

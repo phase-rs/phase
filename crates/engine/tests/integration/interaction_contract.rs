@@ -3421,6 +3421,7 @@ fn loop_shortcut_zero_deliverable_capacity_is_rejected_not_clamped() {
             predicted_winner: Some(P0),
             certificate: engine::analysis::loop_check::LoopCertificate {
                 unbounded: Vec::new(),
+                rising: Vec::new(),
                 win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
                 win_kind_at: None,
                 mandatory: false,
@@ -3485,6 +3486,7 @@ fn loop_shortcut_narrowed_capacity_bounds_the_picker() {
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
             win_kind_at: None,
             mandatory: false,
@@ -3540,6 +3542,7 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
             win_kind_at: None,
             mandatory: false,
@@ -3629,6 +3632,7 @@ fn preview_offer_with_points(
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             mandatory: false,
@@ -4351,6 +4355,7 @@ fn respond_window_on(
             predicted_winner: Some(P0),
             count: count.clone(),
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             template: Some(DecisionTemplate {
@@ -6946,6 +6951,7 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             mandatory: false,
@@ -7183,6 +7189,7 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             mandatory: false,
@@ -8516,6 +8523,7 @@ fn stage_sequenced_offer(
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             mandatory: false,
@@ -11185,6 +11193,7 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
             predicted_winner: Some(P0),
             count: IterationCount::Fixed(3),
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             template: Some(declared),

@@ -39,7 +39,7 @@ function hasAmbiguousCost(shards: string[]): boolean {
 }
 
 export function ManaPaymentUI() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameState = useGameStore((s) => s.gameState);
   const dispatch = useGameStore((s) => s.dispatch);

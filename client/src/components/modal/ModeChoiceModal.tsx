@@ -7,7 +7,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { DialogShell } from "./DialogShell.tsx";
 
 export function ModeChoiceModal() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);

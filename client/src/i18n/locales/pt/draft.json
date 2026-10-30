@@ -166,6 +166,7 @@
     "startSealed": "Iniciar sealed"
   },
   "pack": {
+    "label": "Booster de draft",
     "confirmPick": "Confirmar Escolha",
     "selected": "Selecionada",
     "draftEffects": "Efeitos do draft:",

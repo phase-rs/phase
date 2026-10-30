@@ -3895,8 +3895,8 @@ export interface UnboundedFamilyView {
   state: FamilyCollapseState;
 }
 
-/** Mirrors `engine::game::derived_views::CounterMagnitude`. Absent on the wire ⇒ `"Finite"`. */
-export type CounterMagnitude = "Finite" | "Unbounded";
+/** Mirrors `engine::game::derived_views::DisplayMagnitude`. Absent on the wire ⇒ `"Finite"`. */
+export type DisplayMagnitude = "Finite" | "Unbounded";
 
 /**
  * One renderable counter row on one object. Mirrors
@@ -3912,7 +3912,7 @@ export type CounterMagnitude = "Finite" | "Unbounded";
 export interface CounterRowView {
   counter: CounterType;
   count: number;
-  magnitude?: CounterMagnitude;
+  magnitude?: DisplayMagnitude;
 }
 
 /**
@@ -4374,6 +4374,11 @@ export interface DerivedViews {
    * `engine::game::derived_views::DerivedViews::counter_display`.
    */
   counter_display?: Record<string, ObjectCounterDisplay>;
+  /**
+   * Per-player life-readout magnitude, keyed by player id; an absent seat is `"Finite"`. Read
+   * it through `lifeReadout`. Mirrors `engine::game::derived_views::DerivedViews::life_magnitude`.
+   */
+  life_magnitude?: Record<string, DisplayMagnitude>;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */

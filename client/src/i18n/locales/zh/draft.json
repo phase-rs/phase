@@ -285,6 +285,7 @@
     "confirmPick": "确认选牌",
     "currentPick": "第 {{pack}} 包 · 第 {{pick}} 选",
     "draftEffects": "轮抽效应：",
+    "label": "轮抽补充包",
     "pickToDeck": "将 {{card}} 选入套牌",
     "pickToSideboard": "将 {{card}} 选入备牌",
     "picking": "选牌中…",

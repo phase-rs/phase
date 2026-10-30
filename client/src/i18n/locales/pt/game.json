@@ -840,7 +840,7 @@
     "targetingLabel": "Mirando {{label}}",
     "titleTargets": "Alvos: {{targets}}",
     "titlePaid": "Pago: {{paid}}",
-    "titleContext": "Contexto: {{context}}",
+    "titleContext": "Contexto: {{items}}",
     "revealedCards": "Revelada: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} de mana",
@@ -2501,6 +2501,7 @@
     "triggerFallback": "Gatilho {{number}}"
   },
   "costReductionOrder": {
+    "announcedHybrids": "Pagamentos híbridos anunciados",
     "eyebrow": "Ordem das Reduções de Custo",
     "title": "Ordene Suas Reduções de Custo",
     "subtitle": "Estas reduções fixam um custo total diferente conforme a ordem em que você as aplica (CR 601.2f). O topo desta lista é aplicado primeiro.",

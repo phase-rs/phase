@@ -43,7 +43,7 @@ function coverageTone(pct: number): string {
 }
 
 export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalProps) {
-  const { t } = useTranslation("menu");
+  const { t } = useTranslation(["menu", "common"]);
   const { decks, status } = useDecks();
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>(ALL_TYPES);

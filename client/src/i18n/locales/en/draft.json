@@ -166,6 +166,7 @@
     "startSealed": "Start Sealed"
   },
   "pack": {
+    "label": "Draft pack",
     "confirmPick": "Confirm Pick",
     "selected": "Selected",
     "draftEffects": "Draft effects:",

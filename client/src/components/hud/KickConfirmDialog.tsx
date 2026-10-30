@@ -19,7 +19,7 @@ export function KickConfirmDialog({
   onConfirm,
   onCancel,
 }: KickConfirmDialogProps) {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   return (
     <AnimatePresence>
       {isOpen && (

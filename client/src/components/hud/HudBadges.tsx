@@ -1,3 +1,4 @@
+import type { ParseKeys, TFunction } from "i18next";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -508,7 +509,7 @@ const CONDITION_GLYPH: Record<PlayerConditionKind["type"], string> = {
   CastOnlyFromZones: "📤",
 };
 
-const CONDITION_LABEL_KEY: Record<PlayerConditionKind["type"], string> = {
+const CONDITION_LABEL_KEY = {
   CantWin: "badges.condCantWin",
   CantGainLife: "badges.condCantGainLife",
   CantLoseLife: "badges.condCantLoseLife",
@@ -516,7 +517,7 @@ const CONDITION_LABEL_KEY: Record<PlayerConditionKind["type"], string> = {
   CantCastSpells: "badges.condCantCast",
   CantActivateAbilities: "badges.condCantActivate",
   CastOnlyFromZones: "badges.condCastOnlyFromZones",
-};
+} as const satisfies Record<PlayerConditionKind["type"], ParseKeys<"game">>;
 
 /**
  * Renders tooltip content in the project's custom <GameplayTooltip> rather than
@@ -631,7 +632,7 @@ const UNBOUNDED_FAMILY_GLYPH: Record<UnboundedFamily, string> = {
 /** Exported for `LoopShortcutModal`'s preview lines: the engine's
  *  `InteractionShortcutPreviewFamily` is the same 11 literals as `UnboundedFamily`, so the preview
  *  reuses these labels instead of minting a parallel 11-key catalog in 7 locales. */
-export const UNBOUNDED_FAMILY_LABEL_KEY: Record<UnboundedFamily, string> = {
+export const UNBOUNDED_FAMILY_LABEL_KEY = {
   mana: "badges.unboundedMana",
   life: "badges.unboundedLife",
   damage: "badges.unboundedDamage",
@@ -643,7 +644,7 @@ export const UNBOUNDED_FAMILY_LABEL_KEY: Record<UnboundedFamily, string> = {
   combats: "badges.unboundedCombats",
   turns: "badges.unboundedTurns",
   triggers: "badges.unboundedTriggers",
-};
+} as const satisfies Record<UnboundedFamily, ParseKeys<"game">>;
 
 /** CR 732.2a: a badge for one unbounded-resource display family. */
 export function UnboundedBadge({
@@ -747,7 +748,7 @@ export function UnboundedBadge({
 
 /** One human-readable line for a pending next-spell modifier. */
 function describeNextSpellModifier(
-  t: ReturnType<typeof useTranslation>["t"],
+  t: TFunction<"game">,
   modifier: NextSpellModifier,
 ): string {
   switch (modifier.type) {

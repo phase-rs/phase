@@ -3017,17 +3017,30 @@ impl ResourceVector {
     /// drain loop would otherwise name no axis. Single authority shared by Engine
     /// A and Engine B.
     pub fn unbounded_axes_for(&self, controller: PlayerId) -> Vec<ResourceAxis> {
-        let mut out: Vec<ResourceAxis> = self
-            .unbounded_components()
+        self.signed_unbounded_axes_for(controller)
             .into_iter()
             .map(|(axis, _)| axis)
-            .collect();
+            .collect()
+    }
+
+    /// CR 732.2a: the subset of [`Self::unbounded_axes_for`] this delta drives up, from the same
+    /// derivation; the rest (an opponent's drained life, CR 704.5a; a shrinking library) falls.
+    pub fn rising_unbounded_axes_for(&self, controller: PlayerId) -> Vec<ResourceAxis> {
+        self.signed_unbounded_axes_for(controller)
+            .into_iter()
+            .filter(|&(_, n)| n > 0)
+            .map(|(axis, _)| axis)
+            .collect()
+    }
+
+    fn signed_unbounded_axes_for(&self, controller: PlayerId) -> Vec<(ResourceAxis, i64)> {
+        let mut out = self.unbounded_components();
         // CR 704.5a: an opponent's life driven *down* each cycle is the drain win.
         for (pid, &n) in &self.life {
             if n < 0 && *pid != controller {
                 let axis = ResourceAxis::Life(*pid);
-                if !out.contains(&axis) {
-                    out.push(axis);
+                if !out.iter().any(|(a, _)| *a == axis) {
+                    out.push((axis, n));
                 }
             }
         }
@@ -19986,6 +19999,7 @@ mod tests {
         // The ACTUAL wire payload: the `WaitingFor` variant that carries it.
         let cert = LoopCertificate {
             unbounded: vec![],
+            rising: vec![],
             win_kind: Some(WinKind::LethalDamage),
             win_kind_at: None,
             mandatory: false,
@@ -20168,6 +20182,7 @@ mod tests {
             predicted_winner: Some(PlayerId(0)),
             count: IterationCount::UntilLethal,
             unbounded: vec![],
+            rising: vec![],
             win_kind: Some(WinKind::LethalDamage),
             win_kind_at: None,
             template: None,

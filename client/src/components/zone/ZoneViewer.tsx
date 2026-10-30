@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useCallback, useMemo, useRef, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -38,17 +39,17 @@ interface ZoneViewerProps {
   returnFocusRef?: RefObject<HTMLElement | SVGElement | null>;
 }
 
-const ZONE_TITLE_KEYS: Record<string, string> = {
+const ZONE_TITLE_KEYS = {
   graveyard: "zone.graveyard",
   exile: "zone.exile",
   library: "zone.library",
-};
+} as const satisfies Record<ZoneViewerProps["zone"], ParseKeys<"game">>;
 
-const ZONE_TITLE_LOWER_KEYS: Record<string, string> = {
+const ZONE_TITLE_LOWER_KEYS = {
   graveyard: "zone.graveyardLower",
   exile: "zone.exileLower",
   library: "zone.libraryLower",
-};
+} as const satisfies Record<ZoneViewerProps["zone"], ParseKeys<"game">>;
 
 export function ZoneViewer({
   zone,

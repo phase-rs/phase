@@ -840,7 +840,7 @@
     "targetingLabel": "Bersaglia {{label}}",
     "titleTargets": "Bersagli: {{targets}}",
     "titlePaid": "Pagato: {{paid}}",
-    "titleContext": "Contesto: {{context}}",
+    "titleContext": "Contesto: {{items}}",
     "revealedCards": "Rivelata: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} mana",
@@ -2501,6 +2501,7 @@
     "triggerFallback": "Innesco {{number}}"
   },
   "costReductionOrder": {
+    "announcedHybrids": "Pagamenti ibridi annunciati",
     "eyebrow": "Ordine delle riduzioni di costo",
     "title": "Ordina le tue riduzioni di costo",
     "subtitle": "Queste riduzioni fissano un costo totale diverso a seconda dell'ordine in cui le applichi (CR 601.2f). La cima di questo elenco viene applicata per prima.",
