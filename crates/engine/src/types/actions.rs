@@ -1202,8 +1202,14 @@ pub enum DebugAction {
     /// Move an existing object to a different zone.
     /// When `simulate` is true, runs the full pipeline (triggers placed on stack, SBAs);
     /// a `Battlefield` destination also consults ETB replacements (enters tapped,
-    /// enters with counters, "as enters" choices), like `CreateCard { run_etb: true }`.
-    /// When false, raw placement with no replacements, triggers, or SBAs.
+    /// enters with counters, "as enters" choices), like `CreateCard { run_etb: true }`;
+    /// an object already on the battlefield, or a token that has left it (CR 111.8),
+    /// is not put onto the battlefield, so no replacement is consulted and nothing
+    /// enters; triggers and state-based actions are still checked, as for every
+    /// simulated move.
+    /// When false, raw placement with no replacements, triggers, or SBAs; a
+    /// planeswalker or battle still arrives with its printed loyalty / defense
+    /// counters (CR 306.5b + CR 306.5c, CR 310.4b + CR 310.4c).
     MoveToZone {
         object_id: ObjectId,
         to_zone: Zone,
@@ -1232,7 +1238,9 @@ pub enum DebugAction {
         attach_to: Option<AttachTarget>,
         /// When `true`, route a `Battlefield` spawn through the real ETB pipeline
         /// (replacements → ETB triggers → SBAs). When `false`, place the card raw
-        /// with no entry effects — mirrors `MoveToZone { simulate: false }`. Only
+        /// with no entry effects — mirrors `MoveToZone { simulate: false }`; a
+        /// planeswalker or battle still arrives with its printed loyalty / defense
+        /// counters (CR 306.5b + CR 306.5c, CR 310.4b + CR 310.4c). Only
         /// consulted for `zone == Battlefield`; ignored for other destinations.
         #[serde(default = "default_true")]
         run_etb: bool,

@@ -2432,8 +2432,11 @@ function MulliganPanel({
         transition={{ duration: 0.24, ease: "easeOut" }}
       />
       <div className="relative flex min-h-full items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
+        {/* Grow with the card row so a whole hand shows without scrolling when
+            the viewport fits it; never narrower than 72rem (or the viewport),
+            never wider than the viewport (the row scrolls again below that). */}
         <motion.div
-          className="card-scale-reset pointer-events-auto relative z-10 w-full max-w-6xl"
+          className="card-scale-reset pointer-events-auto relative z-10 w-fit min-w-[min(100%,72rem)] max-w-full"
           initial={{ opacity: 0, y: 18, scale: 0.98 }}
           animate={{ opacity: 1, scale: 1, ...slideTransform }}
           transition={{ duration: 0.24, ease: "easeOut" }}

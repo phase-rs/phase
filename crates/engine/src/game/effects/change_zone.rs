@@ -2902,6 +2902,7 @@ pub fn resolve_all(
         // CR 608.2c: drop the consumed set's member-cause provenance in lockstep.
         state.tracked_set_member_causes.remove(id);
         state.tracked_set_participants.remove(id);
+        state.tracked_set_member_origins.remove(id);
     }
 
     // CR 614.12a + CR 614.13a: when a mass entry brings in one or more devourers

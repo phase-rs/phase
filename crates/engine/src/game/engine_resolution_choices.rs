@@ -2523,6 +2523,10 @@ pub(super) fn handle_resolution_choice(
                 pending,
                 ignore_indices,
                 events,
+                // CR 608.2c: suspension-resume paths have no ability in
+                // scope; the parked frame's targets feed the modifier read
+                // through the parked-targets channel.
+                None,
             );
             // CR 608.2c: drain under the owner before restoring the caller.
             let result = next.map(|next| match next {
@@ -2722,6 +2726,9 @@ pub(super) fn handle_resolution_choice(
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                     delayed_trigger_receipts: Vec::new(),
+                    // CR 603.2h: Discover's indicated action is the discover — spent on
+                    // acceptance (Pantlaza ruling), never by this cast.
+                    indicated_action: None,
                 };
                 let result = match casting::initiate_cast_during_resolution(
                     state,
@@ -3110,6 +3117,9 @@ pub(super) fn handle_resolution_choice(
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                     delayed_trigger_receipts: Vec::new(),
+                    // CR 603.2h + CR 702.85a: a cascade cast is part of the cascade, never
+                    // a CR 603.2h indicated action of its own.
+                    indicated_action: None,
                 };
                 let result = match casting::initiate_cast_during_resolution(
                     state,
@@ -3192,6 +3202,9 @@ pub(super) fn handle_resolution_choice(
                             remaining_hits,
                         },
                     delayed_trigger_receipts: Vec::new(),
+                    // CR 603.2h + CR 702.60a: a ripple cast is part of the ripple, never a
+                    // CR 603.2h indicated action of its own.
+                    indicated_action: None,
                 };
                 let result = match casting::initiate_cast_during_resolution(
                     state,
@@ -9625,6 +9638,8 @@ pub(crate) fn abort_resolution_cast(
         reject_action,
         success_action,
         delayed_trigger_receipts: _,
+        // CR 733.1: an offered cast that is not cast was never taken — no CR 603.2h spend.
+        indicated_action: _,
     } = cleanup;
 
     match success_action {
@@ -11867,6 +11882,7 @@ mod tests {
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                     delayed_trigger_receipts: Vec::new(),
+                    indicated_action: None,
                 }),
                 duration: None,
                 graveyard_replacement: None,
@@ -15863,7 +15879,7 @@ mod random_result_resolution_context_tests {
                             let pending = exact.take_active_die_roll_frame().unwrap().unwrap();
                             let ignored = pending.forced_ignored.clone();
                             crate::game::triggers::push_resolving_trigger_context(&mut exact, pending.trigger_context.as_ref().unwrap());
-                            assert_eq!(effects::roll_die::resume_after_ignore(&mut exact, pending, ignored, &mut vec![]), Err(EffectError::ChainTooDeep));
+                            assert_eq!(effects::roll_die::resume_after_ignore(&mut exact, pending, ignored, &mut vec![], None), Err(EffectError::ChainTooDeep));
                         }
                         let mut events = vec![];
                         let result = resume(&mut state, boundary, &mut events);

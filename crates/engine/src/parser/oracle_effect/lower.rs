@@ -14365,6 +14365,7 @@ mod tests {
                     chooser: Chooser::Controller.into(),
                     candidate_source: ZoneChoiceCandidateSource::Legacy,
                     reciprocal_role: None,
+                    gather_role: None,
                     up_to: false,
                     constraint: None,
                     selection: CardSelectionMode::Chosen,
@@ -14461,6 +14462,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: CardSelectionMode::Chosen,
                 constraint: None,
@@ -14974,7 +14976,7 @@ mod tests {
     #[test]
     fn distribute_damage_power_equal_pattern() {
         // Gap 1: "damage equal to its power" — Pattern B where qty follows "damage equal to"
-        use crate::types::game_state::DistributionUnit;
+        use crate::types::game_state_kinds::DistributionUnit;
         let text = "deal damage equal to its power divided as you choose among any number of target creatures and/or players";
         let lower = text.to_lowercase();
         let clause = super::try_parse_distribute_damage(&lower, text).expect("Gap 1 should parse");
@@ -14989,7 +14991,7 @@ mod tests {
     #[test]
     fn distribute_counters_third_person_predicate() {
         // Gap 2: "distributes" (3rd-person) verb after subject stripping
-        use crate::types::game_state::DistributionUnit;
+        use crate::types::game_state_kinds::DistributionUnit;
         let text = "distributes 3 +1/+1 counters among any number of target creatures you control";
         let lower = text.to_lowercase();
         let clause =
@@ -15006,7 +15008,7 @@ mod tests {
     fn distribute_prevent_damage_fixed() {
         // Gap 3: fixed-N prevent-divide
         use crate::types::ability::PreventionAmount;
-        use crate::types::game_state::DistributionUnit;
+        use crate::types::game_state_kinds::DistributionUnit;
         let text =
             "prevent the next 5 damage divided as you choose among any number of target creatures";
         let clause = super::try_parse_prevent_distribute(text).expect("Gap 3 should parse");
@@ -16528,7 +16530,7 @@ mod where_x_tests {
     #[test]
     fn apply_where_x_to_target_constraint_binds_total_mana_value_cap() {
         use crate::types::ability::Comparator;
-        use crate::types::game_state::TargetSelectionConstraint;
+        use crate::types::game_state_kinds::TargetSelectionConstraint;
 
         let mut constraint = TargetSelectionConstraint::TotalManaValue {
             comparator: Comparator::LE,
@@ -16560,7 +16562,7 @@ mod where_x_tests {
     #[test]
     fn parse_total_mana_value_target_constraint_preserves_fixed_cap() {
         use crate::types::ability::Comparator;
-        use crate::types::game_state::TargetSelectionConstraint;
+        use crate::types::game_state_kinds::TargetSelectionConstraint;
 
         assert_eq!(
             super::parse_total_mana_value_target_constraint(
@@ -16588,7 +16590,7 @@ mod where_x_tests {
     /// Constraints without a quantity bound are left untouched.
     #[test]
     fn apply_where_x_to_target_constraint_leaves_non_quantity_unchanged() {
-        use crate::types::game_state::TargetSelectionConstraint;
+        use crate::types::game_state_kinds::TargetSelectionConstraint;
 
         let mut constraint = TargetSelectionConstraint::DifferentObjectControllers;
         let mut unbound = None;

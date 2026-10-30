@@ -333,6 +333,7 @@ fn parse_creatures_with_total_power_or_greater(input: &str) -> OracleResult<'_, 
                         CardTypeSetSource::TrackedSet {
                             set: TrackedAnaphorSource::TriggeringBatch,
                             caused_by: None,
+                            filter: None,
                         },
                     )
                     .expect("object property aggregate is valid"),
@@ -24890,6 +24891,7 @@ mod tests {
                             CardTypeSetSource::TrackedSet {
                                 set: TrackedAnaphorSource::TriggeringBatch,
                                 caused_by: None,
+                                filter: None,
                             },
                         )
                         .expect("valid aggregate"),
@@ -25273,7 +25275,7 @@ mod tests {
         assert_eq!(
             c,
             StaticCondition::SpellCastWithVariantThisTurn {
-                variant: crate::types::game_state::CastingVariant::Warp,
+                variant: crate::types::game_state_kinds::CastingVariant::Warp,
             }
         );
     }
@@ -25340,7 +25342,7 @@ mod tests {
                 assert_eq!(
                     conditions[1],
                     StaticCondition::SpellCastWithVariantThisTurn {
-                        variant: crate::types::game_state::CastingVariant::Warp,
+                        variant: crate::types::game_state_kinds::CastingVariant::Warp,
                     }
                 );
             }

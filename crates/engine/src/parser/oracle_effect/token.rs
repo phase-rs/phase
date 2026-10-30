@@ -1975,6 +1975,7 @@ mod tests {
                     crate::types::ability::CardTypeSetSource::TrackedSet {
                         set: crate::types::ability::TrackedAnaphorSource::TriggeringBatch,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .expect("statically valid property aggregate"),
@@ -2179,6 +2180,7 @@ mod tests {
                     crate::types::ability::CardTypeSetSource::TrackedSet {
                         set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .expect("statically valid property aggregate"),
@@ -2211,6 +2213,7 @@ mod tests {
                     source: crate::types::ability::CardTypeSetSource::TrackedSet {
                         set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                         caused_by: Some(crate::types::ability::ThisWayCause::Discarded),
+                        filter: None,
                     },
                 },
             },
@@ -4358,7 +4361,7 @@ mod tests {
         use crate::types::mana::ManaColor;
 
         assert!(
-            crate::game::token_presets::known_token_body_by_name("Bear").is_none(),
+            crate::types::token_presets::known_token_body_by_name("Bear").is_none(),
             "Bear has multiple catalog bodies and must not pick the first one"
         );
 

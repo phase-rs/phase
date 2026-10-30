@@ -1,10 +1,10 @@
 use crate::game::filter;
 use crate::game::layers::evaluate_condition;
-use crate::game::quantity::{quantity_expr_uses_recipient, resolve_quantity_with_targets};
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, Duration, Effect, EffectError, EffectKind, QuantityExpr,
-    QuantityRef, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
-    TypedFilter,
+    quantity_expr_uses_recipient, ContinuousModification, ControllerRef, Duration, Effect,
+    EffectError, EffectKind, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition,
+    StaticDefinition, TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{EndEffectPermission, GameState, TransientContinuousEffectBindings};
@@ -255,7 +255,9 @@ fn evaluate_static_condition_for_ability(
 /// pay-to-end permission into the state-level construction authority so the
 /// field rides INSIDE the journaled `ResolvedContinuousEffectCommand` rather
 /// than being post-stamped after the fact (which is what `duration_subject`
-/// does, and which a journal replay would lose).
+/// does, and which a journal replay would lose). It also passes the creating
+/// ability, so an `UntilEvent` deadline is bound to that ability's own source
+/// (`ResolvedAbility::effect_source_ref`).
 ///
 /// Every `register_transient_effect` branch installs through here, so a branch
 /// that forgets the permission is impossible to write: the parameter is
@@ -298,6 +300,9 @@ fn install_transient(
             granting_object: ability.context.granting_object,
             ..TransientContinuousEffectBindings::default()
         },
+        // CR 113.7a: an event deadline is bound to the creating ability's own
+        // source (or its last known information), not to whatever now holds the id.
+        Some(ability),
     )
 }
 
@@ -606,7 +611,7 @@ fn bind_transient_effect(
         && static_def
             .affected
             .as_ref()
-            .is_some_and(crate::game::ability_utils::filter_references_target_player);
+            .is_some_and(crate::types::ability::filter_references_target_player);
     let forwarded_parent_target = ability.context.forwarded_result_context.is_some()
         && application_filter.is_some_and(crate::types::ability::filter_refs_parent_target);
     let inherited_object_target = (static_def
@@ -664,7 +669,7 @@ fn bind_transient_effect(
         && !static_affected_references_target_player
     {
         let skip_companion_player_target = target_filter
-            .is_some_and(crate::game::ability_utils::filter_references_target_player)
+            .is_some_and(crate::types::ability::filter_references_target_player)
             && matches!(ability.targets.first(), Some(TargetRef::Player(_)));
         for bound_filter in transient_bound_filters(
             state,
