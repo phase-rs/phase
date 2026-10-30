@@ -2595,8 +2595,11 @@ pub fn assign_targets_in_chain(
 ///
 /// Applicability: the reconstruction reproduces the prompt's slot partition
 /// only if it runs on the same game state and the same unassigned ability tree
-/// that built the prompt's slots. Every production caller builds the slots
-/// from the current state immediately before assigning. The walk total is
+/// that built the prompt's slots. The prompted-completion callers build the
+/// slots from the current state before assigning; the known exception is
+/// `cap_distribution_target_slots`, which shortens the prompt after it is
+/// built, so a coin chain whose root divides damage or counters across several
+/// targets is refused here (no printed card has that shape). The walk total is
 /// checked against the selection length (`assign_selected_slots_in_chain`), so
 /// a differing rebuild is refused rather than assigned by a different
 /// announcement. Modal prompts come from `build_target_slots_labelled` (one
