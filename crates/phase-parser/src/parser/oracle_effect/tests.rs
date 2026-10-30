@@ -13361,6 +13361,76 @@ fn class_wide_graveyard_cast_grant_excludes_resolution_casts_and_riders() {
     }
 }
 
+/// CR 614.1a + CR 611.2a: Forgotten Cellar's "…, and if a card would be put into
+/// your graveyard from anywhere this turn, exile it instead" is its own
+/// replacement-creating instruction beside the grant: the chunker cuts it off
+/// after its "and " with its whole "if …, …" antecedent.
+#[test]
+fn and_joined_windowed_graveyard_redirect_is_its_own_chunk() {
+    let chunks = super::sequence::split_clause_sequence(
+        "you may cast spells from your graveyard this turn, and if a card would be put \
+         into your graveyard from anywhere this turn, exile it instead.",
+    );
+    let texts: Vec<_> = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec![
+            "you may cast spells from your graveyard this turn",
+            "if a card would be put into your graveyard from anywhere this turn, exile it instead",
+        ]
+    );
+}
+
+/// CR 601.3 + CR 614.1a: Forgotten Cellar's unlock trigger grants the casts and
+/// installs the graveyard redirect until end of turn. Its "may" is the later
+/// cast, so neither the trigger nor the resolving ability is optional: the
+/// redirect applies whatever its controller casts.
+#[test]
+fn forgotten_cellar_unlock_trigger_grants_casts_and_installs_the_redirect() {
+    let parsed = parse_oracle_text(
+        "When you unlock this door, you may cast spells from your graveyard this turn, and \
+         if a card would be put into your graveyard from anywhere this turn, exile it instead.",
+        "Forgotten Cellar",
+        &[],
+        &["Enchantment".to_string()],
+        &["Room".to_string()],
+    );
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("one trigger, got {:?}", parsed.triggers);
+    };
+    assert!(!trigger.optional);
+    let execute = trigger.execute.as_ref().expect("execute");
+    assert!(!execute.optional);
+    let (permission, window) = graveyard_grant_parts(&execute.effect)
+        .unwrap_or_else(|| panic!("a graveyard cast permission grant, got {execute:?}"));
+    assert_eq!(*window, Some(Duration::UntilEndOfTurn));
+    assert!(matches!(
+        permission.mode,
+        StaticMode::GraveyardCastPermission {
+            pool: GraveyardPermissionPool::OwnGraveyard,
+            graveyard_destination_replacement: None,
+            ..
+        }
+    ));
+    let redirect = execute.sub_ability.as_ref().expect("the redirect clause");
+    let Effect::AddTargetReplacement {
+        replacement,
+        target: TargetFilter::None,
+    } = redirect.effect.as_ref()
+    else {
+        panic!("a resolution-installed replacement, got {redirect:?}");
+    };
+    assert_eq!(replacement.destination_zone, Some(Zone::Graveyard));
+    assert!(replacement.expiry.is_some(), "\"this turn\" ends it");
+    let Some(TargetFilter::Typed(card)) = replacement.valid_card.as_ref() else {
+        panic!("typed card filter, got {:?}", replacement.valid_card);
+    };
+    assert!(card.properties.contains(&FilterProp::Owned {
+        controller: ControllerRef::You
+    }));
+    assert!(redirect.sub_ability.is_none());
+}
+
 /// B7-negative — with a typed-target leg as the NEAREST publisher, the
 /// singular recall keeps the chain tracked set (nearest-first scan does not
 /// see the earlier self-exile).

@@ -2194,6 +2194,15 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return None;
     }
 
+    // CR 614.1a + CR 611.2a: "<effect>, and if a card would be put into your
+    // graveyard from anywhere this turn, exile it instead" (Forgotten Cellar) —
+    // the conjunct is a replacement effect the resolution creates, its own
+    // instruction. Cut it off after its "and " so the chunk opens with its "if"
+    // antecedent and keeps that antecedent's comma.
+    if starts_windowed_graveyard_redirect_conjunct(&trimmed_lower) {
+        return Some((ClauseBoundary::Comma, whitespace_len + "and ".len()));
+    }
+
     // CR 205.2a + CR 205.3a + CR 608.2c: keep an "exile all/each A, all B, and
     // all C" union intact — a comma before a "[all|each] <type>" continuation is
     // a union delimiter, not a clause boundary (Everything Comes to Dust). Legs
@@ -2437,6 +2446,21 @@ fn starts_perpetual_subject_conjunct(trimmed_lower: &str) -> bool {
 
 /// Phrase shared by every "if {C} was spent to cast <it>" gate.
 const MANA_SPENT_TO_CAST: &str = "was spent to cast ";
+
+/// CR 614.1a + CR 611.2a: Does the lowercase text after a comma open an
+/// "and"-joined windowed graveyard redirect that runs to the end of its
+/// sentence? `parse_windowed_graveyard_redirect_install` is the single
+/// authority for that grammar.
+fn starts_windowed_graveyard_redirect_conjunct(remainder_lower: &str) -> bool {
+    tag::<_, _, OracleError<'_>>("and ")
+        .parse(remainder_lower)
+        .is_ok_and(|(conjunct, _)| {
+            crate::parser::oracle_replacement::parse_windowed_graveyard_redirect_install(
+                before_sentence_boundary(conjunct),
+            )
+            .is_some()
+        })
+}
 
 /// The text up to the first sentence boundary (". "), or all of it when the text
 /// holds a single sentence.
