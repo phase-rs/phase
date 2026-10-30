@@ -7,6 +7,7 @@ use std::io::Read;
 use engine::ai_support::legal_actions;
 use engine::game::effects::change_zone::resolve_all;
 use engine::game::engine::apply_as_current;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::types::ability::{
     ControllerRef, Effect, LibraryPosition, ResolvedAbility, TargetFilter, TypedFilter,
 };

@@ -1,4 +1,4 @@
-import type { TFunction } from "i18next";
+import type { ParseKeys, TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import type {
@@ -20,39 +20,39 @@ type CastingVariantChoice = Extract<
   { type: "CastingVariantChoice" }
 >;
 
-// Maps each engine `CastingVariant` discriminant to its i18n key leaf. Variants
+// Maps each engine `CastingVariant` discriminant to its `castingVariant.*` key. Variants
 // not listed fall back to the parameterized `variantFallback`.
-const VARIANT_KEYS: Partial<Record<CastingVariant["type"], string>> = {
-  Normal: "variantNormal",
-  Adventure: "variantAdventure",
-  Omen: "variantOmen",
-  Warp: "variantWarp",
-  Escape: "variantEscape",
-  Retrace: "variantRetrace",
-  Harmonize: "variantHarmonize",
-  Mayhem: "variantMayhem",
-  Flashback: "variantFlashback",
-  Aftermath: "variantAftermath",
-  GraveyardPermission: "variantGraveyardPermission",
-  HandPermission: "variantHandPermission",
-  Miracle: "variantMiracle",
-  Madness: "variantMadness",
-  Evoke: "variantEvoke",
-  Suspend: "variantSuspend",
-  Plot: "variantPlot",
-  Foretell: "variantForetell",
-  Overload: "variantOverload",
-  Bestow: "variantBestow",
-  Blitz: "variantBlitz",
-  Mutate: "variantMutate",
-  Awaken: "variantAwaken",
-  Cleave: "variantCleave",
-  Impending: "variantImpending",
-  MoreThanMeetsTheEye: "variantMoreThanMeetsTheEye",
-  Prototype: "variantPrototype",
-  FaceDown: "variantFaceDown",
-  Freerunning: "variantFreerunning",
-  Fuse: "variantFuse",
+const VARIANT_KEYS: Partial<Record<CastingVariant["type"], ParseKeys<"game">>> = {
+  Normal: "castingVariant.variantNormal",
+  Adventure: "castingVariant.variantAdventure",
+  Omen: "castingVariant.variantOmen",
+  Warp: "castingVariant.variantWarp",
+  Escape: "castingVariant.variantEscape",
+  Retrace: "castingVariant.variantRetrace",
+  Harmonize: "castingVariant.variantHarmonize",
+  Mayhem: "castingVariant.variantMayhem",
+  Flashback: "castingVariant.variantFlashback",
+  Aftermath: "castingVariant.variantAftermath",
+  GraveyardPermission: "castingVariant.variantGraveyardPermission",
+  HandPermission: "castingVariant.variantHandPermission",
+  Miracle: "castingVariant.variantMiracle",
+  Madness: "castingVariant.variantMadness",
+  Evoke: "castingVariant.variantEvoke",
+  Suspend: "castingVariant.variantSuspend",
+  Plot: "castingVariant.variantPlot",
+  Foretell: "castingVariant.variantForetell",
+  Overload: "castingVariant.variantOverload",
+  Bestow: "castingVariant.variantBestow",
+  Blitz: "castingVariant.variantBlitz",
+  Mutate: "castingVariant.variantMutate",
+  Awaken: "castingVariant.variantAwaken",
+  Cleave: "castingVariant.variantCleave",
+  Impending: "castingVariant.variantImpending",
+  MoreThanMeetsTheEye: "castingVariant.variantMoreThanMeetsTheEye",
+  Prototype: "castingVariant.variantPrototype",
+  FaceDown: "castingVariant.variantFaceDown",
+  Freerunning: "castingVariant.variantFreerunning",
+  Fuse: "castingVariant.variantFuse",
 };
 
 export function CastingVariantModal() {
@@ -138,7 +138,7 @@ function labelForFace(face: CastingVariantFace, obj: { name: string; back_face?:
 function labelForVariant(variant: CastingVariant, t: TFunction<"game">): string {
   const key = VARIANT_KEYS[variant.type];
   return key
-    ? t(`castingVariant.${key}`)
+    ? t(key)
     : t("castingVariant.variantFallback", { type: variant.type });
 }
 

@@ -412,11 +412,24 @@ pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
     enter_phase(state, Phase::Cleanup, events, None);
 }
 
+/// CR 506.4 + CR 511.3 + CR 724.1d + CR 724.2d: remove every object from combat,
+/// invalidating layers (CR 611.3a) only for a combat that differs from the
+/// untouched default BeginCombat installs.
+pub(crate) fn remove_all_from_combat(state: &mut GameState) {
+    if state
+        .combat
+        .take()
+        .is_some_and(|combat| combat != combat::CombatState::default())
+    {
+        state.layers_dirty.mark_full();
+    }
+}
+
 /// CR 511.2 + CR 511.3: End Combat effects expire and combat objects leave
 /// combat only after the step's priority window has ended. Explicit effects
 /// that skip directly out of combat use the same teardown authority.
 fn complete_end_combat_teardown(state: &mut GameState) {
-    state.combat = None;
+    remove_all_from_combat(state);
     state.current_combat_attacker_restriction = None;
     state.current_combat_attacker_restriction_source = None;
     super::layers::prune_end_of_combat_effects(state);
@@ -1689,6 +1702,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.triggers_fired_this_turn.clear();
     state.trigger_fire_counts_this_turn.clear();
     state.triggers_fired_this_turn_per_opponent.clear();
+    // CR 603.2h: "that turn" — indicated actions reset each turn.
+    state.trigger_indicated_actions_this_turn.clear();
     state.activated_abilities_this_turn.clear();
     // CR 602.5b: "Activate only once each turn" crew restriction resets each turn.
     state.crew_activated_this_turn.clear();
@@ -3448,6 +3463,10 @@ fn should_skip_step_now(state: &mut GameState, step: Phase) -> bool {
 /// CR 500.1 + CR 500.8 + CR 500.9 + CR 500.11: record that `step` begins, unless
 /// it is skipped as it would begin. The only writer of `steps_started_this_turn`.
 pub(super) fn record_step_begin(state: &mut GameState, step: Phase) {
+    // CR 611.3a: a layer result that read the step in progress applies to the new step at once.
+    if state.layers_read_current_step {
+        state.layers_dirty.mark_full();
+    }
     if step_skip(state, step).is_none() {
         state.steps_started_this_turn.record(step);
     }
@@ -5502,7 +5521,7 @@ card into your hand at the beginning of your next end step.";
         // P0 is debug-toggled (SetInfiniteMana marks `debug_infinite_mana`) AND holds the
         // recorded Mana axes — the multi-authority case: the debug marker dominates.
         state.debug_infinite_mana.insert(p0);
-        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES);
+        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES, &INFINITE_MANA_AXES);
         state.players[0].mana_pool.add(ManaUnit::new(
             ManaType::Blue,
             ObjectId(11),
@@ -6559,6 +6578,35 @@ card into your hand at the beginning of your next end step.";
         assert!(
             state.cards_exiled_with_source_this_turn.is_empty(),
             "per-turn exiled-with-source pool must reset at turn start"
+        );
+    }
+
+    /// CR 603.2h: "has not yet taken the indicated action that turn" — the
+    /// indicated-action facts reset at turn start. Driven through
+    /// `start_next_turn` so dropping the reset line fails here.
+    #[test]
+    fn start_next_turn_resets_trigger_indicated_actions() {
+        let mut state = setup();
+        let key = crate::types::ability::TriggerDefinitionRef {
+            source: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(42), 0),
+            occurrence: crate::types::ability::TriggerDefinitionOccurrenceRef::Printed {
+                base_set: crate::types::ability::TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 0,
+            },
+        };
+        state
+            .trigger_indicated_actions_this_turn
+            .insert((key, PlayerId(0)));
+        assert!(
+            !state.trigger_indicated_actions_this_turn.is_empty(),
+            "precondition"
+        );
+
+        start_next_turn(&mut state, &mut Vec::new());
+
+        assert!(
+            state.trigger_indicated_actions_this_turn.is_empty(),
+            "CR 603.2h indicated actions must reset at turn start"
         );
     }
 
@@ -14177,6 +14225,60 @@ mod object_sweep_sharing_tests {
         push_live(&mut state, ids[0], expiring(RestrictionExpiry::EndOfCombat));
         complete_end_combat_teardown(&mut state);
         assert!(state.objects[&ids[0]].replacement_definitions.is_empty());
+    }
+
+    /// CR 508.4 + CR 509.4 + CR 506.4 + CR 511.3 + CR 611.3a: a combat that recorded
+    /// membership (entered attacking, a placed blocker, or a removed attacker)
+    /// invalidates layers when it ends.
+    #[test]
+    fn end_combat_teardown_invalidates_layers_for_recorded_combat() {
+        type Shape = fn(&mut GameState, ObjectId, ObjectId);
+        let shapes: [(&str, Shape); 3] = [
+            ("entered attacking", |_, _, _| {}),
+            (
+                "placed blocking, attacker removed",
+                |state, attacker, blocker| {
+                    assert!(combat::place_blocking(state, blocker, attacker));
+                    assert!(combat::prune_object_from_combat(state, attacker));
+                },
+            ),
+            ("attacker removed", |state, attacker, _| {
+                assert!(combat::prune_object_from_combat(state, attacker));
+            }),
+        ];
+        for (name, shape) in shapes {
+            let (mut state, ids) = battlefield_fixture();
+            state.combat = Some(combat::CombatState::default());
+            combat::enter_attacking_at_target(
+                &mut state,
+                ids[0],
+                P1,
+                combat::AttackTarget::Player(P1),
+            );
+            shape(&mut state, ids[0], ids[1]);
+            state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+            complete_end_combat_teardown(&mut state);
+            assert!(state.combat.is_none(), "{name}");
+            assert_eq!(
+                state.layers_dirty,
+                crate::types::game_state::LayersDirty::Full,
+                "{name}"
+            );
+        }
+    }
+
+    /// CR 611.3a: ending the untouched combat BeginCombat installs leaves the layer cache clean.
+    #[test]
+    fn end_combat_teardown_keeps_layers_clean_for_untouched_combat() {
+        let (mut state, _) = battlefield_fixture();
+        state.combat = Some(combat::CombatState::default());
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+        complete_end_combat_teardown(&mut state);
+        assert!(state.combat.is_none());
+        assert_eq!(
+            state.layers_dirty,
+            crate::types::game_state::LayersDirty::Clean
+        );
     }
 
     /// Call-site pin (S7): the start of a player's turn still expires live

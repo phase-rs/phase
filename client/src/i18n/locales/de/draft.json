@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Bot-Schwierigkeit",
+    "pickEnhancements": {
+      "label": "Integrierte KI mit Draft-Pick-Verbesserungen verwenden",
+      "hint": "Bots folgen für Formate mit Leitfaden einer geschriebenen Pick-Reihenfolge (derzeit Mirrodin, Darksteel und Fifth Dawn). Gilt ab mittlerem Schwierigkeitsgrad."
+    },
     "difficultyLevels": {
       "VeryEasy": "Sehr leicht",
       "Easy": "Leicht",
@@ -132,6 +136,12 @@
     "packOrder": "Booster-Reihenfolge",
     "candidateSets": "Kandidaten-Sets",
     "clearPacks": "Leeren",
+    "randomSet": "Zufälliges Set",
+    "randomSetHint": "Alle Booster mit einem zufällig gewählten Set füllen",
+    "randomPacks": "Zufällige Booster",
+    "randomPacksHint": "Jedem Booster ein eigenes, zufällig gewähltes Set geben",
+    "randomCandidates": "Zufällige Sets",
+    "randomCandidatesHint": "Verschiedene Kandidaten-Sets zufällig wählen",
     "emptyPacks_one": "Wähle ein Set für jeden Booster. Ein Draft öffnet standardmäßig {{count}} Booster — wiederhole ein Set oder mische mehrere.",
     "emptyPacks_other": "Wähle ein Set für jeden Booster. Ein Draft öffnet standardmäßig {{count}} Booster — wiederhole ein Set oder mische mehrere für einen Block-Draft.",
     "emptyPacksFixed_one": "Sealed öffnet genau {{count}} Booster. Wähle ein Set dafür.",
@@ -156,6 +166,7 @@
     "startSealed": "Sealed starten"
   },
   "pack": {
+    "label": "Draft-Booster",
     "confirmPick": "Pick bestätigen",
     "selected": "Ausgewählt",
     "draftEffects": "Draft-Effekte:",

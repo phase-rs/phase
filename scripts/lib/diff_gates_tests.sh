@@ -135,6 +135,30 @@ expect_rc 'parser: a line moved out of an excluded *_tests.rs file fails' 1
 expect_listed 'parser: the line moved out of the excluded file is listed' "  crates/engine/src/parser/clause.rs:
     $P_FROZEN"
 
+# The AST-layer grammar module is in the gate's scope: a line moved into it from
+# the parser is a move, a line planted in it is listed, and other types/ files
+# stay outside the gate's view.
+parser_fixture
+put crates/engine/src/parser/clause.rs 'use super::*;' "$P_FROZEN" 'fn other() {}'
+commit_base
+put crates/engine/src/parser/clause.rs 'use super::*;' 'fn other() {}'
+put crates/engine/src/types/text_grammar.rs "$P_FROZEN"
+commit 'move into the grammar module'
+run_gate
+expect_rc 'parser: a line moved into types/text_grammar.rs passes' 0
+expect_out 'parser: types/text_grammar.rs was scanned' 'Gate A: scanned 2 file(s)'
+printf '%s\n' "$P_PLANTED" >> "$FIXTURE/crates/engine/src/types/text_grammar.rs"
+commit planted
+run_gate
+expect_rc 'parser: a line planted in types/text_grammar.rs fails' 1
+expect_listed 'parser: only the line planted in the grammar module is listed' "  crates/engine/src/types/text_grammar.rs:
+    $P_PLANTED"
+put crates/engine/src/types/other.rs "$P_PLANTED"
+commit 'plant outside the grammar module'
+run_gate
+expect_listed 'parser: a line planted in another types/ file is not listed' "  crates/engine/src/types/text_grammar.rs:
+    $P_PLANTED"
+
 # --- check-engine-authorities.sh: family (A) -------------------------------
 # Sections (B0)-(D) are full-tree censuses of the real engine. Here they are
 # stubs that pass, so section (A), the diff-based one, decides the exit.

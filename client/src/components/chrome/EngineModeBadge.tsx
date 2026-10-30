@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import { canAttemptNativeEngine } from "../../services/nativeEngine";
@@ -14,7 +15,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore";
  * still read as unavailable — a future reason silently downgraded to "never
  * asked" would be the same false claim in the opposite direction.
  */
-function inBrowserTooltipKey(fallbackReason: string | null): string {
+function inBrowserTooltipKey(fallbackReason: string | null): ParseKeys<"common"> {
   switch (fallbackReason) {
     case null:
       return "engineBadge.notAttemptedTooltip";

@@ -7,18 +7,19 @@ use crate::game::game_object::{AttachTarget, DisplayIdentity};
 use super::counter::CounterType;
 
 use super::ability::{
-    ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile,
-    StaticDefinition, TargetRef,
+    ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile, TargetRef,
 };
-use super::card_type::{CoreType, Supertype};
 use super::events::EventObjectSnapshot;
 use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::keywords::Keyword;
-use super::mana::{ManaColor, ManaType, UnitDecision};
+use super::mana::{ManaType, UnitDecision};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::zones::Zone;
 
+pub use super::token_spec::{
+    TokenAttackRequest, TokenCharacteristics, TokenHostRequest, TokenSpec,
+};
 pub use super::zones::{ChainReferentIntent, EtbTapState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -322,144 +323,6 @@ impl CounterPlacement {
     }
 }
 
-/// CR 111.1 + CR 111.4 + CR 111.10: The body characteristics of a token —
-/// the fields that constitute its identity as a permanent, independent of
-/// the runtime context in which it's created.
-///
-/// Shared by `TokenSpec` (runtime/resolved token creation), `TokenPreset`
-/// (debug catalog entries), and `DebugAction::CreateToken` (debug-create
-/// payload). Single source of truth for the token body shape — no parallel
-/// field lists.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenCharacteristics {
-    /// CR 111.4: The token's display name (same as its subtype(s) + "Token"
-    /// unless the creating effect specifies otherwise).
-    pub display_name: String,
-    /// CR 208.2: Fixed power, or `None` for non-creature tokens.
-    pub power: Option<i32>,
-    /// CR 208.2: Fixed toughness, or `None` for non-creature tokens.
-    pub toughness: Option<i32>,
-    /// CR 306.5b: Printed loyalty, or `None` for non-planeswalker tokens.
-    ///
-    /// The token's *printed* loyalty, as `CardFace::loyalty` is for a card-backed
-    /// planeswalker. Battlefield loyalty itself remains counter-derived (CR 306.5c).
-    /// Seeding a token's entry loyalty counters from this value (CR 306.5b) is not
-    /// yet done.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub loyalty: Option<u32>,
-    pub core_types: Vec<CoreType>,
-    pub subtypes: Vec<String>,
-    pub supertypes: Vec<Supertype>,
-    pub colors: Vec<ManaColor>,
-    pub keywords: Vec<Keyword>,
-}
-
-/// CR 111.1 + CR 111.4 + CR 111.10: Fully-resolved token creation specification.
-///
-/// `Effect::Token` carries authoring-time fields (`PtValue`, `QuantityExpr`,
-/// `TargetFilter owner`) that must be resolved against game state before the
-/// token hits the replacement pipeline. `TokenSpec` captures the resolved,
-/// self-describing form used by `ProposedEvent::CreateToken` and the
-/// post-accept apply path, so replacement matchers and modifiers see the full
-/// characteristics of the token that's about to be created.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenSpec {
-    pub characteristics: TokenCharacteristics,
-    /// Original Forge-style script name (or custom name) used by the token
-    /// parser on the apply path to re-derive attributes. Preserved so the
-    /// existing `parse_token_script` dispatch still fires after widening.
-    pub script_name: String,
-    /// CR 113.3d: Static abilities granted to the token (e.g., "This token
-    /// can't block.").
-    pub static_abilities: Vec<StaticDefinition>,
-    /// CR 122.6a: Counters placed on the token as it enters the battlefield
-    /// (resolved from `QuantityExpr` at propose time).
-    pub enter_with_counters: Vec<(CounterType, u32)>,
-    /// CR 614.1: Token enters tapped.
-    pub tapped: bool,
-    /// CR 508.4: Token enters the battlefield attacking (not declared as
-    /// attacker).
-    pub enters_attacking: bool,
-    /// CR 603.7: When set, the token is sacrificed at the end of the given
-    /// duration (e.g., Mobilize tokens sacrificed at end of combat).
-    pub sacrifice_at: Option<Duration>,
-    /// CR 107.3a: Ability source — the object that created the token. Needed
-    /// on the apply path for defending-player resolution (`enters_attacking`)
-    /// and for the delayed-trigger source.
-    pub source_id: ObjectId,
-    /// CR 107.3a: Ability controller — the player who controls the effect
-    /// creating the token (distinct from `owner`, the player to whom the
-    /// token belongs).
-    pub controller: PlayerId,
-    /// CR 303.4 + CR 303.4i: The token instruction's "attached to …" clause and
-    /// its binding outcome, resolved once at propose time so the
-    /// replacement-safe apply path attaches each created token without
-    /// re-reading `ability.targets`.
-    #[serde(default, skip_serializing_if = "TokenHostRequest::is_not_requested")]
-    pub attach_to: TokenHostRequest,
-}
-
-/// CR 303.4i: what the token instruction asked for as a host, and whether
-/// anything bound it.
-///
-/// The distinction is load-bearing, which is why it is a type rather than an
-/// `Option<AttachTarget>`: CR 303.4i denies the entry of an Aura token whose
-/// named host is *undefined*, while an ordinary token that never named a host
-/// is created normally. Both were `None` before, so the seam that had to tell
-/// them apart could not. [`TokenHostRequest::Unbound`] is the state that
-/// `None` could not express.
-///
-/// Carried through the CR 614 replacement pipeline rather than consumed before
-/// it: a replacement effect may change the entering token's characteristics,
-/// so whether CR 303.4i applies is a question about the ACTUAL entrant and can
-/// only be answered per token, after replacements.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum TokenHostRequest {
-    /// The instruction named no host. An ordinary token.
-    #[default]
-    NotRequested,
-    /// The instruction named a host and it resolved to this object or player.
-    /// Whether that host can legally be enchanted is a separate question,
-    /// owned by `effects::attach`.
-    Bound(AttachTarget),
-    /// CR 303.4i: the instruction named a host and nothing bound it — the host
-    /// is undefined.
-    Unbound,
-}
-
-impl TokenHostRequest {
-    /// Whether the instruction named no host. Keeping this default omitted
-    /// preserves the existing wire shape for ordinary token creation events.
-    pub fn is_not_requested(&self) -> bool {
-        matches!(self, Self::NotRequested)
-    }
-
-    /// The resolved host, if one bound. `None` for both of the other states —
-    /// use the variant itself when the difference matters.
-    pub fn bound(self) -> Option<AttachTarget> {
-        match self {
-            Self::Bound(target) => Some(target),
-            Self::NotRequested | Self::Unbound => None,
-        }
-    }
-
-    /// Did the instruction name a host at all?
-    pub fn is_requested(self) -> bool {
-        !matches!(self, Self::NotRequested)
-    }
-
-    /// Build the request from a named-host flag and its binding outcome. The
-    /// single place the three states are derived, so no caller re-encodes the
-    /// mapping.
-    pub fn from_binding(named: bool, bound: Option<AttachTarget>) -> Self {
-        match (named, bound) {
-            (_, Some(target)) => Self::Bound(target),
-            (true, None) => Self::Unbound,
-            (false, None) => Self::NotRequested,
-        }
-    }
-}
-
 /// CR 707.2 + CR 707.5: Copy-token creation payload carried by the same
 /// `CreateToken` proposed event that ordinary token creation uses for
 /// replacement effects. `TokenSpec` remains the replacement-visible probe
@@ -487,6 +350,9 @@ pub struct CopyTokenSpec {
     pub additional_modifications: Vec<ContinuousModification>,
     pub tapped: bool,
     pub enters_attacking: bool,
+    /// CR 508.4: the batch's resolved destination.
+    #[serde(default, skip_serializing_if = "TokenAttackRequest::is_unspecified")]
+    pub attack_request: TokenAttackRequest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sacrifice_at: Option<Duration>,
     pub source_id: ObjectId,
@@ -1593,6 +1459,10 @@ impl ProposedEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::EntryAttackDestination;
+    use crate::types::attack_target::AttackTarget;
+    use crate::types::card_type::CoreType;
+    use crate::types::mana::ManaColor;
 
     #[test]
     fn replacement_id_equality_and_hash() {
@@ -1816,6 +1686,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(1),
             controller: PlayerId(0),
@@ -1943,6 +1814,133 @@ mod tests {
         assert!(ProposedEvent::begin_turn(PlayerId(0), false)
             .into_token_batches()
             .is_none());
+    }
+
+    #[test]
+    fn token_attack_request_selects_the_destination_by_creation_ordinal() {
+        assert_eq!(TokenAttackRequest::named(Vec::new()), None);
+
+        let request = TokenAttackRequest::named([PlayerId(1), PlayerId(2)])
+            .expect("a non-empty player list names a request");
+        let at = |player: u8| EntryAttackDestination::Exact {
+            target: AttackTarget::Player(PlayerId(player)),
+        };
+        assert_eq!(request.for_entrant(0), at(1));
+        assert_eq!(request.for_entrant(1), at(2));
+        assert_eq!(request.for_entrant(2), at(1));
+
+        for ordinal in 0..3 {
+            assert_eq!(
+                TokenAttackRequest::Unspecified.for_entrant(ordinal),
+                EntryAttackDestination::AnyDefender
+            );
+        }
+    }
+
+    #[test]
+    fn token_attack_request_after_entrants_continues_the_ordinal_sequence() {
+        let request = TokenAttackRequest::named([PlayerId(1), PlayerId(2), PlayerId(3)])
+            .expect("a non-empty player list names a request");
+        for consumed in 0..7 {
+            let resumed = request.after_entrants(consumed);
+            for ordinal in 0..7 {
+                assert_eq!(
+                    resumed.for_entrant(ordinal),
+                    request.for_entrant(consumed + ordinal),
+                    "consumed {consumed}, ordinal {ordinal}"
+                );
+            }
+        }
+        assert_eq!(
+            TokenAttackRequest::Unspecified.after_entrants(3),
+            TokenAttackRequest::Unspecified
+        );
+    }
+
+    fn token_spec_with(attack_request: TokenAttackRequest) -> TokenSpec {
+        TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Goblin".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                loyalty: None,
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Goblin".to_string()],
+                supertypes: vec![],
+                colors: vec![ManaColor::Red],
+                keywords: vec![],
+            },
+            script_name: "Goblin".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: true,
+            enters_attacking: true,
+            attack_request,
+            sacrifice_at: None,
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            attach_to: TokenHostRequest::NotRequested,
+        }
+    }
+
+    fn copy_token_spec_with(attack_request: TokenAttackRequest) -> CopyTokenSpec {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        CopyTokenSpec {
+            values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
+                &state.objects[&id],
+            )),
+            display: crate::game::game_object::DisplayIdentity {
+                display_source: crate::game::game_object::DisplaySource::Token,
+                ..Default::default()
+            },
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+            tapped: true,
+            enters_attacking: true,
+            attack_request,
+            sacrifice_at: None,
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            donor: None,
+        }
+    }
+
+    /// An unspecified request is omitted from the wire, a payload without the
+    /// key reads as unspecified, and a named request round-trips.
+    #[test]
+    fn token_attack_request_wire_shape_is_additive() {
+        let named = TokenAttackRequest::Named {
+            first: PlayerId(1),
+            rest: vec![PlayerId(2)],
+        };
+
+        let plain = serde_json::to_value(token_spec_with(TokenAttackRequest::Unspecified))
+            .expect("serializes");
+        assert!(plain.get("attack_request").is_none(), "{plain}");
+        let back: TokenSpec = serde_json::from_value(plain).expect("reads without the key");
+        assert_eq!(back.attack_request, TokenAttackRequest::Unspecified);
+        let with_named = serde_json::to_value(token_spec_with(named.clone())).expect("serializes");
+        assert!(with_named.get("attack_request").is_some(), "{with_named}");
+        let back: TokenSpec = serde_json::from_value(with_named).expect("round-trips");
+        assert_eq!(back.attack_request, named);
+
+        let plain = serde_json::to_value(copy_token_spec_with(TokenAttackRequest::Unspecified))
+            .expect("serializes");
+        assert!(plain.get("attack_request").is_none(), "{plain}");
+        let back: CopyTokenSpec = serde_json::from_value(plain).expect("reads without the key");
+        assert_eq!(back.attack_request, TokenAttackRequest::Unspecified);
+        let with_named =
+            serde_json::to_value(copy_token_spec_with(named.clone())).expect("serializes");
+        assert!(with_named.get("attack_request").is_some(), "{with_named}");
+        let back: CopyTokenSpec = serde_json::from_value(with_named).expect("round-trips");
+        assert_eq!(back.attack_request, named);
     }
 
     #[test]

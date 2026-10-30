@@ -5,10 +5,11 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until, take_while1};
 use nom::character::complete::{anychar, one_of, satisfy, space0, space1, u8 as parse_u8};
 use nom::combinator::{
-    all_consuming, eof, map, map_res, not, opt, peek, recognize, rest, value, verify,
+    all_consuming, eof, map, map_opt, map_res, not, opt, peek, recognize, rest, success, value,
+    verify,
 };
 use nom::error::ParseError;
-use nom::multi::{many1, many_till, separated_list0};
+use nom::multi::{many0, many1, many_till, separated_list0};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -62,8 +63,8 @@ use crate::types::ability::{
     PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
     PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, ReturnResultReadSpec,
     SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment, TapStateChange,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
-    ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
+    TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause, TokenAttackDestination,
+    TypeFilter, TypedFilter, ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
@@ -981,6 +982,21 @@ pub(super) fn is_life_noun(noun: &str) -> bool {
 fn parse_numeric_imperative_ast_with_context(
     text: &str,
     lower: &str,
+    // Upstream evolution (true-upstream rebase): `ctx` is threaded mutably
+    // (declared-slot registry); this reader only copies the `Copy`
+    // `bare_card_aggregate_source` leaf, so the wider parameter is free.
+    ctx: &mut ParseContext,
+) -> Option<NumericImperativeAst> {
+    parse_numeric_imperative_ast_with_bare_card_source(text, lower, ctx)
+}
+
+fn parse_numeric_imperative_ast_with_bare_card_source(
+    text: &str,
+    lower: &str,
+    // Upstream evolution (true-upstream rebase): numeric count positions —
+    // including the bare-card aggregate fallback — now run through the shared
+    // ctx-threaded count grammar (`parse_verb_count_slot`), so this layer
+    // carries no separate binding parameter.
     ctx: &mut ParseContext,
 ) -> Option<NumericImperativeAst> {
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| value((), tag("draw ")).parse(input))
@@ -2368,7 +2384,9 @@ pub(super) fn parse_targeted_action_ast(
                 .as_ref()
                 .is_some_and(|spec| matches!(spec.min, QuantityExpr::Fixed { value: 0 }))
         {
-            aggregate_return.map(|(_, constraint)| constraint)
+            aggregate_return
+                .as_ref()
+                .map(|(_, constraint)| constraint.clone())
         } else {
             if aggregate_return.is_some() {
                 target = parse_target_with_syntax(original_target_text, ctx).0;
@@ -2386,17 +2404,57 @@ pub(super) fn parse_targeted_action_ast(
         } else {
             BounceSelection::Targeted
         };
-        let is_mass = is_mass || count.is_some();
-        let origin = super::infer_origin_zone(rest_lower).or_else(|| {
-            matches!(
-                target,
-                TargetFilter::TrackedSetFiltered {
-                    caused_by: Some(ThisWayCause::Exiled),
-                    ..
-                }
-            )
-            .then_some(crate::types::zones::Zone::Exile)
-        });
+        // CR 607.2a + CR 406.6: "return the exiled card to its owner's hand" in
+        // a printed ability linked to an earlier exile ability (Tidehollow
+        // Sculler, Mesmeric Fiend, Ashiok's Erasure) names the card exiled by the
+        // linked ability, which resolved separately. When there is no earlier
+        // same-chain exile producer, bind it durably to `ExiledBySource` so it
+        // resolves from the source's linked-exile ledger (LKI-snapshotted on
+        // leaving the battlefield, CR 603.10a) rather than a chain-local
+        // `TrackedSet(0)` sentinel. A return to the battlefield keeps its binding: that class
+        // is paired with its ETB exile by
+        // `detect_etb_exile_ltb_return`, which keys on the `TrackedSet` shape.
+        // This binding applies only to the linked hand-return wording. Other
+        // non-battlefield returns (for example a granted delayed return to a
+        // graveyard) retain their normal antecedent and zone semantics.
+        let target_text_lower = target_text.trim().to_ascii_lowercase();
+        let names_linked_exiled_card =
+            all_consuming((tag::<_, _, OracleError<'_>>("the exiled card"), space0, eof))
+                .parse(target_text_lower.as_str())
+                .is_ok();
+        let returns_to_hand = matches!(dest, Some(ref d) if d.zone == Zone::Hand);
+        let target = if returns_to_hand
+            && ctx.current_ability_exile_cost_zone.is_none()
+            && names_linked_exiled_card
+        {
+            resolve_singular_exiled_card_target(ctx.chain_has_prior_exile_producer, target)
+        } else {
+            target
+        };
+        // `ExiledBySource` denotes the complete linked set (CR 607.3), even
+        // when the printed phrase is singular. Lower it through the existing
+        // set-wide ChangeZoneAll path so copied ETB abilities return every card.
+        let is_mass = is_mass
+            || count.is_some()
+            || (returns_to_hand && matches!(&target, TargetFilter::ExiledBySource));
+        let origin = super::infer_origin_zone(rest_lower)
+            .or_else(|| {
+                matches!(
+                    target,
+                    TargetFilter::TrackedSetFiltered {
+                        caused_by: Some(ThisWayCause::Exiled),
+                        ..
+                    }
+                )
+                .then_some(crate::types::zones::Zone::Exile)
+            })
+            // CR 406.6 + CR 607.2a: a card linked as "exiled with" the source lives in
+            // exile, so the return is a `ChangeZone` out of exile — `Effect::Bounce`
+            // only moves battlefield/graveyard/stack objects.
+            .or_else(|| {
+                matches!(target, TargetFilter::ExiledBySource)
+                    .then_some(crate::types::zones::Zone::Exile)
+            });
         // CR 400.7: A returned card's target filter must be scoped to its origin
         // zone. Without this, "return target ... card from your graveyard to the
         // battlefield" enumerates legal targets on the battlefield (the default
@@ -2412,6 +2470,14 @@ pub(super) fn parse_targeted_action_ast(
         } else {
             target
         };
+        // CR 608.2c: Fail closed on a dropped "this way" back-reference
+        // (Danse Macabre's "a creature card put into a graveyard this way"):
+        // the single authority in `mod.rs` (`target_span_dropped_this_way_anaphor`)
+        // owns the bound-anaphor exemptions (payment amounts, reveal choices),
+        // so this call site never duplicates the predicate.
+        if super::target_span_dropped_this_way_anaphor(target_text, &target) {
+            return None;
+        }
 
         // CR 400.7: Single-object battlefield destinations use ChangeZone;
         // mass destinations use ChangeZoneAll. Only pure mass-bounce
@@ -3702,6 +3768,7 @@ pub(super) fn parse_search_and_creation_ast(
                 target,
                 source_filter,
                 enters_attacking,
+                attack_destination,
                 tapped,
                 count,
                 extra_keywords,
@@ -3712,6 +3779,7 @@ pub(super) fn parse_search_and_creation_ast(
                 count,
                 source_filter,
                 enters_attacking,
+                attack_destination,
                 tapped,
                 extra_keywords,
                 additional_modifications,
@@ -3729,6 +3797,7 @@ pub(super) fn parse_search_and_creation_ast(
                 attach_to,
                 static_abilities,
                 enters_attacking,
+                attack_destination,
                 ..
             }) => Some(SearchCreationImperativeAst::Token {
                 token: Box::new(TokenDescription {
@@ -3744,6 +3813,7 @@ pub(super) fn parse_search_and_creation_ast(
                     attach_to,
                     static_abilities,
                     enters_attacking,
+                    attack_destination,
                 }),
             }),
             _ => None,
@@ -3972,6 +4042,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             count,
             source_filter,
             enters_attacking,
+            attack_destination,
             tapped,
             extra_keywords,
             additional_modifications,
@@ -3980,6 +4051,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             owner: TargetFilter::Controller,
             source_filter,
             enters_attacking,
+            attack_destination,
             tapped,
             count,
             extra_keywords,
@@ -3997,6 +4069,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             owner: TargetFilter::Controller,
             attach_to: token.attach_to,
             enters_attacking: token.enters_attacking,
+            attack_destination: token.attack_destination,
             // CR 205.4a: Preserve parsed token supertypes (legendary/snow).
             supertypes: token.supertypes,
             static_abilities: token.static_abilities,
@@ -5915,6 +5988,7 @@ pub(super) fn parse_for_each_player_exile_controlled(
         chooser: Chooser::Controller.into(),
         candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
         reciprocal_role: None,
+        gather_role: None,
         up_to,
         selection: CardSelectionMode::Chosen,
         constraint: None,
@@ -6047,6 +6121,7 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
         chooser: Chooser::Controller.into(),
         candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Direct,
         reciprocal_role: None,
+        gather_role: None,
         up_to: false,
         selection: if random.is_some() {
             CardSelectionMode::Random
@@ -6078,6 +6153,149 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
         exile_all,
     )));
     Some(clause)
+}
+
+/// CR 701.13a + CR 401.1: the count and library owner of one library object of
+/// a third-person "<player> exile[s] …" instruction, composed from the shared
+/// grammars rather than re-parsed here — one `alt` over the three forms:
+///   * "the top half of <owner> library, rounded up|down" — the fraction
+///     combinator `parse_half_rounded` reads the count (CR 107.1a); the
+///     "<owner> library" it counts names the library, read ahead by `peek`
+///     because the fraction grammar consumes it as its counted quantity;
+///   * "the top N|X card(s) of <owner> library" — the shared count head
+///     [`parse_exile_top_count`] plus the "card[s] of <owner> library" suffix
+///     [`parse_library_player_suffix`];
+///   * "that many cards from the top of <owner> library" and the other
+///     dynamic-count forms — [`parse_dynamic_exile_from_top`].
+///
+/// Every owner comes from `parse_library_owner_phrase`, the single authority
+/// for whose library a possessive names; the caller maps it against the
+/// subject. FAIL-CLOSED: an owner that table does not name fails the parse.
+/// The remainder is the post-library tail.
+fn parse_subject_exile_library_source<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, (QuantityExpr, TargetFilter)> {
+    let owner_library =
+        |i: &'a str| parse_library_owner_phrase(i, ctx).ok_or_else(|| oracle_err(i));
+    let cards_of_owner_library =
+        |i: &'a str| parse_library_player_suffix(i, ctx).ok_or_else(|| oracle_err(i));
+    let dynamic_count = |i: &'a str| {
+        parse_dynamic_exile_from_top(i, ctx)
+            .map(|(rest, owner, count)| (rest, (count, owner)))
+            .ok_or_else(|| oracle_err(i))
+    };
+    alt((
+        preceded(
+            tag::<_, _, OracleError<'_>>("the top "),
+            alt((
+                map(
+                    (
+                        // The owner the fraction then consumes as its counted quantity.
+                        peek(preceded(
+                            (nom_quantity::parse_fraction_divisor, opt(tag("of "))),
+                            owner_library,
+                        )),
+                        nom_quantity::parse_half_rounded,
+                    ),
+                    |(owner, count)| (count, owner),
+                ),
+                (parse_exile_top_count, cards_of_owner_library),
+            )),
+        ),
+        dynamic_count,
+    ))
+    .parse(input)
+}
+
+/// CR 701.13a: To exile an object, move it to the exile zone.
+///
+/// The library object of a "<player> exile[s] …" instruction (see
+/// [`parse_subject_exile_library_source`]), optionally "face down" (CR 406.3,
+/// via the shared `strip_exile_top_face_down` suffix).
+fn parse_subject_exile_library_top<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, SubjectExileLibraryTopAst> {
+    let (after_lib, (count, owner)) = parse_subject_exile_library_source(input, ctx)?;
+    let (rest, face_down) = strip_exile_top_face_down(after_lib);
+    Ok((
+        rest,
+        SubjectExileLibraryTopAst {
+            count,
+            face_down,
+            owner,
+        },
+    ))
+}
+
+/// CR 701.13a: "a card at random from their graveyard|hand" — one object of a
+/// "<player> exile[s] …" instruction, read from the zone of the player "their"
+/// names (the subject). The zone is read by `parse_choose_zone_list`, the zone
+/// axis of the choose-from-zone connector; a union of zones is not an object
+/// this list models. No CR rule governs random selection; the selection
+/// follows the printed instruction (CR 608.2c).
+fn parse_subject_exile_random_zone_object(input: &str) -> OracleResult<'_, Zone> {
+    map_opt(
+        preceded(
+            (
+                alt((tag::<_, _, OracleError<'_>>("a "), tag("one "))),
+                tag("card at random from their "),
+            ),
+            parse_choose_zone_list,
+        ),
+        |zones| match zones.as_slice() {
+            [zone @ (Zone::Graveyard | Zone::Hand)] => Some(*zone),
+            _ => None,
+        },
+    )
+    .parse(input)
+}
+
+/// CR 701.13a: one object of a "<player> exile[s] …" instruction — the top
+/// cards of a library, or a card at random from the subject's graveyard or
+/// hand.
+fn parse_subject_exile_object<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, SubjectExileObjectAst> {
+    alt((
+        map(
+            |i| parse_subject_exile_library_top(i, ctx),
+            SubjectExileObjectAst::LibraryTop,
+        ),
+        map(
+            parse_subject_exile_random_zone_object,
+            SubjectExileObjectAst::AtRandomFrom,
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 701.13a + CR 608.2f: the objects of a third-person "<player> exile[s]
+/// A[, B][, and C]" instruction, in printed order and in any order of kinds.
+/// An action taken on multiple objects is processed simultaneously (CR
+/// 608.2f), so the caller lowers two or more objects as one exile action. The
+/// remainder is returned unconsumed; the caller decides whether it is
+/// terminal.
+pub(super) fn parse_subject_exile_object_list<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, SubjectExileObjectsAst> {
+    map(
+        preceded(
+            alt((tag::<_, _, OracleError<'_>>("exiles "), tag("exile "))),
+            (
+                |i| parse_subject_exile_object(i, ctx),
+                many0(preceded(
+                    alt((tag(", and "), tag(", "), tag(" and "))),
+                    |i| parse_subject_exile_object(i, ctx),
+                )),
+            ),
+        ),
+        |(first, rest)| SubjectExileObjectsAst { first, rest },
+    )
+    .parse(input)
 }
 
 /// CR 102.2 + CR 102.3 + CR 608.2c + CR 608.2d: "For each opponent, choose [up
@@ -6126,6 +6344,7 @@ pub(super) fn parse_for_each_opponent_choose_controlled(
         chooser: Chooser::Controller.into(),
         candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
         reciprocal_role: None,
+        gather_role: None,
         up_to,
         selection: CardSelectionMode::Chosen,
         constraint: None,
@@ -6748,6 +6967,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             chooser: chooser.into(),
             candidate_source,
             reciprocal_role: None,
+            gather_role: None,
             up_to: false,
             selection,
             constraint: None,
@@ -6776,6 +6996,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
                 chooser: chooser.into(),
                 candidate_source,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to,
                 selection,
                 constraint: None,
@@ -10744,8 +10965,17 @@ pub(super) fn parse_destroy_ast(
         // CR 608.2k: thread `ctx` so bare "it"/"them" anaphors bind to the
         // triggering subject ("Whenever a creature dies, destroy it" class).
         let (target, rem) = parse_target_with_ctx(rest, ctx);
+        // Upstream evolution (true-upstream rebase): an attachment qualifier
+        // now binds into the target rather than refusing the arm. Our
+        // fail-closed guard runs AFTER the bind, on the bound target, so a
+        // genuinely dropped "this way" still refuses.
         let phrase = &rest[..rest.len() - rem.len()];
         let (target, _rem) = bind_attachment_qualifier(target, phrase, rem, ctx)?;
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest, &target) {
+            return None;
+        }
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         return Some(ZoneCounterImperativeAst::Destroy { target, all: true });
@@ -10762,9 +10992,14 @@ pub(super) fn parse_destroy_ast(
         // supported lowering (the chain's anaphor rewrite collapses it to the
         // creature) and no printed producer, so it keeps the strict gap. The
         // untargeted resolution choice (Light of Judgment) passes through.
-        if crate::game::filter::filter_reads_declared_slot(&target)
+        if crate::types::ability::filter_reads_declared_slot(&target)
             && nom_primitives::scan_contains(&phrase.to_lowercase(), "target ")
         {
+            return None;
+        }
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest, &target) {
             return None;
         }
         #[cfg(debug_assertions)]
@@ -11183,6 +11418,21 @@ fn parse_dynamic_exile_from_top<'a>(
     None
 }
 
+/// CR 107.3 + CR 701.13a: the count head of "the top N|X card(s) of …" — a
+/// number or an X placeholder, read by the shared
+/// `nom_quantity::parse_quantity_expr_number` (`Fixed` / `Variable("X")`, bound
+/// by the spell's chosen X or a where-X definition), or no count at all ("the
+/// top card") for one card. The single count grammar of the positional
+/// top-of-library exile, shared by the imperative form (`parse_exile_ast`) and
+/// the third-person subject form (`parse_subject_exile_library_top`). Never fails.
+fn parse_exile_top_count(input: &str) -> OracleResult<'_, QuantityExpr> {
+    alt((
+        terminated(nom_quantity::parse_quantity_expr_number, space0),
+        success(QuantityExpr::Fixed { value: 1 }),
+    ))
+    .parse(input)
+}
+
 /// Parse the two library edges that a positional exile instruction currently
 /// supports. Keeping the edge separate from its surrounding sentence lets a
 /// caller preserve `LibraryPosition` rather than degrading a bottom instruction
@@ -11382,21 +11632,7 @@ pub(super) fn parse_exile_ast(
     }
 
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exile the top ").parse(lower) {
-        let (initial_count, remainder) =
-            if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest) {
-                (QuantityExpr::Fixed { value: n as i32 }, rem.trim_start())
-            } else if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("x").parse(rest) {
-                (
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::Variable {
-                            name: "X".to_string(),
-                        },
-                    },
-                    rem.trim_start(),
-                )
-            } else {
-                (QuantityExpr::Fixed { value: 1 }, rest)
-            };
+        let (remainder, initial_count) = parse_exile_top_count(rest).ok()?;
         // CR 608.2 + CR 400.12 + CR 115.1: Match the "[card|cards] of [a player]'s
         // library" suffix and resolve the library owner via the shared
         // `parse_library_player_suffix` helper (also used by the manifest
@@ -11539,6 +11775,11 @@ pub(super) fn parse_exile_ast(
         } else {
             parsed_target
         };
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest, &target) {
+            return None;
+        }
         let origin = super::infer_origin_zone(rest_lower);
         let (origin, target) = super::compose_exile_graveyard_origin_and_target(
             origin,
@@ -11632,6 +11873,11 @@ pub(super) fn parse_exile_ast(
     if mass_zone {
         let (target, _rem) =
             ctx.with_player_antecedents(|scoped| parse_target_with_ctx(rest_text, scoped));
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest_text, &target) {
+            return None;
+        }
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         let origin = super::infer_origin_zone(rest_lower);
@@ -11678,6 +11924,11 @@ pub(super) fn parse_exile_ast(
         let tail_is_consumed = tail_clean.is_empty() || !enter_with_counters.is_empty();
         if rem.trim().is_empty() && !matches!(target, TargetFilter::Any) && tail_is_consumed {
             attach_controller_if_absent(&mut target, ControllerRef::You);
+            // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+            // way" the filter doesn't bind must refuse, not sweep.
+            if super::target_span_dropped_this_way_anaphor(rest_lower, &target) {
+                return None;
+            }
             if let TargetFilter::Typed(typed) = &mut target {
                 typed
                     .properties
@@ -11742,6 +11993,11 @@ pub(super) fn parse_exile_ast(
             && target.extract_in_zone() == Some(Zone::Graveyard)
             && terminal_punctuation_only(remainder)
         {
+            // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+            // way" the filter doesn't bind must refuse, not sweep.
+            if super::target_span_dropped_this_way_anaphor(target_text, &target) {
+                return None;
+            }
             return Some(ZoneCounterImperativeAst::Exile {
                 origin: Some(Zone::Graveyard),
                 target,
@@ -11835,6 +12091,11 @@ pub(super) fn parse_exile_ast(
     } else {
         parsed_target
     };
+    // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+    // way" the filter doesn't bind must refuse, not sweep.
+    if super::target_span_dropped_this_way_anaphor(target_input, &target) {
+        return None;
+    }
     // CR 400.7 (issue #6505): infer the origin zone excluding ONLY a trailing
     // compound conjunct ("and their graveyard", Strategic Betrayal) so its
     // sibling graveyard leg cannot leak Zone::Graveyard onto the battlefield
@@ -13325,7 +13586,7 @@ fn parse_context_set_referent<'a>(
                     // Eligibility first: an entry that reads a declared slot can
                     // never be the antecedent, so it is not evidence either way.
                     let eligible = entries.iter().filter(|entry| {
-                        !crate::game::filter::filter_reads_declared_slot(&entry.filter)
+                        !crate::types::ability::filter_reads_declared_slot(&entry.filter)
                     });
                     // An incomplete registry (any eligible entry without a
                     // chain-wide index) cannot prove the nearest declarer.
@@ -14868,7 +15129,8 @@ pub(super) fn parse_imperative_family_ast(
                 // None for count == 1 so "roll a d6" / "roll one d6" falls through.
                 Some(ast)
             } else {
-                try_parse_roll_die_with_modifier(lower).map(|(sides, modifier)| {
+                try_parse_roll_die_with_modifier(lower, ctx.bare_card_aggregate_source).map(
+                    |(sides, modifier)| {
                     ImperativeFamilyAst::RollDie {
                         count: QuantityExpr::Fixed { value: 1 },
                         sides,
@@ -16021,11 +16283,17 @@ fn parse_reassemble_contraption_imperative(
 /// an optional trailing `" and (add|subtract) {quantity}"` modifier that the
 /// resolver applies to the natural roll before result-table lookup.
 ///
+/// This is the single authority for the die-roll header grammar, reached from
+/// both the chain dispatch and the line-initial die-table dispatch: a
+/// non-empty tail that is not a recognized add/subtract modifier refuses the
+/// whole header (CR 706.2).
+///
 /// Returns `(sides, modifier)` on success. The modifier is `None` when the
 /// remainder is empty or only contains trailing punctuation; otherwise the
 /// remainder must shape as a recognized add/subtract clause.
-fn try_parse_roll_die_with_modifier(
+pub(crate) fn try_parse_roll_die_with_modifier(
     lower: &str,
+    bare_card: Option<crate::parser::oracle_ir::context::BareCardAggregateBinding>,
 ) -> Option<(u8, Option<crate::types::ability::DieRollModifier>)> {
     let (sides, rest) = try_parse_roll_die_sides_with_rest(lower)?;
     let rest = rest.trim_end_matches(['.', ',', ';']).trim();
@@ -16042,7 +16310,21 @@ fn try_parse_roll_die_with_modifier(
     ))
     .parse(after_and)
     .ok()?;
-    let (_, value) = nom_quantity::parse_quantity_ref_complete(modifier_text).ok()?;
+    // CR 608.2c + CR 115.1: the generic quantity grammar cannot see a bare
+    // "those cards" aggregate (intentionally unavailable context-free), so when
+    // the chain established a bare-card binding, try it before refusing. The
+    // contextual parse must consume fully — a prefix-only match refuses the
+    // whole header honestly rather than silently narrowing the modifier.
+    let value = nom_quantity::parse_quantity_ref_complete(modifier_text)
+        .ok()
+        .map(|(_, qty)| qty)
+        .or_else(|| {
+            let binding = bare_card?;
+            let (rest, qty) =
+                nom_quantity::parse_contextual_bare_card_aggregate_ref(modifier_text, binding)
+                    .ok()?;
+            rest.trim().is_empty().then_some(qty)
+        })?;
     let modifier = if sign {
         crate::types::ability::DieRollModifier::Add {
             value: crate::types::ability::QuantityExpr::Ref { qty: value },
@@ -16094,6 +16376,18 @@ const DIE_RESULT_EM_DASH: &str = "\u{2014}";
 /// The printed endpoint is a separate question from the resolvable bound: a
 /// printed `"0 or less"` row is nonsense and is still refused, by that arm's own
 /// `verify` on the printed maximum.
+///
+/// ASYMMETRY WITH `"N+"`, deliberate and bounded. The open-ended UPPER form maps
+/// to `u8::MAX` so a modifier-boosted roll above the printed bound still lands in
+/// the branch (CR 706.2). The `"N or less"` form does NOT get the mirrored
+/// treatment of a `0` floor, because CR 706.1a makes 1 the smallest NATURAL
+/// result and this lower bound is exact for an unmodified roll. A negative
+/// modifier can drive a result below 1 (CR 706.2 allows the final number to be
+/// any integer), and such a result would fall through this branch rather than
+/// into it. No printed card combines a downward modifier with an "or less" row,
+/// so the gap is unreachable today; it is recorded here rather than papered over
+/// by widening the floor to 0, which would silently swallow `"0 or less"` — the
+/// exact refusal the guard below exists to make.
 ///
 /// This is also the DETECTOR the spell-resolution continuation loop uses to
 /// recognize a results-table row (`oracle.rs`), so the loop and the row
@@ -16289,6 +16583,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination: TokenAttackDestination::ControllerChooses,
                     supertypes: Vec::new(),
                     static_abilities: Vec::new(),
                     enter_with_counters: Vec::new(),
@@ -17081,6 +17376,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 constraint: None,
@@ -17120,6 +17416,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 constraint: None,
@@ -17204,6 +17501,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 chooser: Chooser::Controller.into(),
                 candidate_source: ZoneChoiceCandidateSource::Direct,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: true,
                 selection: CardSelectionMode::Chosen,
                 constraint,
@@ -17523,7 +17821,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         },
         ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,
         ImperativeFamilyAst::VentureIntoUndercity => Effect::VentureInto {
-            dungeon: crate::game::dungeon::DungeonId::Undercity,
+            dungeon: crate::types::dungeon::DungeonId::Undercity,
         },
         ImperativeFamilyAst::TakeTheInitiative => Effect::TakeTheInitiative,
         // CR 701.31c: An ability instructs a player to planeswalk.

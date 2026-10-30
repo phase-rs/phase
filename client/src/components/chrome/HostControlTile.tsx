@@ -91,7 +91,7 @@ function SeatRow({
   mutate: (mutation: SeatMutation) => void;
   assign: (assignments: AiAssignment[]) => void;
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation(["common", "menu"]);
   const isOpen = slot.kind.type === "WaitingHuman";
   const kickLabel = slot.name || t("hostControl.fallbackPlayerName", { number: slot.playerId + 1 });
   const aiSeat = slot.kind.type === "Ai" ? slot.kind : null;
@@ -297,7 +297,7 @@ export function HostControlTile() {
   const serverInfo = useMultiplayerStore((s) => s.serverInfo);
   const navigate = useNavigate();
   const location = useLocation();
-  const { t } = useTranslation();
+  const { t } = useTranslation(["common", "menu"]);
 
   // The reachable `<code>@<host>` join string, available only when the server
   // advertised a public URL (server-run hosting). P2P/broker hosts have no

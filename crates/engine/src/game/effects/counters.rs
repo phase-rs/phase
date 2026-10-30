@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crate::game::engine_replacement::CopyEntryResumption;
 use crate::game::game_object::GameObject;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     AbilityTag, CounterMoveSelection, CounterTransferMode, DelayedTriggerCondition,
@@ -1023,6 +1024,7 @@ fn apply_pending_counter_post_action(
             object_id,
             name,
             enters_attacking,
+            attack_destination,
             source_id,
             controller,
         } => {
@@ -1030,7 +1032,13 @@ fn apply_pending_counter_post_action(
             // replacement-processed counters finish, preserving attacking
             // placement and the normal token ETB events.
             if enters_attacking {
-                crate::game::combat::enter_attacking(state, object_id, source_id, controller);
+                crate::game::combat::enter_attacking_at_destination(
+                    state,
+                    object_id,
+                    source_id,
+                    controller,
+                    &attack_destination,
+                );
             }
             super::token::inject_predefined_token_abilities(state, object_id);
             crate::game::layers::mark_layers_entered(state, object_id);
@@ -1100,6 +1108,7 @@ fn apply_pending_counter_post_action(
             object_id,
             name,
             enters_attacking,
+            attack_destination,
             source_id,
             controller,
             remaining_modifications,
@@ -1109,6 +1118,7 @@ fn apply_pending_counter_post_action(
             object_id,
             name,
             enters_attacking,
+            attack_destination,
             source_id,
             controller,
             remaining_modifications,
@@ -1981,7 +1991,7 @@ pub fn resolve_add(
         // CR 608.2c: A quantity bound to the resolved recipient (such as
         // Sovereign Okinec Ahau's "the difference") is evaluated separately
         // for each object. Source-relative quantities remain one shared value.
-        let count_uses_recipient = crate::game::quantity::quantity_expr_uses_recipient(&count);
+        let count_uses_recipient = crate::types::ability::quantity_expr_uses_recipient(&count);
         let counter_num_shared = (!count_uses_recipient).then(|| {
             // CR 107.1b: Ability-context resolve preserves the announced X for
             // source-relative counter quantities.
@@ -2284,7 +2294,7 @@ pub fn resolve_add_all(
     // re-evaluated against each object; a uniform count (the source's power —
     // Ouroboroid) is resolved once and shared. Detected via the recipient-
     // binding scope the parser stamps on per-recipient counts.
-    let count_uses_recipient = crate::game::quantity::quantity_expr_uses_recipient(&count);
+    let count_uses_recipient = crate::types::ability::quantity_expr_uses_recipient(&count);
 
     let additions: Vec<PendingCounterAddition> = matching_ids
         .into_iter()
@@ -9162,6 +9172,7 @@ mod tests {
                     source_id,
                     controller: PlayerId(0),
                     enters_attacking: false,
+                    attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                     attach_to: None,
                     sacrifice_at: None,
                     created_ids: Vec::new(),
@@ -9174,6 +9185,7 @@ mod tests {
                     object_id,
                     name: "Saproling".to_string(),
                     enters_attacking: false,
+                    attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                     source_id,
                     controller: PlayerId(0),
                 },
@@ -9193,6 +9205,8 @@ mod tests {
                         object_id,
                         name: "Saproling".to_string(),
                         enters_attacking: false,
+                        attack_destination:
+                            crate::types::ability::EntryAttackDestination::AnyDefender,
                         source_id,
                         controller: PlayerId(0),
                         remaining_modifications: Vec::new(),
@@ -9451,6 +9465,7 @@ mod tests {
                     object_id,
                     name: "Copy Token".to_string(),
                     enters_attacking: false,
+                    attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                     source_id,
                     controller: PlayerId(0),
                 },
@@ -9459,6 +9474,8 @@ mod tests {
                         object_id,
                         name: "Copy Token".to_string(),
                         enters_attacking: false,
+                        attack_destination:
+                            crate::types::ability::EntryAttackDestination::AnyDefender,
                         source_id,
                         controller: PlayerId(0),
                         remaining_modifications: Vec::new(),

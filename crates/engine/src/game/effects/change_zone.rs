@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::game_state::RandomDraw;
 use rand::Rng;
 
@@ -2847,12 +2848,17 @@ pub fn resolve_all(
                     // CR 108.2 + CR 109.1: a mass move out of exile moves
                     // cards; the CR 722.3c retained prepare copy is not one.
                     && obj.is_card_population_member()
-                    && (!tracked_members_name_parent_object
-                        || if delayed_exile_return {
+                    && (if tracked_members_name_parent_object {
+                        if delayed_exile_return {
                             target_pin_is_current_or_delayed_exile_successor(state, ability, id)
                         } else {
                             ability.target_pin_is_current(id, state)
-                        })
+                        }
+                    } else {
+                        // CR 400.7 + CR 603.7c: pins taken from the tracked set's own
+                        // members at delayed-trigger creation; unpinned ids pass.
+                        ability.target_pin_is_current(id, state)
+                    })
                     && crate::game::filter::matches_target_filter_for_zone(
                         state,
                         id,
@@ -2896,6 +2902,7 @@ pub fn resolve_all(
         // CR 608.2c: drop the consumed set's member-cause provenance in lockstep.
         state.tracked_set_member_causes.remove(id);
         state.tracked_set_participants.remove(id);
+        state.tracked_set_member_origins.remove(id);
     }
 
     // CR 614.12a + CR 614.13a: when a mass entry brings in one or more devourers
@@ -6992,6 +6999,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -13157,6 +13166,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],

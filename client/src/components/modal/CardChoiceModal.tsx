@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
+import type { ParseKeys, TFunction } from "i18next";
 
 import { CardImage } from "../card/CardImage.tsx";
 import { objectImageProps } from "../../services/cardImageLookup.ts";
@@ -1385,7 +1385,7 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const isReady = isUpTo
     ? selected.size >= minCount && selected.size <= data.count
     : selected.size === data.count;
-  const subtitleKey = isUpTo
+  const subtitleKey: ParseKeys<"game"> = isUpTo
     ? minCount > 0
       ? `cardChoice.effectZone.subtitle${mode}Range`
       : `cardChoice.effectZone.subtitle${mode}UpTo`

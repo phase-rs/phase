@@ -208,4 +208,6 @@ const EXPECTED: &[(&str, &str)] = &[
     ("engine/tests/integration/fixtures/zurs_weirding_nested_dispatching_pre_7485.json.gz", "RESTOREERR OwnerlessPostReplacementDispatch"),
     ("phase-ai/fixtures/scenarios/galvanic-blast-manapayment-turn4.json.gz", "BUDGET Priority"),
     ("phase-ai/fixtures/scenarios/invisible-woman-cosmic-crucible-mana.json.gz", "BUDGET Priority"),
+    ("phase-ai/fixtures/scenarios/judged-cryptbreaker-draw-step.json.gz", "BUDGET Priority"),
+    ("phase-ai/fixtures/scenarios/judged-karns-bastion-upkeep.json.gz", "BUDGET Priority"),
 ];

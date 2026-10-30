@@ -5,7 +5,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::anychar;
-use nom::combinator::{all_consuming, eof, opt, peek, recognize, rest, value, verify};
+use nom::combinator::{all_consuming, eof, opt, peek, recognize, rest, success, value, verify};
 use nom::multi::many_till;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -13,8 +13,9 @@ use nom::Parser;
 use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, Effect, FilterProp, ObjectScope, PtValue, QuantityExpr,
-    QuantityRef, StaticDefinition, TargetFilter, ThisWayCause, TypeFilter,
+    ContinuousModification, ControllerRef, Effect, FilterProp, NamedDefenderScope, ObjectScope,
+    PtValue, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, ThisWayCause,
+    TokenAttackDestination, TypeFilter,
 };
 use crate::types::ability_visit::{
     nested_definitions_name_granter, own_fields_name_granter, token_static_grants_to_itself,
@@ -139,6 +140,9 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking,
+            // CR 508.4: the copy modifiers name no destination; a following
+            // "enters tapped and attacking …" sentence sets it.
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped,
             count,
             extra_keywords,
@@ -176,6 +180,7 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         owner: TargetFilter::Controller,
         attach_to: token.attach_to,
         enters_attacking: token.enters_attacking,
+        attack_destination: token.attack_destination,
         // CR 205.4a: Carry parsed supertypes (e.g. "legendary" for Marit Lage)
         // onto the token so the legend rule (CR 704.5j) applies.
         supertypes: token.supertypes,
@@ -633,12 +638,10 @@ fn parse_token_description_with_context(
     // Pakal, Thousandth Moon) — accept that as a valid terminator in addition
     // to EOF so the attacking flag is captured even when a variable-X binding
     // trails the clause.
-    // CR 508.4: trailing defender phrases ("that player or a planeswalker they
-    // control", "that opponent", etc. — Adeline, Resplendent Cathar / Myriad
-    // class) must not prevent the inline modifier from matching; accept a word
-    // boundary after "attacking" the same way `parse_battlefield_entry_qualifiers`
-    // does for put-onto-battlefield effects.
-    let attacking_clause = |i| -> OracleResult<'_, bool> {
+    // CR 508.4: a defender phrase after "attacking" names the destination
+    // (`parse_token_attack_destination`); any other following word still ends
+    // the clause at a word boundary.
+    let attacking_clause = |i| -> OracleResult<'_, (bool, TokenAttackDestination)> {
         let (i, _) = alt((
             tag(" that's"),
             tag(" that is"),
@@ -651,6 +654,7 @@ fn parse_token_description_with_context(
             value(false, tag(" attacking")),
         ))
         .parse(i)?;
+        let (i, destination) = opt(parse_token_attack_destination).parse(i)?;
         let (i, _) = alt((
             value((), nom::combinator::eof),
             value((), tag(", where ")),
@@ -659,7 +663,7 @@ fn parse_token_description_with_context(
             value((), tag(".")),
         ))
         .parse(i)?;
-        Ok((i, tapped))
+        Ok((i, (tapped, destination.unwrap_or_default())))
     };
     // Nom parses forward; scan byte positions (only those starting with the
     // leading space the clause requires) for the first place where the clause
@@ -669,7 +673,7 @@ fn parse_token_description_with_context(
             .then(|| {
                 attacking_clause(&lower_trimmed[pos..])
                     .ok()
-                    .map(|(_, tapped)| (pos, tapped))
+                    .map(|(_, (tapped, destination))| (pos, tapped, destination))
             })
             .flatten()
     });
@@ -677,12 +681,19 @@ fn parse_token_description_with_context(
     // trailing ", where X is …" that followed the clause is cut off from the
     // token body.  Extract and save it now (from the pre-truncation text) so
     // the X-binding step below can still bind an X/X token's P/T.
-    let saved_where_x_expr: Option<String> =
-        entry_clause.and_then(|(pos, _)| extract_token_where_x_expression(&text[pos..]));
-    let (text, mut enters_attacking, enters_tapped_attacking) = match entry_clause {
-        Some((len, tapped)) => (&text[..len], true, tapped),
-        None => (text, false, false),
-    };
+    let saved_where_x_expr: Option<String> = entry_clause
+        .as_ref()
+        .and_then(|(pos, _, _)| extract_token_where_x_expression(&text[*pos..]));
+    let (text, mut enters_attacking, enters_tapped_attacking, attack_destination) =
+        match entry_clause {
+            Some((len, tapped, destination)) => (&text[..len], true, tapped, destination),
+            None => (
+                text,
+                false,
+                false,
+                TokenAttackDestination::ControllerChooses,
+            ),
+        };
     let (mut count, leading_name, mut rest) = match slot_count {
         Some(count) => (count, None, text),
         None => {
@@ -807,7 +818,7 @@ fn parse_token_description_with_context(
     // take precedence and are never overwritten. The lookup keys on the bare
     // descriptor, so type-bearing descriptors ("Soldier creature") never match
     // a catalog `display_name` and are left untouched.
-    if let Some(body) = crate::game::token_presets::known_token_body_by_name_for_source(
+    if let Some(body) = crate::types::token_presets::known_token_body_by_name_for_source(
         descriptor,
         ctx.card_name.as_deref(),
     ) {
@@ -938,7 +949,34 @@ fn parse_token_description_with_context(
         attach_to,
         static_abilities,
         enters_attacking,
+        attack_destination,
     })
+}
+
+/// CR 508.4: the defender a token instruction names after "attacking":
+/// "that player", "that opponent", optionally "or a planeswalker they
+/// control". Input starts at the space after "attacking"; the phrase must end
+/// the clause.
+pub(super) fn parse_token_attack_destination(
+    input: &str,
+) -> OracleResult<'_, TokenAttackDestination> {
+    let (rest, _) = (tag(" that "), alt((tag("player"), tag("opponent")))).parse(input)?;
+    let (rest, scope) = alt((
+        value(
+            NamedDefenderScope::PlayerOrPlaneswalker,
+            tag(" or a planeswalker they control"),
+        ),
+        success(NamedDefenderScope::Player),
+    ))
+    .parse(rest)?;
+    let (rest, ()) = nom_primitives::peek_clause_terminator(rest)?;
+    Ok((
+        rest,
+        TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope,
+        },
+    ))
 }
 
 /// CR 608.2c + CR 120.1 + CR 603.2c: split a trailing token-count rider off a
@@ -1718,7 +1756,7 @@ fn known_registry_token_identity(
     source_name: Option<&str>,
 ) -> Option<(String, Vec<String>)> {
     let body =
-        crate::game::token_presets::known_token_body_by_name_for_source(descriptor, source_name)?;
+        crate::types::token_presets::known_token_body_by_name_for_source(descriptor, source_name)?;
     let mut types: Vec<String> = body
         .core_types
         .iter()
@@ -1937,6 +1975,7 @@ mod tests {
                     crate::types::ability::CardTypeSetSource::TrackedSet {
                         set: crate::types::ability::TrackedAnaphorSource::TriggeringBatch,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .expect("statically valid property aggregate"),
@@ -2141,6 +2180,7 @@ mod tests {
                     crate::types::ability::CardTypeSetSource::TrackedSet {
                         set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .expect("statically valid property aggregate"),
@@ -2173,6 +2213,7 @@ mod tests {
                     source: crate::types::ability::CardTypeSetSource::TrackedSet {
                         set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                         caused_by: Some(crate::types::ability::ThisWayCause::Discarded),
+                        filter: None,
                     },
                 },
             },
@@ -4098,6 +4139,7 @@ mod tests {
         let Effect::Token {
             tapped,
             enters_attacking,
+            attack_destination,
             ..
         } = effect
         else {
@@ -4107,6 +4149,74 @@ mod tests {
         assert!(
             enters_attacking,
             "Human token must enter attacking despite trailing defender phrase"
+        );
+        assert_eq!(
+            attack_destination,
+            TokenAttackDestination::Player {
+                player: ControllerRef::DefendingPlayer,
+                scope: NamedDefenderScope::PlayerOrPlaneswalker,
+            },
+            "the trailing defender phrase names the destination"
+        );
+    }
+
+    /// CR 508.4: the destination phrase after "attacking" names the defending
+    /// player (optionally "or a planeswalker they control") and must end the
+    /// clause; any other continuation is not a destination.
+    #[test]
+    fn token_attack_destination_phrase_ends_the_clause() {
+        let player = |scope| TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope,
+        };
+        for (input, scope) in [
+            (" that player", NamedDefenderScope::Player),
+            (" that opponent", NamedDefenderScope::Player),
+            (" that player.", NamedDefenderScope::Player),
+            (
+                " that player or a planeswalker they control",
+                NamedDefenderScope::PlayerOrPlaneswalker,
+            ),
+            (" that player, where X is 2", NamedDefenderScope::Player),
+        ] {
+            let (_, destination) = parse_token_attack_destination(input)
+                .unwrap_or_else(|error| panic!("{input:?} must parse: {error:?}"));
+            assert_eq!(destination, player(scope), "{input:?}");
+        }
+        for input in [
+            " that player's planeswalker",
+            " that player and",
+            " that creature",
+            " attacking",
+        ] {
+            assert!(
+                parse_token_attack_destination(input).is_err(),
+                "{input:?} is not a destination"
+            );
+        }
+    }
+
+    /// CR 508.4: the leading "tapped and attacking" modifier names no defender.
+    #[test]
+    fn leading_tapped_and_attacking_modifier_names_no_destination() {
+        let text = "Create a tapped and attacking X/X green Dinosaur creature token with trample, where X is the greatest power among other attacking creatures.";
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token {
+            enters_attacking,
+            attack_destination,
+            ..
+        } = effect
+        else {
+            panic!("expected Token effect");
+        };
+        assert!(
+            enters_attacking,
+            "reach guard: the leading modifier applied"
+        );
+        assert_eq!(
+            attack_destination,
+            TokenAttackDestination::ControllerChooses
         );
     }
 
@@ -4251,7 +4361,7 @@ mod tests {
         use crate::types::mana::ManaColor;
 
         assert!(
-            crate::game::token_presets::known_token_body_by_name("Bear").is_none(),
+            crate::types::token_presets::known_token_body_by_name("Bear").is_none(),
             "Bear has multiple catalog bodies and must not pick the first one"
         );
 

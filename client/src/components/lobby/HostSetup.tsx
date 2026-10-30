@@ -10,7 +10,7 @@ import type {
   LoopDetectionMode,
   MatchType,
 } from "../../adapter/types";
-import { AI_DIFFICULTIES } from "../../constants/ai";
+import { AI_DIFFICULTIES, isAiDifficulty } from "../../constants/ai";
 import { FORMAT_REGISTRY, formatSuppliesDeck } from "../../data/formatRegistry";
 import {
   directoryLobbySources,
@@ -358,7 +358,7 @@ export function HostSetup({
   hostDisabledReason,
   seed,
 }: HostSetupProps) {
-  const { t } = useTranslation(["multiplayer", "menu"]);
+  const { t } = useTranslation(["multiplayer", "menu", "common"]);
   // Player name is edited in `PlayerIdentityBanner` above this form (see
   // MultiplayerPage). We read it here only to submit it and to seed the
   // room-name placeholder — this form itself intentionally has no
@@ -1512,7 +1512,9 @@ export function HostSetup({
                             ariaLabel={t("menu:aiDifficulty.label")}
                             label={
                               difficultyMenuItems.find((item) => item.value === aiSeat.difficulty)?.label ??
-                              t(`menu:aiDifficulty.levels.${aiSeat.difficulty}`)
+                              (isAiDifficulty(aiSeat.difficulty)
+                                ? t(`menu:aiDifficulty.levels.${aiSeat.difficulty}`)
+                                : t("menu:aiDifficulty.label"))
                             }
                             selectedValue={aiSeat.difficulty}
                             items={difficultyMenuItems}

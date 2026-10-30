@@ -124,7 +124,7 @@ pub(crate) fn resolve_fight_fighters(
         return Ok(Some((object_targets[0], object_targets[1])));
     }
     if let Effect::Fight { subject, .. } = &ability.effect {
-        if crate::game::ability_utils::fight_subject_needs_target_slot(subject) {
+        if crate::types::ability::fight_subject_needs_target_slot(subject) {
             // CR 701.14a: Dual-target fights require both chosen fighters; do
             // not reinterpret a lone survivor as "~ fights target creature".
             return Ok(None);

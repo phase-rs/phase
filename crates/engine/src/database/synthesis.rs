@@ -20,8 +20,8 @@ use crate::types::ability::{
     PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     ReplacementCondition, ReplacementDefinition, RuntimeHandler, SacrificeCost,
     SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
-    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier,
+    TargetChoiceTiming, TargetFilter, TokenAttackDestination, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -862,6 +862,7 @@ fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: true,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -1021,6 +1022,7 @@ fn synthesize_etb_token_attach_keyword(
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -2258,7 +2260,7 @@ pub(crate) fn scavenge_ability_for_keyword(keyword: &Keyword) -> Option<AbilityD
 /// (seam 4: activated-ability-on-grant). The runtime activated-ability gather
 /// (`activated_ability_definitions` in `casting.rs`) calls this for each keyword
 /// in a graveyard card's *effective* keyword set so a keyword granted by a
-/// static (e.g. Encore/Scavenge granted to a graveyard card) surfaces its
+/// static (e.g. Encore/Scavenge/Unearth granted to a graveyard card) surfaces its
 /// activatable ability — the `AddKeyword` layer seam installs only the keyword
 /// and triggers, never activated abilities. Returns `None` for keywords whose
 /// behavior is not a graveyard activated ability. Extend this match as new
@@ -2268,6 +2270,9 @@ pub(crate) fn graveyard_activated_ability_for_keyword(
 ) -> Option<AbilityDefinition> {
     crate::database::encore::encore_ability_for_keyword(keyword)
         .or_else(|| scavenge_ability_for_keyword(keyword))
+        // CR 702.84a: Unearth functions while the card is in a graveyard
+        // (Dregscape Sliver, Sedris, Mishra and Solemn Doomguide grant it there).
+        .or_else(|| crate::database::unearth::unearth_ability_for_keyword(keyword))
 }
 
 /// CR 702.107a: Synthesize the Outlast activated ability from a `Keyword::Outlast(cost)`.
@@ -3346,6 +3351,7 @@ fn offspring_etb_copy_trigger_for_ordinal(origin_ordinal: u32) -> TriggerDefinit
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
@@ -3544,6 +3550,7 @@ fn install_etb_copy_on_additional_cost(face: &mut CardFace, spec: EtbCopyOnAddit
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: spec.count,
             extra_keywords: vec![],
@@ -3766,6 +3773,7 @@ fn build_fabricate_trigger(n: u32) -> TriggerDefinition {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -4379,6 +4387,7 @@ fn build_afterlife_trigger(count: u32) -> TriggerDefinition {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -5050,6 +5059,7 @@ fn build_double_team_trigger() -> TriggerDefinition {
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: true,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: true,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
@@ -14556,6 +14566,7 @@ mod provoke_runtime_tests {
     use crate::game::ability_utils::build_resolved_from_def_with_targets;
     use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
     use crate::game::effects::resolve_ability_chain;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::zones::create_object;
     use crate::types::ability::{ContinuousModification, EffectKind, TargetRef};
     use crate::types::events::GameEvent;

@@ -29,14 +29,10 @@
 //! the workspace cargo lock:
 //!
 //! ```text
-//! CARGO_TARGET_DIR=/tmp/gs-size \
-//!   cargo rustc -p phase-engine --lib --features proptest \
-//!   -- -Zprint-type-sizes --emit=metadata
+//! CARGO_TARGET_DIR=/tmp/gs-size RUSTFLAGS="-Zprint-type-sizes" \
+//!   cargo build -p phase-engine --lib \
+//!   | grep 'print-type-size type: `types::game_state::GameState`:'
 //! ```
-//! The extra rustc flags apply only to the engine, not every dependency.
-//! Keep the complete output and compiler exit status: a compilation error,
-//! including a fired ceiling, can prevent engine layout output. No matching
-//! layout line is not a size measurement.
 //!
 //! Measured on `nightly-2026-04-19` — `GameState` on x86_64-unknown-linux-gnu,
 //! the other three rows on aarch64-apple-darwin (not re-measured):
@@ -85,16 +81,11 @@
 //! ChooseOneOfBranch more than 200 B apart, so `WaitingFor` carries an intentional
 //! `#[allow(clippy::large_enum_variant)]`; the GameState ceiling above is the bound.
 //!
-//! On x86_64-unknown-linux-gnu (`nightly-2026-04-19`, rustc `0febdbab2`,
-//! features `proptest`), owner-printing LKI captures brought `GameState` to
-//! 14,896 B and `WaitingFor` to 1,768 B, exceeding the unchanged 14,848 B
-//! state ceiling. `NamedChoiceSource` was 1,696 B: its source context carries
-//! LKI directly and again through a cost-paid snapshot. Boxing only the
-//! populated `WaitingFor::NamedChoice.source` brought `GameState` to 14,624 B
-//! and `WaitingFor` to 1,504 B. The maximum variant is now `ChooseOneOfBranch`
-//! (1,498 B); the named-choice payload is 87 B with an 8 B optional source
-//! pointer. Noninteractive choice authorities remain inline, and absent
-//! interactive sources allocate nothing. The ceiling remains 14,848 B.
+//! `GameState` re-measured on x86_64-unknown-linux-gnu (`nightly-2026-04-19`) at
+//! 14,880 B when the loop shortcut's ∞ mark gained `unbounded_rising`, a 24 B map
+//! populated only while a mark stands — not a large rarely-populated field, and
+//! boxing it saves 16 B and stays over; the ceiling moved to
+//! 14,880.next_multiple_of(256) + 256 = 15,360.
 //!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
@@ -105,7 +96,7 @@
 const _: () = {
     use core::mem::size_of;
     assert!(
-        size_of::<crate::types::game_state::GameState>() <= 14_848,
+        size_of::<crate::types::game_state::GameState>() <= 15_360,
         "GameState grew past its stack budget. It is moved by value through the \
          phase-server action + AI path, so an overrun is an uncatchable \
          guard-page abort, not a panic. Re-run the -Zprint-type-sizes command in \

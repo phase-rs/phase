@@ -11,7 +11,7 @@ import { createPortal } from "react-dom";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
+import type { ParseKeys, TFunction } from "i18next";
 
 import type {
   CompanionRevealChoice,
@@ -23,7 +23,11 @@ import type {
   SerializedAbilityCost,
   AiDecisionDiagnosticReceipt,
 } from "../adapter/types";
-import { supportsAiDecisionDiagnostics, supportsMatchConcede } from "../adapter/types";
+import {
+  supportsAiDecisionDiagnostics,
+  supportsDebugHandReveal,
+  supportsMatchConcede,
+} from "../adapter/types";
 import type {
   InteractionManaRestriction,
   InteractionPresentationSurface,
@@ -33,7 +37,9 @@ import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
 import { useResolvedGridRows, useResolvedSplitGridRows } from "../hooks/useResolvedGridRows.ts";
+import { useDebugHandReveal } from "../hooks/useDebugHandReveal";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
+import { formatLifeReadout, lifeReadout } from "../hooks/useDisplayedLife.ts";
 import { useLocalizedCardContent } from "../hooks/useLocalizedCardContent.ts";
 import { CardTextReference } from "../components/card/CardTextReference.tsx";
 import { useGameViewportLock } from "../hooks/useGameViewportLock.ts";
@@ -136,6 +142,7 @@ import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
 import { PlayerHud } from "../components/hud/PlayerHud.tsx";
 import { OpponentHud } from "../components/hud/OpponentHud.tsx";
 import { TurnStatusLine } from "../components/hud/TurnStatusLine.tsx";
+import { DayNightBadge } from "../components/hud/HudBadges.tsx";
 import { GraveyardPile } from "../components/zone/GraveyardPile.tsx";
 import { LibraryPile } from "../components/zone/LibraryPile.tsx";
 import { ExilePile } from "../components/zone/ExilePile.tsx";
@@ -246,15 +253,12 @@ function directSetupFormatConfig(format: GameFormat | null) {
  * a compile error — the idiomatic TS replacement for a `switch`-with-`never`-default
  * when the union has a single arm today but will grow.
  */
-const HOSTING_FAILURE_MESSAGE_KEYS: Record<
-  Extract<P2PAdapterEvent, { type: "hostingFailed" }>["reason"],
-  string
-> = {
+const HOSTING_FAILURE_MESSAGE_KEYS = {
   room_still_claimed: "gamePage.toasts.roomStillClaimed",
-};
+} as const satisfies Record<Extract<P2PAdapterEvent, { type: "hostingFailed" }>["reason"], ParseKeys<"game">>;
 
 export function GamePage() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "multiplayer"]);
   const navigate = useNavigate();
   const { id: gameId } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
@@ -1065,6 +1069,7 @@ function GamePageContent({
       adapter.setAiDecisionDiagnosticsEnabled(false);
     };
   }, [adapter, aiDecisionCaptureEnabled]);
+  useDebugHandReveal(showAiHand);
   // The AUTHORITATIVE game mode. The URL-derived `mode` prop structurally
   // cannot contain `native-ai` (desktop solo arrives as `rawMode === "ai"`), so
   // it cannot answer "is anyone else at this table?".
@@ -1565,7 +1570,7 @@ function GamePageContent({
             <>
               <div aria-hidden />
               <div className="min-w-0">
-                <OpponentHand showCards={showAiHand} />
+                <OpponentHand />
               </div>
               <DraggableWidget
                 target={{ kind: "widget", key: "opponentPiles" }}
@@ -1613,7 +1618,6 @@ function GamePageContent({
             effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout}
             oppHud={oppHud}
             playerHud={playerHud}
-            showOpponentCards={showAiHand}
             onKickPlayer={isP2PHost ? handleKickPlayer : undefined}
             onViewZone={handleViewZone}
           />
@@ -1705,6 +1709,7 @@ function GamePageContent({
             <div className="flex flex-col gap-1 max-lg:gap-1">
               <MobilePhaseChip className="w-full" />
               <HandBadge className="w-full" />
+              <DayNightBadge />
             </div>
             <div className="flex items-center gap-1.5">
               <PriorityYieldList />
@@ -1724,7 +1729,10 @@ function GamePageContent({
             <CombatPhaseIndicator />
           </div>
           {isSpectatorMode ? (
-            <TurnStatusLine />
+            <div className="flex flex-row items-center gap-1.5">
+              <TurnStatusLine />
+              <DayNightBadge />
+            </div>
           ) : (
             <>
               <div className="hidden max-lg:portrait:block max-lg:portrait:w-full">
@@ -1736,6 +1744,7 @@ function GamePageContent({
                 <MobilePhaseChip className="lg:hidden" />
                 <TurnStatusLine />
                 <HandBadge />
+                <DayNightBadge />
                 {/* CR 117.3d: standing priority-yield summary chip, beside the
                     Full Control toggle (self-hides when no yields stand). */}
                 <PriorityYieldList />
@@ -1756,7 +1765,7 @@ function GamePageContent({
       {/* Game menu — top-left hamburger */}
       <GameMenu
         gameId={gameId}
-        isAiMode={mode === "ai"}
+        isAiMode={mode === "ai" && supportsDebugHandReveal(adapter)}
         isOnlineMode={isOnlineMode}
         showAiHand={showAiHand}
         onToggleAiHand={() => setShowAiHand((v) => !v)}
@@ -2421,8 +2430,11 @@ function MulliganPanel({
         transition={{ duration: 0.24, ease: "easeOut" }}
       />
       <div className="relative flex min-h-full items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
+        {/* Grow with the card row so a whole hand shows without scrolling when
+            the viewport fits it; never narrower than 72rem (or the viewport),
+            never wider than the viewport (the row scrolls again below that). */}
         <motion.div
-          className="card-scale-reset pointer-events-auto relative z-10 w-full max-w-6xl"
+          className="card-scale-reset pointer-events-auto relative z-10 w-fit min-w-[min(100%,72rem)] max-w-full"
           initial={{ opacity: 0, y: 18, scale: 0.98 }}
           animate={{ opacity: 1, scale: 1, ...slideTransform }}
           transition={{ duration: 0.24, ease: "easeOut" }}
@@ -2969,10 +2981,10 @@ function GameOverScreen({
 
   const activePlayerId = useMultiplayerStore((s) => s.activePlayerId) ?? 0;
 
-  const playerLife = players?.[activePlayerId]?.life ?? 0;
-  const opponentLife = players
-    ? (players.find((p) => p.id !== activePlayerId)?.life ?? 0)
-    : 0;
+  const playerLife = formatLifeReadout(lifeReadout(gameState, activePlayerId));
+  const opponentId = players?.find((p) => p.id !== activePlayerId)?.id;
+  const opponentLife =
+    opponentId === undefined ? "0" : formatLifeReadout(lifeReadout(gameState, opponentId));
 
   const isVictory = winner === activePlayerId;
   const isDraw = winner == null;

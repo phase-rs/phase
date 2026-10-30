@@ -44,22 +44,51 @@ export function deckCardNames(deck: ParsedDeck): string[] {
   ];
 }
 
+const SET_ONLY_PRINTING_SUFFIX_RE = /^(.*\S)\s+\(([a-z0-9]+|[A-Z0-9]+)\)$/;
+
+/** The base of `name` when it ends in a lowercase or uppercase set-only suffix. */
+function baseNameWithoutSetOnlySuffix(name: string): string | null {
+  const match = name.match(SET_ONLY_PRINTING_SUFFIX_RE);
+  return match ? match[1] : null;
+}
+
 /**
  * The engine's canonical spelling of each distinct name in `names`, holding
  * only the names it spells differently. Rejects if the engine cannot answer.
+ *
+ * A name that carries a set-only printing suffix (`Name (SET)`) falls back to
+ * the base name when the suffixed spelling does not resolve but the base does.
+ * The suffixed spelling is checked first, so a real parenthesized card name
+ * (`Hazmat Suit (Used)`) is kept whenever the engine resolves it.
  */
 export async function canonicalNameMap(names: readonly string[]): Promise<Map<string, string>> {
   const distinct = [...new Set(names)];
   const renamed = new Map<string, string>();
   if (distinct.length === 0) return renamed;
-  const answers = await getSharedAdapter().canonicalCardNames(distinct);
-  if (!Array.isArray(answers) || answers.length !== distinct.length) {
+
+  const bases = new Map<string, string>();
+  for (const name of distinct) {
+    const base = baseNameWithoutSetOnlySuffix(name);
+    if (base !== null) bases.set(name, base);
+  }
+  const candidates = [...new Set([...distinct, ...bases.values()])];
+  const answers = await getSharedAdapter().canonicalCardNames(candidates);
+  if (!Array.isArray(answers) || answers.length !== candidates.length) {
     throw new Error("canonicalCardNames returned a list that does not match its input");
   }
-  distinct.forEach((name, index) => {
-    const canonical = answers[index];
-    if (typeof canonical === "string" && canonical !== name) renamed.set(name, canonical);
-  });
+  const canonicalByName = new Map(candidates.map((name, index) => [name, answers[index]]));
+
+  for (const name of distinct) {
+    const canonical = canonicalByName.get(name);
+    if (typeof canonical === "string") {
+      if (canonical !== name) renamed.set(name, canonical);
+      continue;
+    }
+    const base = bases.get(name);
+    if (base === undefined) continue;
+    const canonicalBase = canonicalByName.get(base);
+    if (typeof canonicalBase === "string") renamed.set(name, canonicalBase);
+  }
   return renamed;
 }
 

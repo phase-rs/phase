@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::game_state::RandomDraw;
 use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
@@ -29,6 +30,7 @@ use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIn
 use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::TokenAttackRequest;
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
 use crate::types::resolution::ResolutionStack;
@@ -123,12 +125,13 @@ pub enum EngineError {
         player: PlayerId,
         pending: Box<crate::types::game_state::PendingCast>,
     },
-    /// A life change in this action proved unrepresentable (the final amount,
-    /// the life total, or the per-turn gained/lost counter does not fit the
+    /// A life, player-counter or energy change in this action proved
+    /// unrepresentable (the final amount, the life total, the per-turn
+    /// gained/lost counter, or the counter/energy total does not fit the
     /// engine's `i32`/`u32` storage). Representability is an engine limit, not
     /// a game rule; the action boundary rejects the whole action and restores
     /// its pre-action snapshot rather than silently skipping the change.
-    #[error("Life change is not representable for player {player:?}")]
+    #[error("Player-resource change is not representable for player {player:?}")]
     LifeChangeUnrepresentable { player: PlayerId },
 }
 
@@ -839,94 +842,6 @@ fn ensure_assist_cancellation_is_allowed(state: &GameState) -> Result<(), Engine
     Ok(())
 }
 
-fn handle_unlock_room_door(
-    state: &mut GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-    door: crate::game::game_object::RoomDoor,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    if state.active_player != player
-        || !matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
-        || !state.stack.is_empty()
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "Room doors can be unlocked only as a main-phase special action with an empty stack"
-                .to_string(),
-        ));
-    }
-
-    let cost = {
-        let obj = state
-            .objects
-            .get(&object_id)
-            .ok_or_else(|| EngineError::InvalidAction("Room not found".to_string()))?;
-        if obj.controller != player || obj.zone != Zone::Battlefield {
-            return Err(EngineError::ActionNotAllowed(
-                "Only the controller of a battlefield Room can unlock it".to_string(),
-            ));
-        }
-        if !obj
-            .card_types
-            .subtypes
-            .iter()
-            .any(|subtype| subtype == "Room")
-        {
-            return Err(EngineError::ActionNotAllowed(
-                "Object is not a Room".to_string(),
-            ));
-        }
-        if obj.room_unlocks.unwrap_or_default().is_unlocked(door) {
-            return Err(EngineError::ActionNotAllowed(
-                "That door is already unlocked".to_string(),
-            ));
-        }
-        // CR 709.5e + CR 707.2: the unlock cost is the locked HALF's mana cost,
-        // read from the EFFECTIVE halves (printed order) — the copied snapshot
-        // when a copy effect applies, else the object's own printed halves
-        // (whose orientation `room::own_room_halves` resolves through
-        // `live_face_door`, the same CR 709.5d mapping as before).
-        let halves = super::room::effective_room_halves(obj);
-        match door {
-            crate::game::game_object::RoomDoor::Left => halves.left.mana_cost.clone(),
-            crate::game::game_object::RoomDoor::Right => halves
-                .right
-                .as_ref()
-                .map(|half| half.mana_cost.clone())
-                .ok_or_else(|| {
-                    EngineError::ActionNotAllowed("Room has no second door face".to_string())
-                })?,
-        }
-    };
-
-    // CR 116.2m + CR 118.7a: Reduce the door's generic unlock cost by the
-    // player's active `ReduceActionCost { action: UnlockDoor }` statics
-    // (Inquisitive Glimmer — "Unlock costs you pay cost {1} less") before
-    // payment. Single authority shared with the plot path.
-    let cost = casting::apply_special_action_cost_reduction(
-        state,
-        player,
-        crate::types::mana::SpecialAction::UnlockDoor,
-        cost,
-    );
-
-    // CR 116.2m + CR 709.5e + CR 106.6: The unlock cost is a special action's
-    // mana cost. Route payment through `PaymentContext::SpecialAction(UnlockDoor)`
-    // so spend-restricted mana ("only to … unlock doors", Smoky Lounge) is
-    // eligible here and spell/activation-restricted mana is correctly rejected.
-    casting::pay_special_action_mana_cost(
-        state,
-        player,
-        Some(object_id),
-        &cost,
-        crate::types::mana::SpecialAction::UnlockDoor,
-        events,
-    )?;
-
-    super::room::unlock_door_designation(state, object_id, player, door, events);
-    Ok(WaitingFor::Priority { player })
-}
-
 /// Public engine entrypoint. Every caller must supply the `actor` — the
 /// `PlayerId` whose authenticated identity is making this action. The engine
 /// rejects any action whose `actor` does not match `authorized_submitter(state)`
@@ -1480,8 +1395,9 @@ impl ProspectiveSimulationOutcome {
     }
 }
 
-/// Closes this boundary's life window and restores the window that was open
-/// before it. Returns the player whose life change failed inside the boundary.
+/// Closes this boundary's ingress window and restores the window that was open
+/// before it. Returns the player whose life, player-counter or energy change
+/// failed inside the boundary.
 fn close_ingress_window(
     state: &mut GameState,
     prior: &mut Option<crate::types::game_state::IngressLifeWindow>,
@@ -1491,8 +1407,8 @@ fn close_ingress_window(
     window.and_then(|window| window.failed_player)
 }
 
-/// The player whose life change inside the current action proved
-/// unrepresentable, if any. An open ingress window records the first failure;
+/// The player whose life, player-counter or energy change inside the current
+/// action proved unrepresentable, if any. An open ingress window records the first failure;
 /// the enclosing action boundary turns it into a rejection and restores its
 /// pre-action snapshot.
 fn boundary_life_change_failure(state: &GameState) -> Option<PlayerId> {
@@ -1645,10 +1561,10 @@ fn apply_action_boundary_core(
             lifecycle,
         });
     }
-    // A life change this action resolves must be representable: open the
-    // ingress window after transient cleanup (which clears any prior window)
+    // A player-resource change this action resolves must be representable: open
+    // the ingress window after transient cleanup (which clears any prior window)
     // and close it before returning a `RawActionApplication`. Every ordinary
-    // life settlement records a failure here instead of silently treating the
+    // life, player-counter and energy settlement records a failure here instead of silently treating the
     // change as zero, so the boundary rejects the whole action atomically.
     state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
     // CR 601.2c + CR 602.2b + CR 603.2: the live announcement's trigger
@@ -2752,7 +2668,11 @@ fn reconcile_loop_shortcut(state: &mut GameState, result: &mut ActionResult) {
                         // the live producer of `unbounded_resources` for a detected loop (the
                         // debug `SetInfiniteMana` toggle is the only other producer). It runs
                         // only inside this OFF-gated block, so a default-OFF game never marks ∞.
-                        state.mark_unbounded_loop(winner, &delta.unbounded_axes_for(winner));
+                        state.mark_unbounded_loop(
+                            winner,
+                            &delta.unbounded_axes_for(winner),
+                            &delta.rising_unbounded_axes_for(winner),
+                        );
                         super::elimination::end_game(state, Some(winner), &mut result.events);
                     }
                 }
@@ -2835,7 +2755,11 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
         if mandatory {
             // FIRM #1 — mandatory winning drain: identical to the `On` auto-win.
             // CR 732.2a: mark the loop's unbounded axes; CR 704.5a: terminal GameOver.
-            state.mark_unbounded_loop(winner, &delta.unbounded_axes_for(winner));
+            state.mark_unbounded_loop(
+                winner,
+                &delta.unbounded_axes_for(winner),
+                &delta.rising_unbounded_axes_for(winner),
+            );
             super::elimination::end_game(state, Some(winner), &mut result.events);
         } else {
             // CR 732.2a: OPTIONAL winning drain — only the player with priority may propose
@@ -3053,12 +2977,12 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
                     .copied()
                     .filter(|id| frames.current().battlefield.contains(id))
                     .collect();
-                Some((axes, enablers))
+                Some((axes, delta.rising_unbounded_axes_for(controller), enablers))
             })
         };
-        if let Some((axes, enablers)) = hit {
+        if let Some((axes, rising, enablers)) = hit {
             // CR 104.4b: mark the revocable unbounded capability (idempotent set-union).
-            state.mark_unbounded_loop(controller, &axes);
+            state.mark_unbounded_loop(controller, &axes, &rising);
             state.register_unbounded_loop_enablers(controller, enablers);
         }
     }
@@ -3140,6 +3064,7 @@ fn build_cert(
     };
     crate::analysis::loop_check::LoopCertificate {
         unbounded: delta.unbounded_axes_for(winner),
+        rising: delta.rising_unbounded_axes_for(winner),
         win_kind: Some(crate::analysis::loop_check::classify_win_kind(
             winner,
             &win_kind_delta,
@@ -3921,7 +3846,10 @@ fn bounded_offer_tail(
         use crate::analysis::resource::ResourceAxis;
         base.unbounded
             .retain(|axis| *axis != ResourceAxis::LibraryDelta(proposer));
+        base.rising
+            .retain(|axis| *axis != ResourceAxis::LibraryDelta(proposer));
         base.unbounded.push(ResourceAxis::ExtraTurns);
+        base.rising.push(ResourceAxis::ExtraTurns);
     }
     let certificate = crate::analysis::loop_check::LoopCertificate {
         per_cycle: Some(crate::analysis::resource::PeriodSignature::EveryRepetition(
@@ -4780,7 +4708,7 @@ fn entry_announces(
     // `bounded_cycle_pin_slots_requires_a_single_mandatory_announcement_slot`, the third by
     // `bounded_cycle_pin_slots_legal_set_comes_from_the_announcement_authority`:
     // * `len() == 1` — a chained second "target" (2 slots) or an effect whose filter the
-    //   SLOT BUILDER declines (0 slots: `triggers::extract_target_filter_from_effect`
+    //   SLOT BUILDER declines (0 slots: `types::ability::extract_target_filter_from_effect`
     //   carves out `Sacrifice`/`UnattachAll`/… for which `Effect::target_filter()` still
     //   returns `Some`, and `target_choice_timing == Resolution` surfaces no stack slot at
     //   all) would leave the published `min/max_targets: 1` contradicting the announcement.
@@ -5956,7 +5884,7 @@ fn apply_until_lethal_shortcut(
                             winner.filter(|winner| Some(*winner) == proposal.predicted_winner)
                         {
                             let mut w = *s;
-                            w.mark_unbounded_loop(winner, &proposal.unbounded);
+                            w.mark_unbounded_loop(winner, &proposal.unbounded, &proposal.rising);
                             *state = w;
                             result.events.append(&mut events);
                             result.waiting_for = state.waiting_for.clone();
@@ -6047,7 +5975,7 @@ fn crown_until_lethal(
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     winner: PlayerId,
 ) {
-    state.mark_unbounded_loop(winner, &proposal.unbounded);
+    state.mark_unbounded_loop(winner, &proposal.unbounded, &proposal.rising);
     super::elimination::end_game(state, Some(winner), &mut result.events);
     result.waiting_for = state.waiting_for.clone();
 }
@@ -8336,6 +8264,7 @@ pub(crate) fn counted_offer(
     // published as one repetition's and classifies nothing.
     let certificate = crate::analysis::loop_check::LoopCertificate {
         unbounded: Vec::new(),
+        rising: Vec::new(),
         win_kind: ending,
         win_kind_at: ending.map(|_| count),
         mandatory: false,
@@ -8383,7 +8312,7 @@ fn materialize_object_growth_shortcut(
 ) {
     // CR 732.2a: reuse the single `unbounded_resources` writer (never mutate the map inline). The
     // proposer is the loop controller (the offer required the whole period to be theirs).
-    state.mark_unbounded_loop(proposal.proposer, &proposal.unbounded);
+    state.mark_unbounded_loop(proposal.proposer, &proposal.unbounded, &proposal.rising);
     // CR 732.2a / CR 110.1: snapshot the ∞ pile — the proposer's tapped fodder-class members —
     // for `DerivedViews::unbounded_pile`. A mana-engine loop reproduces no token ⇒ no fodder ⇒ no
     // pile (correct).
@@ -8644,6 +8573,7 @@ fn seed_representative_fodder(
             additional_modifications: vec![],
             tapped,
             enters_attacking: false,
+            attack_request: TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: owner,
@@ -8904,6 +8834,7 @@ fn handle_declare_shortcut(
         predicted_winner: offer.predicted_winner,
         count,
         unbounded: offer.certificate.unbounded.clone(),
+        rising: offer.certificate.rising.clone(),
         win_kind: offer.certificate.win_kind,
         win_kind_at: offer.certificate.win_kind_at,
         template,
@@ -10099,7 +10030,8 @@ enum AutoPassDecision {
 ///
 /// Interrupts (MTGA-style): `UntilStackEmpty` bails when the stack empties or
 /// grows beyond the baseline (trigger or opponent spell); `UntilTurnBoundary`
-/// bails when an opponent-controlled object is on top of the stack or when the
+/// bails when an opponent-controlled object is on top of the stack, when the
+/// player's own top is `Held` (`priority::standing_priority_pass`), or when the
 /// current phase is in the user-supplied `phase_stops` list. The per-window
 /// interrupt logic is boundary-agnostic — both `EndOfCurrentTurn` and
 /// `MyNextTurnStart` behave identically within a priority window.
@@ -10136,14 +10068,21 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
             // CR 117.3d: An opponent-controlled top-of-stack normally ends the
             // session so the player can respond — unless they have pre-committed
             // to yield priority for that exact triggered ability, in which case
-            // the session keeps auto-passing through it. The standing rungs are
-            // `priority::standing_priority_pass`'s; Full Control already returned
-            // above, so `Withheld` cannot reach this arm.
-            let opponent_on_stack = state.stack.last().is_some_and(|top| {
-                priority::standing_priority_pass(state, player, Some(top))
-                    == priority::StandingPriorityPass::Undecided
+            // the session keeps auto-passing through it. CR 117.1d + CR 605.3a:
+            // the player's own object that can move one of their activatable
+            // mana sources off the battlefield (`Held`) ends it too, since that
+            // activation is lost once the object resolves. (`UntilStackEmpty` is
+            // consent to resolve the stack itself, so it passes through.) The standing rungs
+            // are `priority::standing_priority_pass`'s; Full Control already
+            // returned above, so `Withheld` cannot reach this arm.
+            let top_needs_response = state.stack.last().is_some_and(|top| {
+                matches!(
+                    priority::standing_priority_pass(state, player, Some(top)),
+                    priority::StandingPriorityPass::Undecided
+                        | priority::StandingPriorityPass::Held
+                )
             });
-            if opponent_on_stack {
+            if top_needs_response {
                 AutoPassDecision::Break
             } else if state.phase_stop_hit(player) {
                 AutoPassDecision::Finish
@@ -10696,7 +10635,9 @@ fn stack_resolution_session_participant_authorizes_pass(
         // the session's own representative's included.
         priority::StandingPriorityPass::Withheld => return false,
         priority::StandingPriorityPass::Granted => true,
-        priority::StandingPriorityPass::Undecided => false,
+        // CR 117.1d + CR 605.3a: an own object that can remove an activatable
+        // mana source is no standing pass; only explicit consent skips it.
+        priority::StandingPriorityPass::Held | priority::StandingPriorityPass::Undecided => false,
     };
     match session.policy {
         // A verified AI pass authorizes later windows in this exact fenced
@@ -10766,7 +10707,14 @@ pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Op
     // CR 117.3b + CR 117.4: resolving K entries skips every participant's
     // window over each of the next K − 1 entries, each with its own top; the
     // boundary ends before the first window a participant has not authorized
-    // (CR 732.2b), so K = 1 + the authorized prefix of those windows.
+    // (CR 732.2b), so K = 1 + the authorized prefix of those windows. Each
+    // window is judged against the board before anything resolves, so it cannot
+    // see a mana source an earlier member untaps. That is sound for the `Held`
+    // rung because a batch consumes only windows this look-ahead authorized, and
+    // its members are either the resolver's fixed inert kinds or one repeated
+    // untargeted triggered ability. A member that untaps a mana source which a
+    // later identical member then removes, without pausing, is an accepted
+    // under-approximation.
     let authorized_skipped_windows = fenced_prefix
         .take_while(|window_top| {
             participants.iter().all(|&participant| {
@@ -12847,7 +12795,7 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            handle_unlock_room_door(state, *player, object_id, door, &mut events)?
+            super::room::handle_unlock_room_door(state, *player, object_id, door, &mut events)?
         }
         (WaitingFor::Priority { player }, GameAction::RollPlanarDie) => {
             if state.priority_player
@@ -12858,8 +12806,16 @@ fn apply_non_priority_pass_action(
             // CR 901.9 / CR 116.2i: Rolling the planar die as a special action
             // does not use the stack; the escalating cost is charged before the
             // roll and effect-caused rolls do not increment the counter.
-            crate::game::planechase::take_paid_planar_die_action(state, *player, &mut events)?;
-            WaitingFor::Priority { player: *player }
+            // CR 605.3b + CR 616.1: a paused cost move or pre-spend echo choice
+            // leaves the action uncommitted; the typed planar-die root returns
+            // its prompt and finishes the locked-cost roll once answered.
+            match crate::game::planechase::take_paid_planar_die_action(state, *player, &mut events)?
+            {
+                crate::game::planechase::PaidPlanarDieAction::Rolled(_) => {
+                    WaitingFor::Priority { player: *player }
+                }
+                crate::game::planechase::PaidPlanarDieAction::Paused => state.waiting_for.clone(),
+            }
         }
         // CR 715.3a: Player chooses creature or Adventure face.
         (
@@ -13906,80 +13862,18 @@ fn apply_non_priority_pass_action(
                 source,
                 cost_source,
                 remaining_cost,
-            } => {
-                if chosen.len() != *count {
-                    return Err(EngineError::InvalidAction(format!(
-                        "Must choose exactly {} permanent(s)/card(s)",
-                        count
-                    )));
-                }
-                // CR 118.1 + CR 118.3 + CR 702.37e: Multi-object cost payment requires distinct IDs
-                let mut seen = std::collections::HashSet::new();
-                for &id in chosen.iter() {
-                    if !seen.insert(id) {
-                        return Err(EngineError::InvalidAction(
-                            "Selected cards/permanents must be distinct".into(),
-                        ));
-                    }
-                    if !choices.contains(&id) {
-                        return Err(EngineError::InvalidAction(
-                            "Selected card or permanent is not eligible".to_string(),
-                        ));
-                    }
-                }
-                match kind {
-                    PayCostKind::ReturnToHand | PayCostKind::Discard | PayCostKind::Sacrifice => {
-                        use crate::types::game_state::TurnFaceUpMoveKind;
-                        let move_kind = match kind {
-                            PayCostKind::ReturnToHand => TurnFaceUpMoveKind::ReturnToHand,
-                            PayCostKind::Discard => TurnFaceUpMoveKind::Discard,
-                            _ => TurnFaceUpMoveKind::Sacrifice,
-                        };
-                        // CR 702.37e + CR 118.3: the selected objects move together as
-                        // one cost component through the shared turn-face-up move loop.
-                        let cost_event_start = events.len();
-                        super::morph::move_turn_face_up_cost_objects(
-                            state,
-                            super::morph::TurnFaceUpCostMoveRequest {
-                                player: *player,
-                                source: *source,
-                                cost_source: *cost_source,
-                                move_kind,
-                                chosen: chosen.clone(),
-                                start_at_index: 0,
-                                remaining_cost: remaining_cost.clone(),
-                            },
-                            super::casting_costs::CostMoveLedger::default(),
-                            cost_event_start,
-                            &mut events,
-                        )?
-                    }
-                    PayCostKind::Reveal => {
-                        let revealed_names = chosen
-                            .iter()
-                            .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
-                            .collect();
-                        events.push(GameEvent::CardsRevealed {
-                            player: *player,
-                            card_ids: chosen.to_vec(),
-                            card_names: revealed_names,
-                        });
-                        super::morph::finish_or_continue_turn_face_up(
-                            state,
-                            *player,
-                            *source,
-                            *cost_source,
-                            remaining_cost.clone(),
-                            &mut events,
-                        )?
-                    }
-                    _ => {
-                        return Err(EngineError::InvalidAction(
-                            "Cost kind cannot resume a turn-face-up PayCost".into(),
-                        ));
-                    }
-                }
-            }
+            } => super::morph::handle_turn_face_up_cost_selection(
+                state,
+                *player,
+                kind,
+                choices,
+                *count,
+                &chosen,
+                *source,
+                *cost_source,
+                remaining_cost.clone(),
+                &mut events,
+            )?,
         },
         // CR 601.2: Player backed out of a cost-payment choice. Only spell
         // casts can be cancelled; mana-ability cost payment has no cancel path.
@@ -13998,6 +13892,10 @@ fn apply_non_priority_pass_action(
             },
             GameAction::CancelCast,
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        // CR 116.2b + CR 702.37e: A turn-face-up special action is only backed out
+        // before any cost component is paid. `supported_for_turn_face_up` admits
+        // single-leaf costs only (Composite is rejected at the scope gate in
+        // `costs.rs`), so this prompt is always the first and only payment step.
         (
             WaitingFor::PayCost {
                 player,
@@ -14110,7 +14008,9 @@ fn apply_non_priority_pass_action(
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (
             WaitingFor::ChooseManaColor {
-                choice, context, ..
+                player: prompt_player,
+                choice,
+                context,
             },
             GameAction::ChooseManaColor {
                 choice: chosen,
@@ -14165,13 +14065,58 @@ fn apply_non_priority_pass_action(
                     wf
                 }
                 crate::types::game_state::ManaChoiceContext::ResolvingEffect(pending_effect) => {
-                    effects::mana::handle_choose_mana_effect(
+                    // CR 605.4a: a choice answered inside a paused accepted
+                    // triggered-mana occurrence resumes that fixed point (same
+                    // wrap the optional/opponent-may answers use). With no live
+                    // carrier both hooks are exact no-ops and this is the
+                    // historical immediate completion. The latched prompt
+                    // player travels as the recipient backstop so suspension
+                    // cannot misroute the deposit.
+                    let wf = super::triggers::with_accepted_triggered_mana_action_scope(
                         state,
-                        pending_effect,
-                        choice,
-                        chosen.clone(),
+                        |state| {
+                            effects::mana::handle_choose_mana_effect(
+                                state,
+                                pending_effect,
+                                *prompt_player,
+                                choice,
+                                chosen.clone(),
+                                &mut events,
+                            )
+                        },
+                    )?;
+                    if let super::triggers::TriggeredManaReadiness::Resumed {
+                        wait,
+                        settled_direct_priority_root,
+                    } = super::triggers::finish_accepted_triggered_mana_action(
+                        state,
                         &mut events,
-                    )?
+                        events_before,
+                    )? {
+                        // CR 117.5 + CR 605.4a (mirrors the opponent-may arm):
+                        // this reducer arm returns its `ActionResult` directly,
+                        // so the ordinary epilogue never runs. A resumed
+                        // direct `Priority` root with no live owner must
+                        // converge here, or ordinary deferred triggers from
+                        // its own settled batch (e.g. a Manabarbs observer on
+                        // the same tap) would sit undrained when priority
+                        // returns. Every other owner keeps its queue and
+                        // returns the frame's wait unchanged.
+                        let wait = *wait;
+                        let wait = if settled_direct_priority_root {
+                            engine_priority::run_post_action_pipeline_from_settled_priority(
+                                state,
+                                &mut events,
+                                events_before,
+                                &wait,
+                            )?
+                        } else {
+                            wait
+                        };
+                        state.waiting_for = wait.clone();
+                        return Ok(ActionResult::applied(events, wait));
+                    }
+                    wf
                 }
             };
             // CR 603.2c + CR 605.4a: A NON-mana `ResolvingEffect` colour choice
@@ -15594,7 +15539,10 @@ fn apply_non_priority_pass_action(
             {
                 waiting_for
             } else {
-                engine_combat::finish_declare_attackers(state, &mut events, false)?
+                // CR 508.1g + CR 701.43d: this action carries only the exert
+                // decision and the buffered declaration batch owns the events;
+                // the declaration span starts at this action's beginning.
+                engine_combat::finish_declare_attackers(state, &mut events, 0, false)?
             }
         }
         // CR 508.1g + CR 702.154a: the active player may tap up to one eligible
@@ -15629,7 +15577,10 @@ fn apply_non_priority_pass_action(
             {
                 waiting_for
             } else {
-                engine_combat::finish_declare_attackers(state, &mut events, false)?
+                // CR 508.1g + CR 702.154a: this action carries only the enlist
+                // decision and the buffered declaration batch owns the events;
+                // the declaration span starts at this action's beginning.
+                engine_combat::finish_declare_attackers(state, &mut events, 0, false)?
             }
         }
         (
@@ -17488,20 +17439,19 @@ pub fn preflight_debug_action(
         .validate_create_count()
         .map_err(EngineError::InvalidAction)?;
     action
-        .validate_life_change_amount()
+        .validate_player_resource_amount()
         .map_err(EngineError::InvalidAction)?;
 
-    // CR 616.1: a sandbox life change is a real event whose replacements can
-    // park a replacement-order choice for the affected player. Only a settled
-    // Priority boundary can own that choice; admitting a second event under an
-    // open prompt would replace the outstanding proposal before it resolves.
-    if matches!(
-        action,
-        DebugAction::GainLife { .. } | DebugAction::LoseLife { .. }
-    ) && !matches!(state.waiting_for, WaitingFor::Priority { .. })
+    // CR 616.1: a sandbox life change or player-counter/energy gain is a real
+    // event whose replacements can park a replacement-order choice for the
+    // affected player. Only a settled Priority boundary can own that choice;
+    // admitting a second event under an open prompt would replace the
+    // outstanding proposal before it resolves.
+    if action.requires_settled_priority()
+        && !matches!(state.waiting_for, WaitingFor::Priority { .. })
     {
         return Err(EngineError::InvalidAction(
-            "Debug::GainLife / Debug::LoseLife require a Priority window".into(),
+            "Debug::GainLife / Debug::LoseLife / Debug::GivePlayerCounters / Debug::GiveEnergy require a Priority window".into(),
         ));
     }
 
@@ -22664,6 +22614,7 @@ mod stage2_injector_tests {
             predicted_winner: None,
             certificate: LoopCertificate {
                 unbounded: Vec::new(),
+                rising: Vec::new(),
                 win_kind: Some(WinKind::LethalDamage),
                 win_kind_at: None,
                 mandatory: false,
@@ -22952,6 +22903,7 @@ mod stage2_injector_tests {
             predicted_winner: Some(P0),
             count: IterationCount::UntilLethal,
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
             win_kind_at: None,
             template: Some(template),
@@ -23107,6 +23059,7 @@ mod stage2_injector_tests {
             predicted_winner: Some(P0),
             count: IterationCount::UntilLethal,
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
             win_kind_at: None,
             template: Some(sched),
@@ -25128,6 +25081,8 @@ mod stage2_injector_tests {
                     owner: TargetFilter::Controller,
                     attach_to: Some(attach),
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -25869,7 +25824,7 @@ mod kilo_interruptibility_tests {
         // axis and left it ∞-marked for manual play). The offer hook never reads
         // `unbounded_resources`, so the mark must NOT suppress the re-offer.
         let mut marked = base.clone();
-        marked.mark_unbounded_loop(P0, &[ResourceAxis::Life(P0)]);
+        marked.mark_unbounded_loop(P0, &[ResourceAxis::Life(P0)], &[ResourceAxis::Life(P0)]);
         assert!(
             marked
                 .unbounded_resources

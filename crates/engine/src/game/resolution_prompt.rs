@@ -232,7 +232,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         //      — it is not a compile error to silence. rustc's own diagnostic
         //      prints a `help:` suggesting `..`, which silently disarms the
         //      guard. Classify the new field against the scope filter, then name
-        //      it `_`. The 14-field `Effect::Token` arm is the one that maximally
+        //      it `_`. The `Effect::Token` arm is the one that maximally
         //      invites the `..`.
         //
         //      CR 107.1c + CR 608.2d: THE `UpTo` GUARD IS ON *EVERY*
@@ -270,6 +270,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
             owner: _,
             attach_to: _,
             enters_attacking: _,
+            attack_destination: _,
             supertypes: _,
             static_abilities: _,
             enter_with_counters: _,
@@ -1001,6 +1002,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],

@@ -58,6 +58,20 @@ pub struct ExtraPhaseId(pub u64);
 #[serde(transparent)]
 pub struct TrackedSetId(pub u64);
 
+/// CR 702.50a: Names one rest-of-game Epic effect by its position in
+/// `GameState::epic_effects`, which only grows, so a position is a stable identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EpicEffectId(pub u64);
+
+/// CR 615.5 + CR 614.6: names one runtime continuation of a resolution-installed
+/// replacement or prevention shield by its position in
+/// `GameState::replacement_continuations`, which only grows, so a position is a
+/// stable identity for the rest of the game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReplacementContinuationId(pub u64);
+
 /// CR 603.7: Monotonic identity of one installed delayed triggered ability.
 ///
 /// This is deliberately distinct from its source object: multiple delayed
@@ -180,26 +194,6 @@ impl ObjectIncarnationRef {
             object_id,
             incarnation,
         }
-    }
-
-    /// Convenience: capture the current incarnation of a live object.
-    pub fn from_object(obj: &GameObject) -> Self {
-        Self {
-            object_id: obj.id,
-            incarnation: obj.incarnation,
-        }
-    }
-
-    /// CR 400.7: True when this pinned reference still names the live object it
-    /// was captured from. An object that changed zones became a new object and
-    /// bumped its incarnation (`GameObject::bump_incarnation`), so a stale pin
-    /// matches nothing even though the engine reuses the `ObjectId` as storage
-    /// identity.
-    pub fn is_current(&self, state: &crate::types::game_state::GameState) -> bool {
-        state
-            .objects
-            .get(&self.object_id)
-            .is_some_and(|object| Self::from_object(object) == *self)
     }
 }
 

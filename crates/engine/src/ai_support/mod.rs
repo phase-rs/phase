@@ -266,14 +266,19 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
 
 /// CR 608.2d + CR 614.12a: A named choice made while an effect applies, or as a
 /// permanent enters, is announced from the prompt's enumerated domain, and the
-/// reducer accepts any member of it (`engine_resolution_choices.rs`, the
-/// `NamedChoice` arm) — so `SimulationFilter` can skip its clone-and-apply
-/// probe. Mirrors [`structurally_valid_search_selection`].
+/// reducer's submission guard admits any member of it
+/// (`engine_resolution_choices.rs`, the `NamedChoice` arm) — so
+/// `SimulationFilter` skips its clone-and-apply probe on this verdict. Mirrors
+/// [`structurally_valid_search_selection`].
+///
+/// The verdict is the submission guard's, not the apply's: an admitted answer
+/// can still fail later in the action, as a life gain the engine cannot
+/// represent does (`EngineError::LifeChangeUnrepresentable`).
 ///
 /// This is load-bearing for creature-type prompts: each of the several hundred
 /// enumerated answers (one per known creature type) paid a full `GameState`
-/// clone, which is costly on a large board, to re-derive a verdict that
-/// membership alone decides.
+/// clone, which is costly on a large board, to re-derive the guard's verdict,
+/// which membership alone decides.
 ///
 /// CR 601.2f + CR 601.2h + CR 602.2b: while a cast or activation is in progress
 /// (`GameState::withholds_priority`), an answer precedes determining and paying
@@ -331,6 +336,34 @@ pub(crate) fn structurally_valid_named_choice_answer(
             | NamedChoiceSourceBinding::ExactObjectAndResolution => true,
         },
     }
+}
+
+/// CR 608.2d + CR 614.12a + CR 701.23a: Whether the pending prompt's submission
+/// guard admits `action`, decided without mutating the game, for a library search
+/// selection ([`structurally_valid_search_selection`]) or a named choice from the
+/// prompt's enumerated domain ([`structurally_valid_named_choice_answer`]).
+/// `true` means the guard admits the answer; `false` means it rejects it or the
+/// shape is not modeled here.
+///
+/// This is the one authority for those shapes. `SimulationFilter` consults it
+/// before its clone-and-apply probe, and phase-ai's planner legality gate
+/// consults it outside the filter pipeline, so the verdict reads only the
+/// state and the action — never a candidate's actor or semantic owner, nor a
+/// cast probe. CR 723.5: under player control, or a latched search control,
+/// the controller submits the controlled player's answer; who submits it does
+/// not change whether the guard admits it.
+///
+/// Only prompt-answer shapes with that property belong here. The other
+/// `SimulationFilter` hatches (pass, convoke payment, priority activation and
+/// cast) are scoped to that filter's own probe. The planner legality gate in
+/// phase-ai does not consult them: it admits a pass during
+/// `WaitingFor::Priority` by its own arm, without simulating it, and simulates
+/// the convoke payment, activation and cast candidates it validates.
+///
+/// Conservative by design: `false` only costs a simulation.
+pub fn structurally_valid_prompt_answer(state: &GameState, action: &GameAction) -> bool {
+    structurally_valid_search_selection(state, action)
+        || structurally_valid_named_choice_answer(state, action)
 }
 
 fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
@@ -2029,7 +2062,8 @@ fn beneficial_mana_tap_trigger_hold(
 /// - Only `PassPriority` is available (no spells, abilities, or lands to play)
 /// - Initial upkeep/draw priority without an explicit phase stop (MTGA-style)
 /// - Player's own spell/ability is on top of the stack (MTGA-style: let your
-///   own spells resolve without pausing)
+///   own spells resolve without pausing), unless resolving it can remove a
+///   mana source the player can activate now
 ///
 /// This centralizes the "meaningful action" classification in the engine so
 /// frontends don't need to inspect game objects or card types.
@@ -2089,9 +2123,12 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // so the recommendation and the engine-side pass cannot disagree about the
     // same window. A yield or own object outranks every castability and
     // meaningful-action hold below, including the issue #4388 opponent-turn
-    // mana-window hold (MTGA parity).
+    // mana-window hold (MTGA parity). CR 117.1d + CR 605.3a: an own object
+    // that can move one of the player's activatable mana sources off the
+    // battlefield holds instead — the rungs below never count a mana activation
+    // as meaningful, so falling through would still pass that window.
     match standing_priority_pass(state, player, state.stack.back()) {
-        StandingPriorityPass::Withheld => return false,
+        StandingPriorityPass::Withheld | StandingPriorityPass::Held => return false,
         StandingPriorityPass::Granted => return true,
         StandingPriorityPass::Undecided => {}
     }
@@ -6201,6 +6238,8 @@ mod tests {
                     }),
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -7861,7 +7900,7 @@ mod tests {
             );
             let expected = match verdict {
                 StandingPriorityPass::Granted => (true, true),
-                StandingPriorityPass::Withheld => (false, false),
+                StandingPriorityPass::Withheld | StandingPriorityPass::Held => (false, false),
                 StandingPriorityPass::Undecided => (false, true),
             };
             assert_eq!(

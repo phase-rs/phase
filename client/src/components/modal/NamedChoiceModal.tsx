@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
@@ -19,25 +20,25 @@ type OptionChoice = Extract<
   { type: "NamedChoice" | "OpponentGuess" }
 >;
 
-/** Maps a ChoiceType key to its i18n leaf under `namedChoice.title.*`. */
-const CHOICE_TYPE_TITLE_KEYS: Record<string, string> = {
-  CreatureType: "creatureType",
-  Color: "color",
-  OddOrEven: "oddOrEven",
-  BasicLandType: "basicLandType",
-  CardType: "cardType",
-  CardName: "cardName",
-  LandType: "landType",
-  Opponent: "opponent",
-  Player: "player",
-  TwoColors: "twoColors",
-  NumberRange: "numberRange",
-  Labeled: "labeled",
-  CardPredicate: "cardPredicate",
-  CardPredicateGuess: "cardPredicateGuess",
-  Keyword: "keyword",
-  CounterKind: "counterKind",
-};
+/** Maps a ChoiceType key to its `namedChoice.title.*` key. */
+const CHOICE_TYPE_TITLE_KEYS: ReadonlyMap<string, ParseKeys<"game">> = new Map([
+  ["CreatureType", "namedChoice.title.creatureType"],
+  ["Color", "namedChoice.title.color"],
+  ["OddOrEven", "namedChoice.title.oddOrEven"],
+  ["BasicLandType", "namedChoice.title.basicLandType"],
+  ["CardType", "namedChoice.title.cardType"],
+  ["CardName", "namedChoice.title.cardName"],
+  ["LandType", "namedChoice.title.landType"],
+  ["Opponent", "namedChoice.title.opponent"],
+  ["Player", "namedChoice.title.player"],
+  ["TwoColors", "namedChoice.title.twoColors"],
+  ["NumberRange", "namedChoice.title.numberRange"],
+  ["Labeled", "namedChoice.title.labeled"],
+  ["CardPredicate", "namedChoice.title.cardPredicate"],
+  ["CardPredicateGuess", "namedChoice.title.cardPredicateGuess"],
+  ["Keyword", "namedChoice.title.keyword"],
+  ["CounterKind", "namedChoice.title.counterKind"],
+]);
 
 /** Extract the string key from a ChoiceType value.
  * Unit variants serialize as strings; data variants serialize as
@@ -299,10 +300,7 @@ function ButtonGrid({ data, typeKey }: { data: OptionChoice["data"]; typeKey: st
     }
   }, [dispatch, selected]);
 
-  const titleKey = CHOICE_TYPE_TITLE_KEYS[typeKey];
-  const title = titleKey
-    ? t(`namedChoice.title.${titleKey}`)
-    : t("namedChoice.title.fallback");
+  const title = t(CHOICE_TYPE_TITLE_KEYS.get(typeKey) ?? "namedChoice.title.fallback");
   const isPlayerChoice = typeKey === "Player" || typeKey === "Opponent";
   const showFilter = !isPlayerChoice && data.options.length > FILTERABLE_OPTION_THRESHOLD;
 

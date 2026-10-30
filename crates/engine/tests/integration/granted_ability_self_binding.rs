@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use engine::game::game_object::AttachTarget;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
@@ -1463,6 +1464,7 @@ fn torrent_of_lava_damage_source_channel_not_masked() {
 /// object incarnation; the unbound `ObjectScope::GrantingObject` reads as `Source` in
 /// counter reads.
 mod object_scope_reads {
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use engine::game::layers::evaluate_layers;
     use engine::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
     use engine::game::scenario::{GameScenario, P0};
@@ -1687,6 +1689,7 @@ mod object_scope_reads {
 // ---------------------------------------------------------------------------
 
 mod concretizer_seams {
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use std::sync::Arc;
 
     use engine::game::combat::{can_block_pair, AttackTarget};
@@ -3497,6 +3500,7 @@ mod granter_stamp {
     use engine::game::effects::attach::attach_to;
     use engine::game::effects::resolve_ability_chain;
     use engine::game::filter::{matches_target_filter, FilterContext};
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use engine::game::layers::evaluate_layers;
     use engine::game::mana_abilities::can_activate_mana_ability_now;
     use engine::game::quantity::resolve_quantity_with_targets;
@@ -4669,6 +4673,7 @@ mod granter_stamp {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
@@ -5558,6 +5563,7 @@ mod granter_stamp {
 
     mod bound_granter {
         use super::*;
+        use engine::game::game_object::ObjectIncarnationRefExt;
         use engine::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceScope};
         use engine::types::keywords::KeywordKind;
 
@@ -6620,6 +6626,7 @@ fn gutter_grime_token_static_description_names_the_creator() {
 mod toggo_rock {
     use super::{find_effect, sacrifice_target, GUTTER_GRIME, PLACEHOLDER, TOGGO};
     use engine::game::game_object::AttachTarget;
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use engine::game::layers::evaluate_layers;
     use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};

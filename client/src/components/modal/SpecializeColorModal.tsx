@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useCallback, useState } from "react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -7,13 +8,13 @@ import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 
 type SpecializeColor = Extract<WaitingFor, { type: "SpecializeColor" }>;
 
-const COLOR_LABEL_KEYS: Record<ManaColor, string> = {
+const COLOR_LABEL_KEYS = {
   White: "specializeColor.white",
   Blue: "specializeColor.blue",
   Black: "specializeColor.black",
   Red: "specializeColor.red",
   Green: "specializeColor.green",
-};
+} as const satisfies Record<ManaColor, ParseKeys<"game">>;
 
 export function SpecializeColorModal({ data }: { data: SpecializeColor["data"] }) {
   const { t } = useTranslation("game");

@@ -333,6 +333,7 @@ function buildDefaultPreferences(): PreferencesState {
     multiplayerSplitLayoutNudgeDismissed: true,
     aiSeats: [defaultAiSeat()],
     cedhMode: false,
+    draftPickEnhancements: false,
     aiArchetypeFilter: "Any",
     aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
     aiBracketFilter: [] as CommanderBracket[],
@@ -455,6 +456,9 @@ interface PreferencesState {
    *  pools are restricted to bracket-5 decks. cEDH is a table property, not a
    *  per-seat difficulty — see `effectiveAiDifficulty` in `services/cedhLock`. */
   cedhMode: boolean;
+  /** Draft bots (Medium and above) apply the built-in per-format draft guides
+   *  to their picks. Off by default; formats without a guide are unaffected. */
+  draftPickEnhancements: boolean;
   aiArchetypeFilter: AiArchetypeFilter;
   aiCoverageFloor: number;
   aiBracketFilter: CommanderBracket[];
@@ -550,6 +554,7 @@ interface PreferencesActions {
   ensureAiSeatCount: (count: number) => void;
   /** Toggle the table-wide cEDH mode (all AI play cEDH, deck pools → bracket 5). */
   setCedhMode: (enabled: boolean) => void;
+  setDraftPickEnhancements: (enabled: boolean) => void;
   setAiArchetypeFilter: (filter: AiArchetypeFilter) => void;
   setAiCoverageFloor: (floor: number) => void;
   setAiBracketFilter: (brackets: CommanderBracket[]) => void;
@@ -751,6 +756,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           return { aiSeats: grown };
         }),
       setCedhMode: (enabled) => set({ cedhMode: enabled }),
+      setDraftPickEnhancements: (enabled) => set({ draftPickEnhancements: enabled }),
       setAiArchetypeFilter: (filter) => set({ aiArchetypeFilter: filter }),
       setAiCoverageFloor: (floor) => set({ aiCoverageFloor: floor }),
       setAiBracketFilter: (brackets) => set({ aiBracketFilter: brackets }),

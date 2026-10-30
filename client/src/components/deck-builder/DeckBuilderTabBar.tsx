@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { panelId, tabId, type DeckBuilderSurface } from "./deckBuilderTabs";
@@ -8,7 +9,7 @@ interface DeckBuilderTabBarProps {
   deckCount: number;
 }
 
-const TABS: { id: DeckBuilderSurface; labelKey: string }[] = [
+const TABS: { id: DeckBuilderSurface; labelKey: ParseKeys<"deck-builder"> }[] = [
   { id: "deck", labelKey: "tabs.deck" },
   { id: "info", labelKey: "tabs.info" },
 ];

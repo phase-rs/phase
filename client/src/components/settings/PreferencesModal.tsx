@@ -7,7 +7,7 @@ import {
   type RefObject,
 } from "react";
 import { Trans, useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
+import type { ParseKeys, TFunction } from "i18next";
 
 import { audioManager } from "../../audio/AudioManager.ts";
 import { cacheThemeManifest, clearThemeCache } from "../../audio/audioCache.ts";
@@ -124,8 +124,8 @@ export type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
  *  for the frontend-authored group/option labels; battlefield and plain
  *  background labels come from engine/asset modules and stay raw. */
 type BoardBackgroundGroup = {
-  labelKey: string;
-  options: { value: string; labelKey?: string; label?: string }[];
+  labelKey: ParseKeys<"settings">;
+  options: { value: string; labelKey?: ParseKeys<"settings">; label?: string }[];
 };
 const BOARD_BACKGROUND_GROUPS: BoardBackgroundGroup[] = [
   {
@@ -162,7 +162,7 @@ export function PreferencesModal({
   highlight,
   returnFocusRef,
 }: PreferencesModalProps) {
-  const { t } = useTranslation("settings");
+  const { t } = useTranslation(["settings", "common"]);
   const [troubleshootingOpen, setTroubleshootingOpen] = useState(false);
   const troubleshootingButtonRef = useRef<HTMLButtonElement>(null);
   const setFlexEditMode = useUiStore((s) => s.setFlexEditMode);
@@ -1569,7 +1569,7 @@ function PacingSection({
   );
 }
 
-const ART_CHAIN_RULE_OPTIONS: { type: ArtChainEntry["type"]; labelKey: string }[] = [
+const ART_CHAIN_RULE_OPTIONS: { type: ArtChainEntry["type"]; labelKey: ParseKeys<"settings"> }[] = [
   { type: "source_printing", labelKey: "artChain.rules.sourcePrinting" },
   { type: "newest", labelKey: "artChain.rules.newest" },
   { type: "oldest", labelKey: "artChain.rules.oldest" },
