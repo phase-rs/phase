@@ -514,9 +514,14 @@ fn debug_created_battle_enters_with_printed_defense_counters() {
             ),
             "{row}: the stack entry is the Siege's triggered ability"
         );
+        let resolution_stack = &runner.state().resolution_stack;
         assert!(
-            runner.state().resolution_stack.is_empty(),
-            "{row}: the parked entry resumed and finished"
+            resolution_stack.is_empty(),
+            "{row}: the parked entry resumed and finished, leftover frames {:?}",
+            resolution_stack
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>()
         );
     }
 
