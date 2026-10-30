@@ -183,6 +183,7 @@ mod chosen_object_reader_hand_built;
 mod chosen_target_groups_phase2;
 mod civilized_scholar_discard_transform;
 mod claim_jumper_repeat;
+mod cleanup_control_reversion_triggers;
 mod cleanup_discard_trigger_pipeline;
 mod cleave_text_changing_cost;
 mod client_wire_viewer_projection;
