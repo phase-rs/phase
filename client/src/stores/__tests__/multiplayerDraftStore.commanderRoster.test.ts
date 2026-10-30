@@ -160,7 +160,7 @@ async function openPod(options: { allRemainingBots?: boolean; targetDisconnected
       is_bot: seat_index === 3 || (options.allRemainingBots === true && seat_index === 2),
       connected: seat_index !== 1 || !options.targetDisconnected,
     })),
-  } as DraftPlayerView;
+  } as unknown as DraftPlayerView;
   probe.view = view;
   asPrivate().draftStarted = true;
   const target = options.targetDisconnected ? null : connect(1);
