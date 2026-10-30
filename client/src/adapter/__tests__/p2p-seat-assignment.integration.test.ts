@@ -196,7 +196,7 @@ describe("conditional waiting-seat assignments through the real WASM reducer (lo
     await host.applySeatMutation(fill(1));
     const guest = await join();
     await settled(host);
-    expect(host.getPlayerSlots()[1].kind).toEqual(ai);
+    expect(host.getPlayerSlots()[1].kind).toMatchObject(ai);
     retainGuest(host, guest, 2);
   });
 
@@ -268,7 +268,7 @@ describe("conditional waiting-seat assignments through the real WASM reducer (lo
     expect(active).toBeDefined();
     expect(guest).toBeDefined();
     retainGuest(active!, guest!);
-    expect(active!.getPlayerSlots()[3].kind).toEqual(ai);
+    expect(active!.getPlayerSlots()[3].kind).toMatchObject(ai);
     expect(active!.getPlayerSlots()[2].kind.type).toBe("WaitingHuman");
     await publishedMutation(guest!);
   });

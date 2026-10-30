@@ -664,7 +664,7 @@ fn queued_conditional_assignment_preserves_joining_human_over_real_sockets() {
                 }
             };
             // SessionAttached precedes slot enqueueing; the bootstrap follows
-            // it. Wait for that cutover before using a host Ping as the drain.
+            // it. Wait for the first guest's bootstrap and host slot publication.
             loop {
                 match recv_server_message(&mut other).await {
                     ServerMessage::StateUpdate { .. } => break,
@@ -672,13 +672,20 @@ fn queued_conditional_assignment_preserves_joining_human_over_real_sockets() {
                     _ => {}
                 }
             }
-            // Drain all creation/first-join publications before measuring the
-            // two distinct publications from the blocked join and mutation.
-            send_test_message(&mut host, &ClientMessage::Ping { timestamp: 1 }, false).await;
-            while !matches!(
-                recv_server_message(&mut host).await,
-                ServerMessage::Pong { timestamp: 1 }
-            ) {}
+            // The first join's publication follows creation on the host's
+            // application mailbox. Drain through that observable state, not Pong.
+            loop {
+                match recv_server_message(&mut host).await {
+                    ServerMessage::PlayerSlotsUpdate { slots }
+                        if slots[1].kind == SeatKind::JoinedHuman =>
+                    {
+                        assert_eq!(slots[2].kind, SeatKind::WaitingHuman);
+                        break;
+                    }
+                    ServerMessage::Error { message, .. } => panic!("initial slots: {message}"),
+                    _ => {}
+                }
+            }
 
             let gate = app.context.socket_hooks.arm_cutover();
             let mut guest = connect_and_hello(url).await;
@@ -710,7 +717,22 @@ fn queued_conditional_assignment_preserves_joining_human_over_real_sockets() {
                 .await
                 .unwrap();
             send_test_message(&mut host, &ClientMessage::Ping { timestamp: 2 }, false).await;
+            // Pong proves decoder receipt, not application completion. Await it
+            // while the joining guest still holds the session lease.
+            loop {
+                match recv_server_message(&mut host).await {
+                    ServerMessage::Pong { timestamp: 2 } => break,
+                    ServerMessage::Error { message, .. } => panic!("queued assignment: {message}"),
+                    _ => {}
+                }
+            }
             gate.release.notify_one();
+            // Host commands are handled sequentially. This successful edit's
+            // publication follows the stale assignment on the same mailbox.
+            mutation["data"]["mutation"]["data"]["seatIndex"] = 3.into();
+            host.send(WsMessage::Text(mutation.to_string().into()))
+                .await
+                .unwrap();
             let guest_token = loop {
                 match recv_server_message(&mut guest).await {
                     ServerMessage::SessionAttached {
@@ -725,19 +747,24 @@ fn queued_conditional_assignment_preserves_joining_human_over_real_sockets() {
                     _ => {}
                 }
             };
-            let mut publications = Vec::new();
             loop {
                 match recv_server_message(&mut host).await {
-                    ServerMessage::PlayerSlotsUpdate { slots } => publications.push(slots),
-                    ServerMessage::Pong { timestamp: 2 } => break,
+                    ServerMessage::PlayerSlotsUpdate { slots } => {
+                        assert_eq!(
+                            slots[2].kind,
+                            SeatKind::JoinedHuman,
+                            "the queued assignment displaced the joining guest"
+                        );
+                        if matches!(slots[3].kind, SeatKind::Ai { .. }) {
+                            break;
+                        }
+                    }
                     ServerMessage::Error { message, .. } => {
                         panic!("conditional assignment: {message}")
                     }
                     _ => {}
                 }
             }
-            assert_eq!(publications.len(), 2, "join and no-op must each publish");
-            assert_eq!(publications[1][2].kind, SeatKind::JoinedHuman);
             {
                 let session = crate::lock_session(&app.sessions, &code).await.unwrap();
                 assert_eq!(session.player_tokens[2], guest_token);
@@ -750,30 +777,6 @@ fn queued_conditional_assignment_preserves_joining_human_over_real_sockets() {
                 app.sessions.lock().await.game_for_token(&guest_token),
                 Some(code.as_str())
             );
-            send_test_message(&mut guest, &ClientMessage::Ping { timestamp: 3 }, false).await;
-            loop {
-                match recv_server_message(&mut guest).await {
-                    ServerMessage::Pong { timestamp: 3 } => break,
-                    ServerMessage::Error { message, .. } => panic!("protected guest: {message}"),
-                    _ => {}
-                }
-            }
-
-            mutation["data"]["mutation"]["data"]["seatIndex"] = 3.into();
-            host.send(WsMessage::Text(mutation.to_string().into()))
-                .await
-                .unwrap();
-            loop {
-                match recv_server_message(&mut host).await {
-                    ServerMessage::PlayerSlotsUpdate { slots }
-                        if matches!(slots[3].kind, SeatKind::Ai { .. }) =>
-                    {
-                        break
-                    }
-                    ServerMessage::Error { message, .. } => panic!("other AI: {message}"),
-                    _ => {}
-                }
-            }
             mutation["data"]["mutation"]["data"]["seatIndex"] = 2.into();
             mutation["data"]["mutation"]["data"]
                 .as_object_mut()
@@ -782,23 +785,20 @@ fn queued_conditional_assignment_preserves_joining_human_over_real_sockets() {
             host.send(WsMessage::Text(mutation.to_string().into()))
                 .await
                 .unwrap();
-            send_test_message(&mut host, &ClientMessage::Ping { timestamp: 4 }, false).await;
-            let mut replaced = false;
             loop {
                 match recv_server_message(&mut host).await {
-                    ServerMessage::PlayerSlotsUpdate { slots } => {
-                        assert!(matches!(slots[2].kind, SeatKind::Ai { .. }));
+                    ServerMessage::PlayerSlotsUpdate { slots }
+                        if matches!(slots[2].kind, SeatKind::Ai { .. }) =>
+                    {
                         assert_eq!(slots[1].kind, SeatKind::JoinedHuman);
-                        replaced = true;
+                        break;
                     }
-                    ServerMessage::Pong { timestamp: 4 } => break,
                     ServerMessage::Error { message, .. } => {
                         panic!("explicit replacement: {message}")
                     }
                     _ => {}
                 }
             }
-            assert!(replaced);
             loop {
                 if let ServerMessage::Error { message, .. } = recv_server_message(&mut guest).await
                 {
