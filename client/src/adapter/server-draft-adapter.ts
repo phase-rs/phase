@@ -716,10 +716,12 @@ export class ServerDraftAdapter implements EngineAdapter {
           this.draftResolve = null;
           this.draftReject = null;
         }
-        if (this.ws === sourceSocket) {
-          this.settleInit(initOwner, new AdapterError("WS_CLOSED", "Connection closed before draft started", true));
-        }
-        if (this.pendingInit === null && this.draftToken && !this.disposed) {
+        // A close that settles this socket's own init is the failure signal for
+        // that operation; it must not also surface as a lost established
+        // connection (the pre-fix behavior emitted only with no init pending).
+        const settledOwn = this.ws === sourceSocket
+          && this.settleInit(initOwner, new AdapterError("WS_CLOSED", "Connection closed before draft started", true));
+        if (!settledOwn && this.pendingInit === null && this.draftToken && !this.disposed) {
           this.emit({ type: "disconnected" });
         }
       };

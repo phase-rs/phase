@@ -2107,6 +2107,8 @@ describe("draft attachment settlement", () => {
   });
 
   it.each(["error", "close"] as const)("H4 preserves current installed reconnect %s failure", async (type) => {
+    const events = vi.fn();
+    adapter.onEvent(events);
     const read = start("reconnect");
     const ws = await completeHandshake();
     expect(frames(ws)).toContain("ReconnectDraft");
@@ -2114,6 +2116,22 @@ describe("draft attachment settlement", () => {
     expect(callback).toBeTypeOf("function");
     callback!();
     expect(await read()).toMatchObject({ code: type === "error" ? "WS_ERROR" : "WS_CLOSED", recoverable: true });
+    // The close settled this socket's own reconnect init: that rejection is the
+    // operation's failure signal, not a lost established connection.
+    if (type === "close") expect(events).not.toHaveBeenCalledWith({ type: "disconnected" });
+  });
+
+  it("H5 established socket close without a pending init emits disconnected once", () => {
+    const events = vi.fn();
+    adapter.onEvent(events);
+    // beforeEach awaited the real DraftCreated create, so no init is pending
+    // and `established` is the installed socket holding the draft token.
+    // Dispatch the close event only: production listens through the `onclose`
+    // IDL property, and a spec-compliant EventTarget (happy-dom included)
+    // routes a dispatched "close" to that property. `dispatchSynthetic("close")`
+    // also invokes `onclose` directly, which delivers this one close twice.
+    established.dispatchEvent(new Event("close"));
+    expect(events.mock.calls.filter(([event]) => event.type === "disconnected")).toHaveLength(1);
   });
 
   it("P1 reconnect handshake failure does not reject a sent pick", async () => {
