@@ -42350,6 +42350,11 @@ fn subject_led_cant_be_blocked_state_backed_gate_still_passes_through() {
                 runner.state().objects[&forest_id.unwrap()].controller,
                 crate::game::scenario::P1
             );
+            assert!(runner.state().stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                crate::types::game_state::WaitingFor::Priority { .. }
+            ));
             assert_complete_evasion_block(runner, attacker, blocker, true);
         } else if forest == Some(1) {
             // Changing the source controller rebinds both the recipient and Forest gate.
@@ -42362,6 +42367,11 @@ fn subject_led_cant_be_blocked_state_backed_gate_still_passes_through() {
                 runner.state().objects[&source_id].controller,
                 crate::game::scenario::P1
             );
+            assert!(runner.state().stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                crate::types::game_state::WaitingFor::Priority { .. }
+            ));
             assert_complete_evasion_block(runner, attacker, blocker, true);
         }
     }
@@ -42400,6 +42410,11 @@ fn complete_static_source_controller_change_rebinds_both_live_filters() {
         outcome.events(),
         outcome.final_waiting_for(),
     );
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        crate::types::game_state::WaitingFor::Priority { .. }
+    ));
     assert_complete_evasion_block(
         GameRunner::from_state(runner.state().clone()),
         attacker,
@@ -42407,6 +42422,954 @@ fn complete_static_source_controller_change_rebinds_both_live_filters() {
         true,
     );
     assert_complete_evasion_block(runner, blocker, attacker, false);
+}
+
+// Control-recipient regressions use synthetic text only when explicitly labelled.
+// CR 115.1a + CR 601.2c: the player and permanent are separate target occurrences.
+fn control_subject_definition(
+    player: TargetFilter,
+    object: TargetFilter,
+    draw: bool,
+) -> AbilityDefinition {
+    use crate::types::ability::{ChosenGroupId, TargetChoiceTiming};
+    let group = ChosenGroupId::declared_player(0);
+    let mut transfer = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GiveControl {
+            target: object,
+            recipient: TargetFilter::DeclaredPlayer { group },
+        },
+    );
+    transfer.target_choice_timing = TargetChoiceTiming::Stack;
+    let effect = if draw {
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: player,
+        }
+    } else {
+        Effect::TargetOnly { target: player }
+    };
+    let mut head = AbilityDefinition::new(AbilityKind::Spell, effect);
+    head.declares_chosen_group = Some(group);
+    head.target_choice_timing = TargetChoiceTiming::Stack;
+    head.sub_ability = Some(Box::new(transfer));
+    head
+}
+
+#[test]
+fn control_subject_complete_ir_and_native_definitions() {
+    use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir};
+    use crate::parser::oracle_effect::{lower_ability_ir, parse_effect_chain_ir};
+    use crate::parser::oracle_ir::ast::{ClauseBoundary, ParsedEffectClause};
+    use crate::parser::oracle_ir::context::ParseContext;
+    use crate::parser::oracle_ir::doc::{OracleDocBuilder, OracleNodeIr};
+    use crate::parser::oracle_ir::effect_chain::{
+        AbilityIr, AbilityRootTransform, AbilityShellIr, ClauseDisposition, ClauseIrBuilder,
+        EffectChainIr, InjectedColorChoice, PlayerScopeRewrite,
+    };
+    use crate::types::ability::{ChosenGroupId, ContinuousEffectOnset};
+    use crate::types::oracle_diagnostic::OracleSourceSpan;
+
+    for (name, text, player, controlled, draw) in [
+        (
+            "Synthetic control change",
+            "Target player gains control of target permanent.",
+            TargetFilter::Player,
+            false,
+            false,
+        ),
+        (
+            "Donate",
+            "Target player gains control of target permanent you control.",
+            TargetFilter::Player,
+            true,
+            false,
+        ),
+        (
+            "Harmless Offering",
+            "Target opponent gains control of target permanent you control.",
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            true,
+            false,
+        ),
+        (
+            "Synthetic draw and control",
+            "Target player draws a card and gains control of target permanent.",
+            TargetFilter::Player,
+            false,
+            true,
+        ),
+    ] {
+        let object = TargetFilter::Typed(if controlled {
+            TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You)
+        } else {
+            TypedFilter::new(TypeFilter::Permanent)
+        });
+        let expected = control_subject_definition(player.clone(), object, draw);
+        let fragment = text.trim_end_matches('.');
+        let group = ChosenGroupId::declared_player(0);
+        // Build the expected IR from the printed instruction and independent
+        // operands, including every clause field and the source allocator's span.
+        let parsed = ParsedEffectClause {
+            effect: expected.effect.as_ref().clone(),
+            duration: None,
+            sub_ability: expected.sub_ability.clone(),
+            distribute: None,
+            multi_target: None,
+            optional_targeting: false,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+            unlowered_guard: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
+        };
+        let mut builder = ClauseIrBuilder::new(text);
+        builder
+            .clause(
+                fragment,
+                parsed,
+                Some(ClauseBoundary::Sentence),
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .declared_player_group(Some(group))
+            .push();
+        if !draw {
+            builder.last_mut().unwrap().declares_chosen_group = Some(group);
+        }
+        let expected_chain = EffectChainIr {
+            clauses: builder.finish(),
+            kind: AbilityKind::Spell,
+            continuation_kind: None,
+            player_scope_rewrite: PlayerScopeRewrite::Apply,
+            chain_rounding: None,
+            actor: None,
+            in_trigger: false,
+            repeat_until: None,
+            injected_color_choice: InjectedColorChoice::Permitted,
+        };
+        let actual = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        assert_eq!(
+            actual, expected_chain,
+            "{name}: complete chain, including defaults"
+        );
+        assert_eq!(
+            crate::parser::oracle_effect::lower::lower_effect_chain_ir(&actual),
+            expected,
+            "{name}: complete lowered definition"
+        );
+        assert_eq!(actual.clauses[0].source.fragment(), Some(fragment));
+        assert_eq!(
+            actual.clauses[0].source.span(),
+            &OracleSourceSpan::chain_relative(0, 0, 0, fragment.len(), 0)
+        );
+
+        let expected_ability = AbilityIr {
+            source_text: text.into(),
+            body: expected_chain,
+            shell: AbilityShellIr::default(),
+            die_results: vec![],
+            root_transforms: vec![
+                AbilityRootTransform::SetMinXValue(0),
+                AbilityRootTransform::SetDescription(text.into()),
+            ],
+            modal: None,
+        };
+        let mut expected_doc = OracleDocBuilder::new();
+        let slot =
+            expected_doc.begin_item(OracleSourceSpan::exact(0, 0, 0, text.len(), 0), Some(text));
+        expected_doc
+            .emit(slot, OracleNodeIr::Spell(expected_ability.clone()))
+            .unwrap();
+        let expected_doc = expected_doc.finish(text, name, vec![]);
+        let mut document = parse_oracle_ir(text, name, &[], &["Sorcery".into()], &[]);
+        assert_eq!(
+            document, expected_doc,
+            "{name}: complete document, source and independent items"
+        );
+        let native = lower_oracle_ir(&mut document);
+        let mut expected_native = expected;
+        expected_native.description = Some(text.into());
+        assert_eq!(lower_ability_ir(&expected_ability), expected_native);
+        assert_eq!(native.abilities, vec![expected_native]);
+        assert!(
+            native.triggers.is_empty()
+                && native.statics.is_empty()
+                && native.replacements.is_empty()
+        );
+        assert!(
+            native.extracted_keywords.is_empty()
+                && native.modal.is_none()
+                && native.additional_cost.is_none()
+        );
+        assert!(native.casting_restrictions.is_empty() && native.casting_options.is_empty());
+        assert!(
+            native.solve_condition.is_none()
+                && native.strive_cost.is_none()
+                && native.parse_warnings.is_empty()
+        );
+    }
+}
+
+// Submit each announcement through apply(), inspecting its actual actor/options.
+// In particular, distinct player occurrences cannot reuse a fluent target intent.
+fn choose_control_subject_target(
+    runner: &mut crate::game::scenario::GameRunner,
+    index: usize,
+    target: Option<crate::types::ability::TargetRef>,
+) {
+    use crate::game::scenario::P0;
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::WaitingFor;
+    let WaitingFor::TargetSelection {
+        player,
+        target_slots,
+        selection,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "required target occurrence {index}: {:?}",
+            runner.state().waiting_for
+        )
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(selection.current_slot, index);
+    let slot = &target_slots[index];
+    assert!(slot.chooser.is_none() || slot.chooser == Some(P0));
+    if let Some(target) = &target {
+        assert!(
+            selection.current_legal_targets.contains(target),
+            "{target:?}: {selection:?}"
+        );
+    } else {
+        assert!(slot.optional);
+    }
+    runner.act(GameAction::ChooseTarget { target }).unwrap();
+}
+
+fn start_control_subject_cast(
+    runner: &mut crate::game::scenario::GameRunner,
+    spell: crate::types::identifiers::ObjectId,
+) -> Result<crate::types::game_state::ActionResult, crate::game::engine::EngineError> {
+    use crate::types::actions::GameAction;
+    runner.act(GameAction::CastSpell {
+        object_id: spell,
+        card_id: runner.state().objects[&spell].card_id,
+        targets: vec![],
+        payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+    })
+}
+
+#[test]
+fn control_subject_public_announcements_and_real_control_filters() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::{ChosenGroupId, TargetRef};
+    use crate::types::game_state::WaitingFor;
+    use crate::types::mana::{parse_mtgjson_mana_cost, ManaColor, ManaUnit};
+    use crate::types::player::PlayerId;
+    for (name, text, mana, color, opponent, controlled) in [
+        (
+            "Synthetic control change",
+            "Target player gains control of target permanent.",
+            "{0}",
+            ManaColor::Blue,
+            false,
+            false,
+        ),
+        (
+            "Donate",
+            "Target player gains control of target permanent you control.",
+            "{2}{U}",
+            ManaColor::Blue,
+            false,
+            true,
+        ),
+        (
+            "Harmless Offering",
+            "Target opponent gains control of target permanent you control.",
+            "{2}{R}",
+            ManaColor::Red,
+            true,
+            true,
+        ),
+    ] {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let gift = scenario
+            .add_artifact_from_oracle(P0, "Selected gift", "")
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            (0..3)
+                .map(|_| ManaUnit::new(color.into(), gift, false, vec![]))
+                .collect(),
+        );
+        let other = scenario
+            .add_artifact_from_oracle(P0, "Unselected matching permanent", "")
+            .id();
+        let foreign = scenario
+            .add_artifact_from_oracle(P1, "Opponent's permanent", "")
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, name, false, text)
+            .with_mana_cost(parse_mtgjson_mana_cost(mana))
+            .with_color(vec![color])
+            .id();
+        let mut runner = scenario.build();
+        start_control_subject_cast(&mut runner, spell).unwrap();
+        let WaitingFor::TargetSelection {
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("required player prompt")
+        };
+        assert_eq!(target_slots.len(), 2);
+        assert!(selection
+            .current_legal_targets
+            .contains(&TargetRef::Player(P1)));
+        assert!(selection
+            .current_legal_targets
+            .contains(&TargetRef::Player(PlayerId(2))));
+        if opponent {
+            assert!(!selection
+                .current_legal_targets
+                .contains(&TargetRef::Player(P0)));
+            assert!(runner
+                .act(crate::types::actions::GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(P0))
+                })
+                .is_err());
+        }
+        choose_control_subject_target(&mut runner, 0, Some(TargetRef::Player(P1)));
+        if controlled {
+            let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+                panic!("required object prompt")
+            };
+            assert!(!selection
+                .current_legal_targets
+                .contains(&TargetRef::Object(foreign)));
+            assert!(runner
+                .act(crate::types::actions::GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(foreign))
+                })
+                .is_err());
+        }
+        choose_control_subject_target(&mut runner, 1, Some(TargetRef::Object(gift)));
+        assert_eq!(runner.state().stack.len(), 1);
+        let root = runner.state().stack[0].ability().unwrap();
+        let transfer = root.sub_ability.as_deref().unwrap();
+        assert_eq!(
+            root.declares_chosen_group,
+            Some(ChosenGroupId::declared_player(0))
+        );
+        assert_eq!(root.chosen_target_slots.slots(), &[0]);
+        assert_eq!(transfer.chosen_target_slots.slots(), &[0]);
+        assert_eq!(
+            crate::game::ability_utils::declared_targets_in_chain(root),
+            vec![TargetRef::Player(P1), TargetRef::Object(gift)]
+        );
+        assert_eq!(transfer.targets, vec![TargetRef::Object(gift)]);
+        assert!(transfer.target_pin_is_current(gift, runner.state()));
+        assert!(!transfer.target_pins.is_empty());
+        assert_eq!(transfer.reads_chosen_group, None);
+        assert_eq!(
+            transfer.effect,
+            Effect::GiveControl {
+                target: TargetFilter::Typed(if controlled {
+                    TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You)
+                } else {
+                    TypedFilter::new(TypeFilter::Permanent)
+                }),
+                recipient: TargetFilter::DeclaredPlayer {
+                    group: ChosenGroupId::declared_player(0)
+                }
+            }
+        );
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&gift].controller, P1);
+        assert_eq!(runner.state().objects[&gift].owner, P0);
+        assert_eq!(runner.state().objects[&other].controller, P0);
+        assert_eq!(runner.state().objects[&foreign].controller, P1);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+        assert_eq!(
+            runner.state().players[0].mana_pool.total(),
+            if mana == "{0}" { 3 } else { 0 }
+        );
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+#[test]
+fn control_subject_full_faces_survive_normal_string_and_file_loaders() {
+    use crate::database::CardDatabase;
+    use crate::types::card::CardFace;
+    use crate::types::card_type::{CardType, CoreType};
+    use crate::types::mana::{parse_mtgjson_mana_cost, ManaColor};
+    for (name, text, mana, colors, player, controlled) in [
+        (
+            "Synthetic control change",
+            "Target player gains control of target permanent.",
+            "{0}",
+            vec![],
+            TargetFilter::Player,
+            false,
+        ),
+        (
+            "Donate",
+            "Target player gains control of target permanent you control.",
+            "{2}{U}",
+            vec![ManaColor::Blue],
+            TargetFilter::Player,
+            true,
+        ),
+        (
+            "Harmless Offering",
+            "Target opponent gains control of target permanent you control.",
+            "{2}{R}",
+            vec![ManaColor::Red],
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            true,
+        ),
+    ] {
+        // This follows the existing normal loader fixture pattern. Export the
+        // parsed face, then compare each independent loader with a full model
+        // derived from the printed text, never with another loader's result.
+        let codes: Vec<&str> = colors
+            .iter()
+            .map(|color| match color {
+                ManaColor::Blue => "U",
+                ManaColor::Red => "R",
+                _ => unreachable!(),
+            })
+            .collect();
+        let raw = serde_json::json!({"data": {(name): [{"name": name, "manaCost": mana,
+            "colors": codes, "colorIdentity": codes, "layout": "normal", "type": "Sorcery",
+            "types": ["Sorcery"], "subtypes": [], "supertypes": [], "manaValue": if controlled { 3 } else { 0 }, "identifiers": {}, "text": text}]}});
+        let input = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(input.path(), serde_json::to_vec(&raw).unwrap()).unwrap();
+        let db = CardDatabase::from_mtgjson(input.path()).unwrap();
+        let export = db.export_subset_json(&std::collections::BTreeSet::from([name.to_string()]));
+        let mut ability = control_subject_definition(
+            player,
+            TargetFilter::Typed(if controlled {
+                TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You)
+            } else {
+                TypedFilter::new(TypeFilter::Permanent)
+            }),
+            false,
+        );
+        ability.description = Some(text.into());
+        let expected = CardFace {
+            name: name.into(),
+            mana_cost: parse_mtgjson_mana_cost(mana),
+            card_type: CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Sorcery],
+                subtypes: vec![],
+            },
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            oracle_text: Some(text.into()),
+            non_ability_text: None,
+            flavor_name: None,
+            keywords: vec![],
+            abilities: vec![ability],
+            triggers: vec![],
+            static_abilities: vec![],
+            replacements: vec![],
+            cleave_variant: None,
+            color_override: None,
+            color_identity: colors,
+            scryfall_oracle_id: None,
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
+            solve_condition: None,
+            strive_cost: None,
+            brawl_commander: false,
+            is_commander: false,
+            is_oathbreaker: false,
+            deck_copy_limit: None,
+            attraction_lights: vec![],
+            parse_warnings: vec![],
+            metadata: Default::default(),
+            rarities: Default::default(),
+        };
+        assert_eq!(
+            db.get_face_by_name(name).unwrap(),
+            &expected,
+            "{name}: parser/native face"
+        );
+        assert!(!crate::game::coverage::card_face_has_unimplemented_parts(
+            &expected
+        ));
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &export).unwrap();
+        assert_eq!(
+            CardDatabase::from_json_str(&export)
+                .unwrap()
+                .get_face_by_name(name)
+                .unwrap(),
+            &expected,
+            "{name}: String"
+        );
+        assert_eq!(
+            CardDatabase::from_export(file.path())
+                .unwrap()
+                .get_face_by_name(name)
+                .unwrap(),
+            &expected,
+            "{name}: FILE"
+        );
+    }
+}
+
+#[test]
+fn control_subject_missing_object_preserves_its_gap_and_independent_ability() {
+    use crate::parser::oracle::{has_unimplemented, lower_oracle_ir, parse_oracle_ir};
+    use crate::types::mana::parse_mtgjson_mana_cost;
+    // Synthetic malformed sibling: the second instruction has no object
+    // operand. The complete first activation must remain independently usable.
+    let first = "{T}: Target player gains control of target permanent.";
+    let second = "{1}: Target player gains control of.";
+    let text = format!("{first}\n{second}");
+    let mut doc = parse_oracle_ir(
+        &text,
+        "Synthetic missing control operand",
+        &[],
+        &["Artifact".into()],
+        &[],
+    );
+    assert_eq!(doc.items.len(), 2);
+    assert_ne!(doc.items[0].id, doc.items[1].id);
+    assert_eq!(doc.items[0].source.fragment(), Some(first));
+    assert_eq!(doc.items[1].source.fragment(), Some(second));
+    assert_eq!(doc.items[0].source.span().first_line, 0);
+    assert_eq!(doc.items[1].source.span().first_line, 1);
+    assert_eq!(
+        doc.items[1].source.span().end_byte - doc.items[1].source.span().start_byte,
+        second.len()
+    );
+    let native = lower_oracle_ir(&mut doc);
+    assert_eq!(native.abilities.len(), 2);
+    let mut expected = control_subject_definition(
+        TargetFilter::Player,
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
+        false,
+    );
+    expected.kind = AbilityKind::Activated;
+    expected.cost = Some(AbilityCost::Tap);
+    expected.description = Some(first.into());
+    assert_eq!(native.abilities[0], expected);
+    assert!(
+        !has_unimplemented(&native.abilities[0]),
+        "positive reach guard"
+    );
+    assert!(
+        has_unimplemented(&native.abilities[1]),
+        "missing operand stays unsupported"
+    );
+    assert_eq!(
+        native.abilities[1].cost,
+        Some(AbilityCost::Mana {
+            cost: parse_mtgjson_mana_cost("{1}")
+        })
+    );
+    assert_eq!(native.abilities[1].description.as_deref(), Some(second));
+    let face = crate::types::card::CardFace {
+        abilities: native.abilities,
+        ..Default::default()
+    };
+    assert!(crate::game::coverage::card_face_has_unimplemented_parts(
+        &face
+    ));
+}
+
+#[test]
+fn control_subject_activated_structure_retains_costs_and_independent_abilities() {
+    use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir};
+    use crate::parser::oracle_ir::doc::OracleNodeIr;
+    use crate::types::mana::parse_mtgjson_mana_cost;
+    let bazaar =
+        "{T}: Target player gains control of target artifact, creature, or land you control.";
+    let zedruu = "At the beginning of your upkeep, you gain X life and draw X cards, where X is the number of permanents you own that your opponents control.\n{U}{R}{W}: Target opponent gains control of target permanent you control.";
+    for (name, text, player, object, cost, trigger_count) in [
+        (
+            "Bazaar Trader",
+            bazaar,
+            TargetFilter::Player,
+            TargetFilter::Or {
+                filters: [TypeFilter::Artifact, TypeFilter::Creature, TypeFilter::Land]
+                    .into_iter()
+                    .map(|kind| {
+                        TargetFilter::Typed(TypedFilter::new(kind).controller(ControllerRef::You))
+                    })
+                    .collect(),
+            },
+            AbilityCost::Tap,
+            0,
+        ),
+        (
+            "Zedruu the Greathearted",
+            zedruu,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You),
+            ),
+            AbilityCost::Mana {
+                cost: parse_mtgjson_mana_cost("{U}{R}{W}"),
+            },
+            1,
+        ),
+    ] {
+        let mut doc = parse_oracle_ir(text, name, &[], &["Creature".into()], &[]);
+        assert_eq!(doc.items.len(), trigger_count + 1);
+        if trigger_count == 1 {
+            assert!(matches!(doc.items[0].node, OracleNodeIr::Trigger(_)));
+            let first_line = text.lines().next().unwrap();
+            assert_eq!(doc.items[0].source.fragment(), Some(first_line));
+            assert_eq!(doc.items[0].source.span().first_line, 0);
+            assert_eq!(doc.items[1].source.span().first_line, 1);
+            assert_ne!(doc.items[0].id, doc.items[1].id);
+        }
+        let mut expected = control_subject_definition(player, object, false);
+        expected.kind = AbilityKind::Activated;
+        expected.cost = Some(cost);
+        expected.description = Some(text.lines().last().unwrap().into());
+        let native = lower_oracle_ir(&mut doc);
+        assert_eq!(
+            native.abilities,
+            vec![expected],
+            "{name}: entire activation, including defaults and cost"
+        );
+        assert_eq!(native.triggers.len(), trigger_count);
+        if trigger_count == 1 {
+            assert_eq!(
+                native.triggers[0].description.as_deref(),
+                text.lines().next()
+            );
+        }
+        assert!(native.statics.is_empty() && native.replacements.is_empty());
+    }
+}
+
+#[test]
+fn control_subject_later_anaphor_and_draw_head_keep_distinct_groups_public() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir};
+    use crate::parser::oracle_ir::doc::OracleNodeIr;
+    use crate::types::ability::{ChosenGroupId, TargetRef};
+    use crate::types::game_state::WaitingFor;
+    use crate::types::player::PlayerId;
+    // Both are explicitly synthetic. Earlier and later player declarations use
+    // unequal seats; a final ordinary object declaration retains its own cursor.
+    for (text, draw_head) in [
+        ("Target player gains 2 life. Target player gains control of target permanent. That player draws a card. Target player gains 3 life. Choose target artifact. Tap that artifact.", false),
+        ("Target player gains 2 life. Target player draws a card and gains control of target permanent. Target player gains 3 life. Choose target artifact. Tap that artifact.", true),
+    ] {
+        let mut document = parse_oracle_ir(text, "Synthetic independent declarations", &[], &["Instant".into()], &[]);
+        let OracleNodeIr::Spell(ability) = &document.items[0].node else { panic!("complete spell IR") };
+        let clauses = &ability.body.clauses;
+        assert_eq!(document.items.len(), 1);
+        assert_eq!(document.items[0].source.fragment(), Some(text));
+        assert_eq!(document.items[0].source.span(), &crate::types::oracle_diagnostic::OracleSourceSpan::exact(0, 0, 0, text.len(), 0));
+        let mut offset = 0;
+        for (index, fragment) in text.trim_end_matches('.').split(". ").enumerate() {
+            assert_eq!(clauses[index].id, crate::parser::oracle_ir::effect_chain::ClauseId(index as u32));
+            assert_eq!(clauses[index].source.fragment(), Some(fragment));
+            assert_eq!(clauses[index].source.span(), &crate::types::oracle_diagnostic::OracleSourceSpan::chain_relative(0, 0, offset, offset + fragment.len(), index as u32));
+            offset += fragment.len() + 2;
+        }
+        let group = ChosenGroupId::declared_player(1);
+        assert_eq!(clauses[0].declared_player_group, Some(ChosenGroupId::declared_player(0)));
+        assert_eq!(clauses[1].declared_player_group, Some(group));
+        if !draw_head {
+            assert_eq!(clauses[1].declares_chosen_group, Some(group));
+            assert_eq!(clauses[1].declares_chosen_clause, Some(clauses[1].id));
+            assert_eq!(clauses[2].parsed.effect, Effect::Draw { count: QuantityExpr::Fixed { value: 1 }, target: TargetFilter::DeclaredPlayer { group } });
+        }
+        assert_eq!(clauses[if draw_head { 2 } else { 3 }].declared_player_group, Some(ChosenGroupId::declared_player(2)));
+        let object_declaration = &clauses[if draw_head { 3 } else { 4 }];
+        assert!(matches!(object_declaration.parsed.effect, Effect::TargetOnly { .. }));
+        assert_eq!(object_declaration.declared_player_group, None);
+        assert_eq!(object_declaration.declares_chosen_group, Some(ChosenGroupId(if draw_head { 0 } else { 1 })), "the provisional player-header object ID stays consumed");
+        assert_eq!(clauses[1].parsed.sub_ability.as_ref().unwrap().effect.as_ref(), &Effect::GiveControl { target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)), recipient: TargetFilter::DeclaredPlayer { group } });
+        let native = lower_oracle_ir(&mut document);
+        assert_eq!(native.abilities.len(), 1);
+        assert!(!crate::parser::oracle::has_unimplemented(&native.abilities[0]));
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        for player in [P0, P1, PlayerId(2)] { scenario.with_library_top(player, &["Safe top", "Safe next", "Safe last"]); }
+        let gift = scenario.add_artifact_from_oracle(P0, "Gift", "").id();
+        let untouched = scenario.add_artifact_from_oracle(P0, "Unselected gift", "").id();
+        let tap = scenario.add_artifact_from_oracle(PlayerId(2), "Independent later target", "").id();
+        let spell = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic independent declarations", true, text).id();
+        let mut runner = scenario.build();
+        let hands: Vec<_> = runner.state().players.iter().map(|player| player.hand.len()).collect();
+        start_control_subject_cast(&mut runner, spell).unwrap();
+        for (index, target) in [TargetRef::Player(P0), TargetRef::Player(P1), TargetRef::Object(gift), TargetRef::Player(PlayerId(2)), TargetRef::Object(tap)].into_iter().enumerate() {
+            choose_control_subject_target(&mut runner, index, Some(target));
+        }
+        let root = runner.state().stack[0].ability().unwrap();
+        assert_eq!(crate::game::ability_utils::declared_targets_in_chain(root), vec![TargetRef::Player(P0), TargetRef::Player(P1), TargetRef::Object(gift), TargetRef::Player(PlayerId(2)), TargetRef::Object(tap)]);
+        let header = root.sub_ability.as_deref().unwrap();
+        assert_eq!(header.declares_chosen_group, Some(group));
+        assert_eq!(header.targets, vec![TargetRef::Player(P1)]);
+        let transfer = header.sub_ability.as_deref().unwrap();
+        assert_eq!(transfer.targets, vec![TargetRef::Object(gift)]);
+        assert_eq!(transfer.reads_chosen_group, None);
+        assert!(transfer.target_pin_is_current(gift, runner.state()));
+        assert_eq!(root.context.chosen_group_targets.iter().find(|(id, _)| *id == group).unwrap().1, vec![(TargetRef::Player(P1), None)]);
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&gift].controller, P1);
+        assert_eq!(runner.state().objects[&gift].owner, P0);
+        assert_eq!(runner.state().objects[&untouched].controller, P0);
+        assert!(runner.state().objects[&tap].tapped);
+        assert_eq!(runner.state().players[0].life, 22);
+        assert_eq!(runner.state().players[2].life, 23);
+        assert_eq!(runner.state().players[0].hand.len(), hands[0] - 1);
+        assert_eq!(runner.state().players[1].hand.len(), hands[1] + 1);
+        assert_eq!(runner.state().players[2].hand.len(), hands[2]);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { .. }));
+    }
+}
+
+#[test]
+fn control_subject_optional_zero_and_mandatory_no_legal_object_public() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::TargetRef;
+    use crate::types::game_state::WaitingFor;
+    // Synthetic cardinality forms; the mandatory player never inherits up-to.
+    for (optional, legal_object, decline) in [
+        (false, false, false),
+        (true, false, true),
+        (false, true, false),
+        (true, true, false),
+        (true, true, true),
+    ] {
+        let text = if optional {
+            "Target player gains control of up to one target creature."
+        } else {
+            "Target player gains control of target creature."
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let gift = legal_object.then(|| {
+            scenario
+                .add_creature(P0, "Legal cardinality counterpart", 2, 3)
+                .id()
+        });
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Synthetic object cardinality", true, text)
+            .id();
+        let mut runner = scenario.build();
+        let result = start_control_subject_cast(&mut runner, spell);
+        if !optional && !legal_object {
+            assert!(result.is_err(), "no mandatory creature target exists");
+            assert!(runner.state().stack.is_empty());
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+            continue;
+        }
+        result.unwrap();
+        let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+            panic!("mandatory player prompt")
+        };
+        assert!(!target_slots[0].optional);
+        assert_eq!(target_slots[1].optional, optional);
+        choose_control_subject_target(&mut runner, 0, Some(TargetRef::Player(P1)));
+        let selected_object = gift.filter(|_| !decline);
+        choose_control_subject_target(&mut runner, 1, selected_object.map(TargetRef::Object));
+        let root = runner.state().stack[0].ability().unwrap();
+        let mut expected_targets = vec![TargetRef::Player(P1)];
+        if let Some(gift) = selected_object {
+            expected_targets.push(TargetRef::Object(gift));
+        }
+        assert_eq!(
+            crate::game::ability_utils::declared_targets_in_chain(root),
+            expected_targets
+        );
+        assert_eq!(
+            root.sub_ability.as_ref().unwrap().targets,
+            selected_object
+                .map(TargetRef::Object)
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
+        runner.resolve_top();
+        if let Some(gift) = gift {
+            assert_eq!(
+                runner.state().objects[&gift].controller,
+                if decline { P0 } else { P1 }
+            );
+            assert_eq!(runner.state().objects[&gift].owner, P0);
+        } else {
+            assert!(runner.state().battlefield.is_empty());
+        }
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+#[test]
+fn control_subject_public_object_departure_and_player_shroud_never_substitute() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::WaitingFor;
+    use crate::types::player::PlayerId;
+    for protect_player in [false, true] {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let gift = scenario
+            .add_artifact_from_oracle(P0, "Selected gift", "Flash")
+            .id();
+        let other = scenario
+            .add_artifact_from_oracle(P0, "Matching substitute forbidden", "")
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic control change",
+                true,
+                "Target player gains control of target permanent.",
+            )
+            .id();
+        let bounce = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic public bounce",
+                true,
+                "Return target permanent to its owner's hand.",
+            )
+            .id();
+        // Existing player-shroud static plus Flash supplies a public response:
+        // its entry changes only player legality while the object stays legal.
+        let shield = scenario
+            .add_artifact_to_hand_from_oracle(
+                P1,
+                "Synthetic flash player shield",
+                "Flash\nYou have shroud.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let announced_incarnation = runner.state().objects[&gift].incarnation;
+        let mut committed = runner
+            .cast(spell)
+            .target_player(P1)
+            .target_object(gift)
+            .commit();
+        let root = committed.state().stack[0].ability().unwrap();
+        assert_eq!(
+            crate::game::ability_utils::declared_targets_in_chain(root),
+            vec![
+                crate::types::ability::TargetRef::Player(P1),
+                crate::types::ability::TargetRef::Object(gift)
+            ]
+        );
+        assert!(root
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .target_pin_is_current(gift, committed.state()));
+        if protect_player {
+            assert!(!crate::game::static_abilities::player_has_shroud(
+                committed.state(),
+                P1
+            ));
+            committed.act(GameAction::PassPriority).unwrap();
+            assert!(
+                matches!(committed.state().waiting_for, WaitingFor::Priority { player } if player == P1)
+            );
+            {
+                let mut response = committed.cast(shield).commit();
+                assert_eq!(response.state().stack.len(), 2);
+                for _ in 0..12 {
+                    if response.state().stack.len() == 1 {
+                        break;
+                    }
+                    assert!(matches!(
+                        response.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    response.act(GameAction::PassPriority).unwrap();
+                }
+                assert_eq!(
+                    response.state().stack.len(),
+                    1,
+                    "only the shield has resolved"
+                );
+            }
+            assert!(crate::game::static_abilities::player_has_shroud(
+                committed.state(),
+                P1
+            ));
+            assert!(!crate::game::static_abilities::player_has_shroud(
+                committed.state(),
+                PlayerId(2)
+            ));
+            assert_eq!(committed.state().objects[&gift].zone, Zone::Battlefield);
+            let outcome = committed.resolve();
+            assert!(!outcome.events().iter().any(|event| matches!(event, crate::types::events::GameEvent::ControllerChanged { object_id, .. } if *object_id == gift)));
+        } else {
+            {
+                let mut response = committed.cast(bounce).target_object(gift).commit();
+                assert_eq!(response.state().stack.len(), 2);
+                for _ in 0..12 {
+                    if response.state().stack.len() == 1 {
+                        break;
+                    }
+                    assert!(matches!(
+                        response.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    response.act(GameAction::PassPriority).unwrap();
+                }
+                assert_eq!(
+                    response.state().stack.len(),
+                    1,
+                    "only the bounce has resolved"
+                );
+            }
+            assert_eq!(committed.state().objects[&gift].zone, Zone::Hand);
+            // A public recast makes a new battlefield incarnation of the same
+            // ObjectId before control resolves; its old pin cannot name it.
+            {
+                let recast = committed.cast(gift).commit();
+                assert_eq!(recast.state().stack.len(), 2);
+            }
+            let outcome = committed.resolve();
+            assert!(!outcome.events().iter().any(|event| matches!(event, crate::types::events::GameEvent::ControllerChanged { object_id, .. } if *object_id == gift)));
+            assert_eq!(runner.state().objects[&gift].zone, Zone::Battlefield);
+            assert_ne!(
+                runner.state().objects[&gift].incarnation,
+                announced_incarnation
+            );
+        }
+        assert_eq!(runner.state().objects[&gift].controller, P0);
+        assert_eq!(runner.state().objects[&gift].owner, P0);
+        assert_eq!(runner.state().objects[&other].controller, P0);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
 }
 
 // Synthetic full-source fixture: cast the actual complete parsed static carrier.

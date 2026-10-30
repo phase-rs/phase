@@ -543,6 +543,114 @@ mod tests {
         )
     }
 
+    #[test]
+    fn give_control_named_recipient_is_terminal_and_reads_its_root_declaration() {
+        use crate::types::ability::ChosenGroupId;
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+        // CR 608.2b + CR 608.2c: this supplements the public legality tests.
+        // Every failure has a legal object, misleading local player, event,
+        // controller and sole opponent; none may replace the named authority.
+        for case in [
+            "valid", "missing", "foreign", "empty", "illegal", "departed",
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let gift = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Gift".into(),
+                Zone::Battlefield,
+            );
+            let source = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Synthetic named transfer".into(),
+                Zone::Stack,
+            );
+            let group = ChosenGroupId::declared_player(7);
+            let foreign = ChosenGroupId::declared_player(8);
+            let mut transfer = ResolvedAbility::new(
+                Effect::GiveControl {
+                    target: TargetFilter::Any,
+                    recipient: TargetFilter::DeclaredPlayer {
+                        group: if case == "foreign" { foreign } else { group },
+                    },
+                },
+                vec![TargetRef::Object(gift), TargetRef::Player(PlayerId(0))],
+                source,
+                PlayerId(0),
+            );
+            transfer.announce_target_pins(&state);
+            let mut root = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Player,
+                },
+                vec![TargetRef::Player(PlayerId(1))],
+                source,
+                PlayerId(0),
+            );
+            root.declares_chosen_group = (case != "missing").then_some(group);
+            if case == "empty" {
+                root.targets.clear();
+            }
+            if case == "illegal" {
+                root.illegal_target_slots = vec![0];
+            }
+            root.sub_ability = Some(Box::new(transfer.clone()));
+            state.resolving_stack_entry = Some(StackEntry {
+                id: source,
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: source,
+                    ability: Box::new(root),
+                },
+            });
+            state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+                attacker_ids: vec![gift],
+                defending_player: PlayerId(0),
+                attacks: vec![],
+                declaration_records: vec![],
+            });
+            if case == "departed" {
+                state.players[1].is_eliminated = true;
+            }
+            let Effect::GiveControl { recipient, .. } = &transfer.effect else {
+                unreachable!()
+            };
+            let named =
+                crate::game::targeting::resolve_effect_player_ref(&state, &transfer, recipient);
+            if case == "valid" {
+                assert_eq!(named, Some(PlayerId(1)));
+            } else {
+                assert_eq!(named, None, "{case}");
+            }
+            let before = state.transient_continuous_effects.len();
+            let mut events = vec![];
+            let result = resolve_give(&mut state, &transfer, &mut events);
+            if case == "valid" {
+                result.unwrap();
+                crate::game::layers::evaluate_layers(&mut state);
+                assert_eq!(state.objects[&gift].controller, PlayerId(1));
+                assert_eq!(state.objects[&gift].owner, PlayerId(0));
+                assert_eq!(state.transient_continuous_effects.len(), before + 1);
+                assert!(events.iter().any(|event| matches!(event, GameEvent::ControllerChanged { object_id, old_controller, new_controller } if *object_id == gift && *old_controller == PlayerId(0) && *new_controller == PlayerId(1))));
+            } else {
+                assert!(
+                    matches!(result, Err(EffectError::MissingParam(ref name)) if name == "GiveControl declared recipient"),
+                    "{case}: {result:?}"
+                );
+                assert_eq!(state.objects[&gift].controller, PlayerId(0), "{case}");
+                assert_eq!(state.transient_continuous_effects.len(), before, "{case}");
+                assert!(
+                    events.is_empty(),
+                    "{case}: no control or resolution event: {events:?}"
+                );
+            }
+        }
+    }
+
     /// CR 611.2b + CR 122.1c: Shield Broker — "put a shield counter on target
     /// noncommander creature you don't control. You gain control of that
     /// creature for as long as it has a shield counter on it." The control TCE's

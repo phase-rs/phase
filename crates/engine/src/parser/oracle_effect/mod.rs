@@ -50544,6 +50544,18 @@ fn parse_effect_chain_ir_body(
                 .declared_player_group(clause_declared_group)
                 .push();
 
+            // CR 601.2c + CR 608.2c: this explicit player declaration and its
+            // recipient operand name one group before a later clause reads it.
+            // Keep the ordinary TargetOnly ClauseId and consumed object-group
+            // cursor; only the supplied player declaration owns this identity.
+            if let (Some(group), Some(declaration)) = (clause_declared_group, builder.last_mut()) {
+                if let Effect::TargetOnly { target } = &declaration.parsed.effect {
+                    if declared_player_controller_ref(target).is_some() {
+                        declaration.declares_chosen_group = Some(group);
+                    }
+                }
+            }
+
             if prior_controller_population {
                 if let Some(reader) = builder.last_mut() {
                     reader.target_reads = TargetReadOrigin::ParentAnnouncement;

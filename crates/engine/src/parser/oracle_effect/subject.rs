@@ -9347,6 +9347,145 @@ mod tests {
     use crate::types::identifiers::TrackedSetId;
     use crate::types::statics::BlockExceptionKind;
 
+    #[test]
+    fn control_subject_wrapper_preserves_every_operand_and_instruction_field() {
+        use crate::types::ability::{
+            AbilityCondition, AbilityCost, GuardReading, TargetChoiceTiming, TargetSelectionMode,
+            UnlessPayModifier, UnloweredGuard,
+        };
+        use crate::types::game_state_kinds::DistributionUnit;
+        // Supplement to public casts: deliberately populate every field the
+        // wrapper moves, including a following child and instruction-wide gates.
+        let object = TargetFilter::Typed(TypedFilter::creature());
+        let following = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let condition = AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn;
+        let unless_pay = UnlessPayModifier {
+            cost: AbilityCost::Tap,
+            payer: TargetFilter::Controller,
+        };
+        let guard = UnloweredGuard {
+            reading: GuardReading::State,
+            clause_text: "Synthetic guarded control instruction".into(),
+        };
+        let multi = MultiTargetSpec::fixed(0, 3);
+        let original = ParsedEffectClause {
+            effect: Effect::GiveControl {
+                target: object.clone(),
+                recipient: TargetFilter::Player,
+            },
+            duration: Some(Duration::UntilEndOfTurn),
+            sub_ability: Some(Box::new(following.clone())),
+            distribute: Some(DistributionUnit::Damage),
+            multi_target: Some(multi.clone()),
+            optional_targeting: true,
+            condition: Some(condition.clone()),
+            optional: true,
+            unless_pay: Some(unless_pay.clone()),
+            unlowered_guard: Some(guard.clone()),
+            entry_onset: ContinuousEffectOnset::WithEntry,
+        };
+        let subject = SubjectPhraseAst {
+            affected: Some(TargetFilter::Player),
+            target: Some(TargetFilter::Player),
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+            player_anaphor: None,
+        };
+        let mut ctx = ParseContext {
+            next_declared_player_group: 7,
+            next_chosen_object_group: 19,
+            target_selection_mode: TargetSelectionMode::Random,
+            target_chooser: Some(TargetFilter::Opponent),
+            declared_target_choice_timing: Some(TargetChoiceTiming::Resolution),
+            ..ParseContext::default()
+        };
+        let actual = wrap_target_subject_control(original.clone(), &subject, &mut ctx);
+        let group = ChosenGroupId::declared_player(7);
+        let mut expected_transfer = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GiveControl {
+                target: object,
+                recipient: TargetFilter::DeclaredPlayer { group },
+            },
+        );
+        expected_transfer.duration = Some(Duration::UntilEndOfTurn);
+        expected_transfer.sub_ability = Some(Box::new(following));
+        expected_transfer.distribute = Some(DistributionUnit::Damage);
+        expected_transfer.multi_target = Some(multi);
+        expected_transfer.optional_targeting = true;
+        expected_transfer.entry_onset = ContinuousEffectOnset::WithEntry;
+        expected_transfer.target_selection_mode = TargetSelectionMode::Random;
+        expected_transfer.target_chooser = Some(TargetFilter::Opponent);
+        expected_transfer.target_choice_timing = TargetChoiceTiming::Resolution;
+        assert_eq!(
+            actual,
+            ParsedEffectClause {
+                effect: Effect::TargetOnly {
+                    target: TargetFilter::Player
+                },
+                duration: None,
+                sub_ability: Some(Box::new(expected_transfer)),
+                distribute: None,
+                multi_target: None,
+                optional_targeting: false,
+                condition: Some(condition),
+                optional: true,
+                unless_pay: Some(unless_pay),
+                unlowered_guard: Some(guard),
+                entry_onset: ContinuousEffectOnset::WhenFollowed,
+            }
+        );
+        assert_eq!(ctx.clause_declared_group, Some(group));
+        assert_eq!(ctx.next_declared_player_group, 8);
+        assert_eq!(ctx.next_chosen_object_group, 19);
+        assert_eq!(ctx.target_selection_mode, TargetSelectionMode::Chosen);
+        assert_eq!(ctx.target_chooser, None);
+        assert_eq!(ctx.declared_target_choice_timing, None);
+
+        // An ambiguous companion, plural subject, or missing targeted witness
+        // must return the incumbent clause and leave all context unchanged.
+        for (subject, mut clause) in [
+            (
+                SubjectPhraseAst {
+                    target: None,
+                    ..subject.clone()
+                },
+                original.clone(),
+            ),
+            (
+                SubjectPhraseAst {
+                    multi_target: Some(MultiTargetSpec::fixed(2, 2)),
+                    ..subject.clone()
+                },
+                original.clone(),
+            ),
+            (subject.clone(), original),
+        ] {
+            if subject.target.is_some() && subject.multi_target.is_none() {
+                clause.effect = Effect::GiveControl {
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                    ),
+                    recipient: TargetFilter::Player,
+                };
+            }
+            let mut context = ctx.clone();
+            let before = context.clone();
+            assert_eq!(
+                wrap_target_subject_control(clause.clone(), &subject, &mut context),
+                clause
+            );
+            assert_eq!(context, before);
+        }
+    }
+
     /// CR 613.1d: "isn't"/"aren't" head a type-removal predicate only when no
     /// relative pronoun introduces them. After "that"/"who"/"which" the copula
     /// negation belongs to the subject's relative clause and the real predicate
