@@ -8,7 +8,7 @@ use crate::eval::EvalWeights;
 
 /// High-level deck strategy classification derived from card composition.
 /// Used to adjust evaluation weights, timing policies, and combat aggression.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 // Exhaustiveness for the mana-development floor test comes from `EnumIter`, not
 // from a hand-written array: a sixth archetype is iterated automatically and
 // cannot silently escape the floor guarantee. Mirrors `oracle_ir/feature.rs`.

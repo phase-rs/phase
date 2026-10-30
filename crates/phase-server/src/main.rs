@@ -41,6 +41,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::Parser;
+use engine::ai_deck_manifest::AiDeckManifest;
 use engine::ai_support::{
     activation_block_reasons_for_viewer as engine_activation_block_reasons_for_viewer,
     auto_pass_recommended_for_viewer as engine_auto_pass_for_viewer,
@@ -48,7 +49,7 @@ use engine::ai_support::{
     mana_payment_shortcut_actions as engine_mana_payment_shortcut_actions,
     with_viewer_actions as engine_with_viewer_actions,
 };
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, ComboTable};
 use engine::game::derived_views::derive_filtered_views;
 use engine::game::interaction::{derive_viewer_interaction, object_action_payloads};
 use engine::game::validate_name_deck_for_format_full;
@@ -128,6 +129,8 @@ type SharedState = Arc<Mutex<SessionManager>>;
 type SharedConnections =
     Arc<Mutex<HashMap<String, HashMap<PlayerId, crate::socket_mailbox::Sender>>>>;
 type SharedDb = Arc<CardDatabase>;
+type SharedComboTable = Arc<ComboTable>;
+type SharedAiDeckManifest = Arc<AiDeckManifest>;
 /// The lobby registry, wrapped in the WASM-safe [`Broker`]. LobbyOnly broker
 /// dispatch goes through `Broker::handle`/`on_disconnect`/`reap_expired`;
 /// Full-mode and draft lobby-listing operations call through
@@ -1024,7 +1027,7 @@ impl Default for Limits {
 /// rather than held in a global so tests can drive a handler at a small cap
 /// without perturbing the rest of the suite. It also carries the Jev relay,
 /// whose in-flight cap is an admission limit of the same kind.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct ServerContext {
     #[cfg(test)]
     socket_hooks: socket_test_hooks::Hooks,
@@ -1035,11 +1038,27 @@ struct ServerContext {
     /// has no way to turn a label back into a number.
     replica_ordinal: Option<u32>,
     metrics: Arc<metrics::ServerMetrics>,
+    ai_deck_manifest: SharedAiDeckManifest,
     /// The outbound `/jev/systemone` relay: its upstream, client and in-flight cap.
     jev_relay: jev_relay::JevRelay,
     /// Shared by every game and application encoder; transport control never
     /// waits for a compute permit.
     game_executor: game_executor::GameExecutor,
+}
+
+impl Default for ServerContext {
+    fn default() -> Self {
+        Self {
+            #[cfg(test)]
+            socket_hooks: Default::default(),
+            limits: Limits::default(),
+            replica_ordinal: None,
+            metrics: Arc::new(metrics::ServerMetrics::default()),
+            ai_deck_manifest: Arc::new(AiDeckManifest::bundled().clone()),
+            jev_relay: Default::default(),
+            game_executor: Default::default(),
+        }
+    }
 }
 
 // The lobby-only broker capacity cap (`MAX_LOBBY_ENTRIES`) now lives in
@@ -1269,6 +1288,33 @@ fn select_card_data_source(data_dir: &Path, dev_fixture: bool) -> CardDataSource
         return CardDataSource::DevFixture(data_dir.join("mtgjson/test_fixture.json"));
     }
     CardDataSource::Export(export_path)
+}
+
+fn load_ai_deck_manifest(data_dir: &Path) -> Result<AiDeckManifest, String> {
+    let override_path = data_dir.join("ai-commander-decks.json");
+    if override_path.is_file() {
+        let manifest = AiDeckManifest::from_json_path(&override_path).map_err(|error| {
+            format!(
+                "failed to load AI Commander deck manifest {}: {error}",
+                override_path.display()
+            )
+        })?;
+        info!(
+            path = %override_path.display(),
+            version = %manifest.version,
+            decks = manifest.decks.len(),
+            "AI Commander deck manifest loaded from data directory"
+        );
+        return Ok(manifest);
+    }
+
+    let manifest = AiDeckManifest::bundled().clone();
+    info!(
+        version = %manifest.version,
+        decks = manifest.decks.len(),
+        "bundled AI Commander deck manifest loaded"
+    );
+    Ok(manifest)
 }
 
 fn bootstrap_required(data_dir: &Path, dev_fixture: bool) -> bool {
@@ -2990,7 +3036,7 @@ async fn serve() {
     let game_cpu_permits = cli
         .game_cpu_permits
         .unwrap_or_else(game_executor::GameExecutor::default_parallelism);
-    let server_context = ServerContext {
+    let mut server_context = ServerContext {
         #[cfg(test)]
         socket_hooks: Default::default(),
         limits: Limits {
@@ -2999,6 +3045,7 @@ async fn serve() {
         },
         replica_ordinal: cli.replica_ordinal,
         metrics: Arc::new(metrics::ServerMetrics::default()),
+        ai_deck_manifest: Arc::new(AiDeckManifest::bundled().clone()),
         jev_relay,
         game_executor: game_executor::GameExecutor::new(game_cpu_permits),
     };
@@ -3062,6 +3109,40 @@ async fn serve() {
     };
     info!(cards = card_db.card_count(), "card database loaded");
     let db: SharedDb = Arc::new(card_db);
+    let combo_table_path = data_path.join("combo-table.json");
+    let combo_table = if combo_table_path.is_file() {
+        match std::fs::read_to_string(&combo_table_path)
+            .map_err(|error| error.to_string())
+            .and_then(|raw| ComboTable::from_json_str(&raw).map_err(|error| error.to_string()))
+        {
+            Ok(table) => table,
+            Err(error) => {
+                warn!(
+                    path = %combo_table_path.display(),
+                    %error,
+                    "failed to load combo table; combo floors are unmeasured"
+                );
+                ComboTable::default()
+            }
+        }
+    } else {
+        info!(
+            path = %combo_table_path.display(),
+            "combo table absent; combo floors are unmeasured"
+        );
+        ComboTable::default()
+    };
+    if let Some(provenance) = combo_table.provenance() {
+        info!(
+            entries = combo_table.len(),
+            snapshot_date = %provenance.snapshot_date,
+            "combo table loaded"
+        );
+    }
+    let combos: SharedComboTable = Arc::new(combo_table);
+    let ai_deck_manifest: SharedAiDeckManifest =
+        Arc::new(load_ai_deck_manifest(data_path).unwrap_or_else(|message| fatal_startup(message)));
+    server_context.ai_deck_manifest = ai_deck_manifest;
 
     // Initialize SQLite persistence. `games_db` overrides the in-data-dir
     // default so the shell can keep saved games outside the per-version data
@@ -3155,7 +3236,7 @@ async fn serve() {
                     };
                     let game_code = &runtime.key.game_code;
                     info!(game = %game_code, "restoring persisted session");
-                    match GameSession::from_persisted(snapshot.persisted, &db) {
+                    match GameSession::from_persisted(snapshot.persisted, &db, &combos) {
                         Ok(mut session) => {
                             // The column's own string, so the first persist
                             // after a restart re-serializes nothing.
@@ -3279,6 +3360,7 @@ async fn serve() {
         draft_pools,
         connections,
         db,
+        combos,
         lobby,
         lobby_subscribers,
         player_count,
@@ -4407,7 +4489,7 @@ mod restored_draft_startup_tests {
 mod restored_full_startup_tests {
     use std::sync::Arc;
 
-    use engine::database::CardDatabase;
+    use engine::database::{CardDatabase, ComboTable};
     use engine::game::deck_loading::PlayerDeckPayload;
     use engine::types::game_state::WaitingFor;
     use engine::types::player::PlayerId;
@@ -4456,6 +4538,7 @@ mod restored_full_startup_tests {
         GameSession::from_persisted(
             snapshot.persisted.clone(),
             &Arc::new(CardDatabase::default()),
+            &ComboTable::default(),
         )
         .expect("persisted test session restores")
     }
@@ -4876,6 +4959,7 @@ struct AppState {
     draft_pools: SharedDraftPools,
     connections: SharedConnections,
     db: SharedDb,
+    combos: SharedComboTable,
     lobby: SharedLobby,
     lobby_subscribers: SharedLobbySubscribers,
     player_count: SharedPlayerCount,
@@ -4961,6 +5045,7 @@ async fn ws_handler(
                 app_state.draft_pools,
                 app_state.connections,
                 app_state.db,
+                app_state.combos,
                 app_state.lobby,
                 app_state.lobby_subscribers,
                 app_state.player_count,
@@ -5019,6 +5104,7 @@ async fn handle_socket(
     draft_pools: SharedDraftPools,
     connections: SharedConnections,
     db: SharedDb,
+    combos: SharedComboTable,
     lobby: SharedLobby,
     lobby_subscribers: SharedLobbySubscribers,
     player_count: SharedPlayerCount,
@@ -5152,6 +5238,7 @@ async fn handle_socket(
                 &draft_pools,
                 &connections,
                 &db,
+                &combos,
                 &lobby,
                 &lobby_subscribers,
                 &player_count,
@@ -5964,31 +6051,129 @@ struct MultiplayerSessionRequest {
 /// describes it. `Err` refuses the create, matching every other deck failure
 /// in the handler this replaces the inline loop in — a seat whose deck cannot
 /// be resolved has no honest provenance to record.
+#[allow(clippy::too_many_arguments)]
 fn ai_seat_setups(
     db: &engine::database::CardDatabase,
+    combos: &ComboTable,
     ai_seats: &[server_core::protocol::AiSeatRequest],
     pc: u8,
     format_config: Option<&engine::types::format::FormatConfig>,
     match_type: engine::types::match_config::MatchType,
+    seed: u64,
+    manifest: &AiDeckManifest,
 ) -> Result<Vec<server_core::session::AiSeatSetup>, String> {
+    use engine::game::bracket_estimate::CommanderBracketTier;
+    use phase_ai::pod_selection::{
+        select_pod, PodConstraint, PodSeatOccupant, PodSelectionRequest, SeatAttribute,
+        TierEnforcement, TierSet,
+    };
     use seat_reducer::types::DeckChoice;
 
-    let mut setups = Vec::new();
-    for seat in ai_seats {
-        if seat.seat_index == 0 || seat.seat_index >= pc {
+    let seats: Vec<_> = ai_seats
+        .iter()
+        .filter(|seat| seat.seat_index != 0 && seat.seat_index < pc)
+        .collect();
+    let commander_family = format_config.is_some_and(|config| config.uses_commander);
+    let mut effective_decks = Vec::with_capacity(seats.len());
+    let mut unresolved = Vec::new();
+
+    for (index, seat) in seats.iter().enumerate() {
+        let explicit = match &seat.deck {
+            Some(DeckChoice::DeckList(deck)) => Some(deck.as_ref().clone()),
+            Some(DeckChoice::Named(name)) => resolve_named_ai_deck(name, manifest),
+            Some(DeckChoice::Random) | None => seat
+                .deck_name
+                .as_deref()
+                .filter(|name| !name.eq_ignore_ascii_case("random"))
+                .and_then(|name| resolve_named_ai_deck(name, manifest)),
+        };
+
+        if let Some(deck) = explicit {
+            effective_decks.push(Some(deck));
             continue;
         }
-        let effective = match &seat.deck {
-            Some(DeckChoice::DeckList(deck)) => deck.as_ref().clone(),
-            Some(DeckChoice::Named(name)) => named_starter_or_random(name),
-            Some(DeckChoice::Random) | None => match &seat.deck_name {
-                Some(name) if name.eq_ignore_ascii_case("random") => {
-                    server_core::starter_decks::random_starter_deck()
-                }
-                Some(name) => named_starter_or_random(name),
-                None => server_core::starter_decks::random_starter_deck(),
-            },
+
+        let unresolved_name = match &seat.deck {
+            Some(DeckChoice::Named(name)) => Some(name.as_str()),
+            Some(DeckChoice::Random) | None => seat
+                .deck_name
+                .as_deref()
+                .filter(|name| !name.eq_ignore_ascii_case("random")),
+            Some(DeckChoice::DeckList(_)) => None,
         };
+        if let Some(name) = unresolved_name {
+            warn!(deck = %name, "unknown AI deck name, using random");
+        }
+        effective_decks.push(None);
+        unresolved.push(index);
+    }
+
+    if commander_family && !unresolved.is_empty() {
+        let candidates = ai_manifest_candidates(db, manifest);
+        let occupied = effective_decks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, deck)| deck.as_ref().map(|deck| (index, deck)))
+            .map(|(index, deck)| {
+                let deck_id = manifest_deck_id(manifest, deck)
+                    .unwrap_or_else(|| format!("explicit-seat-{}", seats[index].seat_index));
+                PodSeatOccupant {
+                    deck_id,
+                    commander: deck.commander.clone(),
+                }
+            })
+            .collect();
+        let cedh_only = seats
+            .iter()
+            .all(|seat| seat.difficulty == phase_ai::config::AiDifficulty::CEDH);
+        let allowed = if cedh_only {
+            TierSet::new(vec![CommanderBracketTier::Cedh])
+        } else {
+            TierSet::default()
+        };
+        let enforcement = if cedh_only {
+            TierEnforcement::HardGate
+        } else {
+            TierEnforcement::Advisory
+        };
+        let seat_count = u8::try_from(unresolved.len())
+            .map_err(|_| "too many unresolved AI seats for pod selection".to_string())?;
+        let request = PodSelectionRequest::new(
+            allowed,
+            None,
+            enforcement,
+            seat_count,
+            vec![
+                PodConstraint::Distinct(SeatAttribute::Deck),
+                PodConstraint::Distinct(SeatAttribute::Commander),
+                PodConstraint::Distinct(SeatAttribute::ColorIdentity),
+            ],
+            0,
+            None,
+            seed,
+        )
+        .with_occupied(occupied);
+        let assignment = select_pod(&candidates, &request, db)
+            .map_err(|error| format!("AI Commander pod selection failed: {error:?}"))?;
+
+        for (deck_index, pod_seat) in unresolved.iter().zip(&assignment.seats) {
+            let entry = manifest.find(&pod_seat.candidate_id).ok_or_else(|| {
+                format!(
+                    "AI Commander pod selected missing manifest deck `{}`",
+                    pod_seat.candidate_id
+                )
+            })?;
+            effective_decks[*deck_index] = Some(entry.to_deck_data());
+        }
+    } else {
+        for index in unresolved {
+            effective_decks[index] = Some(server_core::starter_decks::random_starter_deck());
+        }
+    }
+
+    let mut setups = Vec::with_capacity(seats.len());
+    for (seat, effective) in seats.into_iter().zip(effective_decks) {
+        let effective = effective.expect("every unresolved AI seat was assigned a deck");
         if let Some(fc) = format_config {
             if let Err(reasons) = validate_name_deck_for_format_full(
                 db,
@@ -6013,7 +6198,7 @@ fn ai_seat_setups(
                 ));
             }
         }
-        let resolved = resolve_deck(db, &effective)?;
+        let resolved = resolve_deck(db, combos, &effective)?;
         setups.push(server_core::session::AiSeatSetup {
             seat_index: seat.seat_index,
             difficulty: seat.difficulty,
@@ -6027,11 +6212,44 @@ fn ai_seat_setups(
     Ok(setups)
 }
 
-fn named_starter_or_random(name: &str) -> engine::starter_decks::DeckData {
-    server_core::starter_decks::find_starter_deck(name).unwrap_or_else(|| {
-        warn!(deck = %name, "unknown AI deck name, using random");
-        server_core::starter_decks::random_starter_deck()
-    })
+fn resolve_named_ai_deck(
+    name: &str,
+    manifest: &AiDeckManifest,
+) -> Option<engine::starter_decks::DeckData> {
+    server_core::starter_decks::find_starter_deck(name)
+        .or_else(|| manifest.find(name).map(|entry| entry.to_deck_data()))
+}
+
+fn manifest_deck_id(
+    manifest: &AiDeckManifest,
+    deck: &engine::starter_decks::DeckData,
+) -> Option<String> {
+    manifest
+        .commander_decks()
+        .find(|entry| entry.commander == deck.commander && entry.main_deck == deck.main_deck)
+        .map(|entry| entry.id.clone())
+}
+
+fn ai_manifest_candidates(
+    db: &CardDatabase,
+    manifest: &AiDeckManifest,
+) -> Vec<phase_ai::pod_selection::AiDeckCandidate> {
+    use phase_ai::pod_selection::{AiDeckCandidate, BracketLabel, LabelProvenance};
+
+    manifest
+        .commander_decks()
+        .map(|entry| AiDeckCandidate {
+            id: entry.id.clone(),
+            commander: entry.commander.clone(),
+            label: entry.declared.map(|tier| BracketLabel {
+                tier,
+                provenance: LabelProvenance::Declared,
+                data_version: db.bracket_lists_version().to_string(),
+            }),
+            coverage_pct: None,
+            archetype: None,
+        })
+        .collect()
 }
 
 /// Allocates the Full key for a just-claimed code. A refusal while an active
@@ -7346,12 +7564,14 @@ fn build_draft_match_start_message(
 }
 
 /// Generate pairings and spawn 2-player game sessions for pending draft tables.
+#[allow(clippy::too_many_arguments)]
 async fn maybe_spawn_draft_matches(
     draft_code: &str,
     draft_state: &SharedDraftState,
     game_state: &SharedState,
     executor: &game_executor::GameExecutor,
     db: &SharedDb,
+    combos: &SharedComboTable,
     game_db: &SharedGameDb,
     connections: &SharedConnections,
 ) {
@@ -7359,6 +7579,7 @@ async fn maybe_spawn_draft_matches(
     let code = draft_code.to_string();
     let card_db = db.clone();
     let persistence = game_db.clone();
+    let combo_table = combos.clone();
     // Creation owns unpublished games through the registry, but all engine
     // initialization and snapshot preparation still run under CPU admission.
     let (game_mgr, (draft_mgr, spawns)) = executor
@@ -7376,35 +7597,40 @@ async fn maybe_spawn_draft_matches(
                 .get(&code)
                 .map(|s| s.session.current_round)
                 .unwrap_or(1);
-            let spawns =
-                match draft_mgr.spawn_match_games_for_round(&code, game_mgr, &card_db, round) {
-                    Ok(spawned) => spawned
-                        .into_iter()
-                        .filter_map(|spawn| {
-                            match initialize_draft_match_runtime(game_mgr, &persistence, &spawn) {
-                                Ok(full_key) => Some((spawn, full_key)),
-                                Err(error) => {
-                                    warn!(
-                                        draft = %code,
-                                        match_id = %spawn.match_id,
-                                        game = %spawn.game_code,
-                                        %error,
-                                        "failed to initialize draft match"
-                                    );
-                                    game_mgr.remove_game(&spawn.game_code);
-                                    if let Some(session) = draft_mgr.sessions.get_mut(&code) {
-                                        session.active_matches.remove(&spawn.match_id);
-                                    }
-                                    None
+            let spawns = match draft_mgr.spawn_match_games_for_round(
+                &code,
+                game_mgr,
+                &card_db,
+                &combo_table,
+                round,
+            ) {
+                Ok(spawned) => spawned
+                    .into_iter()
+                    .filter_map(|spawn| {
+                        match initialize_draft_match_runtime(game_mgr, &persistence, &spawn) {
+                            Ok(full_key) => Some((spawn, full_key)),
+                            Err(error) => {
+                                warn!(
+                                    draft = %code,
+                                    match_id = %spawn.match_id,
+                                    game = %spawn.game_code,
+                                    %error,
+                                    "failed to initialize draft match"
+                                );
+                                game_mgr.remove_game(&spawn.game_code);
+                                if let Some(session) = draft_mgr.sessions.get_mut(&code) {
+                                    session.active_matches.remove(&spawn.match_id);
                                 }
+                                None
                             }
-                        })
-                        .collect(),
-                    Err(e) => {
-                        warn!(draft = %code, error = %e, "draft match spawn skipped");
-                        Vec::new()
-                    }
-                };
+                        }
+                    })
+                    .collect(),
+                Err(e) => {
+                    warn!(draft = %code, error = %e, "draft match spawn skipped");
+                    Vec::new()
+                }
+            };
             (draft_mgr, spawns)
         })
         .await;
@@ -7674,6 +7900,10 @@ fn should_rearm_pick_timer(
 
 struct ServerDeckResolver<'a> {
     db: &'a CardDatabase,
+    combos: &'a ComboTable,
+    manifest: &'a AiDeckManifest,
+    format_config: &'a engine::types::format::FormatConfig,
+    occupied: Vec<phase_ai::pod_selection::PodSeatOccupant>,
 }
 
 impl DeckResolver for ServerDeckResolver<'_> {
@@ -7682,9 +7912,12 @@ impl DeckResolver for ServerDeckResolver<'_> {
         choice: &DeckChoice,
     ) -> Result<engine::game::deck_loading::PlayerDeckList, String> {
         let deck = match choice {
+            DeckChoice::Random if self.format_config.uses_commander => {
+                first_unoccupied_commander_deck(self.manifest, &self.occupied)?
+            }
             DeckChoice::Random => server_core::starter_decks::random_starter_deck(),
-            DeckChoice::Named(name) => server_core::starter_decks::find_starter_deck(name)
-                .ok_or_else(|| format!("Starter deck not found: {name}"))?,
+            DeckChoice::Named(name) => resolve_named_ai_deck(name, self.manifest)
+                .ok_or_else(|| format!("AI deck not found: {name}"))?,
             DeckChoice::DeckList(deck) => deck.as_ref().clone(),
         };
         // The reducer stays at the name-only layer (see `DeckResolver` docs),
@@ -7694,7 +7927,7 @@ impl DeckResolver for ServerDeckResolver<'_> {
         // table with `SeatDeckMissing`, naming a seat rather than the deck
         // that caused it. Validating here causes the reducer to return `Err`,
         // which phase-server then surfaces to the client.
-        server_core::resolve_deck(self.db, &deck)?;
+        server_core::resolve_deck(self.db, self.combos, &deck)?;
         Ok(engine::game::deck_loading::PlayerDeckList {
             main_deck: deck.main_deck,
             sideboard: deck.sideboard,
@@ -7707,8 +7940,50 @@ impl DeckResolver for ServerDeckResolver<'_> {
             sticker_sheets: deck.sticker_sheets,
             signature_spell: deck.signature_spell,
             bracket_tier: deck.bracket_tier,
+            combo_declaration: deck.combo_declaration,
         })
     }
+}
+
+fn first_unoccupied_commander_deck(
+    manifest: &AiDeckManifest,
+    occupied: &[phase_ai::pod_selection::PodSeatOccupant],
+) -> Result<engine::starter_decks::DeckData, String> {
+    manifest
+        .commander_decks()
+        .find(|entry| !occupied.iter().any(|seat| seat.deck_id == entry.id))
+        .map(|entry| entry.to_deck_data())
+        .ok_or_else(|| "AI Commander manifest has no unoccupied deck".to_string())
+}
+
+fn occupied_ai_seats(
+    manifest: &AiDeckManifest,
+    seat_state: &seat_reducer::types::SeatState,
+) -> Vec<phase_ai::pod_selection::PodSeatOccupant> {
+    use phase_ai::pod_selection::PodSeatOccupant;
+    use seat_reducer::types::SeatKind;
+
+    seat_state
+        .seats
+        .iter()
+        .enumerate()
+        .filter_map(|(seat_index, kind)| {
+            let SeatKind::Ai { deck, .. } = kind else {
+                return None;
+            };
+            let effective = match deck {
+                DeckChoice::DeckList(deck) => Some(deck.as_ref().clone()),
+                DeckChoice::Named(name) => resolve_named_ai_deck(name, manifest),
+                DeckChoice::Random => None,
+            }?;
+            Some((seat_index, effective))
+        })
+        .map(|(seat_index, effective)| PodSeatOccupant {
+            deck_id: manifest_deck_id(manifest, &effective)
+                .unwrap_or_else(|| format!("occupied-seat-{seat_index}")),
+            commander: effective.commander,
+        })
+        .collect()
 }
 
 async fn broadcast_game_started(
@@ -9309,6 +9584,7 @@ async fn join_game_with_password_full(
     state: &SharedState,
     connections: &SharedConnections,
     db: &SharedDb,
+    combos: &SharedComboTable,
     lobby: &SharedLobby,
     lobby_subscribers: &SharedLobbySubscribers,
     player_count: &SharedPlayerCount,
@@ -9352,10 +9628,11 @@ async fn join_game_with_password_full(
     }
 
     let card_db = db.clone();
+    let combo_table = combos.clone();
     let (deck, resolution) = context
         .game_executor
         .run(move || {
-            let resolution = resolve_deck(&card_db, &deck);
+            let resolution = resolve_deck(&card_db, &combo_table, &deck);
             (deck, resolution)
         })
         .await;
@@ -9649,6 +9926,7 @@ async fn handle_client_message(
     draft_pools: &SharedDraftPools,
     connections: &SharedConnections,
     db: &SharedDb,
+    combos: &SharedComboTable,
     lobby: &SharedLobby,
     lobby_subscribers: &SharedLobbySubscribers,
     player_count: &SharedPlayerCount,
@@ -9746,10 +10024,11 @@ async fn handle_client_message(
                 return;
             }
             let card_db = db.clone();
+            let combo_table = combos.clone();
             let (deck, resolution) = context
                 .game_executor
                 .run(move || {
-                    let resolution = resolve_deck(&card_db, &deck);
+                    let resolution = resolve_deck(&card_db, &combo_table, &deck);
                     (deck, resolution)
                 })
                 .await;
@@ -9850,10 +10129,11 @@ async fn handle_client_message(
             }
 
             let card_db = db.clone();
+            let combo_table = combos.clone();
             let (deck, resolution) = context
                 .game_executor
                 .run(move || {
-                    let resolution = resolve_deck(&card_db, &deck);
+                    let resolution = resolve_deck(&card_db, &combo_table, &deck);
                     (deck, resolution)
                 })
                 .await;
@@ -9884,6 +10164,7 @@ async fn handle_client_message(
                     state,
                     connections,
                     db,
+                    combos,
                     lobby,
                     lobby_subscribers,
                     player_count,
@@ -10584,7 +10865,14 @@ async fn handle_client_message(
                 }
             }
 
+            // No game state exists yet on this create path, so there is no
+            // session RNG seed to reuse. Generate exactly once here, pass it
+            // into the pure pod selector, and log it with the resolved seat
+            // indices so an operator can replay the selection inputs.
+            let ai_pod_seed = rand::random::<u64>();
             let card_db = db.clone();
+            let combo_table = combos.clone();
+            let ai_deck_manifest = context.ai_deck_manifest.clone();
             let persistence = game_db.clone();
             let match_type = match_config.match_type;
             let prepared = context
@@ -10611,10 +10899,11 @@ async fn handle_client_message(
                             }
                         }
                     }
-                    let resolved = resolve_deck(&card_db, &deck).map_err(|error| {
-                        error!(%error, "CreateGameWithSettings: deck resolve failed");
-                        ServerMessage::error(error)
-                    })?;
+                    let resolved =
+                        resolve_deck(&card_db, &combo_table, &deck).map_err(|error| {
+                            error!(%error, "CreateGameWithSettings: deck resolve failed");
+                            ServerMessage::error(error)
+                        })?;
                     if let Some(ref format) = format_config {
                         if format.format == engine::types::format::GameFormat::Planechase
                             && !ai_seats.is_empty()
@@ -10648,9 +10937,17 @@ async fn handle_client_message(
                             )));
                         }
                     }
-                    let ai_requests =
-                        ai_seat_setups(&card_db, &ai_seats, pc, format_config.as_ref(), match_type)
-                            .map_err(ServerMessage::error)?;
+                    let ai_requests = ai_seat_setups(
+                        &card_db,
+                        &combo_table,
+                        &ai_seats,
+                        pc,
+                        format_config.as_ref(),
+                        match_type,
+                        ai_pod_seed,
+                        &ai_deck_manifest,
+                    )
+                    .map_err(ServerMessage::error)?;
                     Ok((deck, resolved, format_config, ai_requests, requested_code))
                 })
                 .await;
@@ -10661,6 +10958,19 @@ async fn handle_client_message(
                     return;
                 }
             };
+            let candidate_ids = ai_requests
+                .iter()
+                .filter_map(|seat| match &seat.choice {
+                    DeckChoice::DeckList(deck) => manifest_deck_id(&context.ai_deck_manifest, deck),
+                    DeckChoice::Random | DeckChoice::Named(_) => None,
+                })
+                .collect::<Vec<_>>();
+            info!(
+                seed = ai_pod_seed,
+                seat_indices = ?ai_requests.iter().map(|seat| seat.seat_index).collect::<Vec<_>>(),
+                candidate_ids = ?candidate_ids,
+                "AI seat decks resolved"
+            );
 
             if !ai_requests.is_empty() && ai_requests.len() as u8 == pc - 1 {
                 // Admission precedes the registry lock: a saturated compute
@@ -11286,6 +11596,7 @@ async fn handle_client_message(
                 state,
                 connections,
                 db,
+                combos,
                 lobby,
                 lobby_subscribers,
                 player_count,
@@ -11909,6 +12220,8 @@ async fn handle_client_message(
                 }
 
                 let card_db = db.clone();
+                let combo_table = combos.clone();
+                let ai_deck_manifest = context.ai_deck_manifest.clone();
                 let persistence = game_db.clone();
                 let persistence_executor = context.game_executor.clone();
                 let (session, result) = context
@@ -11918,8 +12231,14 @@ async fn handle_client_message(
                             session.lobby_meta.as_ref().is_some_and(|meta| meta.public);
                         let mut seat_state = session.seat_state();
                         let delta_result = {
+                            let occupied = occupied_ai_seats(&ai_deck_manifest, &seat_state);
+                            let format_config = seat_state.format.clone();
                             let resolver = ServerDeckResolver {
                                 db: card_db.as_ref(),
+                                combos: &combo_table,
+                                manifest: &ai_deck_manifest,
+                                format_config: &format_config,
+                                occupied,
                             };
                             let ctx = ReducerCtx {
                                 platform: phase_ai::config::Platform::Native,
@@ -11946,7 +12265,12 @@ async fn handle_client_message(
                             })
                             .collect::<Vec<_>>();
 
-                        session.apply_seat_delta(seat_state, &delta, card_db.as_ref());
+                        session.apply_seat_delta(
+                            seat_state,
+                            &delta,
+                            card_db.as_ref(),
+                            &combo_table,
+                        );
                         // Issue #1506: a `SeatMutate` is an *explicit* host edit (Start,
                         // Kick, Remove, add-AI). Only `SeatMutation::Start` — surfaced as
                         // `delta.now_started` — may begin the game here. Folding in an
@@ -12578,6 +12902,7 @@ async fn handle_client_message(
                         state,
                         &context.game_executor,
                         db,
+                        combos,
                         game_db,
                         connections,
                     )
@@ -14226,6 +14551,7 @@ mod full_socket_authority_tests {
         let mut restored = GameSession::from_persisted(
             persisted.persisted.clone(),
             &Arc::new(CardDatabase::default()),
+            &ComboTable::default(),
         )
         .expect("restore persisted Full session");
         restored.full_runtime = Some(FullRuntime {
@@ -15966,6 +16292,7 @@ mod issue_4548_full_create_tests {
             draft_pools: Arc::new(pools),
             connections: Arc::new(Mutex::new(HashMap::new())),
             db,
+            combos: Arc::new(ComboTable::default()),
             lobby: Arc::new(Mutex::new(Broker::new())),
             lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
             player_count: Arc::new(AtomicU32::new(0)),
@@ -16780,7 +17107,8 @@ mod issue_4548_full_create_tests {
                 .expect("session")
                 .to_persisted();
             let db = Arc::new(CardDatabase::default());
-            let mut restored = GameSession::from_persisted(persisted, &db).expect("restores");
+            let mut restored = GameSession::from_persisted(persisted, &db, &ComboTable::default())
+                .expect("restores");
             assert_eq!(
                 restored.start_game(&db),
                 Err(server_core::session::StartGameError::SeatDeckMissing { seat_index: 2 })
@@ -17461,8 +17789,12 @@ mod issue_4548_full_create_tests {
                     key: snapshot.key.clone(),
                     activation_epoch: snapshot.activation_epoch,
                 };
-                let mut session =
-                    GameSession::from_persisted(snapshot.persisted, &app.db).expect("restore");
+                let mut session = GameSession::from_persisted(
+                    snapshot.persisted,
+                    &app.db,
+                    &ComboTable::default(),
+                )
+                .expect("restore");
                 session.seed_deck_pools_encoding(snapshot.deck_pools_json);
                 assert!(matches!(
                     finish_restored_full_startup(&mut mgr, &app.game_db, &runtime, session),
@@ -23401,8 +23733,14 @@ mod issue_4548_deadlock_tests {
 
 #[cfg(test)]
 mod ai_seat_setup_tests {
-    use engine::database::CardDatabase;
+    use std::collections::BTreeMap;
+
+    use engine::ai_deck_manifest::AiDeckManifest;
+    use engine::database::{CardDatabase, ComboTable};
+    use engine::types::card::CardFace;
+    use engine::types::card_type::{CardType, CoreType, Supertype};
     use engine::types::format::FormatConfig;
+    use engine::types::mana::ManaColor;
     use engine::types::match_config::MatchType;
     use phase_ai::config::AiDifficulty;
     use seat_reducer::types::DeckChoice;
@@ -23420,7 +23758,7 @@ mod ai_seat_setup_tests {
                         "name": name,
                         "mana_cost": { "type": "NoCost" },
                         "card_type": {
-                            "supertypes": [], "core_types": ["Land"], "subtypes": []
+                            "supertypes": ["Basic"], "core_types": ["Land"], "subtypes": []
                         },
                         "power": null,
                         "toughness": null,
@@ -23431,7 +23769,8 @@ mod ai_seat_setup_tests {
                         "triggers": [],
                         "static_abilities": [],
                         "replacements": [],
-                        "keywords": []
+                        "keywords": [],
+                        "legalities": { "standard": "legal", "commander": "legal" }
                     }),
                 )
             })
@@ -23456,6 +23795,104 @@ mod ai_seat_setup_tests {
         }
     }
 
+    fn commander_fixture() -> (CardDatabase, AiDeckManifest) {
+        let commanders = [
+            ("Commander White", ManaColor::White),
+            ("Commander Blue", ManaColor::Blue),
+            ("Commander Black", ManaColor::Black),
+        ];
+        let mut entries = BTreeMap::new();
+        let forest = CardFace {
+            name: "Wastes".to_string(),
+            card_type: CardType {
+                supertypes: vec![Supertype::Basic],
+                core_types: vec![CoreType::Land],
+                subtypes: Vec::new(),
+            },
+            color_identity: Vec::new(),
+            ..CardFace::default()
+        };
+        let mut forest_json = serde_json::to_value(forest).expect("serialize Forest");
+        forest_json.as_object_mut().unwrap().insert(
+            "legalities".to_string(),
+            serde_json::json!({ "commander": "legal" }),
+        );
+        entries.insert("wastes".to_string(), forest_json);
+        for (name, color) in commanders {
+            let face = CardFace {
+                name: name.to_string(),
+                card_type: CardType {
+                    supertypes: vec![Supertype::Legendary],
+                    core_types: vec![CoreType::Creature],
+                    subtypes: Vec::new(),
+                },
+                color_identity: vec![color],
+                ..CardFace::default()
+            };
+            let mut value = serde_json::to_value(face).expect("serialize commander");
+            value.as_object_mut().unwrap().insert(
+                "legalities".to_string(),
+                serde_json::json!({ "commander": "legal" }),
+            );
+            entries.insert(name.to_lowercase(), value);
+        }
+        let db = CardDatabase::from_json_str(&serde_json::to_string(&entries).unwrap())
+            .expect("synthetic Commander database parses");
+        let decks = commanders
+            .iter()
+            .enumerate()
+            .map(|(index, (commander, _))| {
+                serde_json::json!({
+                    "id": format!("deck-{}", index + 1),
+                    "name": format!("Deck {}", index + 1),
+                    "commander": [commander],
+                    "main_deck": vec!["Wastes"; 99],
+                    "declared": "core",
+                    "source": "test",
+                    "source_date": "2026-09-27"
+                })
+            })
+            .collect::<Vec<_>>();
+        let manifest = AiDeckManifest::from_json_str(
+            &serde_json::json!({ "version": "test", "decks": decks }).to_string(),
+        )
+        .expect("synthetic Commander manifest parses");
+        (db, manifest)
+    }
+
+    fn random_requests(count: u8) -> Vec<AiSeatRequest> {
+        (1..=count)
+            .map(|seat_index| AiSeatRequest {
+                seat_index,
+                difficulty: AiDifficulty::Easy,
+                deck_name: None,
+                deck: Some(DeckChoice::Random),
+            })
+            .collect()
+    }
+
+    fn selected_manifest_ids(
+        setups: &[server_core::session::AiSeatSetup],
+        manifest: &AiDeckManifest,
+    ) -> Vec<String> {
+        setups
+            .iter()
+            .map(|setup| {
+                let DeckChoice::DeckList(deck) = &setup.choice else {
+                    panic!("AI setup did not record its resolved deck list")
+                };
+                manifest
+                    .commander_decks()
+                    .find(|entry| {
+                        entry.commander == deck.commander && entry.main_deck == deck.main_deck
+                    })
+                    .expect("selected deck belongs to the manifest")
+                    .id
+                    .clone()
+            })
+            .collect()
+    }
+
     #[test]
     fn a_resolvable_ai_deck_is_set_up_with_the_choice_that_describes_it() {
         // The paired positive control for the refusal below, which a function
@@ -23464,10 +23901,13 @@ mod ai_seat_setup_tests {
 
         let setups = ai_seat_setups(
             &db,
+            &ComboTable::default(),
             &[request(Some(list(&["Forest"])), None)],
             2,
             None,
             MatchType::Bo1,
+            1,
+            AiDeckManifest::bundled(),
         )
         .expect("a resolvable deck is accepted");
 
@@ -23476,7 +23916,7 @@ mod ai_seat_setup_tests {
             panic!("expected a recorded list, got {:?}", setups[0].choice);
         };
         assert_eq!(
-            server_core::deck_resolve::resolve_deck(&db, recorded)
+            server_core::deck_resolve::resolve_deck(&db, &ComboTable::default(), recorded)
                 .expect("the recorded choice re-resolves")
                 .main_deck
                 .len(),
@@ -23490,10 +23930,13 @@ mod ai_seat_setup_tests {
 
         let result = ai_seat_setups(
             &db,
+            &ComboTable::default(),
             &[request(Some(list(&["Nonexistent Card"])), None)],
             2,
             None,
             MatchType::Bo1,
+            1,
+            AiDeckManifest::bundled(),
         );
 
         // No setup is produced: the seat cannot be installed with a deck no
@@ -23510,10 +23953,13 @@ mod ai_seat_setup_tests {
 
         let setups = ai_seat_setups(
             &db,
+            &ComboTable::default(),
             &[request(None, Some("Red Deck Wins"))],
             2,
             None,
             MatchType::Bo1,
+            1,
+            AiDeckManifest::bundled(),
         )
         .expect("a named starter deck resolves");
 
@@ -23526,15 +23972,130 @@ mod ai_seat_setup_tests {
     }
 
     #[test]
+    fn commander_lobby_random_seat_resolves_to_a_commander_deck() {
+        let (db, manifest) = commander_fixture();
+        let setups = ai_seat_setups(
+            &db,
+            &ComboTable::default(),
+            &random_requests(3),
+            4,
+            Some(&FormatConfig::commander()),
+            MatchType::Bo1,
+            17,
+            &manifest,
+        )
+        .expect("a Commander pod resolves");
+
+        let ids = selected_manifest_ids(&setups, &manifest);
+        assert_eq!(setups.len(), 3);
+        assert_eq!(
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            3
+        );
+        assert!(setups.iter().all(|setup| match &setup.choice {
+            DeckChoice::DeckList(deck) => !deck.commander.is_empty(),
+            DeckChoice::Random | DeckChoice::Named(_) => false,
+        }));
+    }
+
+    #[test]
+    fn non_commander_lobby_random_seat_is_unchanged() {
+        let names = server_core::starter_decks::STARTER_DECKS
+            .iter()
+            .flat_map(|deck| deck.main_deck.iter().map(|(name, _)| *name))
+            .collect::<Vec<_>>();
+        let db = db_with(&names);
+        let setups = ai_seat_setups(
+            &db,
+            &ComboTable::default(),
+            &random_requests(1),
+            2,
+            Some(&FormatConfig::standard()),
+            MatchType::Bo1,
+            23,
+            AiDeckManifest::bundled(),
+        )
+        .expect("a Standard random seat keeps using a starter deck");
+
+        let DeckChoice::DeckList(deck) = &setups[0].choice else {
+            panic!("random starter was not recorded as a deck list")
+        };
+        assert_eq!(deck.main_deck.len(), 60);
+        assert!(deck.commander.is_empty());
+    }
+
+    #[test]
+    fn commander_lobby_pod_is_reproducible_from_its_seed() {
+        let (db, manifest) = commander_fixture();
+        let select = || {
+            ai_seat_setups(
+                &db,
+                &ComboTable::default(),
+                &random_requests(3),
+                4,
+                Some(&FormatConfig::commander()),
+                MatchType::Bo1,
+                0x61_11,
+                &manifest,
+            )
+            .expect("Commander pod resolves")
+        };
+
+        assert_eq!(
+            selected_manifest_ids(&select(), &manifest),
+            selected_manifest_ids(&select(), &manifest)
+        );
+    }
+
+    #[test]
+    fn commander_lobby_explicit_seat_is_never_duplicated_by_selection() {
+        let (db, manifest) = commander_fixture();
+        let requests = vec![
+            AiSeatRequest {
+                seat_index: 1,
+                difficulty: AiDifficulty::Easy,
+                deck_name: None,
+                deck: Some(DeckChoice::Named("deck-1".to_string())),
+            },
+            random_requests(2)[1].clone(),
+            AiSeatRequest {
+                seat_index: 3,
+                ..random_requests(3)[2].clone()
+            },
+        ];
+        let setups = ai_seat_setups(
+            &db,
+            &ComboTable::default(),
+            &requests,
+            4,
+            Some(&FormatConfig::commander()),
+            MatchType::Bo1,
+            91,
+            &manifest,
+        )
+        .expect("mixed explicit/automatic Commander pod resolves");
+
+        let ids = selected_manifest_ids(&setups, &manifest);
+        assert_eq!(ids.iter().filter(|id| id.as_str() == "deck-1").count(), 1);
+        assert_eq!(
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            3
+        );
+    }
+
+    #[test]
     fn an_empty_ai_deck_list_is_accepted_only_where_the_engine_supplies_the_deck() {
         let db = db_with(&["Forest"]);
         let setups_for = |format: &FormatConfig| {
             ai_seat_setups(
                 &db,
+                &ComboTable::default(),
                 &[request(Some(list(&[])), None)],
                 2,
                 Some(format),
                 MatchType::Bo1,
+                1,
+                AiDeckManifest::bundled(),
             )
         };
         for format in [FormatConfig::dandan(), FormatConfig::momir()] {
@@ -23756,6 +24317,7 @@ mod admin_auth_tests {
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
             db: Arc::new(engine::database::CardDatabase::default()),
+            combos: Arc::new(engine::database::ComboTable::default()),
             lobby: Arc::new(Mutex::new(Broker::new())),
             lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
             player_count: Arc::new(AtomicU32::new(0)),
@@ -23926,6 +24488,7 @@ mod compression_tests {
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
             db: Arc::new(engine::database::CardDatabase::default()),
+            combos: Arc::new(engine::database::ComboTable::default()),
             lobby: Arc::new(Mutex::new(Broker::new())),
             lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
             player_count: Arc::new(AtomicU32::new(0)),
@@ -24603,6 +25166,7 @@ mod p2p_backup_delete_tests {
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(std::collections::HashMap::new())),
             db: Arc::new(engine::database::CardDatabase::default()),
+            combos: Arc::new(engine::database::ComboTable::default()),
             lobby: Arc::new(Mutex::new(Broker::new())),
             lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
             player_count: Arc::new(AtomicU32::new(0)),
@@ -24985,7 +25549,7 @@ mod metrics_tests {
 
     use axum::routing::get;
     use axum::Router;
-    use engine::database::CardDatabase;
+    use engine::database::{CardDatabase, ComboTable};
     use engine::game::deck_loading::PlayerDeckPayload;
     use futures_util::SinkExt;
     use futures_util::StreamExt;
@@ -25017,6 +25581,7 @@ mod metrics_tests {
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(HashMap::new())),
             db: Arc::new(CardDatabase::default()),
+            combos: Arc::new(engine::database::ComboTable::default()),
             lobby: Arc::new(Mutex::new(Broker::new())),
             lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
             player_count: Arc::new(AtomicU32::new(0)),
@@ -25602,8 +26167,12 @@ mod metrics_tests {
             let session = handle.lock().await;
             session.to_persisted()
         };
-        GameSession::from_persisted(persisted, &Arc::new(CardDatabase::default()))
-            .expect("the snapshot restores")
+        GameSession::from_persisted(
+            persisted,
+            &Arc::new(CardDatabase::default()),
+            &ComboTable::default(),
+        )
+        .expect("the snapshot restores")
     }
 
     /// Legacy `CreateGame` must record the host's unresolved deck: a restart

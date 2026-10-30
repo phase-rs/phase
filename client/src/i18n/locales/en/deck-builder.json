@@ -265,16 +265,96 @@
     "clearOverride": "Clear Art Override"
   },
   "bracket": {
-    "unavailable": "Bracket estimation isn't available in this build.",
+    "card": {
+      "estimatedLabel": "Estimated bracket",
+      "tierName": "B{{tier}} {{label}}",
+      "tierShort": "B{{tier}}",
+      "declaredNone": "Declared: none",
+      "declared": "Declared: B{{tier}} {{label}}",
+      "youMarker": "You",
+      "belowFloor": "You declared B{{declared}}, but this deck can't be lower than B{{floor}}. The AI plays your declared B{{declared}}.",
+      "partialCoverage_one": "{{count}} card name wasn't found; counts may be low",
+      "partialCoverage_few": "{{count}} card names weren't found; counts may be low",
+      "partialCoverage_many": "{{count}} card names weren't found; counts may be low",
+      "partialCoverage_other": "{{count}} card names weren't found; counts may be low",
+      "combosUnchecked": "Two-card combos weren't checked in this build. Answer the combo question above to include them.",
+      "tabsLabel": "Bracket details",
+      "tabWhy": "Why B{{tier}}",
+      "tabBringDown": "Bring it down",
+      "commanderTag": "Commander",
+      "listComma": ", ",
+      "listOr": " or ",
+      "why": {
+        "nothingRaises": "Nothing in this deck raises it above B2, where every estimate starts.",
+        "rulesOutB1": "These rule out declaring B1:"
+      },
+      "reason": {
+        "cardRule": "{{axis}}: {{count}}",
+        "comboStandalone": "Two-card combo",
+        "comboEarly": "Early two-card combo",
+        "ownerAnswer": "Your combo answer",
+        "ownerIntended": "You said this deck has an intentional two-card combo.",
+        "ownerIntendedEarly": "You said this deck has an early-game two-card combo.",
+        "ownerIntendedLate": "You said this deck has a two-card combo that comes together late.",
+        "comboFromTable": "(combo)"
+      },
+      "combo": {
+        "assembles": "assembles for {{cost}} mana"
+      },
+      "explain": {
+        "cardRule": "B{{tier}} allows up to {{allowed}}; this deck has {{observed}}.",
+        "cardRuleNone": "B{{tier}} allows none; this deck has {{observed}}.",
+        "comboStandalone": "B1 and B2 don't allow intentional two-card infinite combos.",
+        "comboEarly": "B3 allows two-card combos only if they come together late (more than {{ceiling}} mana).",
+        "ownerAnswer": "phase can't check this answer; it uses what you said. Change it in the combo question above."
+      },
+      "source": "{{document}}, {{published}} ↗",
+      "ladder": {
+        "removeAll_one": "Remove it:",
+        "removeAll_few": "Remove all {{count}}:",
+        "removeAll_many": "Remove all {{count}}:",
+        "removeAll_other": "Remove all {{count}}:",
+        "removeSome_one": "Remove {{count}} of:",
+        "removeSome_few": "Remove {{count}} of:",
+        "removeSome_many": "Remove {{count}} of:",
+        "removeSome_other": "Remove {{count}} of:",
+        "breakCombo": "Break the combo",
+        "removeOneOf": "Remove one of:",
+        "removeThis": "Remove:",
+        "replaceCommander_one": "Going lower also needs a different commander:",
+        "replaceCommander_few": "Going lower also needs {{count}} different commanders:",
+        "replaceCommander_many": "Going lower also needs {{count}} different commanders:",
+        "replaceCommander_other": "Going lower also needs {{count}} different commanders:",
+        "changeComboAnswer": "Change your combo answer in the question above.",
+        "footnote": "B2 is as low as the estimate goes; B1 depends on deck theme."
+      }
+    },
+    "unavailable": "Bracket estimation needs card data, which hasn't loaded yet.",
     "addCommander": "Add a commander to see your bracket estimate.",
-    "estimated": "Estimated: B{{tier}} {{label}}",
-    "manual": "Manual: B{{tier}} {{label}}",
-    "mismatch": " ⚠ mismatch",
-    "hideBreakdown": "Hide breakdown",
-    "showBreakdown": "Show breakdown",
-    "hideBreakdownButton": "▲ Hide breakdown",
-    "showBreakdownButton": "▼ Show breakdown",
-    "forced": "(forced B{{tier}})",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Mass Land Denial",
+      "extraTurns": "Extra Turns",
+      "efficientTutors": "Efficient Tutors"
+    },
+    "combo": {
+      "attribution": "Combo data: {{attribution}}, snapshot {{date}}",
+      "outcome": {
+        "wins": "Wins the game",
+        "unbounded": "Unbounded {{resource}}"
+      },
+      "resource": {
+        "mana": "mana",
+        "damage": "damage",
+        "lifeLoss": "life loss",
+        "lifegain": "life gain",
+        "mill": "mill",
+        "draw": "card draw",
+        "tokens": "tokens",
+        "combat": "combat phases",
+        "turns": "turns"
+      }
+    },
     "dataVersion": "Data: {{version}}",
     "aboutBrackets": "About brackets ↗",
     "estimatedChip": "Estimated: B{{tier}}",
@@ -285,6 +365,37 @@
   "bracketPicker": {
     "ariaLabel": "Deck bracket",
     "unrated": "Unrated"
+  },
+  "signals": {
+    "title": "Deck signals",
+    "disclaimer": "Descriptive statistics from the deck's parsed card text. These are not bracket criteria and never change the estimate.",
+    "avgManaValue": "Average mana value (nonland): {{value}}",
+    "notMeasurable": "not measurable",
+    "noCommander": "Add a commander to see deck signals.",
+    "unavailable": "Deck signals need card data, which hasn't loaded yet.",
+    "unresolved": "{{n}} card names were not found in the card data.",
+    "kind": {
+      "counterspells": "Counterspells",
+      "spot_removal": "Spot removal",
+      "sweepers": "Sweepers",
+      "card_advantage": "Card advantage",
+      "free_interaction": "Free interaction",
+      "mana_producers": "Mana producers",
+      "land_fetch": "Land fetch",
+      "rituals": "Rituals",
+      "extra_land_drops": "Extra land drops"
+    }
+  },
+  "comboBarometer": {
+    "ariaLabel": "Two-card infinite combo",
+    "question": "Intentional two-card infinite combo?",
+    "undeclared": "Not answered",
+    "noneIntended": "None intended",
+    "intended": "Intended",
+    "windowAriaLabel": "When can it assemble?",
+    "windowUnstated": "Unstated",
+    "windowEarly": "Early game",
+    "windowLate": "Late game only"
   },
   "warnings": {
     "commanderCount": "Deck has {{count}} cards (need exactly {{expected}})",

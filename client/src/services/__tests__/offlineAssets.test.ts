@@ -90,6 +90,7 @@ function preconCandidate(deckId: string): DeckCatalogCandidate {
     name: deckId,
     source: { type: "precon", deckId, code: "TST" },
     deck: { main: [], sideboard: [] },
+    comboDeclaration: { kind: "undeclared" },
   };
 }
 

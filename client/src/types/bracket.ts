@@ -2,14 +2,49 @@ import type { GameFormat } from "../adapter/types";
 import { formatMetadata } from "../data/formatRegistry";
 import { BRACKET_TIER_NUMERIC, type CommanderBracketTier } from "./bracketEstimate";
 export {
-  BRACKET_AXES,
+  BRACKET_TIER_BY_NUMERIC,
   BRACKET_TIER_NUMERIC,
+  UNDECLARED_COMBO,
+  type Barometer,
+  type BarometerAuthority,
   type BracketAxis,
+  type BracketCard,
+  type BracketCardRole,
+  type BracketCut,
+  type BracketExplanation,
+  type BracketLadderStep,
+  type BracketReason,
+  type BracketReasonSource,
+  type ExplainedCombo,
+  type BracketCheck,
+  type BracketCheckOutcome,
+  type BracketCoverage,
   type BracketDeckRequest,
   type BracketEstimate,
-  type BracketViolation,
+  type BracketEstimateRequest,
   type CommanderBracketTier,
+  type ComboBarometer,
+  type ComboCheck,
+  type ComboCoverage,
+  type ComboDeclaration,
+  type ComboFilterCounts,
+  type ComboFloorTrigger,
+  type ComboMatch,
+  type ComboOmission,
+  type ComboOutcome,
+  type ComboPiece,
+  type ComboPieceZone,
+  type ComboProvenance,
+  type ComboResource,
+  type ComboSetup,
+  type ComboWindow,
+  type DeclarationVerdict,
+  type EarlyComboReading,
+  type EstimateConfidence,
+  type SignalSource,
   isBracketEstimate,
+  isComboDeclaration,
+  sameComboDeclaration,
 } from "./bracketEstimate";
 
 /**
@@ -51,8 +86,9 @@ export const BRACKET_NUMERIC_TIER: Record<CommanderBracket, CommanderBracketTier
  * pilot declaring *above* it (a 0-Game Changer deck they call B3, a B4
  * estimate they call cEDH) is expected, not a conflict — so the manual
  * tag is returned as-is in both directions. Under-reporting (manual
- * below the estimate) is still flagged via `isBracketMismatch`, but the
- * declared tag remains the effective value: the pilot's word is final.
+ * below the estimate) is flagged by the engine's `DeclarationVerdict` in the
+ * audit panel, but the declared tag remains the effective value: the pilot's
+ * word is final. The engine's AI effective tier follows the same rule.
  */
 export function effectiveBracket(
   manual: CommanderBracket | null,
@@ -61,25 +97,6 @@ export function effectiveBracket(
   if (manual !== null) return manual;
   if (estimateTier === null) return null;
   return BRACKET_TIER_NUMERIC[estimateTier];
-}
-
-/**
- * True when a manual tag under-reports the deck: the engine estimate (a
- * floor) sits above the declared bracket, so the deck contains cards
- * illegal at the declared tier. Declaring *at or above* the estimate is
- * always allowed, as is declaring B1 Exhibition on a B2-floor estimate —
- * the estimator never returns B1 (its card criteria are nearly identical
- * to B2's), so B1 is purely a pilot self-declaration.
- */
-export function isBracketMismatch(
-  manual: CommanderBracket | null,
-  estimateTier: CommanderBracketTier,
-): boolean {
-  if (manual === null) return false;
-  const estimated = BRACKET_TIER_NUMERIC[estimateTier];
-  if (manual >= estimated) return false;
-  if (manual === 1 && estimated === 2) return false;
-  return true;
 }
 
 /**

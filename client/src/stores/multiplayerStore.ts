@@ -127,7 +127,7 @@ import {
   type DraftPhase,
 } from "../adapter/server-draft-adapter";
 import type { DraftPlayerView } from "../adapter/draft-adapter";
-import type { CommanderBracketTier } from "../types/bracketEstimate";
+import type { ComboDeclaration, CommanderBracketTier } from "../types/bracketEstimate";
 import type {
   DeckChoice,
   PlayerSlot,
@@ -175,7 +175,8 @@ function asDeckPayload(deck: HostingDeck): {
   commander: string[];
   planar_deck: string[];
   scheme_deck: string[];
-  bracket_tier?: CommanderBracketTier;
+  bracket_tier?: CommanderBracketTier | null;
+  combo_declaration?: ComboDeclaration;
 } {
   return {
     main_deck: deck.main_deck,
@@ -184,6 +185,7 @@ function asDeckPayload(deck: HostingDeck): {
     planar_deck: deck.planar_deck ?? [],
     scheme_deck: deck.scheme_deck ?? [],
     ...(deck.bracket_tier ? { bracket_tier: deck.bracket_tier } : {}),
+    ...(deck.combo_declaration ? { combo_declaration: deck.combo_declaration } : {}),
   };
 }
 
@@ -1488,8 +1490,10 @@ export interface HostingDeck {
   commander: string[];
   planar_deck?: string[];
   scheme_deck?: string[];
-  /** Declared Commander bracket tier; omitted decks default to Core on the engine. */
-  bracket_tier?: CommanderBracketTier;
+  /** Declared Commander bracket tier; omitted or `null` is undeclared and plays at the engine's estimate. */
+  bracket_tier?: CommanderBracketTier | null;
+  /** The owner's two-card-combo answer; omitted means unanswered. */
+  combo_declaration?: ComboDeclaration;
 }
 
 /** Persisted snapshot of the host-setup form so the lobby remembers the

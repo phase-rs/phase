@@ -10,12 +10,11 @@ import {
   type SeatMutation,
   type SeatKind,
 } from "../../stores/multiplayerStore";
-import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { candidateSeatDeck, useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { applyPoolSelection, withCatalogSavedNames } from "../../services/randomPoolSelection";
 import { usePoolFolderIndex } from "../../hooks/usePoolFolderIndex";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { formatJoinShare } from "../../services/serverDetection";
-import { expandParsedDeck } from "../../services/deckParser";
 import { formatSuppliesDeck } from "../../data/formatRegistry";
 import { suppliedAiDeckChoice } from "../../services/pileSource";
 import { SelectField } from "../ui/SelectField";
@@ -328,7 +327,7 @@ export function HostControlTile() {
         : aiDeckCatalog.candidates.map((candidate) => ({
             id: candidate.id,
             label: candidate.name,
-            choice: { type: "DeckList" as const, data: expandParsedDeck(candidate.deck) },
+            choice: { type: "DeckList" as const, data: candidateSeatDeck(candidate) },
           })),
     [suppliedFormat, aiDeckCatalog.candidates],
   );

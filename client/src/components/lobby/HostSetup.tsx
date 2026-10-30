@@ -29,7 +29,7 @@ import type {
 import { refreshServerDirectory, type DirectorySource } from "../../services/serverDirectory";
 import type { HostSeed } from "../../pages/multiplayerPageState";
 import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
-import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { candidateSeatDeck, useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
   cedhSeatProblem,
   pickAiSeatDecks,
@@ -53,8 +53,6 @@ import {
 } from "../../services/customFormats";
 import { getHostAdapter } from "../../adapter/wasm-adapter";
 import { isFormatConfigShape } from "../../adapter/format-config-shape";
-import { expandParsedDeck } from "../../services/deckParser";
-import { bracketToEngineTier } from "../../types/bracketEstimate";
 import { AiDeckPicker } from "../menu/AiDeckPicker";
 import { RandomPoolTree } from "../menu/RandomPoolTree";
 import { menuButtonClass } from "../menu/buttonStyles";
@@ -868,7 +866,7 @@ export function HostSetup({
       deckId: requestedDeckIds[i],
       deck: {
         type: "DeckList" as const,
-        data: { ...expandParsedDeck(picks[i].deck), bracket_tier: bracketToEngineTier(picks[i].bracket) },
+        data: candidateSeatDeck(picks[i]),
       },
     }));
   };

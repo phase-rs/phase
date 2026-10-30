@@ -181,6 +181,13 @@ export function deckCopyLimit(name: string): any;
 export function deckSupplyForFormat(format: any): any;
 
 /**
+ * Structural deck signals. Pure and stateless; reads `CARD_DB` without
+ * touching `GAME_STATE`. Returns `null` (via serde) when the deck has no
+ * commander or the card database is not loaded.
+ */
+export function deck_signals_for_deck(deck_js: any): any;
+
+/**
  * Host the running Eye to Eye / Mouth to Mouth contest locally (single-player and
  * P2P-host engines have no server to stamp time). The JS driver passes its own
  * monotonic `now_ms` (`performance.now()`), the seats that are AI, and any clicks it
@@ -195,11 +202,12 @@ export function deckSupplyForFormat(format: any): any;
 export function drive_contest_js(now_ms: number, ai_players: Uint8Array, away_players: Uint8Array, clicks: any): any;
 
 /**
- * Estimates a Commander deck's bracket without touching `GAME_STATE`.
- * Reads `CARD_DB` for bracket signals. Returns `null` (via serde) when the
- * deck has no commander or the card database is not loaded.
+ * Estimates a Commander deck's bracket and reconciles an optional declared
+ * tier without touching `GAME_STATE`. Reads `CARD_DB` for bracket signals.
+ * Returns `null` (via serde) when the deck has no commander or the card
+ * database is not loaded.
  */
-export function estimate_bracket_for_deck(deck_js: any): any;
+export function estimate_bracket_for_deck(request_js: any): any;
 
 /**
  * Always-definite deck/format gate for callers that ENFORCE rather than hint.
@@ -273,6 +281,11 @@ export function formatConfigForCustomRules(custom_rules: any): any;
  * this check.
  */
 export function getAiActionProposalFromLlmResponse(player_id: number, fingerprint: string, provider_label: string, status: number, response_body: string): any;
+
+/**
+ * Returns the engine-authored default AI rung for every Commander bracket.
+ */
+export function getBracketDifficultyTable(): any;
 
 /**
  * Return the authoritative list of user-selectable formats as a typed array.
@@ -517,6 +530,12 @@ export function llmProviderCatalog(): any;
 export function load_card_database(json_str: string): number;
 
 /**
+ * Load the combo table (combo-table.json). Optional: with no table loaded the
+ * estimator reports `ComboCoverage::Unmeasured` and no combo floor can fire.
+ */
+export function load_combo_table(json_str: string): number;
+
+/**
  * Load a replay log (the JSON produced by `export_replay_log`) for
  * scrubbing/playback. Independent of the live `GAME_STATE` — does not
  * require, and does not affect, an active game. Uses the loaded `CARD_DB`
@@ -681,6 +700,8 @@ export function resume_restored_game_state(): any;
  */
 export function search_cards_js(query: any): any;
 
+export function selectAiPod(candidates_js: any, request_js: any): any;
+
 /**
  * Request (or stop requesting) the "Show AI Hand" disclosure for the local
  * seat's `get_game_state` projection. The engine honors it only for a seat
@@ -819,13 +840,12 @@ export interface InitOutput {
     readonly canonicalCardNames: (a: any) => [number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
-    readonly clear_replay_playback: () => void;
     readonly commanderPartnerCandidates: (a: number, b: number, c: any, d: any) => [number, number, number];
     readonly companionCandidates: (a: any) => [number, number, number];
-    readonly create_initial_state: () => any;
     readonly customFormatFromLobbyConfig: (a: number, b: number, c: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
     readonly deckSupplyForFormat: (a: any) => any;
+    readonly deck_signals_for_deck: (a: any) => [number, number, number];
     readonly drive_contest_js: (a: number, b: number, c: number, d: number, e: number, f: any) => any;
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
     readonly evaluateDeckFormatGate: (a: any) => [number, number, number];
@@ -834,7 +854,7 @@ export interface InitOutput {
     readonly export_replay_log: () => [number, number, number, number];
     readonly formatConfigForCustomRules: (a: any) => [number, number, number];
     readonly getAiActionProposalFromLlmResponse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
-    readonly getFormatRegistry: () => any;
+    readonly getBracketDifficultyTable: () => [number, number, number];
     readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
     readonly get_ai_action_proposal_from_scores_with_diagnostics: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
@@ -846,14 +866,10 @@ export interface InitOutput {
     readonly get_card_parse_details: (a: number, b: number) => any;
     readonly get_card_rulings: (a: number, b: number) => any;
     readonly get_filtered_game_state: (a: number) => any;
-    readonly get_game_state: () => any;
     readonly get_legal_actions_for_viewer_js: (a: number) => any;
-    readonly get_legal_actions_js: () => any;
-    readonly get_stack_pressure: () => any;
     readonly get_viewer_snapshot_js: (a: number) => any;
     readonly get_viewer_transition_snapshot_js: (a: number, b: any) => any;
     readonly has_replay_recording: () => number;
-    readonly init_panic_hook: () => void;
     readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly initialize_multiplayer_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly isCardCommanderEligibleForFormat: (a: number, b: number, c: any) => number;
@@ -861,9 +877,8 @@ export interface InitOutput {
     readonly is_multiplayer_mode: () => number;
     readonly legal_targets_for_castable_js: (a: number) => any;
     readonly legal_targets_for_castables_js: (a: any) => any;
-    readonly list_token_presets_js: () => any;
-    readonly llmProviderCatalog: () => any;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
+    readonly load_combo_table: (a: number, b: number) => [number, number, number];
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
     readonly maxDeckCopies: (a: number, b: number, c: any) => any;
     readonly ping: () => [number, number];
@@ -871,13 +886,12 @@ export interface InitOutput {
     readonly preview_interaction_js: (a: number, b: any) => any;
     readonly preview_mana_payment_js: (a: number, b: any) => any;
     readonly project_seat_view: (a: number, b: number) => [number, number, number];
-    readonly replay_header_js: () => any;
-    readonly replay_length_js: () => number;
     readonly replay_seek_js: (a: number) => [number, number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number, number];
     readonly resume_restored_game_state: () => [number, number, number];
     readonly search_cards_js: (a: any) => [number, number, number];
+    readonly selectAiPod: (a: any, b: any) => [number, number, number];
     readonly set_debug_hand_reveal: (a: number) => void;
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
@@ -897,6 +911,17 @@ export interface InitOutput {
     readonly submit_interaction_js: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
     readonly validateLlmProbeResponse: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly get_game_state: () => any;
+    readonly get_legal_actions_js: () => any;
+    readonly get_stack_pressure: () => any;
+    readonly init_panic_hook: () => void;
+    readonly replay_header_js: () => any;
+    readonly list_token_presets_js: () => any;
+    readonly llmProviderCatalog: () => any;
+    readonly create_initial_state: () => any;
+    readonly getFormatRegistry: () => any;
+    readonly clear_replay_playback: () => void;
+    readonly replay_length_js: () => number;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

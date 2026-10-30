@@ -11,6 +11,7 @@ import { countProjectedNames, type DraftWorkspacePartition } from "../components
 import { writeDraftAutosaveDeck, type DraftAutosaveSlot } from "../constants/storage";
 import type { ParsedDeck } from "./deckParser";
 import { serializeSavedDeck } from "./savedDeckProjection";
+import { UNDECLARED_COMBO } from "../types/bracket";
 import { notifyDraftAutosaveSkipped } from "./savedDeckWriteFailure";
 
 /** A solo cube draft runs as kind `Quick`; only its set code tells it apart. */
@@ -75,7 +76,7 @@ export async function autosaveDraftDeck(submission: DraftDeckAutosave): Promise<
     const label = i18n.t("draft:deckAutosave.deckName", { format: autosaveSlotLabels()[slot] });
     const format = submission.view.commanders_required > 0 ? "CommanderDraft" : "Limited";
     const deck = draftSubmissionToParsedDeck(submission.partition, submission.commanders);
-    const result = await writeDraftAutosaveDeck(slot, label, serializeSavedDeck(deck, format, null));
+    const result = await writeDraftAutosaveDeck(slot, label, serializeSavedDeck(deck, format, null, UNDECLARED_COMBO));
     if (result.status === "skipped") {
       console.warn("[draftDeckAutosave] autosave skipped:", result.reason);
       notifyDraftAutosaveSkipped(result.reason);

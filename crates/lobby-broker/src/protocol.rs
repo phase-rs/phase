@@ -3458,6 +3458,47 @@ mod tests {
         }
     }
 
+    /// The deck carriers' `bracket_tier` is nullable from lobby protocol 17: an
+    /// explicit `null` and an omitted field both decode as undeclared, never as a
+    /// declared Core, and a named tier still decodes as declared. The lobby moved
+    /// because `DeckData`'s field type changed. A broker below 17 would reject a
+    /// `null` frame, but no client sends one: `brokerClient` registers and joins
+    /// with an empty, tier-less deck.
+    #[test]
+    fn deck_carriers_decode_a_null_or_omitted_bracket_tier_as_undeclared() {
+        use engine::game::bracket_estimate::CommanderBracketTier;
+
+        let deck_tier = |frame: &str| match parse_lobby_client_message(frame) {
+            ParsedFrame::Message(msg) => match *msg {
+                LobbyClientMessage::CreateGameWithSettings { deck, .. }
+                | LobbyClientMessage::JoinGameWithPassword { deck, .. } => deck.bracket_tier,
+                other => panic!("expected a deck carrier, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        };
+        for (deck, expected) in [
+            (r#"{"main_deck":[],"bracket_tier":null}"#, None),
+            (r#"{"main_deck":[]}"#, None),
+            (
+                r#"{"main_deck":[],"bracket_tier":"core"}"#,
+                Some(CommanderBracketTier::Core),
+            ),
+        ] {
+            let create = format!(
+                r#"{{"type":"CreateGameWithSettings","data":{{"deck":{deck},"display_name":"Host","public":true,"password":null,"timer_seconds":null}}}}"#
+            );
+            let join = format!(
+                r#"{{"type":"JoinGameWithPassword","data":{{"game_code":"ABC123","deck":{deck},"display_name":"Guest","password":null}}}}"#
+            );
+            assert_eq!(
+                deck_tier(&create),
+                expected,
+                "CreateGameWithSettings {deck}"
+            );
+            assert_eq!(deck_tier(&join), expected, "JoinGameWithPassword {deck}");
+        }
+    }
+
     /// Phase 1d: `FormatConfig::deserialize`'s admission gate now runs
     /// through this exact wire chokepoint (`parse_lobby_client_message` ->
     /// `serde_json::from_str::<LobbyClientMessage>` -> the embedded

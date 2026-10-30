@@ -27,10 +27,11 @@ import {
   isRandomDeckSelection,
   loadActiveDeck,
   loadActiveDeckBracket,
+  loadActiveDeckComboDeclaration,
 } from "../constants/storage";
-import type { CommanderBracket } from "../types/bracket";
+import type { ComboDeclaration, CommanderBracket } from "../types/bracket";
 import { bracketToEngineTier, type CommanderBracketTier } from "../types/bracketEstimate";
-import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
+import { buildLegalAiDeckCatalog, candidateSeatDeck } from "../services/aiDeckCatalog";
 import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
 import { withCatalogSavedNames } from "../services/randomPoolSelection";
 import { cedhSeatProblem, pickAiSeatDecks, resolveRandomDrawPool } from "../services/aiRandomPool";
@@ -262,7 +263,10 @@ type ExpandedDeckWithTier = {
   signature_spell: string[];
   companion: string[];
   sticker_sheets: string[];
-  bracket_tier: CommanderBracketTier;
+  /** The owner's declared bracket; `null` is undeclared (the engine plays the estimate). */
+  bracket_tier: CommanderBracketTier | null;
+  /** The deck owner's two-card-combo answer; omitted means unanswered (the engine's default). */
+  combo_declaration?: ComboDeclaration;
 };
 type DeckListPayload = {
   player: ExpandedDeckWithTier;
@@ -359,7 +363,7 @@ function nativeFallbackReason(error: unknown): string {
 const EMPTY_PARSED_DECK: ParsedDeck = { main: [], sideboard: [] };
 
 function emptySeat(): ExpandedDeckWithTier {
-  return { ...emptySeatDeck(), bracket_tier: "core" };
+  return { ...emptySeatDeck(), bracket_tier: null };
 }
 
 function buildPlayerOnlyDeckList(player: ExpandedDeckWithTier): DeckListPayload {
@@ -373,6 +377,7 @@ async function buildLocalAiDeckList(
   formatConfig: FormatConfig | undefined,
   selectedMatchType: MatchType | undefined,
   playerBracket: CommanderBracket | null,
+  comboDeclaration: ComboDeclaration,
   pileSource: PileSource,
   seats: readonly LocalAiSeatPlan[],
 ): Promise<DeckListPayload> {
@@ -385,7 +390,7 @@ async function buildLocalAiDeckList(
     if (!pile) throw new Error(t("multiplayer:page.couldNotLoadDeck"));
     const aiDifficulties = seats.map((seat) => seat.difficulty);
     return {
-      player: { ...pile, bracket_tier: "core" },
+      player: { ...pile, bracket_tier: null },
       opponent: emptySeat(),
       ai_decks: Array.from({ length: opponentCount - 1 }, emptySeat),
       ai_difficulties: aiDifficulties,
@@ -447,9 +452,14 @@ async function buildLocalAiDeckList(
   }
 
   const excludeIds = new Set<string>();
-  let playerDeck = deck;
-  let resolvedPlayerBracket = playerBracket;
-  if (!playerDeck) {
+  let player: ExpandedDeckWithTier;
+  if (deck) {
+    player = {
+      ...expandParsedDeck(deck),
+      bracket_tier: bracketToEngineTier(playerBracket),
+      combo_declaration: comboDeclaration,
+    };
+  } else {
     // A deferred human Random pick draws from the shared bracket-then-curation
     // layering, so it lands in the same bracket(s) as the AI seats (falling
     // back the same way when the selection matches nothing).
@@ -469,8 +479,7 @@ async function buildLocalAiDeckList(
           : t("gameProvider.noLegalAiDecks.generic"),
       );
     }
-    playerDeck = playerPick.deck;
-    resolvedPlayerBracket = playerPick.bracket;
+    player = candidateSeatDeck(playerPick);
     excludeIds.add(playerPick.id);
   }
 
@@ -486,16 +495,14 @@ async function buildLocalAiDeckList(
     excludeIds,
   });
 
-  const playerExpanded = expandParsedDeck(playerDeck);
-  const playerTier = bracketToEngineTier(resolvedPlayerBracket);
   // Build ai_difficulties in the same order as the AI seats: opponent first,
   // then any additional ai_decks. Seat 0 maps to the opponent, seats 1+ map
   // to ai_decks. The plan's difficulties are already cEDH-mapped.
   const aiDifficulties = seats.map((seat) => seat.difficulty);
   return {
-    player: { ...playerExpanded, bracket_tier: playerTier },
-    opponent: { ...expandParsedDeck(picks[0].deck), bracket_tier: bracketToEngineTier(picks[0].bracket) },
-    ai_decks: picks.slice(1).map((c) => ({ ...expandParsedDeck(c.deck), bracket_tier: bracketToEngineTier(c.bracket) })),
+    player,
+    opponent: candidateSeatDeck(picks[0]),
+    ai_decks: picks.slice(1).map(candidateSeatDeck),
     ai_difficulties: aiDifficulties,
   };
 }
@@ -943,6 +950,7 @@ export function GameProvider({
             player = {
               ...expandParsedDeck(parsedDeck ?? EMPTY_PARSED_DECK),
               bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
+              combo_declaration: loadActiveDeckComboDeclaration(),
             };
           } else if (mode === "p2p-host") {
             const pileDeck = await pileSeatDeck(suppliedFormat, pileSourceFromParam(pile));
@@ -950,7 +958,7 @@ export function GameProvider({
               if (!signal.aborted) onNoDeckRef.current?.(tRef.current("multiplayer:page.couldNotLoadDeck"));
               return;
             }
-            player = { ...pileDeck, bracket_tier: "core" };
+            player = { ...pileDeck, bracket_tier: null };
           } else {
             player = emptySeat();
           }
@@ -1279,6 +1287,7 @@ export function GameProvider({
         ? {
             ...parsedDeckToDeckData(parsedDeck),
             bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
+            combo_declaration: loadActiveDeckComboDeclaration(),
           }
         : emptySeatDeck();
 
@@ -1821,6 +1830,7 @@ export function GameProvider({
               formatConfig,
               matchConfig?.match_type,
               loadActiveDeckBracket(),
+              loadActiveDeckComboDeclaration(),
               pileSourceFromParam(pile),
               resolveLocalAiSeatPlan(gameId, playerCount ?? 2),
             );
@@ -1892,6 +1902,7 @@ export function GameProvider({
           formatConfig,
           matchConfig?.match_type,
           loadActiveDeckBracket(),
+          loadActiveDeckComboDeclaration(),
           pileSourceFromParam(pile),
           resolveLocalAiSeatPlan(gameId, playerCount ?? 2),
         );
@@ -1980,6 +1991,7 @@ export function GameProvider({
                 formatConfig,
                 matchConfig?.match_type,
                 loadActiveDeckBracket(),
+                loadActiveDeckComboDeclaration(),
                 pileSourceFromParam(pile),
                 resolveLocalAiSeatPlan(gameId, playerCount ?? 2),
               );

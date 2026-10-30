@@ -31,6 +31,7 @@ import {
   ACTIVE_DECK_KEY,
   loadActiveDeck,
   loadActiveDeckBracket,
+  loadActiveDeckComboDeclaration,
   loadSavedDeck,
   touchDeckPlayed,
 } from "../constants/storage";
@@ -457,7 +458,11 @@ function MultiplayerPageContent({
   const expandDeck = useCallback(() => {
     const deck = loadActiveDeck();
     if (!deck) return null;
-    return { ...expandParsedDeck(deck), bracket_tier: bracketToEngineTier(loadActiveDeckBracket()) };
+    return {
+      ...expandParsedDeck(deck),
+      bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
+      combo_declaration: loadActiveDeckComboDeclaration(),
+    };
   }, []);
 
   // A supplied-deck format never reads the active deck: the host submits the pile seat's deck.

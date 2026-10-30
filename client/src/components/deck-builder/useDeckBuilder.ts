@@ -17,6 +17,7 @@ import {
   listFolders,
   loadSavedDeck,
   loadSavedDeckBracket,
+  loadSavedDeckComboDeclaration,
   onSavedDeckRewritten,
   saveBuilderDeck,
   setDeckFolder,
@@ -35,10 +36,16 @@ import { hasSearchCriteria } from "./searchFilters";
 import type { GroupMode } from "./deckGrouping";
 import type { DeckSizeRule, GameFormat } from "../../adapter/types";
 import { DECK_CONSTRUCTION_FORMATS, formatMetadata } from "../../data/formatRegistry";
-import type { CommanderBracket } from "../../types/bracket";
+import {
+  BRACKET_TIER_BY_NUMERIC,
+  UNDECLARED_COMBO,
+  sameComboDeclaration,
+  type ComboDeclaration,
+  type CommanderBracket,
+} from "../../types/bracket";
 import { getPreconBracket } from "../../data/preconBrackets";
-import { getSharedAdapter } from "../../adapter/wasm-adapter";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
+import { useDeckSignals } from "../../hooks/useDeckSignals";
 import { projectSignatureSpellForFormat, serializeSavedDeck } from "../../services/savedDeckProjection";
 import {
   commanderPartnerCandidates,
@@ -99,6 +106,8 @@ export function useDeckBuilder({
   const [searchResults, setSearchResults] = useState<ScryfallCard[]>([]);
   const [deckName, setDeckName] = useState("");
   const [bracket, setBracket] = useState<CommanderBracket | null>(null);
+  const [comboDeclaration, setComboDeclaration] =
+    useState<ComboDeclaration>(UNDECLARED_COMBO);
   const [savedDecks, setSavedDecks] = useState(listSavedDecks);
   // The deck currently loaded/saved in the editor, by name and stored bytes — not React state:
   // `saveBuilderDeck` and Clone update it inside their own transaction body, with the bytes they
@@ -301,20 +310,42 @@ export function useDeckBuilder({
     };
   }, [deck.main, format, isCommander]);
 
-  const { estimate, unsupported: bracketUnsupported } = useBracketEstimate({
+  const { estimate, outcome: bracketOutcome } = useBracketEstimate({
     deck,
     commanders,
     format,
-    adapter: getSharedAdapter(),
+    declaredTier: bracket === null ? null : BRACKET_TIER_BY_NUMERIC[bracket],
+    comboDeclaration,
+  });
+  const { signals, outcome: signalsOutcome } = useDeckSignals({
+    deck,
+    commanders,
+    format,
   });
 
-  const auditEmptyReason: "not-commander" | "no-commander" | "unsupported" | undefined =
+  const auditEmptyReason:
+    | "not-commander"
+    | "no-commander"
+    | "card-data-unavailable"
+    | undefined =
     !isCommander
       ? "not-commander"
       : commanders.length === 0
         ? "no-commander"
-        : bracketUnsupported
-          ? "unsupported"
+        : bracketOutcome?.kind === "card-data-unavailable"
+          ? "card-data-unavailable"
+          : undefined;
+  const signalsEmptyReason:
+    | "not-commander"
+    | "no-commander"
+    | "card-data-unavailable"
+    | undefined =
+    !isCommander
+      ? "not-commander"
+      : commanders.length === 0
+        ? "no-commander"
+        : signalsOutcome?.kind === "card-data-unavailable"
+          ? "card-data-unavailable"
           : undefined;
 
   const handleScrollToCard = useCallback((cardName: string) => {
@@ -546,6 +577,12 @@ export function useDeckBuilder({
     setBracket(next);
   }, [bracket, markDirty]);
 
+  const handleComboDeclarationChange = useCallback((next: ComboDeclaration) => {
+    if (sameComboDeclaration(next, comboDeclaration)) return;
+    markDirty();
+    setComboDeclaration(next);
+  }, [comboDeclaration, markDirty]);
+
   const applyDeckToEditor = useCallback((next: ParsedDeck, targetFormat: GameFormat = format) => {
     const projected = projectSignatureSpellForFormat(next, targetFormat);
     const targetUsesCommander = formatMetadata(targetFormat)?.default_config.uses_commander ?? false;
@@ -593,7 +630,7 @@ export function useDeckBuilder({
       applyDeckToEditor(resolved);
     }
     // The editor can still hold spellings the saved-deck name repair already replaced.
-    const data = serializeSavedDeck(await canonicalizeDeckNames(resolved), format, bracket);
+    const data = serializeSavedDeck(await canonicalizeDeckNames(resolved), format, bracket, comboDeclaration);
     const nextName = deckName.trim();
     const claimsEditor = () => !editorChangedSince(captured).reloaded;
     const saved = await attemptSavedDeckWrite("save", async () => {
@@ -629,6 +666,7 @@ export function useDeckBuilder({
     applyDeckToEditor,
     format,
     bracket,
+    comboDeclaration,
     showNotification,
     t,
   ]);
@@ -642,7 +680,7 @@ export function useDeckBuilder({
     // capture it now, before any await lets a Load or rename-Save race this transaction.
     const folderAtClick = sourceAtClick ? getDeckMeta(sourceAtClick.name)?.folderId ?? null : null;
     const base = deckName.trim() || "Untitled Deck";
-    const data = serializeSavedDeck(await canonicalizeDeckNames(currentDeck), format, bracket);
+    const data = serializeSavedDeck(await canonicalizeDeckNames(currentDeck), format, bracket, comboDeclaration);
     const cloned = await attemptSavedDeckWrite("clone", () =>
       withSavedDeckLibrary((txn) => {
         const name = freeDeckName(txn, `${base} copy`, (i) => `${base} copy ${i}`);
@@ -675,7 +713,7 @@ export function useDeckBuilder({
     setDeckName(cloneName);
     setJustSaved(true);
     setDirty(false);
-  }, [deckName, captureEditor, editorChangedSince, currentDeck, format, bracket, showNotification, t]);
+  }, [deckName, captureEditor, editorChangedSince, currentDeck, format, bracket, comboDeclaration, showNotification, t]);
 
   useEffect(() => {
     if (!justSaved) return;
@@ -708,6 +746,7 @@ export function useDeckBuilder({
       setDeckName(`${deckEntry.name} (${deckEntry.code})`);
       savedDeckRef.current = null;
       setBracket(getPreconBracket(deckId) ?? null);
+      setComboDeclaration(UNDECLARED_COMBO);
       return true;
     }
     const persisted = JSON.parse(stored.raw) as ParsedDeck & { format?: string };
@@ -743,6 +782,7 @@ export function useDeckBuilder({
       stopAdopting();
     }
     setBracket(loadSavedDeckBracket(name));
+    setComboDeclaration(loadSavedDeckComboDeclaration(name));
     return true;
   }, [applyDeckToEditor, onFormatChange, captureEditor, editorChangedSince]);
 
@@ -970,6 +1010,8 @@ export function useDeckBuilder({
     searchResults,
     deckName,
     bracket,
+    comboDeclaration,
+    handleComboDeclarationChange,
     savedDecks,
     justSaved,
     setJustSaved,
@@ -994,6 +1036,8 @@ export function useDeckBuilder({
     deckSizeRule,
     estimate,
     auditEmptyReason,
+    signals,
+    signalsEmptyReason,
     cmcValues,
     colorDistribution,
     cardCounts,

@@ -84,7 +84,6 @@ import { BracketEstimateChip, ManualBracketChip } from "../deck-builder/BracketE
 import { MenuSelect } from "../ui/MenuSelect";
 import { TextPromptDialog } from "../ui/TextPromptDialog";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
-import { getSharedAdapter } from "../../adapter/wasm-adapter";
 import { isCommanderFamilyFormat, type CommanderBracket } from "../../types/bracket";
 const PRECON_PREFIX = "[Pre-built] ";
 const PRECON_PAGE_SIZE = 12;
@@ -235,7 +234,8 @@ function EstimatedBracketChipForDeck({ candidate }: { candidate: DeckCatalogCand
     deck: candidate.deck,
     commanders: candidate.deck.commander ?? [],
     format: candidate.knownFormat,
-    adapter: getSharedAdapter(),
+    declaredTier: null,
+    comboDeclaration: candidate.comboDeclaration,
   });
   return <BracketEstimateChip tier={estimate?.tier ?? null} />;
 }

@@ -59,9 +59,11 @@ const { useCardImage, useSetSymbol, advanceSetSource } = vi.hoisted(() => ({
 
 vi.mock("../../../hooks/useCardImage", () => ({ useCardImage }));
 
-vi.mock("../../../hooks/useBracketEstimate", () => ({
-  useBracketEstimate: () => ({ estimate: null, loading: false, unsupported: false }),
+const { useBracketEstimate } = vi.hoisted(() => ({
+  useBracketEstimate: vi.fn(() => ({ estimate: null, loading: false, unsupported: false })),
 }));
+
+vi.mock("../../../hooks/useBracketEstimate", () => ({ useBracketEstimate }));
 
 vi.mock("../../../adapter/wasm-adapter", () => ({
   getSharedAdapter: () => ({}),
@@ -122,6 +124,8 @@ function legalCandidate(name: string, bracket: CommanderBracket | null): AiDeckC
     coveragePct: null,
     archetype: null,
     bracket,
+    declaredBracket: bracket,
+    comboDeclaration: { kind: "undeclared" },
   };
 }
 
@@ -134,6 +138,8 @@ function preconCandidate(deckId: string, name: string): AiDeckCandidate {
     coveragePct: null,
     archetype: null,
     bracket: null,
+    declaredBracket: null,
+    comboDeclaration: { kind: "undeclared" },
     knownFormat: "Commander",
   };
 }
@@ -197,6 +203,25 @@ describe("MyDecks", () => {
     expect(commanderTile).not.toBeNull();
     expect(within(standardTile!).queryByLabelText("Declared bracket: B3 Upgraded")).not.toBeInTheDocument();
     expect(within(commanderTile!).getByLabelText("Declared bracket: B3 Upgraded")).toBeInTheDocument();
+  });
+
+  it("estimates an untagged Commander deck with its own combo answer", async () => {
+    const early = { kind: "intended", window: "early_game" };
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Early Combo", JSON.stringify({
+      main: [{ name: "Island", count: 99 }],
+      sideboard: [],
+      commander: ["Test Commander"],
+      format: "Commander",
+      combo_declaration: early,
+    }));
+    vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({});
+
+    render(<MyDecks mode="manage" activeDeckName={null} />);
+
+    await screen.findByText("Early Combo");
+    await waitFor(() =>
+      expect(useBracketEstimate).toHaveBeenCalledWith(expect.objectContaining({ comboDeclaration: early })),
+    );
   });
 
   it("keeps cached subscriptions usable while offline and re-enables refresh on reconnect", async () => {

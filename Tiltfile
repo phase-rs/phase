@@ -67,6 +67,8 @@ ENGINE_SRC = [
     'crates/engine/data/',
     'crates/engine/build.rs',
     'crates/engine/Cargo.toml',
+    # `database/bracket_lists.rs` `include_str!`s this file from the repo root.
+    'data/bracket_lists.json',
 ]
 ENGINE_TESTS = ['crates/engine/tests/']
 # `crates/engine/src/types/format.rs` `include_str!`s the first two files

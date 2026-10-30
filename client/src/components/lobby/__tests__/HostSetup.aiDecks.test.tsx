@@ -63,6 +63,8 @@ function candidate(
     coveragePct: 100,
     archetype: null,
     bracket: null,
+    declaredBracket: overrides.bracket ?? null,
+    comboDeclaration: { kind: "undeclared" },
     ...overrides,
   };
 }
@@ -188,13 +190,13 @@ describe("HostSetup — per-seat AI decks", () => {
         seatIndex: 1,
         difficulty: "Medium",
         deckId: "Alpha",
-        deck: { type: "DeckList", data: { ...expandParsedDeck(ALPHA.deck), bracket_tier: "core" } },
+        deck: { type: "DeckList", data: { ...expandParsedDeck(ALPHA.deck), bracket_tier: null, combo_declaration: { kind: "undeclared" } } },
       }),
       expect.objectContaining({
         seatIndex: 2,
         difficulty: "Hard",
         deckId: "Bravo",
-        deck: { type: "DeckList", data: { ...expandParsedDeck(BRAVO.deck), bracket_tier: "core" } },
+        deck: { type: "DeckList", data: { ...expandParsedDeck(BRAVO.deck), bracket_tier: null, combo_declaration: { kind: "undeclared" } } },
       }),
     ]);
   });
@@ -214,7 +216,7 @@ describe("HostSetup — per-seat AI decks", () => {
     const decks = aiSeats.map((seat: { deck: { type: string; data: unknown } }) => seat.deck);
     for (const deck of decks) expect(deck.type).toBe("DeckList");
     expect(decks[0].data).not.toEqual(decks[1].data);
-    const catalogDecks = [ALPHA, BRAVO, CHARLIE].map((c) => ({ ...expandParsedDeck(c.deck), bracket_tier: "core" }));
+    const catalogDecks = [ALPHA, BRAVO, CHARLIE].map((c) => ({ ...expandParsedDeck(c.deck), bracket_tier: null, combo_declaration: { kind: "undeclared" } }));
     for (const deck of decks) expect(catalogDecks).toContainEqual(deck.data);
   });
 
@@ -233,7 +235,7 @@ describe("HostSetup — per-seat AI decks", () => {
     await user.click(screen.getByRole("button", { name: "Host Game" }));
 
     const { aiSeats } = onHost.mock.calls[0][0];
-    const poolDecks = [BRAVO, CHARLIE].map((c) => ({ ...expandParsedDeck(c.deck), bracket_tier: "core" }));
+    const poolDecks = [BRAVO, CHARLIE].map((c) => ({ ...expandParsedDeck(c.deck), bracket_tier: null, combo_declaration: { kind: "undeclared" } }));
     expect(aiSeats).toHaveLength(2);
     for (const seat of aiSeats) {
       expect(seat.deckId).toBe("Random");
@@ -269,7 +271,8 @@ describe("HostSetup — per-seat AI decks", () => {
     expect(aiSeats[0].deckId).toBe("Bravo");
     expect(aiSeats[0].deck.data).toEqual({
       ...expandParsedDeck(candidate("Bravo").deck),
-      bracket_tier: "core",
+      bracket_tier: null,
+      combo_declaration: { kind: "undeclared" },
     });
     expect(aiSeats[1].deckId).toBe("Alpha");
   });
@@ -277,7 +280,12 @@ describe("HostSetup — per-seat AI decks", () => {
   it("carries each picked deck's declared bracket tier onto the seat payload", async () => {
     const user = userEvent.setup();
     rememberTwoAiSeats();
-    catalogState.candidates = [candidate("Alpha", { bracket: 5 }), BRAVO];
+    // Bravo's filter bracket is an estimate, not a declaration: the seat stays
+    // undeclared so the engine plays it at its own estimate.
+    catalogState.candidates = [
+      candidate("Alpha", { bracket: 5 }),
+      candidate("Bravo", { bracket: 3, declaredBracket: null }),
+    ];
     const onHost = renderHostSetup();
 
     await waitFor(() => expect(deckPickers()).toHaveLength(2));
@@ -289,7 +297,29 @@ describe("HostSetup — per-seat AI decks", () => {
 
     const { aiSeats } = onHost.mock.calls[0][0];
     expect(aiSeats[0].deck.data.bracket_tier).toBe("cedh");
-    expect(aiSeats[1].deck.data.bracket_tier).toBe("core");
+    expect(aiSeats[1].deck.data.bracket_tier).toBeNull();
+  });
+
+  it("carries each picked deck's combo answer onto the seat payload", async () => {
+    const user = userEvent.setup();
+    rememberTwoAiSeats();
+    const early = { kind: "intended", window: "early_game" } as const;
+    catalogState.candidates = [
+      candidate("Alpha", { comboDeclaration: early }),
+      candidate("Bravo"),
+    ];
+    const onHost = renderHostSetup();
+
+    await waitFor(() => expect(deckPickers()).toHaveLength(2));
+    await user.click(deckPickers()[0]);
+    await user.click(screen.getByRole("option", { name: /^Alpha/ }));
+    await user.click(deckPickers()[1]);
+    await user.click(screen.getByRole("option", { name: /^Bravo/ }));
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+
+    const { aiSeats } = onHost.mock.calls[0][0];
+    expect(aiSeats[0].deck.data.combo_declaration).toEqual(early);
+    expect(aiSeats[1].deck.data.combo_declaration).toEqual({ kind: "undeclared" });
   });
 
   it("remembers the selection, not the resolved deck, so Random stays Random", async () => {

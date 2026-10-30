@@ -34,7 +34,11 @@ import type {
   InteractionPreviewRequest,
   InteractionSubmission,
 } from "./generated/interaction";
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type {
+  BracketDeckRequest,
+  BracketEstimateRequest,
+} from "../types/bracketEstimate";
+import type { DeckSignals } from "../types/deckSignals";
 import type { EngineQueryArgs, EngineQueryName, EngineQueryResult } from "./engine-queries";
 import { debugLog } from "../game/debugLog";
 import { notifyEngineSlow } from "../game/engineRecovery";
@@ -621,8 +625,12 @@ export class EngineWorkerClient {
     return this.request<string | null>({ type: "takeLastPanic" });
   }
 
-  async estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null> {
-    return this.request<BracketEstimate | null>({ type: "estimateBracketForDeck", deck });
+  async estimateBracketForDeck(request: BracketEstimateRequest): Promise<unknown> {
+    return this.request<unknown>({ type: "estimateBracketForDeck", request });
+  }
+
+  async deckSignalsForDeck(deck: BracketDeckRequest): Promise<DeckSignals | null> {
+    return this.request<DeckSignals | null>({ type: "deckSignalsForDeck", deck });
   }
 
   // ── Replay system ──────────────────────────────────────────────────────

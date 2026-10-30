@@ -58,9 +58,13 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use engine::database::CardDatabase;
+#[cfg(test)]
+use engine::database::ComboTable;
+use engine::game::bracket_estimate::{CommanderBracketTier, ACCEPTED_BRACKET_LABELS};
 use engine::game::deck_loading::{
     load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
 };
+use engine::game::{evaluate_deck_compatibility, DeckCompatibilityRequest};
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -68,6 +72,13 @@ use engine::types::player::PlayerId;
 use phase_ai::auto_play::{run_driver_loop, DriverExit};
 use phase_ai::config::{
     create_config_for_players, AiConfig, AiDifficulty, Platform, ACCEPTED_DIFFICULTY_LABELS,
+};
+use phase_ai::harness_combo_table;
+use phase_ai::pod::feed::{load_commander_decks, FeedDeck};
+use phase_ai::pod::report::{self, PodComboTable, PodGameRow, PodReport, PodSeatConfig};
+use phase_ai::pod::{
+    censored_observation, finish_measurement, pre_screen_measurement, PodEvidence, PodMeasurement,
+    PodObservation, SeatCoverage,
 };
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -78,6 +89,10 @@ const DEFAULT_ACTION_CAP: usize = 200_000;
 /// always played before `--players` existed, so every unflagged invocation —
 /// and its stdout — is unchanged.
 const DEFAULT_PLAYERS: u8 = 4;
+
+/// The only table a `--pod-report` can describe: `PodReport` and `PodEvidence`
+/// record exactly four seats, in the `seat0_*` .. `seat3_*` report fields.
+const POD_REPORT_PLAYERS: u8 = 4;
 
 /// Stack size for the thread that actually drives games. Deep AI search
 /// recursion (even at Easy difficulty — directly reproduced this session:
@@ -136,18 +151,58 @@ fn main() {
 /// move across the `thread::spawn` boundary, not eight.
 struct CliArgs {
     cards_path: String,
+    combo_table: Option<PathBuf>,
     feed: String,
     seed: u64,
     difficulty: AiDifficulty,
+    /// `--bracket`: the declaration stamped on every deck that declares none.
+    /// `None` leaves those decks undeclared, so each plays at its estimate.
+    bracket: Option<CommanderBracketTier>,
     players: u8,
-    /// One slot per seat (`len == players`); `None` = the table-wide
-    /// `difficulty`.
-    seat_difficulty: Vec<Option<AiDifficulty>>,
+    /// One slot per seat (`len == players`).
+    seats: Vec<SeatOverride>,
     action_cap: usize,
     games_file: Option<String>,
     batch_games: Option<Vec<(u64, AiDifficulty)>>,
     watch_cards: HashSet<String>,
     run_context: RunContext,
+    coverage_floor: Option<u8>,
+    pod_report: Option<PathBuf>,
+    refresh_pod_baseline: Option<PathBuf>,
+}
+
+/// Independent overrides for one seat.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SeatOverride {
+    difficulty: Option<AiDifficulty>,
+    tier: Option<CommanderBracketTier>,
+    deck: Option<PathBuf>,
+}
+
+/// The `--<axis>-pK` flags, one per `SeatOverride` field.
+#[derive(Debug, Clone, Copy)]
+enum SeatAxis {
+    Difficulty,
+    Bracket,
+    Deck,
+}
+
+impl SeatAxis {
+    /// The flag text up to the seat index.
+    fn flag(self) -> &'static str {
+        match self {
+            Self::Difficulty => "--difficulty-p",
+            Self::Bracket => "--bracket-p",
+            Self::Deck => "--deck-p",
+        }
+    }
+
+    /// Splits a seat flag into its axis and the seat-index text after it.
+    fn strip_flag(arg: &str) -> Option<(Self, &str)> {
+        [Self::Difficulty, Self::Bracket, Self::Deck]
+            .into_iter()
+            .find_map(|axis| Some((axis, arg.strip_prefix(axis.flag())?)))
+    }
 }
 
 /// Which execution mode every seat's `AiConfig` should run under for a given
@@ -183,18 +238,23 @@ enum RunContext {
 /// `--action-cap` value, via `parse_action_cap`.
 fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> {
     let mut cards_path: Option<String> = None;
+    let mut combo_table: Option<PathBuf> = None;
 
     let mut seed: u64 = 42;
     let mut difficulty = AiDifficulty::Easy;
+    let mut bracket = None;
     let mut players: u8 = DEFAULT_PLAYERS;
-    // Per-seat `--difficulty-pK` overrides (pod-lab gauntlet mixed-skill tables)
-    // as raw `(index suffix, label)` pairs in command-line order. Resolved after
-    // the loop, once `--players` is known, so an override is validated against the
-    // table's seat count whichever flag comes first.
-    let mut seat_overrides: Vec<(&str, Option<&str>)> = Vec::new();
+    // Per-seat `--<axis>-pK` overrides (pod-lab gauntlet mixed-skill tables) as
+    // raw `(axis, index suffix, value)` triples in command-line order. Resolved
+    // after the loop, once `--players` is known, so an override is validated
+    // against the table's seat count whichever flag comes first.
+    let mut seat_overrides: Vec<(SeatAxis, &str, Option<&str>)> = Vec::new();
     let mut action_cap: usize = DEFAULT_ACTION_CAP;
     let mut feed: String = "feeds/mtggoldfish-commander.json".to_string();
     let mut games_file: Option<String> = None;
+    let mut coverage_floor: Option<u8> = None;
+    let mut pod_report: Option<PathBuf> = None;
+    let mut refresh_pod_baseline: Option<PathBuf> = None;
     // pod-lab swap-liveness telemetry (loop-3 Q3(b)): empty means the
     // per-event scan in `play_one_game` is skipped entirely, not merely a
     // no-op HashSet lookup — a run that doesn't pass this flag pays nothing.
@@ -215,6 +275,10 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
                     difficulty = parse_difficulty(v);
                 }
             }
+            "--bracket" => match args_iter.next() {
+                Some(value) => bracket = Some(parse_bracket(value)?),
+                None => return Err("error: --bracket requires a bracket label".to_string()),
+            },
             "--action-cap" => {
                 if let Some(v) = args_iter.next() {
                     action_cap = parse_action_cap(v);
@@ -229,9 +293,33 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
                     feed = v.clone();
                 }
             }
+            "--combo-table" => match args_iter.next() {
+                Some(value) if !value.trim().is_empty() && !value.starts_with("--") => {
+                    combo_table = Some(PathBuf::from(value));
+                }
+                Some(_) | None => return Err("error: --combo-table requires a path".to_string()),
+            },
             "--games-file" => match args_iter.next() {
                 Some(v) => games_file = Some(v.clone()),
                 None => return Err("error: --games-file requires a path".to_string()),
+            },
+            "--coverage-floor" => match args_iter.next() {
+                Some(value) => coverage_floor = Some(parse_coverage_floor(value)?),
+                None => return Err("error: --coverage-floor requires a percent".to_string()),
+            },
+            "--pod-report" => match args_iter.next() {
+                Some(value) if !value.trim().is_empty() && !value.starts_with("--") => {
+                    pod_report = Some(PathBuf::from(value));
+                }
+                Some(_) | None => return Err("error: --pod-report requires a path".to_string()),
+            },
+            "--refresh-pod-baseline" => match args_iter.next() {
+                Some(value) if !value.trim().is_empty() && !value.starts_with("--") => {
+                    refresh_pod_baseline = Some(PathBuf::from(value));
+                }
+                Some(_) | None => {
+                    return Err("error: --refresh-pod-baseline requires a path".to_string());
+                }
             },
             "--watch-cards" => match args_iter.next() {
                 Some(v) => {
@@ -260,15 +348,15 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
                 None => return Err("error: --watch-card requires an exact card name".to_string()),
             },
             other => {
-                // `--difficulty-p0` .. `--difficulty-p{N-1}`: single-seat
-                // override, parameterized on seat index rather than one bespoke
-                // flag per seat. The value arg is consumed unconditionally so a
-                // bad index can't leak its label into the catch-all; the pair
-                // is checked after the loop by `parse_seat_override`, which
-                // hard-fails (like the sibling parsers) instead of silently
-                // dropping a mistyped flag and running a mislabeled seat.
-                if let Some(suffix) = other.strip_prefix("--difficulty-p") {
-                    seat_overrides.push((suffix, args_iter.next().map(String::as_str)));
+                // `--<axis>-p0` .. `--<axis>-p{N-1}`: single-seat override,
+                // parameterized on seat index rather than one bespoke flag per
+                // seat. The value arg is consumed unconditionally so a bad index
+                // can't leak its label into the catch-all; the triple is checked
+                // after the loop by `parse_seat_override`, which hard-fails (like
+                // the sibling parsers) instead of silently dropping a mistyped
+                // flag and running a mislabeled seat.
+                if let Some((axis, suffix)) = SeatAxis::strip_flag(other) {
+                    seat_overrides.push((axis, suffix, args_iter.next().map(String::as_str)));
                 } else if !other.starts_with("--") {
                     // F4: first non-`--`-prefixed token is the positional
                     // `cards_path`. This arm only sees tokens that were NOT
@@ -286,16 +374,38 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
         }
     }
 
-    // `None` means "use the table-wide --difficulty for this seat". Applied in
-    // command-line order, so a repeated override of one seat keeps the last.
-    let mut seat_difficulty: Vec<Option<AiDifficulty>> = vec![None; usize::from(players)];
-    for (suffix, value) in seat_overrides {
-        let (idx, label) = parse_seat_override(suffix, value, players)?;
-        seat_difficulty[idx] = Some(parse_difficulty(label));
+    // An axis left `None` falls back to the table-wide flag or the deck itself.
+    // Applied in command-line order, so a repeated override of one seat keeps the
+    // last.
+    let mut seats = vec![SeatOverride::default(); usize::from(players)];
+    for (axis, suffix, value) in seat_overrides {
+        let (idx, value) = parse_seat_override(axis.flag(), suffix, value, players)?;
+        let seat = &mut seats[idx];
+        match axis {
+            SeatAxis::Difficulty => seat.difficulty = Some(parse_difficulty(value)),
+            SeatAxis::Bracket => seat.tier = Some(parse_bracket(value)?),
+            SeatAxis::Deck => seat.deck = Some(PathBuf::from(value)),
+        }
     }
 
     watch_cards.extend(exact_watch_cards);
     let cards_path = cards_path.unwrap_or_else(|| "client/public".to_string());
+    if refresh_pod_baseline.is_some() && pod_report.is_none() {
+        return Err("error: --refresh-pod-baseline requires --pod-report".to_string());
+    }
+    if pod_report.is_some() && players != POD_REPORT_PLAYERS {
+        return Err(format!(
+            "error: --pod-report measures a {POD_REPORT_PLAYERS}-seat table; got --players {players}"
+        ));
+    }
+    if let (Some(output), Some(baseline)) = (&pod_report, &refresh_pod_baseline) {
+        if same_output_path(output, baseline) {
+            return Err(
+                "error: --pod-report and --refresh-pod-baseline must name different files"
+                    .to_string(),
+            );
+        }
+    }
 
     // `--games-file` batch entries are validated up front — same hard-fail-at-
     // startup discipline as `parse_difficulty`/`parse_action_cap`/
@@ -311,6 +421,22 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
             Err(e) => return Err(format!("error: {e}")),
         },
     };
+    if pod_report.is_some() {
+        if let Some(games) = &batch_games {
+            for seat in &seats {
+                if seat.difficulty.is_none() {
+                    let difficulties: BTreeSet<AiDifficulty> =
+                        games.iter().map(|(_, difficulty)| *difficulty).collect();
+                    if difficulties.len() > 1 {
+                        return Err(
+                            "error: --pod-report requires one effective difficulty per seat; mixed games-file difficulties need per-seat overrides"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     // F3 route table: `--games-file` (batch) always runs every seat in
     // Measurement mode (cross-game wall-clock-deadline leak fix, see
@@ -325,16 +451,21 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
 
     Ok(CliArgs {
         cards_path,
+        combo_table,
         feed,
         seed,
         difficulty,
+        bracket,
         players,
-        seat_difficulty,
+        seats,
         action_cap,
         games_file,
         batch_games,
         watch_cards,
         run_context,
+        coverage_floor,
+        pod_report,
+        refresh_pod_baseline,
     })
 }
 
@@ -344,7 +475,8 @@ struct GameRunContext<'a> {
     db: &'a CardDatabase,
     payload: &'a DeckPayload,
     players: u8,
-    seat_difficulty: &'a [Option<AiDifficulty>],
+    seat_overrides: &'a [SeatOverride],
+    seat_configs: &'a [PodSeatConfig],
     action_cap: usize,
     dump_log_path: Option<&'a str>,
     dump_actions_path: Option<&'a str>,
@@ -361,16 +493,21 @@ struct GameRunContext<'a> {
 fn run(cli: CliArgs) -> i32 {
     let CliArgs {
         cards_path,
+        combo_table,
         feed,
         seed,
         difficulty,
+        bracket,
         players,
-        seat_difficulty,
+        seats: seat_overrides,
         action_cap,
         games_file,
         batch_games,
         watch_cards,
         run_context,
+        coverage_floor,
+        pod_report,
+        refresh_pod_baseline,
     } = cli;
 
     let export_path = PathBuf::from(&cards_path).join("card-data.json");
@@ -381,19 +518,13 @@ fn run(cli: CliArgs) -> i32 {
             std::process::exit(1);
         }
     };
-
-    let feed_path = PathBuf::from(&cards_path).join(&feed);
-    let feed_file = match std::fs::File::open(&feed_path) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("failed to open {}: {e}", feed_path.display());
-            std::process::exit(1);
+    let combos = match harness_combo_table::load(combo_table.as_deref()) {
+        Ok(table) => table,
+        Err(error) => {
+            eprintln!("{error}");
+            return 1;
         }
     };
-    let feed_json: serde_json::Value =
-        serde_json::from_reader(feed_file).expect("feed is not valid JSON");
-
-    let decks_json = feed_json["decks"].as_array().expect("feed.decks missing");
 
     println!("=== {players}-player Commander AI test ===");
     println!("Feed: {feed}");
@@ -420,15 +551,83 @@ fn run(cli: CliArgs) -> i32 {
         RunContext::Interactive => println!("ExecutionMode: interactive"),
         RunContext::Measurement => println!("ExecutionMode: measurement"),
     }
+    harness_combo_table::print_provenance(&combos);
 
-    let deck_list = match select_seat_decks(&db, decks_json, players) {
-        Ok(deck_list) => deck_list,
+    let cards_root = PathBuf::from(&cards_path);
+    let feed_decks = if seat_overrides.iter().any(|seat| seat.deck.is_none()) {
+        let (decks, skipped) =
+            load_commander_decks(&db, &cards_root, &feed, Some(usize::from(players)))
+                .unwrap_or_else(|error| {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                });
+        for message in skipped {
+            println!("  SKIP {message}");
+        }
+        decks
+    } else {
+        Vec::new()
+    };
+
+    let seated = match select_seat_decks(&seat_overrides, &feed_decks, bracket) {
+        Ok(seated) => seated,
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
         }
     };
-    let payload: DeckPayload = resolve_deck_list(&db, &deck_list);
+    for FeedDeck { label, list } in &seated {
+        println!(
+            "  {label}  |  commander: {}  |  main: {} cards",
+            list.commander.first().map_or("<none>", String::as_str),
+            list.main_deck.len()
+        );
+    }
+
+    let deck_list = table_deck_list(&seated);
+    let payload: DeckPayload = resolve_deck_list(&db, &combos, &deck_list);
+    let resolved_state = build_game_state(&db, &payload, players, seed);
+    let effective_tiers: Vec<CommanderBracketTier> = (0..players)
+        .map(|seat| {
+            resolved_state
+                .deck_pools
+                .iter()
+                .find(|pool| pool.player == PlayerId(seat))
+                .expect("resolved Commander payload creates one pool per seat")
+                .effective_bracket_tier()
+                .tier()
+        })
+        .collect();
+
+    // The pod schema records exactly four seats, and `parse_cli` holds reports to
+    // that table. Any other table plays and prints but measures nothing.
+    let (seat_coverage, pre_screen_shortfall) = match &pod_report {
+        Some(_) => pre_screen_decks(&db, &seated, coverage_floor),
+        None => ([SeatCoverage::default(); 4], None),
+    };
+    let report_difficulty = batch_games
+        .as_ref()
+        .and_then(|games| games.first().map(|(_, difficulty)| *difficulty))
+        .unwrap_or(difficulty);
+    let seat_configs: Vec<PodSeatConfig> = seated
+        .iter()
+        .zip(&seat_overrides)
+        .zip(effective_tiers)
+        .map(|((deck, seat), effective_tier)| PodSeatConfig {
+            label: deck.label.clone(),
+            difficulty: seat.difficulty.unwrap_or(report_difficulty),
+            tier: deck.list.bracket_tier,
+            effective_tier: Some(effective_tier),
+        })
+        .collect();
+    let report_combo_table = combos
+        .provenance()
+        .map_or(PodComboTable::Unmeasured, |provenance| {
+            PodComboTable::Measured {
+                snapshot_date: provenance.snapshot_date.clone(),
+                table_version: provenance.table_version.clone(),
+            }
+        });
 
     // Post-resolution deck-count line (plan §3.9): `resolve_deck_list` silently
     // skips any name the card database doesn't recognize, so the pre-resolution
@@ -459,7 +658,8 @@ fn run(cli: CliArgs) -> i32 {
         db: &db,
         payload: &payload,
         players,
-        seat_difficulty: &seat_difficulty,
+        seat_overrides: &seat_overrides,
+        seat_configs: &seat_configs,
         action_cap,
         dump_log_path: dump_log_path.as_deref(),
         dump_actions_path: dump_actions_path.as_deref(),
@@ -467,10 +667,101 @@ fn run(cli: CliArgs) -> i32 {
         run_context,
     };
 
+    let report_seeds: Vec<u64> = batch_games.as_ref().map_or_else(
+        || vec![seed],
+        |games| games.iter().map(|(seed, _)| *seed).collect(),
+    );
+    let mut report_rows = Vec::new();
+    let exit_code = if pod_report.is_some() {
+        if let Some(measurement) = &pre_screen_shortfall {
+            report_rows.extend(report_seeds.iter().map(|seed| PodGameRow {
+                seed: *seed,
+                measurement: measurement.clone(),
+            }));
+            0
+        } else {
+            run_games(
+                &game_context,
+                seed,
+                difficulty,
+                batch_games.as_deref(),
+                &seat_coverage,
+                &mut report_rows,
+            )
+        }
+    } else {
+        run_games(
+            &game_context,
+            seed,
+            difficulty,
+            batch_games.as_deref(),
+            &seat_coverage,
+            &mut report_rows,
+        )
+    };
+
+    if let Some(path) = pod_report {
+        let report = PodReport::new(
+            command_output("git", &["rev-parse", "--short=12", "HEAD"]),
+            command_output(
+                "git",
+                &["hash-object", export_path.to_string_lossy().as_ref()],
+            ),
+            artifact_feed_label(&feed),
+            report_combo_table,
+            seat_configs
+                .try_into()
+                .expect("parse_cli holds --pod-report to a four-seat table"),
+            report_seeds,
+            report_rows,
+        );
+        report::write(&path, &report).unwrap_or_else(|error| {
+            eprintln!("failed to write pod report: {error}");
+            std::process::exit(1);
+        });
+        if let Some(baseline_path) = refresh_pod_baseline {
+            report::write(&baseline_path, &report).unwrap_or_else(|error| {
+                eprintln!("failed to refresh pod baseline: {error}");
+                std::process::exit(1);
+            });
+        }
+    }
+    exit_code
+}
+
+fn same_output_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        (Ok(_), Err(_)) | (Err(_), Ok(_)) | (Err(_), Err(_)) => false,
+    }
+}
+
+fn run_games(
+    context: &GameRunContext<'_>,
+    seed: u64,
+    difficulty: AiDifficulty,
+    batch_games: Option<&[(u64, AiDifficulty)]>,
+    seat_coverage: &[SeatCoverage; 4],
+    report_rows: &mut Vec<PodGameRow>,
+) -> i32 {
     match batch_games {
         None => {
-            let outcome = play_one_game(&game_context, seed, difficulty);
-            match outcome {
+            let played = play_one_game(context, seed, difficulty);
+            report_rows.push(PodGameRow {
+                seed,
+                measurement: finish_measurement(
+                    played.observation,
+                    PodEvidence {
+                        seat_coverage: *seat_coverage,
+                        touched_unimplemented: BTreeSet::new(),
+                    },
+                    played.touched_unimplemented,
+                ),
+            });
+            match played.outcome {
                 RunOutcome::Completed => 0,
                 RunOutcome::Aborted => 2,
                 RunOutcome::Stalled => 3,
@@ -478,11 +769,22 @@ fn run(cli: CliArgs) -> i32 {
         }
         Some(games) => {
             run_batch_isolated(
-                &games,
+                games,
                 |(seed, _)| seed.to_string(),
                 |&(seed, seat_diff)| {
                     println!("--- GAME seed={seed} difficulty={seat_diff:?} ---");
-                    play_one_game(&game_context, seed, seat_diff);
+                    let played = play_one_game(context, seed, seat_diff);
+                    report_rows.push(PodGameRow {
+                        seed,
+                        measurement: finish_measurement(
+                            played.observation,
+                            PodEvidence {
+                                seat_coverage: *seat_coverage,
+                                touched_unimplemented: BTreeSet::new(),
+                            },
+                            played.touched_unimplemented,
+                        ),
+                    });
                     // Immediate per-game flush (Tier 1 item 3): if the process
                     // is killed mid-batch (e.g. pod-lab's external wall-clock
                     // timeout on a hung game), every already-completed game's
@@ -500,81 +802,146 @@ fn run(cli: CliArgs) -> i32 {
     }
 }
 
-/// Selects the table's decks: the first `players` feed decks whose primary
-/// commander resolves in `db`, in feed order, printing one SKIP line (commander
-/// not in the card db) or one accepted-deck line per deck examined, exactly as
-/// before `--players` existed. Seat layout: deck 0 is `player` (seat 0), deck 1
-/// is `opponent` (seat 1), and the rest are `ai_decks`, which
-/// `load_deck_into_state` seats at `PlayerId(2 + i)` — empty at two seats.
-/// Fewer than `players` resolvable decks is an `Err` carrying the
-/// "need at least N precons" message the caller prints before exiting 1.
+/// Seats the table's decks: a seat's `--deck-pK` file when it names one, otherwise
+/// the feed deck at the seat's own index, so overriding one seat leaves every other
+/// seat's deck alone. A seat's declared bracket is its `--bracket-pK`, else the
+/// deck's own, else the table-wide `--bracket`. Too few feed decks for the last seat
+/// that draws one is an `Err` carrying the "need at least N precons" message the
+/// caller prints before exiting 1.
 fn select_seat_decks(
-    db: &CardDatabase,
-    decks_json: &[serde_json::Value],
-    players: u8,
-) -> Result<DeckList, String> {
-    let seats = usize::from(players);
-    let mut deck_lists: Vec<PlayerDeckList> = Vec::new();
-    // Commander names are populated in PlayerDeckList.commander and resolved
-    // by the pipeline — no manual tracking needed.
-    for deck in decks_json.iter() {
-        if deck_lists.len() == seats {
-            break;
-        }
-        let deck_name = deck["name"].as_str().unwrap_or("<unnamed>");
-        // Two feed conventions:
-        //  • Precon-style: `commander: ["Card Name"]` is an array of commander names.
-        //  • MTGGoldfish-style: `commander` is null and the deck `name` IS the
-        //    commander card name (included in `main`).
-        let cmd_names: Vec<String> = match deck["commander"].as_array() {
-            Some(arr) if !arr.is_empty() => arr
-                .iter()
-                .map(|v| v.as_str().unwrap().to_string())
-                .collect(),
-            _ => vec![deck_name.to_string()],
-        };
-        let primary_cmd = cmd_names[0].clone();
+    seats: &[SeatOverride],
+    feed_decks: &[FeedDeck],
+    table_bracket: Option<CommanderBracketTier>,
+) -> Result<Vec<FeedDeck>, String> {
+    let required = seats
+        .iter()
+        .rposition(|seat| seat.deck.is_none())
+        .map_or(0, |last| last + 1);
+    seats
+        .iter()
+        .enumerate()
+        .map(|(index, seat)| {
+            let mut deck = match &seat.deck {
+                Some(path) => load_explicit_deck(path)?,
+                None => feed_decks.get(index).cloned().ok_or_else(|| {
+                    format!(
+                        "need at least {required} precons, found {}",
+                        feed_decks.len()
+                    )
+                })?,
+            };
+            deck.list.bracket_tier = seat.tier.or(deck.list.bracket_tier).or(table_bracket);
+            Ok(deck)
+        })
+        .collect()
+}
 
-        if db.get_face_by_name(&primary_cmd).is_none() {
-            println!("  SKIP {deck_name}: commander '{primary_cmd}' not in card db");
-            continue;
-        }
-
-        let mut main: Vec<String> = Vec::new();
-        for entry in deck["main"].as_array().unwrap() {
-            let n = entry["name"].as_str().unwrap();
-            let count = entry["count"].as_u64().unwrap() as usize;
-            if cmd_names.iter().any(|c| c == n) {
-                continue;
-            }
-            for _ in 0..count {
-                main.push(n.to_string());
-            }
-        }
-
-        println!(
-            "  {deck_name}  |  commander: {primary_cmd}  |  main: {} cards",
-            main.len()
-        );
-        deck_lists.push(PlayerDeckList {
-            main_deck: main,
-            sideboard: vec![],
-            commander: cmd_names,
-            ..Default::default()
-        });
+/// Lays the seated decks out as a `DeckList`: deck 0 is `player` (seat 0), deck 1
+/// is `opponent` (seat 1), and the rest are `ai_decks`, which `load_deck_into_state`
+/// seats at `PlayerId(2 + i)` — empty at two seats.
+fn table_deck_list(seated: &[FeedDeck]) -> DeckList {
+    let [player, opponent, ai_decks @ ..] = seated else {
+        unreachable!("parse_player_count admits no table below two seats");
+    };
+    DeckList {
+        player: player.list.clone(),
+        opponent: opponent.list.clone(),
+        ai_decks: ai_decks.iter().map(|deck| deck.list.clone()).collect(),
+        ..Default::default()
     }
+}
 
-    match deck_lists.as_slice() {
-        [player, opponent, ai_decks @ ..] if deck_lists.len() == seats => Ok(DeckList {
-            player: player.clone(),
-            opponent: opponent.clone(),
-            ai_decks: ai_decks.to_vec(),
-            ..Default::default()
-        }),
-        _ => Err(format!(
-            "need at least {players} precons, found {}",
-            deck_lists.len()
-        )),
+fn load_explicit_deck(path: &std::path::Path) -> Result<FeedDeck, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("failed to read deck {}: {error}", path.display()))?;
+    let list: PlayerDeckList = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid deck {}: {error}", path.display()))?;
+    let label = if list.commander.is_empty() {
+        "unnamed-seat-deck".to_string()
+    } else {
+        list.commander.join(" + ")
+    };
+    Ok(FeedDeck { label, list })
+}
+
+fn pre_screen_decks(
+    db: &CardDatabase,
+    decks: &[FeedDeck],
+    coverage_floor: Option<u8>,
+) -> ([SeatCoverage; 4], Option<PodMeasurement>) {
+    let mut evidence = [SeatCoverage::default(); 4];
+    let mut first_shortfall = None;
+    for (index, FeedDeck { list: deck, .. }) in decks.iter().enumerate() {
+        let request = DeckCompatibilityRequest {
+            main_deck: deck.main_deck.clone(),
+            sideboard: deck.sideboard.clone(),
+            commander: deck.commander.clone(),
+            companion: deck.companion.clone(),
+            planar_deck: deck.planar_deck.clone(),
+            scheme_deck: deck.scheme_deck.clone(),
+            signature_spell: deck.signature_spell.clone(),
+            player_count: 4,
+            ..DeckCompatibilityRequest::default()
+        };
+        let result = evaluate_deck_compatibility(db, &request);
+        let coverage = result
+            .coverage
+            .expect("full compatibility includes coverage");
+        let total_copies = request.main_deck.len()
+            + request.sideboard.len()
+            + request.commander.len()
+            + request.companion.len()
+            + request.planar_deck.len()
+            + request.scheme_deck.len()
+            + request.signature_spell.len();
+        let unsupported_copies: usize = coverage
+            .unsupported_cards
+            .iter()
+            .map(|card| card.copies)
+            .sum();
+        let supported_copies = total_copies.saturating_sub(unsupported_copies);
+        evidence[index] = SeatCoverage {
+            total_unique: coverage.total_unique,
+            supported_unique: coverage.supported_unique,
+            total_copies,
+            supported_copies,
+            unknown_names: result.unknown_cards.len(),
+        };
+        if first_shortfall.is_none() {
+            first_shortfall = pre_screen_measurement(
+                PlayerId(index as u8),
+                result.unknown_cards,
+                coverage.unsupported_cards,
+                supported_copies,
+                total_copies,
+                coverage_floor,
+            );
+        }
+    }
+    (evidence, first_shortfall)
+}
+
+fn command_output(program: &str, args: &[&str]) -> String {
+    std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|output| output.trim().to_string())
+        .filter(|output| !output.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn artifact_feed_label(feed: &str) -> String {
+    let path = std::path::Path::new(feed);
+    if path.is_absolute() {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("feed")
+            .to_string()
+    } else {
+        feed.to_string()
     }
 }
 
@@ -588,12 +955,13 @@ fn select_seat_decks(
 /// once for the single-game path and once per line for `--games-file` batch
 /// mode — the SAME function drives both, so batching can never change what one
 /// game's play-through does or prints.
-fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficulty) -> RunOutcome {
+fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficulty) -> PlayedGame {
     let GameRunContext {
         db,
         payload,
         players,
-        seat_difficulty,
+        seat_overrides,
+        seat_configs,
         action_cap,
         dump_log_path,
         dump_actions_path,
@@ -614,9 +982,14 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
     // tier is the phase#6080 failure class.
     println!("Per-seat difficulty (0-indexed by seat):");
     let mut ai_configs: HashMap<PlayerId, AiConfig> = HashMap::new();
-    for (i, override_diff) in seat_difficulty.iter().enumerate() {
-        let seat_diff = override_diff.unwrap_or(difficulty);
-        println!("  P{i}  difficulty={seat_diff:?}");
+    for (i, seat) in seat_configs.iter().enumerate() {
+        let seat_diff = seat_overrides[i].difficulty.unwrap_or(difficulty);
+        println!(
+            "  P{i}  difficulty={seat_diff:?}  bracket={}  deck={}",
+            seat.tier
+                .map_or_else(|| "undeclared".to_string(), |tier| tier.to_string()),
+            seat.label
+        );
         ai_configs.insert(
             PlayerId(i as u8),
             build_seat_config(seat_diff, players, seed, run_context),
@@ -649,7 +1022,7 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
     // by the helper for the duration of the call). It reads the observer's
     // `state` arg (post-batch) and `total_before` (the PRE-batch running total,
     // which the turn line and ELIMINATED lines both printed before).
-    let outcome = run_driver_loop(
+    let driver_outcome = run_driver_loop(
         &mut state,
         &ai_players,
         &ai_configs,
@@ -710,13 +1083,13 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
         },
     );
 
-    let total_actions = outcome.total_actions;
-    let aborted = matches!(outcome.exit, DriverExit::CapReached);
+    let total_actions = driver_outcome.total_actions;
+    let aborted = matches!(&driver_outcome.exit, DriverExit::CapReached);
     // phase#6080: the reason the driver broke early (one of the batch break
     // doors), so a stall can be diagnosed from the game output alone instead of
     // a `tracing::error` no harness captures. A cap abort carries no break door.
-    let last_break_reason = match outcome.exit {
-        DriverExit::BatchBreak(reason) => Some(reason),
+    let last_break_reason = match &driver_outcome.exit {
+        DriverExit::BatchBreak(reason) => Some(reason.clone()),
         DriverExit::CapReached => None,
     };
     // STDOUT PARITY: the abort path prints a blank line + the ABORT line here,
@@ -747,8 +1120,8 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
     }
     println!();
 
-    let outcome = classify_run_outcome(aborted, &state.waiting_for);
-    match outcome {
+    let run_outcome = classify_run_outcome(aborted, &state.waiting_for);
+    match run_outcome {
         RunOutcome::Completed => {
             // `classify_run_outcome` only returns `Completed` for `GameOver`;
             // the fallthrough arm is unreachable and never prints.
@@ -846,7 +1219,29 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
         println!("Dumped {} game-log entries to {path}", game_log.len());
     }
 
-    outcome
+    let observation = match run_outcome {
+        RunOutcome::Completed => PodObservation::Decided {
+            turn: state.turn_number,
+            winner: match &state.waiting_for {
+                WaitingFor::GameOver { winner } => *winner,
+                _ => None,
+            },
+        },
+        RunOutcome::Aborted | RunOutcome::Stalled => {
+            censored_observation(state.turn_number, &driver_outcome.exit)
+        }
+    };
+    PlayedGame {
+        outcome: run_outcome,
+        observation,
+        touched_unimplemented: state.unimplemented_oracle_ids.clone(),
+    }
+}
+
+struct PlayedGame {
+    outcome: RunOutcome,
+    observation: PodObservation,
+    touched_unimplemented: BTreeSet<String>,
 }
 
 #[derive(Default)]
@@ -1084,8 +1479,8 @@ fn parse_player_count(s: &str) -> Result<u8, String> {
     Ok(players)
 }
 
-/// Resolves a `--difficulty-pK <label>` seat override. `suffix` is the text
-/// after `--difficulty-p`; `value` is the following CLI arg (the label), if
+/// Resolves a parameterized `--<axis>-pK <value>` seat override. `suffix` is the
+/// text after the flag stem; `value` is the following CLI argument, if
 /// present. Mirrors the hard-fail discipline of `parse_difficulty` /
 /// `parse_action_cap`: a non-numeric or out-of-range (`>= players`) seat index,
 /// or a missing label, is a startup error rather than a silently dropped flag —
@@ -1095,6 +1490,7 @@ fn parse_player_count(s: &str) -> Result<u8, String> {
 /// `DEFAULT_PLAYERS`, so ≥ 2). `parse_cli` calls this after the argument loop
 /// so the check doesn't depend on argument order.
 fn parse_seat_override<'a>(
+    flag: &str,
     suffix: &str,
     value: Option<&'a str>,
     players: u8,
@@ -1105,13 +1501,34 @@ fn parse_seat_override<'a>(
         .filter(|&i| i < usize::from(players))
         .ok_or_else(|| {
             format!(
-                "error: --difficulty-p{suffix}: seat index must be 0..={}",
+                "error: {flag}{suffix}: seat index must be 0..={}",
                 players - 1
             )
         })?;
-    let label =
-        value.ok_or_else(|| format!("error: --difficulty-p{idx} requires a difficulty label"))?;
+    let label = value
+        .filter(|value| !value.trim().is_empty() && !value.starts_with("--"))
+        .ok_or_else(|| format!("error: {flag}{idx} requires a value"))?;
     Ok((idx, label))
+}
+
+fn parse_bracket(label: &str) -> Result<CommanderBracketTier, String> {
+    CommanderBracketTier::from_label(label).ok_or_else(|| {
+        format!(
+            "error: unrecognized bracket {label:?}; accepted values: {}",
+            ACCEPTED_BRACKET_LABELS.join(", ")
+        )
+    })
+}
+
+fn parse_coverage_floor(value: &str) -> Result<u8, String> {
+    value
+        .trim()
+        .parse::<u8>()
+        .ok()
+        .filter(|percent| *percent <= 100)
+        .ok_or_else(|| {
+            format!("error: --coverage-floor {value:?} must be an integer from 0 to 100")
+        })
 }
 
 /// Parses one non-blank `--games-file` line: `<seed>,<difficulty>`. Pure and
@@ -1256,6 +1673,7 @@ mod tests {
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::zones::Zone;
     use phase_ai::auto_play::AiActionResult;
+    use phase_ai::pod::feed::select_commander_decks;
     use std::sync::{Arc, Mutex};
 
     struct TempFileGuard(PathBuf);
@@ -1341,7 +1759,7 @@ mod tests {
             ai_decks: vec![seat.clone(), seat],
             ..Default::default()
         };
-        let payload: DeckPayload = resolve_deck_list(&db, &deck_list);
+        let payload: DeckPayload = resolve_deck_list(&db, &ComboTable::default(), &deck_list);
 
         // Calls the same setup function `main()` uses — if `build_game_state`
         // ever drops back to a loader that skips the card-name pool, this test
@@ -1645,30 +2063,79 @@ mod tests {
 
     #[test]
     fn parse_seat_override_rejects_non_numeric_index() {
-        assert!(parse_seat_override("x", Some("Hard"), 4).is_err());
+        assert!(parse_seat_override("--difficulty-p", "x", Some("Hard"), 4).is_err());
     }
 
     #[test]
     fn parse_seat_override_rejects_out_of_range_index() {
-        assert!(parse_seat_override("4", Some("Hard"), 4).is_err());
-        assert!(parse_seat_override("9", Some("Hard"), 4).is_err());
-        assert!(parse_seat_override("5", Some("Hard"), 5).is_err());
+        assert!(parse_seat_override("--difficulty-p", "4", Some("Hard"), 4).is_err());
+        assert!(parse_seat_override("--difficulty-p", "9", Some("Hard"), 4).is_err());
+        assert!(parse_seat_override("--difficulty-p", "5", Some("Hard"), 5).is_err());
     }
 
     #[test]
     fn parse_seat_override_requires_a_label_value() {
-        assert!(parse_seat_override("2", None, 4).is_err());
+        assert!(parse_seat_override("--difficulty-p", "2", None, 4).is_err());
     }
 
     #[test]
     fn parse_seat_override_accepts_valid_seat_and_label() {
-        assert_eq!(parse_seat_override("2", Some("Hard"), 4), Ok((2, "Hard")));
         assert_eq!(
-            parse_seat_override("0", Some("VeryHard"), 4),
+            parse_seat_override("--difficulty-p", "2", Some("Hard"), 4),
+            Ok((2, "Hard"))
+        );
+        assert_eq!(
+            parse_seat_override("--difficulty-p", "0", Some("VeryHard"), 4),
             Ok((0, "VeryHard"))
         );
         // The bound is the table's seat count, not a fixed four.
-        assert_eq!(parse_seat_override("4", Some("Hard"), 5), Ok((4, "Hard")));
+        assert_eq!(
+            parse_seat_override("--difficulty-p", "4", Some("Hard"), 5),
+            Ok((4, "Hard"))
+        );
+    }
+
+    #[test]
+    fn seat_override_parses_deck_bracket_and_difficulty_independently() {
+        let args = [
+            "ai-commander",
+            "--bracket-p2",
+            "Cedh",
+            "--difficulty-p2",
+            "Easy",
+            "--deck-p2",
+            "x.json",
+        ]
+        .map(str::to_string);
+        let cli = parse_cli(&args, false).expect("seat axes parse");
+        assert_eq!(
+            cli.seats[2],
+            SeatOverride {
+                difficulty: Some(AiDifficulty::Easy),
+                tier: Some(CommanderBracketTier::Cedh),
+                deck: Some(PathBuf::from("x.json")),
+            }
+        );
+        assert_eq!(cli.seats[0], SeatOverride::default());
+        assert_eq!(cli.seats[1], SeatOverride::default());
+        assert_eq!(cli.seats[3], SeatOverride::default());
+    }
+
+    #[test]
+    fn unknown_bracket_label_hard_fails_before_any_work() {
+        let args = ["ai-commander", "--bracket-p0", "B5"].map(str::to_string);
+        assert!(parse_cli(&args, false).is_err());
+    }
+
+    #[test]
+    fn from_label_round_trips_every_accepted_label_and_rejects_others() {
+        for label in ACCEPTED_BRACKET_LABELS {
+            let tier = CommanderBracketTier::from_label(label).expect("accepted label parses");
+            assert_eq!(tier.to_string(), *label);
+        }
+        for label in ["Medium", "", "B3"] {
+            assert_eq!(CommanderBracketTier::from_label(label), None);
+        }
     }
 
     #[test]
@@ -2059,7 +2526,7 @@ mod tests {
     }
 
     /// A feed deck whose commander is absent from `fixture_db()`, so
-    /// `select_seat_decks` must skip it rather than seat it.
+    /// feed selection must skip it rather than seat it.
     fn ghost_feed_deck() -> serde_json::Value {
         serde_json::json!({
             "name": "Ghost Deck",
@@ -2068,11 +2535,133 @@ mod tests {
         })
     }
 
+    /// Seats `players` feed decks with no overrides, as `run` does.
+    fn seated_feed_table(
+        db: &CardDatabase,
+        feed: &[serde_json::Value],
+        players: u8,
+    ) -> Result<DeckList, String> {
+        let (feed_decks, _skipped) = select_commander_decks(db, feed, Some(usize::from(players)));
+        let seats = vec![SeatOverride::default(); usize::from(players)];
+        select_seat_decks(&seats, &feed_decks, None).map(|seated| table_deck_list(&seated))
+    }
+
+    fn seat_difficulties(cli: &CliArgs) -> Vec<Option<AiDifficulty>> {
+        cli.seats.iter().map(|seat| seat.difficulty).collect()
+    }
+
+    #[test]
+    fn parse_cli_validates_every_seat_axis_against_players_in_either_order() {
+        for (stem, value) in [
+            ("--difficulty-p", "Hard"),
+            ("--bracket-p", "Optimized"),
+            ("--deck-p", "deck.json"),
+        ] {
+            let flag = format!("{stem}4");
+            let accepted: &[&[&str]] = &[
+                &["--players", "5", &flag, value],
+                &[&flag, value, "--players", "5"],
+            ];
+            for row in accepted {
+                assert_eq!(parse_cli_args(row).expect("row must parse").seats.len(), 5);
+            }
+            let rejected: &[&[&str]] = &[
+                &[&flag, value],
+                &["--players", "4", &flag, value],
+                &[&flag, value, "--players", "4"],
+            ];
+            for row in rejected {
+                assert_eq!(
+                    parse_cli_args(row).err(),
+                    Some(format!("error: {flag}: seat index must be 0..=3")),
+                    "row {row:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_cli_holds_a_pod_report_to_the_four_seat_table() {
+        for row in [
+            &["--pod-report", "report.json"][..],
+            &["--players", "4", "--pod-report", "report.json"][..],
+        ] {
+            assert!(parse_cli_args(row).is_ok(), "row {row:?}");
+        }
+        for (players, flag_first) in [("2", true), ("5", false)] {
+            let row: &[&str] = if flag_first {
+                &["--pod-report", "report.json", "--players", players]
+            } else {
+                &["--players", players, "--pod-report", "report.json"]
+            };
+            assert_eq!(
+                parse_cli_args(row).err(),
+                Some(format!(
+                    "error: --pod-report measures a 4-seat table; got --players {players}"
+                )),
+                "row {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn select_seat_decks_seats_the_feed_at_each_seats_own_index() {
+        let db = fixture_db();
+        let (feed_decks, _) =
+            select_commander_decks(&db, &fixture_feed_decks(&[11, 12, 13, 14, 15]), None);
+        let path = temp_games_file_path("seat_deck");
+        let _guard = TempFileGuard(path.clone());
+        std::fs::write(
+            &path,
+            r#"{"main_deck": ["Test Land"], "commander": ["Solo"]}"#,
+        )
+        .unwrap();
+        let mut seats = vec![SeatOverride::default(); 5];
+        seats[1].deck = Some(path);
+        seats[2].tier = Some(CommanderBracketTier::Cedh);
+
+        let seated = select_seat_decks(&seats, &feed_decks, Some(CommanderBracketTier::Core))
+            .expect("every seat has a deck");
+
+        let sizes: Vec<usize> = seated
+            .iter()
+            .map(|deck| deck.list.main_deck.len())
+            .collect();
+        assert_eq!(sizes, [11, 1, 13, 14, 15]);
+        assert_eq!(seated[1].label, "Solo");
+        assert_eq!(
+            seated[2].list.bracket_tier,
+            Some(CommanderBracketTier::Cedh)
+        );
+        assert_eq!(
+            seated[0].list.bracket_tier,
+            Some(CommanderBracketTier::Core)
+        );
+    }
+
+    #[test]
+    fn select_seat_decks_counts_feed_decks_up_to_the_last_seat_that_draws_one() {
+        let path = PathBuf::from("unread-because-the-feed-comes-up-short.json");
+        let seats = [
+            SeatOverride::default(),
+            SeatOverride::default(),
+            SeatOverride {
+                deck: Some(path),
+                ..SeatOverride::default()
+            },
+        ];
+        let empty_feed: &[FeedDeck] = &[];
+        assert_eq!(
+            select_seat_decks(&seats, empty_feed, None).err().as_deref(),
+            Some("need at least 2 precons, found 0")
+        );
+    }
+
     #[test]
     fn parse_cli_defaults_to_four_players() {
         let cli = parse_cli_args(&[]).expect("bare invocation must parse");
         assert_eq!(cli.players, 4);
-        assert_eq!(cli.seat_difficulty.len(), 4);
+        assert_eq!(cli.seats.len(), 4);
     }
 
     #[test]
@@ -2121,7 +2710,7 @@ mod tests {
         for (value, players) in [("2", 2u8), ("5", 5)] {
             let cli = parse_cli_args(&["--players", value]).expect("--players must parse");
             assert_eq!(cli.players, players);
-            assert_eq!(cli.seat_difficulty.len(), usize::from(players));
+            assert_eq!(cli.seats.len(), usize::from(players));
         }
     }
 
@@ -2155,20 +2744,20 @@ mod tests {
         ];
         for row in accepted {
             let cli = parse_cli_args(row).expect("row must parse");
-            assert_eq!(cli.seat_difficulty.len(), 5, "row {row:?}");
+            assert_eq!(cli.seats.len(), 5, "row {row:?}");
             assert_eq!(
-                cli.seat_difficulty[4],
+                cli.seats[4].difficulty,
                 Some(AiDifficulty::Hard),
                 "row {row:?}"
             );
         }
         let cli = parse_cli_args(&["--players", "2", "--difficulty-p1", "Hard"])
             .expect("the last seat of a two-seat table must parse");
-        assert_eq!(cli.seat_difficulty, vec![None, Some(AiDifficulty::Hard)]);
+        assert_eq!(seat_difficulties(&cli), [None, Some(AiDifficulty::Hard)]);
         let cli = parse_cli_args(&["--difficulty-p5", "VeryHard", "--players", "6"])
             .expect("the last seat of a six-seat table must parse");
-        assert_eq!(cli.seat_difficulty.len(), 6);
-        assert_eq!(cli.seat_difficulty[5], Some(AiDifficulty::VeryHard));
+        assert_eq!(cli.seats.len(), 6);
+        assert_eq!(cli.seats[5].difficulty, Some(AiDifficulty::VeryHard));
 
         // K >= N is rejected whichever of the two flags comes first.
         let rejected: &[&[&str]] = &[
@@ -2208,8 +2797,8 @@ mod tests {
         ])
         .expect("repeated override must parse");
         assert_eq!(
-            cli.seat_difficulty,
-            vec![None, Some(AiDifficulty::Hard), None]
+            seat_difficulties(&cli),
+            [None, Some(AiDifficulty::Hard), None]
         );
     }
 
@@ -2220,7 +2809,7 @@ mod tests {
         feed.extend(fixture_feed_decks(&[11, 12, 13, 14, 15, 16, 17]));
         for players in [2u8, 4, 5, 6] {
             let deck_list =
-                select_seat_decks(&db, &feed, players).expect("enough decks must be seated");
+                seated_feed_table(&db, &feed, players).expect("enough decks must be seated");
             assert_eq!(
                 deck_list.ai_decks.len(),
                 usize::from(players) - 2,
@@ -2252,14 +2841,14 @@ mod tests {
         let mut feed = vec![ghost_feed_deck()];
         feed.extend(fixture_feed_decks(&[11, 12, 13, 14]));
         // Reach guard: the same feed seats a four-seat table.
-        assert!(select_seat_decks(&db, &feed, 4).is_ok());
+        assert!(seated_feed_table(&db, &feed, 4).is_ok());
         assert_eq!(
-            select_seat_decks(&db, &feed, 5).err().as_deref(),
+            seated_feed_table(&db, &feed, 5).err().as_deref(),
             Some("need at least 5 precons, found 4")
         );
         let feed = fixture_feed_decks(&[11, 12, 13]);
         assert_eq!(
-            select_seat_decks(&db, &feed, 4).err().as_deref(),
+            seated_feed_table(&db, &feed, 4).err().as_deref(),
             Some("need at least 4 precons, found 3")
         );
     }
@@ -2270,8 +2859,8 @@ mod tests {
         let feed = fixture_feed_decks(&[11, 12, 13, 14, 15, 16]);
         for players in [2u8, 5, 6] {
             let deck_list =
-                select_seat_decks(&db, &feed, players).expect("enough decks must be seated");
-            let payload = resolve_deck_list(&db, &deck_list);
+                seated_feed_table(&db, &feed, players).expect("enough decks must be seated");
+            let payload = resolve_deck_list(&db, &ComboTable::default(), &deck_list);
             let state = build_game_state(&db, &payload, players, 42);
             assert_eq!(state.players.len(), usize::from(players));
             for (k, player) in state.players.iter().enumerate() {
@@ -2311,22 +2900,34 @@ mod tests {
                     .into_iter()
                     .map(|players| {
                         let feed = fixture_feed_decks(&vec![20; usize::from(players)]);
-                        let deck_list = select_seat_decks(&db, &feed, players)
+                        let deck_list = seated_feed_table(&db, &feed, players)
                             .expect("enough decks must be seated");
-                        let payload = resolve_deck_list(&db, &deck_list);
-                        let seat_difficulty = vec![None; usize::from(players)];
+                        let payload = resolve_deck_list(&db, &ComboTable::default(), &deck_list);
+                        let seat_overrides = vec![SeatOverride::default(); usize::from(players)];
+                        let seat_configs: Vec<PodSeatConfig> = (0..players)
+                            .map(|seat| PodSeatConfig {
+                                label: format!("P{seat}"),
+                                difficulty: AiDifficulty::Easy,
+                                tier: None,
+                                effective_tier: None,
+                            })
+                            .collect();
                         let context = GameRunContext {
                             db: &db,
                             payload: &payload,
                             players,
-                            seat_difficulty: &seat_difficulty,
+                            seat_overrides: &seat_overrides,
+                            seat_configs: &seat_configs,
                             action_cap: 200,
                             dump_log_path: None,
                             dump_actions_path: None,
                             watch_cards: &watch_cards,
                             run_context: RunContext::Measurement,
                         };
-                        (players, play_one_game(&context, 7, AiDifficulty::Easy))
+                        (
+                            players,
+                            play_one_game(&context, 7, AiDifficulty::Easy).outcome,
+                        )
                     })
                     .collect::<Vec<_>>()
             })
@@ -2349,7 +2950,7 @@ mod tests {
         let cli = parse_cli_args(&["--players", "2", "--games-file", path.to_str().unwrap()])
             .expect("games-file invocation must parse");
         assert_eq!(cli.players, 2);
-        assert_eq!(cli.seat_difficulty.len(), 2);
+        assert_eq!(cli.seats.len(), 2);
         assert_eq!(cli.batch_games, Some(vec![(1009, AiDifficulty::Easy)]));
     }
 }

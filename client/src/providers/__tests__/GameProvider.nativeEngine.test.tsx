@@ -67,7 +67,10 @@ const {
     private listener: ((event: NativeAdapterEvent) => void) | null = null;
     readonly nativeAiOptions:
       | {
-          aiSeats: Array<{ difficulty: string; deck: { main_deck: string[] } }>;
+          aiSeats: Array<{
+            difficulty: string;
+            deck: { main_deck: string[]; bracket_tier?: string | null; combo_declaration?: unknown };
+          }>;
           formatConfig?: { starting_life: number };
         }
       | undefined;
@@ -90,7 +93,10 @@ const {
       _displayName?: string,
       options?: {
         nativeAi?: {
-          aiSeats: Array<{ difficulty: string; deck: { main_deck: string[] } }>;
+          aiSeats: Array<{
+            difficulty: string;
+            deck: { main_deck: string[]; bracket_tier?: string | null; combo_declaration?: unknown };
+          }>;
           formatConfig?: { starting_life: number };
         };
         nativePregame?: NativePregameReconnect;
@@ -255,7 +261,8 @@ vi.mock("../../constants/storage", async (importOriginal) => ({
   loadSavedDeckBracket: () => null,
 }));
 
-vi.mock("../../services/aiDeckCatalog", () => ({
+vi.mock("../../services/aiDeckCatalog", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/aiDeckCatalog")>(),
   buildLegalAiDeckCatalog: vi.fn(async () => ({
     candidates: [{ id: "ai-deck", deck: { main: ["Mountain"], sideboard: [] }, bracket: null }],
   })),
@@ -371,6 +378,8 @@ function aiCandidate(id: string, main: string[], bracket: CommanderBracket | nul
     coveragePct: 100,
     archetype: null,
     bracket,
+    declaredBracket: bracket,
+    comboDeclaration: { kind: "undeclared" },
   };
 }
 
@@ -1599,6 +1608,55 @@ describe("GameProvider native AI routing", () => {
     // pickRandomDeckCandidate is mocked to take the first candidate, so an
     // unfiltered draw would hand the AI the bracket-4 deck listed first.
     expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.main_deck).toEqual(["B2-Card"]);
+  });
+
+  it.each([
+    ["an untagged deck the pool filtered on its estimate", null, null],
+    ["a declared deck", 4, "optimized"],
+  ] as const)("sends %s to the engine as its declaration only", async (_label, declaredBracket, sentTier) => {
+    preferences.aiSeats = [{ difficulty: "Medium", deckId: "Random" }];
+    // `bracket` is the value the pool filters on; for an untagged deck it is the estimate.
+    const pick = { ...aiCandidate("saved:Pick", ["Pick-Card"], 3), declaredBracket };
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({ candidates: [pick], allCandidates: [pick] });
+
+    render(
+      <GameProvider gameId={`declared-tier-${sentTier}`} mode="ai" formatConfig={COMMANDER_FORMAT_CONFIG}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(nativeAdapters).toHaveLength(1);
+    });
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.main_deck).toEqual(["Pick-Card"]);
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.bracket_tier).toBe(sentTier);
+  });
+
+  it("sends each AI seat its own combo answer on the native path", async () => {
+    const early = { kind: "intended", window: "early_game" } as const;
+    preferences.aiSeats = [
+      { difficulty: "Medium", deckId: "saved:Early" },
+      { difficulty: "Medium", deckId: "saved:Plain" },
+    ];
+    const picks = [
+      { ...aiCandidate("saved:Early", ["Early-Card"], null), comboDeclaration: early },
+      aiCandidate("saved:Plain", ["Plain-Card"], null),
+    ];
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({ candidates: picks, allCandidates: picks });
+
+    render(
+      <GameProvider gameId="native-combo-answers" mode="ai" playerCount={3} formatConfig={COMMANDER_FORMAT_CONFIG}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(nativeAdapters).toHaveLength(1);
+    });
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats.map((seat) => seat.deck.combo_declaration)).toEqual([
+      early,
+      { kind: "undeclared" },
+    ]);
   });
 
   it("starts each AI seat from the game's seat snapshot instead of single-player preferences", async () => {

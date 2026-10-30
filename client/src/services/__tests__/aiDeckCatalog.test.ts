@@ -6,6 +6,7 @@ import type { ParsedDeck } from "../deckParser";
 import { evaluateDeckCompatibility } from "../deckCompatibility";
 import {
   buildLegalAiDeckCatalog,
+  candidateSeatDeck,
   catalogRequestKey,
   filterByBracket,
   useAiDeckCatalog,
@@ -15,7 +16,7 @@ import {
 } from "../aiDeckCatalog";
 import { buildDeckCatalog } from "../deckCatalog";
 import { getCachedFeed, getDeckFeedOrigin, listSubscriptions } from "../feedService";
-import { getSharedAdapter } from "../../adapter/wasm-adapter";
+import { estimateDeckBracket, type BracketEstimateOutcome } from "../bracketEstimate";
 import { loadPreconDeckMap } from "../../hooks/useDecks";
 import { DECKS_CHANGED_EVENT, FEED_DECK_ORIGINS_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
 import { BUNDLED_CEDH_DECKS } from "../../data/cedhDecks";
@@ -26,15 +27,19 @@ vi.mock("../deckCompatibility", () => ({
   evaluateDeckCompatibility: vi.fn(),
 }));
 
-vi.mock("../../adapter/wasm-adapter", () => ({
-  getSharedAdapter: vi.fn(),
+vi.mock("../bracketEstimate", () => ({
+  estimateDeckBracket: vi.fn(),
 }));
 
-/** Stub the shared adapter so `resolveBracket` returns the given estimate. */
+/** Stub the bracket service so `resolveBracket` receives the given estimate. */
 function stubBracketEstimate(estimate: BracketEstimate | null): void {
-  vi.mocked(getSharedAdapter).mockReturnValue({
-    estimateBracket: vi.fn(async () => estimate),
-  } as unknown as ReturnType<typeof getSharedAdapter>);
+  vi.mocked(estimateDeckBracket).mockResolvedValue(
+    estimate ? { kind: "estimate", estimate } : { kind: "no-commander" },
+  );
+}
+
+function stubBracketOutcome(outcome: BracketEstimateOutcome): void {
+  vi.mocked(estimateDeckBracket).mockResolvedValue(outcome);
 }
 
 vi.mock("../feedService", () => ({
@@ -271,6 +276,7 @@ describe("buildLegalAiDeckCatalog", () => {
 
     const candidate = catalog.candidates.find((c) => c.id === "saved:Tagged Commander");
     expect(candidate?.bracket).toBe(4);
+    expect(candidate?.declaredBracket).toBe(4);
   });
 
   it("falls back to the engine bracket estimate for untagged Commander decks", async () => {
@@ -288,6 +294,21 @@ describe("buildLegalAiDeckCatalog", () => {
 
     const candidate = catalog.candidates.find((c) => c.id === "saved:Estimated Commander");
     expect(candidate?.bracket).toBe(4); // "optimized" → 4
+    // The estimate only filters the pool; the seat stays undeclared.
+    expect(candidate?.declaredBracket).toBeNull();
+  });
+
+  it("leaves an untagged deck null when card data is unavailable", async () => {
+    saveDeck("Unavailable Commander", deck("Sol Ring", "Atraxa, Praetors' Voice"));
+    stubBracketOutcome({ kind: "card-data-unavailable", reason: "database load failed" });
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedFormat: "Commander",
+      selectedMatchType: "Bo1",
+    });
+
+    const candidate = catalog.candidates.find((c) => c.id === "saved:Unavailable Commander");
+    expect(candidate?.bracket).toBeNull();
   });
 
   it("prefers an explicit bracket tag over the engine estimate", async () => {
@@ -503,6 +524,8 @@ function savedSettleCandidate(
     coveragePct: null,
     archetype: null,
     bracket,
+    declaredBracket: bracket,
+    comboDeclaration: { kind: "undeclared" },
   };
 }
 
@@ -623,6 +646,89 @@ describe("useSettledAiCatalog", () => {
   });
 });
 
+// Combo declarations — catalog to seat
+// ---------------------------------------------------------------------------
+
+const EARLY_COMBO = { kind: "intended", window: "early_game" } as const;
+
+function saveCommanderDeck(name: string, sidecar: Record<string, unknown> = {}): void {
+  localStorage.setItem(
+    STORAGE_KEY_PREFIX + name,
+    JSON.stringify({ ...deck(`${name} Card`, `${name} Commander`), format: "Commander", ...sidecar }),
+  );
+}
+
+describe("combo declarations", () => {
+  function stubFloorFromDeclaration(): void {
+    vi.mocked(estimateDeckBracket).mockImplementation(async ({ deck: request }) => ({
+      kind: "estimate",
+      estimate: {
+        tier: request.combo_declaration.kind === "intended" ? "optimized" : "core",
+      } as BracketEstimate,
+    }));
+  }
+
+  it("estimates each saved deck with its own answer and carries it on the candidate", async () => {
+    stubFloorFromDeclaration();
+    saveCommanderDeck("Early", { combo_declaration: EARLY_COMBO });
+    saveCommanderDeck("Plain");
+
+    const { candidates } = await buildLegalAiDeckCatalog({ selectedFormat: "Commander" });
+
+    const byName = new Map(candidates.map((candidate) => [candidate.name, candidate]));
+    expect(byName.get("Early")).toMatchObject({
+      bracket: 4,
+      declaredBracket: null,
+      comboDeclaration: EARLY_COMBO,
+    });
+    expect(byName.get("Plain")).toMatchObject({
+      bracket: 2,
+      declaredBracket: null,
+      comboDeclaration: { kind: "undeclared" },
+    });
+  });
+
+  it("lets a manual tag win without losing the answer the seat still sends", async () => {
+    vi.mocked(estimateDeckBracket).mockClear();
+    stubFloorFromDeclaration();
+    saveCommanderDeck("Tagged", { bracket: 2, combo_declaration: EARLY_COMBO });
+
+    const { candidates } = await buildLegalAiDeckCatalog({ selectedFormat: "Commander" });
+
+    const tagged = candidates.find((candidate) => candidate.name === "Tagged");
+    expect(tagged).toMatchObject({ bracket: 2, comboDeclaration: EARLY_COMBO });
+    expect(estimateDeckBracket).not.toHaveBeenCalled();
+  });
+
+  it("gives a seat the candidate's declarations, never its filter bracket", () => {
+    const candidate = {
+      ...makeCandidate("Estimated", 4),
+      declaredBracket: null,
+      comboDeclaration: EARLY_COMBO,
+    };
+
+    expect(candidateSeatDeck(candidate)).toMatchObject({
+      bracket_tier: null,
+      combo_declaration: EARLY_COMBO,
+    });
+    expect(candidateSeatDeck({ ...candidate, declaredBracket: 5 }).bracket_tier).toBe("cedh");
+  });
+
+  it("refreshes a settled catalog when only a candidate's answer changed", async () => {
+    const before = savedSettleCandidate("saved:Tagged", 3);
+    const after = { ...before, comboDeclaration: EARLY_COMBO };
+    const { result, rerender } = renderHook(
+      ({ catalog }) => useSettledAiCatalog(catalog, "Commander::"),
+      { initialProps: { catalog: settleHookResult([before], "Commander::") } },
+    );
+    await waitFor(() => expect(result.current?.candidates).toEqual([before]));
+
+    rerender({ catalog: settleHookResult([after], "Commander::") });
+
+    await waitFor(() => expect(result.current?.candidates[0]?.comboDeclaration).toEqual(EARLY_COMBO));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // filterByBracket — pure bracket filter
 // ---------------------------------------------------------------------------
@@ -636,6 +742,8 @@ function makeCandidate(id: string, bracket: AiDeckCandidate["bracket"]): AiDeckC
     coveragePct: null,
     archetype: null,
     bracket,
+    declaredBracket: bracket,
+    comboDeclaration: { kind: "undeclared" },
   };
 }
 

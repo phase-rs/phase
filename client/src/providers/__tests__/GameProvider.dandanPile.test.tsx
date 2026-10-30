@@ -1,8 +1,12 @@
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CommanderBracketTier } from "../../types/bracketEstimate";
+import type { ComboDeclaration, CommanderBracketTier } from "../../types/bracketEstimate";
 
-type Deck = { main_deck: string[]; bracket_tier?: CommanderBracketTier };
+type Deck = {
+  main_deck: string[];
+  bracket_tier?: CommanderBracketTier | null;
+  combo_declaration?: ComboDeclaration;
+};
 type DeckList = { player: Deck; opponent: Deck; ai_decks: Deck[] };
 
 const {
@@ -304,7 +308,7 @@ describe("GameProvider host-supplied pile routes", () => {
       await waitFor(() => expect(recorded.ws).toHaveLength(1));
       expect(recorded.ws[0].mode).toBe("join");
       expect(recorded.ws[0].deck.main_deck).toEqual(ACTIVE);
-      expect(recorded.ws[0].deck.bracket_tier).toBe("core");
+      expect(recorded.ws[0].deck.bracket_tier).toBeNull();
     });
 
     it("an online guest preserves its active deck's declared bracket", async () => {
@@ -318,6 +322,18 @@ describe("GameProvider host-supplied pile routes", () => {
       expect(recorded.ws[0].mode).toBe("join");
       expect(recorded.ws[0].deck.main_deck).toEqual(ACTIVE);
       expect(recorded.ws[0].deck.bracket_tier).toBe("cedh");
+    });
+
+    it("an online guest preserves its active deck's combo answer", async () => {
+      const declaration = { kind: "intended", window: "early_game" } as const;
+      localStorage.setItem(`${STORAGE_KEY_PREFIX}Active`, JSON.stringify({
+        main: [{ name: "Plains", count: 60 }],
+        sideboard: [],
+        combo_declaration: declaration,
+      }));
+      renderRoute({ mode: "online", joinCode: "ABC123", formatConfig: config("Commander") });
+      await waitFor(() => expect(recorded.ws).toHaveLength(1));
+      expect(recorded.ws[0].deck.combo_declaration).toEqual(declaration);
     });
 
     it("a fresh P2P host submits its active deck", async () => {
