@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use engine::ai_support;
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, ComboTable};
 use engine::game::deck_loading::{load_and_hydrate_decks, resolve_deck_list, DeckList};
 use engine::game::derived_views::ClientGameStateRef;
 use engine::game::{derived, interaction, perf_counters, zones};
@@ -104,7 +104,7 @@ fn build_state(db: &CardDatabase) -> GameState {
     let mut list = DeckList::default();
     list.player.main_deck = deck(&[P0_BATTLEFIELD, P0_HAND], "Island");
     list.opponent.main_deck = deck(&[P1_BATTLEFIELD, P1_HAND], "Forest");
-    let payload = resolve_deck_list(db, &list);
+    let payload = resolve_deck_list(db, &ComboTable::default(), &list);
 
     let mut state = GameState::new_two_player(42);
     load_and_hydrate_decks(&mut state, &payload, Some(db));
