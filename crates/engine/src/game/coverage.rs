@@ -5317,7 +5317,14 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
             "shares a color with the most common color among all permanents".into()
         }
         SC::SourceEnteredThisTurn => "source entered this turn".into(),
-        SC::SourceHasDealtDamage => "source has dealt damage".into(),
+        SC::SourceHasDealtDamage { kind } => {
+            let kind = match kind {
+                crate::types::ability::DamageKindFilter::Any => "",
+                crate::types::ability::DamageKindFilter::CombatOnly => "combat ",
+                crate::types::ability::DamageKindFilter::NoncombatOnly => "noncombat ",
+            };
+            format!("source has dealt {kind}damage")
+        }
         SC::SourceExertedThisTurn => "source has been exerted this turn".into(),
         SC::WasCast { zone } => match zone {
             Some(z) => format!("cast from {}", fmt_zone(z)),
@@ -11212,7 +11219,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
             ("SharesColorWithMostCommonColorAmongPermanents", Handled)
         }
         StaticCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
-        StaticCondition::SourceHasDealtDamage => ("SourceHasDealtDamage", Handled),
+        StaticCondition::SourceHasDealtDamage { .. } => ("SourceHasDealtDamage", Handled),
         StaticCondition::SourceExertedThisTurn => ("SourceExertedThisTurn", Handled),
         StaticCondition::WasCast { .. } => ("WasCast", Handled),
         StaticCondition::IsRingBearer => ("IsRingBearer", Handled),

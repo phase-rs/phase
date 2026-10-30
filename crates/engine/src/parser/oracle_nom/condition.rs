@@ -2558,13 +2558,28 @@ fn parse_source_attached_to_creature(input: &str) -> OracleResult<'_, StaticCond
     Ok((rest, StaticCondition::SourceAttachedToCreature))
 }
 
-/// CR 120.3 + CR 702.11b: Parse "<subject> hasn't dealt damage yet" into
-/// `Not(SourceHasDealtDamage)` — the negated form of the sticky "has dealt
-/// damage since entering" gate (Palladia-Mors, the Ruiner; Karakyk Guardian:
-/// "has hexproof if it hasn't dealt damage yet"). Accepts the self-referential
-/// subjects the conditional-keyword templates use ("it", "~", "this creature",
-/// "this permanent"). Only the negated "hasn't" idiom appears in Oracle text, so
-/// no affirmative form is produced here.
+/// CR 120.2a + CR 120.2b: Parse the sticky-history tail "dealt [combat |noncombat
+/// ]damage yet" into the damage class it names (`Any` for the bare form). Shared
+/// by `parse_source_hasnt_dealt_damage` and the SelfRef "they haven't ..." pronoun
+/// rewrite so both read one definition of the phrase.
+pub(crate) fn parse_dealt_damage_yet(input: &str) -> OracleResult<'_, DamageKindFilter> {
+    preceded(
+        tag("dealt "),
+        terminated(parse_damage_kind_qualifier, tag("damage yet")),
+    )
+    .parse(input)
+}
+
+/// CR 120.3 + CR 702.11b: Parse "<subject> hasn't dealt [combat |noncombat
+/// ]damage yet" into `Not(SourceHasDealtDamage { kind })` — the negated form of
+/// the sticky "has dealt damage since entering" gate (Palladia-Mors, the Ruiner;
+/// Karakyk Guardian: "has hexproof if it hasn't dealt damage yet"; Ruric Thar,
+/// Magecrusher: "... they haven't dealt combat damage yet", after the SelfRef
+/// pronoun rewrite to "~ hasn't ..."). CR 120.2a / CR 120.2b: the optional
+/// qualifier selects the damage class. Accepts the self-referential subjects the
+/// conditional-keyword templates use ("it", "~", "this creature", "this
+/// permanent"). Only the negated "hasn't" idiom appears in Oracle text, so no
+/// affirmative form is produced here.
 fn parse_source_hasnt_dealt_damage(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = alt((
         tag("it "),
@@ -2573,11 +2588,11 @@ fn parse_source_hasnt_dealt_damage(input: &str) -> OracleResult<'_, StaticCondit
         tag("this permanent "),
     ))
     .parse(input)?;
-    value(
-        StaticCondition::Not {
-            condition: Box::new(StaticCondition::SourceHasDealtDamage),
+    map(
+        preceded((parse_hasnt, tag(" ")), parse_dealt_damage_yet),
+        |kind| StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage { kind }),
         },
-        (parse_hasnt, tag(" dealt damage yet")),
     )
     .parse(rest)
 }
@@ -16466,9 +16481,64 @@ mod tests {
         assert_eq!(
             c,
             StaticCondition::Not {
-                condition: Box::new(StaticCondition::SourceHasDealtDamage),
+                condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                    kind: DamageKindFilter::Any,
+                }),
             }
         );
+    }
+
+    // CR 120.2a + CR 120.2b: the damage-class qualifier on the sticky
+    // "hasn't dealt ... damage yet" gate (Ruric Thar, Magecrusher after the
+    // SelfRef pronoun rewrite), incl. the typographic apostrophe.
+    #[test]
+    fn test_source_hasnt_dealt_kind_damage_yet() {
+        let not_dealt = |kind| StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage { kind }),
+        };
+        for (text, kind) in [
+            (
+                "it hasn't dealt combat damage yet",
+                DamageKindFilter::CombatOnly,
+            ),
+            (
+                "~ hasn't dealt noncombat damage yet",
+                DamageKindFilter::NoncombatOnly,
+            ),
+            (
+                "~ hasn\u{2019}t dealt combat damage yet",
+                DamageKindFilter::CombatOnly,
+            ),
+            (
+                "this creature hasn\u{2019}t dealt damage yet",
+                DamageKindFilter::Any,
+            ),
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "{text}: must be fully consumed");
+            assert_eq!(c, not_dealt(kind), "{text}");
+        }
+    }
+
+    // Hostile adjacent grammar: the per-turn "this turn" form is a different
+    // concept and must not be typed as the sticky since-entering gate; the bare
+    // plural "they" is context-gated (only the SelfRef rewrite binds it).
+    #[test]
+    fn test_source_hasnt_dealt_damage_yet_rejects_neighbours() {
+        let is_sticky_gate = |text: &str| {
+            matches!(
+                parse_inner_condition(text),
+                Ok((
+                    "",
+                    StaticCondition::Not { ref condition }
+                )) if matches!(**condition, StaticCondition::SourceHasDealtDamage { .. })
+            )
+        };
+        assert!(!is_sticky_gate("it hasn't dealt combat damage this turn"));
+        assert!(!is_sticky_gate("they haven't dealt damage yet"));
+        assert!(!is_sticky_gate("they haven't dealt combat damage yet"));
+        // Positive reach-guard: the same predicate accepts the typed form.
+        assert!(is_sticky_gate("it hasn't dealt combat damage yet"));
     }
 
     // CR 400.7: Shardmage's Rescue — `~ entered this turn` (no "the battlefield").

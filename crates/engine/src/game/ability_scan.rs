@@ -4857,7 +4857,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
             history: HistoryReads::of(HistoryMember::TurnNumber),
         },
         StaticCondition::SourceExertedThisTurn => Axes::CONSERVATIVE,
-        StaticCondition::SourceHasDealtDamage => Axes {
+        StaticCondition::SourceHasDealtDamage { kind: _ } => Axes {
             event: false,
             sibling: false,
             projected: true,

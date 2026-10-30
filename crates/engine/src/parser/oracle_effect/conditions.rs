@@ -6647,7 +6647,7 @@ pub(crate) fn static_condition_to_ability_condition(
         // Layer-6 gate (the conditional hexproof grant) with no effect-resolution
         // (`AbilityCondition`) equivalent. `Not(SourceHasDealtDamage)` is handled by
         // the inner Not sub-match's `_ => None` arm above.
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         // CR 110.5b + CR 611.2b: `IsTapped { scope }` is a duration-only
         // target-relative tap condition (Zygon Infiltrator's copy duration), not

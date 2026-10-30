@@ -28220,7 +28220,10 @@ fn bridge_and_with_unmappable_returns_none() {
 fn bridge_unmappable_variants_return_none() {
     assert!(static_condition_to_trigger_condition(&StaticCondition::IsRingBearer).is_none());
     assert!(
-        static_condition_to_trigger_condition(&StaticCondition::SourceHasDealtDamage).is_none()
+        static_condition_to_trigger_condition(&StaticCondition::SourceHasDealtDamage {
+            kind: DamageKindFilter::Any
+        })
+        .is_none()
     );
 }
 

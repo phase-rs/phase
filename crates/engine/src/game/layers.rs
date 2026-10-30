@@ -2281,7 +2281,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -2452,7 +2452,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -2584,7 +2584,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -2920,7 +2920,9 @@ fn evaluate_condition_inner(
         // CR 120.3 + CR 120.6 + CR 702.11b: True once the source has actually dealt
         // damage since entering the battlefield (sticky). The "hasn't dealt damage
         // yet" hexproof grant wraps this in `StaticCondition::Not`.
-        StaticCondition::SourceHasDealtDamage => eval_source_has_dealt_damage(state, source_id),
+        StaticCondition::SourceHasDealtDamage { kind } => {
+            eval_source_has_dealt_damage(state, source_id, *kind)
+        }
         // CR 601.2 + CR 611.3a: True when the source permanent was cast.
         StaticCondition::WasCast { zone } => state
             .objects
@@ -5428,7 +5430,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer

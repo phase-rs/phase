@@ -7236,7 +7236,7 @@ fn replacement_condition_from_static(
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer

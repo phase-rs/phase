@@ -33093,7 +33093,9 @@ fn self_has_hexproof_if_it_hasnt_dealt_damage_palladia_mors() {
     assert_eq!(
         def.condition,
         Some(StaticCondition::Not {
-            condition: Box::new(StaticCondition::SourceHasDealtDamage),
+            condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::Any,
+            }),
         }),
         "hexproof must be gated on Not(SourceHasDealtDamage), got {:?}",
         def.condition
@@ -33118,7 +33120,9 @@ fn self_has_hexproof_if_it_hasnt_dealt_damage_karakyk_guardian() {
     assert_eq!(
         def.condition,
         Some(StaticCondition::Not {
-            condition: Box::new(StaticCondition::SourceHasDealtDamage),
+            condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::Any,
+            }),
         })
     );
 }
@@ -33162,7 +33166,9 @@ fn palladia_mors_and_karakyk_guardian_conditional_hexproof_full_card_flip() {
         assert_eq!(
             hexproof.condition,
             Some(StaticCondition::Not {
-                condition: Box::new(StaticCondition::SourceHasDealtDamage),
+                condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                    kind: DamageKindFilter::Any,
+                }),
             }),
             "{name}: hexproof must be gated on Not(SourceHasDealtDamage)"
         );
@@ -33203,7 +33209,9 @@ fn ratonhnhaketon_hasnt_dealt_damage_gates_hexproof_and_cant_be_blocked() {
     assert_eq!(defs.len(), 2, "expected hexproof grant plus evasion static");
 
     let expected_condition = Some(StaticCondition::Not {
-        condition: Box::new(StaticCondition::SourceHasDealtDamage),
+        condition: Box::new(StaticCondition::SourceHasDealtDamage {
+            kind: DamageKindFilter::Any,
+        }),
     });
 
     let hexproof = defs
@@ -33224,6 +33232,170 @@ fn ratonhnhaketon_hasnt_dealt_damage_gates_hexproof_and_cant_be_blocked() {
         .expect("missing conditional can't-be-blocked static");
     assert_eq!(evasion.affected, Some(TargetFilter::SelfRef));
     assert_eq!(evasion.condition, expected_condition);
+}
+
+/// CR 702.11b + CR 613.1f + CR 120.2a: Ruric Thar, Magecrusher's "~ has hexproof
+/// as long as they haven't dealt combat damage yet" — the plural bound pronoun
+/// is rewritten on the SelfRef path and the combat qualifier is typed, so the
+/// grant is gated on `Not(SourceHasDealtDamage { kind: CombatOnly })` instead of
+/// an `Unrecognized` gate (which evaluated permissively, i.e. permanent
+/// hexproof).
+#[test]
+fn ruric_thar_hexproof_as_long_as_they_havent_dealt_combat_damage_yet() {
+    let def = parse_static_line("~ has hexproof as long as they haven't dealt combat damage yet.")
+        .expect("static def");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof
+        }]
+    );
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::CombatOnly,
+            }),
+        }),
+        "hexproof must be gated on Not(SourceHasDealtDamage{{CombatOnly}}), got {:?}",
+        def.condition
+    );
+}
+
+/// CR 702.11b + CR 613.1f + CR 120.2a: FULL-CARD flip for Ruric Thar,
+/// Magecrusher from its verbatim Oracle text: the can't-be-countered static and
+/// the combat-gated hexproof grant, no `Unrecognized` gate, no `Unimplemented`
+/// residual and no swallowed-clause diagnostic.
+#[test]
+fn ruric_thar_magecrusher_conditional_hexproof_full_card_flip() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use crate::types::ability::Effect;
+
+    let name = "Ruric Thar, Magecrusher";
+    let text = "This spell can't be countered.\nReach, vigilance, trample\nRuric Thar has hexproof as long as they haven't dealt combat damage yet. (They can't be the target of spells or abilities your opponents control.)";
+    let parsed = parse_oracle_text(
+        text,
+        name,
+        &[
+            "Reach".to_string(),
+            "Trample".to_string(),
+            "Vigilance".to_string(),
+        ],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Ogre".to_string(), "Warrior".to_string()],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|d| d.mode == StaticMode::CantBeCountered),
+        "missing can't-be-countered static: {:?}",
+        parsed.statics
+    );
+    let hexproof = parsed
+        .statics
+        .iter()
+        .find(|d| {
+            d.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof,
+                })
+        })
+        .expect("missing hexproof static");
+    assert_eq!(hexproof.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        hexproof.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::CombatOnly,
+            }),
+        })
+    );
+    for kw in [Keyword::Reach, Keyword::Vigilance, Keyword::Trample] {
+        assert!(
+            parsed.extracted_keywords.contains(&kw),
+            "missing keyword {kw:?}: {:?}",
+            parsed.extracted_keywords
+        );
+    }
+    for def in &parsed.statics {
+        assert!(
+            !matches!(def.condition, Some(StaticCondition::Unrecognized { .. })),
+            "static carries an Unrecognized gate: {def:?}"
+        );
+        for m in &def.modifications {
+            if let ContinuousModification::GrantAbility { definition } = m {
+                assert!(
+                    !matches!(definition.effect.as_ref(), Effect::Unimplemented { .. }),
+                    "static carries an Unimplemented residual: {def:?}"
+                );
+            }
+        }
+    }
+    let swallowed: Vec<_> = parsed
+        .parse_warnings
+        .iter()
+        .filter(|w| matches!(w, OracleDiagnostic::SwallowedClause { .. }))
+        .collect();
+    assert!(
+        swallowed.is_empty(),
+        "unexpected swallowed-clause diagnostics: {swallowed:?}"
+    );
+}
+
+/// CR 702.11b + CR 613.1f: Oyaminartok, Polar Werebear's "has hexproof if it
+/// hasn't dealt damage yet" (no damage-class qualifier) stays gated on the
+/// `Any` kind — the byte-identical sibling of Palladia-Mors / Karakyk Guardian.
+#[test]
+fn oyaminartok_hexproof_if_it_hasnt_dealt_damage_yet_stays_any_kind() {
+    let def =
+        parse_static_line("~ has hexproof if it hasn't dealt damage yet.").expect("static def");
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::Any,
+            }),
+        })
+    );
+    // The serialized gate keeps the pre-parameterization shape (no `kind`).
+    let json = serde_json::to_value(def.condition.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"type": "Not", "condition": {"type": "SourceHasDealtDamage"}})
+    );
+}
+
+/// Hostile attached subject: the plural "they" rewrite arm is gated on a
+/// SelfRef-affected static, so an attached-subject "they" gate is not bound to
+/// the source and stays `Unrecognized`.
+#[test]
+fn attached_subject_they_havent_dealt_combat_damage_stays_unrecognized() {
+    let def = parse_static_line(
+        "Enchanted creature has hexproof as long as they haven't dealt combat damage yet.",
+    )
+    .expect("static def");
+    assert_ne!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(def.condition, Some(StaticCondition::Unrecognized { .. })),
+        "attached-subject `they` must not bind to the source, got {:?}",
+        def.condition
+    );
+    // Positive reach-guard: the same phrase on a SelfRef static is typed.
+    let self_def =
+        parse_static_line("~ has hexproof as long as they haven't dealt combat damage yet.")
+            .expect("self static def");
+    assert!(matches!(
+        self_def.condition,
+        Some(StaticCondition::Not { ref condition })
+            if **condition == StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::CombatOnly,
+            }
+    ));
 }
 
 #[test]
