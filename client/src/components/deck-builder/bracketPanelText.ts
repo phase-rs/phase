@@ -1,4 +1,4 @@
-import type { TFunction } from "i18next";
+import type { ParseKeys, TFunction } from "i18next";
 
 import {
   BRACKET_TIER_NUMERIC,
@@ -12,14 +12,14 @@ import {
 // Rules, so no CR annotations apply here. Pure display maps: every value shown
 // comes from the engine's explanation; this module only picks i18n keys.
 
-export const AXIS_I18N_KEY: Record<BracketAxis, string> = {
+export const AXIS_I18N_KEY = {
   game_changers: "bracket.axis.gameChangers",
   mass_land_denial: "bracket.axis.massLandDenial",
   extra_turns: "bracket.axis.extraTurns",
   efficient_tutors: "bracket.axis.efficientTutors",
-};
+} as const satisfies Record<BracketAxis, ParseKeys<"deck-builder">>;
 
-export const COMBO_RESOURCE_I18N_KEY: Record<ComboResource, string> = {
+export const COMBO_RESOURCE_I18N_KEY = {
   mana: "bracket.combo.resource.mana",
   damage: "bracket.combo.resource.damage",
   life_loss: "bracket.combo.resource.lifeLoss",
@@ -29,9 +29,9 @@ export const COMBO_RESOURCE_I18N_KEY: Record<ComboResource, string> = {
   tokens: "bracket.combo.resource.tokens",
   combat: "bracket.combo.resource.combat",
   turns: "bracket.combo.resource.turns",
-};
+} as const satisfies Record<ComboResource, ParseKeys<"deck-builder">>;
 
-export function reasonTitle(t: TFunction, reason: BracketReason): string {
+export function reasonTitle(t: TFunction<"deck-builder">, reason: BracketReason): string {
   const { source } = reason;
   switch (source.kind) {
     case "card_rule":
@@ -52,7 +52,7 @@ export function reasonTitle(t: TFunction, reason: BracketReason): string {
   }
 }
 
-export function reasonExplanation(t: TFunction, reason: BracketReason): string {
+export function reasonExplanation(t: TFunction<"deck-builder">, reason: BracketReason): string {
   const { source } = reason;
   switch (source.kind) {
     case "card_rule":
@@ -79,7 +79,7 @@ export function reasonExplanation(t: TFunction, reason: BracketReason): string {
   }
 }
 
-function comboOutcomeText(t: TFunction, outcome: ComboOutcome): string {
+function comboOutcomeText(t: TFunction<"deck-builder">, outcome: ComboOutcome): string {
   switch (outcome.kind) {
     case "wins":
       return t("bracket.combo.outcome.wins");
@@ -94,7 +94,7 @@ function comboOutcomeText(t: TFunction, outcome: ComboOutcome): string {
   }
 }
 
-export function comboOutcomesText(t: TFunction, outcomes: ComboOutcome[]): string {
+export function comboOutcomesText(t: TFunction<"deck-builder">, outcomes: ComboOutcome[]): string {
   return outcomes
     .map((outcome) => comboOutcomeText(t, outcome))
     .join(t("bracket.card.listComma"));

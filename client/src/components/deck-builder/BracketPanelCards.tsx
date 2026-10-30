@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { Fragment } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -35,10 +36,10 @@ interface CardListProps {
   onCardClick: (name: string) => void;
 }
 
-const JOINER_I18N_KEY: Record<CardListProps["joiner"], string> = {
+const JOINER_I18N_KEY = {
   comma: "bracket.card.listComma",
   or: "bracket.card.listOr",
-};
+} as const satisfies Record<CardListProps["joiner"], ParseKeys<"deck-builder">>;
 
 // A plain inline container, not flex: a flex container drops the spaces at the
 // ends of the separator text nodes. Each name is already `inline-flex`, so it

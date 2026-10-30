@@ -395,7 +395,7 @@ describe("BracketAuditPanel", () => {
         />
       </I18nextProvider>,
     );
-    const expected = instance.t("bracket.card.partialCoverage", { count: 2 });
+    const expected = instance.t("bracket.card.partialCoverage", { ns: "deck-builder", count: 2 });
     expect(expected).toBe(plDeckBuilder.bracket.card.partialCoverage_few.replace("{{count}}", "2"));
     expect(screen.getByText(expected)).toBeInTheDocument();
   });
