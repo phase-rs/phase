@@ -24038,8 +24038,21 @@ mod stage2_injector_tests {
         assert_eq!(
             single.len(),
             4,
-            "reach-guard: the shipped board qualifies exactly four sources; actual points={single:?}; wait={:?}; stack sources={:?}",
-            state.waiting_for, state.stack.iter().map(|entry| (entry.id, entry.source_id)).collect::<Vec<_>>()
+            "reach-guard: the shipped board qualifies exactly four sources; actual points={single:?}; wait={:?}; stack sources={:?}; Kodama admission operands={:?}",
+            state.waiting_for, state.stack.iter().map(|entry| (entry.id, entry.source_id)).collect::<Vec<_>>(),
+            state.stack.iter().filter(|entry| entry.source_id == ObjectId(126)).map(|entry| {
+                let ability = entry.ability().expect("Kodama entry retains its actual ability");
+                let gate = crate::game::effects::upfront_optional_gate(
+                    &state, ability, crate::game::effects::OptionalFeasibility::Probe,
+                );
+                let gate = gate.map(|gate| {
+                    let preference = gate.key.as_ref().and_then(|key| state.may_trigger_auto_choice_for_live_prompt(key));
+                    (gate.prompt_player, gate.key, preference)
+                });
+                let slots = crate::game::ability_utils::build_target_slots(&state, ability).map(|slots|
+                    slots.into_iter().map(|slot| (slot.optional, slot.legal_targets)).collect::<Vec<_>>());
+                (entry.id, entry.controller, gate, slots, ability)
+            }).collect::<Vec<_>>()
         );
         assert_eq!(
             single

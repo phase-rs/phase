@@ -33841,8 +33841,11 @@ mod tests {
                 }),
                 "the actual child branch owns a bound independent-departure dispatch"
             );
+            let selected_dispatch = runner.state().resolution_stack.clone();
             let child = runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
-            assert!(child.events.iter().any(|event| matches!(event, GameEvent::ZoneChanged { record, .. } if record.object_id == source && record.to_zone == Zone::Graveyard)));
+            assert!(child.events.iter().any(|event| matches!(event, GameEvent::ZoneChanged { record, .. } if record.object_id == source && record.to_zone == Zone::Graveyard)),
+                "Warp child move missing: grouped={grouped}; child={child:?}; object={:?}; wait={:?}; selected dispatch={selected_dispatch:?}; current frames={:?}; original receipt={original:?}",
+                runner.state().objects.get(&source), runner.state().waiting_for, runner.state().resolution_stack);
             assert!(!original.member.is_current(runner.state()));
             assert!(
                 matches!(
@@ -33955,7 +33958,8 @@ mod tests {
                 !runner.state().stack.is_empty(),
                 "the real phase producer placed its delayed trigger on the stack"
             );
-            runner
+            let original_delayed = runner.state().stack.clone();
+            let begin_resolve_all = runner
                 .act(GameAction::BeginResolveAll {
                     max_resolutions: 1,
                     scope: crate::types::actions::ResolveAllScope::Own,
@@ -33977,7 +33981,11 @@ mod tests {
             ));
             assert!(
                 runner.state().resolving_stack_entry.is_some()
-                    && runner.state().stack_resolution_session.is_some()
+                    && runner.state().stack_resolution_session.is_some(),
+                "Warp custody: terminal={terminal:?}; resolving entry={:?}; session={:?}; BeginResolveAll={begin_resolve_all:?}; priority={:?}; wait={:?}; frames={:?}; pending completion={:?}; deferred={:?}; original delayed={original_delayed:?}",
+                runner.state().resolving_stack_entry, runner.state().stack_resolution_session,
+                runner.state().priority_player, runner.state().waiting_for, runner.state().resolution_stack,
+                runner.state().pending_resolution_completion, runner.state().deferred_triggers
             );
             let mut state = runner.state().clone();
             let mut events = Vec::new();

@@ -381,86 +381,176 @@ mod tests {
         const WORDS_OF_WORSHIP: &str =
             "{1}: The next time you would draw a card this turn, you gain 5 life instead.";
 
-        let mut sc = GameScenario::new();
-        sc.at_phase(Phase::PreCombatMain);
-        let words = sc
-            .add_enchantment_from_oracle(P0, "Words of Worship", WORDS_OF_WORSHIP)
-            .id();
-        for name in ["Mountain", "Forest", "Island", "Plains"] {
-            sc.add_card_to_library_top(P0, name);
-        }
-        let draws: Vec<ObjectId> = (0..3)
-            .map(|_| {
-                sc.add_spell_to_hand_from_oracle(P0, "Draw Spell", false, "Draw a card.")
-                    .id()
-            })
-            .collect();
-        sc.with_mana_pool(
-            P0,
-            vec![
-                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
-                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
-            ],
-        );
-        let mut runner = sc.build();
-        for _ in 0..2 {
-            runner.activate(words, 0).resolve();
-        }
-
-        let state = runner.state();
-        assert_eq!(
-            state.pending_damage_replacements.len(),
-            2,
-            "reach guard: each activation installed its own shield"
-        );
-        let (first, second) = (
-            &state.pending_damage_replacements[0],
-            &state.pending_damage_replacements[1],
-        );
-        assert!(
-            first.runtime_execute.is_some() && first.runtime_execute != second.runtime_execute,
-            "each activation installs its own continuation"
-        );
-        assert_eq!(
-            state.replacement_rider(first),
-            state.replacement_rider(second),
-            "the two substitutes are the same effect"
-        );
-        assert_eq!(state.replacement_continuations.len(), 2);
-
-        let mut deltas = Vec::new();
-        for (n, spell) in draws.into_iter().enumerate() {
-            let life_before = runner.life(P0);
-            // The cast card leaves the hand; the delta counts only drawn cards.
-            let hand_before = runner.state().players[0].hand.len() as i64 - 1;
-            runner.cast(spell).resolve();
-            if let WaitingFor::ReplacementChoice {
-                candidate_count,
-                remember_identity,
-                ..
-            } = &runner.state().waiting_for
-            {
-                assert_eq!(n, 0, "only the first draw meets both shields");
-                assert_eq!(*candidate_count, 2);
-                assert!(
-                    remember_identity.is_none()
-                        && crate::game::replacement::replacement_auto_choice_key(runner.state())
-                            .is_none(),
-                    "floating shields offer no saved preference"
-                );
-                runner
-                    .act(GameAction::ChooseReplacement { index: 0 })
-                    .unwrap();
-                runner.advance_until_stack_empty();
-            } else {
-                assert_ne!(n, 0, "the first draw parks the CR 616.1 choice");
+        for selected_index in [0, 1] {
+            let mut sc = GameScenario::new();
+            sc.at_phase(Phase::PreCombatMain);
+            let words = sc
+                .add_enchantment_from_oracle(P0, "Words of Worship", WORDS_OF_WORSHIP)
+                .id();
+            for name in ["Mountain", "Forest", "Island", "Plains"] {
+                sc.add_card_to_library_top(P0, name);
             }
-            deltas.push((
-                runner.life(P0) - life_before,
-                runner.state().players[0].hand.len() as i64 - hand_before,
-            ));
+            let draws: Vec<ObjectId> = (0..3)
+                .map(|_| {
+                    sc.add_spell_to_hand_from_oracle(P0, "Draw Spell", false, "Draw a card.")
+                        .id()
+                })
+                .collect();
+            sc.with_mana_pool(
+                P0,
+                vec![
+                    ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                    ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                ],
+            );
+            let mut runner = sc.build();
+            for _ in 0..2 {
+                runner.activate(words, 0).resolve();
+            }
+
+            let state = runner.state();
+            assert_eq!(
+                state.pending_damage_replacements.len(),
+                2,
+                "reach guard: each activation installed its own shield"
+            );
+            let (first, second) = (
+                &state.pending_damage_replacements[0],
+                &state.pending_damage_replacements[1],
+            );
+            assert!(
+                first.runtime_execute.is_some() && first.runtime_execute != second.runtime_execute,
+                "each activation installs its own continuation"
+            );
+            assert_eq!(
+                state.replacement_rider(first),
+                state.replacement_rider(second),
+                "the two substitutes are the same effect"
+            );
+            assert_eq!(state.replacement_continuations.len(), 2);
+
+            let mut deltas = Vec::new();
+            for (n, spell) in draws.into_iter().enumerate() {
+                let life_before = runner.life(P0);
+                // The cast card leaves the hand; the delta counts only drawn cards.
+                let hand_before = runner.state().players[0].hand.len() as i64 - 1;
+                runner.cast(spell).resolve();
+                if let WaitingFor::ReplacementChoice {
+                    candidate_count,
+                    remember_identity,
+                    ..
+                } = &runner.state().waiting_for
+                {
+                    assert_eq!(n, 0, "only the first draw meets both shields");
+                    assert_eq!(*candidate_count, 2);
+                    assert!(
+                        remember_identity.is_none()
+                            && crate::game::replacement::replacement_auto_choice_key(
+                                runner.state()
+                            )
+                            .is_none(),
+                        "floating shields offer no saved preference"
+                    );
+                    use crate::game::scenario::GameRunner;
+                    use crate::types::game_state::{PersistedGameState, TrustedGameStateEnvelope};
+                    let current = runner.state();
+                    let expected = current.pending_replacement.as_ref().unwrap().clone();
+                    let handles: Vec<_> = current
+                        .pending_damage_replacements
+                        .iter()
+                        .map(|definition| definition.runtime_execute)
+                        .collect();
+                    let trusted = serde_json::from_value::<TrustedGameStateEnvelope>(
+                        serde_json::to_value(TrustedGameStateEnvelope::capture(current.clone()))
+                            .unwrap(),
+                    )
+                    .unwrap()
+                    .into_game_state();
+                    let persisted = PersistedGameState::capture(current.clone())
+                        .into_game_state()
+                        .unwrap();
+                    for restored in [current.clone(), trusted, persisted] {
+                        assert_eq!(restored.pending_replacement.as_ref().unwrap(), &expected);
+                        assert_eq!(
+                            restored
+                                .pending_damage_replacements
+                                .iter()
+                                .map(|definition| definition.runtime_execute)
+                                .collect::<Vec<_>>(),
+                            handles
+                        );
+                        assert_eq!(restored.replacement_continuations.len(), 2);
+                        let mut restored = GameRunner::from_state(restored);
+                        restored
+                            .act(GameAction::ChooseReplacement {
+                                index: selected_index,
+                            })
+                            .unwrap();
+                        restored.advance_until_stack_empty();
+                        assert_eq!(restored.life(P0), life_before + 5);
+                        assert_eq!(restored.state().players[0].hand.len() as i64, hand_before);
+                        assert!(
+                            restored.state().pending_damage_replacements[selected_index]
+                                .is_consumed
+                        );
+                        assert!(
+                            !restored.state().pending_damage_replacements[1 - selected_index]
+                                .is_consumed
+                        );
+                        assert!(restored.state().pending_replacement.is_none());
+                        assert!(matches!(
+                            restored.state().waiting_for,
+                            WaitingFor::Priority { .. }
+                        ));
+                    }
+                    runner
+                        .act(GameAction::ChooseReplacement {
+                            index: selected_index,
+                        })
+                        .unwrap();
+                    runner.advance_until_stack_empty();
+                } else {
+                    assert_ne!(n, 0, "the first draw parks the CR 616.1 choice");
+                }
+                deltas.push((
+                    runner.life(P0) - life_before,
+                    runner.state().players[0].hand.len() as i64 - hand_before,
+                ));
+            }
+            assert_eq!(deltas, vec![(5, 0), (5, 0), (0, 1)]);
+            assert!(runner.state().replacement_auto_choices.is_empty());
+            assert!(runner
+                .state()
+                .pending_damage_replacements
+                .iter()
+                .all(|shield| shield.is_consumed));
+            let before = (runner.life(P0), runner.state().players[0].hand.len());
+            let mut no_extra_events = Vec::new();
+            crate::game::effects::drain_pending_continuation(
+                runner.state_mut(),
+                &mut no_extra_events,
+            );
+            assert_eq!(
+                (runner.life(P0), runner.state().players[0].hand.len()),
+                before
+            );
+            assert!(!no_extra_events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::GainLife | EffectKind::Draw,
+                    ..
+                }
+            )));
+            let state = runner.state();
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(state.stack.is_empty() && state.resolution_stack.is_empty());
+            assert!(
+                state.pending_replacement.is_none()
+                    && state.resolving_stack_entry.is_none()
+                    && state.pending_resolution_completion.is_none()
+                    && state.return_result_frames.is_empty()
+                    && state.active_return_result_occurrence.is_none()
+            );
         }
-        assert_eq!(deltas, vec![(5, 0), (5, 0), (0, 1)]);
-        assert!(runner.state().replacement_auto_choices.is_empty());
     }
 }
