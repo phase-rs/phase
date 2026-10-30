@@ -884,9 +884,13 @@ pub(crate) struct ClauseIr {
     /// Chain-local identity, assigned in source order by [`ClauseIrBuilder`].
     pub(crate) id: ClauseId,
     /// One choose instruction and its mutually exclusive instead branch share this id.
+    /// A single-object-target producer whose announced target a later anaphor names
+    /// across a resolution-time choice also declares it (`bind_anaphors_across_resolution_choices`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) declares_chosen_clause: Option<ClauseId>,
-    /// The exact choose instruction named by this selected-group consumer.
+    /// The exact choose instruction named by this selected-group consumer, or the
+    /// single-object-target producer a definite anaphor names across a
+    /// resolution-time choice (`bind_anaphors_across_resolution_choices`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reads_chosen_clause: Option<ClauseId>,
     /// CR 115.1 + CR 608.2c: where this clause's `ObjectScope::Target` reads take
@@ -1561,7 +1565,13 @@ impl ClauseDraft<'_> {
             }
         }
         let id = ClauseId(self.builder.next_clause_id);
-        let declares_chosen_clause = if matches!(&self.parsed.effect, Effect::TargetOnly { .. }) {
+        // CR 608.2c + CR 115.1: a `TargetOnly` clause whose lowering minted a
+        // group for the player it announces (`declared_player_group`) bound its
+        // own continuations to that group, so it declares that group in place of
+        // the clause-id group every other `TargetOnly` producer carries.
+        let declares_chosen_clause = if self.declared_player_group.is_some() {
+            None
+        } else if matches!(&self.parsed.effect, Effect::TargetOnly { .. }) {
             if matches!(
                 self.condition,
                 Some(AbilityCondition::AdditionalCostPaidInstead)

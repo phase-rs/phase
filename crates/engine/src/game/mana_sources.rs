@@ -13,7 +13,8 @@
 //! inline resolution — which is why any irreversible sub-effect (damage,
 //! life loss, sacrifice) disqualifies a source from UI-level undo.
 
-use crate::types::ability::ManaSpendRestriction;
+use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::types::ability::{cost_has_component, ManaSpendRestriction};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ControllerRef,
     CostPaidObjectSnapshot, Effect, ManaProduction, PlayerFilter, QuantityExpr, ResolvedAbility,
@@ -369,29 +370,6 @@ impl ManaSourceOption {
                 )
                 .collect(),
         })
-    }
-}
-
-/// Check whether an ability cost includes a tap component.
-/// Matches both `AbilityCost::Tap` and `Composite` costs containing `Tap`.
-/// True when `cost` contains a component satisfying `pred`, checking both a bare
-/// cost and every component of a `Composite`. Single walker behind all
-/// component-presence predicates (`has_tap_component`, `has_untap_component`,
-/// `cost_includes_sacrifice`, `cost_includes_loyalty`).
-///
-/// Walks **one `Composite` level only**: a component nested inside a child
-/// `Composite` is not seen. Sound for presence checks, whose `false` merely
-/// declines a fast path, but never sound for an arity bound — for that use
-/// [`count_leaf_components`], which recurses to the same flattened leaf
-/// multiset the payment path actually pays.
-pub(crate) fn cost_has_component(
-    cost: &Option<AbilityCost>,
-    pred: impl Fn(&AbilityCost) -> bool,
-) -> bool {
-    match cost {
-        Some(AbilityCost::Composite { costs }) => costs.iter().any(&pred),
-        Some(c) => pred(c),
-        None => false,
     }
 }
 

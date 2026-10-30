@@ -424,7 +424,9 @@ fn pipeline_scheming_aspirant_proliferate_trigger() {
     assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
     assert_eq!(
         trigger.player_actions,
-        Some(vec![crate::types::events::PlayerActionKind::Proliferate])
+        Some(vec![
+            crate::types::event_kinds::PlayerActionKind::Proliferate
+        ])
     );
     // Verify the execute body is LoseLife + GainLife
     let exec = trigger.execute.as_ref().expect("execute body");

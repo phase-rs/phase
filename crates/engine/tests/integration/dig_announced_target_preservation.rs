@@ -849,6 +849,7 @@ fn direct_dig_action_preserves_own_target_and_binds_current_conditional_result()
                         value: if keep { 1 } else { 2 },
                     },
                     position: LibraryPosition::Bottom,
+                    arranger: None,
                 },
                 vec![],
                 source,

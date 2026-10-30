@@ -3,26 +3,25 @@ use std::{borrow::Cow, ops::ControlFlow};
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until, take_while};
-use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, map, opt, value};
+use nom::character::complete::{anychar, multispace0};
+use nom::combinator::{all_consuming, map, not, opt, recognize, value};
+use nom::multi::{many1, separated_list1};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
 
-use crate::game::effects::cast_from_zone;
-use crate::game::filter::{
-    filter_contains_filter_prop, retarget_chosen_card_type_to_creature_type,
-};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CardPlayMode,
-    CastManaSpentMetric, CastTimingPermission, CastingPermission, CastingRestriction, ChoiceType,
-    ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction, CounterSourceRider,
-    DamageRedirectTarget, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
-    GuardReading, ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr,
-    QuantityRef, ReplacementDefinition, ReplacementMode, SolveCondition, SpellCastingOption,
-    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
+    filter_contains_filter_prop, graveyard_destination_rider, is_graveyard_exile_rider_subability,
+    retarget_chosen_card_type_to_creature_type, AbilityCondition, AbilityCost, AbilityDefinition,
+    AbilityKind, AbilityTag, ActivationManaPaymentRestriction, ActivationRestriction,
+    AdditionalCost, CardPlayMode, CastManaSpentMetric, CastTimingPermission, CastingPermission,
+    CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification, ControllerRef,
+    CostReduction, CounterSourceRider, DamageRedirectTarget, DelayedTriggerCondition, Duration,
+    Effect, EffectScope, FilterProp, GuardReading, ManaProduction, ModalChoice, ParsedCondition,
+    PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard,
+    VoteSubject,
 };
 use crate::types::ability_visit::{
     granter_symbols, visit_ability_def_scoped, DefinitionNode, ResolutionScope,
@@ -78,7 +77,8 @@ use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     ability_chain_grants_chosen_color_keyword, lower_ability_ir, parse_ability_ir_standalone,
     parse_ability_ir_with_context, parse_additional_cost_instead_condition_fragment,
-    parse_effect_chain, parse_effect_chain_with_context, parse_phase_name_set,
+    parse_effect_chain, parse_effect_chain_with_context,
+    parse_effect_chain_with_context_ability_root, parse_phase_name_set,
     parse_windowed_replacement_install_ir, rewrite_condition_keyword, target_filter_controller_ref,
     try_parse_temporal_delayed_trigger_ability,
 };
@@ -2038,10 +2038,20 @@ fn characteristic_source_uses_filter_prop(
                 CardTypeSetSource::TurnJournal { filter, .. } => filter
                     .as_ref()
                     .is_some_and(|filter| target_filter_uses_filter_prop(filter, pred)),
+                CardTypeSetSource::TrackedSet { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(|filter| target_filter_uses_filter_prop(filter, pred)),
+                // CR 608.2c + CR 115.1: the prop query runs against the canonical
+                // slot filter via the single `targeted_objects_filter`
+                // authority — a targeted-objects population matches exactly
+                // when its slot filter does, never a hardcoded constant.
                 CardTypeSetSource::Zone { .. }
                 | CardTypeSetSource::ExiledBySource
-                | CardTypeSetSource::TrackedSet { .. }
                 | CardTypeSetSource::AnyOf { .. } => false,
+                CardTypeSetSource::TargetedObjects { slot } => target_filter_uses_filter_prop(
+                    &crate::types::ability::CardTypeSetSource::targeted_objects_filter(slot),
+                    pred,
+                ),
             };
         });
     // A truncated walk claims the prop: this feeds parse-time capability
@@ -3826,6 +3836,8 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
+    // A classification probe, not an ability-body producer. Keep the nested
+    // default: the line may continue a spell with earlier target declarations.
     let snapshot = ctx.diagnostics.len();
     let parsed = parse_effect_chain_with_context(&prepared.effect_text, AbilityKind::Spell, ctx);
     ctx.diagnostics.truncate(snapshot);
@@ -5716,12 +5728,14 @@ fn parse_normalized_oracle_ir(
             // are parsed as IR and each is lowered purely to *ask* the question,
             // while whichever IR won is what gets emitted.
             //
-            // Three properties make this the same computation as the original:
+            // The root and nested entries share lowering machinery, with one
+            // intentional damage-target permission difference:
             //
-            // 1. `parse_effect_chain_with_context(t,k,cx)` IS
-            //    `lower_ability_ir(&parse_ability_ir_with_context(t,k,cx))`, so
-            //    each `has_unimplemented` argument is bit-for-bit the definition
-            //    the original tested.
+            // 1. `parse_effect_chain_with_context` withholds parent-target
+            //    population permission, while `parse_ability_ir_with_context`
+            //    enters an ability root that can authorize it. Converting a
+            //    caller can change that binding; the entries otherwise share
+            //    the WithContext recognizers and `lower_ability_ir` pipeline.
             // 2. The `ctx` sequencing is preserved exactly. The retry's parse
             //    receives the SAME, already-mutated `ctx` as the first parse —
             //    not a fresh one — and interposing the lowering between the two
@@ -6665,10 +6679,10 @@ fn parse_normalized_oracle_ir(
             continue;
         }
 
-        // Priority 5-pre: trigger-framed "… enters with [counters] on it" lines
-        // are CR 614.1c replacement effects, not triggered abilities — despite
-        // the "whenever"/"when" framing. Intercept before the generic trigger
-        // dispatch routes them through the SpellCast / ChangesZone matcher.
+        // Priority 5-pre: claim typed/counted "… enters with" frames before
+        // generic trigger dispatch. Cast-framed forms are CR 603.1 triggers
+        // whose resolution installs a CR 614.1c entry replacement; they must
+        // never be lowered as object-hosted static replacements.
         //
         // CR 603.2 exclusion: an ETB-with-counter TRIGGER ("… enters with a
         // counter on it, <consequence>") watches for ANY (untyped) counter and
@@ -6702,8 +6716,8 @@ fn parse_normalized_oracle_ir(
             // CR 603.1 + CR 603.3 + CR 614.1c/614.12: "Whenever you cast [spell],
             // that [subject] enters with … counter(s) on it[, where X is …]"
             // (Wildgrowth Archaic and cousin cards — Runadi, Communal Brewing, Torgal;
-            // Boreal Outrider is NOT recognized here; the self-exile form, Dark
-            // Intimations, is recognized only to fail closed below) is a TRIGGERED
+            // Boreal Outrider is NOT recognized here; Dark Intimations composes a
+            // mandatory self-exile before the installer) is a TRIGGERED
             // ability (CR 603.1),
             // not an object-hosted static replacement — the entering-with-counters
             // effect must survive the source leaving the battlefield after the
@@ -6723,10 +6737,8 @@ fn parse_normalized_oracle_ir(
                 // object-hosted replacement — publishing a partial ability AND
                 // giving it the wrong lifetime, since the effect must outlive the
                 // source leaving the battlefield. Fail the line closed instead,
-                // so the unsupported clause is reported honestly. The self-exile
-                // form ("…, exile this card from your graveyard. That … enters
-                // with …") always lands here, as one unsupported line: neither the
-                // exile nor the rider is published without the other.
+                // so the unsupported clause is reported honestly. A self-exile
+                // prelude and its rider are published together or not at all.
                 CastEntersWithOutcome::ShapeUnsupported => {
                     emitter.unsupported_at(item_line, line.clone());
                     i += 1;
@@ -6884,7 +6896,9 @@ fn parse_normalized_oracle_ir(
             }) {
                 ctx.subject = None;
                 ctx.actor = None;
-                trigger = trigger.execute(parse_effect_chain_with_context(
+                // CR 701.43d + CR 607.2h: the linked exert-payoff trigger has its own
+                // ability body, separate from the optional attack cost.
+                trigger = trigger.execute(parse_effect_chain_with_context_ability_root(
                     effect_rest.trim(),
                     AbilityKind::Spell,
                     &mut ctx,
@@ -7559,8 +7573,11 @@ fn parse_normalized_oracle_ir(
             ctx.subject = None;
             ctx.actor = None;
             // Routed through `parse_ability_ir_with_context` + `ability_ir_at`,
-            // i.e. `lower_ability_ir`, which is what `parse_effect_chain_with_context`
-            // has always been. #6123 converted this site to the raw pair
+            // hence `lower_ability_ir`. The nested `parse_effect_chain_with_context`
+            // entry shares this lowering and recognizer set, but withholds the
+            // damage-target population permission that an ability root may grant.
+            // Converting between the entries changes that permission default.
+            // #6123 converted this site to the raw pair
             // `parse_effect_chain_ir` + `lower_effect_chain_ir` while hoisting the
             // Class-H replacement producers, which silently dropped three things the
             // entry point had been supplying: `finalize_effect_chain`, the
@@ -8817,6 +8834,15 @@ fn parse_activated_ability_ir(
     // reference. Restored after the effect parse — no leak to sibling abilities.
     let prev_exile_zone = ctx.current_ability_exile_cost_zone.take();
     ctx.current_ability_exile_cost_zone = non_self_exile_cost_zone(&cost);
+    // CR 608.2k: likewise expose the cost's payment components (the
+    // `AbilityCost` classifier, one entry per component, no deduplication) so
+    // "the discarded card" / "the sacrificed creature" name a cost-paid object
+    // only when this ability's one slot-binding payment discards / sacrifices.
+    // Restored beside the exile zone.
+    let prev_cost_components = std::mem::replace(
+        &mut ctx.current_ability_cost_components,
+        cost.component_categories(),
+    );
     // CR 707.9a: thread the activated-ability index so "except it has this
     // ability" inside the effect body resolves to RetainPrintedAbilityFromSource.
     let prev_ability_index = ctx.current_ability_index;
@@ -8828,6 +8854,7 @@ fn parse_activated_ability_ir(
     let mut ir = parse_activated_ability_ir_with_self_ref_fallback(&effect_text, card_name, ctx);
 
     ctx.current_ability_exile_cost_zone = prev_exile_zone;
+    ctx.current_ability_cost_components = prev_cost_components;
     ctx.current_ability_index = prev_ability_index;
     let lowered_for_activation_zone = lower_ability_ir(&ir);
     // Three-authority precedence for the activation zone. The ORDER IS A RULES
@@ -8988,15 +9015,13 @@ fn guard_owner(body: &AbilityDefinition, parent: Option<&Effect>) -> bool {
     match parent {
         // O1a — CR 614.1a + CR 608.2n.
         Some(Effect::CastFromZone { .. }) => {
-            cast_from_zone::graveyard_destination_rider(&body.effect, body.condition.as_ref())
-                .is_some()
+            graveyard_destination_rider(&body.effect, body.condition.as_ref()).is_some()
         }
         // O1b — CR 608.2c + CR 614.1a. Exile only: the counter path's library/hand
         // redirect rides `countered_spell_zone`, never a sub-ability.
-        Some(Effect::Counter { .. }) => cast_from_zone::is_graveyard_exile_rider_subability(
-            &body.effect,
-            body.condition.as_ref(),
-        ),
+        Some(Effect::Counter { .. }) => {
+            is_graveyard_exile_rider_subability(&body.effect, body.condition.as_ref())
+        }
         // R-a. CR-neutral hygiene, not a rules claim: the parent already records this
         // clause's unsupportedness, and a second gap over the same defect double-counts it
         // — the same per-unit suppression rule `swallow_check` applies via its
@@ -10188,7 +10213,7 @@ fn unsupported_residual(gap: &str, description: &Option<String>) -> AbilityDefin
 fn demote_lifetimes_in_ability(def: &mut AbilityDefinition) {
     let refused = match &*def.effect {
         Effect::AddTargetReplacement { replacement, .. } => {
-            crate::game::effects::add_target_replacement::replacement_install_is_refused(
+            crate::types::ability::replacement_install_is_refused(
                 replacement,
                 def.duration.as_ref(),
             )
@@ -10202,7 +10227,7 @@ fn demote_lifetimes_in_ability(def: &mut AbilityDefinition) {
         Effect::PreventDamage {
             prevention_duration,
             ..
-        } => crate::game::effects::prevent_damage::prevention_shield_is_refused(
+        } => crate::types::ability::prevention_shield_is_refused(
             prevention_duration.as_ref(),
             def.duration.as_ref(),
         ),
@@ -10894,31 +10919,33 @@ fn demote_sweeps_in_ability(def: &mut AbilityDefinition) {
 ///    weaker rule is what previously missed four carriers. The regenerating
 ///    closure script lives in the plan's carrier-enumeration section and is
 ///    named again in the census's failure message.
-/// 4. Two carriers are deliberately NOT descended because they are
-///    PARSE-UNREACHABLE, not because they are description-free:
-///    `Effect::EpicCopy` (`ResolvedAbility.description`; synthesized at
-///    resolution by `game::triggers`) and `ContinuousModification::CopyValues`
+/// 4. One carrier is deliberately NOT descended because it is
+///    PARSE-UNREACHABLE, not because it is description-free:
+///    `ContinuousModification::CopyValues`
 ///    (`CopiableValues.abilities`/`trigger_definitions`/`replacement_definitions`
 ///    /`static_definitions`; constructed only at runtime by `types::layers`,
 ///    `game::derived_views`, `game::merge`). This is the one place the
 ///    superset claim in point 1 breaks (`ability_visit` DOES descend
 ///    `CopyValues`).
 /// 5. `AbilityCost` is an EXCLUDED AXIS, and structurally must be: blocking it
-///    is what keeps the closure at 27 carriers — unblocked, `TargetFilter` ->
-///    `TypedFilter` -> `FilterProp` -> `Keyword` -> `AbilityCost` makes 184 of
-///    `Effect`'s 232 variants "carriers", i.e. the cost axis is reachable from
-///    nearly every `TargetFilter` in the tree rather than being a sidecar on
-///    `def.cost`. Precedent: `ability_visit`'s module doc keeps the cost walk
+///    is what keeps the closure equal to the net's descend set (`RENDER_DESCEND`
+///    in `tests/integration/parser_oracle.rs` `render_net_effect_carrier_census`) — unblocked,
+///    `TargetFilter` -> `TypedFilter` -> `FilterProp` -> `Keyword` ->
+///    `AbilityCost` makes most of `Effect`'s variants "carriers" (184 of the 232
+///    it had when measured; `Effect` has 237 at base, pinned by
+///    `EFFECT_VARIANT_PIN` in the same census), i.e. the cost axis is
+///    reachable from nearly every `TargetFilter` in the tree rather than being
+///    a sidecar on `def.cost`. Precedent: `ability_visit`'s module doc keeps the cost walk
 ///    separate for the same type-level reason. MEASURED: a marker planted in
 ///    `AbilityCost::Unimplemented.description` survives this net; no production
 ///    parse path plants one.
 /// 6. [`render_effect_descriptions`] is NOT wildcard-free over `Effect`
 ///    (duplicating `ability_visit`'s ~206-name leaf list here would be the
-///    duplication CLAUDE.md forbids; `game::coverage::ability_tree_any` is the
+///    duplication CLAUDE.md forbids; `types::ability_visit::ability_tree_any` is the
 ///    in-tree precedent). Completeness therefore rests on named standing
 ///    instruments plus one contributor obligation, across THREE distinct drift
 ///    classes. (a) A new `Effect` VARIANT: caught by
-///    `tests::render_net_effect_carrier_census`. (b) A new VARIANT on an
+///    `parser_oracle::render_net_effect_carrier_census` (integration). (b) A new VARIANT on an
 ///    INTERMEDIATE PAYLOAD ENUM (`ManaSpellGrant`, `CastingPermission`,
 ///    `ExiledSpellRider`, `CounterSourceRider`, `VoteSubject`) — each has
 ///    exactly ONE description-reaching variant today, so a new sibling falls
@@ -10978,7 +11005,7 @@ fn render_granting_self_descriptions(parsed: &mut ParsedAbilities, card_name: &s
 ///
 /// The destructure is EXHAUSTIVE on purpose, in the spirit of traversal-contract
 /// point 7: `ModalChoice` is a struct reached by FIELD, not an `Effect` arm, so
-/// none of `tests::render_net_effect_carrier_census`' three pins can see a new
+/// none of `parser_oracle::render_net_effect_carrier_census`' three pins (integration) can see a new
 /// field on it. Naming every field makes that addition a COMPILE ERROR here —
 /// strictly stronger than a pin, and affordable at twelve fields.
 ///
@@ -12103,6 +12130,70 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
     None
 }
 
+/// The item separator of a compound "Activate only <A>, only <B>, and only <C>"
+/// instruction. Longest first, so ", and only " is never read as ", " plus a
+/// residual "and only ".
+fn parse_activation_restriction_list_separator(i: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>(", and only "),
+            tag(", only "),
+            tag(" and only "),
+        )),
+    )
+    .parse(i)
+}
+
+/// One item of a compound activation-restriction list: a cadence ("once" /
+/// "once each turn") or any phrase the single-restriction authority
+/// `parse_activation_timing_restriction` accepts (speed, turn/step gates,
+/// before-windows, "if <condition>").
+fn parse_activation_restriction_item(item: &str) -> Option<Vec<ActivationRestriction>> {
+    if let Ok((_, cadence)) = all_consuming(parse_activation_cadence).parse(item) {
+        return Some(vec![cadence]);
+    }
+    parse_activation_timing_restriction(item)
+}
+
+/// CR 602.1b + CR 602.5: an "Activate only <A> and only <B>[, and only <C>]…"
+/// instruction is a list of activation restrictions, every one of which must
+/// hold (Defenders of Humanity: "Activate only if you control no creatures and
+/// only during your turn"; Grizzled Wolverine: "Activate only during the
+/// declare blockers step, only if at least one creature is blocking this
+/// creature, and only once each turn").
+///
+/// All-or-nothing: if any item fails to parse the whole list returns `None`, so
+/// the caller leaves the sentence intact and it surfaces as
+/// `Effect::Unimplemented` rather than committing a partial, more permissive
+/// gate. A single item is refused (`None`) — single phrases belong to
+/// `parse_activation_timing_restriction` and the dedicated condition branch.
+///
+/// Items are emitted in REVERSE text order. Restrictions are conjunctive, so
+/// order carries no rules meaning; reversing matches the right-to-left peeling
+/// order `strip_activated_constraints` already produces for two-item forms,
+/// keeping their output byte-identical.
+fn parse_activation_restriction_list(phrase: &str) -> Option<Vec<ActivationRestriction>> {
+    let lower = phrase.trim().trim_end_matches('.').trim().to_lowercase();
+    let (_, items) = all_consuming(separated_list1(
+        parse_activation_restriction_list_separator,
+        recognize(many1((
+            not(parse_activation_restriction_list_separator),
+            anychar,
+        ))),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    if items.len() < 2 {
+        return None;
+    }
+    let per_item = items
+        .into_iter()
+        .map(parse_activation_restriction_item)
+        .collect::<Option<Vec<_>>>()?;
+    Some(per_item.into_iter().rev().flatten().collect())
+}
+
 /// CR 602.5: Build a `RequiresCondition` activation restriction, or fail.
 ///
 /// The single authority for turning restriction text into an `ActivationRestriction`.
@@ -12480,30 +12571,41 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
 
         // CR 602.5b: Delegate bare "Activate only <timing>" phrases to the same
         // timing parser used by the "Any player may activate ... but only"
-        // composition path. The condition-only form stays on its specialized
-        // branch below so the once-per-turn rider is stripped before condition
-        // parsing. Here and below, the unmodernized "Activate this ability
-        // only …" wording (M'Odo, the Gnarled Oracle; Piercing Rays; Riku and
-        // Riku) is the same restriction as "Activate only …".
+        // composition path. A lone condition ("Activate only if …") stays on its
+        // specialized branch below so the once-per-turn rider is stripped before
+        // condition parsing. Here and below, the unmodernized "Activate this
+        // ability only …" wording (M'Odo, the Gnarled Oracle; Piercing Rays; Riku
+        // and Riku) is the same restriction as "Activate only …".
+        // CR 602.1b + CR 602.5: when the tail is not one phrase, it may be a
+        // compound list ("if you control no creatures and only during your
+        // turn", "once each turn and only during your turn") — every item must
+        // parse or nothing is committed. The list only applies when the
+        // instruction opens its own sentence.
         if let Some((before, restriction)) = tp
             .rsplit_around("activate this ability only ")
             .or_else(|| tp.rsplit_around("activate only "))
         {
-            if tag::<_, _, OracleError<'_>>("if ")
+            let is_condition_tail = tag::<_, _, OracleError<'_>>("if ")
                 .parse(restriction.lower.trim_start())
-                .is_err()
-            {
-                if let Some(parsed) = parse_activation_timing_restriction(restriction.original) {
-                    constraints.restrictions.extend(parsed);
-                    remaining = before
-                        .original
-                        .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                        .to_string();
-                    if remaining.is_empty() {
-                        break;
-                    }
-                    continue;
+                .is_ok();
+            let single = (!is_condition_tail)
+                .then(|| parse_activation_timing_restriction(restriction.original))
+                .flatten();
+            let parsed = single.or_else(|| {
+                is_empty_or_sentence_boundary(before.original)
+                    .then(|| parse_activation_restriction_list(restriction.original))
+                    .flatten()
+            });
+            if let Some(parsed) = parsed {
+                constraints.restrictions.extend(parsed);
+                remaining = before
+                    .original
+                    .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                    .to_string();
+                if remaining.is_empty() {
+                    break;
                 }
+                continue;
             }
         }
 
@@ -12878,22 +12980,30 @@ fn peel_only_once_rider(lower: &str) -> Option<(usize, ActivationRestriction)> {
     take_until::<_, _, OracleError<'_>>("activate only")
         .parse(before)
         .ok()?;
-    // "each turn" is the optional longest-match tail; the rider must end the line.
-    let (rest, each_turn) = preceded(
-        tag::<_, _, OracleError<'_>>(" and only once"),
-        opt(tag::<_, _, OracleError<'_>>(" each turn")),
-    )
+    // The cadence grammar is shared with the restriction list; the rider must
+    // end the line.
+    let (_, restriction) = all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>(" and only "),
+        parse_activation_cadence,
+    ))
     .parse(rider_onward)
     .ok()?;
-    if !rest.is_empty() {
-        return None;
-    }
-    let restriction = if each_turn.is_some() {
-        ActivationRestriction::OnlyOnceEachTurn
-    } else {
-        ActivationRestriction::OnlyOnce
-    };
     Some((before.len(), restriction))
+}
+
+/// CR 602.5b: the activation-cadence item of an "Activate only …" instruction —
+/// "once each turn" → `OnlyOnceEachTurn`, "once" → `OnlyOnce`. Longest match
+/// first so "once each turn" is never read as "once" with a residual. Callers
+/// wrap it in `all_consuming` so "once more" / "twice" are refused.
+fn parse_activation_cadence(i: &str) -> OracleResult<'_, ActivationRestriction> {
+    alt((
+        value(
+            ActivationRestriction::OnlyOnceEachTurn,
+            tag::<_, _, OracleError<'_>>("once each turn"),
+        ),
+        value(ActivationRestriction::OnlyOnce, tag("once")),
+    ))
+    .parse(i)
 }
 
 /// Strip trailing "X can't be 0." / "This ability can't be copied and X can't
@@ -13018,7 +13128,7 @@ pub(super) fn lower_unsupported_node(
 /// carrying one was reported clean. Because the visitor's match is exhaustive
 /// and wildcard-free, a newly added definition-carrying `Effect` variant is now
 /// a compile error there rather than a silent miss here.
-pub(super) fn has_unimplemented(def: &AbilityDefinition) -> bool {
+pub fn has_unimplemented(def: &AbilityDefinition) -> bool {
     any_unimplemented(def, &|_| true)
 }
 
@@ -13158,6 +13268,25 @@ pub(crate) fn normalize_activated_mana_instead_delta(def: &mut AbilityDefinition
 #[cfg(test)]
 #[path = "oracle_tests.rs"]
 mod tests;
+
+/// Test helpers shared by `oracle_tests.rs` and the tests relocated out of it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers {
+    use super::*;
+
+    pub fn parse(
+        text: &str,
+        name: &str,
+        kw: &[Keyword],
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> ParsedAbilities {
+        let keyword_names: Vec<String> = kw.iter().map(keyword_display_name).collect();
+        let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
+        parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
+    }
+}
 
 #[cfg(test)]
 #[path = "oracle_pipeline_snapshot_tests.rs"]

@@ -1479,12 +1479,16 @@ pub fn candidate_actions_broad_with_probe(
                 } else {
                     vec![*count]
                 };
-            // Engine-side beam cap for *combinatorial* enumerations only. Every
-            // candidate returned here flows into
-            // `PlannerServices::validate_candidates`, which clones state +
-            // applies the action per candidate, so a count=4 search against an
-            // 80-card library would produce ~C(80,4) ≈ 1.6M combinations and
-            // stall validation for hours. The cap is constraint-aware so
+            // Engine-side beam cap for *combinatorial* enumerations only. The AI
+            // scores every candidate returned here one selection at a time, and
+            // `SimulationFilter` and phase-ai's planner legality gate simulate
+            // each one `structurally_valid_prompt_answer` defers. The gate
+            // simulates every one on phase-ai's score-only route, in each
+            // determinized sample, and when phase-ai scores a decision again
+            // after an answer the gate admitted without simulating it fails. So
+            // a count=4 search against an 80-card library would produce
+            // ~C(80,4) ≈ 1.6M combinations and stall the AI for hours.
+            // The cap is constraint-aware so
             // distinct-name searches collapse duplicate-named entries before
             // combinatorial explosion (Gifts Ungiven against an 80-card pool with
             // 8 distinct names → 8 candidate ids, C(8,4)=70 legal combos).
@@ -6186,9 +6190,13 @@ fn station_target_candidates(
 /// duplicates are inert because they cannot legally appear in any chosen set
 /// alongside their twin), so the cap collapses sized libraries with many
 /// repeated names down to the unique-name set first. The cap exists strictly
-/// to bound `PlannerServices::validate_candidates`, which clones state per
-/// candidate; without it, multi-card searches against large libraries stall
-/// the AI for hours. Player submissions are validated by the engine
+/// to bound the AI's per-selection work (scoring every issued selection, and
+/// simulating each one `structurally_valid_prompt_answer` defers, or every one
+/// on phase-ai's score-only route, in each determinized sample, and when
+/// phase-ai scores a decision again after an answer its planner legality gate
+/// admitted without simulating it fails); without it,
+/// multi-card searches against large libraries stall the AI for hours. Player
+/// submissions are validated by the engine
 /// submission guard, not by this enumeration, so capping here cannot make a
 /// legal play unsubmittable — it only narrows the AI's *considered* set.
 fn cap_search_choice_pool(
@@ -6197,15 +6205,17 @@ fn cap_search_choice_pool(
     constraint: &crate::types::ability::SearchSelectionConstraint,
     cap: usize,
 ) -> Vec<crate::types::identifiers::ObjectId> {
-    use crate::types::ability::{SearchSelectionConstraint, SharedQuality};
+    use crate::types::ability::{SearchSelectionConstraint, SharedQuality, SharedQualityRelation};
     // CR 201.2: Two cards "have the same name" iff their printed name strings
-    // match. Under distinct-name constraints, keep the first id encountered per name —
-    // later duplicates can never appear in a legal chosen set with their twin
-    // and only inflate the candidate count.
+    // match. Under distinct-name (`DoesNotShare`) constraints, keep the first id
+    // encountered per name — later duplicates can never appear in a legal chosen
+    // set with their twin and only inflate the candidate count. Under `Shares`
+    // duplicates are legal partners, so a name collapse would delete legal sets.
     let collapsed: Vec<crate::types::identifiers::ObjectId> = match constraint {
-        SearchSelectionConstraint::DistinctQualities { qualities }
-            if matches!(qualities.as_slice(), [SharedQuality::Name]) =>
-        {
+        SearchSelectionConstraint::SharesQualities {
+            qualities,
+            relation: SharedQualityRelation::DoesNotShare,
+        } if matches!(qualities.as_slice(), [SharedQuality::Name]) => {
             let mut seen = std::collections::HashSet::new();
             cards
                 .iter()
@@ -6217,13 +6227,17 @@ fn cap_search_choice_pool(
                 .collect()
         }
         SearchSelectionConstraint::None
-        | SearchSelectionConstraint::DistinctQualities { .. }
+        | SearchSelectionConstraint::SharesQualities { .. }
         | SearchSelectionConstraint::TotalManaValue { .. }
         | SearchSelectionConstraint::MatchEachFilter { .. } => cards.to_vec(),
     };
     if collapsed.len() <= cap {
         collapsed
     } else {
+        // Keeps the first `cap` ids in library order, so under `Shares` a legal
+        // set deeper in the pool can be left out of the AI's considered set.
+        // That affects play quality only, never legality: the engine guard
+        // validates every submission.
         collapsed.into_iter().take(cap).collect()
     }
 }
@@ -9165,7 +9179,9 @@ mod tests {
     /// which is still name-unique.
     #[test]
     fn search_choice_candidates_filter_distinct_names() {
-        use crate::types::ability::{SearchSelectionConstraint, SharedQuality};
+        use crate::types::ability::{
+            SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
+        };
         use crate::types::identifiers::ObjectId;
 
         let mut state = GameState::new_two_player(42);
@@ -9216,8 +9232,9 @@ mod tests {
             reveal: false,
             up_to: false,
             allows_partial_find: false,
-            constraint: SearchSelectionConstraint::DistinctQualities {
+            constraint: SearchSelectionConstraint::SharesQualities {
                 qualities: vec![SharedQuality::Name],
+                relation: SharedQualityRelation::DoesNotShare,
             },
             ordering_hint: Default::default(),
             split: None,
@@ -9255,7 +9272,9 @@ mod tests {
     /// previously stalled `validate_candidates` for hours.
     #[test]
     fn search_choice_distinct_names_caps_large_pool_to_unique_names() {
-        use crate::types::ability::{SearchSelectionConstraint, SharedQuality};
+        use crate::types::ability::{
+            SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
+        };
         use crate::types::identifiers::ObjectId;
 
         let mut state = GameState::new_two_player(42);
@@ -9279,8 +9298,9 @@ mod tests {
             reveal: false,
             up_to: true,
             allows_partial_find: false,
-            constraint: SearchSelectionConstraint::DistinctQualities {
+            constraint: SearchSelectionConstraint::SharesQualities {
                 qualities: vec![SharedQuality::Name],
+                relation: SharedQualityRelation::DoesNotShare,
             },
             ordering_hint: Default::default(),
             split: None,
@@ -9291,6 +9311,89 @@ mod tests {
             actions.len(),
             163,
             "cap must collapse 80 ids → 8 unique names → 163 candidates"
+        );
+    }
+
+    /// CR 608.2d + CR 701.23a + CR 205.3i: Myriad Landscape's "up to two basic
+    /// land cards that share a land type". The AI candidate filter must never
+    /// propose a mixed-land-type pair, must still propose the legal pair, and
+    /// the distinct-name pool collapse must not fire under `Shares` (same-named
+    /// cards are legal partners).
+    #[test]
+    fn search_choice_candidates_respect_shared_land_type() {
+        use crate::types::ability::{
+            SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
+        };
+        use crate::types::identifiers::ObjectId;
+
+        let mut state = GameState::new_two_player(42);
+        let mut add_land = |card_id: u64, name: &str, subtype: &str| -> ObjectId {
+            let id = create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Library,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push(subtype.to_string());
+            id
+        };
+        let forest_a = add_land(300, "Forest", "Forest");
+        let forest_b = add_land(301, "Forest", "Forest");
+        let island = add_land(302, "Island", "Island");
+
+        let search_choice = |constraint: SearchSelectionConstraint| WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: None,
+            cards: vec![forest_a, forest_b, island],
+            count: 2,
+            reveal: false,
+            up_to: true,
+            allows_partial_find: true,
+            constraint,
+            ordering_hint: Default::default(),
+            split: None,
+        };
+        let selected = |state: &GameState| -> Vec<Vec<ObjectId>> {
+            candidate_actions_broad(state)
+                .into_iter()
+                .map(|action| match action.action {
+                    GameAction::SelectCards { cards } => cards,
+                    other => panic!("expected SelectCards, got {other:?}"),
+                })
+                .collect()
+        };
+
+        state.waiting_for = search_choice(SearchSelectionConstraint::SharesQualities {
+            qualities: vec![SharedQuality::LandType],
+            relation: SharedQualityRelation::Shares,
+        });
+        let pairs: Vec<Vec<ObjectId>> = selected(&state)
+            .into_iter()
+            .filter(|cards| cards.len() == 2)
+            .collect();
+        assert!(
+            pairs.contains(&vec![forest_a, forest_b]),
+            "reach guard: the legal Forest pair must be proposed, got {pairs:?}"
+        );
+        assert!(
+            pairs.iter().all(|pair| !pair.contains(&island)),
+            "no candidate may mix Forest and Island, got {pairs:?}"
+        );
+
+        // Hostile: `Shares` over names keeps both same-named ids (the
+        // distinct-name collapse must not fire), so the Forest pair survives.
+        state.waiting_for = search_choice(SearchSelectionConstraint::SharesQualities {
+            qualities: vec![SharedQuality::Name],
+            relation: SharedQualityRelation::Shares,
+        });
+        assert!(
+            selected(&state)
+                .iter()
+                .any(|cards| cards == &vec![forest_a, forest_b]),
+            "Shares+Name must not collapse same-named cards out of the pool"
         );
     }
 

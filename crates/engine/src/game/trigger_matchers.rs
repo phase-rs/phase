@@ -1173,6 +1173,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::PhysicalContestStarted { .. }
         | GameEvent::PhysicalContestResolved { .. }
         | GameEvent::VoteCast { .. }
+        | GameEvent::CardNamed { .. }
         | GameEvent::VoteResolved { .. }
         | GameEvent::PowerToughnessChanged { .. }
         | GameEvent::CascadeMissed { .. }
@@ -1216,6 +1217,20 @@ fn named_origin_zone(origin: &OriginConstraint, from: Option<Zone>) -> Option<Zo
     }
 }
 
+/// CR 603.6c: whether a zone-change clause requires the object to have gone to a
+/// particular zone. "Leaves the battlefield without dying" (`NotEquals`) names
+/// only where it didn't go.
+fn clause_names_destination(
+    destination: Option<&Zone>,
+    destination_constraint: &DestinationConstraint,
+) -> bool {
+    destination.is_some()
+        || matches!(
+            destination_constraint,
+            DestinationConstraint::Equals(_) | DestinationConstraint::OneOf(_)
+        )
+}
+
 fn destination_matches_constraint(zone: Zone, constraint: &DestinationConstraint) -> bool {
     match constraint {
         DestinationConstraint::Any => true,
@@ -1255,13 +1270,29 @@ fn zone_change_clause_matches(
     if !origin_ok {
         return false;
     }
-    if let Some(dest) = destination {
-        if dest != to {
+    if record.departure.left_game() {
+        // CR 800.4a + CR 603.6c + CR 702.26k: an object that left the game with
+        // its owner went to no zone, so only a leaves-the-battlefield clause sees
+        // it: one naming the battlefield as origin and no destination it went to.
+        if named_origin_zone(origin, *from) != Some(Zone::Battlefield)
+            || !record
+                .departure
+                .observed_leaving_battlefield(clause_names_destination(
+                    destination,
+                    destination_constraint,
+                ))
+        {
             return false;
         }
-    }
-    if !destination_matches_constraint(*to, destination_constraint) {
-        return false;
+    } else {
+        if let Some(dest) = destination {
+            if dest != to {
+                return false;
+            }
+        }
+        if !destination_matches_constraint(*to, destination_constraint) {
+            return false;
+        }
     }
     if let Some(filter) = valid_card {
         let ctx = super::filter::FilterContext::from_trigger_source(source_context);
@@ -3124,7 +3155,20 @@ pub(super) fn match_becomes_target(
     match target {
         TargetRef::Object(object_id) => {
             // Check if the targeted object matches the trigger's valid_card filter.
-            if trigger.valid_card.is_some() {
+            if let Some(filter) = &trigger.valid_card {
+                // CR 109.2: a zone-less subject such as "a creature" (Horobi,
+                // Death's Wail) means a creature permanent on the battlefield.
+                // A creature card targeted in a graveyard (Nezumi Graverobber's
+                // flip side) or exile is not "a creature", so it does not fire
+                // the trigger even though the card has the creature type.
+                if super::filter::filter_denotes_battlefield_permanent(filter)
+                    && state
+                        .objects
+                        .get(object_id)
+                        .is_none_or(|obj| obj.zone != Zone::Battlefield)
+                {
+                    return false;
+                }
                 valid_card_matches(trigger, state, *object_id, source_context)
             } else {
                 *object_id == source_id
@@ -3377,8 +3421,15 @@ pub(super) fn match_exiled(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::ZoneChanged { object_id, to, .. } = event {
-        if *to != Zone::Exile {
+    if let GameEvent::ZoneChanged {
+        object_id,
+        to,
+        record,
+        ..
+    } = event
+    {
+        // CR 800.4a: an object that left the game with its owner was not exiled.
+        if *to != Zone::Exile || record.departure.left_game() {
             return false;
         }
         if !valid_card_matches(trigger, state, *object_id, source_context) {
@@ -5839,6 +5890,7 @@ pub(crate) fn test_trigger_source_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::game_object::{AttachTarget, RoomDoor};
     use crate::game::zones::create_object;
     use crate::parser::oracle_trigger::parse_trigger_line;

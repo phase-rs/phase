@@ -17,9 +17,10 @@
 //!
 //! [`declared_to_stored`] is the only bridge between them.
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{ResolvedAbility, TargetRef};
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectIncarnationRef;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 
 /// A position in a node's projected (post-validation) `targets`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,6 +250,28 @@ impl ResolvedAbility {
     pub fn target_occurrence_is_current(&self, index: usize, state: &GameState) -> bool {
         self.target_pin_at(index)
             .is_none_or(|pin| pin.is_current(state))
+    }
+
+    /// CR 400.7: the announced incarnation for one targeted object —
+    /// positional occurrence pins first (announced targets), then keyed pins
+    /// (delayed-trigger referents). `None` when nothing pinned the object.
+    /// First-match by id: suspension capture's fallback only. Live
+    /// characteristic reads select positionally (`target_pin_at` /
+    /// `DeclaredTargetEntry`) and never consult this.
+    pub fn occurrence_pin_for(&self, object_id: ObjectId) -> Option<ObjectIncarnationRef> {
+        if let Some(index) = self
+            .targets
+            .iter()
+            .position(|target| matches!(target, TargetRef::Object(id) if *id == object_id))
+        {
+            if let Some(pin) = self.target_pin_at(index) {
+                return Some(pin);
+            }
+        }
+        self.target_incarnations
+            .iter()
+            .find(|pin| pin.object_id == object_id)
+            .copied()
     }
 
     /// CR 115.7 + CR 400.7: whether writing `new` at `index` changes the

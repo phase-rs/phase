@@ -11,6 +11,7 @@
 //!    must live in the engine (`game/cost_payability.rs`), not in
 //!    `legal_actions` / AI / frontend pre-filtering.
 
+use engine::game::cost_payability::AbilityCostPayability;
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCost, AdditionalCost, SacrificeCost, TargetFilter, TypeFilter, TypedFilter,

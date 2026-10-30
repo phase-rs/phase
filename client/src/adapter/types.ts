@@ -832,12 +832,20 @@ export type PayCostKind =
   | { type: "TapCreatures"; mode: TapCreaturesSelectionMode }
   | { type: "Behold"; action: "ChooseOrReveal" | "ExileChosen" };
 
-// CR 118.12 + CR 601.2b + CR 605.3b: resumption context after a `PayCost`
+// CR 118.12 + CR 601.2b + CR 605.3b + CR 702.37e: resumption context after a `PayCost`
 // choice. The frontend treats the inner pending payload as opaque pass-through.
 export type CostResume =
   | { type: "Spell"; Spell: PendingCast }
+  | { type: "SpellCost"; Spell: PendingCast; cost: unknown; source: "Other" | "Offering" | "Emerge" }
   | { type: "Resolution" }
-  | { type: "ManaAbility"; ManaAbility: unknown };
+  | { type: "ManaAbility"; ManaAbility: unknown }
+  | {
+      type: "TurnFaceUp";
+      source?: ObjectIncarnationRef;
+      object_id?: number;
+      cost_source: "Morph" | "Megamorph" | "Disguise" | "ManifestManaCost";
+      remaining_cost?: unknown;
+    };
 
 export type ManaColor = "White" | "Blue" | "Black" | "Red" | "Green";
 
@@ -948,7 +956,9 @@ export type SpecialAction =
   | "TurnFaceUp"
   | "RollPlanarDie"
   // CR 116.2c: pay a continuous effect's printed termination cost to end it.
-  | "EndContinuousEffect";
+  | "EndContinuousEffect"
+  // CR 116.2h: pay {2} to exile a card with foretell from hand face down.
+  | "Foretell";
 
 export type ManaRestriction =
   // "Spend this mana only to cast spells."
@@ -1528,9 +1538,12 @@ export type ChooseFromZoneConstraint =
   | { type: "DistinctCardTypes"; categories: string[] }
   | { type: "TotalManaValue"; comparator: string; value: number };
 
+// Mirrors Rust `SharedQualityRelation` (relation among the chosen cards).
+export type SharedQualityRelation = "Shares" | "DoesNotShare";
+
 export type SearchSelectionConstraint =
   | { type: "None" }
-  | { type: "DistinctQualities"; qualities: string[] }
+  | { type: "SharesQualities"; qualities: string[]; relation: SharedQualityRelation }
   | { type: "TotalManaValue"; comparator: string; value: number }
   | { type: "MatchEachFilter"; filters: TargetFilter[] };
 
@@ -2894,7 +2907,7 @@ export type WaitingFor =
   | { type: "ClashChooseOpponent"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
   // CR 608.2d: "an opponent chooses" from a zone (multiplayer) — the controller
   // picks WHICH opponent makes the choice before the zone choice is presented.
-  | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown; purpose?: "Ordinary" | "BindReciprocalConsume" | "PerPlayerChoiceOrder" | "SubstituteChooser" } }
+  | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown; purpose?: "Ordinary" | "BindReciprocalConsume" | "PerPlayerChoiceOrder" | "SubstituteChooser" | "SubstituteArranger" } }
   | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
   | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; pending_cast: unknown } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][]; bottom_cards?: ObjectId[] } }
@@ -3226,8 +3239,12 @@ export type DebugAction =
   | { type: "GrantKeyword"; data: { object_id: ObjectId; keyword: Keyword } }
   | { type: "RemoveKeyword"; data: { object_id: ObjectId; keyword: Keyword } }
   | { type: "SetLife"; data: { player_id: PlayerId; life: number } }
+  | { type: "GainLife"; data: { player_id: PlayerId; amount: number } }
+  | { type: "LoseLife"; data: { player_id: PlayerId; amount: number } }
   | { type: "ModifyPlayerCounters"; data: { player_id: PlayerId; counter_kind: PlayerCounterKind; delta: number } }
   | { type: "ModifyEnergy"; data: { player_id: PlayerId; delta: number } }
+  | { type: "GivePlayerCounters"; data: { player_id: PlayerId; counter_kind: PlayerCounterKind; count: number } }
+  | { type: "GiveEnergy"; data: { player_id: PlayerId; count: number } }
   | { type: "AddMana"; data: { player_id: PlayerId; mana: ManaType[] } }
   | { type: "SetInfiniteMana"; data: { player_id: PlayerId; enabled: boolean } }
   | { type: "SetPhase"; data: { phase: Phase; active_player: PlayerId } }
@@ -3631,6 +3648,7 @@ export type GameEvent =
   | { type: "DungeonCompleted"; data: { player_id: PlayerId; dungeon: DungeonId } }
   | { type: "InitiativeTaken"; data: { player_id: PlayerId } }
   | { type: "CardPredicateGuessMade"; data: { player_id: PlayerId; source_id: ObjectId | null; choice: string } }
+  | { type: "CardNamed"; data: { player_id: PlayerId; source_id: ObjectId | null; name: string } }
   | { type: "DebugActionUsed"; data: { player_id: PlayerId; description: string } }
   | { type: "DebugPermissionGranted"; data: { host: PlayerId; player_id: PlayerId } }
   | { type: "DebugPermissionRevoked"; data: { host: PlayerId; player_id: PlayerId } }
@@ -4837,6 +4855,21 @@ export class AdapterError extends Error {
   }
 }
 
+/**
+ * A browser's module map retains failed dynamic imports for the document
+ * lifetime. Retrying this requires a page reload, unlike WASM initialization
+ * and card-data loading failures.
+ */
+export class EngineModuleReloadRequiredError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super("The engine module failed to load; reload the page to retry.");
+    this.name = "EngineModuleReloadRequiredError";
+    this.cause = cause;
+  }
+}
+
 /** Error codes for AdapterError */
 export const AdapterErrorCode = {
   NOT_INITIALIZED: "NOT_INITIALIZED",
@@ -5201,6 +5234,21 @@ export function supportsAiDecisionDiagnostics(
   return adapter != null
     && "setAiDecisionDiagnosticsEnabled" in adapter
     && "subscribeAiDecisionDiagnostics" in adapter;
+}
+
+/**
+ * Local-engine transports that can ask the engine to disclose every hand in the
+ * local seat's projection ("Show AI Hand"). The engine decides whether
+ * the seat is entitled to it; the client never reconstructs hidden cards.
+ */
+export interface DebugHandRevealCapability {
+  setDebugHandReveal(enabled: boolean): Promise<void>;
+}
+
+export function supportsDebugHandReveal(
+  adapter: EngineAdapter | null,
+): adapter is EngineAdapter & DebugHandRevealCapability {
+  return adapter != null && "setDebugHandReveal" in adapter;
 }
 
 /** Result of the engine-owned game-scoped AI worker card-data build. */

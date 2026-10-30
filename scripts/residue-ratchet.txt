@@ -1,0 +1,69 @@
+# Gate H slice-1 residue syntax ceiling ledger.
+# Baseline revision: 03e2ad44ebcd7eb29cd5fb5f2d9c66a1e2123484
+# Extraction: python3 -B scripts/lib/detect-residue-discards.py --baseline
+# Review: --list; 128 obligations = 101 residue bindings + 18 projections
+# + 9 exact unwrap_or(TargetFilter::SelfRef|Any) defaults, across 22 files.
+# Counted helpers: parse_target, parse_target_with_ctx, parse_target_with_syntax,
+# parse_target_disjunction, parse_target_with_disjunctive_restriction,
+# parse_fight_target, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx.
+# Also counted: whole-result drops (zero at baseline), reviewed context wrappers,
+# qualified/aliased calls, and syntax-helper .2 projections. Nom (rest, ())
+# helpers are NOT this helper family; their second-component drops are excluded.
+# _name bindings include debug-asserted remainders: conservative syntax risks,
+# not claims that every site loses text. Defaults likewise freeze syntax only.
+# Distinct match-arm alternatives count separately, including parenthesized and
+# leading-| forms: splitting an arm preserves its obligation count. Mixed arms
+# count only discarding alternatives. Overlapping recognizers count once.
+# All baseline sites were reviewed in source.
+# Bindings include optional types and tuple `..`; match arms include guards and
+# comma-free block bodies. Closure propagation is limited to ParseContext's
+# with_player_antecedents / with_player_scope methods, which return f(...) intact.
+# Revalidated at source revision 1a02596722fa122040542716e0af8a982b84a49a:
+# --baseline still measures these same 128 obligations; no ceiling increased.
+# Revalidated at source revision 9f4e171edfd14b24845b853402521cd9f715c9db:
+# block-expression closure tails / comma-free arms, module-scoped aliases,
+# ref/mut residue bindings and typed wildcards still measure 128; no increases.
+# Uncalled closures are excluded; precise-capture bounds are not imports.
+# Local bindings shadowing imported helper aliases are untracked (possible false
+# positives); helper import aliases do not occur in the current parser tree.
+# Let-else initializers stop at top-level else; typed/ref/mut forms are included.
+# Revalidated at source revision fd3d6cf3c2fea2a7853ec422891188475cec5236:
+# let-else / or-pattern recognition still measures 128; no ceiling increased.
+# Revalidated at source revision 5c4bfcbcb1e8c25e572e42fb518c05cebcc3c145:
+# optional trailing argument/pattern commas still measure 128; no increases.
+# Revalidated at source revision ac65b48581d229bc7c83e5b2f92071ce50bb1835:
+# `_`/`_name` whole-result bindings (including ref/mut/types and match-arm
+# alternatives) each count one conservative obligation, even if later used.
+# Discovery excludes exactly tests.rs / *_tests.rs, snapshots, and proven
+# test-only modules, not production filenames merely containing `tests`.
+# --baseline still measures 128 obligations across 22 nonzero rows / 89 scanned
+# files; no new real sites or ceiling increases.
+# Gate H opts into item exclusion; other censuses retain their legacy population.
+# Format: <repository-relative-path> <nonnegative decimal ceiling>.
+# Tightening rule: every burn-down change must lower its ceiling in the same
+# commit; remove zero-count rows. Equal/lower passes; never auto-refresh upward.
+# A same-file deletion/addition can fit this per-file ceiling. This does not
+# prove unread text cannot be dropped, complete item #181, or fix its six cards.
+# Rollout: rebased parser PRs adding counted syntax can fail H, intentionally.
+crates/engine/src/parser/oracle_cost.rs 3
+crates/engine/src/parser/oracle_effect/counter.rs 3
+crates/engine/src/parser/oracle_effect/imperative.rs 40
+crates/engine/src/parser/oracle_effect/lower.rs 4
+crates/engine/src/parser/oracle_effect/mod.rs 19
+crates/engine/src/parser/oracle_effect/search.rs 1
+crates/engine/src/parser/oracle_effect/sequence.rs 2
+crates/engine/src/parser/oracle_effect/subject.rs 9
+crates/engine/src/parser/oracle_effect/token.rs 1
+crates/engine/src/parser/oracle_keyword.rs 1
+crates/engine/src/parser/oracle_nom/condition.rs 12
+crates/engine/src/parser/oracle_replacement.rs 1
+crates/engine/src/parser/oracle_static/cost_mod.rs 3
+crates/engine/src/parser/oracle_static/dispatch.rs 5
+crates/engine/src/parser/oracle_static/evasion.rs 3
+crates/engine/src/parser/oracle_static/grammar.rs 3
+crates/engine/src/parser/oracle_static/keyword_grant.rs 3
+crates/engine/src/parser/oracle_static/restriction.rs 6
+crates/engine/src/parser/oracle_static/shared.rs 1
+crates/engine/src/parser/oracle_static/static_helpers.rs 1
+crates/engine/src/parser/oracle_target.rs 3
+crates/engine/src/parser/oracle_trigger.rs 4

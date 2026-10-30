@@ -19,6 +19,10 @@ import type {
 } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useBoundedLoopRepetitions } from "../../hooks/usePlayerDesignations.ts";
+import {
+  useDesignationTokenArt,
+  type DesignationArtKind,
+} from "../../hooks/useDesignationTokenArt.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { getKeywordDisplayText } from "../../viewmodel/keywordProps.ts";
@@ -48,6 +52,47 @@ export function StatusBadge({
   );
 }
 
+/**
+ * Official token art inside a designation badge, or the caller's glyph
+ * fallback while loading / when art is unavailable. The image is always
+ * decorative (`alt=""`, `aria-hidden`) — the badge's accessible name lives
+ * on the wrapping `role="img"` element, so art loading, failing, or being
+ * absent never changes what assistive tech announces.
+ */
+export function DesignationArt({
+  art,
+  fallback,
+  className = "absolute inset-0 h-full w-full rounded-full object-cover",
+}: {
+  art: DesignationArtKind;
+  fallback: ReactNode;
+  className?: string;
+}) {
+  const src = useDesignationTokenArt(art);
+  // The hook resolves when the URL is known, not when the bytes arrive — and
+  // a failed download never recovers. Keep the glyph until `onLoad` confirms
+  // the CURRENT src, so a slow or broken image degrades to the fallback
+  // instead of an empty shell. No `onError` handler: the fallback simply
+  // stays when a load never succeeds.
+  const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
+  const artReady = src !== null && loadedSrc === src;
+  return (
+    <>
+      {artReady ? null : fallback}
+      {src && (
+        <img
+          src={src}
+          alt=""
+          aria-hidden
+          draggable={false}
+          className={artReady ? className : "hidden"}
+          onLoad={() => setLoadedSrc(src)}
+        />
+      )}
+    </>
+  );
+}
+
 export function MonarchBadge() {
   const { t } = useTranslation("game");
   return (
@@ -65,7 +110,12 @@ export function MonarchBadge() {
           aria-hidden
           className="absolute -bottom-1 left-1/2 h-3 w-5 -translate-x-1/2 rounded-[45%] bg-amber-950/30 blur-[1px]"
         />
-        <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.45)]">👑</span>
+        <DesignationArt
+          art="monarch"
+          fallback={
+            <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.45)]">👑</span>
+          }
+        />
       </span>
     </BadgeTip>
   );
@@ -88,7 +138,12 @@ export function InitiativeBadge() {
           aria-hidden
           className="absolute -bottom-1 left-1/2 h-3 w-5 -translate-x-1/2 rounded-[45%] bg-cyan-950/30 blur-[1px]"
         />
-        <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">🛡</span>
+        <DesignationArt
+          art="initiative"
+          fallback={
+            <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">🛡</span>
+          }
+        />
       </span>
     </BadgeTip>
   );
@@ -107,7 +162,58 @@ export function CityBlessingBadge() {
           aria-hidden
           className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_50%_40%,rgba(255,255,255,0.95)_0_18%,transparent_22%),radial-gradient(circle_at_50%_50%,rgba(254,240,138,0.85)_0_36%,transparent_42%),linear-gradient(135deg,#fefce8_0%,#fde047_36%,#ca8a04_72%,#422006_100%)]"
         />
-        <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.4)]">☀</span>
+        <DesignationArt
+          art="cityBlessing"
+          fallback={
+            <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.4)]">☀</span>
+          }
+        />
+      </span>
+    </BadgeTip>
+  );
+}
+
+/**
+ * Game-global day/night indicator (CR 731). Unlike the per-player badges
+ * above, this reads `gameState.day_night` directly — day/night is a shared
+ * designation, so it mounts once in the action rail, not per HUD. Self-hides
+ * when neither is in effect. Art is the matching face of the MID Day //
+ * Night token; the sun/moon glyph covers loading and offline.
+ */
+export function DayNightBadge() {
+  const { t } = useTranslation("game");
+  const dayNight = useGameStore((s) => s.gameState?.day_night ?? null);
+  if (dayNight == null) return null;
+  const isDay = dayNight === "Day";
+  return (
+    <BadgeTip text={isDay ? t("badges.dayTooltip") : t("badges.nightTooltip")}>
+      <span
+        role="img"
+        aria-label={isDay ? t("badges.day") : t("badges.night")}
+        className={`relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[12px] leading-none ring-1 ${
+          isDay
+            ? "bg-amber-300 ring-amber-100 shadow-[0_0_14px_rgba(252,211,77,0.6)]"
+            : "bg-slate-800 ring-slate-400/60 shadow-[0_0_14px_rgba(148,163,184,0.45)]"
+        }`}
+      >
+        <span
+          aria-hidden
+          className={`absolute inset-0 rounded-full ${
+            isDay
+              ? "bg-[radial-gradient(circle_at_50%_40%,rgba(255,255,255,0.95)_0_18%,transparent_22%),linear-gradient(135deg,#fefce8_0%,#fbbf24_42%,#92400e_100%)]"
+              : "bg-[radial-gradient(circle_at_68%_28%,rgba(226,232,240,0.9)_0_8%,transparent_10%),radial-gradient(circle_at_30%_70%,rgba(148,163,184,0.5)_0_6%,transparent_8%),linear-gradient(135deg,#1e293b_0%,#020617_100%)]"
+          }`}
+        />
+        <DesignationArt
+          art={isDay ? "day" : "night"}
+          fallback={
+            <span
+              className={`relative drop-shadow-[0_1px_1px_rgba(0,0,0,${isDay ? "0.4" : "0.6"})]`}
+            >
+              {isDay ? "☀" : "🌙"}
+            </span>
+          }
+        />
       </span>
     </BadgeTip>
   );
@@ -339,7 +445,11 @@ export function CounterBadge({ kind, value, ringBearerName }: CounterBadgeProps)
             className="absolute -bottom-1 left-1/2 h-3 w-5 -translate-x-1/2 rounded-[45%] bg-amber-950/28 blur-[1px]"
           />
           <span className="relative inline-flex items-center gap-px">
-            <ManaFontIcon iconClass="ms-counter-rad" fallbackText="☢" />
+            <DesignationArt
+              art="radiation"
+              className="h-4 w-4 shrink-0 rounded-full object-cover"
+              fallback={<ManaFontIcon iconClass="ms-counter-rad" fallbackText="☢" />}
+            />
             {value}
           </span>
         </span>

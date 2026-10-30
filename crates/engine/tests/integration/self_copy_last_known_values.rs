@@ -104,6 +104,7 @@ fn self_copy_trigger(state: &GameState, source: ObjectId) -> ResolvedAbility {
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],

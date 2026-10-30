@@ -4,6 +4,7 @@ use engine::ai_support::{
     certify_pact_plan, current_target_selection_targets, find_copy_targets, is_pact_payment_cast,
 };
 use engine::game::combat;
+use engine::game::cost_payability::AbilityCostPayability;
 use engine::game::effects::draw::can_draw_at_least_one;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords;
@@ -6270,8 +6271,13 @@ mod tests {
         ));
         let session = AiSession::arc_from_game(&state);
         let mut rng = SmallRng::seed_from_u64(42);
-        let selection =
-            choose_action_with_session_diagnostic(&state, PlayerId(0), &config, &mut rng, &session);
+        let selection = choose_action_with_session_diagnostic(
+            &state,
+            &config,
+            &mut rng,
+            &session,
+            &AiDecisionContract::issue(&state, PlayerId(0)),
+        );
         let receipt = selection
             .receipt
             .expect("the public chooser must retain its ranked target receipt");

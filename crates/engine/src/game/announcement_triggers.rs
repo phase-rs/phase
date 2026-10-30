@@ -16,7 +16,7 @@
 
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    AnnouncementEventScope, GameState, InFlightSpellTriggerCarrier, PendingCastOwner,
+    AnnouncementEventScope, GameState, InFlightSpellTriggerCarrier, PendingCast, PendingCastOwner,
     PendingCostMoveResume, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
@@ -156,7 +156,8 @@ fn retained_by_cost_owners(state: &GameState) -> Vec<GameEvent> {
             | PendingCostMoveResume::CounterCostRemovalPayment { .. }
             | PendingCostMoveResume::LoyaltyActivation { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
-            | PendingCostMoveResume::RandomDiscardUnlessPayment(..),
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+            | PendingCostMoveResume::TurnFaceUpCostMove { .. },
         )
         | None => {}
     }
@@ -214,6 +215,21 @@ pub(crate) fn take_inline_trigger_span(
     triggers::resolve_tap_mana_triggers_inline(state, events, start);
     stage_announcement_trigger_events(state, events, start);
     start..owned_from.min(events.len())
+}
+
+/// CR 601.2c + CR 603.2: stage a spell's announcement triggers while
+/// it owns `state.pending_cast` (the spell is still in flight and has not yet
+/// parked in an external payment root or waiting prompt), so the staging
+/// authority sees the spell before payment can move its targets.
+pub(crate) fn stage_with_pending_owner(
+    state: &mut GameState,
+    pending: &PendingCast,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    let prior_pending = state.pending_cast.replace(Box::new(pending.clone()));
+    stage_announcement_trigger_events(state, events, event_start);
+    state.pending_cast = prior_pending;
 }
 
 /// Stages the not-yet-collected events of `events[event_start..]` into the
@@ -474,6 +490,12 @@ fn commit_announcement_span(
     let mut deferred = std::mem::take(&mut state.deferred_triggers);
     collection.commit_into(state, &mut deferred);
     state.deferred_triggers = deferred;
+    // CR 400.7 + CR 601.2h: the priority pipeline clears the transient cast
+    // payment stamps after a non-empty trigger collection; a committed
+    // announcement is that collection for its span, so it clears them too.
+    if !new_events.is_empty() {
+        triggers::clear_post_collection_transients(state);
+    }
     // The span is claimed below by its identities in the full buffer.
     triggers::collect_delayed_trigger_contexts_into_deferred(state, &delayed_events);
     // CR 603.2c: each occurrence is collected once, by this commit, for both
@@ -561,7 +583,8 @@ fn take_completed_cast_prefix(state: &mut GameState, owner: PendingCastOwner) ->
             | PendingCostMoveResume::CounterCostRemovalPayment { .. }
             | PendingCostMoveResume::LoyaltyActivation { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
-            | PendingCostMoveResume::RandomDiscardUnlessPayment(_),
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_)
+            | PendingCostMoveResume::TurnFaceUpCostMove { .. },
         )
         | None => Vec::new(),
     }

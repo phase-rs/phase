@@ -145,6 +145,160 @@ type SharedPlayerCount = Arc<AtomicU32>;
 type SharedGameDb = Arc<persistence::GameDb>;
 type SharedDraftState = Arc<Mutex<DraftSessionManager>>;
 const SPECTATOR_PLAYER_ID: PlayerId = PlayerId(u8::MAX);
+const PERSISTED_SESSION_REAPER_INTERVAL: Duration = Duration::from_secs(10);
+const PERSISTED_SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Default)]
+struct StaleSessionReaper {
+    last_success: Option<tokio::time::Instant>,
+}
+
+impl StaleSessionReaper {
+    fn cleanup_if_due(&mut self, game_db: &persistence::GameDb) {
+        let now = tokio::time::Instant::now();
+        if self
+            .last_success
+            .is_some_and(|last| now.duration_since(last) < PERSISTED_SESSION_CLEANUP_INTERVAL)
+        {
+            return;
+        }
+
+        match game_db.delete_stale(persistence::PERSISTED_SESSION_MAX_AGE_SECS) {
+            Ok(deleted) => {
+                self.last_success = Some(now);
+                if deleted > 0 {
+                    info!(count = deleted, "cleaned up stale persisted sessions");
+                }
+            }
+            Err(error) => error!(error = %error, "failed to clean up stale persisted sessions"),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_background_reaper(
+    mut stale_session_reaper: StaleSessionReaper,
+    bg_state: SharedState,
+    bg_draft_state: SharedDraftState,
+    bg_connections: SharedConnections,
+    bg_draft_spectators: SharedDraftSpectators,
+    bg_game_spectators: SharedGameSpectators,
+    bg_lobby: SharedLobby,
+    bg_lobby_subs: SharedLobbySubscribers,
+    bg_game_db: SharedGameDb,
+) {
+    let mut interval = tokio::time::interval(PERSISTED_SESSION_REAPER_INTERVAL);
+    loop {
+        interval.tick().await;
+        stale_session_reaper.cleanup_if_due(&bg_game_db);
+
+        // Check reconnect grace period expiry. The read is non-destructive:
+        // a code this tick cannot act on is reported again by the next one.
+        let expired = {
+            let mgr = bg_state.lock().await;
+            mgr.reconnect.check_expired()
+        };
+        if !expired.is_empty() {
+            let prepared = prepare_disconnect_terminals(&bg_state, &bg_game_db, &expired).await;
+            let ExpirySweep {
+                acted: removed,
+                deferred,
+            } = {
+                let mut mgr = bg_state.lock().await;
+                reap_expired_disconnects(&mut mgr, &bg_game_db, &expired, &prepared)
+            };
+            // Unconditional inside this branch, because the per-game lines
+            // below are emitted only for what was removed: a tick that
+            // deferred every lapsed seat would otherwise look exactly like
+            // a tick with nothing to do, which is the one case contention
+            // needs reported.
+            info!(
+                forfeited = removed.len(),
+                deferred, "disconnect grace sweep"
+            );
+            // Nothing else is held here: the branch below takes
+            // `bg_game_spectators` at its end and the lobby-expiry branch
+            // takes `bg_lobby` and `bg_state` in sequence, never one inside
+            // the other, so the lobby lock this call takes is nested under
+            // neither.
+            delist_removed_sessions(&bg_lobby, &bg_lobby_subs, &removed).await;
+            {
+                let conns = bg_connections.lock().await;
+                for game_code in &removed {
+                    info!(game = %game_code, reason = "disconnect_expired", "game over");
+                    if let Some(players) = conns.get(game_code) {
+                        if let Some(deliveries) = prepared.get(game_code) {
+                            for (player, delivery) in deliveries {
+                                if let Some(sender) = players.get(player) {
+                                    let _ = sender.send(ServerMessage::TerminalResult {
+                                        delivery: Some(delivery.clone()),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Keeps its base argument — the codes this sweep removed — so
+            // it cannot prune a game it skipped.
+            prune_game_connections(&bg_connections, removed.iter().map(String::as_str)).await;
+            let mut specs = bg_game_spectators.lock().await;
+            for game_code in &removed {
+                specs.remove(game_code);
+            }
+        }
+
+        // Check lobby game expiry (5 minute timeout for waiting games).
+        // The report is non-destructive, so a listing this tick declines to
+        // act on is reported again by the next one; the broker then
+        // consumes exactly what was dispositioned. The Full-mode session/db
+        // deletion stays here — the broker is WASM-safe and has no
+        // SQLite/SessionManager.
+        let expired_lobby = {
+            let broker = bg_lobby.lock().await;
+            broker.lobby().check_expired(300, &SysEnv)
+        };
+        let lobby_sweep = if expired_lobby.is_empty() {
+            LobbyExpirySweep::default()
+        } else {
+            // Same discipline as the reaper above: `try_session` under the
+            // registry guard decides, the removal happens in the same
+            // critical section, and the session the retire needs is read
+            // from that guard before it is dropped. A contended game is
+            // skipped, not waited on.
+            let live_drafts = live_draft_codes(&bg_draft_state, &expired_lobby).await;
+            let mut mgr = bg_state.lock().await;
+            handle_expired_lobby_games(&mut mgr, &bg_game_db, &expired_lobby, &live_drafts)
+        };
+        // Every tick, not only the ticks a lobby entry lapsed: the
+        // tournament half of this sweep runs on its own lifecycle clocks
+        // and has no shell-side decline to wait for.
+        let routes =
+            ExpiredLobbyRoutes::capture(&lobby_sweep, &bg_connections, &bg_game_spectators).await;
+        finish_lobby_expiry_sweep(
+            &bg_lobby,
+            &bg_lobby_subs,
+            &bg_connections,
+            &bg_game_spectators,
+            &lobby_sweep,
+            routes,
+        )
+        .await;
+
+        sweep_draft_seat_expiry(
+            &bg_draft_state,
+            &bg_state,
+            &bg_connections,
+            &bg_draft_spectators,
+            &bg_game_spectators,
+            &bg_lobby,
+            &bg_lobby_subs,
+            &bg_game_db,
+        )
+        .await;
+    }
+}
+
 /// Stack size for every thread that can run the engine: the runtime *owner*
 /// thread spawned in `main`, plus Tokio's worker and blocking threads.
 ///
@@ -355,7 +509,9 @@ fn finish_restored_full_startup(
             .expect("restored session is private to this startup handoff");
         session.full_runtime = Some(runtime.clone());
 
-        let resumed = session.resume_restored_stack_automation();
+        let resumed = session
+            .resume_restored_stack_automation()
+            .map_err(|error| format!("failed to resume restored Full session: {error}"))?;
         if let engine::types::game_state::WaitingFor::GameOver { winner } =
             &session.state.waiting_for
         {
@@ -2926,15 +3082,10 @@ async fn serve() {
     let game_db: SharedGameDb = Arc::new(
         persistence::GameDb::open(&game_db_path, retention).expect("Failed to open game database"),
     );
-    // Clean up stale sessions (>24 hours old). Skipped for a single-user local
-    // instance, where the one suspended solo game must survive until replaced.
-    if !cli.single_user {
-        if let Ok(deleted) = game_db.delete_stale(86400) {
-            if deleted > 0 {
-                info!(count = deleted, "cleaned up stale persisted sessions");
-            }
-        }
-    }
+    // Always clean up once at startup. The database retention policy preserves
+    // SingleUser gameplay sessions while still expiring old terminal payloads.
+    let mut stale_session_reaper = StaleSessionReaper::default();
+    stale_session_reaper.cleanup_if_due(&game_db);
 
     // A single-user instance has no other players whose seats a grace period
     // would free, so reconnects never expire — a game suspended for any length
@@ -3061,127 +3212,19 @@ async fn serve() {
         .await;
     }
 
-    // Spawn background task for grace period and lobby expiry
-    let bg_state = state.clone();
-    let bg_draft_state = draft_sessions.clone();
-    let bg_connections = connections.clone();
-    let bg_draft_spectators = draft_spectators.clone();
-    let bg_game_spectators = game_spectators.clone();
-    let bg_lobby = lobby.clone();
-    let bg_lobby_subs = lobby_subscribers.clone();
-    let bg_game_db = game_db.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
-        loop {
-            interval.tick().await;
-
-            // Check reconnect grace period expiry. The read is non-destructive:
-            // a code this tick cannot act on is reported again by the next one.
-            let expired = {
-                let mgr = bg_state.lock().await;
-                mgr.reconnect.check_expired()
-            };
-            if !expired.is_empty() {
-                let prepared = prepare_disconnect_terminals(&bg_state, &bg_game_db, &expired).await;
-                let ExpirySweep {
-                    acted: removed,
-                    deferred,
-                } = {
-                    let mut mgr = bg_state.lock().await;
-                    reap_expired_disconnects(&mut mgr, &bg_game_db, &expired, &prepared)
-                };
-                // Unconditional inside this branch, because the per-game lines
-                // below are emitted only for what was removed: a tick that
-                // deferred every lapsed seat would otherwise look exactly like
-                // a tick with nothing to do, which is the one case contention
-                // needs reported.
-                info!(
-                    forfeited = removed.len(),
-                    deferred, "disconnect grace sweep"
-                );
-                // Nothing else is held here: the branch below takes
-                // `bg_game_spectators` at its end and the lobby-expiry branch
-                // takes `bg_lobby` and `bg_state` in sequence, never one inside
-                // the other, so the lobby lock this call takes is nested under
-                // neither.
-                delist_removed_sessions(&bg_lobby, &bg_lobby_subs, &removed).await;
-                {
-                    let conns = bg_connections.lock().await;
-                    for game_code in &removed {
-                        info!(game = %game_code, reason = "disconnect_expired", "game over");
-                        if let Some(players) = conns.get(game_code) {
-                            if let Some(deliveries) = prepared.get(game_code) {
-                                for (player, delivery) in deliveries {
-                                    if let Some(sender) = players.get(player) {
-                                        let _ = sender.send(ServerMessage::TerminalResult {
-                                            delivery: Some(delivery.clone()),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                // Keeps its base argument — the codes this sweep removed — so
-                // it cannot prune a game it skipped.
-                prune_game_connections(&bg_connections, removed.iter().map(String::as_str)).await;
-                let mut specs = bg_game_spectators.lock().await;
-                for game_code in &removed {
-                    specs.remove(game_code);
-                }
-            }
-
-            // Check lobby game expiry (5 minute timeout for waiting games).
-            // The report is non-destructive, so a listing this tick declines to
-            // act on is reported again by the next one; the broker then
-            // consumes exactly what was dispositioned. The Full-mode session/db
-            // deletion stays here — the broker is WASM-safe and has no
-            // SQLite/SessionManager.
-            let expired_lobby = {
-                let broker = bg_lobby.lock().await;
-                broker.lobby().check_expired(300, &SysEnv)
-            };
-            let lobby_sweep = if expired_lobby.is_empty() {
-                LobbyExpirySweep::default()
-            } else {
-                // Same discipline as the reaper above: `try_session` under the
-                // registry guard decides, the removal happens in the same
-                // critical section, and the session the retire needs is read
-                // from that guard before it is dropped. A contended game is
-                // skipped, not waited on.
-                let live_drafts = live_draft_codes(&bg_draft_state, &expired_lobby).await;
-                let mut mgr = bg_state.lock().await;
-                handle_expired_lobby_games(&mut mgr, &bg_game_db, &expired_lobby, &live_drafts)
-            };
-            // Every tick, not only the ticks a lobby entry lapsed: the
-            // tournament half of this sweep runs on its own lifecycle clocks
-            // and has no shell-side decline to wait for.
-            let routes =
-                ExpiredLobbyRoutes::capture(&lobby_sweep, &bg_connections, &bg_game_spectators)
-                    .await;
-            finish_lobby_expiry_sweep(
-                &bg_lobby,
-                &bg_lobby_subs,
-                &bg_connections,
-                &bg_game_spectators,
-                &lobby_sweep,
-                routes,
-            )
-            .await;
-
-            sweep_draft_seat_expiry(
-                &bg_draft_state,
-                &bg_state,
-                &bg_connections,
-                &bg_draft_spectators,
-                &bg_game_spectators,
-                &bg_lobby,
-                &bg_lobby_subs,
-                &bg_game_db,
-            )
-            .await;
-        }
-    });
+    // Spawn the existing background maintenance worker. It owns persisted
+    // session cleanup on its normal 10s cadence, before it takes any locks.
+    tokio::spawn(run_background_reaper(
+        stale_session_reaper,
+        state.clone(),
+        draft_sessions.clone(),
+        connections.clone(),
+        draft_spectators.clone(),
+        game_spectators.clone(),
+        lobby.clone(),
+        lobby_subscribers.clone(),
+        game_db.clone(),
+    ));
 
     let cors = match cli.cors_origin.as_deref() {
         Some("*") | None => CorsLayer::permissive(),
@@ -3522,6 +3565,185 @@ async fn server_info(State(app_state): State<AppState>) -> Json<ServerInfoDocume
         build_commit: Some(build_commit().to_string()),
         public_url: app_state.public_url,
     })
+}
+
+#[cfg(test)]
+mod stale_session_reaper_tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use rusqlite::{params, Connection};
+    use tempfile::NamedTempFile;
+    use tokio::time::{advance, Duration};
+
+    use super::{
+        persistence, run_background_reaper, Broker, DraftSessionManager, Mutex, SessionManager,
+        SharedGameDb, StaleSessionReaper, PERSISTED_SESSION_CLEANUP_INTERVAL,
+        PERSISTED_SESSION_REAPER_INTERVAL,
+    };
+
+    fn test_db(path: &Path, retention: persistence::SessionRetention) -> SharedGameDb {
+        Arc::new(persistence::GameDb::open(path, retention).unwrap())
+    }
+
+    fn seed_stale_cycle(path: &Path, code: &str) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT INTO game_sessions (game_code, session_json, updated_at) VALUES (?1, 'game', 1)",
+            params![format!("game-{code}")],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO draft_sessions (draft_code, session_json, updated_at) VALUES (?1, 'draft', 1)",
+            params![format!("draft-{code}")],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO p2p_draft_backups (draft_code, host_peer_id, snapshot_json, updated_at)
+             VALUES (?1, 'peer', 'backup', 1)",
+            params![format!("backup-{code}")],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO terminal_match_results
+             (game_code, generation, terminal_revision, artifact_digest, display_json, created_at)
+             VALUES (?1, 1, 9, 'digest', '{\"winner\":null,\"reason\":\"expired\",\"ranked_result\":null}', 1)",
+            params![code],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO terminal_match_delivery
+             (game_code, generation, player_id, terminal_revision, delivery_id,
+              pre_terminal_token_verifier, credential_verifier, acknowledged_at, final_view_json)
+             VALUES (?1, 1, 0, 9, ?2, 'pre', 'credential', NULL, '{\"private\":true}')",
+            params![code, format!("delivery-{code}")],
+        )
+        .unwrap();
+    }
+
+    fn cycle_state(path: &Path, code: &str) -> ((u64, u64, u64), Option<String>) {
+        let conn = Connection::open(path).unwrap();
+        let counts = (
+            conn.query_row(
+                "SELECT COUNT(*) FROM game_sessions WHERE game_code = ?1",
+                params![format!("game-{code}")],
+                |row| row.get(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT COUNT(*) FROM draft_sessions WHERE draft_code = ?1",
+                params![format!("draft-{code}")],
+                |row| row.get(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT COUNT(*) FROM p2p_draft_backups WHERE draft_code = ?1",
+                params![format!("backup-{code}")],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        );
+        let payload = conn
+            .query_row(
+                "SELECT final_view_json FROM terminal_match_delivery WHERE game_code = ?1 AND generation = 1",
+                params![code],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (counts, payload)
+    }
+
+    fn spawn_production_worker(
+        game_db: SharedGameDb,
+        stale_session_reaper: StaleSessionReaper,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(run_background_reaper(
+            stale_session_reaper,
+            Arc::new(Mutex::new(SessionManager::new())),
+            Arc::new(Mutex::new(DraftSessionManager::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(Broker::new())),
+            Arc::new(Mutex::new(Vec::new())),
+            game_db,
+        ))
+    }
+
+    async fn let_reaper_run() {
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn production_reaper_repeats_without_restart_in_both_retention_modes() {
+        for retention in [
+            persistence::SessionRetention::Multiplayer,
+            persistence::SessionRetention::SingleUser,
+        ] {
+            let file = NamedTempFile::new().unwrap();
+            let db = test_db(file.path(), retention);
+            seed_stale_cycle(file.path(), "FIRST");
+            Connection::open(file.path())
+                .unwrap()
+                .execute_batch(
+                    "CREATE TRIGGER fail_first_expiry
+                     BEFORE UPDATE OF final_view_json ON terminal_match_delivery
+                     WHEN OLD.game_code = 'FIRST'
+                     BEGIN SELECT RAISE(ABORT, 'retry on next production tick'); END;",
+                )
+                .unwrap();
+
+            // This is the same recurring task spawned by server startup. Its
+            // first 10s tick fails; the next tick must retry immediately after
+            // the database error instead of waiting for the hourly throttle.
+            let task = spawn_production_worker(db, StaleSessionReaper::default());
+            let_reaper_run().await;
+            assert_eq!(
+                cycle_state(file.path(), "FIRST"),
+                ((1, 1, 1), Some("{\"private\":true}".to_string())),
+                "the trigger aborts the first transaction"
+            );
+
+            Connection::open(file.path())
+                .unwrap()
+                .execute_batch("DROP TRIGGER fail_first_expiry;")
+                .unwrap();
+            advance(Duration::from_secs(10)).await;
+            let_reaper_run().await;
+            let expected_counts = if retention == persistence::SessionRetention::Multiplayer {
+                (0, 0, 0)
+            } else {
+                (1, 1, 1)
+            };
+            assert_eq!(
+                cycle_state(file.path(), "FIRST"),
+                (expected_counts, None),
+                "the recurring task retries the failed cleanup on its next tick"
+            );
+
+            seed_stale_cycle(file.path(), "SECOND");
+            advance(Duration::from_secs(10)).await;
+            let_reaper_run().await;
+            assert_eq!(
+                cycle_state(file.path(), "SECOND"),
+                ((1, 1, 1), Some("{\"private\":true}".to_string())),
+                "a successful cleanup is throttled for an hour"
+            );
+
+            advance(PERSISTED_SESSION_CLEANUP_INTERVAL - PERSISTED_SESSION_REAPER_INTERVAL).await;
+            let_reaper_run().await;
+            assert_eq!(
+                cycle_state(file.path(), "SECOND"),
+                (expected_counts, None),
+                "the same live task performs a later sweep without a process restart"
+            );
+            task.abort();
+            let _ = task.await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -6148,6 +6370,26 @@ async fn persist_draft_session_async(
 /// Immutable terminal result prepared before any recipient is told that a
 /// started Full session ended. The database transaction retires the runtime,
 /// creates recipient-scoped capabilities, and makes retries idempotent.
+fn recipient_terminal_final_view_json(
+    authoritative_state: &GameState,
+    recipient: PlayerId,
+) -> Result<String, String> {
+    #[derive(serde::Serialize)]
+    struct FinalViewerState<'a> {
+        #[serde(flatten)]
+        state: &'a GameState,
+        derived: engine::game::derived_views::DerivedViews,
+    }
+
+    let filtered = server_core::filter_state_for_player(authoritative_state, recipient);
+    let derived = derive_transport_views(authoritative_state, &filtered, Some(recipient));
+    serde_json::to_string(&FinalViewerState {
+        state: &filtered,
+        derived,
+    })
+    .map_err(|error| error.to_string())
+}
+
 fn terminal_artifact(
     session: &GameSession,
     winner: Option<PlayerId>,
@@ -6158,16 +6400,18 @@ fn terminal_artifact(
         .full_runtime
         .as_ref()
         .ok_or_else(|| "Full session has no runtime identity".to_string())?;
-    let recipients = session
-        .player_tokens
-        .iter()
-        .enumerate()
-        .filter(|(_, token)| !token.is_empty())
-        .map(|(player_id, token)| persistence::TerminalRecipient {
-            player_id: PlayerId(player_id as u8),
+    let mut recipients = Vec::new();
+    for (player_id, token) in session.player_tokens.iter().enumerate() {
+        if token.is_empty() {
+            continue;
+        }
+        let player_id = PlayerId(player_id as u8);
+        recipients.push(persistence::TerminalRecipient {
+            player_id,
             pre_terminal_player_token: token.clone(),
-        })
-        .collect();
+            final_view_json: recipient_terminal_final_view_json(&session.state, player_id)?,
+        });
+    }
     Ok(persistence::FullTerminalArtifact {
         key: runtime.key.clone(),
         terminal_revision: session.state_revision,
@@ -17783,7 +18027,12 @@ mod issue_4548_full_create_tests {
             .await;
             assert_eq!(created_code(reply), "BOTRS2");
 
-            assert!(!app_state.connections.lock().await["BOTRS2"].contains_key(&PlayerId(1)));
+            assert!(app_state
+                .connections
+                .lock()
+                .await
+                .get("BOTRS2")
+                .is_none_or(|routes| !routes.contains_key(&PlayerId(1))));
         })
         .await;
         server.abort();
@@ -19572,6 +19821,115 @@ mod game_submission_tests {
         .await;
         server.abort();
         result.expect("stale socket replacement scenario timed out");
+    }
+
+    #[tokio::test]
+    async fn reconnect_after_an_action_observes_the_post_action_full_snapshot() {
+        let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut socket_a = connect_and_hello(url.clone()).await;
+            let (game_code, player_token, full_key) =
+                create_started_ai_game(&mut socket_a, None, DeckData::default(), None).await;
+            // Empty libraries skip the mulligan (`start_game_with_starting_player`),
+            // but whether seat 0 or the AI seat holds the first priority window
+            // depends on who won the starting-player roll. A PassPriority from seat
+            // 0 is only legal, and only the cause of the next revision, once seat 0
+            // holds priority; until then the AI's own moves advance the revision.
+            // Wait for that window and take the baseline revision under the same
+            // guard: while seat 0 holds priority nothing else can advance the
+            // game, so any later advance is this Action's.
+            //
+            // Observe through the awaited lock: `try_session` answers `None`
+            // whenever a transition holds the session lease, which the executor
+            // does while it runs the Action asynchronously.
+            let before_revision = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    {
+                        let session = lock_session(&app_state.sessions, &game_code)
+                            .await
+                            .expect("started Full session");
+                        match &session.state.waiting_for {
+                            engine::types::game_state::WaitingFor::Priority { player }
+                                if *player == PlayerId(0) =>
+                            {
+                                break session.state_revision;
+                            }
+                            engine::types::game_state::WaitingFor::GameOver { .. } => {
+                                panic!("game ended before seat 0 held priority")
+                            }
+                            _ => {}
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("seat 0 must receive a priority window for the Action");
+
+            socket_a
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::Action {
+                        action: GameAction::PassPriority,
+                    })
+                    .expect("action json")
+                    .into(),
+                ))
+                .await
+                .expect("send current action");
+
+            let action_revision = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let revision = lock_session(&app_state.sessions, &game_code)
+                        .await
+                        .expect("Action-first session stays live")
+                        .state_revision;
+                    if revision > before_revision {
+                        break revision;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("current Action must advance the authoritative snapshot");
+
+            let mut socket_b = connect_and_hello(url).await;
+            socket_b
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::Reconnect {
+                        game_code: game_code.clone(),
+                        player_token,
+                        full_key,
+                    })
+                    .expect("reconnect json")
+                    .into(),
+                ))
+                .await
+                .expect("send same-seat reconnect");
+            let reconnect_revision = loop {
+                match recv_server_message(&mut socket_b).await {
+                    ServerMessage::GameStarted { state_revision, .. } => break state_revision,
+                    ServerMessage::Error { message, .. } => {
+                        panic!("same-seat reconnect failed: {message}")
+                    }
+                    _ => {}
+                }
+            };
+
+            assert!(
+                reconnect_revision >= action_revision,
+                "reconnect must observe the Action-first snapshot or a later one"
+            );
+            let session = lock_session(&app_state.sessions, &game_code)
+                .await
+                .expect("reconnected Full session");
+            assert!(
+                session.state_revision >= reconnect_revision,
+                "reconnect snapshot must come from the authoritative session revision"
+            );
+        })
+        .await;
+        server.abort();
+        result.expect("Action-first reconnect scenario timed out");
     }
 
     #[test]
@@ -21462,6 +21820,11 @@ mod issue_4548_deadlock_tests {
         TournamentFormat,
     };
     use engine::game::deck_loading::PlayerDeckPayload;
+    use engine::game::game_object::GameObject;
+    use engine::types::game_state::{GameState, WaitingFor};
+    use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
     use server_core::draft_session::DraftSessionManager;
     use tempfile::NamedTempFile;
 
@@ -21788,7 +22151,167 @@ mod issue_4548_deadlock_tests {
                 reason: "Opponent disconnected (grace period expired)".to_string(),
                 ranked_result: None,
             },
+            final_view: None,
         }
+    }
+
+    fn terminal_final_view_fixture_state() -> GameState {
+        fn add_object(
+            state: &mut GameState,
+            owner: PlayerId,
+            name: &str,
+            zone: Zone,
+            card_id: u64,
+        ) -> ObjectId {
+            let id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            state.objects.insert(
+                id,
+                GameObject::new(id, CardId(card_id), owner, name.to_string(), zone),
+            );
+            match zone {
+                Zone::Hand => state.players[owner.0 as usize].hand.push_back(id),
+                Zone::Library => state.players[owner.0 as usize].library.push_back(id),
+                Zone::Battlefield => state.battlefield.push_back(id),
+                _ => unreachable!("fixture uses only modeled object zones"),
+            }
+            id
+        }
+
+        let mut state = GameState::new_two_player(7);
+        state.turn_number = 6;
+        state.phase = Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+        state.players[0].life = 37;
+        state.players[1].life = 23;
+
+        add_object(&mut state, PlayerId(0), "P0 private card", Zone::Hand, 101);
+        add_object(&mut state, PlayerId(1), "P1 private card", Zone::Hand, 102);
+        add_object(
+            &mut state,
+            PlayerId(0),
+            "P0 library card",
+            Zone::Library,
+            103,
+        );
+        add_object(
+            &mut state,
+            PlayerId(1),
+            "P1 library card",
+            Zone::Library,
+            104,
+        );
+        let permanent = add_object(
+            &mut state,
+            PlayerId(0),
+            "Wind Drake",
+            Zone::Battlefield,
+            105,
+        );
+        let permanent = state.objects.get_mut(&permanent).expect("permanent exists");
+        permanent.power = Some(2);
+        permanent.toughness = Some(2);
+        permanent.keywords = vec![engine::types::Keyword::Flying];
+        state
+    }
+
+    #[test]
+    fn terminal_final_view_matches_the_production_filtered_state_fixture() {
+        let state = terminal_final_view_fixture_state();
+        let recipient = PlayerId(0);
+        let filtered = server_core::filter_state_for_player(&state, recipient);
+        let expected_derived = derive_transport_views(&state, &filtered, Some(recipient));
+
+        let json = recipient_terminal_final_view_json(&state, recipient).unwrap();
+        assert_eq!(
+            json,
+            include_str!("../../../fixtures/full-terminal-final-view.template.json").trim()
+        );
+        let final_view: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let filtered_value = serde_json::to_value(filtered).unwrap();
+        for (field, value) in filtered_value.as_object().unwrap() {
+            assert_eq!(&final_view[field], value, "filtered field {field}");
+        }
+        assert_eq!(
+            final_view["derived"],
+            serde_json::to_value(expected_derived).unwrap()
+        );
+        assert!(json.rfind("\"derived\"").unwrap() > json.find("\"turn_number\"").unwrap());
+        assert!(json.contains("P0 private card"));
+        assert!(!json.contains("P1 private card"));
+        assert!(final_view["derived"]["unique_authorized_submitter"].is_number());
+        assert_eq!(
+            final_view["derived"]["battlefield_keyword_badges"]["5"],
+            serde_json::json!(["Flying"])
+        );
+        let opponent_view = recipient_terminal_final_view_json(&state, PlayerId(1)).unwrap();
+        assert!(opponent_view.contains("P1 private card"));
+        assert!(!opponent_view.contains("P0 private card"));
+    }
+
+    #[test]
+    fn production_terminal_final_view_survives_database_restart_byte_exactly() {
+        let state = terminal_final_view_fixture_state();
+        let final_view_p0 = recipient_terminal_final_view_json(&state, PlayerId(0)).unwrap();
+        let final_view_p1 = recipient_terminal_final_view_json(&state, PlayerId(1)).unwrap();
+        let committed_fixture =
+            include_str!("../../../fixtures/full-terminal-final-view.template.json").trim();
+        assert_eq!(final_view_p0, committed_fixture);
+        assert_ne!(
+            &final_view_p0, &final_view_p1,
+            "recipient projections differ because their private hands differ"
+        );
+
+        let file = NamedTempFile::new().unwrap();
+        let db = persistence::GameDb::open(file.path(), persistence::SessionRetention::Multiplayer)
+            .unwrap();
+        db.save_session("TERM05", "{}").unwrap();
+        let key = server_core::FullSessionKey {
+            game_code: "TERM05".to_string(),
+            generation: 0,
+        };
+        let artifact = persistence::FullTerminalArtifact {
+            key: key.clone(),
+            terminal_revision: 6,
+            display: server_core::TerminalMatchDisplay {
+                winner: Some(PlayerId(0)),
+                reason: "Match conceded".to_string(),
+                ranked_result: None,
+            },
+            recipients: vec![
+                persistence::TerminalRecipient {
+                    player_id: PlayerId(0),
+                    pre_terminal_player_token: "terminal-seat-0".to_string(),
+                    final_view_json: final_view_p0,
+                },
+                persistence::TerminalRecipient {
+                    player_id: PlayerId(1),
+                    pre_terminal_player_token: "terminal-seat-1".to_string(),
+                    final_view_json: final_view_p1,
+                },
+            ],
+        };
+        assert_eq!(
+            db.prepare_full_terminal(&artifact).unwrap(),
+            persistence::PrepareFullTerminalDisposition::Prepared
+        );
+        let original = db
+            .current_terminal_delivery_for_recipient(&key, PlayerId(0), "terminal-seat-0")
+            .unwrap()
+            .unwrap();
+        let expected_json = original.final_view.unwrap().get().to_string();
+        assert_eq!(expected_json, committed_fixture);
+        let credential = original.credential;
+        drop(db);
+
+        let reopened =
+            persistence::GameDb::open(file.path(), persistence::SessionRetention::Multiplayer)
+                .unwrap();
+        let recovered = reopened.read_terminal_result(&credential).unwrap().unwrap();
+        assert_eq!(recovered.final_view.as_ref().unwrap().get(), expected_json);
     }
 
     /// The deferral that does not clear itself. A contended game is skipped for

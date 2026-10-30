@@ -1,24 +1,21 @@
-// CR 604.3 — characteristic-defining ability statics.
+// CR 604.3: unconditional and conditional self power/toughness equality statics.
 
 #[allow(unused_imports)]
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 
-/// Parse CDA power/toughness equality patterns like:
+/// Parse self power/toughness equality, using ordinary setters for gated
+/// abilities and characteristic-defining setters for unconditional abilities:
 /// - "~'s power and toughness are each equal to the number of creatures you control."
 /// - "~'s power is equal to the number of card types among cards in all graveyards
 ///   and its toughness is equal to that number plus 1."
 /// - "~'s toughness is equal to the number of cards in your hand."
 pub(crate) fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDefinition> {
-    // CR 611.3a + CR 604.3: peel a leading turn-window timing condition so a CDA
-    // scoped to "During your turn," / "During turns other than yours," carries
-    // that condition (Angry Mob). A continuous effect from a static ability
-    // applies at any moment to whatever its text indicates (CR 611.3a), so the
-    // turn window becomes a `StaticCondition`. Such a card's two clauses are split
-    // into separate sentences upstream by `parse_multi_sentence_statics`, so each
-    // clause reaches here independently. `nom_tag_tp` slices the original and
-    // lowercased text in lockstep (no manual byte-offset arithmetic).
+    // CR 604.3a + CR 611.3a: an equality that only applies within a turn
+    // window or while a condition holds is not characteristic defining.
+    // Preserve the full description while parsing only the equality body.
+    let description = text;
     let tp = TextPair::new(text, lower);
     let (lower, text, timing_condition) = if let Some(rest) = nom_tag_tp(&tp, "during your turn, ")
     {
@@ -39,16 +36,32 @@ pub(crate) fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDef
         (lower, text, None)
     };
 
+    let tp = TextPair::new(text, lower);
+    // "For as long as" belongs to effect duration, not this static gate.
+    if nom_primitives::scan_contains(lower, "for as long as ") {
+        return None;
+    }
+    let (body, gate_condition) = match split_trailing_gate_condition_with_body(&tp) {
+        Some((body, gate)) => (
+            body,
+            Some(
+                parse_static_condition(gate).unwrap_or_else(|| StaticCondition::Unrecognized {
+                    text: gate.to_string(),
+                }),
+            ),
+        ),
+        None => (text, None),
+    };
+    let condition = super::evasion::combine_conditions(timing_condition, gate_condition);
+    let body_lower = body.to_lowercase();
+    let lower = body_lower.as_str();
+
     // Detect framing
     let both = nom_primitives::scan_contains(lower, "power and toughness are each equal to");
     let power_only = !both && nom_primitives::scan_contains(lower, "power is equal to");
     let toughness_only =
         !both && !power_only && nom_primitives::scan_contains(lower, "toughness is equal to");
-    // CR 604.3 + CR 613.4a (Layer 7a): constant characteristic-defining P/T —
-    // "~'s power and toughness are each N" (Angry Mob's off-turn clause "... are
-    // each 2") is a CDA that defines P/T as a fixed value, not a dynamic quantity.
-    // Guarded by `!both` so the dynamic "are each equal to" framing (which also
-    // contains "are each ") keeps priority.
+    // Fixed equality shares the same conditional/CDA classification.
     let both_const = !both
         && !power_only
         && !toughness_only
@@ -72,29 +85,27 @@ pub(crate) fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDef
                 ContinuousModification::SetPower { value },
                 ContinuousModification::SetToughness { value },
             ])
-            .cda()
-            .description(text.to_string());
-        if let Some(cond) = timing_condition {
+            .description(description.to_string());
+        if let Some(cond) = condition {
             def = def.condition(cond);
+        } else {
+            def = def.cda();
         }
         return Some(def);
     }
 
-    // Extract the quantity text after "equal to "
-    let quantity_start = if both {
-        lower
-            .find("are each equal to ") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-            .map(|p| p + "are each equal to ".len())
-    } else if power_only {
-        lower
-            .find("power is equal to ") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-            .map(|p| p + "power is equal to ".len())
-    } else {
-        lower
-            .find("toughness is equal to ") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-            .map(|p| p + "toughness is equal to ".len())
-    };
-    let quantity_text = &lower[quantity_start?..];
+    // Extract the quantity body through the shared word-boundary scanner.
+    let quantity_text = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        preceded(
+            alt((
+                tag::<_, _, OracleError<'_>>("are each equal to "),
+                tag("power is equal to "),
+                tag("toughness is equal to "),
+            )),
+            rest,
+        )
+        .parse(i)
+    })?;
 
     // Strip trailing clause for split P/T ("and its toughness is equal to...")
     let quantity_text = quantity_text
@@ -105,10 +116,26 @@ pub(crate) fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDef
 
     let qty = parse_cda_quantity(quantity_text)?;
 
+    // CR 604.3a + CR 613.4a + CR 613.4b: gated equality uses ordinary
+    // layer-7b setters; unconditional characteristic definitions use layer 7a.
+    let set_power = |value| {
+        if condition.is_some() {
+            ContinuousModification::SetPowerDynamic { value }
+        } else {
+            ContinuousModification::SetDynamicPower { value }
+        }
+    };
+    let set_toughness = |value| {
+        if condition.is_some() {
+            ContinuousModification::SetToughnessDynamic { value }
+        } else {
+            ContinuousModification::SetDynamicToughness { value }
+        }
+    };
     let mut modifications = Vec::new();
 
     if both {
-        modifications.push(ContinuousModification::SetDynamicPower { value: qty.clone() });
+        modifications.push(set_power(qty.clone()));
         // CR 208.2 + CR 613.4a: "... are each equal to <qty> and its toughness is
         // equal to that number plus N" (Subgoyf: */1+*). Power stays bare `qty`;
         // toughness takes the same "+N" offset the `power_only` branch applies,
@@ -121,32 +148,29 @@ pub(crate) fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDef
             },
             None => qty,
         };
-        modifications.push(ContinuousModification::SetDynamicToughness {
-            value: toughness_value,
-        });
+        modifications.push(set_toughness(toughness_value));
     } else if power_only {
-        modifications.push(ContinuousModification::SetDynamicPower { value: qty.clone() });
+        modifications.push(set_power(qty.clone()));
         // Check for split P/T: "and its toughness is equal to that number plus N"
         if let Some(offset) = parse_that_number_plus_offset(lower) {
-            modifications.push(ContinuousModification::SetDynamicToughness {
-                value: QuantityExpr::Offset {
-                    inner: Box::new(qty),
-                    offset,
-                },
-            });
+            modifications.push(set_toughness(QuantityExpr::Offset {
+                inner: Box::new(qty),
+                offset,
+            }));
         }
     } else {
         // toughness_only
-        modifications.push(ContinuousModification::SetDynamicToughness { value: qty });
+        modifications.push(set_toughness(qty));
     }
 
     let mut def = StaticDefinition::continuous()
         .affected(TargetFilter::SelfRef)
         .modifications(modifications)
-        .cda()
-        .description(text.to_string());
-    if let Some(cond) = timing_condition {
+        .description(description.to_string());
+    if let Some(cond) = condition {
         def = def.condition(cond);
+    } else {
+        def = def.cda();
     }
     Some(def)
 }

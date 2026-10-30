@@ -10,7 +10,10 @@
 //! The cap is deliberately generous — far above any realistic game state,
 //! including degenerate token-army boards — so it never rejects legitimate play;
 //! it only blocks payloads engineered to force large allocations/clones.
-use engine::types::actions::{DebugAction, DebugTokenRequest, GameAction, MAX_DEBUG_CREATE_COUNT};
+use engine::types::actions::{
+    DebugAction, DebugTokenRequest, GameAction, MAX_DEBUG_COUNTER_AMOUNT, MAX_DEBUG_CREATE_COUNT,
+    MAX_DEBUG_LIFE_AMOUNT,
+};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{ManaChoice, ProductionOverride};
 use engine::types::mana::{ManaRestriction, ManaSourceSelection, SpellCostCriterion};
@@ -401,6 +404,22 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         }
         DebugAction::RemoveKeyword { keyword, .. } => {
             bound_serialized_json("Debug.RemoveKeyword.keyword", keyword)?;
+        }
+        DebugAction::GainLife { amount, .. } | DebugAction::LoseLife { amount, .. } => {
+            if *amount > MAX_DEBUG_LIFE_AMOUNT {
+                return Err(format!(
+                    "Debug.LifeChange.amount {amount} exceeds the maximum {MAX_DEBUG_LIFE_AMOUNT}"
+                ));
+            }
+        }
+        // `counter_kind` is a unit-variant enum (a bounded scalar), so only the
+        // count needs a bound.
+        DebugAction::GivePlayerCounters { count, .. } | DebugAction::GiveEnergy { count, .. } => {
+            if *count > MAX_DEBUG_COUNTER_AMOUNT {
+                return Err(format!(
+                    "Debug.CounterGain.count {count} exceeds the maximum {MAX_DEBUG_COUNTER_AMOUNT}"
+                ));
+            }
         }
         DebugAction::MoveToZone { .. }
         | DebugAction::RemoveObject { .. }

@@ -352,5 +352,10 @@
   "deepLink": {
     "gameInProgressTitle": "Gra w toku",
     "gameInProgressBody": "Zakończ lub opuść bieżącą grę, a potem otwórz link ponownie."
+  },
+  "terminalRecovery": {
+    "finalViewsUnpublished": "Poddanie osiągnęło stan końcowy Full, ale nie udało się opublikować natywnych widoków końcowych.",
+    "concedeUnreconciled": "Nie udało się uzgodnić wyniku poddania; miejsce pozostaje zablokowane.",
+    "receiptUnsent": "Nie udało się wysłać trwałego potwierdzenia odbioru wyniku końcowego; oczekiwanie na ponowne dostarczenie"
   }
 }

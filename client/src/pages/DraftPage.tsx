@@ -780,6 +780,7 @@ export function DraftPage() {
                 onStartDraft={handleStartDraft}
                 defaultPackCount={setupMode === "sealed" ? SEALED_PACK_COUNT : DRAFT_PACK_COUNT}
                 fixedPackCount={setupMode === "sealed"}
+                showPickEnhancements={setupMode === "quick"}
                 startLabel={
                   setupMode === "sealed"
                     ? t("setSelector.startSealed")

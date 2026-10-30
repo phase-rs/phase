@@ -329,6 +329,8 @@ pub enum InteractionManaSpecialAction {
     RollPlanarDie,
     /// CR 116.2c: pay a continuous effect's printed termination cost to end it.
     EndContinuousEffect,
+    /// CR 116.2h: pay {2} to foretell a card from hand.
+    Foretell,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

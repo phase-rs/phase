@@ -67,7 +67,7 @@ fn a_morph_creature_is_offered_when_only_off_color_mana_can_pay_the_3() {
     scenario.at_phase(Phase::PreCombatMain);
     let morph = scenario
         .add_creature_to_hand(P0, "Ainok Survivalist", 2, 1)
-        .with_keyword(Keyword::Morph(green_morph_cost()))
+        .with_keyword(Keyword::morph(green_morph_cost()))
         .with_mana_cost(green_morph_cost())
         .id();
     for _ in 0..3 {
@@ -91,7 +91,7 @@ fn the_offered_off_color_cast_dispatches_face_down() {
     scenario.at_phase(Phase::PreCombatMain);
     let morph = scenario
         .add_creature_to_hand(P0, "Ainok Survivalist", 2, 1)
-        .with_keyword(Keyword::Morph(green_morph_cost()))
+        .with_keyword(Keyword::morph(green_morph_cost()))
         .with_mana_cost(green_morph_cost())
         .id();
     for _ in 0..3 {
@@ -125,7 +125,7 @@ fn kadena_makes_the_face_down_cast_offered_with_no_mana_at_all() {
     scenario.add_creature_from_oracle(P0, "Snake Sorcerer", 3, 3, KADENA_TEXT);
     let morph = scenario
         .add_creature_to_hand(P0, "Secret Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::morph(ManaCost::generic(4)))
         .with_mana_cost(ManaCost::generic(5))
         .id();
     let mut runner = scenario.build();
@@ -154,7 +154,7 @@ fn the_face_down_offer_respects_sorcery_speed_timing() {
     scenario.at_phase(Phase::DeclareBlockers);
     let morph = scenario
         .add_creature_to_hand(P0, "Ainok Survivalist", 2, 1)
-        .with_keyword(Keyword::Morph(green_morph_cost()))
+        .with_keyword(Keyword::morph(green_morph_cost()))
         .with_mana_cost(green_morph_cost())
         .id();
     for _ in 0..3 {
@@ -203,7 +203,7 @@ fn the_printed_cast_stays_offered_with_on_color_mana() {
     scenario.at_phase(Phase::PreCombatMain);
     let morph = scenario
         .add_creature_to_hand(P0, "Ainok Survivalist", 2, 1)
-        .with_keyword(Keyword::Morph(green_morph_cost()))
+        .with_keyword(Keyword::morph(green_morph_cost()))
         .with_mana_cost(green_morph_cost())
         .id();
     scenario.add_basic_land(P0, ManaColor::Green);

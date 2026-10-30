@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     AbilityDefinition, DelayedTriggerCondition, DelayedTriggerKind, Effect, EffectError,
     EffectKind, ManaProduction, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
@@ -668,6 +669,18 @@ pub fn resolve(
     // declared players no longer exist; carry them while that chain does.
     delayed_ability.context.outer_declared_players =
         crate::game::targeting::live_declared_players(state, ability);
+    // CR 400.7 + CR 603.7c: a delayed move of a tracked set's exiled members
+    // ("When that token leaves the battlefield, put the exiled card into your
+    // hand") affects only the objects exiled by the creating effect. A member
+    // that left exile and came back is a new object and is not affected, so pin
+    // each member to the incarnation it has now.
+    let target_pins = if target_pins.is_empty() {
+        tracked_set_id
+            .map(|real_id| tracked_exile_member_pins(state, &delayed_ability, real_id))
+            .unwrap_or_default()
+    } else {
+        target_pins
+    };
     delayed_ability.set_target_incarnations_recursive(target_pins);
     delayed_ability.set_unpinned_targets(snapshot_targets);
     // CR 608.2k: Give each clause that names an event-subject anaphor its own
@@ -712,7 +725,7 @@ pub fn resolve(
                 .iter()
                 .flatten()
                 .any(|filter| {
-                    crate::game::filter::filter_contains_filter_prop(filter, &|prop| {
+                    crate::types::ability::filter_contains_filter_prop(filter, &|prop| {
                         matches!(prop, crate::types::ability::FilterProp::IsChosenColor)
                     })
                 });
@@ -771,6 +784,36 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 400.7 + CR 603.7c: Incarnation pins for the members of the bound tracked
+/// set that currently sit in exile, when the delayed payload moves exactly that
+/// set out of exile. Empty for every other payload shape.
+fn tracked_exile_member_pins(
+    state: &GameState,
+    delayed_ability: &ResolvedAbility,
+    real_id: TrackedSetId,
+) -> Vec<crate::types::identifiers::ObjectIncarnationRef> {
+    let moves_bound_set_from_exile = matches!(
+        &delayed_ability.effect,
+        Effect::ChangeZoneAll {
+            origin: None | Some(Zone::Exile),
+            target: TargetFilter::TrackedSet { id },
+            ..
+        } if *id == real_id
+    );
+    if !moves_bound_set_from_exile {
+        return Vec::new();
+    }
+    state
+        .tracked_object_sets
+        .get(&real_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|object| object.zone == Zone::Exile)
+        .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+        .collect()
 }
 
 /// CR 603.7c + CR 608.2k + CR 400.7: Resolve one event-subject anaphor against
@@ -1347,8 +1390,8 @@ pub(crate) fn concrete_parent_target_filter(
 ///
 /// This mirrors the binder's recursion SHAPE — `And` / `Or` / `Not` and nothing
 /// else — not its decision set. The nearest existing walkers,
-/// `effects::filter_refs_parent_target` and
-/// `effects::filter_requires_parent_target_object`, answer a different question
+/// `types::ability::filter_refs_parent_target` and
+/// `types::ability::filter_requires_parent_target_object`, answer a different question
 /// (does this tree reference a parent, for target inheritance and snapshotting)
 /// and also descend into `TrackedSetFiltered` and `DistinctFrom`, which the
 /// binder never rewrites; reusing either would refuse installs that bind fine.
@@ -1886,7 +1929,7 @@ fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: Tra
 /// parent's chosen OBJECT, and is therefore a referent an incarnation pin can
 /// govern.
 ///
-/// Deliberately NARROWER than `effects::filter_refs_parent_target`, which also
+/// Deliberately NARROWER than `types::ability::filter_refs_parent_target`, which also
 /// admits `ParentTargetController` / `ParentTargetOwner`. Those derive a
 /// `TargetRef::Player`, not an object: under CR 608.2h they are built to
 /// survive the referent's departure (`ability_utils::parent_target_controller`
@@ -5502,6 +5545,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
 
@@ -6044,7 +6088,7 @@ mod tests {
     /// `filter_refs_parent_target` is a hard non-goal, and this is its guard.
     #[test]
     fn t_u4_parent_object_anaphor_is_narrower_than_parent_target() {
-        use crate::game::effects::filter_refs_parent_target;
+        use crate::types::ability::filter_refs_parent_target;
 
         // The two OBJECT anaphors ⇒ true.
         assert!(filter_refs_parent_object_anaphor(

@@ -12,6 +12,9 @@ const wasm = vi.hoisted(() => ({
   get_legal_actions_for_viewer_js: vi.fn(),
   resume_restored_game_state: vi.fn(),
   resume_multiplayer_host_state: vi.fn(),
+  load_card_database: vi.fn(),
+  classify_deck_js: vi.fn(),
+  deckSupplyForFormat: vi.fn(),
 }));
 vi.mock("@wasm/engine", () => ({ default: vi.fn(), ...wasm }));
 
@@ -77,6 +80,51 @@ describe("engine worker — requests", () => {
       expect(wasm.get_legal_actions_for_viewer_js).toHaveBeenCalledWith(3);
       expect(wasm.get_legal_actions_js).not.toHaveBeenCalled();
       expect(pick(resultOf(id)!.data)).toEqual({ viewer: 3 });
+    });
+  });
+
+  // Runs last: a successful load leaves the module-level database flag set.
+  describe("stateless queries", () => {
+    const send = async (data: Record<string, unknown>) =>
+      (fakeSelf.onmessage as (e: unknown) => unknown)({ data });
+    const responseTo = (id: number) =>
+      fakeSelf.postMessage.mock.calls.map(([m]) => m).find((m) => m.id === id);
+
+    afterEach(() => {
+      Object.values(wasm).forEach((fn) => fn.mockReset());
+    });
+
+    it("answers a query that reads no card database without one loaded", async () => {
+      wasm.deckSupplyForFormat.mockReturnValue({ kind: "PlayerDecks" });
+
+      await send({ type: "query", id: 1001, name: "deckSupplyForFormat", args: ["Standard"] });
+
+      expect(wasm.deckSupplyForFormat).toHaveBeenCalledWith("Standard");
+      expect(responseTo(1001)).toEqual({ type: "result", id: 1001, data: { kind: "PlayerDecks" } });
+    });
+
+    it("refuses a card-database query until a load returns cards", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("{}")));
+      const classify = { type: "query", name: "classifyDeck", args: [["Forest"]] };
+
+      await send({ ...classify, id: 1002 });
+      wasm.load_card_database.mockReturnValueOnce(0);
+      await send({ type: "loadCardDbFromUrl", id: 1003 });
+      await send({ ...classify, id: 1004 });
+
+      expect(responseTo(1002)?.type).toBe("error");
+      expect(responseTo(1003)).toMatchObject({ type: "error", message: expect.stringContaining("no cards loaded") });
+      expect(responseTo(1004)?.type).toBe("error");
+      expect(wasm.classify_deck_js).not.toHaveBeenCalled();
+
+      wasm.load_card_database.mockReturnValueOnce(5);
+      wasm.classify_deck_js.mockReturnValue({ archetype: "Ramp" });
+      await send({ type: "loadCardDbFromUrl", id: 1005 });
+      await send({ ...classify, id: 1006 });
+
+      expect(responseTo(1005)).toEqual({ type: "result", id: 1005, data: 5 });
+      expect(wasm.classify_deck_js).toHaveBeenCalledWith(["Forest"]);
+      expect(responseTo(1006)).toEqual({ type: "result", id: 1006, data: { archetype: "Ramp" } });
     });
   });
 });

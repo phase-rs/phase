@@ -1550,3 +1550,51 @@ fn fixed_point_shield_is_continuous_not_one_shot() {
         "CR 614.6: neither planeswalk happened — no rotation"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Planar controller concedes: the handoff planeswalk triggers once
+// ---------------------------------------------------------------------------
+
+/// CR 901.10 + CR 901.11 + CR 603.2c: the planar controller concedes, so their
+/// plane leaves the game and the next player planeswalks to the top of the
+/// planar deck. The handoff collects that planeswalk's triggers itself; the
+/// concession's own collection of the departure's events must not collect them
+/// again.
+///
+/// REVERT-FAILING: without the handoff claiming its planeswalk, the arriving
+/// plane's "when you planeswalk to" ability is queued twice.
+#[test]
+fn planar_controller_concession_collects_the_handoff_planeswalk_once() {
+    let mut state = GameState::new(FormatConfig::planechase(), 3, 7);
+    let p0 = PlayerId(0);
+    let plane_a = synthesized_planar_face(CoreType::Plane, vec![], vec![]);
+    let plane_b = synthesized_planar_face(CoreType::Plane, vec![planeswalked_to_trigger()], vec![]);
+    let (active_id, deck_ids) = setup_planechase(
+        &mut state,
+        p0,
+        ("Plane A", &plane_a),
+        &[("Plane B", &plane_b)],
+    );
+    let arriving_id = deck_ids[0];
+
+    let mut events = Vec::new();
+    crate::game::elimination::concede(&mut state, p0, &mut events);
+
+    // Reach guard: the handoff planeswalked away from the departed player's plane.
+    assert!(!state.command_zone.contains(&active_id));
+    assert_eq!(state.planar_controller, Some(PlayerId(1)));
+    let queued = state
+        .deferred_triggers
+        .iter()
+        .filter(|d| d.pending.source_id == arriving_id)
+        .count()
+        + state
+            .stack
+            .iter()
+            .filter(|entry| entry.source_id == arriving_id)
+            .count();
+    assert_eq!(
+        queued, 1,
+        "the planeswalk-to trigger from {arriving_id:?} is collected exactly once"
+    );
+}

@@ -30,7 +30,9 @@ use super::super::oracle_target::{
     parse_target_with_ctx, parse_target_with_syntax, parse_that_clause_suffix,
     parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, TargetSyntax,
 };
-use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
+use super::super::oracle_util::{
+    parse_comparator_prefix, parse_count_expr, parse_count_expr_combinator, strip_after, TextPair,
+};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -50,7 +52,7 @@ use crate::types::ability::{
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
 use crate::types::counter::CounterType;
-use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
+use crate::types::game_state_kinds::{DistributionUnit, TargetSelectionConstraint};
 use crate::types::phase::Phase;
 use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::zones::{EtbTapState, Zone};
@@ -64,7 +66,7 @@ use super::{
     parse_for_each_object_copy_parts, refine_damage_target_remainder, replace_player_anaphor,
     scan_contains_phrase, target_filter_controller_ref, ParsedEffectClause,
 };
-use crate::game::effects::effect::generic_effect_population_filter;
+use crate::types::ability::generic_effect_population_filter;
 
 pub(super) fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
     replace_player_anaphor(def.effect.as_mut(), || TargetFilter::ParentTarget);
@@ -905,6 +907,7 @@ pub(super) fn normalize_linked_exile_cast_bottom_cleanup(effect: &mut Effect) {
         ref mut target,
         ref mut count,
         position,
+        arranger: _,
     } = effect
     {
         if matches!(position, LibraryPosition::Bottom) {
@@ -976,6 +979,7 @@ pub(super) fn normalize_exile_until_cast_bottom_cleanup(effect: &mut Effect) {
         ref mut target,
         ref mut count,
         position,
+        arranger: _,
     } = effect
     {
         if matches!(position, LibraryPosition::Bottom) {
@@ -1023,6 +1027,7 @@ pub(super) fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
             target: TargetFilter::ParentTarget,
             count: QuantityExpr::Fixed { value: 1 },
             position,
+            arranger: None,
         },
         SpellStackToGraveyardReplacement::Hand => Effect::ChangeZone {
             destination: Zone::Hand,
@@ -1438,6 +1443,7 @@ mod linked_exile_cleanup_tests {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Bottom,
+            arranger: None,
         }
     }
 
@@ -2431,7 +2437,7 @@ pub(super) fn target_choice_timing_for_parsed(
             target,
             selection: _,
         } if attachment.is_context_ref()
-            && crate::game::ability_utils::attach_host_filter_needs_target_slot(target)
+            && crate::types::ability::attach_host_filter_needs_target_slot(target)
             && target.denotes_battlefield_objects()
             && nom_primitives::scan_contains(&lower, "attach ") =>
         {
@@ -2499,7 +2505,7 @@ pub(super) fn target_choice_timing_for_parsed(
             && parsed.multi_target.is_none()
             && parsed.distribute.is_none()
             && !nom_primitives::scan_contains(&lower, "target ")
-            && crate::game::effects::deal_damage::names_resolution_chosen_recipient(target)
+            && crate::types::ability::names_resolution_chosen_recipient(target)
         {
             return TargetChoiceTiming::Resolution;
         }
@@ -3714,6 +3720,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             target,
             owner,
             enters_attacking,
+            attack_destination,
             tapped,
             extra_keywords,
             additional_modifications,
@@ -3723,6 +3730,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             owner: owner.clone(),
             source_filter: None,
             enters_attacking: *enters_attacking,
+            attack_destination: attack_destination.clone(),
             tapped: *tapped,
             count: count.clone(),
             extra_keywords: extra_keywords.clone(),
@@ -3739,6 +3747,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             owner,
             attach_to,
             enters_attacking,
+            attack_destination,
             supertypes,
             static_abilities,
             enter_with_counters,
@@ -3755,6 +3764,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             owner: owner.clone(),
             attach_to: attach_to.clone(),
             enters_attacking: *enters_attacking,
+            attack_destination: attack_destination.clone(),
             supertypes: supertypes.clone(),
             static_abilities: static_abilities.clone(),
             enter_with_counters: enter_with_counters.clone(),
@@ -5427,10 +5437,11 @@ pub(super) fn strip_optional_effect_prefix(
 /// much as possible" rule. On success returns the suffix-free head; the
 /// match itself confirms the difference-repeat pattern.
 ///
-/// `strip_repeat_count_suffix` only recognizes numeric / `twice` / `three
-/// times` repeats via `parse_count_expr`, so this dedicated combinator owns
-/// the difference variant — it both detects and consumes the full suffix in
-/// one `terminated(take_until(..), tag(..))` operation.
+/// `strip_repeat_count_suffix` only peels a clause-final `twice` /
+/// `<count> times` repeat (any `parse_count_expr` count before "times"); this
+/// suffix ends in "the difference", not "times", so this dedicated combinator
+/// owns the difference variant — it both detects and consumes the full suffix
+/// in one `terminated(take_until(..), tag(..))` operation.
 pub(super) fn split_difference_repeat_suffix(text: &str) -> Option<&str> {
     const SUFFIX: &str = " a number of times equal to the difference";
     nom::sequence::terminated(take_until::<_, _, OracleError<'_>>(SUFFIX), tag(SUFFIX))
@@ -5973,48 +5984,46 @@ pub(super) fn for_each_repeatable_repeat_for(text: &str) -> Option<QuantityExpr>
     }
 }
 
-/// CR 107.1: Strip "twice" / "three times" / "N times" suffix to produce a
-/// `repeat_for` count — an integer repeat multiplier (count templating), not the
-/// CR 609.3 "do as much as possible" rule. Unified with `strip_for_each_prefix`
-/// at the chain level so the base action is parsed normally and the resolver
-/// loops it N times.
+/// CR 608.2c + CR 608.2h + CR 107.1: Strip a trailing "twice" / "<count> times"
+/// repeat count to produce a `repeat_for` count, where `<count>` is any
+/// [`parse_count_expr`] phrase — a literal ("three times"), `X` ("X times"), the
+/// anaphoric "that many" (→ `EventContextAmount`, "investigate that many
+/// times"), or a composition ("twice that many times"). The count is an integer
+/// repeat multiplier (count templating), not the CR 609.3 "do as much as
+/// possible" rule; it is determined once when the effect applies (CR 608.2h).
+/// Unified with `strip_for_each_prefix` at the chain level so the base action is
+/// parsed normally and the resolver loops it N times.
+///
+/// The clause must end immediately after "times" / "twice" (no trailing period
+/// or rider), and an empty base ("three times" on its own) is not a repeat.
 pub(crate) fn strip_repeat_count_suffix(text: &str) -> (Option<QuantityExpr>, String) {
     let lower = text.to_lowercase();
-    let suffixes: &[(&str, i32)] = &[
-        (" twice", 2),
-        (" three times", 3),
-        (" four times", 4),
-        (" five times", 5),
-    ];
-    for &(suffix, count) in suffixes {
-        if let Ok((_, base)) = terminated(
-            take_until::<_, _, OracleError<'_>>(suffix),
-            nom::combinator::all_consuming(tag(suffix)),
-        )
-        .parse(lower.as_str())
-        {
-            return (
-                Some(QuantityExpr::Fixed { value: count }),
-                text[..base.len()].to_string(),
-            );
-        }
+    let Some((before, quantity, _)) =
+        nom_primitives::scan_preceded(lower.as_str(), parse_repeat_count_tail)
+    else {
+        return (None, text.to_string());
+    };
+    // Lowercasing preserves byte length for the Oracle corpus (as in
+    // `split_for_each_suffix`), so the lowercase prefix length indexes the
+    // original-case text; `get` keeps a non-boundary offset from panicking.
+    match text.get(..before.len()).map(str::trim_end) {
+        Some(base) if !base.is_empty() => (Some(quantity), base.to_string()),
+        _ => (None, text.to_string()),
     }
-    if let Ok((_, base)) = terminated(
-        take_until::<_, _, OracleError<'_>>(" times"),
-        nom::combinator::all_consuming(tag(" times")),
-    )
-    .parse(lower.as_str())
-    {
-        if let Some(space_idx) = base.rfind(' ') {
-            let qty_text = text[space_idx + 1..text.len() - " times".len()].trim();
-            if let Some((qty, remainder)) = parse_count_expr(qty_text) {
-                if remainder.trim().is_empty() {
-                    return (Some(qty), text[..space_idx].to_string());
-                }
-            }
-        }
-    }
-    (None, text.to_string())
+}
+
+/// CR 608.2c + CR 107.1: the repeat-count tail of a clause — `<count> times` or
+/// `twice`, each arm anchored at end of input. Each arm carries its own `eof`, so
+/// the alternatives are order-independent: the bare "twice" arm cannot succeed on
+/// the prefix of a composed "twice that many times" (which the count arm parses as
+/// `Multiply { 2, EventContextAmount }`), and `alt` never settles on a partial
+/// match that a later end check would reject.
+fn parse_repeat_count_tail(input: &str) -> OracleResult<'_, QuantityExpr> {
+    alt((
+        terminated(parse_count_expr_combinator, (tag("times"), eof)),
+        value(QuantityExpr::Fixed { value: 2 }, (tag("twice"), eof)),
+    ))
+    .parse(input)
 }
 
 /// Strip "each player/opponent [verb]s" subject prefix.
@@ -13971,8 +13980,9 @@ mod tests {
         parse_where_x_quantity_expression_with_owner,
         patch_choose_from_zone_counter_continuation_target, relink_gated_token_referent_consumers,
         relink_gated_tracked_set_consumers, strip_redundant_flip_win_quantifier,
-        strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
-        strip_terminal_where_x, strip_trailing_duration, strip_trailing_where_x,
+        strip_repeat_count_suffix, strip_return_destination_ext_with_remainder,
+        strip_temporal_prefix, strip_temporal_suffix, strip_terminal_where_x,
+        strip_trailing_duration, strip_trailing_where_x,
         value_quantity_clause_owns_this_turn_suffix, ControlClausePossessor,
     };
     use crate::parser::oracle_ir::ast::parsed_clause;
@@ -14092,6 +14102,88 @@ mod tests {
     use crate::types::triggers::{PlaneswalkRole, TriggerMode};
     use crate::types::zones::Zone;
 
+    /// CR 608.2c + CR 608.2h + CR 107.1: the repeat-count suffix admits every
+    /// `parse_count_expr` phrase before "times" (including the multi-word
+    /// anaphoric "that many" and compositions), keeps the pre-existing literal /
+    /// `X` / "twice" forms identical, and rejects non-count words before "times".
+    #[test]
+    fn strip_repeat_count_suffix_count_phrase_matrix() {
+        let that_many = || QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        // New multi-word count phrases (the "investigate that many times" class).
+        for (text, quantity, base) in [
+            ("investigate that many times", that_many(), "investigate"),
+            ("incubate 2 that many times", that_many(), "incubate 2"),
+            (
+                "investigate twice that many times",
+                QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(that_many()),
+                },
+                "investigate",
+            ),
+            // Pre-existing forms stay identical (base keeps original case).
+            (
+                "investigate twice",
+                QuantityExpr::Fixed { value: 2 },
+                "investigate",
+            ),
+            (
+                "investigate three times",
+                QuantityExpr::Fixed { value: 3 },
+                "investigate",
+            ),
+            (
+                "Investigate X times",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                "Investigate",
+            ),
+            (
+                "incubate 3 X times",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                "incubate 3",
+            ),
+            (
+                "Incubate 2 five times",
+                QuantityExpr::Fixed { value: 5 },
+                "Incubate 2",
+            ),
+            ("scry 2 twice", QuantityExpr::Fixed { value: 2 }, "scry 2"),
+        ] {
+            assert_eq!(
+                strip_repeat_count_suffix(text),
+                (Some(quantity), base.to_string()),
+                "{text:?} must peel its trailing repeat count",
+            );
+        }
+        // Non-count words before "times", an unterminated phrase, an empty base,
+        // and a trailing period are not repeat suffixes — the text is returned
+        // unchanged. The positives above prove the scanner fires.
+        for text in [
+            "repeat this process two more times",
+            "you may activate this ability any number of times",
+            "flip a coin that many times or until you lose a flip",
+            "investigate that many",
+            "three times",
+            "investigate that many times.",
+        ] {
+            assert_eq!(
+                strip_repeat_count_suffix(text),
+                (None, text.to_string()),
+                "{text:?} must not peel a repeat count",
+            );
+        }
+    }
+
     #[test]
     fn strip_redundant_flip_win_quantifier_accepts_number_and_tense_variants() {
         for prefix in [
@@ -14161,6 +14253,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -14271,6 +14365,7 @@ mod tests {
                     chooser: Chooser::Controller.into(),
                     candidate_source: ZoneChoiceCandidateSource::Legacy,
                     reciprocal_role: None,
+                    gather_role: None,
                     up_to: false,
                     constraint: None,
                     selection: CardSelectionMode::Chosen,
@@ -14367,6 +14462,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: CardSelectionMode::Chosen,
                 constraint: None,
@@ -14880,7 +14976,7 @@ mod tests {
     #[test]
     fn distribute_damage_power_equal_pattern() {
         // Gap 1: "damage equal to its power" — Pattern B where qty follows "damage equal to"
-        use crate::types::game_state::DistributionUnit;
+        use crate::types::game_state_kinds::DistributionUnit;
         let text = "deal damage equal to its power divided as you choose among any number of target creatures and/or players";
         let lower = text.to_lowercase();
         let clause = super::try_parse_distribute_damage(&lower, text).expect("Gap 1 should parse");
@@ -14895,7 +14991,7 @@ mod tests {
     #[test]
     fn distribute_counters_third_person_predicate() {
         // Gap 2: "distributes" (3rd-person) verb after subject stripping
-        use crate::types::game_state::DistributionUnit;
+        use crate::types::game_state_kinds::DistributionUnit;
         let text = "distributes 3 +1/+1 counters among any number of target creatures you control";
         let lower = text.to_lowercase();
         let clause =
@@ -14912,7 +15008,7 @@ mod tests {
     fn distribute_prevent_damage_fixed() {
         // Gap 3: fixed-N prevent-divide
         use crate::types::ability::PreventionAmount;
-        use crate::types::game_state::DistributionUnit;
+        use crate::types::game_state_kinds::DistributionUnit;
         let text =
             "prevent the next 5 damage divided as you choose among any number of target creatures";
         let clause = super::try_parse_prevent_distribute(text).expect("Gap 3 should parse");
@@ -15424,6 +15520,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: true,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -16432,7 +16530,7 @@ mod where_x_tests {
     #[test]
     fn apply_where_x_to_target_constraint_binds_total_mana_value_cap() {
         use crate::types::ability::Comparator;
-        use crate::types::game_state::TargetSelectionConstraint;
+        use crate::types::game_state_kinds::TargetSelectionConstraint;
 
         let mut constraint = TargetSelectionConstraint::TotalManaValue {
             comparator: Comparator::LE,
@@ -16464,7 +16562,7 @@ mod where_x_tests {
     #[test]
     fn parse_total_mana_value_target_constraint_preserves_fixed_cap() {
         use crate::types::ability::Comparator;
-        use crate::types::game_state::TargetSelectionConstraint;
+        use crate::types::game_state_kinds::TargetSelectionConstraint;
 
         assert_eq!(
             super::parse_total_mana_value_target_constraint(
@@ -16492,7 +16590,7 @@ mod where_x_tests {
     /// Constraints without a quantity bound are left untouched.
     #[test]
     fn apply_where_x_to_target_constraint_leaves_non_quantity_unchanged() {
-        use crate::types::game_state::TargetSelectionConstraint;
+        use crate::types::game_state_kinds::TargetSelectionConstraint;
 
         let mut constraint = TargetSelectionConstraint::DifferentObjectControllers;
         let mut unbound = None;
@@ -16760,6 +16858,7 @@ mod where_x_tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -17088,6 +17187,89 @@ mod token_anaphor_rewrite_tests {
             }
             other => panic!("expected GenericEffect, got {other:?}"),
         }
+    }
+
+    /// CR 508.4: "create two of those tokens" rebuilds the antecedent token
+    /// with the new count and keeps the defender the antecedent named.
+    #[test]
+    fn those_tokens_rewrite_keeps_the_antecedent_attack_destination() {
+        use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
+
+        let destination = TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope: NamedDefenderScope::Player,
+        };
+        let antecedent = Effect::Token {
+            name: "Goblin".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), "Goblin".to_string()],
+            colors: Vec::new(),
+            keywords: Vec::new(),
+            tapped: true,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: true,
+            attack_destination: destination.clone(),
+            supertypes: Vec::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+        };
+        let mut cur = Effect::unimplemented("create", "create two of those tokens");
+        rewrite_those_tokens_from_antecedent(&mut cur, &antecedent);
+        let Effect::Token {
+            count,
+            attack_destination,
+            ..
+        } = cur
+        else {
+            panic!("the rewrite builds a Token, got {cur:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Fixed { value: 2 },
+            "reach guard: the rewrite ran"
+        );
+        assert_eq!(attack_destination, destination);
+    }
+
+    /// CR 508.4: the same rewrite over a copy-token antecedent.
+    #[test]
+    fn those_tokens_rewrite_keeps_the_copy_antecedent_attack_destination() {
+        use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
+
+        let destination = TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope: NamedDefenderScope::Player,
+        };
+        let antecedent = Effect::CopyTokenOf {
+            target: TargetFilter::ParentTarget,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: true,
+            attack_destination: destination.clone(),
+            tapped: true,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: Vec::new(),
+            additional_modifications: Vec::new(),
+        };
+        let mut cur = Effect::unimplemented("create", "create two of those tokens");
+        rewrite_those_tokens_from_antecedent(&mut cur, &antecedent);
+        let Effect::CopyTokenOf {
+            count,
+            attack_destination,
+            ..
+        } = cur
+        else {
+            panic!("the rewrite builds a CopyTokenOf, got {cur:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Fixed { value: 2 },
+            "reach guard: the rewrite ran"
+        );
+        assert_eq!(attack_destination, destination);
     }
 }
 

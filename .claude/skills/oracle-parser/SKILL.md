@@ -144,7 +144,7 @@ ParsedAbilities                 — abilities / triggers / statics / replacement
                                   keywords / casting options + parse_warnings
 ```
 
-**`OracleSourceSpan` precision** (`doc.rs`) is typed, and honest about what it knows:
+**`OracleSourceSpan` precision** (`types/oracle_diagnostic.rs`) is typed, and honest about what it knows:
 
 | `SpanPrecision` | Meaning |
 |---|---|
@@ -195,9 +195,9 @@ Per-line classification inside `parse_oracle_ir` (simplified; §3 has the full s
 | Sub-module | Purpose |
 |-----------|---------|
 | `ast.rs` | All parser AST types (`ParsedEffectClause`, `ClauseAst`, modal/loyalty AST — moved here from `oracle_effect/types.rs`, `oracle_modal.rs`, `oracle.rs`) |
-| `doc.rs` | Document-level IR: `OracleDocIr`, `OracleItemIr`, `OracleNodeIr`, `OracleItemId`, `OracleUnitSource`, `OracleSourceSpan`/`SpanPrecision`, `DocumentRelationIr`, `OracleDocBuilder`, `PrintedTriggerIndex` |
+| `doc.rs` | Document-level IR: `OracleDocIr`, `OracleItemIr`, `OracleNodeIr`, `OracleUnitSource`, `DocumentRelationIr`, `OracleDocBuilder`, `PrintedTriggerIndex`; `OracleItemId` and `OracleSourceSpan`/`SpanPrecision` are re-exported from `types/oracle_diagnostic.rs` |
 | `context.rs` | `ParseContext` for stateful parsing (subject, actor, card_name, host_self_reference, …) |
-| `diagnostic.rs` | `OracleDiagnostic` — structured parse warnings |
+| `diagnostic.rs` | Re-exports the `OracleDiagnostic` data family (structured parse warnings) from `types/oracle_diagnostic.rs`; its producers stay in the parser (`swallow_check.rs`, `oracle_effect/gap_diagnosis.rs`, `ParseContext::push_diagnostic`) |
 | `effect_chain.rs` | `EffectChainIr`, `ClauseIr` + **typed clause provenance** (`ClauseId`, `ClauseDisposition`, antecedents, reference uses) and the mandatory `ClauseIrBuilder` |
 | `trigger.rs` | `TriggerIr` + lowering |
 | `static_ir.rs` | `StaticIr` + lowering |
@@ -322,6 +322,8 @@ All parser branches delegate atomic parsing to shared nom 8.0 combinators:
 | `bridge.rs` | `nom_on_lower`, `nom_on_lower_required`, `nom_parse_lower` — mixed-case bridging |
 | `enchant.rs` | "Enchant {filter}" attachment-restriction combinators |
 | `return_as_aura.rs` | "return ~ ... attached to" / return-as-Aura combinators |
+
+The leaf combinators that `Keyword` decoding needs (`parse_number`, `parse_color`, `parse_subtype`, `parse_zone_filter`, `parse_property_filter`, the enchant legs, `OracleResult`/`OracleError`, …) are defined in `crates/engine/src/types/text_grammar.rs`. Every one that parser code still calls is re-exported at its old parser path; call it by that path. The ones no parser code calls have no parser path: the English-number legs (including `parse_article_number`; reach them through `parse_number`), the other private helpers, and `parse_enchant_player_base`. The nom mandate and the combinator gate bind the new file.
 
 ### Two-Phase Parse/Lower Architecture (clause level)
 
@@ -781,7 +783,7 @@ public `parse_static_line()` (two-phase: `parse_static_line_ir` →
 
 | Module | What Lives Here | Use When |
 |--------|----------------|----------|
-| `oracle_nom/primitives.rs` | Numbers (digits, English words, articles), mana symbols/costs, colors, counter types, P/T modifiers, roman numerals, `parse_article_number` (word-boundary guard — prevents "another" → "a"), `scan_at_word_boundaries`, `scan_contains` | Parsing any atomic Oracle text element |
+| `oracle_nom/primitives.rs` | Numbers (digits, English words, articles), mana symbols/costs, colors, counter types, P/T modifiers, roman numerals, `parse_number`'s article arm (word-boundary guard — prevents "another" → "a"; the private `parse_article_number` is defined in `types/text_grammar.rs`), `scan_at_word_boundaries`, `scan_contains` | Parsing any atomic Oracle text element |
 | `oracle_nom/target.rs` | Target phrase combinators, controller suffix, color prefix, combat status, self-reference, event-context refs | Parsing "target X" or type descriptions in nom pipelines |
 | `oracle_nom/quantity.rs` | Quantity expressions, quantity refs, "equal to" patterns, "for each" patterns | Parsing counts and dynamic amounts in nom pipelines |
 | `oracle_nom/duration.rs` | Duration phrase combinators (`parse_duration`, `parse_optional_duration`, `parse_cast_snapshot_suffix`) | Parsing inline duration phrases in nom pipelines — but see the duration doctrine below for where NEW duration patterns go |
