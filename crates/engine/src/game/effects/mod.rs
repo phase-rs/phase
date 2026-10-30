@@ -7588,10 +7588,22 @@ fn detach_after_player_scope_local_chain(
             .player_scope
             .as_ref()
             .is_none_or(|child_scope| child_scope == scope || next_has_aggregate_payer_scope);
+    // CR 608.2e + CR 608.2i: a co-scoped look-back at the preceding action's
+    // table-wide result starts only after that action finishes for every player.
+    // The same acting player does not make the aggregate a per-player result.
+    let mut reads_completed_action = false;
+    next.effect.for_each_quantity_expr(&mut |quantity| {
+        reads_completed_action |= quantity.any_ref(&mut |reference| {
+            matches!(reference, QuantityRef::PreviousEffectAmount { .. })
+        });
+    });
+    let next_reads_completed_scope =
+        next.player_scope.as_ref() == Some(scope) && reads_completed_action;
     let next_is_local_continuation = next.sub_link == SubAbilityLink::ContinuationStep
         && (next_has_iteration_bound_actor
             || is_player_scope_local_continuation(&node.effect, &next.effect, scope))
-        && !next_is_scoped_search_shuffle_tail;
+        && !next_is_scoped_search_shuffle_tail
+        && !next_reads_completed_scope;
     if next_is_performed_gated
         || next_is_zone_change_this_way_gated
         || next_is_co_scoped_anaphoric_consumer
@@ -12864,7 +12876,15 @@ pub(crate) fn optional_prompt_player(
         }
     }
 
-    Some(ability.controller)
+    // CR 109.5 + CR 608.2d: without an explicitly named announcer, a marked
+    // "you may have <patient> ..." choice belongs to the printed controller,
+    // not to the player now carrying out the inner instruction. Legacy
+    // unmarked scoped instructions retain their existing acting-seat fallback.
+    Some(if ability.instruction_actor.is_some() {
+        ability.original_controller.unwrap_or(ability.controller)
+    } else {
+        ability.controller
+    })
 }
 
 fn ability_with_event_context_targets(
@@ -41866,6 +41886,23 @@ mod tests {
             detached.player_scope,
             Some(PlayerFilter::All),
             "the detached Draw keeps its own player_scope so it fans out post-all-reveals"
+        );
+        aggregate
+            .sub_ability
+            .as_mut()
+            .expect("the original aggregate consumer")
+            .instruction_actor = Some(ControllerRef::ScopedPlayer.into());
+        let (marked_scope, marked_tail) = split_player_scope_chain(&aggregate, &PlayerFilter::All);
+        assert!(
+            marked_scope.sub_ability.is_none(),
+            "an explicit scoped actor cannot pull the completed-action aggregate into its producer"
+        );
+        assert_eq!(
+            marked_tail
+                .expect("the marked aggregate still detaches")
+                .player_scope,
+            Some(PlayerFilter::All),
+            "the marked aggregate starts its own all-player action"
         );
 
         // Choose(CreatureType) → ChangeZone(graveyard return), all scope=All

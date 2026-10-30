@@ -1,6 +1,6 @@
 ---
 source: crates/engine/tests/integration/oracle_parser.rs
-assertion_line: 796
+assertion_line: 983
 expression: result
 ---
 {
@@ -97,6 +97,7 @@ expression: result
                               "type": "Controller"
                             }
                           },
+                          "instruction_actor": "You",
                           "cost": null,
                           "sub_ability": null,
                           "duration": null,

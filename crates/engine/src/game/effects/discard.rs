@@ -375,26 +375,23 @@ pub fn resolve(
     //   - Sonic Shrieker: "they discard a card" forwards the damaged PLAYER
     //     via `ParentTarget` (hence `object_bound_discard`), not a chosen
     //     card — same as the Player case above, just via a different filter.
-    // The ORIGINAL (pre-#4950) code gated on `!specific_targets.is_empty()`,
-    // which correctly sent all four shapes above to the generic path — but
-    // that ALSO sent Thoughtseize's empty-reveal case there, force-discarding
-    // an unrelated card whenever hand size happened to equal the discard
-    // count. The one bit those four PLAYER-scoped shapes never carry, and
-    // that Thoughtseize's empty-reveal case DOES, is a
-    // `parent_target_missing_reason` of `RevealHandChoice` — stamped ONLY by
-    // `apply_parent_chain_context` immediately after a `RevealHand`
-    // reveal-choice whose eligible set was empty (see
-    // `GameState::last_parent_target_missing_reason`). So: enter the specific-
-    // targets loop (a no-op when `specific_targets` is empty, which IS the
-    // desired Thoughtseize behavior) whenever either the original condition
-    // holds, OR the parent reveal-choice explicitly found nothing to choose.
-    // Any OTHER empty-`specific_targets`, declared/object-bound discard falls
-    // through to the generic hand-choice/random path below, exactly as
-    // before #4950's broken fix.
+    // `RevealHandChoice` preserves the legacy empty-choice publication, even
+    // for an ordinary `Discard` carrier. The specific-card `DiscardCard`
+    // anaphor below also covers a producer that never reached its card choice
+    // (an unsupported counted reveal, for example), so no publication exists.
+    // An ordinary player-directed `Discard` without that empty-choice marker
+    // still uses the generic hand-choice/random path.
     let parent_reveal_choice_found_nothing =
         ability.parent_target_missing_reason == Some(ParentTargetMissingReason::RevealHandChoice);
+    // CR 608.2c + CR 609.3: the typed "discard that card/those cards/it"
+    // instruction names a specific object. If its producer selected no hand
+    // card, it cannot replace that missing object with an unrelated hand choice.
+    // Ordinary player-directed `Discard` still chooses cards from that hand.
+    let explicit_card_back_reference =
+        matches!(ability.effect, Effect::DiscardCard { .. }) && object_bound_discard;
     if (!specific_targets.is_empty() && (declared_target_discard || object_bound_discard))
         || (object_bound_discard && parent_reveal_choice_found_nothing)
+        || explicit_card_back_reference
     {
         // Discard specific targeted cards
         for (index, obj_id) in specific_targets.iter().copied().enumerate() {
@@ -409,10 +406,11 @@ pub fn resolve(
 
             // CR 701.9a + CR 609.3: Tamiyo, Collector of Tales class — an
             // opponent's spell or ability can't force the protected player to
-            // discard ANY card, regardless of which one.
+            // discard ANY card, regardless of which one. CR 113.8: rebinding
+            // the acting player does not change the causing ability's controller.
             if crate::game::static_abilities::forced_action_muzzled(
                 state,
-                ability.controller,
+                ability.original_controller.unwrap_or(ability.controller),
                 player_id,
                 crate::types::ability::CostCategory::Discards,
             ) {
@@ -562,7 +560,7 @@ pub fn resolve(
         // discard simply discards zero.
         if crate::game::static_abilities::forced_action_muzzled(
             state,
-            ability.controller,
+            ability.original_controller.unwrap_or(ability.controller),
             discard_player,
             crate::types::ability::CostCategory::Discards,
         ) {

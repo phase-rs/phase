@@ -476,9 +476,11 @@ pub fn resolve(
                             // Tajuru Preserver class — an opponent's spell or
                             // ability can't force the protected player to
                             // sacrifice ANY permanent, regardless of which one.
+                            // CR 113.8: the cause retains its original controller,
+                            // independently of the player doing the sacrificing.
                             && !crate::game::static_abilities::forced_action_muzzled(
                                 state,
-                                ability.controller,
+                                ability.original_controller.unwrap_or(ability.controller),
                                 chooser,
                                 crate::types::ability::CostCategory::SacrificesPermanent,
                             )
@@ -659,7 +661,7 @@ pub fn resolve(
         // player to sacrifice ANY permanent, regardless of which one.
         if crate::game::static_abilities::forced_action_muzzled(
             state,
-            ability.controller,
+            ability.original_controller.unwrap_or(ability.controller),
             player_id,
             crate::types::ability::CostCategory::SacrificesPermanent,
         ) {

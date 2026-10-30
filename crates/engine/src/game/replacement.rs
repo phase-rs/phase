@@ -9818,6 +9818,11 @@ fn apply_single_replacement(
     let ability_controller =
         repl_def_ref.map(|def| replacement_ability_controller(state, rid, def));
 
+    // CR 614.6: suppressing the original event's delivery does not change
+    // the amount its replacement continuation refers to. Capture it before
+    // the replacement metadata can zero a substituted draw or token count.
+    let proposed_amount = replacement_event_amount(&proposed);
+
     // Extract replacement metadata before mutably borrowing state for the applier.
     // CR 614.1c: ProposedEvent modifiers (enter_tapped, ETB counters, zone redirect)
     // come from whichever branch is being applied — `execute` on accept / mandatory,
@@ -10141,6 +10146,12 @@ fn apply_single_replacement(
                 // single authority for this event, so suppress the generic stash.
                 let post_effect =
                     post_effect.filter(|_| !matches!(proposed, ProposedEvent::Explore { .. }));
+                // CR 614.1e + CR 708.11: the turn-face-up applier already runs
+                // the full replacement chain while turning the permanent up.
+                // A generic post-effect would repeat that chain, duplicating
+                // counters or parking the same interactive choice a second time.
+                let post_effect =
+                    post_effect.filter(|_| !matches!(proposed, ProposedEvent::TurnFaceUp { .. }));
                 // CR 614.12a: an as-enters choice was made before the permanent
                 // enters (`as_enters_named_choice` parks every apply site first);
                 // its answer rides the event's `enter_with_choices`, so there is
@@ -10249,7 +10260,6 @@ fn apply_single_replacement(
 
     if let Some(handler) = registry.get(&event_key) {
         let event_type = event_key.to_string();
-        let proposed_amount = replacement_event_amount(&proposed);
         let replaced_damage = matches!(proposed, ProposedEvent::Damage { .. });
         let optional_post =
             repl_def_ref.is_some_and(|definition| replacement_mode_is_optional(&definition.mode));

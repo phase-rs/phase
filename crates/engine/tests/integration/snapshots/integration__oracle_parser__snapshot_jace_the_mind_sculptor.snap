@@ -1,5 +1,6 @@
 ---
 source: crates/engine/tests/integration/oracle_parser.rs
+assertion_line: 377
 expression: result
 ---
 {
@@ -207,6 +208,7 @@ expression: result
             "type": "TerminalShuffle"
           }
         },
+        "instruction_actor": "ParentTargetController",
         "cost": null,
         "sub_ability": {
           "kind": "Spell",
@@ -216,6 +218,7 @@ expression: result
               "type": "ParentTargetController"
             }
           },
+          "instruction_actor": "ParentTargetController",
           "cost": null,
           "sub_ability": null,
           "duration": null,

@@ -1145,7 +1145,7 @@ fn iroh_declined_creates_no_ally() {
     runner.advance_to_phase(Phase::BeginCombat);
     let events = drive(
         &mut runner,
-        &[TargetRef::Object(c1), TargetRef::Player(P1)],
+        &[TargetRef::Player(P1), TargetRef::Object(c1)],
         false,
         vec![],
     );

@@ -4321,6 +4321,14 @@ fn companion_target_player_legal_targets(
     {
         return targeting::find_legal_targets(state, payer, ability.controller, ability.source_id);
     }
+    if let Some(recipient) = give_control_declared_recipient_filter(ability) {
+        return targeting::find_legal_targets(
+            state,
+            recipient,
+            ability.controller,
+            ability.source_id,
+        );
+    }
     ability
         .trigger_source
         .as_ref()
@@ -6066,6 +6074,31 @@ fn effect_references_target_opponent(effect: &Effect) -> bool {
     effect_bound_filter_matches(effect, filter_references_target_opponent)
 }
 
+/// CR 115.1d + CR 601.2c: a targeted player who receives control is announced
+/// separately from the permanent. The instruction's explicit target actor
+/// distinguishes this recipient from an untargeted opponent or scoped player.
+fn give_control_declared_recipient_filter(ability: &ResolvedAbility) -> Option<&TargetFilter> {
+    let Effect::GiveControl { recipient, .. } = &ability.effect else {
+        return None;
+    };
+    if effect_primary_target_supplies_player_target(&ability.effect)
+        || !matches!(
+            ability
+                .instruction_actor
+                .as_ref()
+                .and_then(|actor| actor.as_controller()),
+            Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent)
+        )
+    {
+        return None;
+    }
+    (matches!(recipient, TargetFilter::Player | TargetFilter::Opponent)
+        || payer_is_declared_target(recipient)
+        || (quantity_slot_filter_selects_players(recipient)
+            && filter_references_target_player(recipient)))
+    .then_some(recipient)
+}
+
 pub(crate) fn ability_needs_companion_target_player_slot(ability: &ResolvedAbility) -> bool {
     // Triggered abilities carry an exact trigger source. Hellkite-style
     // GainControlAll uses "that player" from the triggering event, not a
@@ -6074,6 +6107,7 @@ pub(crate) fn ability_needs_companion_target_player_slot(ability: &ResolvedAbili
         return false;
     }
     effect_references_target_player(&ability.effect)
+        || give_control_declared_recipient_filter(ability).is_some()
         // CR 115.1 + CR 118.12a: a targeted unless-payer declared inside the unless
         // clause surfaces its own player target slot even when the primary effect
         // references no target player (e.g. Athreos, God of Passage).
@@ -15335,6 +15369,123 @@ mod tests {
             vec![TargetRef::Object(hydra)],
             "goad target must be the damaged player's creature only"
         );
+    }
+
+    /// CR 115.1d + CR 601.2c: the declared opponent and permanent occupy
+    /// independent slots, including in games with several legal opponents.
+    #[test]
+    fn give_control_declared_recipient_has_its_own_player_slot() {
+        let mut state = GameState::new(FormatConfig::duel_commander(), 3, 7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Control source".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let opponent_permanent = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent permanent".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opponent_permanent)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let mut ability = ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::Typed(
+                    TypedFilter::permanent().controller(ControllerRef::You),
+                ),
+                recipient: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.instruction_actor = Some(ControllerRef::TargetOpponent.into());
+        ability.set_test_trigger_source_recursive(1, CardId(0));
+        let slots = build_target_slots(&state, &ability).expect("declared recipient slots");
+        assert_eq!(slots.len(), 2);
+        let opponents = vec![
+            TargetRef::Player(PlayerId(1)),
+            TargetRef::Player(PlayerId(2)),
+        ];
+        assert_eq!(slots[0].legal_targets, opponents);
+        let player_progress =
+            build_target_selection_progress_for_ability(&state, &ability, &slots, &[], 0, vec![])
+                .expect("declared opponent progress");
+        assert_eq!(player_progress.current_legal_targets, opponents);
+        let permanent_progress = build_target_selection_progress_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            1,
+            vec![Some(TargetRef::Player(PlayerId(2)))],
+        )
+        .expect("independent permanent progress");
+        assert!(permanent_progress
+            .current_legal_targets
+            .contains(&TargetRef::Object(source)));
+        assert!(!permanent_progress
+            .current_legal_targets
+            .contains(&TargetRef::Object(opponent_permanent)));
+
+        for (actor, recipient) in [
+            (None, TargetFilter::Opponent),
+            (Some(ControllerRef::ScopedPlayer), TargetFilter::Opponent),
+            (
+                Some(ControllerRef::ChosenPlayer { index: 0 }),
+                TargetFilter::Opponent,
+            ),
+            (
+                Some(ControllerRef::TargetOpponent),
+                TargetFilter::ScopedPlayer,
+            ),
+            (
+                Some(ControllerRef::TargetOpponent),
+                TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
+                ),
+            ),
+        ] {
+            let mut contextual = ability.clone();
+            contextual.instruction_actor = actor.map(Into::into);
+            let Effect::GiveControl {
+                recipient: slot, ..
+            } = &mut contextual.effect
+            else {
+                unreachable!("the fixture remains a control transfer")
+            };
+            *slot = recipient;
+            assert!(!ability_needs_companion_target_player_slot(&contextual));
+            assert_eq!(build_target_slots(&state, &contextual).unwrap().len(), 1);
+        }
+
+        ability.effect = Effect::GiveControl {
+            target: TargetFilter::Player,
+            recipient: TargetFilter::Opponent,
+        };
+        assert!(effect_primary_target_supplies_player_target(
+            &ability.effect
+        ));
+        assert!(give_control_declared_recipient_filter(&ability).is_none());
+        assert_eq!(build_target_slots(&state, &ability).unwrap().len(), 1);
     }
 
     /// CR 115.1 + CR 118.12a (V3): a declared-target unless-payer surfaces its
