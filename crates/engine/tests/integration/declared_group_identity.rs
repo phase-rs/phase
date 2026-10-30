@@ -505,8 +505,8 @@ fn player_fingerprint(state: &GameState, creating_spell: ObjectId) -> String {
 #[test]
 fn player_fingerprint_omits_only_the_creating_spell_graveyard_entry() {
     let mut scenario = GameScenario::new();
-    let creating_spell = scenario.add_card_to_hand(P0, "Probe").id();
-    let other_card = scenario.add_card_to_hand(P1, "Other Card").id();
+    let creating_spell = scenario.add_card_to_hand(P0, "Probe");
+    let other_card = scenario.add_card_to_hand(P1, "Other Card");
     let mut state = scenario.build().state().clone();
     let initial = player_fingerprint(&state, creating_spell);
     state
