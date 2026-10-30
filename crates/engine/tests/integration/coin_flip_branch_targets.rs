@@ -7659,3 +7659,667 @@ fn coin_outcome_multi_target_group_keeps_to_its_own_slots() {
         assert_finished(&runner);
     }
 }
+
+#[derive(Clone, Copy, Debug)]
+enum BulkEntry {
+    Spell,
+    Trigger,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LostShape {
+    Required,
+    UpToOne,
+}
+
+/// Synthetic. One coin chain whose Won outcome is a multi-target node. The
+/// bulk `GameAction::SelectTargets` declaration is driven through the
+/// production entry for `entry`, and the losing outcome is either required or
+/// "up to one" so that a lost flip may find its slot optional.
+fn bulk_coin_groups(entry: BulkEntry, lost: LostShape, won: bool) {
+    use engine::types::ability::TriggerDefinition;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, MultiTargetSpec, TypeFilter, TypedFilter,
+    };
+    use engine::types::triggers::TriggerMode;
+
+    let label = format!("{entry:?}/{lost:?}/{}", if won { "win" } else { "lose" });
+
+    let mut won_effect = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            cant_regenerate: false,
+        },
+    );
+    won_effect.multi_target = Some(MultiTargetSpec::fixed(0, 2));
+
+    let mut lost_effect = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        },
+    );
+    if matches!(lost, LostShape::UpToOne) {
+        lost_effect.multi_target = Some(MultiTargetSpec::fixed(0, 1));
+    }
+
+    let body = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: Some(Box::new(won_effect)),
+            lose_effect: Some(Box::new(lost_effect)),
+            flipper: TargetFilter::Controller,
+        },
+    );
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let artifact = scenario
+        .add_artifact_from_oracle(P1, "Artifact target", "")
+        .id();
+    let victim = scenario
+        .add_creature(P1, "Losing outcome target", 4, 4)
+        .id();
+    let distractor = scenario.add_creature(P0, "Never selected", 2, 2).id();
+    let source = match entry {
+        BulkEntry::Spell => scenario
+            .add_spell_to_hand(P0, "Synthetic bulk coin groups", true)
+            .with_ability_definition(body)
+            .id(),
+        BulkEntry::Trigger => {
+            let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .valid_card(TargetFilter::SelfRef)
+                .destination(Zone::Battlefield)
+                .execute(body);
+            scenario
+                .add_creature_to_hand(P0, "Synthetic bulk coin host", 1, 1)
+                .with_mana_cost(ManaCost::zero())
+                .with_trigger_definition(trigger)
+                .id()
+        }
+    };
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[won]);
+
+    let mut events = Vec::new();
+    match entry {
+        BulkEntry::Spell => {
+            cast_for_prompts(&mut runner, source);
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::TargetSelection { .. }
+                ),
+                "{label}: the spell must pause on its target declaration"
+            );
+        }
+        BulkEntry::Trigger => {
+            drop(runner.cast(source).commit());
+            let mut reached = false;
+            for _ in 0..8 {
+                let prompt = &runner.state().waiting_for;
+                if matches!(prompt, WaitingFor::TriggerTargetSelection { .. }) {
+                    reached = true;
+                    break;
+                }
+                assert!(
+                    matches!(prompt, WaitingFor::Priority { .. }),
+                    "{label}: unexpected prompt {:?}",
+                    prompt
+                );
+                events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+            }
+            assert!(
+                reached,
+                "{label}: the enters trigger must pause on its targets"
+            );
+        }
+    }
+
+    let targets = vec![TargetRef::Object(artifact), TargetRef::Object(victim)];
+    events.extend(
+        runner
+            .act(GameAction::SelectTargets {
+                targets: targets.clone(),
+            })
+            .unwrap_or_else(|err| panic!("{label}: bulk declaration {targets:?} rejected: {err:?}"))
+            .events,
+    );
+    {
+        // CR 601.2c + CR 115.1: the announcement fixes each outcome's own
+        // target group; the bulk list is only a positional prefix of it.
+        let ability = runner.state().stack.back().unwrap().ability().unwrap();
+        let branches = ability.coin_branches.as_ref().unwrap();
+        assert_eq!(
+            branches.won.as_ref().unwrap().targets,
+            vec![TargetRef::Object(artifact)],
+            "{label}: Won keeps to its own announced group"
+        );
+        assert_eq!(
+            branches.lost.as_ref().unwrap().targets,
+            vec![TargetRef::Object(victim)],
+            "{label}: Lost keeps its own announced target"
+        );
+    }
+    finish(&mut runner, &mut events);
+    assert_eq!(flips(&events), vec![won], "{label}");
+    // CR 705.2 + CR 608.2c: the winning and losing instructions are followed in
+    // order, so each outcome affects only the object it announced.
+    let (destroyed, kept) = if won {
+        (artifact, victim)
+    } else {
+        (victim, artifact)
+    };
+    assert_eq!(
+        runner.state().objects[&destroyed].zone,
+        Zone::Graveyard,
+        "{label}: the executed outcome's object"
+    );
+    assert_eq!(
+        runner.state().objects[&kept].zone,
+        Zone::Battlefield,
+        "{label}: the other outcome's object"
+    );
+    assert_eq!(
+        runner.state().objects[&distractor].zone,
+        Zone::Battlefield,
+        "{label}: distractor"
+    );
+    if matches!(entry, BulkEntry::Trigger) {
+        assert_eq!(
+            runner.state().objects[&source].zone,
+            Zone::Battlefield,
+            "{label}: the trigger host stays on the battlefield"
+        );
+    }
+    assert_finished(&runner);
+}
+
+#[test]
+fn bulk_spell_declaration_keeps_coin_outcome_groups_to_their_own_slots() {
+    // Synthetic. CR 601.2c + CR 115.1: a spell's bulk declaration is a
+    // positional prefix of the announced slot vector, so a Won multi-target
+    // node must end at its own group instead of swallowing Lost's target.
+    for won in [false, true] {
+        bulk_coin_groups(BulkEntry::Spell, LostShape::Required, won);
+    }
+}
+
+#[test]
+fn bulk_trigger_declaration_keeps_coin_outcome_groups_to_their_own_slots() {
+    // Synthetic. CR 601.2c + CR 115.1: the enters-trigger entry must reproduce
+    // the same announced partition as the spell entry.
+    for won in [false, true] {
+        bulk_coin_groups(BulkEntry::Trigger, LostShape::Required, won);
+    }
+}
+
+#[test]
+fn bulk_declaration_keeps_an_optional_outcome_target_in_its_own_group() {
+    // Synthetic. CR 601.2c: "up to one" Lost announces one optional slot; the
+    // Won node must not claim it, or a lost flip silently destroys the Won
+    // target's object (CR 705.2 + CR 608.2c).
+    for won in [false, true] {
+        bulk_coin_groups(BulkEntry::Spell, LostShape::UpToOne, won);
+    }
+}
+
+/// Answers every target prompt in order, allowing an explicit decline (`None`)
+/// for an optional slot. Mirrors `answer_prompts`, whose entries are always
+/// targets; the decline is the `ChooseTarget { target: None }` control.
+fn answer_prompt_choices(runner: &mut GameRunner, label: &str, answers: &[Option<ObjectId>]) {
+    let mut remaining = answers.iter().copied();
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        let choice = remaining
+            .next()
+            .unwrap_or_else(|| panic!("{label}: more target prompts than expected"));
+        let target = choice.map(TargetRef::Object);
+        runner
+            .act(GameAction::ChooseTarget { target })
+            .unwrap_or_else(|err| {
+                panic!("{label}: target submission {choice:?} rejected: {err:?}")
+            });
+    }
+    assert!(
+        remaining.next().is_none(),
+        "{label}: targeting ended before every declaration was answered"
+    );
+}
+
+/// Synthetic. CR 601.2c + CR 115.1: the announcement fixes the ancestor's
+/// variable-count group and the coin outcome's own target. On a coin chain with
+/// a multi-target node the bulk list is a positional prefix of the announced
+/// slot vector, so a list that declines a slot mid-list cannot be re-packed.
+/// Declining the whole group in bulk is refused for the same reason, and the
+/// same choice stays expressible one slot at a time (CR 608.2c).
+#[test]
+fn bulk_declaration_reads_an_ancestor_multi_target_group_positionally() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, MultiTargetSpec, TypedFilter};
+
+    fn definition() -> AbilityDefinition {
+        let mut definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: None,
+                lose_effect: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Destroy {
+                        target: TargetFilter::Typed(TypedFilter::creature()),
+                        cant_regenerate: false,
+                    },
+                ))),
+                flipper: TargetFilter::Controller,
+            },
+        ));
+        definition.multi_target = Some(MultiTargetSpec::fixed(0, 2));
+        definition
+    }
+
+    /// Object ids: c1 1, c2 2, v 3, spell 4.
+    fn scenario() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let c1 = scenario.add_creature(P0, "Own first", 2, 2).id();
+        let c2 = scenario.add_creature(P1, "Opposing second", 3, 3).id();
+        let v = scenario
+            .add_creature(P1, "Losing outcome target", 4, 4)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic positional ancestor coin", true)
+            .with_ability_definition(definition())
+            .id();
+        (scenario.build(), c1, c2, v, spell)
+    }
+
+    for won in [false, true] {
+        let label = if won { "win" } else { "lose" };
+        let (mut runner, c1, c2, v, spell) = scenario();
+        pin_outcomes(&mut runner, &[won]);
+        cast_for_prompts(&mut runner, spell);
+
+        // 1. Positional refusal: slot 1 is the ancestor's second slot, so the
+        // Lost outcome's required slot is left undeclared.
+        match runner.act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(c1), TargetRef::Object(v)],
+        }) {
+            Ok(_) => panic!(
+                "{label}: positional [c1, v] must be refused because Lost's required slot is undeclared"
+            ),
+            Err(err) => {
+                assert_eq!(
+                    format!("{err:?}"),
+                    r#"InvalidAction("Missing required target")"#,
+                    "{label}"
+                );
+                assert!(
+                    matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::TargetSelection { .. }
+                    ),
+                    "{label}: the refusal leaves the declaration open"
+                );
+            }
+        }
+
+        // 1b. Whole-group decline: `[v]` positions v in the ancestor's first
+        // slot, so Lost again has no declaration.
+        match runner.act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(v)],
+        }) {
+            Ok(_) => panic!(
+                "{label}: positional [v] must be refused because Lost's required slot is undeclared"
+            ),
+            Err(err) => {
+                assert_eq!(
+                    format!("{err:?}"),
+                    r#"InvalidAction("Missing required target")"#,
+                    "{label}"
+                );
+                assert!(
+                    matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::TargetSelection { .. }
+                    ),
+                    "{label}: the refusal leaves the declaration open"
+                );
+            }
+        }
+
+        // 2. A full positional list reproduces the announced partition.
+        let targets = vec![
+            TargetRef::Object(c1),
+            TargetRef::Object(c2),
+            TargetRef::Object(v),
+        ];
+        let mut events = runner
+            .act(GameAction::SelectTargets {
+                targets: targets.clone(),
+            })
+            .unwrap_or_else(|err| panic!("{label}: bulk declaration {targets:?} rejected: {err:?}"))
+            .events;
+        {
+            // CR 601.2c + CR 115.1: each target stays in the group it was
+            // announced and validated for.
+            let ability = runner.state().stack.back().unwrap().ability().unwrap();
+            assert_eq!(
+                ability.targets,
+                vec![TargetRef::Object(c1), TargetRef::Object(c2)],
+                "{label}: the ancestor holds its two announced slots"
+            );
+            assert_eq!(
+                ability
+                    .sub_ability
+                    .as_ref()
+                    .unwrap()
+                    .coin_branches
+                    .as_ref()
+                    .unwrap()
+                    .lost
+                    .as_ref()
+                    .unwrap()
+                    .targets,
+                vec![TargetRef::Object(v)],
+                "{label}: Lost keeps its own slot"
+            );
+        }
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![won], "{label}");
+        // CR 705.2 + CR 608.2c: only the losing outcome destroys its target.
+        assert_eq!(
+            runner.state().objects[&v].zone,
+            if won {
+                Zone::Battlefield
+            } else {
+                Zone::Graveyard
+            },
+            "{label}: the losing outcome's target"
+        );
+        for kept in [c1, c2] {
+            assert_eq!(
+                runner.state().objects[&kept].zone,
+                Zone::Battlefield,
+                "{label}: the ancestor keeps its targets"
+            );
+        }
+        assert_finished(&runner);
+    }
+
+    // 3. Positive control: the same declaration one slot at a time. The single
+    // `None` declines the rest of the ancestor group, so there are exactly
+    // three prompts: two ancestor slots and Lost.
+    let (mut runner, c1, _c2, v, spell) = scenario();
+    pin_outcomes(&mut runner, &[false]);
+    cast_for_prompts(&mut runner, spell);
+    answer_prompt_choices(&mut runner, "lose", &[Some(c1), None, Some(v)]);
+    {
+        let ability = runner.state().stack.back().unwrap().ability().unwrap();
+        assert_eq!(
+            ability.targets,
+            vec![TargetRef::Object(c1)],
+            "lose: the decline ends the ancestor group"
+        );
+        assert_eq!(
+            ability
+                .sub_ability
+                .as_ref()
+                .unwrap()
+                .coin_branches
+                .as_ref()
+                .unwrap()
+                .lost
+                .as_ref()
+                .unwrap()
+                .targets,
+            vec![TargetRef::Object(v)],
+            "lose: Lost keeps its own slot through ChooseTarget"
+        );
+    }
+    let mut events = Vec::new();
+    finish(&mut runner, &mut events);
+    assert_eq!(flips(&events), vec![false]);
+    assert_eq!(runner.state().objects[&v].zone, Zone::Graveyard);
+    assert_finished(&runner);
+}
+
+/// Synthetic. CR 601.2c + CR 115.1: the activation offer's cost search must
+/// price the same announced groups the declaration does. Kopala's {2} tax
+/// applies only when the ability targets a Merfolk, so the only affordable
+/// completion of this coin chain declines the whole ancestor group and targets
+/// the untaxed creature with the losing outcome (CR 705.2 + CR 608.2c).
+#[test]
+fn activation_offer_prices_a_declined_ancestor_group_in_a_coin_chain() {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, MultiTargetSpec, TypedFilter,
+    };
+
+    // Byte-identical to the constant the tax test uses
+    // (professor_hojo_activation_cost.rs).
+    const KOPALA_ACTIVATE_HALF: &str =
+        "Abilities your opponents activate that target a Merfolk you control cost {2} more to activate.";
+
+    /// Object ids: Kopala 1, untaxed creature 2, source 3.
+    fn scenario() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+        let mut definition = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        )
+        .cost(AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        })
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: None,
+                lose_effect: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Destroy {
+                        target: TargetFilter::Typed(TypedFilter::creature()),
+                        cant_regenerate: false,
+                    },
+                ))),
+                flipper: TargetFilter::Controller,
+            },
+        ));
+        definition.multi_target = Some(MultiTargetSpec::fixed(0, 2));
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let kopala = scenario
+            .add_creature_from_oracle(P1, "Kopala, Warden of Waves", 2, 2, KOPALA_ACTIVATE_HALF)
+            .with_subtypes(vec!["Merfolk", "Wizard"])
+            .id();
+        let untaxed = scenario.add_creature(P0, "Untaxed creature", 2, 2).id();
+        let source = scenario
+            .add_artifact_from_oracle(P0, "Taxed coin source", "")
+            .with_ability_definition(definition)
+            .id();
+        mana(&mut scenario, 1);
+        (scenario.build(), kopala, untaxed, source)
+    }
+
+    for won in [false, true] {
+        let label = if won { "win" } else { "lose" };
+        let (mut runner, kopala, untaxed, source) = scenario();
+        pin_outcomes(&mut runner, &[won]);
+        assert!(
+            can_activate_ability_now(runner.state(), P0, source, 0),
+            "{label}: the only untaxed completion declines the ancestor group and targets the non-Merfolk with Lost, so the activation must be offered"
+        );
+        assert!(
+            legal_actions(runner.state()).iter().any(|action| matches!(
+                action,
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index: 0,
+                    ..
+                } if *source_id == source
+            )),
+            "{label}: the AI legal-action list offers it too"
+        );
+        let mut events = runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap_or_else(|err| panic!("{label}: activation refused: {err:?}"))
+            .events;
+        answer_prompt_choices(&mut runner, label, &[None, Some(untaxed)]);
+        if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+            events.extend(
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pay announced activation")
+                    .events,
+            );
+        }
+        assert_eq!(pool(&runner), 0, "{label}: paid {{1}}, untaxed");
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "{label}: the activated ability is on the stack"
+        );
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![won], "{label}");
+        // CR 705.2 + CR 608.2c: only the losing outcome destroys its target.
+        assert_eq!(
+            runner.state().objects[&untaxed].zone,
+            if won {
+                Zone::Battlefield
+            } else {
+                Zone::Graveyard
+            },
+            "{label}: the losing outcome destroys the untaxed creature"
+        );
+        assert_eq!(
+            runner.state().objects[&kopala].zone,
+            Zone::Battlefield,
+            "{label}: Kopala is untouched"
+        );
+        assert_finished(&runner);
+    }
+}
+
+/// Synthetic. CR 601.2c + CR 115.1: the coin node's continuation is announced
+/// up front as its own required target, so a multi-target node nested in the
+/// Won outcome must not claim it. The continuation runs whichever way the flip
+/// goes; only the winning outcome destroys its own target (CR 705.2 + CR 608.2c).
+#[test]
+fn bulk_declaration_keeps_a_coin_outcome_group_off_the_continuation_target() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, MultiTargetSpec, TypeFilter, TypedFilter,
+    };
+
+    for won in [false, true] {
+        let label = if won { "win" } else { "lose" };
+        let mut won_effect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                cant_regenerate: false,
+            },
+        );
+        won_effect.multi_target = Some(MultiTargetSpec::fixed(0, 2));
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(won_effect)),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+        ));
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let artifact = scenario
+            .add_artifact_from_oracle(P1, "Won outcome target", "")
+            .id();
+        let victim = scenario.add_creature(P1, "Continuation target", 4, 4).id();
+        let distractor = scenario.add_creature(P0, "Never selected", 2, 2).id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic coin continuation", true)
+            .with_ability_definition(definition)
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[won]);
+        cast_for_prompts(&mut runner, spell);
+
+        let targets = vec![TargetRef::Object(artifact), TargetRef::Object(victim)];
+        let mut events = runner
+            .act(GameAction::SelectTargets {
+                targets: targets.clone(),
+            })
+            .unwrap_or_else(|err| panic!("{label}: bulk declaration {targets:?} rejected: {err:?}"))
+            .events;
+        {
+            // CR 601.2c + CR 115.1: Won's group ends at its own announced
+            // boundary, so the continuation keeps its own slot.
+            let ability = runner.state().stack.back().unwrap().ability().unwrap();
+            assert_eq!(
+                ability
+                    .coin_branches
+                    .as_ref()
+                    .unwrap()
+                    .won
+                    .as_ref()
+                    .unwrap()
+                    .targets,
+                vec![TargetRef::Object(artifact)],
+                "{label}: Won keeps to its own announced group"
+            );
+            assert_eq!(
+                ability.sub_ability.as_ref().unwrap().targets,
+                vec![TargetRef::Object(victim)],
+                "{label}: the continuation keeps its own slot"
+            );
+        }
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![won], "{label}");
+        // CR 608.2c: the continuation runs after the coin outcome whatever the
+        // flip; CR 705.2: only the winning outcome destroys its own target.
+        assert_eq!(
+            runner.state().objects[&victim].zone,
+            Zone::Graveyard,
+            "{label}: the continuation destroys its own target whatever the flip"
+        );
+        assert_eq!(
+            runner.state().objects[&artifact].zone,
+            if won {
+                Zone::Graveyard
+            } else {
+                Zone::Battlefield
+            },
+            "{label}: only the winning outcome destroys its own target"
+        );
+        assert_eq!(
+            runner.state().objects[&distractor].zone,
+            Zone::Battlefield,
+            "{label}: distractor"
+        );
+        assert_finished(&runner);
+    }
+}
