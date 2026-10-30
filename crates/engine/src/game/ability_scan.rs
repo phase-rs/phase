@@ -2346,7 +2346,14 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
                 )),
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::TriggeringBatch,
-                    ..
+                    caused_by: _,
+                    // Batch members are event records, not tracked objects:
+                    // a member filter has nothing to bind to here (mirrors
+                    // the quantity `TrackedSet` arm), so no filter scan. The
+                    // combination is rejected at the `PropertyAggregate`
+                    // constructor, which every producer and decoder routes
+                    // through — a filtered batch cannot arrive here.
+                    filter: _,
                 } => Axes {
                     event: true,
                     sibling: false,
@@ -2355,8 +2362,11 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
                 },
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
-                    ..
-                } => Axes::NONE,
+                    caused_by: _,
+                    filter,
+                } => filter.as_ref().map_or(Axes::NONE, |filter| {
+                    scan_target_filter(filter, FilterReadContext::LiveBoardCensus, mode)
+                }),
                 // CR 603.3b: the journal population is projected turn state,
                 // while an optional event-relative filter still reads the
                 // triggering event and must participate in trigger ordering.
@@ -2369,6 +2379,23 @@ fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) ->
                 .or(filter.as_ref().map_or(Axes::NONE, |filter| {
                     scan_target_filter(filter, FilterReadContext::SnapshotOrEvent, mode)
                 })),
+                // CR 608.2c + CR 115.1: the resolving ability's announcement-bound
+                // targets (CR 601.2c). Scans EXACTLY as the canonical slot
+                // filter it denotes (via the single `targeted_objects_filter`
+                // authority): the `Objects` arm's census base composed with the
+                // filter scan — so the axes cannot drift from `ParentTarget`'s
+                // own `{event: true}` classification.
+                CardTypeSetSource::TargetedObjects { slot } => Axes {
+                    event: false,
+                    sibling: true,
+                    projected: false,
+                    history: HistoryReads::NONE,
+                }
+                .or(scan_target_filter(
+                    &CardTypeSetSource::targeted_objects_filter(slot),
+                    FilterReadContext::LiveBoardCensus,
+                    mode,
+                )),
                 CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => {
                     Axes::CONSERVATIVE
                 }
@@ -3139,12 +3166,32 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             }
             // Zone / linked-exile / tracked-set / turn-journal / union
             // populations are classified like their card-type and subtype peers
-            // above: `Axes::CONSERVATIVE`, which is fail-closed.
+            // above: `Axes::CONSERVATIVE`, which is fail-closed. A member
+            // filter cannot narrow a conservative verdict.
             crate::types::ability::CardTypeSetSource::Zone { .. }
             | crate::types::ability::CardTypeSetSource::ExiledBySource
             | crate::types::ability::CardTypeSetSource::TrackedSet { .. }
             | crate::types::ability::CardTypeSetSource::TurnJournal { .. }
             | crate::types::ability::CardTypeSetSource::AnyOf { .. } => Axes::CONSERVATIVE,
+            // CR 608.2c + CR 115.1: the distinct-colors head composes the
+            // SAME census base + filter scan as the `Objects` arm above, with
+            // the canonical slot filter via the single
+            // `targeted_objects_filter` authority — never a hardcoded
+            // verdict that could drift from the filter's.
+            crate::types::ability::CardTypeSetSource::TargetedObjects { slot } => {
+                let mut acc = Axes {
+                    event: false,
+                    sibling: true,
+                    projected: false,
+                    history: HistoryReads::NONE,
+                };
+                acc = acc.or(scan_target_filter(
+                    &crate::types::ability::CardTypeSetSource::targeted_objects_filter(slot),
+                    FilterReadContext::LiveBoardCensus,
+                    mode,
+                ));
+                acc
+            }
         },
         QuantityRef::DistinctCounterKindsAmong { filter } => {
             let mut acc = Axes {
@@ -7842,6 +7889,7 @@ mod tests {
         let chain = CardTypeSetSource::TrackedSet {
             set: TrackedAnaphorSource::ChainSet,
             caused_by: None,
+            filter: None,
         };
         let journal = CardTypeSetSource::TurnJournal {
             journal: TurnJournalKind::SpellsCast,
@@ -7851,6 +7899,11 @@ mod tests {
         let event_filtered_journal = CardTypeSetSource::TurnJournal {
             journal: TurnJournalKind::SpellsCast,
             scope: CountScope::Controller,
+            filter: Some(TargetFilter::TriggeringSource),
+        };
+        let event_filtered_chain = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
             filter: Some(TargetFilter::TriggeringSource),
         };
         let rows = vec![
@@ -7869,6 +7922,7 @@ mod tests {
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::TriggeringBatch,
                     caused_by: None,
+                    filter: None,
                 },
                 Axes {
                     event: true,
@@ -7893,6 +7947,19 @@ mod tests {
                     event: true,
                     sibling: false,
                     projected: true,
+                    history: HistoryReads::NONE,
+                },
+            ),
+            // CR 603.3b: a chain set is effect-visible (NONE) until a member
+            // filter reads the trigger event — then the event axis must light
+            // up or the reader is ordered before its writer. The sibling axis
+            // comes from the live-board evaluation context's fail-closed base.
+            (
+                event_filtered_chain,
+                Axes {
+                    event: true,
+                    sibling: true,
+                    projected: false,
                     history: HistoryReads::NONE,
                 },
             ),

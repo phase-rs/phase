@@ -1374,6 +1374,7 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                         source_id: *source,
                         source_controller,
                         ability: None,
+                        ability_targets: None,
                         // Restriction source is the current operation subject,
                         // not a deferred triggered-source read.
                         trigger_source: None,
@@ -24987,6 +24988,7 @@ fn apply_mana_spell_grants(
                 source_id: unit.source_id,
                 source_controller: Some(caster),
                 ability: None,
+                ability_targets: None,
                 // This reflexive cast check evaluates its current mana-source
                 // operation, not a delayed triggered source.
                 trigger_source: None,
@@ -28025,8 +28027,14 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
                         relative &= !filter_references_target_player(filter);
                     }
                     CardTypeSetSource::Zone { .. } => {}
+                    // A member filter narrows the set; it cannot make a
+                    // look-back population target-relative. CR 608.2c +
+                    // CR 115.1: `TargetedObjects` joins this arm — its
+                    // announcement-bound members are look-back by identity
+                    // (live read with LKI fallback), never board-relative.
                     CardTypeSetSource::ExiledBySource
                     | CardTypeSetSource::TrackedSet { .. }
+                    | CardTypeSetSource::TargetedObjects { .. }
                     | CardTypeSetSource::TurnJournal { .. }
                     | CardTypeSetSource::AnyOf { .. } => relative = false,
                 },
@@ -31953,9 +31961,18 @@ fn card_type_set_source_reads_chosen_target(source: &CardTypeSetSource, read: Ta
         CardTypeSetSource::AnyOf { sources } => sources
             .iter()
             .any(|x| card_type_set_source_reads_chosen_target(x, read)),
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => false,
+        CardTypeSetSource::TrackedSet { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|x| target_filter_reads_chosen_target(x, read)),
+        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
+        // CR 608.2c + CR 115.1: a targeted-objects population reads the
+        // ability's chosen targets, so it reads a chosen target by
+        // definition — routed through the single `targeted_objects_filter`
+        // authority rather than answered as a constant.
+        CardTypeSetSource::TargetedObjects { slot } => target_filter_reads_chosen_target(
+            &CardTypeSetSource::targeted_objects_filter(slot),
+            read,
+        ),
     }
 }
 

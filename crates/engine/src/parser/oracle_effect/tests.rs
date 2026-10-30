@@ -337,6 +337,8 @@ fn assert_tracked_mana_value_source(def: &AbilityDefinition, expected: TrackedAn
     };
     assert_eq!(aggregate.function(), AggregateFunction::Sum);
     assert_eq!(aggregate.property(), ObjectProperty::ManaValue);
+    // Test helper asserts the `set` key only; a member filter would not
+    // change the expected answer.
     assert!(matches!(
         aggregate.source(),
         CardTypeSetSource::TrackedSet { set, .. } if *set == expected
@@ -621,6 +623,7 @@ fn nested_batch_aggregate() -> PropertyAggregate {
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::TriggeringBatch,
                     caused_by: None,
+                    filter: None,
                 },
                 CardTypeSetSource::Zone {
                     zone: ZoneRef::Graveyard,
@@ -667,6 +670,8 @@ fn nested_triggering_batch_aggregate_is_rebound_through_the_source_visitor() {
         &mut |leaf| {
             leaves += 1;
             match leaf {
+                // Test census counts leaves by `set` key; member
+                // narrowing does not change the tally.
                 CardTypeSetSource::TrackedSet { set, .. } => match set {
                     TrackedAnaphorSource::TriggeringBatch => batch += 1,
                     TrackedAnaphorSource::ChainSet => chain += 1,
@@ -871,6 +876,61 @@ fn conditional_publishers_require_the_same_source_on_both_branches() {
             expected
         );
     }
+}
+
+/// C-1 — CLASSIFIER. `Effect::TargetOnly` publishes a target-set binding for
+/// the bare "those cards" aggregate (CR 608.2c + CR 115.1: the anaphor names
+/// the ability's chosen targets, not a chain set), while
+/// `Effect::ChooseObjectsIntoTrackedSet` stays `TerminalUnsupported` (M3: its
+/// published set's relation to the anaphor is a separate question).
+#[test]
+fn target_only_publishes_a_target_set_binding() {
+    let target_only = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+        )
+    };
+    assert_eq!(
+        classify_bare_card_aggregate_publisher(&target_only().effect),
+        Some(BareCardAggregatePublisher::TargetSetCompatible)
+    );
+    assert_eq!(
+        classify_latest_bare_card_publisher_in_ability(&target_only()),
+        Some(BareCardAggregatePublisher::TargetSetCompatible)
+    );
+    let tracked_choice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChooseObjectsIntoTrackedSet {
+            chooser: TargetFilter::Controller,
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            min: 0,
+            max: None,
+            cardinality: None,
+            eligibility: None,
+        },
+    );
+    assert_eq!(
+        classify_bare_card_aggregate_publisher(&tracked_choice.effect),
+        Some(BareCardAggregatePublisher::TerminalUnsupported)
+    );
+    // Positive guards: the neighboring leaves did not move.
+    let ability = |text| AbilityDefinition::new(AbilityKind::Spell, parse_effect(text));
+    assert_eq!(
+        classify_latest_bare_card_publisher_in_ability(&ability("discard a card")),
+        Some(BareCardAggregatePublisher::ChainSetCompatible)
+    );
+    // Hostile: a nearer token creator still wins over an older TargetOnly.
+    let mut def = target_only();
+    def.sub_ability = Some(Box::new(ability(
+        "create a 1/1 green Insect creature token",
+    )));
+    assert_eq!(
+        classify_latest_bare_card_publisher_in_ability(&def),
+        Some(BareCardAggregatePublisher::EventFallbackBarrier)
+    );
 }
 
 #[test]
@@ -61591,7 +61651,8 @@ fn ensnared_by_the_mara_damage_amount_is_tracked_set_aggregate() {
         aggregate.source(),
         crate::types::ability::CardTypeSetSource::TrackedSet {
             set: crate::types::ability::TrackedAnaphorSource::ChainSet,
-            caused_by: None
+            caused_by: None,
+            filter: None
         }
     ));
 
@@ -93938,6 +93999,301 @@ fn only_that_player_binds_the_declared_player_as_zone_chooser() {
     }
 }
 
+/// Stitcher Geralf's exile sentence names a participle the target-position
+/// grammar cannot bind ("put into graveyards this way"), so the exile
+/// dispatcher must refuse rather than sweeping every creature card in
+/// graveyards (CR 608.2c — the Entry-35 guard mirrored to exile verbs).
+#[test]
+fn stitcher_geralf_exile_sentence_with_put_participle_is_refused() {
+    let control = parse_effect("Exile up to two creature cards.");
+    assert!(
+        matches!(&control, Effect::ChangeZone { .. }),
+        "reach guard: the same exile without the participle must still lower, got {control:?}"
+    );
+    let refused = parse_effect("Exile up to two creature cards put into graveyards this way.");
+    // Rebase taxonomy note: main's evolved row-body vocabulary names this
+    // `unparsed_verb_arguments` (verb recognized, arguments not modeled) where
+    // our tree said `exile` — equally red, with the full sentence kept.
+    assert!(
+        matches!(&refused, Effect::Unimplemented { name, description, .. }
+            if name == "unparsed_verb_arguments"
+                && description.as_deref().is_some_and(|d| d.contains("put into graveyards this way"))),
+        "Stitcher's exile must refuse the unhandled put-participle, got {refused:?}"
+    );
+}
+
+/// Harsh Mercy rides the mirrored destroy-verb guard through the same
+/// mechanism as the accepted Bidding/Tide flips: the destroy dispatcher's
+/// target span names "this way" ("of a type chosen this way") without
+/// binding it, so the line must refuse rather than destroying every
+/// creature (CR 608.2c).
+#[test]
+fn harsh_mercy_destroy_sentence_with_chosen_type_anaphor_is_refused() {
+    let control = parse_effect("Destroy all creatures.");
+    assert!(
+        matches!(&control, Effect::DestroyAll { .. }),
+        "reach guard: the same destroy-all without the anaphor must still lower, got {control:?}"
+    );
+    let refused = parse_effect("Destroy all creatures that aren't of a type chosen this way.");
+    // Rebase taxonomy note: main's evolved row-body vocabulary names this
+    // `unparsed_verb_arguments` where our tree said `destroy` — equally red,
+    // with the full sentence kept (Entry 39: Harsh Mercy rides MED-1 red-ward).
+    assert!(
+        matches!(&refused, Effect::Unimplemented { name, description, .. }
+            if name == "unparsed_verb_arguments"
+                && description.as_deref().is_some_and(|d| d.contains("of a type chosen this way"))),
+        "Harsh Mercy's destroy must refuse the unhandled chosen-type anaphor, got {refused:?}"
+    );
+}
+
+/// Sarulf's exile threshold names a BOUND quantity-position anaphor ("the
+/// number of counters removed this way" → `PreviousEffectAmount` via the
+/// quantity authority, CR 608.2c + CR 608.2i) — a numeric amount, not an
+/// unbound object-membership restriction. The mass-exile dispatcher must keep
+/// the sentence supported with the threshold intact, not refuse it.
+#[test]
+fn sarulf_exile_sentence_keeps_bound_numeric_threshold() {
+    use crate::types::ability::{Comparator, FilterProp, QuantityExpr, QuantityRef};
+
+    fn binds_removed_counter_threshold(target: &TargetFilter) -> bool {
+        match target {
+            TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| {
+                matches!(
+                    prop,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::PreviousEffectAmount { .. }
+                        }
+                    }
+                )
+            }),
+            // A ceiling in one conjunct bounds the whole conjunction, but a
+            // ceiling in one disjunct leaves the other branches unbounded —
+            // so every `Or` branch must bind it. A ceiling beneath `Not` is
+            // inverted (it admits permanents ABOVE the count), so `Not`
+            // never binds.
+            TargetFilter::And { filters } => filters.iter().any(binds_removed_counter_threshold),
+            TargetFilter::Or { filters } => filters.iter().all(binds_removed_counter_threshold),
+            TargetFilter::Not { .. } => false,
+            _ => false,
+        }
+    }
+
+    let lowered = parse_effect(
+        "Exile each other nonland permanent with mana value less than or equal to the number of counters removed this way.",
+    );
+    let Effect::ChangeZoneAll {
+        destination,
+        target,
+        ..
+    } = &lowered
+    else {
+        panic!("Sarulf's exile must stay a supported mass exile, got {lowered:?}");
+    };
+    assert_eq!(
+        *destination,
+        Zone::Exile,
+        "Sarulf's exile must go to exile, got {lowered:?}"
+    );
+    assert!(
+        binds_removed_counter_threshold(target),
+        "Sarulf's exile must cap MV at the removed-counters amount, got {lowered:?}"
+    );
+    // The helper must discriminate: a ceiling beneath `Not` is inverted and
+    // a ceiling in one `Or` branch leaves the other unbounded — both shapes
+    // must fail, while a fully-bounded `Or` and a narrowed `And` pass.
+    assert!(
+        !binds_removed_counter_threshold(&TargetFilter::Not {
+            filter: Box::new(target.clone())
+        }),
+        "an inverted (Not-wrapped) ceiling must not count as bound"
+    );
+    assert!(
+        !binds_removed_counter_threshold(&TargetFilter::Or {
+            filters: vec![target.clone(), TargetFilter::Any]
+        }),
+        "a ceiling in one Or branch must not cover the unbounded branch"
+    );
+    assert!(
+        binds_removed_counter_threshold(&TargetFilter::Or {
+            filters: vec![target.clone(), target.clone()]
+        }),
+        "a ceiling on every Or branch must count as bound"
+    );
+    assert!(
+        binds_removed_counter_threshold(&TargetFilter::And {
+            filters: vec![target.clone(), TargetFilter::Any]
+        }),
+        "a ceiling in one And conjunct bounds the whole conjunction"
+    );
+}
+
+/// Flickerform's delayed-trigger body: "the other" binds `TrackedSet` at the
+/// return dispatcher (so the Entry-35 guard passes), then "that creature" in
+/// the attach tail triggers the chunk-loop anaphoric rewriter, which would
+/// collapse the set to `ParentTarget` — resolving against the exiled
+/// creature instead of the other exiled cards. The rewriter must refuse the
+/// clause instead (CR 608.2c). The durable fix needs linked-exile-style
+/// binding for the delayed trigger rather than the chain set, which is stale
+/// by the time a delayed trigger fires (CR 603.7c) — DEFERRED(phase 7); this
+/// pin is the refusal, not the binding.
+#[test]
+fn flickerform_return_with_exiled_this_way_and_attach_tail_is_refused() {
+    // Reach guard 1: the anaphoric rewriter still fires for an ordinary
+    // "if you do" anaphor with no tracked set in play.
+    let control = parse_effect_chain(
+        "Exile target creature. If you do, return it to the battlefield.",
+        AbilityKind::Spell,
+    );
+    let control_sub = control
+        .sub_ability
+        .as_deref()
+        .expect("the conditional followup must chain as a sub-ability");
+    assert!(
+        matches!(
+            &*control_sub.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "reach guard: the plain if-you-do anaphor must still rewrite to the parent target, got {:?}",
+        control_sub.effect
+    );
+    // Reach guard 2: without "this way" in the span the rewriter still
+    // proceeds (the `ParentTarget` target below is pre-existing rewriter
+    // behavior, not endorsed — this pins only that refusal requires the
+    // "this way" trigger).
+    let no_trigger = parse_effect_chain(
+        "Return that card to the battlefield. If you do, return the other cards to the battlefield attached to that creature.",
+        AbilityKind::Spell,
+    );
+    let no_trigger_sub = no_trigger
+        .sub_ability
+        .as_deref()
+        .expect("the conditional followup must chain as a sub-ability");
+    assert!(
+        !matches!(&*no_trigger_sub.effect, Effect::Unimplemented { .. }),
+        "reach guard: without \"this way\" the rewriter must still proceed, got {:?}",
+        no_trigger_sub.effect
+    );
+    assert!(
+        matches!(&*no_trigger_sub.effect, Effect::ChangeZone { .. }),
+        "reach guard: without \"this way\" the return must stay a supported ChangeZone, got {:?}",
+        no_trigger_sub.effect
+    );
+    let no_trigger_attach = no_trigger_sub
+        .sub_ability
+        .as_deref()
+        .expect("reach guard: without \"this way\" the attach tail must survive as a sub-ability");
+    assert!(
+        matches!(&*no_trigger_attach.effect, Effect::Attach { .. }),
+        "reach guard: the attach dependent must be an Attach effect, got {:?}",
+        no_trigger_attach.effect
+    );
+
+    let refused = parse_effect_chain(
+        "Return that card to the battlefield under its owner's control. If you do, return the other cards exiled this way to the battlefield under their owners' control attached to that creature.",
+        AbilityKind::Spell,
+    );
+    let refused_sub = refused
+        .sub_ability
+        .as_deref()
+        .expect("the conditional followup must chain as a sub-ability");
+    assert!(
+        matches!(&*refused_sub.effect, Effect::Unimplemented { name, .. } if name == "return"),
+        "Flickerform's return must refuse the clobbered tracked-set anaphor, got {:?}",
+        refused_sub.effect
+    );
+    assert!(
+        refused_sub.sub_ability.is_none(),
+        "the refused sentence's attach dependent must go with it, got {:?}",
+        refused_sub.sub_ability
+    );
+    assert!(
+        refused_sub.condition.is_some(),
+        "the refusal must keep its \"if you do\" gate, got {:?}",
+        refused_sub.condition
+    );
+}
+
+/// The narrowed fail-closed predicate distinguishes BOUND quantity-position
+/// anaphors from DROPPED target-identity participles (CR 608.2c). Wrath of the
+/// Skies' destroy span must NOT trip it (its "this way" rides the
+/// payment-amount channel), while Stitcher Geralf's and Harsh Mercy's spans
+/// must (their participles name the targets and bind nothing).
+#[test]
+fn dropped_this_way_predicate_fires_only_on_unbound_anaphors() {
+    let unbound_target = TargetFilter::Typed(TypedFilter::card());
+    // Wrath: the span really does name "this way" (presence guard, so the
+    // `false` below cannot pass vacuously), but the payment-amount excision
+    // binds it — no refusal.
+    let wrath_span = "each artifact, creature, and enchantment with mana value less than or equal to the amount of {E} paid this way.";
+    assert!(
+        scan_contains_for_test(wrath_span, "this way"),
+        "presence guard: the Wrath span must name the anaphor, got {wrath_span:?}"
+    );
+    assert!(
+        !super::target_span_dropped_this_way_anaphor(wrath_span, &unbound_target),
+        "Wrath's quantity-bound payment anaphor must not trip the refusal"
+    );
+    // Stitcher: the put-participle binds nothing — refusal.
+    assert!(
+        super::target_span_dropped_this_way_anaphor(
+            "up to two creature cards put into graveyards this way.",
+            &unbound_target
+        ),
+        "Stitcher's dropped put-participle must trip the refusal"
+    );
+    // Harsh Mercy: the chosen-type anaphor binds nothing — refusal.
+    assert!(
+        super::target_span_dropped_this_way_anaphor(
+            "all creatures that aren't of a type chosen this way.",
+            &unbound_target
+        ),
+        "Harsh Mercy's dropped chosen-type anaphor must trip the refusal"
+    );
+    // Sarulf: the counters-removed threshold is a BOUND quantity-position
+    // anaphor (PreviousEffectAmount via the quantity authority) — no refusal.
+    let sarulf_span = "each other nonland permanent with mana value less than or equal to the number of counters removed this way.";
+    assert!(
+        scan_contains_for_test(sarulf_span, "this way"),
+        "presence guard: the Sarulf span must name the anaphor, got {sarulf_span:?}"
+    );
+    assert!(
+        !super::target_span_dropped_this_way_anaphor(sarulf_span, &unbound_target),
+        "Sarulf's quantity-bound counters anaphor must not trip the refusal"
+    );
+    // Simic Manipulator: same bound class with an explicit counter kind
+    // ("+1/+1") — no refusal.
+    let simic_span = "target creature with power less than or equal to the number of +1/+1 counters removed this way.";
+    assert!(
+        scan_contains_for_test(simic_span, "this way"),
+        "presence guard: the Simic span must name the anaphor, got {simic_span:?}"
+    );
+    assert!(
+        !super::target_span_dropped_this_way_anaphor(simic_span, &unbound_target),
+        "a kind-qualified counters-removed anaphor must not trip the refusal"
+    );
+    // A tracked-set target passes through untouched even with "this way" present.
+    assert!(
+        !super::target_span_dropped_this_way_anaphor(
+            "the other cards exiled this way",
+            &TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            }
+        ),
+        "a bound tracked-set target must pass through untouched"
+    );
+}
+
+/// Test-local word-boundary presence probe (mirrors `scan_contains_phrase`;
+/// kept local so this pin does not depend on that helper's own wiring).
+fn scan_contains_for_test(text: &str, phrase: &str) -> bool {
+    crate::parser::oracle_nom::primitives::scan_contains(&text.to_ascii_lowercase(), phrase)
+}
+
 // ---------------------------------------------------------------------------
 // CR 701.18b + CR 608.2g: a free, no-duration single-card Play resolves now
 // ---------------------------------------------------------------------------
@@ -94249,4 +94605,98 @@ fn compound_shuffle_self_and_its_owners_graveyard_moves_owners_graveyard() {
             caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
         })
     ));
+}
+
+/// M5: the shared refusal policy's three verdicts — the return arm routes
+/// through this authority rather than duplicating the raw predicate. An
+/// identity participle the target grammar dropped trips it; a bound quantity
+/// anaphor (excised before the scan) and a reveal-choice span (owned by the
+/// reveal binder downstream) do not.
+#[test]
+fn shared_this_way_policy_trips_identity_but_excuses_bound_and_reveal() {
+    let typed_creature = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+    assert!(
+        target_span_dropped_this_way_anaphor(
+            "a creature card put into a graveyard this way",
+            &typed_creature,
+        ),
+        "a dropped identity participle (Danse Macabre) must trip the refusal"
+    );
+    assert!(
+        !target_span_dropped_this_way_anaphor(
+            "up to the number of counters removed this way target creatures",
+            &typed_creature,
+        ),
+        "a bound quantity anaphor (Sarulf's threshold) is consumed, not dropped"
+    );
+    assert!(
+        !target_span_dropped_this_way_anaphor(
+            "a creature card they revealed this way",
+            &typed_creature,
+        ),
+        "a reveal-choice span is owned by the reveal binder, never dropped"
+    );
+    assert!(
+        !target_span_dropped_this_way_anaphor(
+            "a creature card put into a graveyard this way",
+            &TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            },
+        ),
+        "a target that bound the anaphor passes through untouched"
+    );
+}
+
+/// M5: the bound-anaphor excision the refusal policy scans through — now a
+/// loop over the shared `scan_preceded` primitive rather than a caller-local
+/// `.find(' ')` stepper. Every excised chunk is a complete combinator match
+/// consuming its "this way" tail; anything else stays and still trips.
+#[test]
+fn bound_quantity_excision_uses_complete_combinator_matches() {
+    assert_eq!(
+        strip_bound_quantity_anaphors("up to the number of counters removed this way"),
+        "up to ",
+        "the counters-removed anaphor (Sarulf) excises whole"
+    );
+    assert_eq!(
+        strip_bound_quantity_anaphors("the amount of {e} paid this way"),
+        "",
+        "the energy-paid anaphor (Wrath of the Skies) excises whole"
+    );
+    assert_eq!(
+        strip_bound_quantity_anaphors(
+            "the amount of {e} paid this way and the number of counters removed this way"
+        ),
+        " and ",
+        "repeated scans excise every bound anaphor in the span"
+    );
+    assert_eq!(
+        strip_bound_quantity_anaphors("a creature card put into a graveyard this way"),
+        "a creature card put into a graveyard this way",
+        "an identity participle no combinator binds stays and still trips"
+    );
+}
+
+/// M5: return lines through the shared policy — a reveal-choice target span
+/// (owned downstream) and a bound-anaphor span (consumed) parse exactly as
+/// before the return arm was routed through the authority: no new printed
+/// reveal-return regression, and the fallback outcome is unchanged.
+#[test]
+fn return_arm_routes_through_the_shared_this_way_policy() {
+    for line in [
+        "return a creature card they revealed this way to its owner's hand",
+        "return a creature card they revealed this way to its owner's hand and draw a card",
+    ] {
+        let parsed = parse_effect(line);
+        assert!(
+            matches!(
+                parsed,
+                Effect::Bounce {
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "reveal-choice return keeps its pre-routing outcome, got {parsed:?} for {line:?}"
+        );
+    }
 }

@@ -6164,9 +6164,23 @@ fn substitute_another_in_aggregate_source(source: &CardTypeSetSource) -> CardTyp
                 .collect(),
         )
         .expect("rewriting preserves union arity"),
-        CardTypeSetSource::TrackedSet { .. }
-        | CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource => source.clone(),
+        CardTypeSetSource::TrackedSet {
+            set,
+            caused_by,
+            filter,
+        } => CardTypeSetSource::TrackedSet {
+            set: *set,
+            caused_by: *caused_by,
+            filter: filter.as_ref().map(substitute_another_in_filter),
+        },
+        // CR 608.2c + CR 115.1: the slot axis carries no `Another` — the
+        // substitution above only rewrites `Typed`/`Not`/`And`/`Or` shapes, so
+        // a targeted-objects population passes through unchanged, provably
+        // (no shape exists that `substitute_another_in_filter` could alter
+        // into a different slot).
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TargetedObjects { .. } => source.clone(),
     }
 }
 
