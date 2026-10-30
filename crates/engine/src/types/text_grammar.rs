@@ -38,7 +38,7 @@ pub type OracleResult<'a, O> = IResult<&'a str, O, OracleError<'a>>;
 
 // --- from parser/oracle_nom/primitives.rs ---
 
-/// Parse a number from Oracle text: digit string OR English words (one through twenty).
+/// Parse a number from Oracle text: digit string OR English words (zero through one hundred).
 ///
 /// Mirrors `oracle_util::parse_number` but as a nom combinator.
 pub fn parse_number(input: &str) -> OracleResult<'_, u32> {
@@ -84,7 +84,7 @@ pub(crate) fn parse_digit_number(input: &str) -> OracleResult<'_, u32> {
     }
 }
 
-/// Parse an English number word (one through one hundred, plus "a"/"an").
+/// Parse an English number word (zero through one hundred, plus "a"/"an").
 ///
 /// "a"/"an" require a word boundary after the match (whitespace, punctuation, or
 /// end-of-input) to prevent false matches on words like "another" or "anyone".
@@ -121,6 +121,7 @@ fn parse_english_number(input: &str) -> OracleResult<'_, u32> {
         value(3, tag("three")),
         value(2, tag("two")),
         value(1, tag("one")),
+        value(0, tag("zero")),
         parse_article_number,
     )))
     .parse(input)?;
@@ -1357,6 +1358,21 @@ pub fn craft_materials_default() -> TargetFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_cardinal_keeps_number_boundaries_and_remainder() {
+        // CR 107.1b: zero is a cardinal value, with the same token boundary as one.
+        for input in ["zero counters", "0 counters"] {
+            assert_eq!(parse_number(input), Ok((" counters", 0)));
+        }
+        assert_eq!(parse_number("zero"), Ok(("", 0)));
+        assert_eq!(parse_number("zero."), Ok((".", 0)));
+        for input in ["zeroes", "zeroth"] {
+            assert!(parse_number(input).is_err(), "{input}");
+        }
+        assert_eq!(parse_number("one counter"), Ok((" counter", 1)));
+        assert_eq!(parse_number("two counters"), Ok((" counters", 2)));
+    }
 
     /// CR 702.113: "card with awaken" is a parameterized-keyword presence
     /// meta-reference and must map to `KeywordMatch::Kind(Awaken)` (matched by
