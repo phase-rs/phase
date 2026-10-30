@@ -2559,6 +2559,9 @@ fn generate_target_assignments_with_limit(
 }
 
 /// CR 601.2c: Assign chosen targets to the correct effects in the ability chain.
+/// On a coin chain with a multi-target node, `targets` is a positional prefix of
+/// the announced slot vector (`chain_needs_announced_group_ends`); everywhere
+/// else it is the compact declared order.
 pub fn assign_targets_in_chain(
     state: &GameState,
     ability: &mut ResolvedAbility,
@@ -2571,6 +2574,23 @@ pub fn assign_targets_in_chain(
         return Ok(());
     }
     clear_chosen_target_slots(ability);
+    // CR 601.2c + CR 115.1: on a coin chain with a multi-target node the bulk
+    // declaration is a positional prefix of the announced slot vector, the
+    // reading the per-index validator enforces (`validate_target_prefix_with_specs`):
+    // `targets[i]` is slot `i`, unlisted trailing slots are declined. Assigning it
+    // slot-wise against the reconstructed announced groups keeps every target on
+    // the slot it was validated for, and keeps a node inside one outcome from
+    // claiming the next outcome's or the continuation's targets.
+    if chain_needs_announced_group_ends(ability) {
+        let announced = AnnouncedGroupEnds::build(state, ability)?;
+        if targets.len() > announced.total {
+            return Err(announced_partition_mismatch());
+        }
+        let mut selected_slots: Vec<Option<TargetRef>> =
+            targets.iter().cloned().map(Some).collect();
+        selected_slots.resize(announced.total, None);
+        return assign_cleared_selected_slots(state, ability, &selected_slots, Some(&announced));
+    }
     let mut next_target = 0usize;
     assign_targets_recursive(state, ability, targets, &mut next_target)?;
     if next_target != targets.len() {
@@ -2602,7 +2622,11 @@ pub fn assign_targets_in_chain(
 /// targets is refused here (no printed card has that shape). The walk total is
 /// checked against the selection length (`assign_selected_slots_in_chain`), so
 /// a differing rebuild is refused rather than assigned by a different
-/// announcement. Modal prompts come from `build_target_slots_labelled` (one
+/// announcement. The bulk `SelectTargets` entry has no prompt length to check:
+/// it pads its positional prefix to the walk total, and a
+/// `cap_distribution_target_slots` suffix truncation reads as declined trailing
+/// slots rather than as a partition mismatch. Modal prompts come from
+/// `build_target_slots_labelled` (one
 /// accumulator, path-emulated per mode) and are tied to the chained walk only
 /// by a debug count assertion; this table is used only when the chained walk
 /// and the prompt agree, and a divergence surfaces as that refusal.
@@ -2638,6 +2662,13 @@ fn announced_partition_mismatch() -> EngineError {
     EngineError::InvalidAction("Target selection does not match the announced target slots".into())
 }
 
+/// CR 601.2c: chains whose multi-target windows end at the reconstructed
+/// announced group boundaries, and whose bulk declarations are therefore
+/// read positionally (every chain entry point uses this one gate).
+fn chain_needs_announced_group_ends(ability: &ResolvedAbility) -> bool {
+    chain_has_coin_branches(ability) && chain_has_multi_target_node(ability)
+}
+
 fn chain_has_multi_target_node(ability: &ResolvedAbility) -> bool {
     ability.multi_target.is_some()
         || ability
@@ -2661,7 +2692,7 @@ pub fn assign_selected_slots_in_chain(
     // CR 601.2c: built from the unassigned tree the announcement saw. Only coin
     // chains with a multi-target node need it; every other chain keeps the
     // established sub-chain recount in the multi-target window.
-    let announced = (chain_has_coin_branches(ability) && chain_has_multi_target_node(ability))
+    let announced = chain_needs_announced_group_ends(ability)
         .then(|| AnnouncedGroupEnds::build(state, ability))
         .transpose()?;
     // CR 601.2c: the reconstruction applies only if it reproduces the prompt's
@@ -2672,20 +2703,28 @@ pub fn assign_selected_slots_in_chain(
     {
         return Err(announced_partition_mismatch());
     }
+    assign_cleared_selected_slots(state, ability, selected_slots, announced.as_ref())
+}
+
+/// The slot-wise assignment and finishing pass shared by the chain entry
+/// points, after their early-outs and `clear_chosen_target_slots`.
+fn assign_cleared_selected_slots(
+    state: &GameState,
+    ability: &mut ResolvedAbility,
+    selected_slots: &[Option<TargetRef>],
+    announced: Option<&AnnouncedGroupEnds>,
+) -> Result<(), EngineError> {
     let mut next_slot = 0usize;
-    assign_selected_slots_recursive(
-        state,
-        ability,
-        selected_slots,
-        &mut next_slot,
-        announced.as_ref(),
-    )?;
+    assign_selected_slots_recursive(state, ability, selected_slots, &mut next_slot, announced)?;
     if next_slot != selected_slots.len() {
         return Err(EngineError::InvalidAction(
             "Unused selected target slots".to_string(),
         ));
     }
-    debug_assert_eq!(declared_targets_in_chain(ability), chosen);
+    debug_assert_eq!(
+        declared_targets_in_chain(ability),
+        selected_slots.iter().flatten().cloned().collect::<Vec<_>>()
+    );
     stamp_other_batch_source_targets(ability);
     ability.capture_target_incarnations_recursive(state);
     restamp_chosen_group_targets(ability);
@@ -11227,7 +11266,9 @@ fn validate_selected_slots_with_specs(
 /// effect borrow is held; occurrence pins are not maintained here because the
 /// only callers (`assign_targets_in_chain` and its recursion) finish with
 /// `capture_target_incarnations_recursive`, which re-announces every node's
-/// pins aligned with the assigned targets.
+/// pins aligned with the assigned targets. A coin chain with a multi-target
+/// node never reaches this walk: `assign_targets_in_chain` routes it through
+/// `assign_cleared_selected_slots` and the slot authority instead.
 fn assign_targets_recursive(
     state: &GameState,
     ability: &mut ResolvedAbility,
@@ -11327,12 +11368,22 @@ fn assign_targets_recursive(
     // would bind it as subject A. `minimum_targets_in_chain` gates all three
     // companion terms off for a paired node for exactly this reason (§5.8).
     //
-    // The compact assigner still serves external `GameAction::SelectTargets`,
-    // stack restamping, and generic Aura/mutate auto-selection. It consumes
-    // the targets in declared order. Spec-aware automatic and random selection
-    // instead retain every slot's ordinal, including a declined optional slot,
-    // and use `assign_selected_slots_in_chain` so a later child keeps its own
-    // target. Both assignment paths make this paired node a target sink.
+    // The compact assigner serves external `GameAction::SelectTargets`, stack
+    // restamping, and generic Aura/mutate auto-selection on chains WITHOUT a
+    // coin branch and a multi-target node: it consumes the targets in declared
+    // order. On a coin chain with a multi-target node, `assign_targets_in_chain`
+    // reads the bulk list POSITIONALLY instead
+    // (`chain_needs_announced_group_ends`): `targets[i]` is announced slot `i`,
+    // the reading `validate_target_prefix_with_specs` checks, and unlisted
+    // trailing slots are declined. So a mid-list decline cannot be expressed in
+    // bulk; it is a `ChooseTarget { target: None }`. A list that leaves an
+    // undeclared trailing slot required is refused with "Missing required
+    // target". That list is assigned by `assign_selected_slots_in_chain`'s slot
+    // authority, never here (CR 601.2c). Spec-aware automatic and random
+    // selection instead retain every slot's ordinal, including a declined
+    // optional slot, and use `assign_selected_slots_in_chain` so a later child
+    // keeps its own target. Both assignment paths make this paired node a
+    // target sink.
     //
     // This is what makes the resolvers' positional consumption sound: after
     // this block a paired-subject node holds exactly its own claimed entries
@@ -11746,7 +11797,7 @@ fn assign_selected_slots_recursive(
     // CR 601.2c + CR 700.2f: mirror of the paired-subject block in
     // `assign_targets_recursive`, for the ONE-SLOT-AT-A-TIME walk. The bulk
     // `GameAction::SelectTargets` path reaches that function
-    // (the `assign_targets_in_chain` call in `casting_targets::handle_select_targets`, the `assign_targets_in_chain` call in `engine_stack::restamp_pending_die_result`); the step-by-step
+    // (the `assign_targets_in_chain` call in `casting_targets::handle_select_targets`, the `assign_targets_in_chain` call in `engine_stack::handle_trigger_target_selection_select_targets`); the step-by-step
     // `GameAction::ChooseTarget` walk reaches THIS one
     // (the `assign_selected_slots_in_chain` call in `casting_targets::handle_choose_target`, the `assign_selected_slots_in_chain` call in
     // `engine_stack::handle_trigger_target_selection_choose_target`) — and
