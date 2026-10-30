@@ -1235,11 +1235,12 @@ fn route_debug_token_to_battlefield(
                         &mut events,
                     )
                 {
-                    state.pending_liminal_entry_resume = Some(PendingLiminalEntryResume::Token {
-                        source_id: object_id,
-                        player: waiting_for.acting_player().unwrap_or(staged.controller),
-                        event,
-                    });
+                    state.pending_liminal_entry_resume =
+                        Some(Box::new(PendingLiminalEntryResume::Token {
+                            source_id: object_id,
+                            player: waiting_for.acting_player().unwrap_or(staged.controller),
+                            event,
+                        }));
                     state.waiting_for = waiting_for;
                     return ActionResult::applied(events, state.waiting_for.clone());
                 }

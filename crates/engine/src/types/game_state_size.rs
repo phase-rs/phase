@@ -89,6 +89,13 @@
 //! nothing); `GameState` then measures 14,832 B, under the unchanged 14,848
 //! ceiling.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc at 14,880 B after main's
+//! `layers_read_current_step` and `tracked_set_member_origins` landed beside
+//! those evidence tables. `pending_liminal_entry_resume` (184 B inline,
+//! populated only while an entry is parked on a replacement choice) is boxed,
+//! like its `pending_combat_lifelink` sibling; `GameState` then measures
+//! 14,704 B, under the unchanged 14,848 ceiling.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!

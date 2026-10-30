@@ -11398,7 +11398,7 @@ mod tests {
             assert!(!priority_checkpoint_is_settled(&state));
             state.pending_resolution_completion = None;
 
-            state.pending_liminal_entry_resume = Some(PendingLiminalEntryResume::Meld {
+            state.pending_liminal_entry_resume = Some(Box::new(PendingLiminalEntryResume::Meld {
                 source_id: ObjectId(92),
                 player: PlayerId(0),
                 context: MeldSelection {
@@ -11411,7 +11411,7 @@ mod tests {
                     entry: crate::types::ability::PermanentEntryMode::default(),
                 },
                 attack_target: None,
-            });
+            }));
             assert!(!priority_checkpoint_is_settled(&state));
             state.pending_liminal_entry_resume = None;
 

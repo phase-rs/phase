@@ -588,14 +588,15 @@ fn handle_replacement_choice_inner(
                             Some(ReplacementEvent::Moved),
                             events,
                         ) {
-                            state.pending_liminal_entry_resume =
-                                Some(crate::types::game_state::PendingLiminalEntryResume::Token {
+                            state.pending_liminal_entry_resume = Some(Box::new(
+                                crate::types::game_state::PendingLiminalEntryResume::Token {
                                     source_id: entry_ref,
                                     player: waiting_for
                                         .acting_player()
                                         .unwrap_or(state.active_player),
                                     event,
-                                });
+                                },
+                            ));
                             state.waiting_for = waiting_for;
                             return Ok(state.waiting_for.clone());
                         }
@@ -2655,7 +2656,11 @@ pub(super) fn handle_copy_target_choice(
     }
 
     if state.liminal_entries.contains_key(&source_id) {
-        let Some(resume) = state.pending_liminal_entry_resume.take() else {
+        let Some(resume) = state
+            .pending_liminal_entry_resume
+            .take()
+            .map(|resume| *resume)
+        else {
             return Err(EngineError::InvalidAction(
                 "Missing liminal entry resume".to_string(),
             ));
@@ -4510,15 +4515,17 @@ pub(super) fn resume_pending_liminal_token_entry(
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     let is_resumable_token = matches!(
-        state.pending_liminal_entry_resume.as_ref(),
+        state.pending_liminal_entry_resume.as_deref(),
         Some(crate::types::game_state::PendingLiminalEntryResume::Token { source_id, .. })
             if state.liminal_entries.contains_key(source_id)
     );
     if !is_resumable_token {
         return None;
     }
-    let Some(crate::types::game_state::PendingLiminalEntryResume::Token { event, .. }) =
-        state.pending_liminal_entry_resume.take()
+    let Some(crate::types::game_state::PendingLiminalEntryResume::Token { event, .. }) = state
+        .pending_liminal_entry_resume
+        .take()
+        .map(|resume| *resume)
     else {
         unreachable!("the guard above matched a Token resume with a live liminal entry")
     };
