@@ -12395,7 +12395,7 @@ fn latched_source_matches_doubler_filter(
 }
 
 /// A latched doubler's scope, classified structurally (no game state): the one
-/// authority both the runtime evaluator and the export guard use.
+/// authority the runtime evaluator uses.
 #[derive(Debug, Clone)]
 pub enum LatchedScopePlan {
     Any,
@@ -12433,8 +12433,7 @@ pub enum LatchedRelativeProperty {
 }
 
 /// Whether a printed doubler scope is judged on the latched (look-back) path
-/// at all. A scope outside this class isn't doubled there (fail closed); the
-/// export guard requires every printed scope to be in it.
+/// at all. A scope outside this class isn't doubled there (fail closed).
 pub fn latched_doubler_scope_is_judged(filter: &TargetFilter) -> bool {
     latched_doubler_scope_plan(filter).is_some()
 }
@@ -19454,10 +19453,9 @@ pub mod tests {
         );
     }
 
-    /// CR 603.2d + CR 603.10d: supplementary examples (the export guard,
-    /// `latched_doubler_scopes_over_the_export`, is the data-driven check): the
-    /// distinct printed `affected` scopes at the time of writing, each named by
-    /// one card that has it, are judged by the latched evaluator.
+    /// CR 603.2d + CR 603.10d: the distinct printed `affected` scopes at the
+    /// time of writing, each named by one card that has it, are judged by the
+    /// latched evaluator.
     #[test]
     fn every_printed_doubler_scope_is_judged_on_the_latched_path() {
         let mut state = setup();
