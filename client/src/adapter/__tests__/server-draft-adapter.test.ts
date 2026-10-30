@@ -3,9 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EMPTY_DRAFT_POOL_GROUPS } from "../draft-adapter";
 import { ServerDraftAdapter } from "../server-draft-adapter";
 import { PROTOCOL_VERSION } from "../ws-adapter";
-import { AdapterErrorCode } from "../types";
+import { AdapterError, AdapterErrorCode } from "../types";
 import type { DraftPlayerView } from "../draft-adapter";
 import type { GameAction, GameLogEntry, GameState, LegalActionsResult, ObjectAction, SubmitResult } from "../types";
+import type * as OpenPhaseSocketModule from "../../services/openPhaseSocket";
 import type {
   InteractionChoiceId,
   InteractionId,
@@ -13,6 +14,30 @@ import type {
   InteractionSubmission,
   PreviewRequestId,
 } from "../generated/interaction";
+
+// ── openPhaseSocket injection ─────────────────────────────────────────
+//
+// The adapter opens its draft socket through `openPhaseSocket`. Most tests
+// below drive the real helper over the stubbed global WebSocket; the open-
+// failure suite injects one pre-socket rejection (e.g. a LAN authorization
+// denial, which the helper forwards unwrapped) and otherwise passes through.
+const { injectedOpenFailure, openedUrls } = vi.hoisted(() => ({
+  injectedOpenFailure: { current: null as null | { error: unknown } },
+  openedUrls: [] as string[],
+}));
+
+vi.mock("../../services/openPhaseSocket", async (importOriginal) => {
+  const actual = await importOriginal<typeof OpenPhaseSocketModule>();
+  return {
+    ...actual,
+    openPhaseSocket: (...args: Parameters<typeof actual.openPhaseSocket>) => {
+      openedUrls.push(args[0]);
+      const injection = injectedOpenFailure.current;
+      if (injection) return Promise.reject(injection.error);
+      return actual.openPhaseSocket(...args);
+    },
+  };
+});
 
 // ── MockWebSocket (copied from ws-adapter.test.ts) ─────────────────────
 
@@ -2178,5 +2203,74 @@ describe("draft attachment settlement", () => {
       code: "WS_ERROR", message: "No draft session to reconnect to", recoverable: false,
     });
     expect(MockWebSocket.last).toBe(last);
+  });
+});
+
+describe("draft attachment open failures", () => {
+  const settings = {
+    displayName: "Alice",
+    setCodes: ["MKM"],
+    kind: "Premier" as const,
+    public: true,
+    tournamentFormat: "Swiss" as const,
+    podPolicy: "Competitive" as const,
+    podSize: 8,
+  };
+  const credentials = { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 };
+  let adapter: ServerDraftAdapter;
+
+  beforeEach(async () => {
+    injectedOpenFailure.current = null;
+    openedUrls.length = 0;
+    MockWebSocket.last = null;
+    adapter = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const created = adapter.createDraft(settings);
+    const established = await completeHandshake();
+    receive(established, "DraftCreated", credentials);
+    await created;
+    // Forget the setup connection: only the injected failure may open now.
+    openedUrls.length = 0;
+    MockWebSocket.last = null;
+  });
+
+  afterEach(() => {
+    injectedOpenFailure.current = null;
+    adapter.dispose();
+    vi.restoreAllMocks();
+  });
+
+  function start(kind: "create" | "reconnect" | "join"): Promise<unknown> {
+    switch (kind) {
+      case "create":
+        return adapter.createDraft(settings);
+      case "reconnect":
+        return adapter.reconnectDraft();
+      case "join":
+        return adapter.joinDraft("NEXT12", "Alice");
+    }
+  }
+
+  // `openPhaseSocket` forwards ordinary rejections from LAN authorization
+  // unwrapped, so both shapes reach `attachSocket` before a socket exists.
+  const failures = [
+    { label: "an Error", error: new Error("LAN approval denied"), message: "Error: LAN approval denied" },
+    { label: "a non-Error value", error: "denied", message: "denied" },
+  ];
+
+  it.each(
+    (["create", "reconnect", "join"] as const).flatMap((kind) =>
+      failures.map((failure) => ({ kind, ...failure })),
+    ),
+  )("$kind through $label rejects as a recoverable WS_ERROR without opening a socket", async ({ kind, error, message }) => {
+    injectedOpenFailure.current = { error };
+    const read = trackRejection(start(kind));
+
+    const outcome = await read();
+    expect(outcome).toBeInstanceOf(AdapterError);
+    expect(outcome).toMatchObject({ code: "WS_ERROR", message, recoverable: true });
+    // The failure came from the open itself: it was attempted exactly once and
+    // no transport was ever created, so no setup frame could have been sent.
+    expect(openedUrls).toEqual(["ws://localhost:9374/ws"]);
+    expect(MockWebSocket.last).toBeNull();
   });
 });

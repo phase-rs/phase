@@ -627,8 +627,10 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (owner.type === "init") this.pendingInit = owner.init;
     const attachment = { owner, controller: new AbortController() };
     this.unfinishedAttachment = attachment;
-    // attachSocket handles transport/listener failures; this final catch also
-    // owns exceptions thrown by protocol-mismatch diagnostic listeners.
+    // attachSocket settles the owner for transport/listener failures; this
+    // final catch only keeps an exception thrown after settlement (e.g. by a
+    // protocol-mismatch diagnostic listener) from becoming an unhandled
+    // rejection.
     void this.attachSocket(attachment, setupFrame).catch((error: unknown) => {
       this.rejectAttachment(owner, error instanceof Error ? error : new Error(String(error)));
     });
@@ -732,7 +734,13 @@ export class ServerDraftAdapter implements EngineAdapter {
     } catch (error) {
       const failure = error instanceof HandshakeError
         ? new AdapterError("WS_ERROR", error.message, error.kind !== "protocol_mismatch" && error.kind !== "invalid_url")
-        : error instanceof Error ? error : new Error(String(error));
+        // Before a socket exists the failure is an acquisition failure, and the
+        // caller gets the normalized WS_ERROR the base adapter produced.
+        // After acquisition it is a listener/setup failure and keeps its
+        // identity (the setup-send path already throws an AdapterError).
+        : socket === null
+          ? new AdapterError("WS_ERROR", String(error), true)
+          : error instanceof Error ? error : new Error(String(error));
       this.rejectAttachment(attachment.owner, failure);
       if (socket) this.abandonSocket(socket);
       if (error instanceof HandshakeError
