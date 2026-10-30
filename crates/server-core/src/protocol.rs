@@ -2319,6 +2319,7 @@ mod tests {
         let msg = ClientMessage::SeatMutate {
             mutation: SeatMutation::SetKind {
                 seat_index: 1,
+                expected_kind: None,
                 kind: SeatKind::Ai {
                     difficulty: AiDifficulty::Medium,
                     deck: DeckChoice::DeckList(Box::new(DeckData {
@@ -2348,6 +2349,65 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn decoded_conditional_seat_mutation_preserves_joined_human() {
+        struct Resolver;
+        impl seat_reducer::types::DeckResolver for Resolver {
+            fn resolve(
+                &self,
+                _choice: &DeckChoice,
+            ) -> Result<engine::game::deck_loading::PlayerDeckList, String> {
+                Ok(Default::default())
+            }
+        }
+        let context = seat_reducer::types::ReducerCtx {
+            platform: phase_ai::config::Platform::Native,
+            deck_resolver: &Resolver,
+        };
+        let mut state = seat_reducer::types::SeatState {
+            seats: vec![SeatKind::HostHuman, SeatKind::JoinedHuman],
+            tokens: vec!["host".to_string(), "guest".to_string()],
+            format: engine::types::format::FormatConfig::standard(),
+            game_started: false,
+        };
+        let mut frame = serde_json::json!({
+            "type": "SeatMutate",
+            "data": { "mutation": {
+                "type": "SetKind",
+                "data": {
+                    "seatIndex": 1,
+                    "kind": { "type": "Ai", "data": {
+                        "difficulty": "Medium", "deck": { "type": "Random" }
+                    }},
+                    "expectedKind": { "type": "WaitingHuman" }
+                }
+            }}
+        });
+        let ClientMessage::SeatMutate { mutation } = serde_json::from_value(frame.clone()).unwrap()
+        else {
+            panic!("expected seat mutation");
+        };
+        crate::seat_mutation_wire_guard::guard_seat_mutation(&mutation).unwrap();
+        let delta = seat_reducer::apply(&mut state, mutation, &context).unwrap();
+        assert_eq!(state.seats[1], SeatKind::JoinedHuman);
+        assert_eq!(state.tokens[1], "guest");
+        assert!(delta.invalidated_tokens.is_empty());
+
+        frame["data"]["mutation"]["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("expectedKind");
+        let ClientMessage::SeatMutate { mutation } = serde_json::from_value(frame).unwrap() else {
+            panic!("expected seat mutation");
+        };
+        assert!(serde_json::to_value(&mutation).unwrap()["data"]
+            .get("expectedKind")
+            .is_none());
+        let delta = seat_reducer::apply(&mut state, mutation, &context).unwrap();
+        assert_eq!(delta.invalidated_tokens, vec!["guest"]);
+        assert!(matches!(state.seats[1], SeatKind::Ai { .. }));
     }
 
     #[test]

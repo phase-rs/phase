@@ -474,6 +474,16 @@ pub(crate) fn additional_cost_declaration_is_offerable(
     if matches!(cost, AbilityCost::Unimplemented { .. }) {
         return Ok(false);
     }
+    // CR 601.2a + CR 609.4b + CR 611.2f: the cast is priced under the terms of
+    // the graveyard grant it is announced under (Whispersteel Dagger's
+    // concession), which ride its ability until it becomes the pending cast.
+    let terms_state = pending
+        .ability
+        .context
+        .graveyard_permission_latch
+        .as_ref()
+        .and_then(|latch| super::casting::latch_payment_terms_state(state, latch));
+    let state = terms_state.as_ref().unwrap_or(state);
     let exile_this_way_cost = is_exile_any_number_effect_cost(&cost);
     let split = split_declared_mana_addition_and_residual(Some(state), Some(pending), cost)?;
     if let Some(residual) = split.residual.as_ref() {
@@ -7263,11 +7273,13 @@ fn surface_next_interactive_activation_cost_leg(
         }));
     }
 
-    if let Some(AbilityCost::Reveal { count, filter }) =
-        first_activation_cost_component_matching(cost, |cost| {
-            matches!(cost, AbilityCost::Reveal { .. })
-        })
-    {
+    if let Some(AbilityCost::Reveal {
+        count,
+        filter,
+        shared_quality,
+    }) = first_activation_cost_component_matching(cost, |cost| {
+        matches!(cost, AbilityCost::Reveal { .. })
+    }) {
         if let Some(filter) = filter {
             // CR 107.3a + CR 602.2b: the announced X is the number of cards revealed.
             let count =
@@ -7309,7 +7321,9 @@ fn surface_next_interactive_activation_cost_leg(
             );
             return Ok(Some(WaitingFor::PayCost {
                 player,
-                kind: PayCostKind::Reveal,
+                kind: PayCostKind::Reveal {
+                    shared_quality: shared_quality.clone(),
+                },
                 choices,
                 count,
                 min_count: 0,
@@ -11091,7 +11105,11 @@ fn pay_additional_cost_with_source(
                 },
             });
         }
-        AbilityCost::Reveal { count, filter } => {
+        AbilityCost::Reveal {
+            count,
+            filter,
+            shared_quality,
+        } => {
             let mut pending = pending;
             // CR 701.20a: A filter-less reveal is the spell revealing itself —
             // there is no choice to make, the object is already known.
@@ -11135,7 +11153,9 @@ fn pay_additional_cost_with_source(
             }
             return Ok(WaitingFor::PayCost {
                 player,
-                kind: PayCostKind::Reveal,
+                kind: PayCostKind::Reveal {
+                    shared_quality: shared_quality.clone(),
+                },
                 choices: eligible,
                 count,
                 min_count: 0,
@@ -11190,6 +11210,7 @@ fn pay_additional_cost_with_source(
 /// hand — revealing doesn't move it (CR 701.20b) — and becomes the
 /// resolving ability's cost-paid-object referent (CR 608.2k), backing
 /// references like "the revealed card's mana value".
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_reveal_for_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -11197,6 +11218,7 @@ pub(crate) fn handle_reveal_for_cost(
     expected: usize,
     legal_cards: &[ObjectId],
     chosen: &[ObjectId],
+    shared_quality: Option<crate::types::ability::SharedQuality>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if chosen.len() != expected {
@@ -11218,6 +11240,17 @@ pub(crate) fn handle_reveal_for_cost(
             return Err(EngineError::InvalidAction(
                 "Selected card not in hand".to_string(),
             ));
+        }
+    }
+
+    // CR 701.20a: A shared-quality constraint ("two cards that share a color")
+    // travels with this Reveal leg's prompt, so spell and activation costs —
+    // and multiple Reveal legs — each validate against their own constraint.
+    if let Some(quality) = shared_quality {
+        if !super::cost_payability::cards_share_quality(state, chosen, &quality) {
+            return Err(EngineError::InvalidAction(format!(
+                "Revealed cards must share a {quality:?}"
+            )));
         }
     }
 
@@ -11415,23 +11448,29 @@ fn additional_cost_x_max(
             .unwrap_or(0),
         ),
         // CR 107.3a + CR 601.2h: X in a reveal count is announced before the
-        // reveal; the engine caps it at the matching cards in hand, since
-        // revealing more is an unpayable cost (CR 118.3).
+        // reveal; the engine caps it at the matching cards in hand (or, with a
+        // shared quality, the largest group sharing it), since revealing more
+        // is an unpayable cost (CR 118.3).
         AbilityCost::Reveal {
             count,
             filter: Some(filter),
-        } if is_bare_x_count(count) => Some(
-            super::casting::find_eligible_reveal_targets(
+            shared_quality,
+        } if is_bare_x_count(count) => {
+            let eligible = super::casting::find_eligible_reveal_targets(
                 state,
                 player,
                 source_id,
                 granting_object,
                 filter,
-            )
-            .len()
-            .try_into()
-            .unwrap_or(u32::MAX),
-        ),
+            );
+            let max = match shared_quality {
+                Some(quality) => {
+                    super::cost_payability::largest_shared_quality_group(state, &eligible, quality)
+                }
+                None => eligible.len(),
+            };
+            Some(max.try_into().unwrap_or(u32::MAX))
+        }
         AbilityCost::Sacrifice(cost)
             if cost.requirement == SacrificeRequirement::Count { count: u32::MAX } =>
         {
@@ -11581,6 +11620,7 @@ fn cost_needs_activation_x_announcement(cost: &AbilityCost) -> bool {
         AbilityCost::Reveal {
             count,
             filter: Some(_),
+            shared_quality: _,
         } => is_bare_x_count(count),
         AbilityCost::Composite { costs } => costs.iter().any(cost_needs_activation_x_announcement),
         _ => false,
@@ -12938,6 +12978,28 @@ enum ReturnedCreatureCostMove {
     Delivered,
 }
 
+/// CR 608.2c + CR 601.2a: whether a cast permission's "… is a [type] in
+/// addition to its other types" rider applies to the cast of `object_id`: its
+/// printed spell-quality condition ("If you cast a creature spell this way")
+/// is evaluated against the elected spell, which has all the characteristics
+/// of its card. The single gate for the rider, read at finalization and by the
+/// payment-time spell projection (`casting::build_spell_meta`).
+pub(super) fn enters_rider_applies(
+    state: &GameState,
+    object_id: ObjectId,
+    rider: &crate::types::ability::PendingEntersModifications,
+) -> bool {
+    !rider.is_empty()
+        && rider.cast_filter.as_ref().is_none_or(|filter| {
+            crate::game::filter::matches_target_filter(
+                state,
+                object_id,
+                filter,
+                &crate::game::filter::FilterContext::neutral(),
+            )
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finalize_cast_with_phyrexian_choices_inner(
     state: &mut GameState,
@@ -13526,7 +13588,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // the granted `ExileWithAltCost`. When that cast finalizes, register a pending
     // ETB counter so the object enters the battlefield carrying it (CR 122.1h: a
     // finality counter exiles the permanent instead of letting it die).
-    // Osteomancer Adept, The Tomb of Aclazotz.
+    // (Osteomancer Adept's rider shape.)
     //
     // CR 608.2c: the binding uses the selected-permission authority — the rider is
     // read from the permission that actually supports THIS cast, not any permission
@@ -13566,7 +13628,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
     }
 
     // CR 205.1b + CR 613.1d: A `CastFromZone` grant whose rider was "… is a
-    // [type] in addition to its other types" (The Tomb of Aclazotz) records the
+    // [type] in addition to its other types" records the
     // additive type-changing modifications on the granted `ExileWithAltCost`.
     // Apply them as a `Duration::Permanent` continuous effect (CR 611.2a: no
     // stated duration → until end of game) scoped to the one cast object
@@ -13580,27 +13642,34 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // evaluated against the elected spell, which has all the characteristics of
     // its card (CR 601.2a). A cast that does not match the printed quality is
     // granted no modifications, per the instruction as written.
-    let rider_quality_matches =
-        cast_this_way_enters_mods
-            .cast_filter
-            .as_ref()
-            .is_none_or(|filter| {
-                crate::game::filter::matches_target_filter(
-                    state,
-                    object_id,
-                    filter,
-                    &crate::game::filter::FilterContext::neutral(),
-                )
-            });
-    if rider_quality_matches && !cast_this_way_enters_mods.is_empty() {
-        state.add_transient_continuous_effect(
-            object_id,
-            player,
-            crate::types::ability::Duration::Permanent,
-            crate::types::ability::TargetFilter::SpecificObject { id: object_id },
-            cast_this_way_enters_mods.modifications,
-            None,
-        );
+    //
+    // A graveyard cast permission carries the same rider on its own grant
+    // (`GraveyardCastPermission::enters_modifications`), latched as the cast
+    // was announced; it applies the same way.
+    let graveyard_enters_mods = graveyard_permission_latch
+        .as_ref()
+        .map(|latch| latch.enters_modifications.clone())
+        .unwrap_or_default();
+    let mut rider_installed = false;
+    for rider in [cast_this_way_enters_mods, graveyard_enters_mods] {
+        if enters_rider_applies(state, object_id, &rider) {
+            state.add_transient_continuous_effect(
+                object_id,
+                player,
+                crate::types::ability::Duration::Permanent,
+                crate::types::ability::TargetFilter::SpecificObject { id: object_id },
+                rider.modifications,
+                None,
+            );
+            rider_installed = true;
+        }
+    }
+    // CR 611.2f: the rider applies from the moment the spell is put on the
+    // stack, so settle it onto the spell before the cast-time snapshots below
+    // (`snapshot_cast_spell_keywords`, `record_spell_cast_from_zone`) copy its
+    // characteristics into cast history, which later settlement can't repair.
+    if rider_installed {
+        super::layers::flush_layers(state);
     }
 
     if casting_variant == CastingVariant::Foretell {
@@ -13736,6 +13805,24 @@ fn finalize_cast_with_phyrexian_choices_inner(
             .pending
             .chain
             .set_first_optional_effect_performed_gate(true);
+    }
+
+    // A grant whose Oracle wording authorizes ONE cast ("you may cast a creature
+    // spell from your graveyard this turn" — Chainer, Nightmare Adept) is used
+    // up by the cast it authorized: end the effect that granted it, so no
+    // second card is castable through it. Read off the announcement latch, the
+    // grant this cast committed to.
+    if let Some(crate::types::game_state::GraveyardPermissionLatch {
+        cast_limit: crate::types::statics::PermissionCastLimit::Single,
+        permission:
+            crate::types::game_state::GraveyardPermissionId {
+                grant: crate::types::game_state::PermissionGrant::Transient { effect_id, .. },
+                ..
+            },
+        ..
+    }) = &graveyard_permission_latch
+    {
+        super::layers::retire_used_single_cast_grant(state, *effect_id);
     }
 
     // CR 603.2h + CR 601.2i: the spell is now cast — the controller has taken a
@@ -17200,6 +17287,12 @@ fn finalize_mana_payment_with_resume(
     // a later spend.)
     state.active_payment_pins = pending.pinned_pool_units.clone();
     state.active_casting_permission_index = pending.casting_permission_index;
+    state.active_graveyard_permission_latch = pending
+        .ability
+        .context
+        .graveyard_permission_latch
+        .clone()
+        .map(Box::new);
     let spend_only_on_x_count = state
         .objects
         .get(&pending.object_id)
@@ -17523,6 +17616,7 @@ fn finalize_mana_payment_with_resume(
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
     state.active_casting_permission_index = None;
+    state.active_graveyard_permission_latch = None;
     state.active_spend_only_on_x_count = None;
     match finalize_result {
         Ok(waiting_for) => Ok(waiting_for),
@@ -17631,6 +17725,12 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     // empty outside an in-progress finalize spend".
     state.active_payment_pins = pending.pinned_pool_units.clone();
     state.active_casting_permission_index = pending.casting_permission_index;
+    state.active_graveyard_permission_latch = pending
+        .ability
+        .context
+        .graveyard_permission_latch
+        .clone()
+        .map(Box::new);
     let spend_only_on_x_count = state
         .objects
         .get(&pending.object_id)
@@ -17965,6 +18065,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
     state.active_casting_permission_index = None;
+    state.active_graveyard_permission_latch = None;
     state.active_spend_only_on_x_count = None;
     match finalize_result {
         Ok(waiting_for) => Ok(waiting_for),
@@ -18936,6 +19037,9 @@ mod tests {
                         enters_with_counter: None,
                         required_cast_keyword: None,
                         pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                        cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                        mana_spend_permission: None,
+                        enters_modifications: Default::default(),
                     },
                 )
                 .affected(crate::types::ability::TargetFilter::Typed(
@@ -30364,6 +30468,7 @@ its replicate cost was paid.)\nDraw a card.";
                 AbilityCost::Reveal {
                     count: QuantityExpr::Fixed { value: 1 },
                     filter: None,
+                    shared_quality: None,
                 },
             ),
             (

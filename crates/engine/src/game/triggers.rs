@@ -2446,6 +2446,39 @@ fn trigger_source_context_for_event(
     trigger_source_context_for_latch(state, source)
 }
 
+/// CR 603.10 + CR 603.10d: latch every functioning look-back control-change
+/// watcher (a lose-side `ChangesController` trigger source; the gain side is
+/// an ordinary trigger, checked after the event), with its controller and
+/// trigger entries, immediately before a control-change instruction. The source contexts come from the same
+/// `trigger_source_context_for_latch` authority the zone-change group latch
+/// uses. CR 702.26b: phased-out permanents don't trigger; CR 113.6: printed
+/// control-change triggers function on the battlefield.
+pub(crate) fn latch_control_change_watchers(state: &GameState) -> Vec<TriggerSourceContext> {
+    trigger_source_ids_for_zone(state, Zone::Battlefield)
+        .into_iter()
+        .filter_map(|source_id| state.objects.get(&source_id))
+        .filter(|source| {
+            super::functioning_abilities::active_trigger_definitions(state, source).any(|active| {
+                is_look_back_control_change(&active.definition.mode)
+                    && trigger_definition_functions_in_zone(active.definition, Zone::Battlefield)
+            })
+        })
+        .map(|source| trigger_source_context_for_latch(state, source))
+        .collect()
+}
+
+/// CR 603.10d: "when you lose control of ?" / "an opponent gains control of ?
+/// from you" look back in time; CR 603.10: "when you gain control of ?" is an
+/// ordinary trigger, checked immediately after the event.
+pub(crate) fn is_look_back_control_change(mode: &TriggerMode) -> bool {
+    matches!(
+        mode,
+        TriggerMode::ChangesController {
+            side: crate::types::triggers::ControlChangeSide::Loses
+        }
+    )
+}
+
 /// CR 603.10: Capture the full immediately-before authority for a logical
 /// zone-change owner after its initial layer flush and before its first
 /// delivery, preserving the look-back exception's pre-event trigger state.
@@ -2703,10 +2736,19 @@ enum TriggerSourceVisit {
     EventSubject,
     /// Every other source path: live index, off-zone cache, or co-departed LKI.
     Observer,
+    /// CR 603.10 + CR 603.10d: a look-back control-change watcher, latched
+    /// immediately before the event's instruction and carried on the event.
+    /// The only visit that admits a printed `ChangesController` definition, and
+    /// it admits nothing else.
+    ControlChangeWatcher,
 }
 
 impl LogicalZoneTriggerCollection<'_> {
     fn admits_source_visit(self, visit: TriggerSourceVisit, source: ObjectIncarnationRef) -> bool {
+        if matches!(visit, TriggerSourceVisit::ControlChangeWatcher) {
+            // Already the immediately-before authority for its event.
+            return true;
+        }
         match self {
             Self::Ordinary => true,
             // CR 603.10a: Settlement is the one observer pass for all
@@ -3181,6 +3223,17 @@ fn collect_matching_triggers_inner(
     );
     for (trig_idx, definition_ref, trig_def, granted_keyword_kind) in all_triggers {
         let source_context = source_context_for_definition(&source_context, trig_def);
+        // CR 603.10d: a look-back control-change trigger exists, and has its
+        // controller, as of immediately before the change, so it is collected
+        // only from the watcher latched then (`ControlChangeWatcher`), never
+        // from a live, cached or post-event view; and that visit collects
+        // nothing else. The gain side (CR 603.10) is collected by the ordinary
+        // visits, from the board after the event.
+        if is_look_back_control_change(&trig_def.mode)
+            != matches!(visit, TriggerSourceVisit::ControlChangeWatcher)
+        {
+            continue;
+        }
         // Synthesized granted-keyword companion triggers carry a keyword-keyed
         // `MayTriggerOrigin` — the synthetic `trig_idx` points past
         // `trigger_definitions` and must not be used as a `Printed` index.
@@ -3296,6 +3349,12 @@ fn collect_matching_triggers_inner(
             if !admitted {
                 continue;
             }
+            // CR 603.3a: `controller` is the latched source's controller. For a
+            // look-back control-change trigger that is the watcher latched
+            // immediately before the change (CR 603.10d), so the matched "you"
+            // and the trigger's controller read the same field by construction.
+            // For a `Loses` match that's already the old controller (the matcher
+            // requires it), so the side override below is the identity there.
             // CR 603.3a + CR 109.5: a self-ref `ChangesController` trigger is
             // controlled by the player its `side` names — CR 603.10d "when you
             // lose control of ~" is the PRE-change controller (the player who
@@ -6354,6 +6413,51 @@ fn collect_pending_triggers_with_collection(
                         matched.pending,
                         matched.trigger_events,
                     ));
+                }
+            }
+        }
+
+        // CR 603.10 + CR 603.10d: look-back control-change triggers. Their
+        // existence, their controller (CR 603.3a) and the subject's appearance
+        // are those immediately before the change, which the event carries: the
+        // watcher latch and subject snapshot its instruction captured before
+        // its first mutation. Collected only here (the live, cached and LKI
+        // passes above skip `ChangesController`), so a watcher that has since
+        // changed control, lost its abilities or left the battlefield still
+        // triggers exactly as it would have then. `Unrecorded` evidence (a
+        // legacy payload) latches no watcher, so nothing is collected.
+        if let GameEvent::ControllerChanged { evidence, .. } = event {
+            if let Some(watchers) = state
+                .control_change_observation(*evidence)
+                .map(|observation| observation.watchers.clone())
+            {
+                for source_context in watchers.iter() {
+                    let source_id = source_context.identity.reference.object_id;
+                    let matched_triggers = collect_matching_triggers_from_context(
+                        state,
+                        event,
+                        events,
+                        source_context,
+                        Some(Zone::Battlefield),
+                        &mut batched_this_pass,
+                        &mut registered_this_event,
+                        &active_suppress_triggers,
+                        collection,
+                        TriggerSourceVisit::ControlChangeWatcher,
+                    );
+                    for matched in matched_triggers {
+                        if !session.record_match(state, &matched, event) {
+                            continue;
+                        }
+                        if matched.batched {
+                            batched_this_pass.insert((source_id, matched.trig_idx));
+                        }
+                        registered_this_event.insert((source_id, matched.trig_idx));
+                        pending.push(PendingTriggerContext::batched(
+                            matched.pending,
+                            matched.trigger_events,
+                        ));
+                    }
                 }
             }
         }
@@ -12237,71 +12341,612 @@ fn trigger_source_matches_doubler_filter(
     }
 }
 
-fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerContext>) {
-    // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating so a
-    // phased-out doubler no longer doubles triggers.
-    let doublers: Vec<(PlayerId, ObjectId, TriggerCause, Option<TargetFilter>)> = state
+/// CR 603.2d: every functioning trigger-doubling static on the battlefield, as
+/// the board stands now. CR 702.26b + CR 604.1: `active_static_definitions`
+/// owns the gating, so a phased-out doubler doubles nothing. Also latched by
+/// each control-change instruction's capture
+/// (`gain_control::capture_control_change_instruction`).
+pub(crate) fn active_trigger_doublers(
+    state: &GameState,
+) -> Vec<crate::types::events::LatchedTriggerDoubler> {
+    state
         .battlefield
         .iter()
         .filter_map(|&obj_id| {
             let obj = state.objects.get(&obj_id)?;
             let doubler = super::functioning_abilities::active_static_definitions(state, obj)
                 .find(|sd| matches!(sd.mode, StaticMode::DoubleTriggers { .. }))?;
-            let cause = match &doubler.mode {
-                StaticMode::DoubleTriggers { cause } => cause.clone(),
-                _ => unreachable!("filter above guarantees DoubleTriggers"),
+            let StaticMode::DoubleTriggers { cause } = &doubler.mode else {
+                unreachable!("filter above guarantees DoubleTriggers");
             };
-            Some((obj.controller, obj_id, cause, doubler.affected.clone()))
+            Some(crate::types::events::LatchedTriggerDoubler {
+                source: trigger_source_context_for_latch(state, obj),
+                cause: cause.clone(),
+                affected: doubler.affected.clone(),
+            })
         })
-        .collect();
+        .collect()
+}
 
-    if doublers.is_empty() {
-        return;
+/// CR 603.10d + CR 603.2d: a look-back control-change trigger triggers, and is
+/// counted, as of immediately before its change. When `trigger` was collected
+/// from one of its event's latched watchers, returns the doublers that
+/// instruction latched with it and that watcher's source context; the trigger
+/// is qualified against those, not against the post-resolution board (where
+/// its source or a doubler may have changed hands or left).
+fn control_change_doubling_authority<'a>(
+    state: &'a GameState,
+    trigger: &'a PendingTrigger,
+) -> Option<(
+    &'a [crate::types::events::LatchedTriggerDoubler],
+    &'a TriggerSourceContext,
+)> {
+    let Some(GameEvent::ControllerChanged { evidence, .. }) = trigger.trigger_event.as_ref() else {
+        return None;
+    };
+    let observation = state.control_change_observation(*evidence)?;
+    let source = trigger.ability.trigger_source.as_ref()?;
+    let definition = trigger.ability.trigger_definition_ref.as_ref()?;
+    // The trigger is one of a latched watcher's look-back definitions (not a
+    // gain-side trigger of the same source, collected after the event).
+    observation
+        .watchers
+        .iter()
+        .find(|watcher| watcher.identity == source.identity)?
+        .trigger_entries
+        .iter()
+        .any(|entry| {
+            entry.occurrence == definition.occurrence
+                && is_look_back_control_change(&entry.definition.mode)
+        })
+        .then_some((observation.doublers.as_slice(), source))
+}
+
+/// CR 603.2d + CR 603.10d: match a look-back trigger's latched source (the
+/// watcher, `source`) against a latched doubler's scope, entirely as both
+/// stood immediately before the change: no live object, no
+/// `TriggerSourceContext::source_read`. `None` is a scope this evaluator can't
+/// judge from the captured data alone; the trigger is then not doubled (fail
+/// closed; no printed doubler's scope is in that class: see
+/// `latched_doubler_scope`).
+fn latched_source_matches_doubler_filter(
+    state: &GameState,
+    source: &TriggerSourceContext,
+    filter: &TargetFilter,
+    doubler: &crate::types::events::LatchedTriggerDoubler,
+) -> bool {
+    if doubler_filter_requires_battlefield_permanent(filter)
+        && source.identity.expected_zone != Zone::Battlefield
+    {
+        return false;
     }
+    latched_doubler_scope(state, source, filter, doubler).unwrap_or(false)
+}
 
-    let mut extra: Vec<PendingTriggerContext> = Vec::new();
-    for (doubler_controller, doubler_id, cause, ref affected) in &doublers {
-        for trigger_context in pending.iter() {
-            let trigger = &trigger_context.pending;
-            // CR 603.2d: A delayed trigger is already the exact ability that
-            // was created by its originating effect. Trigger doublers apply to
-            // the event that creates a delayed trigger, not again when that
-            // delayed ability later fires.
-            if trigger_context.firing().is_delayed() {
-                continue;
+/// A latched doubler's scope, classified structurally (no game state): the one
+/// authority the runtime evaluator uses.
+#[derive(Debug, Clone)]
+pub enum LatchedScopePlan {
+    Any,
+    /// "~": the watcher is the doubler, by exact incarnation.
+    SelfRef,
+    Object(ObjectId),
+    Or(Vec<LatchedScopePlan>),
+    And(Vec<LatchedScopePlan>),
+    Not(Box<LatchedScopePlan>),
+    Typed {
+        /// The scope's controller clause, admitted only where the captured
+        /// controllers answer it: `None` or `You` (the watcher's latched
+        /// controller is the doubler's).
+        controller: Option<crate::types::ability::ControllerRef>,
+        /// Source-relative properties, judged from the captured data.
+        relative: Vec<LatchedRelativeProperty>,
+        /// The rest of the scope reads only the watcher's characteristics.
+        characteristics: TargetFilter,
+    },
+}
+
+/// A source-relative scope property that the captured data answers exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LatchedRelativeProperty {
+    /// CR 109.1: "another": not the doubler.
+    Another,
+    /// CR 205.3e + CR 702.73a: of the doubler's chosen creature type.
+    ChosenCreatureType,
+    /// CR 301.5 + CR 303.4: attached to the doubler.
+    AttachedToDoubler,
+    /// CR 301.5 + CR 301.5f: equipped by the doubler.
+    EquippedByDoubler,
+    /// Greater power than the doubler's.
+    PowerGreaterThanDoubler,
+}
+
+/// Whether a printed doubler scope is judged on the latched (look-back) path
+/// at all. A scope outside this class isn't doubled there (fail closed).
+pub fn latched_doubler_scope_is_judged(filter: &TargetFilter) -> bool {
+    latched_doubler_scope_plan(filter).is_some()
+}
+
+/// The exhaustive structural classifier (no wildcard arm: a new
+/// `TargetFilter` or `FilterProp` variant fails to compile until classified).
+/// `None`: the scope reads something the capture doesn't hold.
+pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopePlan> {
+    Some(match filter {
+        TargetFilter::Any => LatchedScopePlan::Any,
+        TargetFilter::SelfRef => LatchedScopePlan::SelfRef,
+        TargetFilter::SpecificObject { id } => LatchedScopePlan::Object(*id),
+        TargetFilter::Or { filters } => LatchedScopePlan::Or(
+            filters
+                .iter()
+                .map(latched_doubler_scope_plan)
+                .collect::<Option<_>>()?,
+        ),
+        TargetFilter::And { filters } => LatchedScopePlan::And(
+            filters
+                .iter()
+                .map(latched_doubler_scope_plan)
+                .collect::<Option<_>>()?,
+        ),
+        TargetFilter::Not { filter } => {
+            LatchedScopePlan::Not(Box::new(latched_doubler_scope_plan(filter)?))
+        }
+        TargetFilter::Typed(typed) => {
+            if !latched_controller_clause_is_judged(typed.controller.as_ref()) {
+                return None;
             }
-            // Controller match: trigger source must be controlled by the doubler's controller
-            if trigger.controller != *doubler_controller {
-                continue;
-            }
-            // CR 603.2d: Self-exclusion. A doubler normally never doubles its own
-            // triggered abilities — Panharmonicon/Yarok/Isshin/Wayta all scope to
-            // OTHER permanents. The carve-out: when the doubler's `affected` filter
-            // references the source itself (`~`, e.g. Cloud's "a triggered ability
-            // of Cloud or an Equipment attached to it"), CR 603.2d makes its own
-            // triggered abilities eligible, so skip the exclusion and let the
-            // `affected` match below decide.
-            let affected_references_self = affected.as_ref().is_some_and(filter_references_self);
-            if !affected_references_self && trigger.source_id == *doubler_id {
-                continue;
-            }
-            // CR 603.2d: Check the cause predicate against the spawning event.
-            if !trigger_cause_matches(
-                state,
-                cause,
-                trigger.trigger_event.as_ref(),
-                *doubler_controller,
-            ) {
-                continue;
-            }
-            // CR 603.2d: If the doubler specifies an affected filter (e.g. "creature you
-            // control of the chosen type"), only double triggers from matching sources.
-            if let Some(filter) = affected {
-                if !trigger_source_matches_doubler_filter(state, trigger, filter, *doubler_id) {
-                    continue;
+            let mut relative = Vec::new();
+            let mut watcher_only = Vec::new();
+            for property in &typed.properties {
+                match latched_property_kind(property)? {
+                    Some(kind) => relative.push(kind),
+                    None => watcher_only.push(property.clone()),
                 }
             }
-            extra.push(trigger_context.clone());
+            LatchedScopePlan::Typed {
+                controller: typed.controller.clone(),
+                relative,
+                characteristics: TargetFilter::Typed(crate::types::ability::TypedFilter {
+                    type_filters: typed.type_filters.clone(),
+                    controller: None,
+                    properties: watcher_only,
+                }),
+            }
+        }
+        TargetFilter::None
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::AllPlayers => return None,
+    })
+}
+
+/// Whether the captured controllers answer a scope's controller clause:
+/// none, or "you control" (exhaustive over `ControllerRef`).
+fn latched_controller_clause_is_judged(
+    controller: Option<&crate::types::ability::ControllerRef>,
+) -> bool {
+    use crate::types::ability::ControllerRef;
+    match controller {
+        None | Some(ControllerRef::You) => true,
+        Some(
+            ControllerRef::Opponent
+            | ControllerRef::ScopedPlayer
+            | ControllerRef::TargetPlayer
+            | ControllerRef::TargetOpponent
+            | ControllerRef::ParentTargetController
+            | ControllerRef::EventTargetController
+            | ControllerRef::ParentTargetOwner
+            | ControllerRef::DefendingPlayer
+            | ControllerRef::ChosenPlayer { .. }
+            | ControllerRef::DeclaredPlayer { .. }
+            | ControllerRef::SourceChosenPlayer
+            | ControllerRef::TriggeringPlayer
+            | ControllerRef::EnchantedPlayer
+            | ControllerRef::ActivePlayer
+            | ControllerRef::SpecificPlayer { .. },
+        ) => false,
+    }
+}
+
+/// CR 109.5 + CR 603.10d: "you" is the doubler's captured controller; compare
+/// it with the watcher's captured controller.
+fn latched_controller_clause_matches(
+    controller: Option<&crate::types::ability::ControllerRef>,
+    watcher: &TriggerSourceContext,
+    doubler: &crate::types::events::LatchedTriggerDoubler,
+) -> bool {
+    use crate::types::ability::ControllerRef;
+    match controller {
+        None => true,
+        Some(ControllerRef::You) => watcher.lki.controller == doubler.controller(),
+        // Never admitted by `latched_controller_clause_is_judged`.
+        Some(
+            ControllerRef::Opponent
+            | ControllerRef::ScopedPlayer
+            | ControllerRef::TargetPlayer
+            | ControllerRef::TargetOpponent
+            | ControllerRef::ParentTargetController
+            | ControllerRef::EventTargetController
+            | ControllerRef::ParentTargetOwner
+            | ControllerRef::DefendingPlayer
+            | ControllerRef::ChosenPlayer { .. }
+            | ControllerRef::DeclaredPlayer { .. }
+            | ControllerRef::SourceChosenPlayer
+            | ControllerRef::TriggeringPlayer
+            | ControllerRef::EnchantedPlayer
+            | ControllerRef::ActivePlayer
+            | ControllerRef::SpecificPlayer { .. },
+        ) => false,
+    }
+}
+
+/// One scope property: `Some(Some(kind))` source-relative and judged from the
+/// capture, `Some(None)` read only from the watcher's own characteristics,
+/// `None` not judgeable (fail closed).
+fn latched_property_kind(
+    property: &crate::types::ability::FilterProp,
+) -> Option<Option<LatchedRelativeProperty>> {
+    use crate::types::ability::{AttachmentReferent, FilterProp, QuantityExpr};
+    Some(match property {
+        FilterProp::Another => Some(LatchedRelativeProperty::Another),
+        FilterProp::IsChosenCreatureType => Some(LatchedRelativeProperty::ChosenCreatureType),
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Source,
+        } => Some(LatchedRelativeProperty::AttachedToDoubler),
+        FilterProp::EquippedBy => Some(LatchedRelativeProperty::EquippedByDoubler),
+        FilterProp::PowerGTSource => Some(LatchedRelativeProperty::PowerGreaterThanDoubler),
+        FilterProp::HasSupertype { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::HasColor { .. }
+        | FilterProp::NotColor { .. }
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ToughnessGTPower
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeywordKind { .. } => None,
+        FilterProp::PtComparison { value, .. } => {
+            if matches!(value, QuantityExpr::Fixed { .. }) {
+                None
+            } else {
+                return None;
+            }
+        }
+        // A composite of watcher-only properties reads only the watcher.
+        FilterProp::AnyOf { props } => {
+            for prop in props {
+                if latched_property_kind(prop)?.is_some() {
+                    return None;
+                }
+            }
+            None
+        }
+        FilterProp::Not { prop } => {
+            if latched_property_kind(prop)?.is_some() {
+                return None;
+            }
+            None
+        }
+        // Not judgeable from the captured data: live state, ledgers, other
+        // players' choices, zones, stack or event context.
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::CanEnchant { .. }
+        | FilterProp::Counters { .. }
+        | FilterProp::Cmc { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::AttachedTo { .. }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::Prepared
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::SharesQuality { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => return None,
+    })
+}
+
+/// CR 603.2d + CR 603.10d: judge a latched doubler's scope against the latched
+/// watcher, entirely from the captured data: no live object and no
+/// `TriggerSourceContext::source_read`. `None` when the scope isn't judgeable
+/// (`latched_doubler_scope_plan`).
+fn latched_doubler_scope(
+    state: &GameState,
+    watcher: &TriggerSourceContext,
+    filter: &TargetFilter,
+    doubler: &crate::types::events::LatchedTriggerDoubler,
+) -> Option<bool> {
+    latched_doubler_scope_plan(filter)
+        .map(|plan| latched_scope_plan_matches(state, watcher, &plan, doubler))
+}
+
+fn latched_scope_plan_matches(
+    state: &GameState,
+    watcher: &TriggerSourceContext,
+    plan: &LatchedScopePlan,
+    doubler: &crate::types::events::LatchedTriggerDoubler,
+) -> bool {
+    match plan {
+        LatchedScopePlan::Any => true,
+        LatchedScopePlan::SelfRef => {
+            watcher.identity.reference == doubler.source.identity.reference
+        }
+        LatchedScopePlan::Object(id) => watcher.identity.reference.object_id == *id,
+        LatchedScopePlan::Or(plans) => plans
+            .iter()
+            .any(|plan| latched_scope_plan_matches(state, watcher, plan, doubler)),
+        LatchedScopePlan::And(plans) => plans
+            .iter()
+            .all(|plan| latched_scope_plan_matches(state, watcher, plan, doubler)),
+        LatchedScopePlan::Not(plan) => !latched_scope_plan_matches(state, watcher, plan, doubler),
+        LatchedScopePlan::Typed {
+            controller,
+            relative,
+            characteristics,
+        } => {
+            latched_controller_clause_matches(controller.as_ref(), watcher, doubler)
+                && relative
+                    .iter()
+                    .all(|property| latched_relative_matches(state, watcher, *property, doubler))
+                && matches_target_filter_on_lki_snapshot(
+                    state,
+                    watcher.identity.reference.object_id,
+                    &watcher.lki,
+                    characteristics,
+                    &FilterContext::neutral(),
+                )
+        }
+    }
+}
+
+fn latched_relative_matches(
+    state: &GameState,
+    watcher: &TriggerSourceContext,
+    property: LatchedRelativeProperty,
+    doubler: &crate::types::events::LatchedTriggerDoubler,
+) -> bool {
+    use crate::types::ability::AttachmentKind;
+    let doubler_id = doubler.source_id();
+    let watcher_id = watcher.identity.reference.object_id;
+    let doubler_lki = &doubler.source.lki;
+    match property {
+        LatchedRelativeProperty::Another => watcher_id != doubler_id,
+        // CR 603.2d + CR 603.10d: judge additional triggers using the captured
+        // creature-type choice. Read its last stored choice, matching
+        // `GameObject::chosen_creature_type` on the live path.
+        LatchedRelativeProperty::ChosenCreatureType => doubler_lki
+            .chosen_attributes
+            .iter()
+            .rev()
+            .find_map(crate::types::ability::ChosenAttribute::creature_type)
+            .is_some_and(|chosen| {
+                super::filter::subtype_matches_with_changeling(
+                    chosen,
+                    &watcher.lki.subtypes,
+                    &watcher.lki.keywords,
+                    &state.all_creature_types,
+                )
+            }),
+        LatchedRelativeProperty::AttachedToDoubler => {
+            watcher.attached_to.and_then(|target| target.as_object()) == Some(doubler_id)
+        }
+        // Mirrors the live `EquippedBy`: an attached doubler names its host; an
+        // unattached Equipment names nothing; otherwise any Equipment.
+        LatchedRelativeProperty::EquippedByDoubler => match doubler.source.attached_to {
+            Some(target) => target.as_object() == Some(watcher_id),
+            None if doubler_lki.subtypes.iter().any(|s| s == "Equipment") => false,
+            None => watcher
+                .attachments
+                .iter()
+                .any(|attachment| attachment.kind == AttachmentKind::Equipment),
+        },
+        LatchedRelativeProperty::PowerGreaterThanDoubler => {
+            match (watcher.lki.power, doubler_lki.power) {
+                (Some(watcher_power), Some(doubler_power)) => watcher_power > doubler_power,
+                _ => false,
+            }
+        }
+    }
+}
+
+/// CR 603.2d: whether `doubler` makes `trigger` trigger an additional time.
+/// `latched_source` is the trigger's event-time source authority
+/// (`control_change_doubling_authority`), when it has one.
+fn doubler_applies(
+    state: &GameState,
+    trigger_context: &PendingTriggerContext,
+    doubler: &crate::types::events::LatchedTriggerDoubler,
+    latched_source: Option<&TriggerSourceContext>,
+) -> bool {
+    let trigger = &trigger_context.pending;
+    // CR 603.2d: A delayed trigger is already the exact ability that
+    // was created by its originating effect. Trigger doublers apply to
+    // the event that creates a delayed trigger, not again when that
+    // delayed ability later fires.
+    if trigger_context.firing().is_delayed() {
+        return false;
+    }
+    // Controller match: trigger source must be controlled by the doubler's controller
+    if trigger.controller != doubler.controller() {
+        return false;
+    }
+    // CR 603.2d: Self-exclusion. A doubler normally never doubles its own
+    // triggered abilities — Panharmonicon/Yarok/Isshin/Wayta all scope to
+    // OTHER permanents. The carve-out: when the doubler's `affected` filter
+    // references the source itself (`~`, e.g. Cloud's "a triggered ability
+    // of Cloud or an Equipment attached to it"), CR 603.2d makes its own
+    // triggered abilities eligible, so skip the exclusion and let the
+    // `affected` match below decide.
+    let affected_references_self = doubler
+        .affected
+        .as_ref()
+        .is_some_and(filter_references_self);
+    if !affected_references_self && trigger.source_id == doubler.source_id() {
+        return false;
+    }
+    // CR 603.2d: Check the cause predicate against the spawning event.
+    if !trigger_cause_matches(
+        state,
+        &doubler.cause,
+        trigger.trigger_event.as_ref(),
+        doubler.controller(),
+    ) {
+        return false;
+    }
+    // CR 603.2d: If the doubler specifies an affected filter (e.g. "creature you
+    // control of the chosen type"), only double triggers from matching sources.
+    doubler
+        .affected
+        .as_ref()
+        .is_none_or(|filter| match latched_source {
+            Some(source) => latched_source_matches_doubler_filter(state, source, filter, doubler),
+            None => {
+                trigger_source_matches_doubler_filter(state, trigger, filter, doubler.source_id())
+            }
+        })
+}
+
+fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerContext>) {
+    let live = active_trigger_doublers(state);
+    let mut extra: Vec<PendingTriggerContext> = Vec::new();
+    for doubler in &live {
+        for trigger_context in pending.iter() {
+            if control_change_doubling_authority(state, &trigger_context.pending).is_none()
+                && doubler_applies(state, trigger_context, doubler, None)
+            {
+                extra.push(trigger_context.clone());
+            }
+        }
+    }
+    // CR 603.10d: a look-back control-change trigger is counted against the
+    // doublers its instruction latched, judged on its latched source.
+    for trigger_context in pending.iter() {
+        let Some((doublers, source)) =
+            control_change_doubling_authority(state, &trigger_context.pending)
+        else {
+            continue;
+        };
+        for doubler in doublers {
+            if doubler_applies(state, trigger_context, doubler, Some(source)) {
+                extra.push(trigger_context.clone());
+            }
         }
     }
     pending.extend(extra);
@@ -12320,6 +12965,23 @@ fn zone_change_qualifiers_match(
         ZoneChangeQualifier::CoreType(core_type) => record.core_types.contains(core_type),
         ZoneChangeQualifier::Supertype(supertype) => record.supertypes.contains(supertype),
     })
+}
+
+/// CR 603.2d: whether a doubler's spawning-event predicate can match a
+/// `ControllerChanged` event, the event every look-back control-change trigger
+/// fires on (exhaustive, mirrors `trigger_cause_matches`). A doubler whose
+/// cause can't match never doubles such a trigger, whatever its scope.
+pub fn trigger_cause_can_match_control_change(cause: &TriggerCause) -> bool {
+    match cause {
+        TriggerCause::Any => true,
+        TriggerCause::EntersBattlefield { .. }
+        | TriggerCause::CreatureAttacking
+        | TriggerCause::CreatureDying
+        | TriggerCause::ControlledCreatureDealtDamage
+        | TriggerCause::ControllerCastOrCopiedSpell { .. }
+        | TriggerCause::RoomEntered
+        | TriggerCause::BattlefieldTransition { .. } => false,
+    }
 }
 
 /// CR 603.2d: Predicate check — does a `TriggerCause` match the event that
@@ -18920,6 +19582,149 @@ pub mod tests {
             state.stack.is_empty(),
             "the delayed fallback must not push it"
         );
+    }
+
+    /// CR 603.2d + CR 603.10d: the distinct printed `affected` scopes at the
+    /// time of writing, each named by one card that has it, are judged by the
+    /// latched evaluator.
+    #[test]
+    fn every_printed_doubler_scope_is_judged_on_the_latched_path() {
+        let mut state = setup();
+        let watcher = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let doubler = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Doubler".to_string(),
+            Zone::Battlefield,
+        );
+        let watcher = trigger_source_context_for_latch(&state, &state.objects[&watcher]);
+        let doubler = crate::types::events::LatchedTriggerDoubler {
+            source: trigger_source_context_for_latch(&state, &state.objects[&doubler]),
+            cause: TriggerCause::Any,
+            affected: None,
+        };
+        for (card, shape) in [
+            (
+                "Ancient Greenwarden",
+                r#"{"controller": "You", "properties": [], "type": "Typed", "type_filters": ["Permanent"]}"#,
+            ),
+            (
+                "Annie Joins Up",
+                r#"{"controller": "You", "properties": [{"type": "HasSupertype", "value": "Legendary"}], "type": "Typed", "type_filters": ["Creature"]}"#,
+            ),
+            (
+                "Bifur, Melodic Rider",
+                r#"{"controller": "You", "properties": [], "type": "Typed", "type_filters": [{"Subtype": "Dwarf"}]}"#,
+            ),
+            (
+                "Chief of the Wilds",
+                r#"{"filters": [{"controller": "You", "properties": [{"type": "Another"}], "type": "Typed", "type_filters": [{"Subtype": "Wolf"}]}, {"controller": "You", "properties": [{"type": "Another"}], "type": "Typed", "type_filters": ["Battle"]}], "type": "Or"}"#,
+            ),
+            (
+                "Clara Oswald",
+                r#"{"controller": "You", "properties": [], "type": "Typed", "type_filters": [{"Subtype": "Doctor"}]}"#,
+            ),
+            (
+                "Cloud, Midgar Mercenary",
+                r#"{"filters": [{"type": "SelfRef"}, {"controller": null, "properties": [{"to": {"type": "Source"}, "type": "AttachedTo"}], "type": "Typed", "type_filters": [{"Subtype": "Equipment"}]}], "type": "Or"}"#,
+            ),
+            (
+                "Delney, Streetwise Lookout",
+                r#"{"controller": "You", "properties": [{"comparator": "LE", "scope": "Current", "stat": "Power", "type": "PtComparison", "value": {"type": "Fixed", "value": 2}}], "type": "Typed", "type_filters": ["Creature"]}"#,
+            ),
+            (
+                "Echoes of Eternity",
+                r#"{"filters": [{"controller": "You", "properties": [{"comparator": "EQ", "count": 0, "type": "ColorCount"}], "type": "Typed", "type_filters": ["Card"]}, {"controller": "You", "properties": [{"type": "Another"}, {"comparator": "EQ", "count": 0, "type": "ColorCount"}], "type": "Typed", "type_filters": ["Permanent"]}], "type": "Or"}"#,
+            ),
+            (
+                "Harmonic Prodigy",
+                r#"{"filters": [{"controller": "You", "properties": [], "type": "Typed", "type_filters": [{"Subtype": "Shaman"}]}, {"controller": "You", "properties": [{"type": "Another"}], "type": "Typed", "type_filters": [{"Subtype": "Wizard"}]}], "type": "Or"}"#,
+            ),
+            (
+                "Katara, the Fearless",
+                r#"{"controller": "You", "properties": [], "type": "Typed", "type_filters": [{"Subtype": "Ally"}]}"#,
+            ),
+            (
+                "Roaming Throne",
+                r#"{"controller": "You", "properties": [{"type": "Another"}, {"type": "IsChosenCreatureType"}], "type": "Typed", "type_filters": ["Creature"]}"#,
+            ),
+            (
+                "Sanctum of All",
+                r#"{"controller": "You", "properties": [{"type": "Another"}], "type": "Typed", "type_filters": [{"Subtype": "Shrine"}]}"#,
+            ),
+            (
+                "Splinter, Radical Rat",
+                r#"{"controller": "You", "properties": [], "type": "Typed", "type_filters": ["Creature", {"Subtype": "Ninja"}]}"#,
+            ),
+            (
+                "Twinflame Travelers",
+                r#"{"controller": "You", "properties": [{"type": "Another"}], "type": "Typed", "type_filters": [{"Subtype": "Elemental"}]}"#,
+            ),
+            (
+                "Wizard's Staff",
+                r#"{"controller": null, "properties": [{"type": "EquippedBy"}], "type": "Typed", "type_filters": ["Creature"]}"#,
+            ),
+        ] {
+            let filter: TargetFilter = serde_json::from_str(shape).expect("census shape decodes");
+            assert!(
+                latched_doubler_scope_is_judged(&filter)
+                    && latched_doubler_scope(&state, &watcher, &filter, &doubler).is_some(),
+                "{card}: its scope must be judgeable from the captured data"
+            );
+        }
+        // A scope that reads live state is declined (fail closed).
+        let live = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature()
+                .properties(vec![crate::types::ability::FilterProp::Tapped]),
+        );
+        assert_eq!(
+            latched_doubler_scope(&state, &watcher, &live, &doubler),
+            None
+        );
+    }
+
+    /// CR 603.2d: the structural cause predicate agrees with the runtime
+    /// matcher on a `ControllerChanged` event, for every cause.
+    #[test]
+    fn cause_predicate_agrees_with_the_runtime_matcher_on_control_changes() {
+        use crate::types::card_type::{CoreType, Supertype};
+        use crate::types::statics::ZoneChangeQualifier;
+        let state = setup();
+        let event = GameEvent::ControllerChanged {
+            object_id: ObjectId(1),
+            old_controller: PlayerId(0),
+            new_controller: PlayerId(1),
+            evidence: Default::default(),
+        };
+        for cause in [
+            TriggerCause::Any,
+            TriggerCause::EntersBattlefield { core_types: vec![] },
+            TriggerCause::CreatureAttacking,
+            TriggerCause::CreatureDying,
+            TriggerCause::ControlledCreatureDealtDamage,
+            TriggerCause::ControllerCastOrCopiedSpell {
+                core_types: vec![CoreType::Instant],
+            },
+            TriggerCause::RoomEntered,
+            TriggerCause::BattlefieldTransition {
+                enter: true,
+                leave: true,
+                qualifiers: vec![ZoneChangeQualifier::Supertype(Supertype::Legendary)],
+            },
+        ] {
+            assert_eq!(
+                trigger_cause_can_match_control_change(&cause),
+                trigger_cause_matches(&state, &cause, Some(&event), PlayerId(0)),
+                "{cause:?}"
+            );
+        }
     }
 
     #[test]

@@ -322,6 +322,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
+        control_change_instruction: _,
     } = a;
 
     let mut acc = scan_effect(effect, mode);
@@ -5862,7 +5863,11 @@ fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes {
             selection: _,
             self_scope: _,
         } => scan_quantity_expr(count, mode),
-        AbilityCost::Reveal { count, filter: _ } => scan_quantity_expr(count, mode),
+        AbilityCost::Reveal {
+            count,
+            filter: _,
+            shared_quality: _,
+        } => scan_quantity_expr(count, mode),
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => costs
             .iter()
             .fold(Axes::NONE, |acc, c| acc.or(scan_ability_cost(c, mode))),

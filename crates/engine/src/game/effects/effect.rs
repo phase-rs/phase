@@ -128,6 +128,24 @@ pub fn resolve(
                     // continuous effect for the rest of the turn (CR 611.2c).
                     ContinuousModification::GrantStaticAbility { definition } => {
                         snapshot_granted_cost_modifier(state, ability, definition);
+                        // CR 611.2c + CR 608.2h: a granted graveyard cast
+                        // permission modifies the rules of the game, so its
+                        // card set stays live — but the information its filter
+                        // reads (the players it names, e.g. "from that player's
+                        // graveyard" — Whispersteel Dagger, and any quantity
+                        // bound) is determined once, now, while the resolving
+                        // ability's context (for Whispersteel Dagger, its
+                        // trigger event — CR 608.2c) still exists.
+                        if matches!(
+                            definition.mode,
+                            crate::types::statics::StaticMode::GraveyardCastPermission { .. }
+                        ) {
+                            definition.affected = definition.affected.take().map(|affected| {
+                                crate::game::effects::cast_from_zone::freeze_resolution_cast_filter(
+                                    state, ability, affected, None,
+                                )
+                            });
+                        }
                         // CR 109.5 + CR 508.1c + CR 611.2c: A resolving
                         // one-shot effect that grants a bare recipient-local
                         // attack prohibition fixes the installing player as

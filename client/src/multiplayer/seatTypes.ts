@@ -38,7 +38,15 @@ export interface PlayerSlot {
 }
 
 export type SeatMutation =
-  | { type: "SetKind"; data: { seatIndex: number; kind: SeatKind } }
+  | {
+      type: "SetKind";
+      data: {
+        seatIndex: number;
+        kind: SeatKind;
+        /** Live reducer precondition; mismatch succeeds without changing the seat. */
+        expectedKind?: SeatKind;
+      };
+    }
   | { type: "Remove"; data: { seatIndex: number } }
   | { type: "Start" };
 

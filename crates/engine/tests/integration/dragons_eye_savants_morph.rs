@@ -140,7 +140,7 @@ fn dragons_eye_savants_reveal_blue_card_turns_face_up_and_looks_at_opponent_hand
     // CR 701.20a: Only blue cards in hand can be revealed for this cost.
     match &runner.state().waiting_for {
         WaitingFor::PayCost {
-            kind: PayCostKind::Reveal,
+            kind: PayCostKind::Reveal { .. },
             count,
             choices,
             ..

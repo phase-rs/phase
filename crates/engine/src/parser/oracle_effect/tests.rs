@@ -13174,13 +13174,34 @@ fn class_wide_graveyard_cast_grant_absorbs_the_cast_this_way_exile_rider() {
     );
 }
 
-/// The class is the PLURAL grant. "A creature spell" grants one cast (Chainer,
-/// Nightmare Adept's ruling), and a clause with a further rider ("by foraging …")
+/// CR 601.3 + CR 611.2a: "a creature spell … this turn" grants ONE cast for the
+/// window (Chainer, Nightmare Adept's ruling).
+#[test]
+fn class_wide_graveyard_cast_grant_singular_with_window_is_single() {
+    let def = parse_effect_chain(
+        "You may cast a creature spell from your graveyard this turn.",
+        AbilityKind::Activated,
+    );
+    let (permission, window) = graveyard_grant_parts(&def.effect)
+        .unwrap_or_else(|| panic!("a graveyard cast permission grant, got {:?}", def.effect));
+    assert_eq!(*window, Some(Duration::UntilEndOfTurn));
+    assert!(matches!(
+        permission.mode,
+        StaticMode::GraveyardCastPermission {
+            cast_limit: crate::types::statics::PermissionCastLimit::Single,
+            pool: GraveyardPermissionPool::OwnGraveyard,
+            ..
+        }
+    ));
+}
+
+/// CR 608.2g: without a window the singular casts during resolution (Bilbo,
+/// Thief in the Night), and a clause with a further rider ("by foraging …")
 /// says more than the grant carries; both keep their previous lowering.
 #[test]
-fn class_wide_graveyard_cast_grant_excludes_singular_and_riders() {
+fn class_wide_graveyard_cast_grant_excludes_resolution_casts_and_riders() {
     for text in [
-        "You may cast a creature spell from your graveyard this turn.",
+        "You may cast an artifact, instant, or sorcery spell from your graveyard.",
         "Until end of turn, you may cast creature spells from your graveyard by foraging \
          in addition to paying their other costs.",
     ] {
@@ -57241,7 +57262,8 @@ fn put_zone_change_lifts_transformed_and_finality_counter_suffix() {
 /// CR 614.1c + CR 122.1 — Osteomancer Adept / The Tomb of Aclazotz: the bare
 /// "the creature cast this way enters with a finality counter on it" rider
 /// must parse to `AddPendingETBCounters` (consumed by `CastFromZone` as
-/// permission metadata), across both anaphoric subjects ("that creature",
+/// permission metadata, or folded into a granted graveyard cast permission),
+/// across both anaphoric subjects ("that creature",
 /// "it") and both optional gate prefixes ("if you cast a spell this way,",
 /// "if you do,") — with NO type-grant sub-ability (bare-counter is additive-
 /// preserved, not regressed).
@@ -57372,7 +57394,8 @@ fn osteomancer_adept_finality_rider_parses_through_card() {
     );
 }
 
-/// CR 205.1b + CR 613.1d — The Tomb of Aclazotz: the combined residual sentence
+/// CR 205.1b + CR 613.1d — the Tomb of Aclazotz's rider sentence on Osteomancer
+/// Adept's `CastFromZone` grant shape: the combined residual sentence
 /// "...it enters with a finality counter on it and is a Vampire in addition to
 /// its other types" is fully modeled through the whole-card parse. It must
 /// surface BOTH a reachable `AddPendingETBCounters { finality }` rider AND a
@@ -64860,6 +64883,12 @@ fn stolen_uniform_lose_control_delayed_trigger_shape() {
             side: crate::types::triggers::ControlChangeSide::Loses
         },
         "trigger fires on the control change"
+    );
+    // CR 603.10d: the losing side is the mode's own direction; no gaining
+    // player is named, so `valid_target` (the gaining player) is open.
+    assert_eq!(
+        trigger.valid_target, None,
+        "a lose-control trigger names no gaining player"
     );
     // Claim 2: valid_card binds the Equipment slot, not the collision ParentTarget.
     assert_eq!(
@@ -93493,7 +93522,8 @@ fn cast_permission_rider_requires_the_lingering_shape() {
     );
     assert!(pending_counters(&chain_definitions(&osteomancer.abilities)));
     // The Tomb of Aclazotz (verbatim back face): its "If you do," lead is the
-    // performed-signal condition of the rider clause.
+    // performed-signal condition of the rider clause, which folds into the
+    // single-cast grant it scopes.
     let tomb = parse_oracle_text(
         "{T}: Add {B}.\n{T}: You may cast a creature spell from your graveyard this turn. If you do, it enters with a finality counter on it and is a Vampire in addition to its other types. (If a creature with a finality counter on it would die, exile it instead.)",
         "The Tomb of Aclazotz",
@@ -93502,14 +93532,23 @@ fn cast_permission_rider_requires_the_lingering_shape() {
         &[],
     );
     let tomb_defs = chain_definitions(&tomb.abilities);
-    assert!(pending_counters(&tomb_defs), "got {:?}", tomb.abilities);
     assert!(
         tomb_defs
             .iter()
-            .any(|def| matches!(&*def.effect, Effect::AddPendingEntersModifications { .. })),
-        "the Vampire type grant rides with the counter, got {:?}",
+            .any(
+                |def| graveyard_grant_parts(&def.effect).is_some_and(|(permission, _)| matches!(
+                    &permission.mode,
+                    StaticMode::GraveyardCastPermission {
+                        enters_with_counter: Some(crate::types::counter::CounterType::Finality),
+                        enters_modifications,
+                        ..
+                    } if !enters_modifications.is_empty()
+                ))
+            ),
+        "the finality counter and the Vampire type grant ride the grant, got {:?}",
         tomb.abilities
     );
+    assert!(!pending_counters(&tomb_defs), "got {:?}", tomb.abilities);
     assert!(tomb_defs
         .iter()
         .all(|def| def.effect.unimplemented_description().is_none()));

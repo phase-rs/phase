@@ -3544,10 +3544,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           });
 
           for (const seat of aiSeats) {
+            // An admitted human keeps this seat; a stale AI assignment succeeds
+            // without seating that AI, and setup continues with the other seats.
             await p2pAdapter.applySeatMutation({
               type: "SetKind",
               data: {
                 seatIndex: seat.seatIndex,
+                expectedKind: { type: "WaitingHuman" },
                 kind: {
                   type: "Ai",
                   data: {

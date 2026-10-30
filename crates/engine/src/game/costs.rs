@@ -2285,8 +2285,11 @@ fn pay_ability_cost_inner(
             });
         }
         // CR 702.37e + CR 701.20a/b: Turn-face-up reveal cost (e.g. Krosan Cloudscraper, Voidmage Prodigy).
-        AbilityCost::Reveal { count, filter }
-            if matches!(scope, PaymentScope::TurnFaceUp { .. }) =>
+        AbilityCost::Reveal {
+            count,
+            filter,
+            shared_quality,
+        } if matches!(scope, PaymentScope::TurnFaceUp { .. }) =>
         {
             let PaymentScope::TurnFaceUp {
                 source,
@@ -2315,14 +2318,21 @@ fn pay_ability_cost_inner(
             // so this only ever resolves a fixed count.
             let count = resolve_cost_quantity(state, count, player, source.object_id, scope).max(0)
                 as usize;
-            if eligible.len() < count {
+            if !super::cost_payability::reveal_cost_has_legal_selection(
+                state,
+                &eligible,
+                count,
+                shared_quality.as_ref(),
+            ) {
                 return Ok(payment_failed(
                     "Not enough eligible cards in hand to reveal",
                 ));
             }
             state.waiting_for = WaitingFor::PayCost {
                 player,
-                kind: PayCostKind::Reveal,
+                kind: PayCostKind::Reveal {
+                    shared_quality: shared_quality.clone(),
+                },
                 choices: eligible,
                 count,
                 // CR 118.3: the turn-face-up handler requires exactly `count`.
@@ -2644,7 +2654,11 @@ pub(crate) fn can_pay_turn_face_up(
             );
             eligible.len() >= count
         }
-        AbilityCost::Reveal { count, filter } => {
+        AbilityCost::Reveal {
+            count,
+            filter,
+            shared_quality,
+        } => {
             let eligible = match filter {
                 Some(f) => {
                     super::casting::find_eligible_reveal_targets(state, payer, object_id, None, f)
@@ -2658,7 +2672,12 @@ pub(crate) fn can_pay_turn_face_up(
             // CR 107.3d: variable non-mana morph costs are not supported yet and
             // are declined upstream, so this resolves a fixed count.
             let count = super::quantity::resolve_quantity(state, count, payer, object_id).max(0);
-            eligible.len() >= count as usize
+            super::cost_payability::reveal_cost_has_legal_selection(
+                state,
+                &eligible,
+                count as usize,
+                shared_quality.as_ref(),
+            )
         }
         _ => false,
     }
@@ -3316,6 +3335,7 @@ mod tests {
             AbilityCost::Reveal { .. } => AbilityCost::Reveal {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
+                shared_quality: None,
             },
             AbilityCost::Behold { .. } => AbilityCost::Behold {
                 count: 1,
@@ -3439,6 +3459,7 @@ mod tests {
             AbilityCost::Reveal {
                 count: QuantityExpr::Fixed { value: 0 },
                 filter: None,
+                shared_quality: None,
             },
             AbilityCost::Behold {
                 count: 0,

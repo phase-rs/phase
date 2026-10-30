@@ -284,7 +284,7 @@ fn cost_destination(kind: &PayCostKind) -> Option<Zone> {
             action: crate::types::ability::BeholdCostAction::ExileChosen,
         } => Some(Zone::Exile),
         PayCostKind::ReturnToHand => Some(Zone::Hand),
-        PayCostKind::Reveal
+        PayCostKind::Reveal { shared_quality: _ }
         | PayCostKind::UnattachFrom { .. }
         | PayCostKind::RemoveCounter { .. }
         | PayCostKind::TapCreatures { .. }

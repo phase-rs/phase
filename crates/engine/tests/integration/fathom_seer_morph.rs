@@ -488,7 +488,7 @@ fn ruthless_ripper_turn_face_up_reveal_cost() {
         .expect("turn face up");
     match &runner.state().waiting_for {
         WaitingFor::PayCost {
-            kind: PayCostKind::Reveal,
+            kind: PayCostKind::Reveal { .. },
             count,
             choices,
             ..
@@ -2063,7 +2063,7 @@ fn turn_face_up_reveal_and_discard_redacts_private_choices_for_opponent_and_spec
             raw_waiting,
             WaitingFor::PayCost {
                 player: P0,
-                kind: PayCostKind::Reveal,
+                kind: PayCostKind::Reveal { .. },
                 count: 1,
                 ..
             }

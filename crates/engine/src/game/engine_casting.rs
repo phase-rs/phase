@@ -1323,6 +1323,7 @@ pub(super) fn handle_discard_for_cost(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_reveal_for_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -1330,6 +1331,7 @@ pub(super) fn handle_reveal_for_cost(
     count: usize,
     legal_cards: &[ObjectId],
     chosen: &[ObjectId],
+    shared_quality: Option<crate::types::ability::SharedQuality>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     casting::handle_reveal_for_cost(
@@ -1339,6 +1341,7 @@ pub(super) fn handle_reveal_for_cost(
         count,
         legal_cards,
         chosen,
+        shared_quality,
         events,
     )
 }

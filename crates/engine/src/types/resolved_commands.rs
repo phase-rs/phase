@@ -344,8 +344,9 @@ pub struct ResolvedContinuousEffectCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
-/// Exact records selected at one settled CR 611.2b state-duration boundary.
-/// Replay consumes these operands without rechecking their expired conditions.
+/// Exact records selected at one settled CR 611.2b state-duration boundary, or
+/// a single-cast grant its cast used up. Replay consumes these
+/// operands without rechecking their expired conditions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedContinuousEffectRetirementCommand {
@@ -425,8 +426,12 @@ pub enum ResolvedContinuousEffectRetirementInvariantError {
     EmptyBatch,
     #[error("continuous-effect retirement repeats operand id {0}")]
     DuplicateOperandId(u64),
-    #[error("continuous-effect retirement operand {0} is not a state duration")]
-    NotStateDuration(u64),
+    /// CR 611.2b: only a state duration, or a used single-cast grant,
+    /// ends outside its stated duration.
+    #[error(
+        "continuous-effect retirement operand {0} is neither a state duration nor a single-cast grant"
+    )]
+    NotRetirable(u64),
     #[error("continuous-effect retirement operand {0} is not installed")]
     MissingEffect(u64),
     #[error("continuous-effect retirement id {0} has multiple installed records")]
@@ -450,14 +455,33 @@ impl ResolvedContinuousEffectRetirementCommand {
                     ResolvedContinuousEffectRetirementInvariantError::DuplicateOperandId(effect.id),
                 );
             }
-            if !effect.duration.is_for_as_long_as() {
+            if !effect.duration.is_for_as_long_as() && !grants_single_cast(effect) {
                 return Err(
-                    ResolvedContinuousEffectRetirementInvariantError::NotStateDuration(effect.id),
+                    ResolvedContinuousEffectRetirementInvariantError::NotRetirable(effect.id),
                 );
             }
         }
         Ok(())
     }
+}
+
+/// An effect whose Oracle wording grants ONE cast ("you may cast a creature
+/// spell from your graveyard this turn") ends with the cast it authorized,
+/// before its stated duration runs out.
+fn grants_single_cast(effect: &TransientContinuousEffect) -> bool {
+    effect.modifications.iter().any(|modification| {
+        matches!(
+            modification,
+            ContinuousModification::GrantStaticAbility { definition }
+                if matches!(
+                    definition.mode,
+                    super::statics::StaticMode::GraveyardCastPermission {
+                        cast_limit: super::statics::PermissionCastLimit::Single,
+                        ..
+                    }
+                )
+        )
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

@@ -166,7 +166,7 @@ use crate::types::replacements::ReplacementEvent;
 #[cfg(test)]
 use crate::types::statics::CastFreeOrigin;
 use crate::types::statics::{
-    ActivationExemption, CastFrequency, GraveyardPermissionPool, StaticMode,
+    ActivationExemption, CastFrequency, GraveyardPermissionPool, PermissionCastLimit, StaticMode,
 };
 use crate::types::triggers::{ControlChangeSide, TriggerMode};
 use crate::types::zones::Zone;
@@ -2780,19 +2780,24 @@ fn build_reflexive_coin_flip_trigger(is_win: bool, inner: AbilityDefinition) -> 
     }
 }
 
+/// `event_player` is the trigger's `valid_target`: the player the event is
+/// about ("you" for "when you next cast…"). A "you lose control of …" trigger
+/// passes `None`: its losing side is built into `ChangesController`, and its
+/// `valid_target` would name the player who GAINS control.
 fn build_when_next_delayed_trigger(
     mode: crate::types::triggers::TriggerMode,
     valid_card: TargetFilter,
+    event_player: Option<TargetFilter>,
     inner: AbilityDefinition,
     or_branch: Option<(crate::types::triggers::TriggerMode, TargetFilter)>,
 ) -> ParsedEffectClause {
     let mut trigger_def = crate::types::ability::TriggerDefinition::new(mode);
     trigger_def.valid_card = Some(valid_card);
-    trigger_def.valid_target = Some(TargetFilter::Controller);
+    trigger_def.valid_target = event_player.clone();
     let or_trigger = or_branch.map(|(or_mode, or_filter)| {
         let mut alt = crate::types::ability::TriggerDefinition::new(or_mode);
         alt.valid_card = Some(or_filter);
-        alt.valid_target = Some(TargetFilter::Controller);
+        alt.valid_target = event_player;
         Box::new(alt)
     });
     ParsedEffectClause {
@@ -2914,6 +2919,7 @@ fn try_parse_lose_control_delayed_trigger(
             side: ControlChangeSide::Loses,
         },
         valid_card,
+        None,
         inner,
         None,
     ))
@@ -3068,6 +3074,7 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
         return Some(build_when_next_delayed_trigger(
             TriggerMode::SpellCast,
             spell_filter,
+            Some(TargetFilter::Controller),
             inner,
             Some((TriggerMode::AbilityActivated, ability_filter)),
         ));
@@ -3386,6 +3393,7 @@ fn try_parse_copy_next_spell_when_cast(tp: TextPair) -> Option<ParsedEffectClaus
     Some(build_when_next_delayed_trigger(
         TriggerMode::SpellCast,
         combined_filter,
+        Some(TargetFilter::Controller),
         inner,
         None,
     ))
@@ -4502,9 +4510,10 @@ fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefin
 /// is always one ("a [counter]").
 ///
 /// Single authority for the counter-subject grammar, shared by the one-shot
-/// effect path (graveyard `CastFromZone` grant — Osteomancer Adept, The Tomb of
-/// Aclazotz) and the static cast-permission builders (Noctis, Prince of Lucis;
-/// Intrepid Paleontologist; Leonardo, Sewer Samurai). The effect path wraps the
+/// effect path (graveyard `CastFromZone` grant — Osteomancer Adept's rider
+/// shape; granted graveyard cast permission — The Tomb of Aclazotz) and the
+/// static cast-permission builders (Noctis, Prince of Lucis; Intrepid
+/// Paleontologist; Leonardo, Sewer Samurai). The effect path wraps the
 /// result into `Effect::AddPendingETBCounters` (+ optional type-grant tail); the
 /// static builders take only the `CounterType` to set
 /// `StaticMode::{Graveyard,Exile}CastPermission.enters_with_counter`.
@@ -4566,10 +4575,11 @@ pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(Co
 /// shared `parse_cast_this_way_enters_with_counter`; the counter clause lowers to
 /// `Effect::AddPendingETBCounters`; an optional additive type-grant tail lowers
 /// to `Effect::AddPendingEntersModifications` carried as the counter clause's
-/// `sub_ability`. The runtime `CastFromZone` resolver consumes both as
-/// permission metadata (see `cast_from_zone::grant_lingering_permissions`)
-/// rather than against the current trigger event, so the riders ride the
-/// *future* graveyard cast.
+/// `sub_ability`. Both ride the *future* graveyard cast, never the current
+/// trigger event: under a `CastFromZone` grant the resolver consumes them as
+/// permission metadata (`cast_from_zone::grant_lingering_permissions`); under a
+/// granted graveyard cast permission (The Tomb of Aclazotz)
+/// `lower::fold_cast_rider_into_graveyard_grant` folds them into the permission.
 ///
 /// The type tail delegates to the shared `parse_becomes_type_modifications`
 /// building block (which consumes the "in addition to its other types" suffix
@@ -4577,9 +4587,10 @@ pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(Co
 /// A tail present but unclassifiable returns `None` — honestly
 /// `Effect::Unimplemented`, never a silent type drop.
 ///
-/// Valid only under its producer, a lingering `CastFromZone` grant with a
-/// stated window: reached solely through `entry_counter_rider_clause`, because
-/// `grant_lingering_permissions` is the only runtime consumer of the rider.
+/// Valid only under its producers, a lingering `CastFromZone` grant with a
+/// stated window or a granted graveyard cast permission: reached solely through
+/// `entry_counter_rider_clause`, because those two consumers are the only ones
+/// of the rider.
 fn try_parse_cast_this_way_enters_rider(lower: &str) -> Option<ParsedEffectClause> {
     let (counter_type, rest) = parse_cast_this_way_enters_with_counter(lower)?;
     // The counter grammar ends at " counter on it"; consume the sentence's own
@@ -4631,10 +4642,12 @@ fn try_parse_cast_this_way_enters_rider(lower: &str) -> Option<ParsedEffectClaus
 /// instruction makes available, so the rider is read only under a producer
 /// whose runtime consumes it:
 ///
-/// 1. a lingering graveyard cast permission with a stated window (Osteomancer
-///    Adept, The Tomb of Aclazotz) — the rider is permission metadata for the
-///    future cast (`cast_from_zone::grant_lingering_permissions`, the only
-///    extractor of the rider);
+/// 1. a lingering graveyard cast permission with a stated window — the rider is
+///    permission metadata for the future cast: a `CastFromZone` grant's
+///    (Osteomancer Adept's rider shape) is extracted by
+///    `cast_from_zone::grant_lingering_permissions`, a granted graveyard cast
+///    permission's (The Tomb of Aclazotz) is folded into the permission by
+///    `lower::fold_cast_rider_into_graveyard_grant`;
 /// 2. a battlefield mover whose rider is gated on an object entering this way
 ///    (Heroic Return, Recommission, and What Must Be Done's anaphoric "if it's a
 ///    <type>" gate, which `parse_effect_chain_ir_body` converts to that shape
@@ -4668,18 +4681,26 @@ fn entry_counter_rider_clause(
     // recognizer ("if you cast a spell this way, " — Osteomancer Adept, no
     // clause condition) or stripped into the "if you do" performed-signal
     // (The Tomb of Aclazotz), which the permission grant itself satisfies.
-    if let (
+    // A granted graveyard cast permission ("you may cast a creature spell from
+    // your graveyard this turn") is the same producer; its rider is folded into
+    // the permission (`lower::fold_cast_rider_into_graveyard_grant`).
+    let prior_grants_a_lingering_cast = match prior {
         Some(Effect::CastFromZone {
             driver: CastFromZoneDriver::LingeringPermission,
             duration: Some(_),
             alt_ability_cost: None,
             ..
-        }),
-        None
-        | Some(AbilityCondition::EffectOutcome {
-            signal: EffectOutcomeSignal::OptionalEffectPerformed,
-        }),
-    ) = (prior, condition)
+        }) => true,
+        Some(effect) => crate::parser::oracle_ir::ast::is_graveyard_permission_grant(effect),
+        None => false,
+    };
+    if prior_grants_a_lingering_cast
+        && matches!(
+            condition,
+            None | Some(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            })
+        )
     {
         return try_parse_cast_this_way_enters_rider(&rider_lower());
     }
@@ -26258,38 +26279,71 @@ fn parse_spells_cast_this_way_graveyard_replacement_rider(
 /// after it began. The grant is therefore bound to the player and its filter is
 /// read live, never stamped on the cards present at resolution.
 ///
-/// **Only the plural class.** "You may cast a creature spell from your graveyard
-/// this turn" (Chainer, Nightmare Adept) grants ONE cast; an `Unlimited`
-/// permission would overstate it. The grammar accepts only a type list closed by
-/// the plural " spells" (or bare "spells"), so an article, a quantifier or
-/// "target" never reaches it, and it must consume the whole clause, so a
-/// clause carrying any further rider (a cost, a counter) keeps its old shape.
-fn try_parse_class_wide_graveyard_cast_grant(lower: &str) -> Option<Effect> {
+/// **Plural or singular.** "Creature spells" is any number of casts; "a creature
+/// spell" (Chainer, Nightmare Adept; The Tomb of Aclazotz; Whispersteel Dagger)
+/// is ONE cast, so it builds a `PermissionCastLimit::Single` grant, which ends
+/// with the cast made through it. A quantifier ("up to two") or "target" never
+/// reaches this grammar, and it must consume the whole clause, so a clause
+/// carrying any further rider (a cost, a counter) keeps its old shape.
+///
+/// **Whose graveyard.** "Your graveyard" is the caster's own and "any
+/// graveyard" every player's (CR 404.1). "That player's graveyard" is the
+/// graveyard of the player the trigger event names (CR 608.2c; "Whenever
+/// equipped creature deals combat damage to a player" — Whispersteel Dagger).
+/// A graveyard holds only its owner's cards (CR 400.3), so the filter binds
+/// that owner; the grant freezes it to the player when the ability resolves
+/// (CR 608.2h). Any other "that player" (a declared player target) keeps the
+/// clause's old shape.
+fn try_parse_class_wide_graveyard_cast_grant(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     type E<'a> = OracleError<'a>;
+    /// CR 404.1 + CR 400.3: the graveyard the clause names.
+    #[derive(Clone)]
+    enum Origin {
+        Pool(GraveyardPermissionPool),
+        ThatPlayers,
+    }
     let (rest, _) = tag::<_, _, E>("cast ").parse(lower).ok()?;
-    // CR 601.3: the class the permission lets its player cast.
-    let (rest, mut filter) = alt((
+    let type_legs = || {
         map(
-            terminated(
-                pair(
-                    parse_cast_type_leg,
-                    many0(preceded(parse_cast_type_list_sep, parse_cast_type_leg)),
-                ),
-                tag(" spells"),
+            pair(
+                parse_cast_type_leg,
+                many0(preceded(parse_cast_type_list_sep, parse_cast_type_leg)),
             ),
             |(first, more)| cast_type_legs_filter(first, more),
+        )
+    };
+    // CR 601.3: the class the permission lets its player cast, and how many of
+    // them: the plural is any number, the article one.
+    let (rest, (mut filter, cast_limit)) = alt((
+        map(terminated(type_legs(), tag(" spells")), |filter| {
+            (filter, PermissionCastLimit::Unlimited)
+        }),
+        value(
+            (
+                TargetFilter::Typed(TypedFilter::card()),
+                PermissionCastLimit::Unlimited,
+            ),
+            tag("spells"),
         ),
-        value(TargetFilter::Typed(TypedFilter::card()), tag("spells")),
+        map(
+            delimited(alt((tag("a "), tag("an "))), type_legs(), tag(" spell")),
+            |filter| (filter, PermissionCastLimit::Single),
+        ),
     ))
     .parse(rest)
     .ok()?;
-    // CR 404.1: "your graveyard" is the caster's own; "any graveyard" is every
-    // player's.
-    let (rest, pool) = preceded(
+    let (rest, origin) = preceded(
         tag::<_, _, E>(" from "),
         alt((
-            value(GraveyardPermissionPool::OwnGraveyard, tag("your graveyard")),
-            value(GraveyardPermissionPool::AnyGraveyard, tag("any graveyard")),
+            value(
+                Origin::Pool(GraveyardPermissionPool::OwnGraveyard),
+                tag("your graveyard"),
+            ),
+            value(
+                Origin::Pool(GraveyardPermissionPool::AnyGraveyard),
+                tag("any graveyard"),
+            ),
+            value(Origin::ThatPlayers, tag("that player's graveyard")),
         )),
     )
     .parse(rest)
@@ -26306,15 +26360,34 @@ fn try_parse_class_wide_graveyard_cast_grant(lower: &str) -> Option<Effect> {
     )
     .parse(rest)
     .ok()?;
+    // CR 608.2g: without a window, "you may cast a <type> spell from …" allows
+    // one cast during resolution (Bilbo, Thief in the Night) — `CastFromZone`'s
+    // shape, not a lingering permission. A peeled trailing window arrives on
+    // `stated_clause_duration`.
+    if !cast_limit.is_unlimited() && duration.is_none() && ctx.stated_clause_duration.is_none() {
+        return None;
+    }
 
-    let controller = pool.is_own_graveyard().then_some(ControllerRef::You);
-    add_cast_target_props(
-        &mut filter,
-        &[FilterProp::InZone {
-            zone: Zone::Graveyard,
-        }],
-        controller,
-    );
+    let (pool, controller, owner) = match origin {
+        Origin::Pool(pool) => (
+            pool,
+            pool.is_own_graveyard().then_some(ControllerRef::You),
+            None,
+        ),
+        // CR 608.2c: "that player" is the player the trigger event names.
+        Origin::ThatPlayers => {
+            let owner = (ctx.in_trigger
+                && ctx.relative_player_scope == Some(ControllerRef::TriggeringPlayer))
+            .then_some(ControllerRef::TriggeringPlayer)?;
+            (GraveyardPermissionPool::AnyGraveyard, None, Some(owner))
+        }
+    };
+    let mut props = vec![FilterProp::InZone {
+        zone: Zone::Graveyard,
+    }];
+    // CR 400.3: a graveyard holds only its owner's cards.
+    props.extend(owner.map(|controller| FilterProp::Owned { controller }));
+    add_cast_target_props(&mut filter, &props, controller);
     let permission = StaticDefinition::new(StaticMode::GraveyardCastPermission {
         frequency: CastFrequency::Unlimited,
         play_mode: CardPlayMode::Cast,
@@ -26323,6 +26396,9 @@ fn try_parse_class_wide_graveyard_cast_grant(lower: &str) -> Option<Effect> {
         enters_with_counter: None,
         required_cast_keyword: None,
         pool,
+        cast_limit,
+        mana_spend_permission: None,
+        enters_modifications: Default::default(),
     })
     .affected(filter);
     Some(graveyard_permission_grant(permission, duration))
@@ -34485,7 +34561,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         return Some(effect);
     }
 
-    if let Some(effect) = try_parse_class_wide_graveyard_cast_grant(lower) {
+    if let Some(effect) = try_parse_class_wide_graveyard_cast_grant(lower, ctx) {
         return Some(effect);
     }
 
@@ -35858,22 +35934,24 @@ pub(crate) fn starts_mana_spend_rider_conjunct(remainder_lower: &str) -> bool {
 }
 
 /// CR 609.4b: Is `effect` a cast grant the mana rider can attach to — a
-/// `CastFromZone` or a `GrantCastingPermission { PlayFromExile }` that carries
-/// no `mana_spend_permission` yet?
+/// `CastFromZone`, a `GrantCastingPermission { PlayFromExile }` or a granted
+/// graveyard cast permission (Whispersteel Dagger) that carries no
+/// `mana_spend_permission` yet?
 fn effect_awaits_mana_spend_permission(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::CastFromZone {
-            mana_spend_permission: None,
-            ..
-        } | Effect::GrantCastingPermission {
-            permission: CastingPermission::PlayFromExile {
+    granted_graveyard_permission_awaits_mana_spend_permission(effect)
+        || matches!(
+            effect,
+            Effect::CastFromZone {
                 mana_spend_permission: None,
                 ..
-            },
-            ..
-        }
-    )
+            } | Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mana_spend_permission: None,
+                    ..
+                },
+                ..
+            }
+        )
 }
 
 /// CR 609.4b: The ONE traversal that picks the grant a mana rider modifies:
@@ -35947,8 +36025,44 @@ pub(crate) fn attach_mana_spend_permission_to_prior_cast_grant(
             *slot = Some(permission);
             true
         }
-        _ => false,
+        effect => match crate::parser::oracle_ir::ast::granted_graveyard_permission_mut(effect) {
+            Some(StaticMode::GraveyardCastPermission {
+                mana_spend_permission: slot @ None,
+                ..
+            }) => {
+                *slot = Some(permission);
+                true
+            }
+            _ => false,
+        },
     }
+}
+
+/// CR 609.4b: the granted graveyard cast permission arm of
+/// [`effect_awaits_mana_spend_permission`].
+fn granted_graveyard_permission_awaits_mana_spend_permission(effect: &Effect) -> bool {
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = effect
+    else {
+        return false;
+    };
+    crate::parser::oracle_ir::ast::is_graveyard_permission_grant(effect)
+        && static_abilities.iter().any(|grant| {
+            grant.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::GrantStaticAbility { definition }
+                        if matches!(
+                            definition.mode,
+                            StaticMode::GraveyardCastPermission {
+                                mana_spend_permission: None,
+                                ..
+                            }
+                        )
+                )
+            })
+        })
 }
 
 /// CR 106.4 + CR 514.2: Recognise mana-retention riders that modify the mana

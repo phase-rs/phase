@@ -11422,6 +11422,96 @@ fn trigger_when_you_lose_control_maps_to_changes_controller() {
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
 }
 
+/// CR 603.2 + CR 603.10d: "Whenever an opponent gains control of a permanent
+/// from you" (Zidane, Tantalus Thief) is the opponent-gains half of the
+/// look-back control triggers: ChangesController, the changing permanent in
+/// `valid_card`, the gaining opponent in `valid_target`.
+#[test]
+fn trigger_opponent_gains_control_from_you_maps_to_changes_controller() {
+    let def = parse_trigger_line(
+        "Whenever an opponent gains control of a permanent from you, you create a Treasure token.",
+        "Zidane, Tantalus Thief",
+    );
+    assert_eq!(
+        def.mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Loses
+        }
+    );
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(TypedFilter::permanent()))
+    );
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+}
+
+/// Fail-closed boundaries of the control-change trigger class. Collection runs
+/// after the change, so only subjects that can't depend on the permanent's
+/// post-change state are claimed: a subject with its own controller, any other
+/// type, or any property stays `Unknown`. Positive guard: "a permanent" and
+/// "~" in the same frame are claimed.
+#[test]
+fn trigger_control_change_unsupported_shapes_stay_unknown() {
+    for (text, name) in [
+        (
+            "Whenever an opponent gains control of a creature you control from you, draw a card.",
+            "Probe",
+        ),
+        (
+            "Whenever an opponent gains control of an attacking creature from you, draw a card.",
+            "Probe",
+        ),
+        (
+            "Whenever an opponent gains control of a creature from you, draw a card.",
+            "Probe",
+        ),
+        (
+            "Whenever an opponent gains control of a permanent you own from you, draw a card.",
+            "Probe",
+        ),
+        (
+            "Whenever an opponent gains control of one or more permanents from you, draw a card.",
+            "Probe",
+        ),
+        (
+            "Whenever an opponent gains control of permanents from you, draw a card.",
+            "Probe",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "{text:?} must fail closed, got {:?}",
+            def.mode
+        );
+    }
+    for (text, subject) in [
+        (
+            "Whenever an opponent gains control of a permanent from you, draw a card.",
+            TargetFilter::Typed(TypedFilter::permanent()),
+        ),
+        (
+            "Whenever an opponent gains control of ~ from you, draw a card.",
+            TargetFilter::SelfRef,
+        ),
+    ] {
+        let def = parse_trigger_line(text, "Probe");
+        assert_eq!(
+            def.mode,
+            TriggerMode::ChangesController {
+                side: ControlChangeSide::Loses
+            },
+            "reach: {text:?}"
+        );
+        assert_eq!(def.valid_card, Some(subject), "{text:?}");
+    }
+}
+
 /// CR 603.2 + CR 603.10 + CR 603.3a: Risky Move's second ability, verbatim.
 /// "When you gain control of ~ from another player" maps to ChangesController
 /// `{ side: Gains }` with valid_card = SelfRef; "from another player" adds no
@@ -15691,6 +15781,144 @@ fn trigger_other_than_first_instant_spell_is_a_fire_time_constraint() {
         "a fire-time qualifier is not intervening-if"
     );
     assert!(def.execute.is_some(), "the payoff must remain reachable");
+}
+
+// SHAPE: CR 603.2 makes the ordinal an event qualifier, not the immediately
+// following intervening-if form described by CR 603.4.
+#[test]
+fn trigger_other_than_first_possessive_full_tracker_oracle() {
+    let parsed = parse_oracle_text(
+        "Menace\nModular 2 (This creature enters with two +1/+1 counters on it. When it dies, you may put its +1/+1 counters on target artifact creature.)\nWhenever you cast a spell other than your first spell each turn, put a +1/+1 counter on this creature.",
+        "Arcbound Tracker",
+        &["Menace".to_string(), "Modular".to_string()],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Dog".to_string()],
+    );
+    let def = parsed
+        .triggers
+        .iter()
+        .find(|def| def.mode == TriggerMode::SpellCast)
+        .expect("complete Oracle must retain its executable cast trigger");
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        ))
+    );
+    assert_eq!(def.valid_card, None);
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::NthSpellThisTurn {
+            n: 1,
+            comparator: Comparator::GT,
+            filter: None,
+        })
+    );
+    assert_eq!(def.condition, None);
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("counter payoff remains reachable");
+    assert_no_unimplemented(execute);
+    assert_eq!(
+        execute.effect.as_ref(),
+        &Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    );
+}
+
+// SHAPE: both grammatical forms share the same typed spell-quality axis.
+#[test]
+fn trigger_other_than_first_possessive_matches_repeated_quality() {
+    for quality in ["instant", "creature", "red", "historic"] {
+        let head = format!(
+            "Whenever you cast a {quality} spell other than your first {quality} spell each turn, draw a card."
+        );
+        let def = parse_trigger_line(&head, "Possessive nonfirst shape fixture");
+        let filter = parse_spell_history_filter(quality).expect("known spell quality");
+        assert_eq!(def.mode, TriggerMode::SpellCast, "{head}");
+        assert_eq!(def.valid_card, Some(filter.clone()), "{head}");
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::NthSpellThisTurn {
+                n: 1,
+                comparator: Comparator::GT,
+                filter: Some(filter),
+            }),
+            "{head}"
+        );
+        assert_eq!(def.condition, None, "{head}");
+        assert_no_unimplemented(def.execute.as_deref().expect("draw payoff"));
+    }
+}
+
+// SHAPE: a recognized determiner commits; malformed tails cannot broaden to
+// unconditional SpellCast. Accepted siblings guard the rejection assertions.
+#[test]
+fn other_than_first_classifier_possessive_commitment_boundaries() {
+    for accepted in [
+        "you cast a spell other than your first spell each turn",
+        "you cast an instant spell other than your first instant spell each turn",
+        "an opponent casts an instant spell other than the first instant spell that player casts each turn",
+        "enchanted player casts a spell other than the first spell they cast each turn",
+    ] {
+        assert!(matches!(
+            parse_other_than_first_spell_trigger(accepted),
+            OtherThanFirstSpellParse::Accepted(_)
+        ), "{accepted}");
+        let def = parse_trigger_line(
+            &format!("Whenever {accepted}, draw a card."),
+            "Accepted nonfirst shape fixture",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast, "{accepted}");
+        assert_no_unimplemented(def.execute.as_deref().expect("draw payoff"));
+    }
+    for ordinary in [
+        "you cast a spell",
+        "an opponent casts an instant spell",
+        "you cast another spell",
+        "you cast a spell other than your second spell each turn",
+    ] {
+        assert!(
+            matches!(
+                parse_other_than_first_spell_trigger(ordinary),
+                OtherThanFirstSpellParse::NotCandidate
+            ),
+            "{ordinary}"
+        );
+    }
+    for rejected in [
+        "you cast a spell other than your first spell each turn or copies a spell",
+        "you cast a spell other than your first spell that turn",
+        "you cast a spell other than your first spell each turn extra",
+        "you cast a spell other than your first spell",
+        "you cast a spell other than your first each turn",
+        "you cast an instant spell other than your first sorcery spell each turn",
+        "you cast a red spell other than your first blue spell each turn",
+        "you cast a magenta spell other than your first magenta spell each turn",
+        "an opponent casts a spell other than your first spell each turn",
+        "a player casts a spell other than your first spell each turn",
+        "enchanted player casts a spell other than your first spell each turn",
+    ] {
+        assert!(
+            matches!(
+                parse_other_than_first_spell_trigger(rejected),
+                OtherThanFirstSpellParse::Rejected
+            ),
+            "{rejected}"
+        );
+        let def = parse_trigger_line(
+            &format!("Whenever {rejected}, draw a card."),
+            "Rejected nonfirst shape fixture",
+        );
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "{rejected}: {def:?}"
+        );
+    }
 }
 
 #[test]

@@ -309,6 +309,29 @@ pub struct ParsedItem {
     /// Typed reasons this item is a gap. Omitted from the JSON when empty.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub diagnoses: Vec<GapDiagnosis>,
+    /// The gap this unsupported item reports when its handler isn't its own
+    /// label: set from `ability_node_gaps`. `None` (omitted from the JSON) for
+    /// every item whose gap is its label.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub gap: Option<ItemGap>,
+}
+
+/// A typed gap an unsupported parse item reports in place of its own label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemGap {
+    /// CR 608.2e + CR 603.10d: the node's effect is handled, but its fan-out
+    /// control boundary is unobservable (`PLAYER_SCOPE_CONTROL_BOUNDARY_GAP`).
+    FanOutControlBoundary,
+}
+
+impl ItemGap {
+    /// The handler key `extract_gap_details` reports for this gap.
+    fn handler(self) -> &'static str {
+        match self {
+            ItemGap::FanOutControlBoundary => PLAYER_SCOPE_CONTROL_BOUNDARY_GAP,
+        }
+    }
 }
 
 /// The category of a parsed item in the coverage tree.
@@ -5776,6 +5799,7 @@ pub fn build_parse_details(
             details: vec![],
             children: vec![],
             diagnoses: Vec::new(),
+            gap: None,
         });
     }
 
@@ -5833,6 +5857,7 @@ pub fn build_parse_details(
             details: replacement_details(repl),
             children,
             diagnoses: Vec::new(),
+            gap: None,
         });
     }
 
@@ -5894,6 +5919,7 @@ fn build_trigger_item(
         details: trigger_details(trig),
         children,
         diagnoses: Vec::new(),
+        gap: None,
     }
 }
 
@@ -5973,7 +5999,30 @@ fn build_ability_item(
         }
         _ => effect_type_name(&def.effect),
     };
-    let supported = !matches!(&*def.effect, Effect::Unimplemented { .. });
+    // The node's own verdict and, when it isn't its label, the gap it reports.
+    // An unimplemented effect is labelled by its own name; an unobservable
+    // fan-out boundary on a handled effect reports the boundary, never the
+    // effect's handler.
+    let mut supported = true;
+    let mut gap = None;
+    let mut unimplemented_effect = false;
+    for node_gap in ability_node_gaps(def) {
+        match node_gap {
+            AbilityNodeGap::UnimplementedEffect(_) => {
+                supported = false;
+                unimplemented_effect = true;
+            }
+            // Projected on the node's own cost child (`build_cost_item`).
+            AbilityNodeGap::UnimplementedCost(_) => {}
+            AbilityNodeGap::UnobservableFanOutControl => {
+                supported = false;
+                gap = Some(ItemGap::FanOutControlBoundary);
+            }
+        }
+    }
+    if unimplemented_effect {
+        gap = None;
+    }
     let source_text = def.description.clone().or_else(|| match &*def.effect {
         Effect::Unimplemented { description, .. } => description.clone(),
         _ => None,
@@ -6084,6 +6133,7 @@ fn build_ability_item(
         details,
         children,
         diagnoses,
+        gap,
     }
 }
 
@@ -6116,6 +6166,7 @@ fn build_static_item(
         details: static_details(stat),
         children,
         diagnoses: Vec::new(),
+        gap: None,
     }
 }
 
@@ -6270,6 +6321,7 @@ fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
                 details: vec![],
                 children: vec![],
                 diagnoses: Vec::new(),
+                gap: None,
             });
         }
         AbilityCost::EffectCost { effect } => {
@@ -6282,6 +6334,7 @@ fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
                     details: vec![],
                     children: vec![],
                     diagnoses: Vec::new(),
+                    gap: None,
                 });
             }
         }
@@ -6352,6 +6405,7 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
         details: vec![],
         children: vec![],
         diagnoses: Vec::new(),
+        gap: None,
     });
 }
 
@@ -6402,6 +6456,7 @@ fn build_casting_option_item(option: &SpellCastingOption, items: &mut Vec<Parsed
         details: vec![],
         children: vec![],
         diagnoses: Vec::new(),
+        gap: None,
     });
 }
 
@@ -6650,13 +6705,14 @@ fn extract_gap_details_inner(
         }
 
         if !item.supported {
-            let handler = match item.category {
-                ParseCategory::Keyword => format!("Keyword:{}", item.label),
-                ParseCategory::Ability => format!("Effect:{}", item.label),
-                ParseCategory::Trigger => format!("Trigger:{}", item.label),
-                ParseCategory::Static => format!("Static:{}", item.label),
-                ParseCategory::Cost => format!("Cost:{}", item.label),
-                ParseCategory::Replacement => unreachable!(),
+            let handler = match (item.gap, &item.category) {
+                (Some(gap), _) => gap.handler().to_string(),
+                (None, ParseCategory::Keyword) => format!("Keyword:{}", item.label),
+                (None, ParseCategory::Ability) => format!("Effect:{}", item.label),
+                (None, ParseCategory::Trigger) => format!("Trigger:{}", item.label),
+                (None, ParseCategory::Static) => format!("Static:{}", item.label),
+                (None, ParseCategory::Cost) => format!("Cost:{}", item.label),
+                (None, ParseCategory::Replacement) => unreachable!(),
             };
             if let Some(&index) = seen.get(&handler) {
                 details[index]
@@ -6684,6 +6740,10 @@ impl ParsedItem {
     }
 }
 
+/// The in-game warning for an unimplemented part inside a static or
+/// modification carrier (a granted ability, a token or emblem static, ?).
+pub const STATIC_CARRIER_WARNING: &str = "Static: unimplemented part in a granted ability";
+
 /// Check whether a game object has any mechanics the engine cannot handle.
 ///
 /// Checks keywords (Unknown variant = unrecognized), abilities (api_type
@@ -6699,10 +6759,43 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
         }
     }
 
-    // 2. Check abilities against known effect types
+    // 2. Every ability node's strict failures (`ability_node_gaps`, the shared
+    // node authority), over the object's abilities and its triggers' bodies.
+    let mut push_node_gaps = |def: &AbilityDefinition| {
+        for_each_ability_tree_node(
+            def,
+            TokenStaticTraversal::Include,
+            &mut |node, node_traversal| {
+                // A static or modification carrier (granted abilities, token and
+                // emblem statics, ?) judged by the same helper precon playability
+                // reads, so a gap granted through a static reaches the warning too.
+                if effect_static_carriers_have_unimplemented_parts(&node.effect, node_traversal) {
+                    let label = STATIC_CARRIER_WARNING.to_string();
+                    if !missing.contains(&label) {
+                        missing.push(label);
+                    }
+                }
+                for gap in ability_node_gaps(node) {
+                    let label = match gap {
+                        AbilityNodeGap::UnimplementedEffect(name) => format!("Effect: {name}"),
+                        AbilityNodeGap::UnimplementedCost(_) => "Cost: unimplemented".to_string(),
+                        AbilityNodeGap::UnobservableFanOutControl => {
+                            "Effect: fan_out_control_boundary".to_string()
+                        }
+                    };
+                    if !missing.contains(&label) {
+                        missing.push(label);
+                    }
+                }
+            },
+        );
+    };
     for def in obj.abilities.iter() {
-        if let Effect::Unimplemented { name, .. } = &*def.effect {
-            missing.push(format!("Effect: {name}"));
+        push_node_gaps(def);
+    }
+    for entry in obj.trigger_definitions.iter_all() {
+        if let Some(execute) = &entry.definition().execute {
+            push_node_gaps(execute);
         }
     }
 
@@ -6726,6 +6819,14 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     for stat in obj.static_definitions.iter_all() {
         if !static_registry.contains_key(&stat.mode) && !is_data_carrying_static(&stat.mode) {
             missing.push(format!("Static: {}", stat.mode));
+        }
+        // The static's own granted abilities, as `card_face_has_unimplemented_parts`
+        // judges a face's statics.
+        if static_has_unimplemented_parts(stat) {
+            let label = STATIC_CARRIER_WARNING.to_string();
+            if !missing.contains(&label) {
+                missing.push(label);
+            }
         }
     }
 
@@ -7594,6 +7695,97 @@ pub fn card_face_gaps(face: &CardFace) -> Vec<String> {
     check_shared_source_graveyard_slot(face, &mut missing);
     check_entry_projection(face, &mut missing);
     missing
+}
+
+/// The coverage label for an ability whose per-player fan-out ("each player
+/// …", "each target player …") performs a control-change action whose seat
+/// template isn't one of the allowlisted printed shapes
+/// (`effects::fan_out_control_boundary`): a mandatory mass control action over
+/// a printed producer's exact parsed population, with no executable modifier
+/// and no retained node. Every other fan-out control shape is gapped. CR 608.2e processes each
+/// action simultaneously for every player, and CR 603.10d look-back
+/// control-change triggers need that action's immediately-before board; the
+/// runtime publishes such changes with `Unrecorded` evidence, so the producer
+/// is unsupported and fails closed.
+/// Classified by `effects::player_scope_control_boundary` /
+/// `multi_target_player_control_boundary`, on the exact template the driver
+/// resolves.
+pub const PLAYER_SCOPE_CONTROL_BOUNDARY_GAP: &str = "Effect:fan_out_control_boundary";
+
+fn fan_out_control_boundary_is_unobservable(def: &AbilityDefinition) -> bool {
+    if def.player_scope.is_none() && def.multi_target.is_none() {
+        return false;
+    }
+    let resolved = crate::game::ability_utils::build_resolved_from_def(
+        def,
+        crate::types::identifiers::ObjectId(0),
+        crate::types::player::PlayerId(0),
+    );
+    let unobservable = Some(crate::game::effects::FanOutControlBoundary::Unobservable);
+    crate::game::effects::player_scope_control_boundary(&resolved) == unobservable
+        || crate::game::effects::multi_target_player_control_boundary(&resolved) == unobservable
+}
+
+/// One strict failure on a single ability node. `ability_node_gaps` is the
+/// single node-local authority every coverage support consumer reads: the
+/// missing-parts walk (`card_face_gaps`), `is_ability_supported`, the parse
+/// tree's `supported` flag, precon playability
+/// (`card_face_has_unimplemented_parts`) and the in-game warning
+/// (`unimplemented_mechanics`). A new strict-failure class added here reaches
+/// all of them.
+#[derive(Debug, Clone, Copy)]
+enum AbilityNodeGap<'a> {
+    /// The parser couldn't express the node's effect.
+    UnimplementedEffect(&'a str),
+    /// The node's cost tree holds a component the engine can't pay
+    /// (`AbilityCost::contains_unimplemented`).
+    UnimplementedCost(&'a AbilityCost),
+    /// CR 608.2e + CR 603.10d: a fan-out control boundary the runtime can't
+    /// observe (`fan_out_control_boundary_is_unobservable`).
+    UnobservableFanOutControl,
+}
+
+/// The strict failures on `def` itself (not its children).
+fn ability_node_gaps(def: &AbilityDefinition) -> impl Iterator<Item = AbilityNodeGap<'_>> {
+    let effect = match &*def.effect {
+        Effect::Unimplemented { name, .. } => Some(AbilityNodeGap::UnimplementedEffect(name)),
+        _ => None,
+    };
+    let boundary = fan_out_control_boundary_is_unobservable(def)
+        .then_some(AbilityNodeGap::UnobservableFanOutControl);
+    let cost = def
+        .cost
+        .as_ref()
+        .filter(|cost| cost.contains_unimplemented())
+        .map(AbilityNodeGap::UnimplementedCost);
+    effect.into_iter().chain(boundary).chain(cost)
+}
+
+/// Every ability node the coverage walks judge under `def`: `def` itself, its
+/// sub, else and mode abilities, and its effect's replacement and direct
+/// ability payloads, each with its token-static traversal. Static carriers are
+/// judged per node by the caller.
+fn for_each_ability_tree_node(
+    def: &AbilityDefinition,
+    token_static_traversal: TokenStaticTraversal,
+    visit: &mut dyn FnMut(&AbilityDefinition, TokenStaticTraversal),
+) {
+    visit(def, token_static_traversal);
+    for child in def
+        .sub_ability
+        .as_deref()
+        .into_iter()
+        .chain(def.else_ability.as_deref())
+        .chain(def.mode_abilities.iter())
+    {
+        for_each_ability_tree_node(child, token_static_traversal, visit);
+    }
+    visit_effect_replacement_ability_payloads(&def.effect, |payload_traversal, payload| {
+        for_each_ability_tree_node(payload, payload_traversal, visit);
+    });
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        for_each_ability_tree_node(payload, token_static_traversal, visit);
+    });
 }
 
 /// The coverage label for a face whose as-enters choice is made before it
@@ -8493,38 +8685,12 @@ fn ability_definition_has_unimplemented_parts(
     def: &AbilityDefinition,
     token_static_traversal: TokenStaticTraversal,
 ) -> bool {
-    matches!(*def.effect, Effect::Unimplemented { .. })
-        || def
-            .cost
-            .as_ref()
-            .is_some_and(|c| c.contains_unimplemented())
-        || def.sub_ability.as_ref().is_some_and(|sub| {
-            ability_definition_has_unimplemented_parts(sub, token_static_traversal)
-        })
-        || def.else_ability.as_ref().is_some_and(|else_ability| {
-            ability_definition_has_unimplemented_parts(else_ability, token_static_traversal)
-        })
-        || def
-            .mode_abilities
-            .iter()
-            .any(|mode| ability_definition_has_unimplemented_parts(mode, token_static_traversal))
-        || effect_static_carriers_have_unimplemented_parts(&def.effect, token_static_traversal)
-        || {
-            let mut has_unimplemented_parts = false;
-            visit_effect_replacement_ability_payloads(&def.effect, |payload_traversal, payload| {
-                has_unimplemented_parts |=
-                    ability_definition_has_unimplemented_parts(payload, payload_traversal);
-            });
-            has_unimplemented_parts
-        }
-        || {
-            let mut has_unimplemented_parts = false;
-            visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
-                has_unimplemented_parts |=
-                    ability_definition_has_unimplemented_parts(payload, token_static_traversal);
-            });
-            has_unimplemented_parts
-        }
+    let mut has_unimplemented_parts = false;
+    for_each_ability_tree_node(def, token_static_traversal, &mut |node, node_traversal| {
+        has_unimplemented_parts |= ability_node_gaps(node).next().is_some()
+            || effect_static_carriers_have_unimplemented_parts(&node.effect, node_traversal);
+    });
+    has_unimplemented_parts
 }
 
 fn effect_static_carriers_have_unimplemented_parts(
@@ -8569,8 +8735,19 @@ fn collect_ability_missing_parts(
     token_static_traversal: TokenStaticTraversal,
     missing: &mut Vec<String>,
 ) {
-    if let Effect::Unimplemented { name, .. } = &*def.effect {
-        let label = format!("Effect:{name}");
+    let mut unimplemented_cost = None;
+    for gap in ability_node_gaps(def) {
+        let label = match gap {
+            AbilityNodeGap::UnimplementedEffect(name) => format!("Effect:{name}"),
+            AbilityNodeGap::UnobservableFanOutControl => {
+                PLAYER_SCOPE_CONTROL_BOUNDARY_GAP.to_string()
+            }
+            // Labelled per cost node below, after the delayed-trigger modes.
+            AbilityNodeGap::UnimplementedCost(cost) => {
+                unimplemented_cost = Some(cost);
+                continue;
+            }
+        };
         if !missing.contains(&label) {
             missing.push(label);
         }
@@ -8584,7 +8761,7 @@ fn collect_ability_missing_parts(
         }
     }
 
-    if let Some(cost) = &def.cost {
+    if let Some(cost) = unimplemented_cost {
         collect_ability_cost_missing_parts(cost, missing);
     }
 
@@ -9453,81 +9630,29 @@ fn is_trigger_supported(
     })
 }
 
-/// Check if an ability definition tree has any Unimplemented effects.
+/// Whether every node of an ability definition tree is supported: no
+/// `ability_node_gaps`, no unsupported delayed-trigger mode, and supported
+/// static carriers.
 fn is_ability_supported(
     def: &AbilityDefinition,
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
     static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
     token_static_traversal: TokenStaticTraversal,
 ) -> bool {
-    if matches!(&*def.effect, Effect::Unimplemented { .. }) {
-        return false;
-    }
-    if delayed_trigger_modes(&def.effect)
-        .into_iter()
-        .any(|mode| !delayed_trigger_mode_is_supported(mode, trigger_registry))
-    {
-        return false;
-    }
-    if let Some(sub) = &def.sub_ability {
-        if !is_ability_supported(
-            sub,
-            trigger_registry,
-            static_registry,
-            token_static_traversal,
-        ) {
-            return false;
-        }
-    }
-    if let Some(else_ab) = &def.else_ability {
-        if !is_ability_supported(
-            else_ab,
-            trigger_registry,
-            static_registry,
-            token_static_traversal,
-        ) {
-            return false;
-        }
-    }
-    for mode_ab in &def.mode_abilities {
-        if !is_ability_supported(
-            mode_ab,
-            trigger_registry,
-            static_registry,
-            token_static_traversal,
-        ) {
-            return false;
-        }
-    }
-    if !effect_static_carriers_are_supported(
-        &def.effect,
-        trigger_registry,
-        static_registry,
-        token_static_traversal,
-    ) {
-        return false;
-    }
     let mut supported = true;
-    visit_effect_replacement_ability_payloads(&def.effect, |payload_traversal, payload| {
-        supported &= is_ability_supported(
-            payload,
-            trigger_registry,
-            static_registry,
-            payload_traversal,
-        );
+    for_each_ability_tree_node(def, token_static_traversal, &mut |node, node_traversal| {
+        supported &= ability_node_gaps(node).next().is_none()
+            && delayed_trigger_modes(&node.effect)
+                .into_iter()
+                .all(|mode| delayed_trigger_mode_is_supported(mode, trigger_registry))
+            && effect_static_carriers_are_supported(
+                &node.effect,
+                trigger_registry,
+                static_registry,
+                node_traversal,
+            );
     });
-    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
-        supported &= is_ability_supported(
-            payload,
-            trigger_registry,
-            static_registry,
-            token_static_traversal,
-        );
-    });
-    if !supported {
-        return false;
-    }
-    true
+    supported
 }
 
 fn effect_static_carriers_are_supported(
@@ -14304,6 +14429,810 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 
 #[cfg(test)]
 mod tests {
+    /// Every `player_scope` node of a parsed ability chain.
+    /// The face's verdict from the two production consumers outside the
+    /// coverage walk: precon playability (`database::is_card_playable`, read
+    /// from an export round trip) and the in-game warning
+    /// (`derive_display_state` -> `GameObject::unimplemented_mechanics`).
+    /// Returns (playable, the derived warnings).
+    fn playability_and_object_warnings(face: &CardFace) -> (bool, Vec<String>) {
+        let mut export = serde_json::Map::new();
+        export.insert(
+            face.name.to_lowercase(),
+            serde_json::to_value(face).expect("the face serializes"),
+        );
+        let db = crate::database::CardDatabase::from_json_str(
+            &serde_json::Value::Object(export).to_string(),
+        )
+        .expect("the export round-trips");
+        let playable = crate::database::is_card_playable(&db, &face.name);
+
+        let mut state = crate::types::game_state::GameState::new_two_player(7);
+        let id = crate::game::deck_loading::create_object_from_card_face(
+            &mut state,
+            face,
+            crate::types::player::PlayerId(0),
+        );
+        state.public_state_dirty.all_objects_dirty = true;
+        crate::game::derived::derive_display_state(&mut state);
+        let object = &state.objects[&id];
+        assert_eq!(
+            object.has_unimplemented_mechanics(),
+            !object.unimplemented_mechanics.is_empty(),
+            "the derived field and the live method agree"
+        );
+        (playable, object.unimplemented_mechanics.clone())
+    }
+
+    fn scoped_nodes(
+        def: &crate::types::ability::AbilityDefinition,
+        out: &mut Vec<crate::types::ability::AbilityDefinition>,
+    ) {
+        if def.player_scope.is_some() {
+            out.push(def.clone());
+        }
+        if let Some(sub) = &def.sub_ability {
+            scoped_nodes(sub, out);
+        }
+        if let Some(else_ability) = &def.else_ability {
+            scoped_nodes(else_ability, out);
+        }
+    }
+
+    /// CR 608.2e + CR 603.10d: the allowlist's receipt. Each printed "each player
+    /// gains control" producer on it (verbatim Scryfall text) parses to a
+    /// head-boundary template, which the runtime captures exactly, and isn't
+    /// marked unsupported; and every allowlisted population is one of these
+    /// cards' parsed populations, so the allowlist holds nothing unprinted.
+    #[test]
+    fn printed_scoped_control_producers_have_a_head_boundary() {
+        use crate::game::effects::FanOutControlBoundary;
+        let mut seen = Vec::new();
+        for (name, types, text) in [
+            (
+                "Homeward Path",
+                "Land",
+                "{T}: Add {C}.\n{T}: Each player gains control of all creatures they own.",
+            ),
+            (
+                "The Fall of Lord Konda",
+                "Enchantment Saga",
+                "(As this Saga enters and after your draw step, add a lore counter.)\nI \u{2014} \
+                 Exile target creature an opponent controls with mana value 4 or greater.\nII \
+                 \u{2014} Each player gains control of all permanents they own.\nIII \u{2014} \
+                 Exile this Saga, then return it to the battlefield transformed under your \
+                 control.",
+            ),
+            (
+                "Brooding Saurian",
+                "Creature",
+                "At the beginning of each end step, each player gains control of all nontoken \
+                 permanents they own.",
+            ),
+            (
+                "Trostani Discordant",
+                "Creature",
+                "Other creatures you control get +1/+1.\nWhen Trostani enters, create two 1/1 \
+                 white Soldier creature tokens with lifelink.\nAt the beginning of your end \
+                 step, each player gains control of all creatures they own.",
+            ),
+            (
+                "Alicia Masters, Skilled Sculptor",
+                "Creature",
+                "At the beginning of combat on your turn, if you've cast a noncreature spell \
+                 this turn, create a Treasure token.\nSense the Good \u{2014} At the beginning \
+                 of your end step, each player gains control of all creatures they own.",
+            ),
+            (
+                "Herald of Leshrac",
+                "Creature",
+                "Flying\nCumulative upkeep\u{2014}Gain control of a land you don't control. (At \
+                 the beginning of your upkeep, put an age counter on this permanent, then \
+                 sacrifice it unless you pay its upkeep cost for each age counter on it.)\nThis \
+                 creature gets +1/+1 for each land you control but don't own.\nWhen this \
+                 creature leaves the battlefield, each player gains control of each land they \
+                 own that you control.",
+            ),
+        ] {
+            // "Enchantment Saga": the card type, then its subtypes.
+            let (core, subtypes) = types.split_once(' ').unwrap_or((types, ""));
+            let subtypes: Vec<String> = subtypes.split_whitespace().map(String::from).collect();
+            let parsed =
+                crate::parser::parse_oracle_text(text, name, &[], &[core.to_string()], &subtypes);
+            let mut scoped = Vec::new();
+            for def in parsed.abilities.iter() {
+                scoped_nodes(def, &mut scoped);
+            }
+            for trigger in parsed.triggers.iter() {
+                if let Some(execute) = &trigger.execute {
+                    scoped_nodes(execute, &mut scoped);
+                }
+            }
+            let serialized = serde_json::to_string(&(&parsed.abilities, &parsed.triggers))
+                .expect("the parse serializes");
+            assert!(
+                serialized.contains("\"player_scope\"") && serialized.contains("Control"),
+                "REACH: {name} parses a scoped control-change clause"
+            );
+            let mut missing = Vec::new();
+            super::check_abilities(
+                &parsed.abilities,
+                &super::build_trigger_registry(),
+                &super::build_static_registry(),
+                super::TokenStaticTraversal::Include,
+                &mut missing,
+            );
+            super::check_triggers(
+                &parsed.triggers,
+                &super::build_trigger_registry(),
+                &super::build_static_registry(),
+                super::TokenStaticTraversal::Include,
+                &mut missing,
+            );
+            assert!(
+                !missing
+                    .iter()
+                    .any(|label| label == super::PLAYER_SCOPE_CONTROL_BOUNDARY_GAP),
+                "{name}: the production coverage walk doesn't mark it: {missing:?}"
+            );
+            let face = CardFace {
+                name: name.to_string(),
+                abilities: parsed.abilities.clone(),
+                triggers: parsed.triggers.clone(),
+                ..Default::default()
+            };
+            let (playable, warnings) = playability_and_object_warnings(&face);
+            assert!(
+                !warnings
+                    .iter()
+                    .any(|w| w == "Effect: fan_out_control_boundary"),
+                "{name}: the in-game warning doesn't name the boundary: {warnings:?}"
+            );
+            if name == "Homeward Path" {
+                assert!(
+                    playable
+                        && warnings.is_empty()
+                        && !super::card_face_has_unimplemented_parts(&face),
+                    "Homeward Path: playable, with no in-game warning: {warnings:?}"
+                );
+            }
+            for def in scoped {
+                let resolved = crate::game::ability_utils::build_resolved_from_def(
+                    &def,
+                    crate::types::identifiers::ObjectId(1),
+                    crate::types::player::PlayerId(0),
+                );
+                assert_eq!(
+                    crate::game::effects::player_scope_control_boundary(&resolved),
+                    Some(FanOutControlBoundary::Head),
+                    "{name}: its scoped control action is the template's head"
+                );
+                if let crate::types::ability::Effect::GainControlAll { target } = &*def.effect {
+                    seen.push(target.clone());
+                }
+                assert!(
+                    !super::fan_out_control_boundary_is_unobservable(&def),
+                    "{name}: not marked unsupported"
+                );
+                let item = super::build_ability_item(
+                    &def,
+                    &super::build_trigger_registry(),
+                    &super::build_static_registry(),
+                    super::TokenStaticTraversal::Include,
+                );
+                assert!(
+                    item.supported && item.gap.is_none(),
+                    "{name}: its scoped node's parse item stays supported, with no gap"
+                );
+            }
+        }
+        for population in crate::game::effects::allowlisted_fan_out_control_populations() {
+            assert!(
+                seen.contains(&population),
+                "allowlisted {population:?} is a printed producer's parsed population"
+            );
+        }
+    }
+
+    /// CR 611.2c + CR 608.2e: the printed scoped producers whose seat template
+    /// isn't an allowlisted shape (a per-seat choice, a retained following
+    /// node, a single-object control head, or a population that drops the
+    /// selected recipient: Aminatou's chosen direction, Scrambleverse's random
+    /// choice) fail closed: coverage marks them unsupported, and Zidane doesn't
+    /// trigger on their changes.
+    #[test]
+    fn printed_scoped_producers_off_the_allowlist_are_unsupported() {
+        for (name, types, text) in [
+            (
+                "Inniaz, the Gale Force",
+                "Creature",
+                "Flying\n{2}{W/U}: Attacking creatures with flying get +1/+1 until end of turn. \
+                 ({W/U} can be paid with either {W} or {U}.)\nWhenever three or more creatures \
+                 you control with flying attack, each player gains control of a nonland \
+                 permanent of your choice controlled by the player to their right.",
+            ),
+            (
+                "Seize the Spotlight",
+                "Sorcery",
+                "Each opponent chooses fame or fortune. For each player who chose fame, gain \
+                 control of a creature that player controls until end of turn. Untap those \
+                 creatures and they gain haste until end of turn. For each player who chose \
+                 fortune, you draw a card and create a Treasure token.",
+            ),
+            (
+                "Dack Fayden, Helping Hand",
+                "Creature",
+                "When Dack Fayden enters, reveal cards from the top of your library until you \
+                 reveal X creature cards, where X is the number of opponents you have. Put \
+                 those creature cards onto the battlefield, then shuffle. They're goaded for \
+                 the rest of the game. For each of those permanents, choose a different \
+                 opponent. Each opponent gains control of the permanent for which they were \
+                 chosen.",
+            ),
+            (
+                "Aminatou, the Fateshifter",
+                "Planeswalker",
+                "+1: Draw a card, then put a card from your hand on top of your library.\n\
+                 \u{2212}1: Exile another target permanent you own, then return it to the \
+                 battlefield under your control.\n\u{2212}6: Choose left or right. Each player \
+                 gains control of all nonland permanents other than Aminatou controlled by the \
+                 next player in the chosen direction.\nAminatou, the Fateshifter can be your \
+                 commander.",
+            ),
+            (
+                "Scrambleverse",
+                "Sorcery",
+                "For each nonland permanent, choose a player at random. Then each player gains \
+                 control of each permanent for which they were chosen. Untap those permanents.",
+            ),
+        ] {
+            let parsed =
+                crate::parser::parse_oracle_text(text, name, &[], &[types.to_string()], &[]);
+            let mut missing = Vec::new();
+            super::check_abilities(
+                &parsed.abilities,
+                &super::build_trigger_registry(),
+                &super::build_static_registry(),
+                super::TokenStaticTraversal::Include,
+                &mut missing,
+            );
+            super::check_triggers(
+                &parsed.triggers,
+                &super::build_trigger_registry(),
+                &super::build_static_registry(),
+                super::TokenStaticTraversal::Include,
+                &mut missing,
+            );
+            assert!(
+                missing
+                    .iter()
+                    .any(|label| label == super::PLAYER_SCOPE_CONTROL_BOUNDARY_GAP),
+                "{name}: the production coverage walk marks it: {missing:?}"
+            );
+
+            // All three coverage consumers agree on the scoped node's verdict:
+            // the card's gaps, the support check, and the parse tree's flag.
+            let face = CardFace {
+                name: name.to_string(),
+                abilities: parsed.abilities.clone(),
+                triggers: parsed.triggers.clone(),
+                ..Default::default()
+            };
+            assert!(
+                super::card_face_gaps(&face)
+                    .iter()
+                    .any(|gap| gap == super::PLAYER_SCOPE_CONTROL_BOUNDARY_GAP),
+                "{name}: card_face_gaps reports the boundary gap"
+            );
+            let (playable, warnings) = playability_and_object_warnings(&face);
+            assert!(
+                super::card_face_has_unimplemented_parts(&face) && !playable,
+                "{name}: precon accounting counts it unsupported"
+            );
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w == "Effect: fan_out_control_boundary"),
+                "{name}: the in-game warning names the boundary: {warnings:?}"
+            );
+            let trigger_registry = super::build_trigger_registry();
+            let static_registry = super::build_static_registry();
+            let roots: Vec<&crate::types::ability::AbilityDefinition> = parsed
+                .abilities
+                .iter()
+                .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+                .collect();
+            // Every node the production walk visits: sub, else and mode
+            // abilities, and the effect's ability payloads.
+            fn all_nodes(
+                def: &crate::types::ability::AbilityDefinition,
+                out: &mut Vec<crate::types::ability::AbilityDefinition>,
+            ) {
+                out.push(def.clone());
+                for child in def
+                    .sub_ability
+                    .as_deref()
+                    .into_iter()
+                    .chain(def.else_ability.as_deref())
+                    .chain(def.mode_abilities.iter())
+                {
+                    all_nodes(child, out);
+                }
+                super::visit_effect_replacement_ability_payloads(&def.effect, |_, payload| {
+                    all_nodes(payload, out)
+                });
+                super::visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+                    all_nodes(payload, out)
+                });
+            }
+            let mut unobservable_nodes = 0;
+            for root in roots {
+                let mut scoped = Vec::new();
+                all_nodes(root, &mut scoped);
+                let unobservable: Vec<_> = scoped
+                    .iter()
+                    .filter(|def| super::fan_out_control_boundary_is_unobservable(def))
+                    .collect();
+                if unobservable.is_empty() {
+                    continue;
+                }
+                for def in unobservable {
+                    unobservable_nodes += 1;
+                    assert!(
+                        !super::is_ability_supported(
+                            def,
+                            &trigger_registry,
+                            &static_registry,
+                            super::TokenStaticTraversal::Include,
+                        ),
+                        "{name}: is_ability_supported rejects the scoped node"
+                    );
+                    let item = super::build_ability_item(
+                        def,
+                        &trigger_registry,
+                        &static_registry,
+                        super::TokenStaticTraversal::Include,
+                    );
+                    assert!(
+                        !item.supported,
+                        "{name}: the scoped node's parse item is unsupported"
+                    );
+                    // Its gap is labelled by its typed reason (`ItemGap`, from
+                    // `ability_node_gaps`), never by its handled effect.
+                    let handlers: Vec<String> =
+                        super::extract_gap_details(std::slice::from_ref(&item))
+                            .into_iter()
+                            .map(|gap| gap.handler)
+                            .collect();
+                    assert!(
+                        item.gap == Some(super::ItemGap::FanOutControlBoundary)
+                            && handlers
+                                .iter()
+                                .any(|h| h == super::PLAYER_SCOPE_CONTROL_BOUNDARY_GAP)
+                            && !handlers.contains(&format!("Effect:{}", item.label)),
+                        "{name}: the gap is the boundary, not {}: {handlers:?}",
+                        item.label
+                    );
+                }
+                assert!(
+                    !super::is_ability_supported(
+                        root,
+                        &trigger_registry,
+                        &static_registry,
+                        super::TokenStaticTraversal::Include,
+                    ),
+                    "{name}: the ability holding the scoped node is unsupported"
+                );
+                fn any_unsupported(item: &super::ParsedItem) -> bool {
+                    !item.supported || item.children.iter().any(any_unsupported)
+                }
+                assert!(
+                    any_unsupported(&super::build_ability_item(
+                        root,
+                        &trigger_registry,
+                        &static_registry,
+                        super::TokenStaticTraversal::Include,
+                    )),
+                    "{name}: the parse tree shows an unsupported node beside the gap"
+                );
+            }
+            assert!(
+                unobservable_nodes > 0,
+                "REACH: {name} has an unobservable scoped node"
+            );
+        }
+    }
+    /// CR 608.2e + CR 603.10d: an off-allowlist fan-out reached only through a
+    /// static carrier (`GenericEffect` -> `static_abilities` -> `GrantAbility`)
+    /// reaches the in-game warning as it reaches precon playability; the
+    /// shared node walk alone doesn't descend into carriers.
+    #[test]
+    fn a_fan_out_granted_through_a_static_carrier_reaches_the_warning() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect,
+            StaticDefinition, TargetFilter,
+        };
+        let parsed = crate::parser::parse_oracle_text(
+            "Each player may gain control of all nontoken permanents they own.",
+            "Optional Return",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        let mut scoped = Vec::new();
+        for def in parsed.abilities.iter() {
+            scoped_nodes(def, &mut scoped);
+        }
+        let granted = scoped
+            .into_iter()
+            .find(super::fan_out_control_boundary_is_unobservable)
+            .expect("REACH: the optional fan-out is an unobservable scoped node");
+        let face = CardFace {
+            name: "Granted Fan-Out".to_string(),
+            abilities: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(TargetFilter::SelfRef)
+                        .modifications(vec![ContinuousModification::GrantAbility {
+                            definition: Box::new(granted),
+                        }])],
+                    duration: Some(Duration::UntilEndOfTurn),
+                    target: None,
+                    end_cost: None,
+                },
+            )],
+            ..Default::default()
+        };
+        assert!(
+            super::card_face_has_unimplemented_parts(&face),
+            "REACH: precon playability rejects the carried fan-out"
+        );
+        let (playable, warnings) = playability_and_object_warnings(&face);
+        assert!(!playable);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w == "Effect: fan_out_control_boundary"),
+            "REACH: the node walk alone doesn't reach the carrier: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w == super::STATIC_CARRIER_WARNING),
+            "the warning names the carried gap: {warnings:?}"
+        );
+    }
+
+    /// CR 608.2e + CR 611.2c + CR 118.12a: the `Head` admission is a closed
+    /// allowlist. An allowlisted printed population, mandatory and bare, is
+    /// exact. The same population with any axis that lets a seat pause, pay,
+    /// re-evaluate or act between seats is unsupported (R4-1, R5-1, R6-1, R7-1,
+    /// R7-2), and so is a bare mandatory head over any population off the
+    /// allowlist (R5-1's live owner reference, R8-1's last-zone-changed set) or
+    /// a single-object control head.
+    #[test]
+    fn only_an_allowlisted_bare_mass_control_head_is_exact() {
+        use crate::game::effects::FanOutControlBoundary;
+        use crate::types::ability::{
+            AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, Comparator,
+            ControllerRef, Duration, Effect, FilterProp, PlayerFilter, QuantityExpr, QuantityRef,
+            StaticCondition, TargetFilter, TypedFilter, UnlessPayModifier,
+        };
+        let owned_by = |owner: ControllerRef| {
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::NonToken,
+                FilterProp::Owned { controller: owner },
+            ]))
+        };
+        let head = |target: TargetFilter| {
+            AbilityDefinition::new(AbilityKind::Spell, Effect::GainControlAll { target })
+                .player_scope(PlayerFilter::All)
+        };
+        let allowlisted = || head(owned_by(ControllerRef::ScopedPlayer));
+        let boundary = |def: &AbilityDefinition| {
+            crate::game::effects::player_scope_control_boundary(
+                &crate::game::ability_utils::build_resolved_from_def(
+                    def,
+                    crate::types::identifiers::ObjectId(1),
+                    crate::types::player::PlayerId(0),
+                ),
+            )
+        };
+        assert_eq!(
+            boundary(&allowlisted()),
+            Some(FanOutControlBoundary::Head),
+            "REACH: Brooding Saurian's population, mandatory and bare"
+        );
+
+        let mut unsupported: Vec<(&str, AbilityDefinition)> = vec![
+            ("optional (R4-1)", allowlisted().optional()),
+            (
+                "off the allowlist: a live owner reference (R5-1)",
+                head(owned_by(ControllerRef::ParentTargetController)),
+            ),
+            (
+                "off the allowlist: the last-zone-changed set (R8-1)",
+                head(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::LastZoneChanged,
+                        TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                            FilterProp::Owned {
+                                controller: ControllerRef::ScopedPlayer,
+                            },
+                        ])),
+                    ],
+                }),
+            ),
+            (
+                "a condition re-checked per seat (R7-2)",
+                allowlisted().condition(AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::creature().controller(ControllerRef::You),
+                            ),
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 3 },
+                }),
+            ),
+            (
+                "a single-object control head",
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainControl {
+                        target: TargetFilter::ParentTarget,
+                    },
+                )
+                .player_scope(PlayerFilter::All),
+            ),
+        ];
+        let mut paying = allowlisted();
+        paying.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::Tap,
+            payer: TargetFilter::ScopedPlayer,
+        });
+        unsupported.push(("an unless-payment (R6-1, R7-1)", paying));
+        let mut repeated = allowlisted();
+        repeated.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
+        unsupported.push(("a repeat", repeated));
+        let mut lasting = allowlisted();
+        lasting.duration = Some(Duration::ForAsLongAs {
+            condition: StaticCondition::IsPresent { filter: None },
+        });
+        unsupported.push(("a \"for as long as\" duration", lasting));
+        for (axis, def) in unsupported {
+            assert_eq!(
+                boundary(&def),
+                Some(FanOutControlBoundary::Unobservable),
+                "{axis}"
+            );
+            assert!(
+                super::fan_out_control_boundary_is_unobservable(&def),
+                "{axis}: coverage marks it"
+            );
+        }
+    }
+
+    /// CR 608.2e: a node retained in the seat template after the head can
+    /// remove a later seat's member before that seat's head runs, so no
+    /// retained node is admitted (R5-2). The parsed synthetic retains its
+    /// destroy inside the seat template and is unsupported.
+    #[test]
+    fn a_retained_mutating_continuation_is_unsupported() {
+        use crate::game::effects::FanOutControlBoundary;
+        let text = "Each player may gain control of all nontoken permanents they own and \
+                    destroy target creature.";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Return and Destroy",
+            &[],
+            &["Instant".into()],
+            &[],
+        );
+        let mut scoped = Vec::new();
+        for def in parsed.abilities.iter() {
+            scoped_nodes(def, &mut scoped);
+        }
+        let def = scoped.first().expect("REACH: a scoped clause parses");
+        let resolved = crate::game::ability_utils::build_resolved_from_def(
+            def,
+            crate::types::identifiers::ObjectId(1),
+            crate::types::player::PlayerId(0),
+        );
+        let scope = resolved.player_scope.clone().expect("scoped");
+        let (template, _) = crate::game::effects::split_player_scope_chain(&resolved, &scope);
+        assert!(
+            template.sub_ability.as_deref().is_some_and(|sub| matches!(
+                sub.effect,
+                crate::types::ability::Effect::Destroy { .. }
+            )),
+            "REACH: the destroy is retained inside the seat template"
+        );
+        assert_eq!(
+            crate::game::effects::player_scope_control_boundary(&resolved),
+            Some(FanOutControlBoundary::Unobservable)
+        );
+        assert!(super::fan_out_control_boundary_is_unobservable(def));
+    }
+    /// CR 118.12a + CR 608.2e: an unless-payment is a per-seat pause, read from
+    /// the exhaustive field authority (`resolution_prompt::node_modifiers_offer_choice`)
+    /// (R6-1). Homeward Path's mandatory head stays exact; the same head with an
+    /// unless-payment is unsupported, and so is any node retained inside the
+    /// seat template, even a plain untap.
+    #[test]
+    fn an_unless_payment_on_the_head_or_a_retained_node_settles_seats() {
+        use crate::game::effects::FanOutControlBoundary;
+        use crate::types::ability::{AbilityCost, TargetFilter, UnlessPayModifier};
+        let scoped = |text: &str, name: &str, types: &str| {
+            let parsed = crate::parser::parse_oracle_text(text, name, &[], &[types.into()], &[]);
+            let mut scoped = Vec::new();
+            for def in parsed.abilities.iter() {
+                scoped_nodes(def, &mut scoped);
+            }
+            scoped
+                .into_iter()
+                .next()
+                .expect("REACH: a scoped clause parses")
+        };
+        let boundary = |def: &crate::types::ability::AbilityDefinition| {
+            crate::game::effects::player_scope_control_boundary(
+                &crate::game::ability_utils::build_resolved_from_def(
+                    def,
+                    crate::types::identifiers::ObjectId(1),
+                    crate::types::player::PlayerId(0),
+                ),
+            )
+        };
+        let rider = || UnlessPayModifier {
+            cost: AbilityCost::Tap,
+            payer: TargetFilter::ScopedPlayer,
+        };
+
+        let homeward = scoped(
+            "{T}: Add {C}.\n{T}: Each player gains control of all creatures they own.",
+            "Homeward Path",
+            "Land",
+        );
+        assert_eq!(
+            boundary(&homeward),
+            Some(FanOutControlBoundary::Head),
+            "REACH"
+        );
+        let mut paying = homeward.clone();
+        paying.unless_pay = Some(rider());
+        assert_eq!(boundary(&paying), Some(FanOutControlBoundary::Unobservable));
+        assert!(super::fan_out_control_boundary_is_unobservable(&paying));
+
+        // A node retained inside the seat template runs between seats: even a
+        // plain untap is not admitted.
+        use crate::types::ability::{
+            Effect, EffectScope, ResolvedAbility, TapStateChange, TypedFilter,
+        };
+        let template = |retained: Option<bool>| {
+            // Brooding Saurian's allowlisted population.
+            let mut head = ResolvedAbility::new(
+                Effect::GainControlAll {
+                    target: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                        crate::types::ability::FilterProp::NonToken,
+                        crate::types::ability::FilterProp::Owned {
+                            controller: crate::types::ability::ControllerRef::ScopedPlayer,
+                        },
+                    ])),
+                },
+                vec![],
+                crate::types::identifiers::ObjectId(1),
+                crate::types::player::PlayerId(0),
+            );
+            if let Some(rider_on_untap) = retained {
+                let mut untap = ResolvedAbility::new(
+                    Effect::SetTapState {
+                        target: TargetFilter::Any,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Untap,
+                    },
+                    vec![],
+                    crate::types::identifiers::ObjectId(1),
+                    crate::types::player::PlayerId(0),
+                );
+                if rider_on_untap {
+                    untap.unless_pay = Some(rider());
+                }
+                head.sub_ability = Some(Box::new(untap));
+            }
+            head
+        };
+        assert_eq!(
+            crate::game::effects::fan_out_control_boundary(&template(None)),
+            FanOutControlBoundary::Head,
+            "REACH: the allowlisted head"
+        );
+        for rider_on_untap in [false, true] {
+            assert_eq!(
+                crate::game::effects::fan_out_control_boundary(&template(Some(rider_on_untap))),
+                FanOutControlBoundary::Unobservable,
+                "a retained untap (rider {rider_on_untap})"
+            );
+        }
+    }
+    /// CR 608.2e + CR 603.10d: a control action retained behind a scoped prefix
+    /// ("each player may <X> and gain control of …": the optional clause keeps
+    /// its continuation in the seat) has no single pre-seat boundary, so the
+    /// producer is unsupported. The same chain with the control action at the
+    /// head is accepted.
+    #[test]
+    fn a_control_action_behind_a_retained_scoped_prefix_is_unsupported() {
+        use crate::game::effects::FanOutControlBoundary;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, PlayerFilter, QuantityExpr, SubAbilityLink,
+            TargetFilter,
+        };
+        let steal = || {
+            let mut steal = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainControl {
+                    target: TargetFilter::Any,
+                },
+            );
+            steal.sub_link = SubAbilityLink::ContinuationStep;
+            steal
+        };
+        let draw = Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        };
+        let rejected = AbilityDefinition::new(AbilityKind::Spell, draw.clone())
+            .player_scope(PlayerFilter::All)
+            .optional()
+            .sub_ability(steal());
+        let accepted = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainControlAll {
+                target: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::permanent().properties(vec![
+                        crate::types::ability::FilterProp::NonToken,
+                        crate::types::ability::FilterProp::Owned {
+                            controller: crate::types::ability::ControllerRef::ScopedPlayer,
+                        },
+                    ]),
+                ),
+            },
+        )
+        .player_scope(PlayerFilter::All);
+        let boundary = |def: &AbilityDefinition| {
+            crate::game::effects::player_scope_control_boundary(
+                &crate::game::ability_utils::build_resolved_from_def(
+                    def,
+                    crate::types::identifiers::ObjectId(1),
+                    crate::types::player::PlayerId(0),
+                ),
+            )
+        };
+        assert_eq!(
+            boundary(&rejected),
+            Some(FanOutControlBoundary::Unobservable),
+            "the optional clause retains the control action behind its prefix"
+        );
+        assert!(super::fan_out_control_boundary_is_unobservable(&rejected));
+        let mut missing = Vec::new();
+        super::check_abilities(
+            std::slice::from_ref(&rejected),
+            &super::build_trigger_registry(),
+            &super::build_static_registry(),
+            super::TokenStaticTraversal::Include,
+            &mut missing,
+        );
+        assert!(
+            missing
+                .iter()
+                .any(|label| label == super::PLAYER_SCOPE_CONTROL_BOUNDARY_GAP),
+            "coverage marks the producer unsupported: {missing:?}"
+        );
+
+        assert_eq!(boundary(&accepted), Some(FanOutControlBoundary::Head));
+        assert!(!super::fan_out_control_boundary_is_unobservable(&accepted));
+    }
+
     /// Fixture shared by the replacement-payload stranding tests: an unbound
     /// delayed tracked-set return nested in an `AddTargetReplacement` execute
     /// body — the minimal carrier for the shape CodeRabbit's Major flagged as
@@ -18953,6 +19882,9 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             enters_with_counter: None,
             required_cast_keyword,
             pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
         })
         .affected(TargetFilter::Typed(
             crate::types::ability::TypedFilter::creature(),
@@ -20429,6 +21361,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             details: vec![],
             children: vec![],
             diagnoses: vec![],
+            gap: None,
         }];
         let gaps = extract_gap_details(&items);
         assert_eq!(gaps.len(), 1);
@@ -20450,6 +21383,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             },
             ParsedItem {
                 category: ParseCategory::Ability,
@@ -20459,6 +21393,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             },
         ];
         let gaps = extract_gap_details(&items);
@@ -20482,8 +21417,10 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             }],
             diagnoses: vec![],
+            gap: None,
         }];
         let gaps = extract_gap_details(&items);
         assert_eq!(gaps.len(), 1);
@@ -20506,8 +21443,10 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             }],
             diagnoses: vec![],
+            gap: None,
         }];
         let gaps = extract_gap_details(&items);
         assert_eq!(gaps.len(), 1);
@@ -20524,6 +21463,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             details: vec![],
             children: vec![],
             diagnoses: vec![],
+            gap: None,
         }];
         let gaps = extract_gap_details(&items);
         assert!(gaps.is_empty());
@@ -20540,6 +21480,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             },
             ParsedItem {
                 category: ParseCategory::Trigger,
@@ -20549,6 +21490,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             },
             ParsedItem {
                 category: ParseCategory::Static,
@@ -20558,6 +21500,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             },
             ParsedItem {
                 category: ParseCategory::Cost,
@@ -20567,6 +21510,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 details: vec![],
                 children: vec![],
                 diagnoses: vec![],
+                gap: None,
             },
         ];
         let gaps = extract_gap_details(&items);
@@ -20689,6 +21633,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             details: vec![],
             children: vec![],
             diagnoses: vec![],
+            gap: None,
         };
         assert_eq!(
             serde_json::to_string(&item).expect("serialize parsed item"),
@@ -20909,6 +21854,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             details: vec![],
             children,
             diagnoses: vec![diagnosis],
+            gap: None,
         };
 
         let nested = [node(

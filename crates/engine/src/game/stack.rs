@@ -4861,6 +4861,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         modal,
         mode_abilities,
         parent_target_missing_reason,
+        control_change_instruction,
     } = ability;
 
     let self_counter = matches!(
@@ -4958,6 +4959,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
+        && control_change_instruction.is_none()
 }
 
 /// CR 117.3b + CR 117.3d + CR 117.5 + CR 608.2 + CR 704.3 + CR 119.3: Fixed
@@ -5115,6 +5117,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         modal,
         mode_abilities,
         parent_target_missing_reason,
+        control_change_instruction,
     } = ability;
 
     let fixed_controller_gain_life = matches!(
@@ -5189,6 +5192,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
+        && control_change_instruction.is_none()
 }
 
 /// CR 117.3b + CR 117.3d + CR 117.5 + CR 608.2 + CR 704.3: Fixed opponent-
@@ -5348,6 +5352,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         modal,
         mode_abilities,
         parent_target_missing_reason,
+        control_change_instruction,
     } = ability;
 
     let fixed_opponent_effect = matches!(
@@ -5426,6 +5431,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
+        && control_change_instruction.is_none()
 }
 
 fn optional_ability_is_inert_under_auto_choice(
@@ -5703,6 +5709,10 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         illegal_target_slots: a_illegal_target_slots,
         unjudged_target_slots: a_unjudged_target_slots,
         illegal_local_target_slots: a_illegal_local_target_slots,
+        // CR 608.2e: a player-scope driver's transient capture, never on a
+        // stack entry; guaranteed `None` ONE HOP upstream by the
+        // batch-candidate checks, like the modal ordinal.
+        control_change_instruction: _,
     } = a;
     let ResolvedAbility {
         effect: b_effect,
@@ -5792,6 +5802,10 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         illegal_target_slots: b_illegal_target_slots,
         unjudged_target_slots: b_unjudged_target_slots,
         illegal_local_target_slots: b_illegal_local_target_slots,
+        // CR 608.2e: a player-scope driver's transient capture, never on a
+        // stack entry; guaranteed `None` ONE HOP upstream by the
+        // batch-candidate checks, like the modal ordinal.
+        control_change_instruction: _,
     } = b;
 
     a_effect == b_effect

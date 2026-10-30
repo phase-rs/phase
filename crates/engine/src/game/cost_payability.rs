@@ -22,8 +22,8 @@
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityCost, CardSelectionMode, Comparator,
     CounterCostSelection, DiscardSelfScope, FilterProp, NinjutsuVariant, PlayerFilter,
-    QuantityExpr, QuantityRef, SacrificeCost, TapCreaturesAggregateStat, TapCreaturesRequirement,
-    TargetFilter, TypedFilter, EXILE_COST_X,
+    QuantityExpr, QuantityRef, SacrificeCost, SharedQuality, TapCreaturesAggregateStat,
+    TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{CostResume, PayCostKind, WaitingFor};
@@ -1038,7 +1038,7 @@ pub(crate) fn restrict_activation_prompt_to_joint_payment(
             |c| super::casting::find_battlefield_exile_cost(c).is_some()
         }
         PayCostKind::ReturnToHand => |c| super::casting::find_return_to_hand_cost(c).is_some(),
-        PayCostKind::Reveal
+        PayCostKind::Reveal { .. }
         | PayCostKind::ExileMaterials { .. }
         | PayCostKind::ExileFromManaZone { .. }
         | PayCostKind::UnattachFrom { .. }
@@ -1687,22 +1687,32 @@ impl AbilityCostLegPayability for AbilityCost {
             // CR 601.2b: Reveal N matching cards requires them to exist in hand.
             // Filter-less reveal (self-reveal) is always payable — you can always
             // reveal the source spell you're casting.
-            AbilityCost::Reveal { count, filter } => match filter {
+            // CR 701.20a: A shared-quality constraint additionally requires a
+            // count-sized subset of those cards to share the quality.
+            AbilityCost::Reveal {
+                count,
+                filter,
+                shared_quality,
+            } => match filter {
                 None => true,
                 Some(f) => {
                     // CR 107.3a: X = 0 is a legal announcement, so before X is
                     // announced a symbolic count reads 0 (mirrors Discard).
                     let count = super::quantity::resolve_quantity(state, count, player, source)
                         .max(0) as usize;
-                    super::casting::find_eligible_reveal_targets(
+                    let eligible = super::casting::find_eligible_reveal_targets(
                         state,
                         player,
                         source,
                         granting_object,
                         f,
+                    );
+                    reveal_cost_has_legal_selection(
+                        state,
+                        &eligible,
+                        count,
+                        shared_quality.as_ref(),
                     )
-                    .len()
-                        >= count
                 }
             },
             AbilityCost::Behold {
@@ -1835,6 +1845,83 @@ impl AbilityCostLegPayability for AbilityCost {
             AbilityCost::GetPlayerCounters { .. } => true,
         }
     }
+}
+
+/// CR 701.20a: Whether every object in `cards` has at least one value of
+/// `quality` in common with all the others ("two cards that share a color").
+/// The single authority for reveal-cost shared-quality checks, used by both the
+/// payability probe and the payment validator. Colorless cards share no color,
+/// so a set whose running intersection is empty never qualifies.
+///
+/// For fewer than two cards, this returns `false` because a reveal cost
+/// requiring shared quality cannot be satisfied with fewer than the required
+/// number of cards. The group-check authority in `filter::objects_have_common_quality_value`
+/// treats fewer than two as vacuously true for target validation, so we handle
+/// the reveal-specific cardinality requirement here before delegating.
+pub(crate) fn cards_share_quality(
+    state: &GameState,
+    cards: &[ObjectId],
+    quality: &SharedQuality,
+) -> bool {
+    // Reveal costs require at least 2 cards to share a quality.
+    // This differs from target validation which is vacuously true for < 2.
+    if cards.len() < 2 {
+        return false;
+    }
+    super::filter::objects_have_common_quality_value(state, cards, quality)
+}
+
+/// CR 701.20a: Size of the largest subset of `cards` that satisfies
+/// `cards_share_quality` — the most cards sharing one value of `quality`.
+pub(crate) fn largest_shared_quality_group(
+    state: &GameState,
+    cards: &[ObjectId],
+    quality: &SharedQuality,
+) -> usize {
+    let mut tally: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for id in cards {
+        let Some(obj) = state.objects.get(id) else {
+            continue;
+        };
+        for value in super::filter::object_shared_quality_values_public(
+            obj,
+            quality,
+            &state.all_creature_types,
+        ) {
+            *tally.entry(value).or_default() += 1;
+        }
+    }
+    tally.into_values().max().unwrap_or(0)
+}
+
+/// CR 601.2b + CR 701.20a: Whether a reveal cost has a legal selection —
+/// `count` of the `eligible` cards, all sharing `shared_quality` when the cost
+/// carries one. Single payability authority for every reveal-cost route.
+pub(crate) fn reveal_cost_has_legal_selection(
+    state: &GameState,
+    eligible: &[ObjectId],
+    count: usize,
+    shared_quality: Option<&SharedQuality>,
+) -> bool {
+    let Some(quality) = shared_quality else {
+        return eligible.len() >= count;
+    };
+    // CR 107.3a: X = 0 is a legal announcement. Revealing 0 cards trivially
+    // satisfies any shared-quality constraint (vacuous truth).
+    if count == 0 {
+        return true;
+    }
+    if count > eligible.len() {
+        return false;
+    }
+    if count < 2 {
+        // Reveal costs with shared quality require at least 2 cards to share.
+        // If count < 2 (and not 0), the constraint cannot be satisfied.
+        return false;
+    }
+    // CR 701.20a: A selection of `count` cards that share `quality` exists iff
+    // the largest subset sharing any single value of `quality` is at least `count`.
+    largest_shared_quality_group(state, eligible, quality) >= count
 }
 
 /// CR 601.2b: A `TapCreatures` cost is payable iff the untapped, filter-matching
@@ -2103,6 +2190,109 @@ mod tests {
     use crate::types::mana::ManaCost;
 
     const P0: PlayerId = PlayerId(0);
+
+    /// CR 701.20a: "Cards that share a color" needs one color common to EVERY
+    /// revealed card. Blue-red + blue + red pairwise-overlap with the first card
+    /// but share nothing as a set; and the payability probe finds a legal pair
+    /// only when one exists in the eligible pool.
+    #[test]
+    fn shared_quality_reveal_intersects_across_every_card() {
+        use crate::types::mana::{ManaColor, ManaCost};
+        let mut scenario = GameScenario::new();
+        let mut card = |name: &str, colors: Vec<ManaColor>| {
+            scenario
+                .add_creature_to_hand(P0, name, 1, 1)
+                .with_mana_cost(ManaCost::generic(1))
+                .with_color(colors)
+                .id()
+        };
+        let blue_red = card("Blue Red", vec![ManaColor::Blue, ManaColor::Red]);
+        let blue = card("Blue", vec![ManaColor::Blue]);
+        let red = card("Red", vec![ManaColor::Red]);
+        let green = card("Green", vec![ManaColor::Green]);
+        let runner = scenario.build();
+        let state = runner.state();
+        let color = SharedQuality::Color;
+
+        assert!(cards_share_quality(state, &[blue_red, blue], &color));
+        assert!(cards_share_quality(state, &[blue_red, red], &color));
+        assert!(
+            !cards_share_quality(state, &[blue_red, blue, red], &color),
+            "blue-red, blue, red share no single color"
+        );
+
+        assert!(reveal_cost_has_legal_selection(
+            state,
+            &[green, blue, blue_red],
+            2,
+            Some(&color)
+        ));
+        assert!(!reveal_cost_has_legal_selection(
+            state,
+            &[green, blue, red],
+            2,
+            Some(&color)
+        ));
+        assert!(!reveal_cost_has_legal_selection(
+            state,
+            &[blue_red, blue, red],
+            3,
+            Some(&color)
+        ));
+        // Largest group sharing one color bounds a symbolic reveal count.
+        assert_eq!(
+            largest_shared_quality_group(state, &[blue_red, blue, red, green], &color),
+            2
+        );
+        assert_eq!(largest_shared_quality_group(state, &[], &color), 0);
+        assert!(!reveal_cost_has_legal_selection(
+            state,
+            &[blue_red, blue],
+            3,
+            Some(&color)
+        ));
+        assert!(reveal_cost_has_legal_selection(
+            state,
+            &[green, blue, red],
+            2,
+            None
+        ));
+
+        // CR 601.2h: 30 cards (29 blue, 1 red) with reveal count 30.
+        // Cardinality check passes (30 == 30), but largest shared group is 29 < 30.
+        // Must reject in O(N) without exponential search.
+        let mut large_scenario = GameScenario::new();
+        let mut large_pool = Vec::new();
+        for i in 1..=29 {
+            large_pool.push(
+                large_scenario
+                    .add_creature_to_hand(PlayerId(0), &format!("Blue {i}"), 1, 1)
+                    .with_color(vec![ManaColor::Blue])
+                    .id(),
+            );
+        }
+        // Create red card in the SAME scenario to avoid ObjectId collision
+        large_pool.push(
+            large_scenario
+                .add_creature_to_hand(PlayerId(0), "Red", 1, 1)
+                .with_color(vec![ManaColor::Red])
+                .id(),
+        );
+        let runner = large_scenario.build();
+        let state = runner.state();
+        assert!(!reveal_cost_has_legal_selection(
+            state,
+            &large_pool,
+            30,
+            Some(&color)
+        ));
+        assert!(reveal_cost_has_legal_selection(
+            state,
+            &large_pool[..29],
+            29,
+            Some(&color)
+        ));
+    }
 
     /// CR 109.2 + CR 118.3: the zone a zone-less exile cost reads from is
     /// decided by whether its filter describes a permanent. A description

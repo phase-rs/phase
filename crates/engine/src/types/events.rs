@@ -382,6 +382,143 @@ pub struct EventObjectSnapshot {
     pub relations: EventObjectRelationSnapshot,
 }
 
+/// CR 603.10 + CR 603.10d: what a `ControllerChanged` event records about the
+/// moment immediately before its instruction.
+///
+/// Deliberately not an `Option`: the absent case is a named policy. A payload
+/// saved before this field existed, or any event built without an instruction
+/// capture, is `Unrecorded`, and `Unrecorded` never authorizes a look-back
+/// control-change trigger. It is never reconstructed from current state.
+///
+/// `Observed` holds only the key of its observation in
+/// `GameState::control_change_observations`. The observation itself (latched
+/// watcher contexts, an exact subject snapshot) can describe hidden cards (a
+/// face-down card exiled with Duplicity), and events are cloned into many
+/// carriers: prompts, pending triggers, logs, the live stream. Keeping it out of
+/// the event means no carrier can expose it; viewer projections drop the one
+/// table instead (CR 400.2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ControlChangeEvidence {
+    #[default]
+    Unrecorded,
+    Observed(u64),
+}
+
+impl ControlChangeEvidence {
+    pub fn is_unrecorded(&self) -> bool {
+        matches!(self, Self::Unrecorded)
+    }
+}
+
+/// CR 603.10d: the immediately-before facts of one control change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlChangeObservation {
+    /// CR 400.7 + CR 110.1: the changing object's exact incarnation, zone and
+    /// characteristics immediately before its instruction.
+    pub subject: EventObjectSnapshot,
+    /// CR 603.10: every functioning look-back control-change watcher, with its
+    /// controller, immediately before the instruction. One list is shared by
+    /// every event the instruction publishes.
+    pub watchers: std::sync::Arc<Vec<TriggerSourceContext>>,
+    /// CR 603.2d + CR 603.10d: every functioning trigger-doubling static, with
+    /// its controller, immediately before the instruction. A look-back
+    /// watcher's trigger counts its additional triggers against these, not
+    /// against a doubler the instruction itself moved or removed.
+    #[serde(default, skip_serializing_if = "latched_doublers_are_empty")]
+    pub doublers: std::sync::Arc<Vec<LatchedTriggerDoubler>>,
+}
+
+/// CR 603.2d: one functioning "triggers an additional time" static ability
+/// (`StaticMode::DoubleTriggers`) as it stood when latched: its source, as an
+/// observed source context (its controller is "you", and its chosen
+/// attributes answer source-relative scope such as "of the chosen type"), the
+/// spawning-event predicate and the trigger-source scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatchedTriggerDoubler {
+    pub source: TriggerSourceContext,
+    pub cause: super::statics::TriggerCause,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected: Option<super::ability::TargetFilter>,
+}
+
+impl LatchedTriggerDoubler {
+    pub fn source_id(&self) -> ObjectId {
+        self.source.identity.reference.object_id
+    }
+
+    pub fn controller(&self) -> PlayerId {
+        self.source.lki.controller
+    }
+}
+
+fn latched_doublers_are_empty(doublers: &std::sync::Arc<Vec<LatchedTriggerDoubler>>) -> bool {
+    doublers.is_empty()
+}
+
+/// CR 608.2e + CR 603.10d: one control-change instruction's immediately-before
+/// capture: the shared watcher latch plus every candidate subject's snapshot.
+///
+/// Built by `gain_control::capture_control_change_instruction` (the single
+/// writer) after the instruction's entrance settle and before its first
+/// mutation. A player-scope fan-out builds it once, before its first seat, and
+/// keeps it in `GameState::control_change_captures` under the id its template's
+/// head carries, so every seat (including one resumed from a parked
+/// continuation) publishes against the same pre-instruction board.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlChangeInstructionCapture {
+    pub watchers: std::sync::Arc<Vec<TriggerSourceContext>>,
+    #[serde(default, skip_serializing_if = "latched_doublers_are_empty")]
+    pub doublers: std::sync::Arc<Vec<LatchedTriggerDoubler>>,
+    pub subjects: Vec<EventObjectSnapshot>,
+}
+
+impl ControlChangeInstructionCapture {
+    /// The observation for `object_id`, when it was in the captured population.
+    pub fn observation_for(&self, object_id: ObjectId) -> Option<ControlChangeObservation> {
+        self.subjects
+            .iter()
+            .find(|subject| subject.identity.object_id == object_id)
+            .map(|subject| ControlChangeObservation {
+                subject: subject.clone(),
+                watchers: self.watchers.clone(),
+                doublers: self.doublers.clone(),
+            })
+    }
+}
+
+/// CR 608.2e: what a fan-out driver hands its control-change node(s).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ControlChangeInstructionCarrier {
+    /// The template's single control-change action is its head, so the
+    /// driver's pre-seat capture is that action's immediately-before board.
+    /// The id keys `GameState::control_change_captures`; the capture itself
+    /// stays out of the ability, so no viewer copy carries it.
+    Captured(u64),
+    /// The template's control-change actions can't share one boundary (more
+    /// than one, or one behind a retained prefix). Their events publish
+    /// `Unrecorded` evidence: no observation is substituted. Coverage marks
+    /// every such producer unsupported (`PLAYER_SCOPE_CONTROL_BOUNDARY_GAP`).
+    Unobservable,
+}
+
+/// A player-scope link's pre-seat capture (`GameState::control_change_captures`)
+/// and the members it has already published.
+///
+/// The engine applies one simultaneous action seat by seat, so a later seat
+/// can find a member whose live controller already moved: a layer-dependent
+/// consequence of an earlier seat (an Aura's controller changing who controls
+/// the enchanted creature), or the same member moved by an earlier seat. The
+/// first is still the captured board's change (CR 608.2e: the action is
+/// processed once, simultaneously), so it publishes its captured observation.
+/// The second would be a second change of one member within one action, so it
+/// publishes `Unrecorded`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlChangeLink {
+    pub capture: std::sync::Arc<ControlChangeInstructionCapture>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub published: std::collections::BTreeSet<ObjectId>,
+}
+
 /// How an [`EventObjectSnapshot`] can answer a given [`TargetFilter`] shape.
 ///
 /// This is a *structural* classification, computed without a game state, so a parser gate
@@ -1386,6 +1523,11 @@ pub enum GameEvent {
         object_id: ObjectId,
         old_controller: PlayerId,
         new_controller: PlayerId,
+        /// CR 603.10 + CR 603.10d: the immediately-before authority that
+        /// look-back control-change triggers read. Absent on a pre-change
+        /// payload, which decodes to `Unrecorded` and authorizes nothing.
+        #[serde(default, skip_serializing_if = "ControlChangeEvidence::is_unrecorded")]
+        evidence: ControlChangeEvidence,
     },
     EffectResolved {
         kind: EffectKind,

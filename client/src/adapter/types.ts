@@ -809,7 +809,10 @@ export type TapCreaturesSelectionMode =
 // to the chosen objects. Internally tagged (`#[serde(tag = "type")]`).
 export type PayCostKind =
   | { type: "Discard" }
-  | { type: "Reveal" }
+  // CR 701.20a: `shared_quality` is the engine-side constraint the revealed
+  // cards must satisfy ("two cards that share a color"); the engine validates
+  // the selection, so it is opaque pass-through here.
+  | { type: "Reveal"; shared_quality?: unknown }
   | { type: "Sacrifice" }
   | { type: "ReturnToHand" }
   | { type: "ExileFromZone"; zone: ExileCostSourceZone }

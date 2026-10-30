@@ -359,6 +359,7 @@ fn gain_to_you_does_not_fire_only_loss() {
         object_id: sword,
         old_controller: P1,
         new_controller: P0,
+        evidence: runner.state_mut().control_change_evidence_for_test(sword),
     };
     let mut events = vec![gain];
     let out = check_delayed_triggers(runner.state_mut(), &events);
@@ -373,11 +374,38 @@ fn gain_to_you_does_not_fire_only_loss() {
         "no trigger on the stack after a gain"
     );
 
-    // LOSS from P0 (old = P0, new = owner P1): P0 loses control — fires.
+    // From here P0 controls the Sword, so both loss events below describe a
+    // real P0 -> P1 loss.
+    gain_until_eot(&mut runner, source, P0, sword);
+    assert_eq!(
+        runner.state().objects[&sword].controller,
+        P0,
+        "REACH: P0 controls the Sword for both loss events"
+    );
+
+    // LEGACY LOSS (a pre-evidence payload): `Unrecorded` authorizes nothing,
+    // even in the losing direction while P0 really controls the Sword, and is
+    // never rebuilt from the board.
+    let legacy_loss = GameEvent::ControllerChanged {
+        object_id: sword,
+        old_controller: P0,
+        new_controller: P1,
+        evidence: engine::types::events::ControlChangeEvidence::Unrecorded,
+    };
+    let _ = check_delayed_triggers(runner.state_mut(), &[legacy_loss]);
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "an Unrecorded loss event never fires the lose-control trigger"
+    );
+
+    // LOSS from P0 (old = P0, new = owner P1): P0 loses control — fires. The
+    // evidence is captured while P0 controls the Sword, as the event says.
     let loss = GameEvent::ControllerChanged {
         object_id: sword,
         old_controller: P0,
         new_controller: P1,
+        evidence: runner.state_mut().control_change_evidence_for_test(sword),
     };
     let _ = check_delayed_triggers(runner.state_mut(), &[loss]);
     assert_eq!(

@@ -1079,24 +1079,10 @@ pub(super) fn attach_graveyard_redirect_rider_to_prior_graveyard_cast_grant(
     let Some(prev) = defs.last_mut() else {
         return false;
     };
-    let Effect::GenericEffect {
-        static_abilities, ..
-    } = &mut *prev.effect
-    else {
-        return false;
-    };
-    let [grant] = static_abilities.as_mut_slice() else {
-        return false;
-    };
-    let [ContinuousModification::GrantStaticAbility { definition }] =
-        grant.modifications.as_mut_slice()
-    else {
-        return false;
-    };
-    let StaticMode::GraveyardCastPermission {
+    let Some(StaticMode::GraveyardCastPermission {
         graveyard_destination_replacement: slot @ None,
         ..
-    } = &mut definition.mode
+    }) = crate::parser::oracle_ir::ast::granted_graveyard_permission_mut(&mut prev.effect)
     else {
         return false;
     };
@@ -1794,6 +1780,106 @@ pub(super) fn gate_other_revealed_card_on_multiplayer_reveal(def: &mut AbilityDe
 /// cannot be carried to the spell cast through it.
 pub(super) const CAST_RIDER_ON_LINGERING_GRANT_GAP: &str = "cast_rider_on_lingering_grant";
 
+/// CR 614.1c + CR 122.1 + CR 613.1d: fold a "cast this way" rider into the
+/// granted graveyard cast permission it follows — "You may cast a creature spell
+/// from your graveyard this turn. If you do, it enters with a finality counter on
+/// it and is a Vampire in addition to its other types." (The Tomb of Aclazotz).
+///
+/// The rider describes the spell cast through the grant, which does not exist
+/// while the granting ability resolves, so left as a sub-ability it
+/// would run then and act on nothing. The permission carries both halves to the
+/// cast instead (`GraveyardCastPermission::{enters_with_counter,
+/// enters_modifications}`), applied when the spell is cast through it.
+///
+/// Folds only a rider made entirely of those two instructions — at most one
+/// single counter and one modification set — gated by "If you do" or by
+/// nothing ("If you cast a spell this way" reads as an ungated sibling). Any
+/// other tail keeps its shape.
+pub(super) fn fold_cast_rider_into_graveyard_grant(def: &mut AbilityDefinition) {
+    if crate::parser::oracle_ir::ast::is_graveyard_permission_grant(&def.effect) {
+        if let Some(rider) = def
+            .sub_ability
+            .as_deref()
+            .and_then(graveyard_grant_cast_rider)
+        {
+            if let Some(StaticMode::GraveyardCastPermission {
+                enters_with_counter,
+                enters_modifications,
+                ..
+            }) = crate::parser::oracle_ir::ast::granted_graveyard_permission_mut(&mut def.effect)
+            {
+                if enters_with_counter.is_none() && enters_modifications.is_empty() {
+                    *enters_with_counter = rider.counter;
+                    *enters_modifications = rider.modifications;
+                    def.sub_ability = None;
+                }
+            }
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        fold_cast_rider_into_graveyard_grant(sub);
+    }
+    if let Some(els) = def.else_ability.as_mut() {
+        fold_cast_rider_into_graveyard_grant(els);
+    }
+    for mode in def.mode_abilities.iter_mut() {
+        fold_cast_rider_into_graveyard_grant(mode);
+    }
+}
+
+/// The two halves of a "cast this way" rider a graveyard grant carries.
+struct GraveyardGrantCastRider {
+    counter: Option<crate::types::counter::CounterType>,
+    modifications: crate::types::ability::PendingEntersModifications,
+}
+
+/// The rider [`fold_cast_rider_into_graveyard_grant`] folds, read off the
+/// grant's sub-ability chain; `None` when the chain holds anything else.
+fn graveyard_grant_cast_rider(first: &AbilityDefinition) -> Option<GraveyardGrantCastRider> {
+    let gate_is_foldable = match &first.condition {
+        None => true,
+        Some(crate::types::ability::AbilityCondition::EffectOutcome { signal, .. }) => matches!(
+            signal,
+            crate::types::ability::EffectOutcomeSignal::OptionalEffectPerformed
+        ),
+        Some(_) => false,
+    };
+    if !gate_is_foldable {
+        return None;
+    }
+    let mut rider = GraveyardGrantCastRider {
+        counter: None,
+        modifications: Default::default(),
+    };
+    let mut node = Some(first);
+    let mut gate_read = false;
+    while let Some(def) = node {
+        // Only the first link carries the gate, read above.
+        let plain_link = def.else_ability.is_none()
+            && def.mode_abilities.is_empty()
+            && def.cost.is_none()
+            && (!gate_read || def.condition.is_none());
+        gate_read = true;
+        if !plain_link {
+            return None;
+        }
+        match &*def.effect {
+            Effect::AddPendingETBCounters {
+                counter_type,
+                count: QuantityExpr::Fixed { value: 1 },
+            } if rider.counter.is_none() => rider.counter = Some(counter_type.clone()),
+            Effect::AddPendingEntersModifications {
+                rider: modifications,
+            } if rider.modifications.is_empty() && !modifications.is_empty() => {
+                rider.modifications = modifications.clone();
+            }
+            _ => return None,
+        }
+        node = def.sub_ability.as_deref();
+    }
+    Some(rider)
+}
+
 /// CR 608.2c + CR 611.2f: refuse a `GrantCastingPermission` whose "If you do, …" rider cannot
 /// reach the spell it describes.
 ///
@@ -1821,11 +1907,15 @@ pub(super) const CAST_RIDER_ON_LINGERING_GRANT_GAP: &str = "cast_rider_on_linger
 /// per-permission rider).
 ///
 /// SCOPED TO `GrantCastingPermission`, and that is deliberate. A lingering
-/// `Effect::CastFromZone` CAN carry a deferred rider: The Tomb of Aclazotz ("You
-/// may cast a creature spell from your graveyard this turn. If you do, it enters
-/// with a finality counter …") lowers its rider to `AddPendingETBCounters`, which
-/// binds when the spell later enters. Refusing every lingering cast with a rider
-/// would sweep that in. Measured over the card-data export: the only
+/// `Effect::CastFromZone` CAN carry a deferred rider: "the creature cast this
+/// way enters with a finality counter on it" lowers to `AddPendingETBCounters`,
+/// recorded on the permission the grant creates and bound when the spell later
+/// enters. Refusing every lingering cast with a rider would sweep that in. (A
+/// granted graveyard cast permission is a `GenericEffect`, not a
+/// `GrantCastingPermission`, so this gate passes it;
+/// `fold_cast_rider_into_graveyard_grant`, which runs after it, folds its rider
+/// into the permission — The Tomb of Aclazotz.) Measured over the card-data
+/// export: the only
 /// `GrantCastingPermission` followed by an `OptionalEffectPerformed`-gated rider is
 /// Chiss-Goria's, so this gate moves exactly one card. Should a deferred-binding
 /// rider ever reach this grant, the gate refuses it — fail-closed, an honest gap
@@ -16687,6 +16777,7 @@ mod where_x_tests {
                 qty: QuantityRef::Variable { name: "X".into() },
             },
             filter: Some(filter.clone()),
+            shared_quality: None,
         };
         let mut unbound = None;
         super::apply_where_x_to_ability_cost(&mut cost, Some(expression), &mut unbound);
@@ -16696,6 +16787,7 @@ mod where_x_tests {
             AbilityCost::Reveal {
                 count: expected,
                 filter: Some(filter),
+                shared_quality: None,
             }
         );
     }

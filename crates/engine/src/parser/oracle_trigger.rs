@@ -2231,7 +2231,15 @@ fn lower_trigger_effect_chain(
     // CR 603.5: A triggered ability whose effect is optional ("may") goes
     // on the stack regardless; the choice is made when it resolves. Carry
     // that optionality onto the execute ability, which is what resolves.
-    if modifiers.optional {
+    //
+    // CR 601.3: except for a granted graveyard cast permission ("you may cast a
+    // creature spell from that player's graveyard this turn" — Whispersteel
+    // Dagger): its "may" is the later cast the permission allows, not a choice
+    // made as the trigger resolves, as for the same grant in a spell or an
+    // activated ability.
+    if modifiers.optional
+        && !crate::parser::oracle_ir::ast::is_graveyard_permission_grant(&ability.effect)
+    {
         ability.optional = true;
     }
     ability
@@ -20454,6 +20462,51 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((def.mode.clone(), def));
     }
 
+    // CR 603.2 + CR 603.10d: "Whenever an opponent gains control of <subject>
+    // from you" — the opponent-gains half of CR 603.10d's look-back control
+    // triggers (Zidane, Tantalus Thief). Same ChangesController event as "you
+    // lose control of ~": `valid_card` scopes the changing permanent and
+    // `valid_target` names the gaining player, judged against the pre-event
+    // "you" (`match_changes_controller`).
+    fn parse_opponent_gains_control_from_you(i: &str) -> OracleResult<'_, &str> {
+        all_consuming(preceded(
+            (
+                alt((tag("when "), tag("whenever "))),
+                tag("an opponent gains control of "),
+            ),
+            terminated(take_until(" from you"), tag(" from you")),
+        ))
+        .parse(i)
+    }
+    if let Ok((_, subject_text)) = parse_opponent_gains_control_from_you(lower) {
+        // "from you" fixes the losing controller. Collection runs after the
+        // change, so only subjects whose match can't depend on the permanent's
+        // post-change state are claimed (CR 603.10d look-back), and only in
+        // the singular, which triggers once per permanent (CR 603.2c): "~",
+        // and "a permanent", which every object on the battlefield is
+        // (CR 110.1). Any other type, a controller, a property or a quantified
+        // subject ("one or more permanents") fails closed (stays Unknown).
+        let Ok((_, subject)) = all_consuming(alt((
+            value(TargetFilter::SelfRef, tag::<_, _, OracleError<'_>>("~")),
+            value(
+                TargetFilter::Typed(TypedFilter::permanent()),
+                tag("a permanent"),
+            ),
+        )))
+        .parse(subject_text) else {
+            return None;
+        };
+        let mut def = make_base();
+        def.mode = TriggerMode::ChangesController {
+            side: ControlChangeSide::Loses,
+        };
+        def.valid_card = Some(subject);
+        def.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+        return Some((def.mode.clone(), def));
+    }
+
     if matches!(lower, "whenever you lose life" | "when you lose life") {
         let mut def = make_base();
         def.mode = TriggerMode::LifeLost;
@@ -21299,8 +21352,8 @@ fn try_parse_nth_spell_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefin
         OtherThanFirstSpellParse::Accepted(def) => {
             return Some((TriggerMode::SpellCast, *def));
         }
-        // The marker commits this grammar: never let a malformed qualifier
-        // silently broaden through the generic SpellCast parser.
+        // A recognized exclusion determiner commits this grammar: never let a
+        // malformed qualifier silently broaden through the generic SpellCast parser.
         OtherThanFirstSpellParse::Rejected => {
             return Some((
                 TriggerMode::Unknown("malformed other-than-first spell trigger".to_string()),
@@ -21338,9 +21391,15 @@ enum OtherThanFirstSpellActor {
     EnchantedPlayer,
 }
 
+#[derive(Clone, Copy)]
+enum NonFirstExclusionForm {
+    Definite,
+    Possessive,
+}
+
 /// CR 603.2: this event qualifier is fire-time only, unlike a CR 603.4
-/// intervening-if condition. The recognizer owns the predicate only after it
-/// reaches the marker, so a malformed repeated qualifier fails closed.
+/// intervening-if condition. A recognized exclusion determiner commits the
+/// predicate, so a malformed repeated qualifier or tail fails closed.
 fn parse_other_than_first_spell_trigger(input: &str) -> OtherThanFirstSpellParse {
     // `parse_trigger_condition` passes the complete trigger head (including
     // "whenever"), while direct classifier tests pass its payload. Normalize
@@ -21384,37 +21443,61 @@ fn parse_other_than_first_spell_trigger(input: &str) -> OtherThanFirstSpellParse
     };
     let Ok((after_marker, first_qualifier)) = alt((
         terminated(
-            take_until(" spell other than the first "),
-            tag::<_, _, OracleError<'_>>(" spell other than the first "),
+            take_until(" spell other than "),
+            tag::<_, _, OracleError<'_>>(" spell other than "),
         ),
-        value("", tag("spell other than the first ")),
+        value("", tag("spell other than ")),
     ))
     .parse(after_actor) else {
+        return OtherThanFirstSpellParse::NotCandidate;
+    };
+    let Ok((after_determiner, form)) = alt((
+        value(
+            NonFirstExclusionForm::Definite,
+            tag::<_, _, OracleError<'_>>("the first "),
+        ),
+        value(NonFirstExclusionForm::Possessive, tag("your first ")),
+    ))
+    .parse(after_marker) else {
         return OtherThanFirstSpellParse::NotCandidate;
     };
     let Ok((after_repeated, repeated_qualifier)) = alt((
         terminated(take_until(" spell "), tag(" spell ")),
         value("", tag::<_, _, OracleError<'_>>("spell ")),
     ))
-    .parse(after_marker) else {
+    .parse(after_determiner) else {
         return OtherThanFirstSpellParse::Rejected;
     };
-    let pronoun_is_valid = match actor {
-        OtherThanFirstSpellActor::You => {
+    let tail_is_valid = match (form, actor) {
+        (NonFirstExclusionForm::Possessive, OtherThanFirstSpellActor::You) => {
+            all_consuming(tag::<_, _, OracleError<'_>>("each turn"))
+                .parse(after_repeated)
+                .is_ok()
+        }
+        (
+            NonFirstExclusionForm::Possessive,
+            OtherThanFirstSpellActor::Opponent
+            | OtherThanFirstSpellActor::AnyPlayer
+            | OtherThanFirstSpellActor::EnchantedPlayer,
+        ) => false,
+        (NonFirstExclusionForm::Definite, OtherThanFirstSpellActor::You) => {
             all_consuming(tag::<_, _, OracleError<'_>>("you cast each turn"))
                 .parse(after_repeated)
                 .is_ok()
         }
-        OtherThanFirstSpellActor::Opponent
-        | OtherThanFirstSpellActor::AnyPlayer
-        | OtherThanFirstSpellActor::EnchantedPlayer => all_consuming(alt((
+        (
+            NonFirstExclusionForm::Definite,
+            OtherThanFirstSpellActor::Opponent
+            | OtherThanFirstSpellActor::AnyPlayer
+            | OtherThanFirstSpellActor::EnchantedPlayer,
+        ) => all_consuming(alt((
             tag::<_, _, OracleError<'_>>("that player casts each turn"),
             tag("they cast each turn"),
         )))
         .parse(after_repeated)
         .is_ok(),
     };
-    if !pronoun_is_valid {
+    if !tail_is_valid {
         return OtherThanFirstSpellParse::Rejected;
     }
     let parse_qualifier = |qualifier: &str| {

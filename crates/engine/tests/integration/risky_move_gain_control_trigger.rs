@@ -336,6 +336,7 @@ impl Board {
                     object_id,
                     old_controller,
                     new_controller,
+                    ..
                 } => Some((*object_id, *old_controller, *new_controller)),
                 _ => None,
             })
@@ -934,6 +935,10 @@ fn c1_attribution_reads_event_endpoints_in_apnap_order() {
         "reach: the live controller is the last gainer, not the first"
     );
     assert_eq!(state.active_player, P0);
+    // Each event carries evidence captured from this board, as a control-change
+    // instruction records it before its change (the latch includes Risky Move).
+    let first = state.control_change_evidence_for_test(risky);
+    let second = state.control_change_evidence_for_test(risky);
     process_triggers(
         state,
         &[
@@ -941,11 +946,13 @@ fn c1_attribution_reads_event_endpoints_in_apnap_order() {
                 object_id: risky,
                 old_controller: P0,
                 new_controller: P1,
+                evidence: first,
             },
             GameEvent::ControllerChanged {
                 object_id: risky,
                 old_controller: P1,
                 new_controller: P2,
+                evidence: second,
             },
         ],
     );

@@ -7,7 +7,8 @@
 //! action, so the ability keeps triggering. Once the action is taken, instances
 //! already on the stack resolve with no effect (Calix / Riveteers Ascendancy
 //! rulings), and a payment the controller cannot make is never offered
-//! (CR 118.3 + CR 608.2d). "This ability triggers only once each turn" is a
+//! (CR 118.3 + CR 608.2d), nor is a move of an object that left its zone or a
+//! reveal from an empty library (CR 608.2d). "This ability triggers only once each turn" is a
 //! trigger limit (CR 603.2) and stays spent by triggering.
 //!
 //! Every fixture drives the real pipeline (cast → trigger → `apply`) and uses the
@@ -1990,4 +1991,525 @@ fn planetarium_cancelled_free_cast_does_not_spend_the_limit() {
         P0,
         "the untaken limit leaves Planetarium free to trigger again",
     );
+}
+
+// ---------------------------------------------------------------------------
+// An impossible move or reveal is not offered and spends no limit
+// (CR 608.2d + CR 603.2h)
+// ---------------------------------------------------------------------------
+
+const THE_REAPER: &str = "When The Reaper enters, put a -1/-1 counter on each of up to two target creatures.\nWhenever a creature an opponent controls with a -1/-1 counter on it dies, you may put that card onto the battlefield under your control. Do this only once each turn.";
+
+const ACADEMY_RECTOR: &str = "When this creature dies, you may exile it. If you do, search your library for an enchantment card, put that card onto the battlefield, then shuffle.";
+
+const BLADEWINGS_THRALL: &str = "This creature has flying as long as you control a Dragon.\nWhen a Dragon enters, you may return this card from your graveyard to the battlefield.";
+
+const PRIORITY_BOARDING: &str = "Whenever you roll a die, you may reveal the top card of your library. Do this only once each turn. Whenever you reveal a card with mana value less than the result this way, you may exile it. If you do, you may play it this turn.";
+
+/// Synthetic: a free removal spell, so a creature dies on demand.
+const DESTROY_TARGET_CREATURE: &str = "Destroy target creature.";
+
+/// Synthetic: a free graveyard exile, cast in response to a trigger whose object
+/// is in a graveyard.
+const EXILE_GRAVEYARD_CARD: &str = "Exile target card from a graveyard.";
+
+/// Synthetic: a free die roll, so Priority Boarding triggers on demand.
+const DIE_ROLLER: &str = "{0}: Roll a d20.";
+
+/// Synthetic: a free way to put the drawn card back on top of the library.
+const HAND_TO_LIBRARY_TOP: &str = "{0}: Put a card from your hand on top of your library.";
+
+/// Synthetic: an optional reveal whose "If you do" rider shows whether the
+/// reveal was performed.
+const REVEAL_FOR_LIFE: &str =
+    "{0}: You may reveal the top card of your library. If you do, you gain 3 life.";
+
+fn add_free_spell(
+    scenario: &mut GameScenario,
+    name: &str,
+    is_instant: bool,
+    text: &str,
+) -> ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(P0, name, is_instant, text)
+        .with_mana_cost(free())
+        .id()
+}
+
+/// Cast `spell` at `target` and pass priority until the spell has resolved,
+/// stopping with any triggers it caused on the stack.
+fn cast_at_and_resolve(runner: &mut GameRunner, spell: ObjectId, target: ObjectId) {
+    let _ = runner.cast(spell).target_object(target).commit();
+    resolve_spell(runner, spell, "Dinosaur");
+}
+
+/// Cast `spell` at `target` and pass priority until the stack is empty, leaving
+/// every "you may" unanswered: a prompt stops the driver where it stands.
+fn cast_at_and_resolve_stack(runner: &mut GameRunner, spell: ObjectId, target: ObjectId) {
+    runner
+        .cast(spell)
+        .target_object(target)
+        .commit()
+        .stop_at_optional()
+        .resolve();
+}
+
+/// CR 608.2d + CR 400.7 + CR 603.2h: a card exiled from the graveyard before The
+/// Reaper's trigger resolves is a new object that can't be put onto the
+/// battlefield, so the "you may" is not offered and no indicated action is taken;
+/// the next qualifying death triggers The Reaper again, and taking that card
+/// spends the limit.
+#[test]
+fn the_reaper_exiled_card_is_not_offered_and_does_not_spend_the_limit() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let reaper = scenario
+        .add_creature_from_oracle(P0, "The Reaper, King No More", 3, 3, THE_REAPER)
+        .as_artifact_creature()
+        .id();
+    let bears = ["Bear A", "Bear B", "Bear C"].map(|name| {
+        scenario
+            .add_creature(P1, name, 2, 2)
+            .with_minus_counters(1)
+            .id()
+    });
+    let murders = ["Murder A", "Murder B", "Murder C"]
+        .map(|name| add_free_spell(&mut scenario, name, false, DESTROY_TARGET_CREATURE));
+    let purge = add_free_spell(&mut scenario, "Purge", true, EXILE_GRAVEYARD_CARD);
+    let mut runner = scenario.build();
+
+    // Leg 1: Bear A dies, then is exiled in response to The Reaper's trigger.
+    cast_at_and_resolve(&mut runner, murders[0], bears[0]);
+    let refs = stacked_trigger_refs(&runner, reaper);
+    let [Some(reaper_ref)] = refs.as_slice() else {
+        panic!("reach: Bear A's death triggers The Reaper once, got {refs:?}");
+    };
+    let reaper_ref = reaper_ref.clone();
+    cast_at_and_resolve_stack(&mut runner, purge, bears[0]);
+    assert_eq!(runner.state().objects[&bears[0]].zone, Zone::Exile);
+    assert_settled_priority(&runner, "an exiled card's return is never offered");
+    assert!(
+        indicated_actions(&runner).is_empty(),
+        "an impossible return takes no indicated action"
+    );
+
+    // Leg 2: Bear B dies — the untaken limit lets The Reaper trigger and offer it.
+    cast_at_and_resolve(&mut runner, murders[1], bears[1]);
+    assert_eq!(
+        stacked_trigger_refs(&runner, reaper).len(),
+        1,
+        "the untaken limit leaves The Reaper free to trigger"
+    );
+    runner.advance_until_stack_empty();
+    assert_optional_prompt(&runner, P0, "a card still in the graveyard is offered");
+    decide(&mut runner, true);
+    runner.advance_until_stack_empty();
+    assert_settled_priority(&runner, "after taking Bear B");
+    assert_eq!(runner.state().objects[&bears[1]].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&bears[1]].controller, P0);
+    assert_eq!(
+        indicated_actions(&runner),
+        HashSet::from([(reaper_ref, P0)]),
+        "putting the card onto the battlefield takes the indicated action"
+    );
+
+    // Leg 3: the limit is spent — Bear C's death does not trigger The Reaper.
+    cast_at_and_resolve(&mut runner, murders[2], bears[2]);
+    assert_eq!(
+        runner.state().objects[&bears[2]].zone,
+        Zone::Graveyard,
+        "reach: Bear C died"
+    );
+    assert!(
+        stacked_trigger_refs(&runner, reaper).is_empty(),
+        "The Reaper's controller took its action this turn, so it no longer triggers"
+    );
+}
+
+/// Academy Rector, killed by a free removal spell, with its dies trigger on the
+/// stack, an enchantment card in P0's library and a free graveyard exile in hand.
+struct RectorBoard {
+    runner: GameRunner,
+    rector: ObjectId,
+    enchantment: ObjectId,
+    purge: ObjectId,
+}
+
+fn rector_board() -> RectorBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let rector = scenario
+        .add_creature_from_oracle(P0, "Academy Rector", 1, 2, ACADEMY_RECTOR)
+        .id();
+    let enchantment = scenario
+        .add_spell_to_library_top(P0, "Library Enchantment", false)
+        .as_enchantment()
+        .id();
+    let murder = add_free_spell(&mut scenario, "Murder", false, DESTROY_TARGET_CREATURE);
+    let purge = add_free_spell(&mut scenario, "Purge", true, EXILE_GRAVEYARD_CARD);
+    let mut runner = scenario.build();
+    cast_at_and_resolve(&mut runner, murder, rector);
+    assert_eq!(
+        stacked_trigger_refs(&runner, rector).len(),
+        1,
+        "reach: Academy Rector's death triggers it"
+    );
+    RectorBoard {
+        runner,
+        rector,
+        enchantment,
+        purge,
+    }
+}
+
+/// CR 608.2d + CR 400.7 + CR 118.12: Academy Rector exiled from the graveyard in
+/// response can't be exiled by its own trigger, so "you may exile it" is not
+/// offered and its "If you do" search does not happen; with Rector still in the
+/// graveyard the same trigger is offered and accepting it searches.
+#[test]
+fn academy_rector_exiled_in_response_is_not_offered_and_does_not_search() {
+    let RectorBoard {
+        mut runner,
+        rector,
+        enchantment,
+        purge,
+    } = rector_board();
+    cast_at_and_resolve_stack(&mut runner, purge, rector);
+    assert_eq!(runner.state().objects[&rector].zone, Zone::Exile);
+    assert_settled_priority(&runner, "an exiled Rector's exile is never offered");
+    assert_eq!(
+        runner.state().objects[&enchantment].zone,
+        Zone::Library,
+        "the \"If you do\" search did not happen"
+    );
+
+    let RectorBoard {
+        mut runner,
+        rector,
+        enchantment: _,
+        purge: _,
+    } = rector_board();
+    runner.advance_until_stack_empty();
+    assert_optional_prompt(&runner, P0, "a Rector still in the graveyard is offered");
+    decide(&mut runner, true);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::SearchChoice { .. }),
+        "exiling Rector runs the \"If you do\" search, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().objects[&rector].zone, Zone::Exile);
+}
+
+/// CR 608.2d + CR 400.7: Bladewing's Thrall exiled from the graveyard in response
+/// to its own trigger can't be returned, so "you may return this card" is not
+/// offered; with the Thrall still in the graveyard it is offered and returns.
+#[test]
+fn bladewings_thrall_exiled_in_response_is_not_offered() {
+    let build = || {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let thrall = scenario
+            .add_creature_to_graveyard(P0, "Bladewing's Thrall", 3, 3)
+            .with_subtypes(vec!["Zombie"])
+            .from_oracle_text(BLADEWINGS_THRALL)
+            .id();
+        let dragon = scenario
+            .add_creature_to_hand(P0, "Test Dragon", 4, 4)
+            .with_subtypes(vec!["Dragon"])
+            .with_mana_cost(free())
+            .id();
+        let purge = add_free_spell(&mut scenario, "Purge", true, EXILE_GRAVEYARD_CARD);
+        let mut runner = scenario.build();
+        cast(&mut runner, dragon);
+        resolve_spell(&mut runner, dragon, "Dinosaur");
+        assert_eq!(
+            stacked_trigger_refs(&runner, thrall).len(),
+            1,
+            "reach: the Dragon's entry triggers Bladewing's Thrall from the graveyard"
+        );
+        (runner, thrall, purge)
+    };
+
+    let (mut runner, thrall, purge) = build();
+    cast_at_and_resolve_stack(&mut runner, purge, thrall);
+    assert_eq!(runner.state().objects[&thrall].zone, Zone::Exile);
+    assert_settled_priority(&runner, "an exiled Thrall's return is never offered");
+
+    let (mut runner, thrall, _) = build();
+    runner.advance_until_stack_empty();
+    assert_optional_prompt(&runner, P0, "a Thrall still in the graveyard is offered");
+    decide(&mut runner, true);
+    runner.advance_until_stack_empty();
+    assert_settled_priority(&runner, "after returning the Thrall");
+    assert_eq!(runner.state().objects[&thrall].zone, Zone::Battlefield);
+}
+
+/// Priority Boarding with a free die roller, a free draw and a free way to put
+/// the drawn card back on top of P0's library, which holds only `card_a`.
+struct BoardingBoard {
+    runner: GameRunner,
+    boarding: ObjectId,
+    roller: ObjectId,
+    drawer: ObjectId,
+    topper: ObjectId,
+    card_a: ObjectId,
+}
+
+fn boarding_board() -> BoardingBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let boarding = scenario
+        .add_enchantment_from_oracle(P0, "Priority Boarding", PRIORITY_BOARDING)
+        .id();
+    let roller = scenario
+        .add_artifact_from_oracle(P0, "Die Roller", DIE_ROLLER)
+        .id();
+    let drawer = scenario
+        .add_artifact_from_oracle(P0, "Card Drawer", FREE_DRAW)
+        .id();
+    let topper = scenario
+        .add_artifact_from_oracle(P0, "Library Topper", HAND_TO_LIBRARY_TOP)
+        .id();
+    let card_a = scenario.add_card_to_library_top(P0, "Card A");
+    scenario.with_library_top(P1, &["P1 Card A", "P1 Card B", "P1 Card C"]);
+    BoardingBoard {
+        runner: scenario.build(),
+        boarding,
+        roller,
+        drawer,
+        topper,
+        card_a,
+    }
+}
+
+/// On another player's turn the active player receives priority after each
+/// resolution (CR 117.3b); pass it around to P0 so P0 can activate.
+fn p0_priority(runner: &mut GameRunner) {
+    while matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player != P0) {
+        runner.act(GameAction::PassPriority).expect("pass to P0");
+    }
+}
+
+/// Draw `card_a`, leaving P0's library empty.
+fn draw_card_a(board: &mut BoardingBoard) {
+    p0_priority(&mut board.runner);
+    activate_and_resolve(&mut board.runner, board.drawer);
+    assert_eq!(
+        board.runner.state().objects[&board.card_a].zone,
+        Zone::Hand,
+        "reach: Card A was drawn"
+    );
+    assert!(board.runner.state().players[P0.0 as usize]
+        .library
+        .is_empty());
+}
+
+/// Put `card_a` from P0's hand back on top of the library.
+fn return_card_a(board: &mut BoardingBoard) {
+    p0_priority(&mut board.runner);
+    activate_and_resolve(&mut board.runner, board.topper);
+    if matches!(
+        board.runner.state().waiting_for,
+        WaitingFor::EffectZoneChoice { .. }
+    ) {
+        board
+            .runner
+            .act(GameAction::SelectCards {
+                cards: vec![board.card_a],
+            })
+            .expect("put Card A on top of the library");
+    }
+    assert_eq!(
+        board.runner.state().players[P0.0 as usize].library.front(),
+        Some(&board.card_a),
+        "reach: Card A is back on top of the library"
+    );
+}
+
+/// Roll a die; returns the number of Priority Boarding triggers it stacked.
+fn roll(board: &mut BoardingBoard) -> usize {
+    p0_priority(&mut board.runner);
+    activate_and_resolve(&mut board.runner, board.roller);
+    stacked_trigger_refs(&board.runner, board.boarding).len()
+}
+
+/// Resolve the stack, declining every "you may" (Priority Boarding's "you may
+/// exile it" rider) and returning the events, so a reveal can be observed.
+fn resolve_declining(runner: &mut GameRunner) -> Vec<engine::types::events::GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..40 {
+        let action = match runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return events,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::OptionalEffectChoice { .. } => {
+                GameAction::DecideOptionalEffect { accept: false }
+            }
+            ref other => panic!("unexpected prompt while resolving: {other:?}"),
+        };
+        events.extend(runner.act(action).expect("resolve the stack").events);
+    }
+    panic!("the stack never settled");
+}
+
+fn revealed(events: &[engine::types::events::GameEvent], card: ObjectId) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            engine::types::events::GameEvent::CardsRevealed { card_ids, .. }
+                if card_ids.contains(&card)
+        )
+    })
+}
+
+/// CR 608.2d + CR 701.20a + CR 603.2h: with an empty library, Priority Boarding's
+/// "you may reveal the top card of your library" would reveal nothing, so it is
+/// not offered and no indicated action is taken; once the library has a card the
+/// next roll triggers it again, and revealing spends the limit.
+#[test]
+fn priority_boarding_empty_library_reveal_is_not_offered_and_does_not_spend_the_limit() {
+    let mut board = boarding_board();
+    draw_card_a(&mut board);
+
+    // Leg 1: empty library — the trigger resolves without a prompt.
+    let refs = {
+        activate_and_resolve(&mut board.runner, board.roller);
+        stacked_trigger_refs(&board.runner, board.boarding)
+    };
+    let [Some(boarding_ref)] = refs.as_slice() else {
+        panic!("reach: the roll triggers Priority Boarding once, got {refs:?}");
+    };
+    let boarding_ref = boarding_ref.clone();
+    board.runner.advance_until_stack_empty();
+    assert_settled_priority(&board.runner, "an empty-library reveal is never offered");
+    assert!(
+        indicated_actions(&board.runner).is_empty(),
+        "an impossible reveal takes no indicated action"
+    );
+
+    // Leg 2: Card A back on top — the next roll triggers again and is offered.
+    return_card_a(&mut board);
+    assert_eq!(
+        roll(&mut board),
+        1,
+        "the untaken limit leaves Priority Boarding free to trigger"
+    );
+    board.runner.advance_until_stack_empty();
+    assert_optional_prompt(&board.runner, P0, "a non-empty library's reveal is offered");
+    let mut events = board
+        .runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accept the reveal")
+        .events;
+    events.extend(resolve_declining(&mut board.runner));
+    assert!(revealed(&events, board.card_a), "Card A was revealed");
+    assert_eq!(
+        indicated_actions(&board.runner),
+        HashSet::from([(boarding_ref, P0)]),
+        "revealing takes the indicated action"
+    );
+
+    // Leg 3: the limit is spent — the next roll does not trigger Priority Boarding.
+    assert_eq!(roll(&mut board), 0, "the reveal was taken this turn");
+}
+
+/// CR 603.5 + CR 608.2d + CR 603.2h: a remembered "always accept" is not read for
+/// an impossible reveal — the empty-library instance spends nothing — while a
+/// later possible instance the same turn is accepted by it and spends the limit.
+#[test]
+fn priority_boarding_remembered_accept_does_not_spend_the_limit_on_an_empty_library() {
+    let mut board = boarding_board();
+
+    // Turn 1: remember "always accept" on a real reveal.
+    assert_eq!(
+        roll(&mut board),
+        1,
+        "reach: the roll triggers Priority Boarding"
+    );
+    board.runner.advance_until_stack_empty();
+    assert_optional_prompt(&board.runner, P0, "the first reveal is offered");
+    let mut events = board
+        .runner
+        .act(GameAction::DecideOptionalEffectAndRemember {
+            choice: AutoMayChoice::Accept,
+            scope: MayTriggerAutoChoiceScope::ExactInstance,
+        })
+        .expect("accept and remember")
+        .events;
+    events.extend(resolve_declining(&mut board.runner));
+    assert!(
+        revealed(&events, board.card_a),
+        "reach: Card A was revealed"
+    );
+    assert_eq!(indicated_actions(&board.runner).len(), 1);
+    draw_card_a(&mut board);
+
+    // P1's turn: the ledger resets, and P0's library is empty.
+    next_main_with_p0_priority(&mut board.runner);
+    assert!(indicated_actions(&board.runner).is_empty());
+    assert_eq!(
+        roll(&mut board),
+        1,
+        "reach: the roll triggers Priority Boarding"
+    );
+    let events = resolve_declining(&mut board.runner);
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            engine::types::events::GameEvent::CardsRevealed { .. }
+        )),
+        "nothing is revealed from an empty library"
+    );
+    assert!(
+        indicated_actions(&board.runner).is_empty(),
+        "the remembered accept is not applied to an impossible reveal"
+    );
+
+    // A card on top: the remembered accept reveals it and spends the limit.
+    return_card_a(&mut board);
+    assert_eq!(
+        roll(&mut board),
+        1,
+        "the untaken limit leaves it free to trigger"
+    );
+    let events = resolve_declining(&mut board.runner);
+    assert!(
+        revealed(&events, board.card_a),
+        "the remembered accept reveals Card A"
+    );
+    assert_eq!(
+        indicated_actions(&board.runner).len(),
+        1,
+        "the remembered accept takes the indicated action"
+    );
+}
+
+/// CR 608.2d + CR 118.12: an optional reveal with an empty library is not offered
+/// and its "If you do" rider does not happen; with a card it is offered and the
+/// rider follows the accepted reveal.
+#[test]
+fn optional_reveal_with_an_empty_library_skips_its_if_you_do_rider() {
+    let build = |library: &[&str]| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_artifact_from_oracle(P0, "Reveal Engine", REVEAL_FOR_LIFE)
+            .id();
+        scenario.with_library_top(P0, library);
+        (scenario.build(), source)
+    };
+
+    let (mut runner, source) = build(&[]);
+    let life_before = runner.life(P0);
+    runner.activate(source, 0).stop_at_optional().resolve();
+    assert_settled_priority(&runner, "an empty-library reveal is never offered");
+    assert_eq!(runner.life(P0), life_before, "the rider did not run");
+
+    let (mut runner, source) = build(&["Card A"]);
+    let life_before = runner.life(P0);
+    runner.activate(source, 0).stop_at_optional().resolve();
+    assert_optional_prompt(&runner, P0, "a non-empty library's reveal is offered");
+    decide(&mut runner, true);
+    runner.advance_until_stack_empty();
+    assert_settled_priority(&runner, "after the accepted reveal");
+    assert_eq!(runner.life(P0), life_before + 3, "the rider ran");
 }
