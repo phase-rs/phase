@@ -1495,6 +1495,8 @@ fn apply_action_boundary_core(
     // immediately preceding action. Drop it before a new outer action starts;
     // the active search itself remains the sole authority during the prompt.
     state.clear_completed_hidden_search_audiences();
+    // Taken once per action, so every field a replayed cycle grows must be a structurally shared
+    // container.
     let boundary_snapshot = std::sync::Arc::new(state.clone());
     let cast_undo_boundary =
         super::engine_casting::CastUndoBoundaryGuard::enter(boundary_snapshot.clone());

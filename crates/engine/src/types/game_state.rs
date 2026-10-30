@@ -23706,10 +23706,10 @@ declare_game_state! {
     pub activated_abilities_this_turn: im::HashMap<(ObjectId, usize), u32>,
     #[serde(
         default,
-        skip_serializing_if = "HashMap::is_empty",
+        skip_serializing_if = "im::HashMap::is_empty",
         with = "tuple_key_map"
     )]
-    pub activated_abilities_this_game: HashMap<(ObjectId, usize), u32>,
+    pub activated_abilities_this_game: im::HashMap<(ObjectId, usize), u32>,
     /// CR 602.5b + CR 702.122: Vehicles whose crew ability has been activated this
     /// turn. Populated on a successful crew announcement; read to enforce an
     /// "Activate only once each turn" crew restriction. Crew is not an
@@ -25040,9 +25040,9 @@ declare_game_state! {
     /// public zone. Ordinary `LKISnapshot` is intentionally filter-shaped and
     /// does not carry ability definitions; copy effects need the complete
     /// copiable surface when the copy source later ceases to exist.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
-    pub lki_copiable_values: HashMap<ObjectId, CopiableValues>,
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map")]
+    pub lki_copiable_values: im::HashMap<ObjectId, CopiableValues>,
 
     /// CR 400.7 + CR 608.2h: LKI keyed by exact object incarnation. The legacy
     /// `lki_cache` remains the broad ObjectId-only authority for existing callers;
@@ -25323,6 +25323,12 @@ fn history_map_entries_unshared(original: &GameState, copy: &GameState) -> u64 {
         + original
             .activated_abilities_this_turn
             .unshared(&copy.activated_abilities_this_turn)
+        + original
+            .activated_abilities_this_game
+            .unshared(&copy.activated_abilities_this_game)
+        + original
+            .lki_copiable_values
+            .unshared(&copy.lki_copiable_values)
         + original
             .batched_zone_change_trigger_fired
             .unshared(&copy.batched_zone_change_trigger_fired)
@@ -32223,7 +32229,7 @@ impl GameState {
             triggers_fired_this_game: HashSet::new(),
             triggered_abilities_added_mana_this_turn: HashSet::new(),
             activated_abilities_this_turn: im::HashMap::new(),
-            activated_abilities_this_game: HashMap::new(),
+            activated_abilities_this_game: im::HashMap::new(),
             crew_activated_this_turn: HashSet::new(),
             crew_resolved_this_turn: HashSet::new(),
             crew_history_this_turn: HashSet::new(),
@@ -32382,7 +32388,7 @@ impl GameState {
             stack_trigger_event_batches: HashMap::new(),
             stack_trigger_firings: HashMap::new(),
             lki_cache: im::HashMap::new(),
-            lki_copiable_values: HashMap::new(),
+            lki_copiable_values: im::HashMap::new(),
             lki_by_incarnation: im::HashMap::new(),
             lki_copiable_values_by_incarnation: im::HashMap::new(),
             departed_stack_spells: im::HashMap::new(),
