@@ -2037,10 +2037,20 @@ fn characteristic_source_uses_filter_prop(
                 CardTypeSetSource::TurnJournal { filter, .. } => filter
                     .as_ref()
                     .is_some_and(|filter| target_filter_uses_filter_prop(filter, pred)),
+                CardTypeSetSource::TrackedSet { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(|filter| target_filter_uses_filter_prop(filter, pred)),
+                // CR 608.2c + CR 115.1: the prop query runs against the canonical
+                // slot filter via the single `targeted_objects_filter`
+                // authority — a targeted-objects population matches exactly
+                // when its slot filter does, never a hardcoded constant.
                 CardTypeSetSource::Zone { .. }
                 | CardTypeSetSource::ExiledBySource
-                | CardTypeSetSource::TrackedSet { .. }
                 | CardTypeSetSource::AnyOf { .. } => false,
+                CardTypeSetSource::TargetedObjects { slot } => target_filter_uses_filter_prop(
+                    &crate::types::ability::CardTypeSetSource::targeted_objects_filter(slot),
+                    pred,
+                ),
             };
         });
     // A truncated walk claims the prop: this feeds parse-time capability
@@ -10909,7 +10919,7 @@ fn demote_sweeps_in_ability(def: &mut AbilityDefinition) {
 ///    `CopyValues`).
 /// 5. `AbilityCost` is an EXCLUDED AXIS, and structurally must be: blocking it
 ///    is what keeps the closure equal to the net's descend set (`RENDER_DESCEND`
-///    in `parser::oracle_tests::render_net_effect_carrier_census`) — unblocked,
+///    in `tests/integration/parser_oracle.rs` `render_net_effect_carrier_census`) — unblocked,
 ///    `TargetFilter` -> `TypedFilter` -> `FilterProp` -> `Keyword` ->
 ///    `AbilityCost` makes most of `Effect`'s variants "carriers" (184 of the 232
 ///    it had when measured; `Effect` has 237 at base, pinned by
@@ -10925,7 +10935,7 @@ fn demote_sweeps_in_ability(def: &mut AbilityDefinition) {
 ///    in-tree precedent). Completeness therefore rests on named standing
 ///    instruments plus one contributor obligation, across THREE distinct drift
 ///    classes. (a) A new `Effect` VARIANT: caught by
-///    `tests::render_net_effect_carrier_census`. (b) A new VARIANT on an
+///    `parser_oracle::render_net_effect_carrier_census` (integration). (b) A new VARIANT on an
 ///    INTERMEDIATE PAYLOAD ENUM (`ManaSpellGrant`, `CastingPermission`,
 ///    `ExiledSpellRider`, `CounterSourceRider`, `VoteSubject`) — each has
 ///    exactly ONE description-reaching variant today, so a new sibling falls
@@ -10985,7 +10995,7 @@ fn render_granting_self_descriptions(parsed: &mut ParsedAbilities, card_name: &s
 ///
 /// The destructure is EXHAUSTIVE on purpose, in the spirit of traversal-contract
 /// point 7: `ModalChoice` is a struct reached by FIELD, not an `Effect` arm, so
-/// none of `tests::render_net_effect_carrier_census`' three pins can see a new
+/// none of `parser_oracle::render_net_effect_carrier_census`' three pins (integration) can see a new
 /// field on it. Naming every field makes that addition a COMPILE ERROR here —
 /// strictly stronger than a pin, and affordable at twelve fields.
 ///
@@ -13108,7 +13118,7 @@ pub(super) fn lower_unsupported_node(
 /// carrying one was reported clean. Because the visitor's match is exhaustive
 /// and wildcard-free, a newly added definition-carrying `Effect` variant is now
 /// a compile error there rather than a silent miss here.
-pub(super) fn has_unimplemented(def: &AbilityDefinition) -> bool {
+pub fn has_unimplemented(def: &AbilityDefinition) -> bool {
     any_unimplemented(def, &|_| true)
 }
 
@@ -13248,6 +13258,25 @@ pub(crate) fn normalize_activated_mana_instead_delta(def: &mut AbilityDefinition
 #[cfg(test)]
 #[path = "oracle_tests.rs"]
 mod tests;
+
+/// Test helpers shared by `oracle_tests.rs` and the tests relocated out of it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers {
+    use super::*;
+
+    pub fn parse(
+        text: &str,
+        name: &str,
+        kw: &[Keyword],
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> ParsedAbilities {
+        let keyword_names: Vec<String> = kw.iter().map(keyword_display_name).collect();
+        let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
+        parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
+    }
+}
 
 #[cfg(test)]
 #[path = "oracle_pipeline_snapshot_tests.rs"]

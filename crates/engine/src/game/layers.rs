@@ -4499,10 +4499,19 @@ fn characteristic_source_reads_life_total(source: &CardTypeSetSource) -> bool {
                 CardTypeSetSource::TurnJournal { filter, .. } => {
                     filter.as_ref().is_some_and(target_filter_reads_life_total)
                 }
+                CardTypeSetSource::TrackedSet { filter, .. } => {
+                    filter.as_ref().is_some_and(target_filter_reads_life_total)
+                }
+                // CR 608.2c + CR 115.1: a targeted-objects population reads a
+                // life total exactly when its canonical slot filter does — via
+                // the single `targeted_objects_filter` authority, never a
+                // hardcoded constant.
                 CardTypeSetSource::Zone { .. }
                 | CardTypeSetSource::ExiledBySource
-                | CardTypeSetSource::TrackedSet { .. }
                 | CardTypeSetSource::AnyOf { .. } => false,
+                CardTypeSetSource::TargetedObjects { slot } => target_filter_reads_life_total(
+                    &CardTypeSetSource::targeted_objects_filter(slot),
+                ),
             };
         });
     // A truncated walk claims the read: one redundant recompute beats a stale
@@ -13262,6 +13271,67 @@ mod tests {
             unreachable!()
         };
         assert_eq!(replacement.granting_object, Some(granter));
+    }
+
+    /// F2: a granted body whose direct-head quantity carries a sole
+    /// unbound granting-object symbol in its member filter names its
+    /// granter, so the layers gate stamps it; an unfiltered — or an
+    /// already-bound — head names nothing.
+    #[test]
+    fn direct_head_member_filter_decides_the_granter_stamp() {
+        use crate::types::ability::{SubtypeExclusion, TrackedAnaphorSource};
+
+        let granter = ObjectIncarnationRef::of(ObjectId(5), 1);
+        let tracked = |filter: Option<TargetFilter>| CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter,
+        };
+        let heads = |source: CardTypeSetSource| {
+            [
+                QuantityRef::DistinctCardTypes {
+                    source: source.clone(),
+                },
+                QuantityRef::SharedCardTypes {
+                    source: source.clone(),
+                },
+                QuantityRef::DistinctSubtypes {
+                    source: source.clone(),
+                    exclude: SubtypeExclusion::None,
+                    restrict: None,
+                },
+                QuantityRef::DistinctColorsAmong { source },
+            ]
+        };
+        let body = |qty: QuantityRef| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref { qty },
+                    player: TargetFilter::Controller,
+                },
+            )
+        };
+        for qty in heads(tracked(Some(TargetFilter::GrantingObject { bound: None }))) {
+            assert!(
+                references_granting_object(DefinitionNode::Ability(&body(qty))),
+                "a sole unbound symbol must trip the stamp gate"
+            );
+        }
+        for qty in heads(tracked(None)) {
+            assert!(
+                !references_granting_object(DefinitionNode::Ability(&body(qty))),
+                "an unfiltered head names no granter"
+            );
+        }
+        for qty in heads(tracked(Some(TargetFilter::GrantingObject {
+            bound: Some(granter),
+        }))) {
+            assert!(
+                !references_granting_object(DefinitionNode::Ability(&body(qty))),
+                "an already-bound head has nothing left to stamp"
+            );
+        }
     }
 
     /// CR 514.2 + CR 109.4: `prune_until_next_turn_effects` arms an
@@ -35986,5 +36056,107 @@ mod object_sweep_sharing_tests {
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         assert_eq!(active(&state), 0);
+    }
+}
+
+/// Tests relocated from `parser::oracle_static`'s test module (`oracle_static/tests.rs`).
+#[cfg(test)]
+mod parser_oracle_static_tests {
+    use crate::parser::oracle_static::parse_static_line;
+    use crate::parser::oracle_static::test_helpers::P3_SEG;
+    use crate::types::ability::AttackedYouScope;
+    use crate::types::statics::StaticMode;
+    use crate::types::StaticCondition;
+
+    /// ROW 5: an unrecognized interposed class is
+    /// PERMANENTLY INERT at runtime AND leaves the card RED in coverage.
+    ///
+    /// Two fixtures differing ONLY in the interposed segment. `unenforceable_gate_marker`
+    /// yields `Not(Unrecognized{..})`: `layers::evaluate_condition_inner` reads a BARE
+    /// `Unrecognized` as TRUE, so the `Not` wrapper is what makes the
+    /// gate evaluate FALSE forever — a bare `Unrecognized` here would grant the
+    /// PERMISSION against EVERY defender — the fail-OPEN outcome this row forbids —
+    /// while `contains_unrecognized` still reports the gap either way.
+    ///
+    /// BASE-SHAPE RECORD: before this change the same line parsed to a
+    /// `Continuous`/`AddKeyword(Defender)` grant whose `card_face_gaps` was `[]` —
+    /// dishonestly GREEN. This row therefore measures a real supported -> unsupported
+    /// FLIP, and its value must not be mistaken for "it was always red".
+    #[test]
+    fn unrecognized_interposed_class_is_permanently_inert_and_leaves_the_card_red() {
+        let ok = format!("This creature can attack {P3_SEG} as though it didn't have defender.");
+        const BAD: &str =
+            "This creature can attack players who wear a hat as though it didn't have defender.";
+
+        // (i) REACH-GUARD / PAIRED POSITIVE CONTROL: the widened scan consumed THIS
+        // line shape. Without it, BAD's inert marker could be produced for a line the
+        // scan never saw — a shadowed fixture is inert and red for the WRONG reason.
+        assert_eq!(
+            parse_static_line(&ok)
+                .expect("reach-guard: the recognized class must be consumed")
+                .condition,
+            Some(StaticCondition::AnyPlayerAttackedYouLastTurn {
+                scope: AttackedYouScope::AttackedPlayer,
+            })
+        );
+
+        // (ii) the inert marker, POSITIVE shape.
+        let bad = parse_static_line(BAD).expect(
+            "the line shape is still consumed — the production must OWN the line rather \
+         than decline it back to the AddKeyword(Defender) fallback",
+        );
+        assert_eq!(bad.mode, StaticMode::CanAttackWithDefender);
+        assert_eq!(
+            bad.condition,
+            Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::Unrecognized {
+                    text: "players who wear a hat".to_string(),
+                }),
+            })
+        );
+
+        // (iii) INERT AT RUNTIME — the half a parse-shape assertion cannot buy.
+        let state = crate::types::game_state::GameState::new(
+            crate::types::format::FormatConfig::standard(),
+            2,
+            42,
+        );
+        assert!(
+            !crate::game::layers::evaluate_condition_for_test(
+                &state,
+                bad.condition.as_ref().unwrap(),
+                crate::types::player::PlayerId(0),
+                crate::types::identifiers::ObjectId(1),
+            ),
+            "a Not(Unrecognized) gate must evaluate FALSE (a bare Unrecognized is TRUE)"
+        );
+
+        // (iv) RED IN COVERAGE — the half the fallback's NAME does not guarantee:
+        // being permanently inert at runtime does not by itself make the card red.
+        let bad_face = crate::types::card::CardFace {
+            static_abilities: vec![bad.clone()],
+            ..Default::default()
+        };
+        let gaps = crate::game::coverage::card_face_gaps(&bad_face);
+        assert!(
+            gaps.iter()
+                .any(|g| g.contains("Static:Unrecognized(players who wear a hat)")),
+            "the unparsed class must leave the card RED; got {gaps:?}"
+        );
+
+        // SECOND CONTROL, SAME FIXTURE: the recognized class is GREEN, proving the gap
+        // signal comes from the MARKER and not from `CanAttackWithDefender` being
+        // unsupported in the coverage registry.
+        let ok_face = crate::types::card::CardFace {
+            static_abilities: vec![parse_static_line(&ok).unwrap()],
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::game::coverage::card_face_gaps(&ok_face),
+            Vec::<String>::new(),
+            "a RECOGNIZED anchored class must report NO coverage gap — the gap signal \
+         comes from the unenforceable marker, not from `CanAttackWithDefender` \
+         being unsupported in the registry"
+        );
     }
 }

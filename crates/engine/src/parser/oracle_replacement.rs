@@ -4628,7 +4628,7 @@ enum EntersWithDecline {
 /// CR 614.1c: the printed part of an "enters with" replacement the parser
 /// cannot carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EntersWithGap {
+pub enum EntersWithGap {
     /// A printed gate is present and cannot be carried (or two gates co-occur
     /// in the single condition slot).
     Gate,
@@ -14092,7 +14092,7 @@ pub(crate) fn as_long_as_gate_is_unparsed(text: &str, card_name: &str) -> bool {
 /// placement the parser cannot carry. Normalizes exactly as
 /// `parse_replacement_line_inner` does and applies the same reach gate, so the
 /// route and the parser cannot drift.
-pub(crate) fn enters_with_fails_closed(text: &str, card_name: &str) -> Option<EntersWithGap> {
+pub fn enters_with_fails_closed(text: &str, card_name: &str) -> Option<EntersWithGap> {
     let text = strip_reminder_text(text);
     let norm_lower = replace_self_refs(&text, card_name).to_lowercase();
     if !has_enters_with_counter_tokens(&norm_lower) {

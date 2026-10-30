@@ -50,7 +50,7 @@ use crate::types::game_state::{
     PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
     PendingPlayerScopeTail, RepeatIterationChoice, RepeatIterationMovement, RepeatProcessRequest,
     RepeatUntilIterationWitness, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
-    ReturnResultOccurrenceId, SeatCreatedTokens, WaitingFor, ZoneChangeRecord,
+    ReturnResultOccurrenceId, SeatCreatedTokens, TrackedMemberOrigin, WaitingFor, ZoneChangeRecord,
     ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{DiscardFrameId, ObjectId, ObjectIncarnationRef, TrackedSetId};
@@ -6011,7 +6011,8 @@ fn declined_search_scalar_quantity_dependency(
                 source,
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
-                    caused_by: None
+                    caused_by: None,
+                    ..
                 }
             )
         },
@@ -6048,7 +6049,8 @@ fn declined_search_scalar_filter_inputs(
                 source,
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
-                    caused_by: None
+                    caused_by: None,
+                    ..
                 }
             )
         },
@@ -6080,7 +6082,8 @@ fn declined_search_player_dependency(state: &GameState, player: &PlayerFilter) -
                 source,
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
-                    caused_by: None
+                    caused_by: None,
+                    ..
                 }
             )
         },
@@ -6163,6 +6166,7 @@ fn declined_search_population_dependency(
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
                     caused_by: None,
+                    ..
                 } => true,
                 CardTypeSetSource::Objects { filter } => {
                     declined_search_filter_dependency(state, filter, information, context)
@@ -14922,15 +14926,71 @@ pub(crate) fn publish_tracked_set_with_causes(
 /// contributed to the same merged set. The only writer of
 /// [`GameState::tracked_set_member_causes`] that adds an entry, shared by both
 /// recording publications so neither can record a cause the other cannot.
+/// Origins stamp alongside causes (same key, same overwrite policy): every
+/// `Some(cause)` names a zone-transition producer action, so the member's
+/// latest zone-change record — verified, not assumed — is its producing
+/// transition. Unverifiable members stamp no origin and keep the live read.
 fn stamp_member_causes(state: &mut GameState, affected: Vec<(ObjectId, Option<ThisWayCause>)>) {
     if let Some(chain_id) = state.chain_tracked_set_id {
+        let derived: Vec<(ObjectId, ThisWayCause, Option<TrackedMemberOrigin>)> = affected
+            .into_iter()
+            .filter_map(|(id, cause)| {
+                cause.map(|cause| (id, cause, producing_origin_for(state, id, cause)))
+            })
+            .collect();
         let causes = state.tracked_set_member_causes.entry(chain_id).or_default();
-        for (id, cause) in affected {
-            if let Some(cause) = cause {
-                causes.insert(id, cause);
+        let origins = state
+            .tracked_set_member_origins
+            .entry(chain_id)
+            .or_default();
+        for (id, cause, origin) in derived {
+            causes.insert(id, cause);
+            if let Some(origin) = origin {
+                origins.insert(id, origin);
             }
         }
     }
+}
+
+/// CR 608.2h + CR 400.7: derive one member's producing-transition origin at
+/// publication. The latest zone-change record for the member must BE the
+/// producing transition: it ends where the member is (nothing moved since),
+/// it departs a real zone (created-directly members stamp nothing), and it
+/// agrees with the action's origin when the action determines one. Returns
+/// `None` — no stamp, live read — on any mismatch rather than binding a
+/// stale or unrelated departure.
+fn producing_origin_for(
+    state: &GameState,
+    id: ObjectId,
+    cause: ThisWayCause,
+) -> Option<TrackedMemberOrigin> {
+    let live = state.objects.get(&id)?;
+    let record = state
+        .zone_changes_this_turn
+        .iter()
+        .rev()
+        .find(|record| record.object_id == id)?;
+    let from = record.from_zone?;
+    if record.to_zone != live.zone {
+        return None;
+    }
+    if cause
+        .expected_origin_zone()
+        .is_some_and(|expected| expected != from)
+    {
+        return None;
+    }
+    // zones.rs bumps the incarnation exactly +1 per genuine zone change and
+    // nothing for a same-zone record, so the departure recorded under:
+    let departure_incarnation = if record.to_zone == Zone::Battlefield || from != record.to_zone {
+        live.incarnation.saturating_sub(1)
+    } else {
+        live.incarnation
+    };
+    Some(TrackedMemberOrigin {
+        departed_from: from,
+        departure_incarnation,
+    })
 }
 
 /// CR 608.2c + CR 614.6: the fresh-scope sibling of
@@ -19431,6 +19491,28 @@ fn should_collect_player_scope_sacrifice_choices(ability: &ResolvedAbility) -> b
     matches!(ability.effect, Effect::Sacrifice { .. }) && ability.sub_ability.is_none()
 }
 
+/// CR 608.2c: publish the members of a completed player-scope sacrifice
+/// clause for a downstream tracked-set consumer (Danse Macabre's die modifier
+/// reads the sacrificed members here — later instructions read what earlier
+/// ones published). The sacrifice-specific
+/// choice flow returns before the generic fan-out's
+/// `publish_player_scope_clause_results` call, so without this the clause's
+/// set is never published and consumers read 0. Mirrors that authority's
+/// gate-then-publish pair: `tail_needs_set` is the detached after-scope
+/// chain (sync arm) or the parked continuation (resumed arms).
+fn publish_completed_sacrifice_clause_set(
+    state: &mut GameState,
+    template: &ResolvedAbility,
+    tail_needs_set: bool,
+    scoped_events: &[GameEvent],
+) {
+    if !tail_needs_set {
+        return;
+    }
+    let affected = affected_objects_with_causes(state, template, &template.effect, scoped_events);
+    publish_tracked_set_with_causes(state, affected);
+}
+
 fn start_player_scope_sacrifice_choices(
     state: &mut GameState,
     template: &ResolvedAbility,
@@ -19468,9 +19550,25 @@ fn start_player_scope_sacrifice_choices(
 
     match perform_player_scope_sacrifices(state, template, selections, None, events)? {
         PlayerScopeSacrificePerformOutcome::PausedForReplacement => {
-            return Ok(ResolutionProgress::Waiting)
+            // CR 608.2c: park the detached tail before suspension, mirroring
+            // the prompt arm above — the resumed drain completes through
+            // `drain_pending_player_scope_sacrifice_after_replacement`, whose
+            // publication gate reads this parked tail and whose caller drains
+            // the continuation exactly once (Danse Macabre's roll).
+            append_to_pending_continuation(state, after_scope);
+            return Ok(ResolutionProgress::Waiting);
         }
-        PlayerScopeSacrificePerformOutcome::Completed { .. } => {
+        PlayerScopeSacrificePerformOutcome::Completed {
+            events_before_sacrifice,
+            events_after_sacrifice,
+            ..
+        } => {
+            publish_completed_sacrifice_clause_set(
+                state,
+                template,
+                branch_references_tracked_set(after_scope.as_deref()),
+                &events[events_before_sacrifice..events_after_sacrifice],
+            );
             if let Some(after_scope) = after_scope {
                 return resolve_ability_chain_step(state, &after_scope, events, depth + 1);
             }
@@ -19583,11 +19681,25 @@ pub(crate) fn advance_pending_player_scope_sacrifice_choice(
             events_before_sacrifice,
             events_after_sacrifice,
             sacrificed_count,
-        } => Ok(Some(PendingPlayerScopeSacrificeOutcome::Completed {
-            events_before_sacrifice,
-            events_after_sacrifice,
-            sacrificed_count,
-        })),
+        } => {
+            // The after-scope tail was parked on the continuation frame when
+            // the choice completed; gate publication on it, mirroring the
+            // sync arm's detached-tail gate.
+            let tail_needs_set = state
+                .active_ability_continuation()
+                .is_some_and(|c| branch_references_tracked_set(Some(c.chain.as_ref())));
+            publish_completed_sacrifice_clause_set(
+                state,
+                &pending.ability,
+                tail_needs_set,
+                &events[events_before_sacrifice..events_after_sacrifice],
+            );
+            Ok(Some(PendingPlayerScopeSacrificeOutcome::Completed {
+                events_before_sacrifice,
+                events_after_sacrifice,
+                sacrificed_count,
+            }))
+        }
     }
 }
 
@@ -19622,11 +19734,25 @@ pub(crate) fn drain_pending_player_scope_sacrifice_after_replacement(
             events_before_sacrifice,
             events_after_sacrifice,
             sacrificed_count,
-        } => Ok(PendingPlayerScopeSacrificeOutcome::Completed {
-            events_before_sacrifice,
-            events_after_sacrifice,
-            sacrificed_count,
-        }),
+        } => {
+            // The after-scope tail was parked on the continuation frame when
+            // the choice paused; gate publication on it, mirroring the sync
+            // arm's detached-tail gate.
+            let tail_needs_set = state
+                .active_ability_continuation()
+                .is_some_and(|c| branch_references_tracked_set(Some(c.chain.as_ref())));
+            publish_completed_sacrifice_clause_set(
+                state,
+                &pending.ability,
+                tail_needs_set,
+                &events[events_before_sacrifice..events_after_sacrifice],
+            );
+            Ok(PendingPlayerScopeSacrificeOutcome::Completed {
+                events_before_sacrifice,
+                events_after_sacrifice,
+                sacrificed_count,
+            })
+        }
     }
 }
 
@@ -31156,10 +31282,12 @@ mod tests {
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::ChainSet,
                 caused_by: Some(ThisWayCause::Destroyed),
+                filter: None,
             },
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::ChainSet,
                 caused_by: None,
+                filter: None,
             },
             CardTypeSetSource::Objects {
                 filter: TargetFilter::ParentTarget,
@@ -31743,6 +31871,67 @@ mod tests {
                     TargetFilter::SpecificObject { id: ObjectId(8) },
                 ]
             }
+        );
+    }
+
+    /// M1r2: publication stamps each member's producing-transition origin —
+    /// verified against the zone journal, never assumed. A real
+    /// battlefield→hand→graveyard journey publishes Discarded bound to the
+    /// hand departure; a cause/origin mismatch (Sacrificed for a hand
+    /// departure) and a selection (`None` cause) stamp nothing, keeping the
+    /// live read rather than binding a stale departure.
+    #[test]
+    fn publish_stamps_verified_producing_origins() {
+        let mut state = GameState::new_two_player(42);
+        let oak = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Oak".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, oak, Zone::Hand, &mut events);
+        crate::game::zones::move_to_zone(&mut state, oak, Zone::Graveyard, &mut events);
+        let live_incarnation = state.objects.get(&oak).unwrap().incarnation;
+
+        let discarded = publish_fresh_tracked_set_with_causes(
+            &mut state,
+            vec![oak],
+            Some(ThisWayCause::Discarded),
+        );
+        assert_eq!(
+            state
+                .tracked_set_member_origins
+                .get(&discarded)
+                .and_then(|origins| origins.get(&oak)),
+            Some(&TrackedMemberOrigin {
+                departed_from: Zone::Hand,
+                departure_incarnation: live_incarnation - 1,
+            }),
+            "the discard binds the verified hand departure"
+        );
+
+        let mismatched = publish_fresh_tracked_set_with_causes(
+            &mut state,
+            vec![oak],
+            Some(ThisWayCause::Sacrificed),
+        );
+        assert!(
+            state
+                .tracked_set_member_origins
+                .get(&mismatched)
+                .is_none_or(|origins| !origins.contains_key(&oak)),
+            "Sacrificed demands a battlefield origin: a hand departure stamps nothing"
+        );
+
+        let selection = publish_fresh_tracked_set_with_causes(&mut state, vec![oak], None);
+        assert!(
+            state
+                .tracked_set_member_origins
+                .get(&selection)
+                .is_none_or(|origins| !origins.contains_key(&oak)),
+            "a selection names no transition and stamps nothing"
         );
     }
 
@@ -36305,6 +36494,7 @@ mod tests {
                     crate::types::ability::CardTypeSetSource::TrackedSet {
                         set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .expect("statically valid property aggregate"),
@@ -36355,6 +36545,7 @@ mod tests {
                         crate::types::ability::CardTypeSetSource::TrackedSet {
                             set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                             caused_by: None,
+                            filter: None,
                         },
                         crate::types::ability::CardTypeSetSource::ExiledBySource,
                     ])
@@ -36398,6 +36589,7 @@ mod tests {
                 source: crate::types::ability::CardTypeSetSource::TrackedSet {
                     set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                     caused_by: None,
+                    filter: None,
                 },
             },
         };
@@ -36414,6 +36606,7 @@ mod tests {
                         crate::types::ability::CardTypeSetSource::TrackedSet {
                             set: crate::types::ability::TrackedAnaphorSource::ChainSet,
                             caused_by: None,
+                            filter: None,
                         },
                     ])
                     .expect("two-member union is valid"),
@@ -61152,6 +61345,8 @@ mod entry_observation_settlement_tests {
                     source_id: ObjectId(100),
                     controller: PlayerId(0),
                     roller: PlayerId(0),
+                    quantity_controller: None,
+                    scoped_player: None,
                     targets: Vec::new(),
                     sides: 6,
                     results: vec![3, 4],
@@ -61169,6 +61364,14 @@ mod entry_observation_settlement_tests {
                     forced_ignored: Vec::new(),
                     chain_root_targets: Vec::new(),
                     trigger_context: None,
+                    // MED2 parked-slot context the branch struct carries;
+                    // neutral here — this fixture pins `deferred`, not resume.
+                    illegal_target_slots: Vec::new(),
+                    chain_root_target_pins: Vec::new(),
+                    declared_capture: None,
+                    local_target_pins: Vec::new(),
+                    keyed_target_incarnations: Vec::new(),
+                    declared_player: None,
                 })));
             state
         };
@@ -63547,5 +63750,380 @@ mod x_announcement_merge_tests {
             "the rider receives the paid X"
         );
         assert_eq!(rider.x_announcement, None, "the mark is consumed");
+    }
+}
+
+/// Tests relocated from `parser::oracle_effect`'s test module (`oracle_effect/tests.rs`).
+#[cfg(test)]
+mod parser_oracle_effect_tests {
+    use crate::parser::oracle_effect::test_helpers::expected_creature_target_match;
+    use crate::parser::oracle_effect::{
+        chain_clause_is_exile_producer, parse_effect_chain, publishes_exiled_cause_at_resolution,
+        publishes_tracked_set_from_resolution,
+    };
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Chooser, DelayedTriggerCondition, DigRestOrder, Effect,
+        ForEachCategoryAction, IterationCategory, LibraryPosition, QuantityExpr,
+        RevealUntilDisposition, TargetFilter, ThisWayCause, TypedFilter,
+    };
+    use crate::types::phase::Phase;
+    use crate::types::zones::Zone;
+
+    /// GAP 3 RUNTIME discrimination (minimal level): the carried condition itself
+    /// must evaluate FALSE against a planeswalker-target ability and TRUE against
+    /// a creature-target ability. This is the runtime semantics that prove the
+    /// riders are skipped for a planeswalker (so it dies normally / is not exiled)
+    /// and applied for a creature. A raw `RevealedHasCardType` condition would
+    /// evaluate FALSE for BOTH (no revealed id), which is the silent-wrong bug.
+    #[test]
+    fn conditional_creature_gate_evaluates_per_target_type() {
+        use crate::game::effects::evaluate_condition;
+        use crate::game::zones;
+        use crate::types::ability::{ResolvedAbility, TargetRef};
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::GameState;
+        use crate::types::identifiers::{CardId, ObjectId};
+        use crate::types::player::PlayerId;
+        use crate::types::zones::Zone;
+
+        // The exact condition the parser stamps on the riders.
+        let cond = expected_creature_target_match();
+
+        let mut state = GameState::new_two_player(42);
+
+        // A creature on the battlefield.
+        let creature = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Test Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // A planeswalker on the battlefield.
+        let planeswalker = zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Test Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&planeswalker).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+        }
+
+        // Ability targeting the CREATURE → condition TRUE (riders apply).
+        let creature_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        assert!(
+            evaluate_condition(&cond, &state, &creature_ability),
+            "creature-target damage ability: 'if it's a creature' must be TRUE"
+        );
+
+        // Ability targeting the PLANESWALKER → condition FALSE (riders skipped:
+        // it goes to the graveyard normally, no regen lock, no exile-instead).
+        let pw_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(planeswalker)],
+            ObjectId(101),
+            PlayerId(0),
+        );
+        assert!(
+            !evaluate_condition(&cond, &state, &pw_ability),
+            "planeswalker-target damage ability: 'if it's a creature' must be FALSE"
+        );
+    }
+
+    /// CR 608.2c + CR 607.2a invariant: every effect shape that
+    /// `publishes_exiled_cause_at_resolution` accepts must actually stamp
+    /// `ThisWayCause::Exiled` on the members it publishes at runtime.
+    ///
+    /// The predicate exists to gate a `TrackedSetFiltered { caused_by:
+    /// Some(Exiled) }` binding on 51 cards' cast anaphors. If a later contributor
+    /// widens `is_exile_effect` with a producer whose runtime cause is `None` (as
+    /// `Dig{Exile}`, `HeistExile`, `ExileHaunting`,
+    /// `ExileResolvingSpellInsteadOfGraveyard` and `RevealUntil{kept: Exile}` all
+    /// are — they are accepted by the *sibling* `chain_clause_is_exile_producer`
+    /// and deliberately not by this one), those cards' anaphors would silently
+    /// match nothing and every one of them would go quietly inert. The compiler
+    /// cannot see that coupling.
+    ///
+    /// **Scope of the guarantee.** This test checks a hand-listed set of shapes; it
+    /// does NOT enumerate everything `is_exile_effect` accepts, so a newly added
+    /// arm would pass unnoticed until it is listed here. Widening
+    /// `is_exile_effect` therefore means adding the shape below by hand.
+    ///
+    /// Two arms of the predicate are pinned differently:
+    /// * The `is_exile_effect` shapes are checked directly against the runtime
+    ///   registry `game::effects::this_way_cause_for_effect`.
+    /// * `ForEachCategory { action: ExileFromPool }` does not go through that
+    ///   registry — its resolver
+    ///   (`game::effects::choose_from_zone::complete_per_category_exile`) calls
+    ///   `publish_tracked_set_with_causes` with an explicit
+    ///   `ThisWayCause::Exiled`. Its runtime pin is
+    ///   `tests/integration/issue_4253_sanar_vivid.rs`.
+    #[test]
+    fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
+        use crate::game::effects::this_way_cause_for_effect;
+        use crate::types::counter::CounterType;
+        use crate::types::zones::EtbTapState;
+
+        let direct_publishers = [
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                library_shuffle: Default::default(),
+                random_order: false,
+            },
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+                face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+            },
+        ];
+        for effect in &direct_publishers {
+            assert!(
+                publishes_exiled_cause_at_resolution(effect),
+                "expected {effect:?} to be an Exiled-cause publisher"
+            );
+            assert_eq!(
+                this_way_cause_for_effect(effect),
+                Some(ThisWayCause::Exiled),
+                "{effect:?} is accepted by publishes_exiled_cause_at_resolution but does NOT stamp \
+             ThisWayCause::Exiled at runtime — a cause-filtered cast anaphor bound after it \
+             would match nothing"
+            );
+        }
+
+        // CR 603.7a: the delayed-trigger wrapper defers its exile to a LATER
+        // resolution, so it answers the two questions differently — yes to "did
+        // this chain publish a tracked set?", no to "does this clause stamp
+        // Exiled when it resolves?". Both directions are pinned here: the first
+        // guards the six scopes whose sole producer is a delayed wrapper
+        // (conqueror's galleon, end-blaze epiphany, fire giant's fury, priority
+        // boarding, storm herald, waltz of rage) against losing their binding;
+        // the second is why the narrow predicate spells its shapes out instead of
+        // delegating to `is_exile_effect`.
+        let delayed = Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                direct_publishers[0].clone(),
+            )),
+            uses_tracked_set: true,
+        };
+        assert!(
+            publishes_tracked_set_from_resolution(&delayed),
+            "the delayed wrapper stands in for a real exile in an earlier clause, so the \
+         chain DID publish a set — dropping this sends six cards back to the \
+         unrewritten ParentTarget binding"
+        );
+        assert!(
+            !publishes_exiled_cause_at_resolution(&delayed),
+            "the delayed wrapper stamps nothing when it resolves, so a cause-filtered \
+         cast anaphor bound after it would match nothing"
+        );
+        assert_eq!(
+            this_way_cause_for_effect(&delayed),
+            None,
+            "the runtime registry agrees: no cause is stamped. If this ever returns \
+         Some(Exiled), the narrow predicate can accept the wrapper again."
+        );
+
+        // The per-category exile arm: accepted here, stamped explicitly by its own
+        // resolver rather than by the shared registry.
+        let per_category = Effect::ForEachCategory {
+            category: IterationCategory::Color,
+            chooser: Chooser::Controller,
+            action: ForEachCategoryAction::ExileFromPool {
+                zone: Zone::Library,
+                up_to: true,
+            },
+        };
+        assert!(
+            publishes_exiled_cause_at_resolution(&per_category),
+            "Sanar's per-category exile must count as an Exiled-cause publisher"
+        );
+
+        // Negative sibling: the OTHER ForEachCategory action is not an exile at
+        // all, and must not drag a cast anaphor onto the exiled-members binding.
+        let per_category_counters = Effect::ForEachCategory {
+            category: IterationCategory::Color,
+            chooser: Chooser::Controller,
+            action: ForEachCategoryAction::PutCounter {
+                target: TargetFilter::Any,
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        };
+        assert!(
+            !publishes_exiled_cause_at_resolution(&per_category_counters),
+            "ForEachCategory{{PutCounter}} exiles nothing and must not be an exile publisher"
+        );
+
+        // Negative: shapes that DO exile but whose members carry no cause. Each is
+        // accepted by `chain_clause_is_exile_producer` and must stay rejected here.
+        let uncaused_exilers = [
+            Effect::HeistExile,
+            Effect::Dig {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                destination: Some(Zone::Exile),
+                keep_count: Some(1),
+                keep_count_expr: None,
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: None,
+                rest_split_top_count: None,
+                rest_order: crate::types::ability::DigRestOrder::Preserve,
+                reveal: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                source: crate::types::ability::DigSource::default(),
+            },
+            Effect::ExileHaunting {
+                target: TargetFilter::Any,
+            },
+            Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: None },
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                matched_disposition: RevealUntilDisposition::RevealOnly,
+                kept_destination: Zone::Exile,
+                rest_destination: Zone::Library,
+                rest_order: DigRestOrder::Preserve,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: None,
+                enters_under: None,
+                kept_destination_if: None,
+            },
+        ];
+        for effect in &uncaused_exilers {
+            assert!(
+                chain_clause_is_exile_producer(effect),
+                "{effect:?} is expected to remain a same-chain exile producer"
+            );
+            assert!(
+                !publishes_exiled_cause_at_resolution(effect),
+                "{effect:?} publishes no cause stamp, so a cause-filtered cast anaphor must NOT be \
+             bound after it"
+            );
+            assert_eq!(this_way_cause_for_effect(effect), None);
+        }
+    }
+
+    #[test]
+    fn wretched_banquet_least_power_evaluates_per_target() {
+        use crate::game::effects::evaluate_condition;
+        use crate::game::zones;
+        use crate::types::ability::{ResolvedAbility, TargetRef};
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::GameState;
+        use crate::types::identifiers::{CardId, ObjectId};
+        use crate::types::player::PlayerId;
+        use crate::types::zones::Zone;
+
+        let def = parse_effect_chain(
+            "Destroy target creature if it has the least power among creatures.",
+            AbilityKind::Spell,
+        );
+        let cond = def.condition.expect("expected least-power condition");
+
+        let mut state = GameState::new_two_player(42);
+        let weak = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "1/1".to_string(),
+            Zone::Battlefield,
+        );
+        let mid = zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "2/2".to_string(),
+            Zone::Battlefield,
+        );
+        let strong = zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "3/3".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, power) in [(weak, 1), (mid, 2), (strong, 3)] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(power);
+            obj.toughness = Some(power);
+        }
+
+        let ability_for = |target| {
+            ResolvedAbility::new(
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+                vec![TargetRef::Object(target)],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+
+        assert!(
+            evaluate_condition(&cond, &state, &ability_for(weak)),
+            "1/1 tied for least power must pass"
+        );
+        assert!(
+            !evaluate_condition(&cond, &state, &ability_for(mid)),
+            "2/2 is not least power"
+        );
+        assert!(
+            !evaluate_condition(&cond, &state, &ability_for(strong)),
+            "3/3 is not least power"
+        );
     }
 }

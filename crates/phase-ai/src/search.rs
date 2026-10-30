@@ -3759,6 +3759,86 @@ fn root_issued_candidates(
     }
 }
 
+/// Which kind of root decision `score_candidates_core_for_root` is scoring. It selects how
+/// much the root's tactical score (policy verdicts + `should_play_now` + class adjustments
+/// + gate penalty) weighs against the beam's continuation value before softmax selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootDecisionContext {
+    /// Target selection decisions are dominated by the tactical policy
+    /// (anti-self-harm) but benefit from limited search lookahead.
+    /// The 0.7 weight ensures the tactical signal (anti-self-harm penalties
+    /// of -50+) still dominates obvious cases while allowing 30% search
+    /// influence for ambiguous multi-target decisions where the
+    /// continuation matters (e.g., which creature to pump).
+    TargetSelection,
+    /// Stack response decisions (counter/interact with opponent's spell) need
+    /// higher tactical weight because search can't see through the full
+    /// cast-target-pay-resolve chain at typical depths. Policies like
+    /// counterspell_score and stack_awareness guide these reactive decisions.
+    StackResponse,
+    /// The AI's own Upkeep or Draw step, holding priority on an empty stack.
+    /// CR 102.1 + CR 723.3: "own turn" is the active player (a controlled player is still the
+    /// active player). CR 117.1a: absent a flash-style permission (CR 702.8a), no noninstant
+    /// spell can be cast here, so most candidates are a "now vs. in my main phase" choice that
+    /// the short beam rarely sees past. CR 501.1 +
+    /// CR 502.4: the untap step grants no priority, so Upkeep and Draw are the beginning
+    /// phase's only priority windows. Timing policies need their verdict to survive the root
+    /// weight here (phase-rs/phase#10334).
+    OwnUpkeepOrDraw,
+    /// Every other root: main/combat/end priority, any priority on an opponent's turn, priority
+    /// over a stack holding only the AI's own entries, and non-priority, non-target prompts.
+    /// Here the tactical score is a move-ordering / tie-break nudge on the continuation.
+    Ordinary,
+}
+
+impl RootDecisionContext {
+    /// Classify the root decision. Precedence: target selection, then a stack holding an
+    /// entry another player controls, then the AI's own Upkeep/Draw window, then everything else.
+    fn classify(state: &GameState, ai_player: PlayerId) -> Self {
+        if matches!(
+            state.waiting_for,
+            WaitingFor::TargetSelection { .. }
+                | WaitingFor::TriggerTargetSelection { .. }
+                | WaitingFor::MultiTargetSelection { .. }
+        ) {
+            return Self::TargetSelection;
+        }
+        if state
+            .stack
+            .iter()
+            .any(|entry| entry.controller != ai_player)
+        {
+            return Self::StackResponse;
+        }
+        // CR 117.1 + CR 117.1b: timing decisions exist only while the AI holds priority.
+        let own_priority = matches!(
+            state.waiting_for,
+            WaitingFor::Priority { player } if player == ai_player
+        );
+        // CR 503.1 + CR 504.2: the active player receives priority in the upkeep and draw
+        // steps; CR 102.1: the active player is the player whose turn it is.
+        if own_priority
+            && state.active_player == ai_player
+            && state.stack.is_empty()
+            && matches!(state.phase, Phase::Upkeep | Phase::Draw)
+        {
+            return Self::OwnUpkeepOrDraw;
+        }
+        Self::Ordinary
+    }
+
+    /// Root weight on the tactical score in `continuation + score * weight` (and the rung-0
+    /// floor). Interior nodes use their own 0.05 in `planner::BeamContinuationPlanner`; the
+    /// heuristic-only branch is unweighted.
+    const fn tactical_weight(self) -> f64 {
+        match self {
+            Self::TargetSelection => 0.7,
+            Self::StackResponse | Self::OwnUpkeepOrDraw => 0.35,
+            Self::Ordinary => 0.1,
+        }
+    }
+}
+
 /// [`score_candidates_core`] over a decision state whose priority domain may
 /// already have been built for this decision, with the caller's knowledge of
 /// the root. Under [`RootReuse::FromChooser`] the contract's candidates stand
@@ -3912,35 +3992,7 @@ fn score_candidates_core_for_root(
     // Score actions via search or heuristics
     if config.search.enabled {
         let branching = config.search.max_branching as usize;
-
-        // Target selection decisions are dominated by the tactical policy
-        // (anti-self-harm) but benefit from limited search lookahead.
-        // The 0.7 weight ensures the tactical signal (anti-self-harm penalties
-        // of -50+) still dominates obvious cases while allowing 30% search
-        // influence for ambiguous multi-target decisions where the
-        // continuation matters (e.g., which creature to pump).
-        let is_target_selection = matches!(
-            state.waiting_for,
-            WaitingFor::TargetSelection { .. }
-                | WaitingFor::TriggerTargetSelection { .. }
-                | WaitingFor::MultiTargetSelection { .. }
-        );
-        // Stack response decisions (counter/interact with opponent's spell) need
-        // higher tactical weight because search can't see through the full
-        // cast-target-pay-resolve chain at typical depths. Policies like
-        // counterspell_score and stack_awareness guide these reactive decisions.
-        let is_stack_response = !state.stack.is_empty()
-            && state
-                .stack
-                .iter()
-                .any(|entry| entry.controller != ai_player);
-        let tactical_weight = if is_target_selection {
-            0.7
-        } else if is_stack_response {
-            0.35
-        } else {
-            0.1
-        };
+        let tactical_weight = RootDecisionContext::classify(state, ai_player).tactical_weight();
 
         // Score and rank directly from `gated`, which already carries penalty
         // alongside each candidate. Previously a `penalty_for` closure did an
@@ -19649,5 +19701,374 @@ one on the bottom of your library.";
             "a revisited position must be scored again, not answered from a memo"
         );
         assert_eq!(tracked_trace, untracked_trace);
+    }
+
+    // ---- phase-rs/phase#10334: root tactical weight by decision context ----
+
+    /// Every root window `RootDecisionContext::classify` distinguishes, with the
+    /// weight each one feeds into the root score. AI = P0.
+    #[test]
+    fn root_decision_context_classifies_each_window() {
+        use RootDecisionContext::{Ordinary, OwnUpkeepOrDraw, StackResponse, TargetSelection};
+
+        struct Row {
+            label: &'static str,
+            waiting_for: WaitingFor,
+            phase: Phase,
+            active: PlayerId,
+            stack: Option<StackEntry>,
+            turn_decision_controller: Option<PlayerId>,
+            expected: RootDecisionContext,
+            weight: f64,
+        }
+        let priority = |player| WaitingFor::Priority { player };
+        let row = |label, waiting_for, phase, active, stack, expected, weight| Row {
+            label,
+            waiting_for,
+            phase,
+            active,
+            stack,
+            turn_decision_controller: None,
+            expected,
+            weight,
+        };
+        let rows = [
+            row(
+                "a: own upkeep",
+                priority(P0),
+                Phase::Upkeep,
+                P0,
+                None,
+                OwnUpkeepOrDraw,
+                0.35,
+            ),
+            row(
+                "b: own draw",
+                priority(P0),
+                Phase::Draw,
+                P0,
+                None,
+                OwnUpkeepOrDraw,
+                0.35,
+            ),
+            row(
+                "c: own main",
+                priority(P0),
+                Phase::PreCombatMain,
+                P0,
+                None,
+                Ordinary,
+                0.1,
+            ),
+            row(
+                "d: own end step (low_value_empty_stack_phase sibling)",
+                priority(P0),
+                Phase::End,
+                P0,
+                None,
+                Ordinary,
+                0.1,
+            ),
+            row(
+                "e: own untap (CR 502.4: no priority)",
+                priority(P0),
+                Phase::Untap,
+                P0,
+                None,
+                Ordinary,
+                0.1,
+            ),
+            row(
+                "f: opponent's upkeep",
+                priority(P0),
+                Phase::Upkeep,
+                P1,
+                None,
+                Ordinary,
+                0.1,
+            ),
+            row(
+                "g: opponent's draw",
+                priority(P0),
+                Phase::Draw,
+                P1,
+                None,
+                Ordinary,
+                0.1,
+            ),
+            row(
+                "h: own upkeep, opponent holds priority",
+                priority(P1),
+                Phase::Upkeep,
+                P0,
+                None,
+                Ordinary,
+                0.1,
+            ),
+            row(
+                "i: own upkeep, own-entries-only stack",
+                priority(P0),
+                Phase::Upkeep,
+                P0,
+                Some(no_op_stack_entry(10, P0)),
+                Ordinary,
+                0.1,
+            ),
+            row(
+                "j: own upkeep, foreign stack entry",
+                priority(P0),
+                Phase::Upkeep,
+                P0,
+                Some(no_op_stack_entry(10, P1)),
+                StackResponse,
+                0.35,
+            ),
+            row(
+                "k: own main, foreign stack entry",
+                priority(P0),
+                Phase::PreCombatMain,
+                P0,
+                Some(no_op_stack_entry(10, P1)),
+                StackResponse,
+                0.35,
+            ),
+            row(
+                "l: own upkeep, target selection",
+                WaitingFor::MultiTargetSelection {
+                    player: P0,
+                    legal_targets: vec![],
+                    min_targets: 1,
+                    max_targets: 1,
+                    pending_ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        ObjectId(10),
+                        P0,
+                    )),
+                },
+                Phase::Upkeep,
+                P0,
+                None,
+                TargetSelection,
+                0.7,
+            ),
+            row(
+                "m: own upkeep, non-priority prompt",
+                WaitingFor::OrderTriggers {
+                    player: P0,
+                    triggers: Vec::new(),
+                },
+                Phase::Upkeep,
+                P0,
+                None,
+                Ordinary,
+                0.1,
+            ),
+            // CR 723.1 + CR 723.5: P0 controls P1's turn and scores P1's upkeep
+            // root; the controller is neither the active player nor the priority seat.
+            Row {
+                turn_decision_controller: Some(P0),
+                ..row(
+                    "n: P0 controlling P1's upkeep",
+                    priority(P1),
+                    Phase::Upkeep,
+                    P1,
+                    None,
+                    Ordinary,
+                    0.1,
+                )
+            },
+        ];
+
+        for row in rows {
+            let mut state = make_state();
+            state.waiting_for = row.waiting_for;
+            state.phase = row.phase;
+            state.active_player = row.active;
+            state.turn_decision_controller = row.turn_decision_controller;
+            state.stack.extend(row.stack);
+            let context = RootDecisionContext::classify(&state, P0);
+            assert_eq!(context, row.expected, "{}", row.label);
+            assert_eq!(context.tactical_weight(), row.weight, "{}", row.label);
+        }
+    }
+
+    /// A board where P0 holds priority on an empty stack in `phase` of
+    /// `active`'s turn, with a Prodigal Sorcerer-style pinger that reaches
+    /// search (its damage effect is outside the low-value pass shortcut's safe
+    /// set) and an opposing 1/5 the ping cannot kill.
+    fn timing_window_board(phase: Phase, active: PlayerId) -> (GameState, ObjectId) {
+        let mut state = make_state();
+        state.phase = phase;
+        state.active_player = active;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        let pinger = add_creature(&mut state, P0, 1, 1);
+        let abilities = engine::parser::oracle::parse_oracle_text(
+            "{T}: This creature deals 1 damage to any target.",
+            "Prodigal Sorcerer",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        )
+        .abilities;
+        let obj = state.objects.get_mut(&pinger).unwrap();
+        obj.summoning_sick = false;
+        *Arc::make_mut(&mut obj.abilities) = abilities;
+        add_creature(&mut state, P1, 1, 5);
+        for player in &mut state.players {
+            player.life = 20;
+        }
+        (state, pinger)
+    }
+
+    /// Hard, measurement mode, rung 0 only (BeamOnly): each root candidate's
+    /// score is its quiesced child eval plus `tactical_score * weight`, so root
+    /// order cannot reallocate a node budget between paired runs.
+    fn hard_rung0_config() -> AiConfig {
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        config.search.planner_mode = PlannerMode::BeamOnly;
+        config.search.determinization_samples = 0;
+        assert!(config.search.enabled, "reach-guard: Hard searches");
+        config
+    }
+
+    fn score_with(
+        state: &GameState,
+        policies: Vec<Box<dyn TacticalPolicy>>,
+        config: &AiConfig,
+    ) -> Vec<(GameAction, f64)> {
+        let mut session = AiSession::from_game(state);
+        session.policy_registry_override = Some(Arc::new(PolicyRegistry::for_tests(policies)));
+        score_candidates_with_session(state, P0, config, &Arc::new(session))
+    }
+
+    fn ping_action(pinger: ObjectId) -> GameAction {
+        GameAction::ActivateAbility {
+            source_id: pinger,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        }
+    }
+
+    /// Root-only timing verdict on one source's activations: it cannot fire in
+    /// the continuation, so a paired run isolates the root weight.
+    struct RootTimingStub {
+        source: ObjectId,
+    }
+
+    const ROOT_TIMING_STUB_DELTA: f64 = 1.2;
+
+    impl TacticalPolicy for RootTimingStub {
+        fn id(&self) -> PolicyId {
+            PolicyId::ActivationPatience
+        }
+
+        fn decision_kinds(&self) -> &'static [DecisionKind] {
+            &[DecisionKind::ActivateAbility]
+        }
+
+        fn activation(
+            &self,
+            _: &crate::features::DeckFeatures,
+            _: &GameState,
+            _: PlayerId,
+        ) -> Option<f32> {
+            Some(1.0)
+        }
+
+        fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
+            if let GameAction::ActivateAbility { source_id, .. } = &ctx.candidate.action {
+                if ctx.search_depth == SearchDepth::Root && *source_id == self.source {
+                    return PolicyVerdict::preference(
+                        -ROOT_TIMING_STUB_DELTA,
+                        PolicyReason::new("root_timing_stub"),
+                    );
+                }
+            }
+            PolicyVerdict::neutral(PolicyReason::new("root_timing_stub"))
+        }
+    }
+
+    /// phase-rs/phase#10334: a root timing verdict in the AI's own Upkeep or
+    /// Draw step on an empty stack moves the root score at 0.35; main phase,
+    /// End step and the opponent's turn keep 0.1. Driven through
+    /// `score_candidates_with_session`.
+    #[test]
+    fn own_upkeep_and_draw_root_weights_a_timing_verdict_at_0_35_elsewhere_0_1() {
+        let cfg = hard_rung0_config();
+        let rows = [
+            (Phase::Upkeep, P0, 0.35),
+            (Phase::Draw, P0, 0.35),
+            (Phase::PreCombatMain, P0, 0.1),
+            (Phase::End, P0, 0.1),
+            (Phase::Upkeep, P1, 0.1),
+        ];
+        for (phase, active, expected_w) in rows {
+            let (state, pinger) = timing_window_board(phase, active);
+            let ping = ping_action(pinger);
+            let pass = GameAction::PassPriority;
+            let control = score_with(&state, vec![], &cfg);
+            let timed = score_with(
+                &state,
+                vec![Box::new(RootTimingStub { source: pinger })],
+                &cfg,
+            );
+            for scored in [&control, &timed] {
+                assert!(
+                    scored.iter().any(|(action, _)| action == &ping)
+                        && scored.iter().any(|(action, _)| action == &pass),
+                    "{phase:?}/active {active:?}: reach-guard: ping and pass both reach search, got {scored:?}"
+                );
+            }
+            assert_eq!(
+                score_of(&control, &pass),
+                score_of(&timed, &pass),
+                "{phase:?}/active {active:?}: pairing control: the stub must not move Pass"
+            );
+            let delta = score_of(&control, &ping) - score_of(&timed, &ping);
+            assert!(
+                (delta - ROOT_TIMING_STUB_DELTA * expected_w).abs() < 1e-9,
+                "{phase:?}/active {active:?}: root margin moved by {delta}, expected {ROOT_TIMING_STUB_DELTA}x{expected_w}"
+            );
+        }
+    }
+
+    /// phase-rs/phase#10334: the real `ActivationPatiencePolicy` verdict in the
+    /// AI's own Upkeep reaches the searched root score at 0.35 of its raw
+    /// (heuristic-branch, unweighted) contribution.
+    #[test]
+    fn own_upkeep_root_carries_activation_patience_at_0_35() {
+        use crate::policies::activation_patience::ActivationPatiencePolicy;
+        use crate::policies::registry::NUDGE_MAX;
+
+        let (state, pinger) = timing_window_board(Phase::Upkeep, P0);
+        let ping = ping_action(pinger);
+        let pass = GameAction::PassPriority;
+        let with = || -> Vec<Box<dyn TacticalPolicy>> { vec![Box::new(ActivationPatiencePolicy)] };
+
+        let mut heur = hard_rung0_config();
+        heur.search.enabled = false;
+        let heur_without = score_with(&state, vec![], &heur);
+        let heur_with = score_with(&state, with(), &heur);
+        let d_h = score_of(&heur_without, &ping) - score_of(&heur_with, &ping);
+        assert!(
+            d_h > NUDGE_MAX,
+            "reach-guard: activation patience must fire at preference band or higher, got {d_h}"
+        );
+
+        let cfg = hard_rung0_config();
+        let search_without = score_with(&state, vec![], &cfg);
+        let search_with = score_with(&state, with(), &cfg);
+        assert_eq!(
+            score_of(&search_without, &pass),
+            score_of(&search_with, &pass),
+            "pairing control: patience must not move Pass"
+        );
+        let d_s = score_of(&search_without, &ping) - score_of(&search_with, &ping);
+        assert!(
+            (d_s - 0.35 * d_h).abs() < 1e-9,
+            "own-upkeep root margin {d_s} must be 0.35 x raw patience {d_h}"
+        );
     }
 }
