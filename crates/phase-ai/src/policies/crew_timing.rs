@@ -223,6 +223,7 @@ mod tests {
     use crate::context::AiContext;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::effects::counter;
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect, ResolvedAbility,

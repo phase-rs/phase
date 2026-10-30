@@ -35,12 +35,13 @@
 //! that net deliberately does not (`CopyValues` is parse-unreachable).
 //!
 //! Two narrower ad-hoc walkers remain unmigrated and are candidate future
-//! consumers: `game::coverage::ability_tree_any` (which has a `_ => {}`
-//! wildcard and omits many carriers — broadening it would change the coverage
-//! report) and `game::replacement::ability_tree_creates_tokens` (which walks
-//! only `Token` / `ChooseOneOf` / `sub_ability` / `else_ability` — broadening it
-//! would change replacement behavior). Neither is migrated here, because either
-//! migration would change behavior.
+//! consumers: [`ability_tree_any`], which lives in this module verbatim but is
+//! not built on the shared walk (it has a `_ => {}` wildcard and omits many
+//! carriers — broadening it would change the coverage report), and
+//! `game::replacement::ability_tree_creates_tokens` (which walks only `Token` /
+//! `ChooseOneOf` / `sub_ability` / `else_ability` — broadening it would change
+//! replacement behavior). Neither is migrated onto the shared walk, because
+//! either migration would change behavior.
 //!
 //! The effect-axis walk is one `define_walk!` body, expanded as the shared
 //! `&Effect` walk here and as the exclusive definition-node walk in [`nodes_mut`].
@@ -83,8 +84,8 @@
 
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ContinuousModification, CopiableValues,
-    CounterSourceRider, Effect, ReplacementDefinition, ReplacementMode, StaticDefinition,
-    TargetFilter, TriggerDefinition, VoteSubject,
+    CounterSourceRider, Effect, NestedDefinitionEdge, ReplacementDefinition, ReplacementMode,
+    StaticDefinition, TargetFilter, TriggerDefinition, VoteSubject,
 };
 use std::ops::ControlFlow;
 
@@ -1494,9 +1495,33 @@ fn quantity_ref(r: &$($mut_)? QuantityRef, v: &mut impl FnMut(Symbol<'_>)) {
         QuantityRef::CountersOn { scope, .. } => object_scope(scope, v),
         QuantityRef::ObjectCount { filter: f } => filter(f, v),
         QuantityRef::PropertyAggregate(aggregate) => {
-            if let CardTypeSetSource::Objects { filter: f } = define_granter_walk!(@source aggregate $($mut_)?) {
-                filter(f, v);
-            }
+            // CR 201.5a: member filters bind the granting incarnation exactly
+            // like object filters — including members nested in `AnyOf`
+            // unions. Omitting them leaves granter symbols in the aggregate
+            // unbound. The member walk is the bounded union authority, shared
+            // with every other population-axis consumer.
+            define_granter_walk!(@members aggregate $($mut_)?, &mut |leaf| {
+                match leaf {
+                    CardTypeSetSource::Objects { filter: f } => filter(f, v),
+                    CardTypeSetSource::TrackedSet { filter: Some(f), .. } => filter(f, v),
+                    _ => {}
+                }
+            });
+        }
+        // F2: the four direct card-type heads admit the same filtered
+        // sources — walk their members through the same bounded union
+        // authority so a sole granter symbol binds in both modes.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            define_granter_walk!(@members_of source $($mut_)?, &mut |leaf| {
+                match leaf {
+                    CardTypeSetSource::Objects { filter: f } => filter(f, v),
+                    CardTypeSetSource::TrackedSet { filter: Some(f), .. } => filter(f, v),
+                    _ => {}
+                }
+            });
         }
         _ => {}
     }
@@ -1510,6 +1535,30 @@ fn object_scope(scope: &$($mut_)? ObjectScope, v: &mut impl FnMut(Symbol<'_>)) {
     };
     (@source $aggregate:ident) => { $aggregate.source() };
     (@source $aggregate:ident mut) => { $aggregate.source_mut() };
+    (@members $aggregate:ident, $visit:expr) => {
+        $aggregate.source().try_for_each_member(
+            crate::types::ability::UNION_DEPTH_BUDGET,
+            $visit,
+        )
+    };
+    (@members $aggregate:ident mut, $visit:expr) => {
+        $aggregate.source_mut().try_for_each_member_mut(
+            crate::types::ability::UNION_DEPTH_BUDGET,
+            $visit,
+        )
+    };
+    (@members_of $source:ident, $visit:expr) => {
+        $source.try_for_each_member(
+            crate::types::ability::UNION_DEPTH_BUDGET,
+            $visit,
+        )
+    };
+    (@members_of $source:ident mut, $visit:expr) => {
+        $source.try_for_each_member_mut(
+            crate::types::ability::UNION_DEPTH_BUDGET,
+            $visit,
+        )
+    };
 }
 
 /// Shared granter-symbol walk.
@@ -1587,4 +1636,366 @@ pub(crate) fn nested_definitions_name_granter(def: &StaticDefinition) -> bool {
 /// (CR 613.1f).
 pub(crate) fn token_static_grants_to_itself(def: &StaticDefinition) -> bool {
     matches!(def.affected.as_ref(), Some(TargetFilter::SelfRef))
+}
+
+/// Walk an ability definition tree, visiting all nested `AbilityDefinition`s including
+/// those embedded in compound effects (`FlipCoins`, `RollDie`, `GrantAbility`, etc.).
+/// Returns `true` if the predicate returns `true` for any node in the tree.
+///
+/// `pub(crate)`: also the single-authority walker `PerpetualGrantModification::try_from`
+/// (`types/ability.rs`) reuses to reject a `GrantAbility` whose nested tree contains
+/// `Effect::Unimplemented` -- never reimplement tree-walking at that call site.
+pub(crate) fn ability_tree_any(
+    def: &AbilityDefinition,
+    pred: &impl Fn(&AbilityDefinition) -> bool,
+) -> bool {
+    if pred(def) {
+        return true;
+    }
+    // Standard chaining: sub_ability, else_ability, mode_abilities
+    if let Some(ref sub) = def.sub_ability {
+        if ability_tree_any(sub, pred) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if ability_tree_any(else_ab, pred) {
+            return true;
+        }
+    }
+    for mode_ab in &def.mode_abilities {
+        if ability_tree_any(mode_ab, pred) {
+            return true;
+        }
+    }
+    let mut found = false;
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        found |= ability_tree_any(payload, pred);
+    });
+    if found {
+        return true;
+    }
+    // ContinuousModification::GrantAbility inside GenericEffect
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*def.effect
+    {
+        for stat in static_abilities {
+            for modif in &stat.modifications {
+                if let ContinuousModification::GrantAbility { definition } = modif {
+                    if ability_tree_any(definition, pred) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Visits the one-level executable ability payloads embedded directly in an effect.
+///
+/// Thin adapter over [`Effect::for_each_nested_definition`], the single
+/// authority for which effects carry a direct executable payload. The traversal
+/// and its exhaustiveness guarantee live in the AST layer; this wrapper exists
+/// only so coverage's many call sites keep their `impl FnMut` call style rather
+/// than each spelling out `&mut`.
+///
+/// Because the AST-layer match is exhaustive and wildcard-free, a newly added
+/// definition-carrying `Effect` variant is a compile error there — and every
+/// consumer in `game::coverage` inherits that guarantee instead of needing its own
+/// arm list to be kept in sync by hand.
+pub(crate) fn visit_direct_effect_ability_payloads<'a>(
+    effect: &'a Effect,
+    mut visit: impl FnMut(NestedDefinitionEdge, &'a AbilityDefinition),
+) {
+    effect.for_each_nested_definition(&mut visit);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::granter_symbols;
+    use super::{each_granter_symbol, DefinitionNode};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, AggregateFunction, CardTypeSetSource, Effect,
+        ObjectProperty, PropertyAggregate, QuantityExpr, QuantityRef, SubtypeExclusion,
+        TargetFilter, TrackedAnaphorSource,
+    };
+
+    /// PR-C F5 — VISITOR. The granter walk visits a `TrackedSet` member
+    /// filter exactly like an `Objects` filter: a granting-object symbol
+    /// inside the member filter is found (and therefore bindable), and an
+    /// unfiltered set yields nothing.
+    #[test]
+    fn granter_walk_visits_tracked_set_member_filter() {
+        let define = |filter: Option<TargetFilter>| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::PropertyAggregate(
+                            PropertyAggregate::new(
+                                AggregateFunction::Sum,
+                                ObjectProperty::Toughness,
+                                CardTypeSetSource::TrackedSet {
+                                    set: TrackedAnaphorSource::ChainSet,
+                                    caused_by: None,
+                                    filter,
+                                },
+                            )
+                            .expect("statically valid property aggregate"),
+                        ),
+                    },
+                    player: TargetFilter::Controller,
+                },
+            )
+        };
+        let collect = |def: &AbilityDefinition| {
+            let mut found = false;
+            each_granter_symbol(DefinitionNode::Ability(def), &mut |symbol| {
+                found |= matches!(symbol, granter_symbols::Symbol::Filter(_));
+            });
+            found
+        };
+        assert!(
+            collect(&define(Some(TargetFilter::GrantingObject { bound: None }))),
+            "a granter symbol in the member filter must be visited"
+        );
+        assert!(
+            !collect(&define(None)),
+            "an unfiltered set yields no granter symbol"
+        );
+    }
+
+    /// M3: the granter walk descends into union members — a granter symbol in
+    /// an object filter or tracked-set member filter nested in `AnyOf` binds
+    /// exactly like a top-level one.
+    #[test]
+    fn granter_walk_visits_any_of_nested_member_filters() {
+        let filtered_objects = CardTypeSetSource::Objects {
+            filter: TargetFilter::GrantingObject { bound: None },
+        };
+        let filtered_tracked = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(TargetFilter::GrantingObject { bound: None }),
+        };
+        let unfiltered_tracked = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: None,
+        };
+        let define = |source| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::PropertyAggregate(
+                            PropertyAggregate::new(
+                                AggregateFunction::Sum,
+                                ObjectProperty::Toughness,
+                                source,
+                            )
+                            .expect("statically valid property aggregate"),
+                        ),
+                    },
+                    player: TargetFilter::Controller,
+                },
+            )
+        };
+        let collect = |def: &AbilityDefinition| {
+            let mut found = false;
+            each_granter_symbol(DefinitionNode::Ability(def), &mut |symbol| {
+                found |= matches!(symbol, granter_symbols::Symbol::Filter(_));
+            });
+            found
+        };
+        assert!(
+            collect(&define(
+                CardTypeSetSource::any_of(vec![filtered_objects, unfiltered_tracked.clone()])
+                    .expect("union holds")
+            )),
+            "a granter symbol in an object filter nested in AnyOf must be visited"
+        );
+        assert!(
+            collect(&define(
+                CardTypeSetSource::any_of(vec![unfiltered_tracked.clone(), filtered_tracked])
+                    .expect("union holds")
+            )),
+            "a granter symbol in a tracked-set member filter nested in AnyOf must be visited"
+        );
+        assert!(
+            !collect(&define(
+                CardTypeSetSource::any_of(vec![unfiltered_tracked.clone(), unfiltered_tracked])
+                    .expect("union holds")
+            )),
+            "a union of unfiltered sets yields no granter symbol"
+        );
+    }
+
+    /// F2: the granter walk visits `TrackedSet` member filters on the four
+    /// direct card-type heads exactly like `PropertyAggregate` — a sole
+    /// granting-object symbol is found (and therefore bindable), including
+    /// nested in an `AnyOf` union, and an unfiltered set yields nothing.
+    #[test]
+    fn granter_walk_visits_direct_head_member_filters() {
+        let filtered_tracked = || CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(TargetFilter::GrantingObject { bound: None }),
+        };
+        let unfiltered_tracked = || CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: None,
+        };
+        let filtered_objects = || CardTypeSetSource::Objects {
+            filter: TargetFilter::GrantingObject { bound: None },
+        };
+        let heads = |source: CardTypeSetSource| {
+            [
+                QuantityRef::DistinctCardTypes {
+                    source: source.clone(),
+                },
+                QuantityRef::SharedCardTypes {
+                    source: source.clone(),
+                },
+                QuantityRef::DistinctSubtypes {
+                    source: source.clone(),
+                    exclude: SubtypeExclusion::None,
+                    restrict: None,
+                },
+                QuantityRef::DistinctColorsAmong { source },
+            ]
+        };
+        let define = |qty: QuantityRef| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref { qty },
+                    player: TargetFilter::Controller,
+                },
+            )
+        };
+        let collect = |def: &AbilityDefinition| {
+            let mut found = false;
+            each_granter_symbol(DefinitionNode::Ability(def), &mut |symbol| {
+                found |= matches!(symbol, granter_symbols::Symbol::Filter(_));
+            });
+            found
+        };
+        for (source, expected, what) in [
+            (
+                filtered_tracked(),
+                true,
+                "a sole symbol in a TrackedSet member filter",
+            ),
+            (filtered_objects(), true, "a symbol in an Objects filter"),
+            (
+                CardTypeSetSource::any_of(vec![unfiltered_tracked(), filtered_tracked()])
+                    .expect("union holds"),
+                true,
+                "a symbol nested in an AnyOf union",
+            ),
+            (unfiltered_tracked(), false, "an unfiltered set"),
+        ] {
+            for qty in heads(source) {
+                assert_eq!(
+                    collect(&define(qty)),
+                    expected,
+                    "{what} must agree on granter-symbol discovery"
+                );
+            }
+        }
+    }
+
+    /// F2: the mutable granter walk binds a sole symbol in a direct head's
+    /// member filter to the stamped granter — and keeps a pre-existing
+    /// unrelated stamp (binding never clobbers).
+    #[test]
+    fn granter_walk_binds_direct_head_member_filters() {
+        use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+
+        let granter = ObjectIncarnationRef::of(ObjectId(5), 1);
+        let earlier = ObjectIncarnationRef::of(ObjectId(9), 4);
+        let define = |qty: QuantityRef| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref { qty },
+                    player: TargetFilter::Controller,
+                },
+            )
+        };
+        let tracked = |bound: Option<ObjectIncarnationRef>| CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(TargetFilter::GrantingObject { bound }),
+        };
+        let heads = |source: CardTypeSetSource| {
+            [
+                QuantityRef::DistinctCardTypes {
+                    source: source.clone(),
+                },
+                QuantityRef::SharedCardTypes {
+                    source: source.clone(),
+                },
+                QuantityRef::DistinctSubtypes {
+                    source: source.clone(),
+                    exclude: SubtypeExclusion::None,
+                    restrict: None,
+                },
+                QuantityRef::DistinctColorsAmong { source },
+            ]
+        };
+        let bound_of = |def: &AbilityDefinition| {
+            let Effect::GainLife {
+                amount: QuantityExpr::Ref { qty },
+                ..
+            } = &*def.effect
+            else {
+                panic!("GainLife shape required");
+            };
+            let source = match qty {
+                QuantityRef::DistinctCardTypes { source }
+                | QuantityRef::SharedCardTypes { source }
+                | QuantityRef::DistinctSubtypes { source, .. }
+                | QuantityRef::DistinctColorsAmong { source } => source,
+                other => panic!("direct head required, found {other:?}"),
+            };
+            let CardTypeSetSource::TrackedSet {
+                filter: Some(TargetFilter::GrantingObject { bound }),
+                ..
+            } = source
+            else {
+                panic!("filtered TrackedSet required");
+            };
+            *bound
+        };
+        let stamp = |def: &mut AbilityDefinition| {
+            super::granter_symbols_mut::each_node(
+                super::DefinitionNodeMut::Ability(def),
+                &mut |node| {
+                    super::granter_symbols_mut::node_fields(
+                        node,
+                        &mut super::granter_symbols_mut::bind(granter),
+                    )
+                },
+            )
+        };
+        for qty in heads(tracked(None)) {
+            let mut def = define(qty);
+            stamp(&mut def);
+            assert_eq!(bound_of(&def), Some(granter));
+        }
+        for qty in heads(tracked(Some(earlier))) {
+            let mut def = define(qty);
+            stamp(&mut def);
+            assert_eq!(
+                bound_of(&def),
+                Some(earlier),
+                "binding must not clobber an unrelated stamp"
+            );
+        }
+    }
 }

@@ -5940,6 +5940,7 @@ pub(crate) fn test_trigger_source_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::game_object::{AttachTarget, RoomDoor};
     use crate::game::zones::create_object;
     use crate::parser::oracle_trigger::parse_trigger_line;

@@ -1479,12 +1479,16 @@ pub fn candidate_actions_broad_with_probe(
                 } else {
                     vec![*count]
                 };
-            // Engine-side beam cap for *combinatorial* enumerations only. Every
-            // candidate returned here flows into
-            // `PlannerServices::validate_candidates`, which clones state +
-            // applies the action per candidate, so a count=4 search against an
-            // 80-card library would produce ~C(80,4) ≈ 1.6M combinations and
-            // stall validation for hours. The cap is constraint-aware so
+            // Engine-side beam cap for *combinatorial* enumerations only. The AI
+            // scores every candidate returned here one selection at a time, and
+            // `SimulationFilter` and phase-ai's planner legality gate simulate
+            // each one `structurally_valid_prompt_answer` defers. The gate
+            // simulates every one on phase-ai's score-only route, in each
+            // determinized sample, and when phase-ai scores a decision again
+            // after an answer the gate admitted without simulating it fails. So
+            // a count=4 search against an 80-card library would produce
+            // ~C(80,4) ≈ 1.6M combinations and stall the AI for hours.
+            // The cap is constraint-aware so
             // distinct-name searches collapse duplicate-named entries before
             // combinatorial explosion (Gifts Ungiven against an 80-card pool with
             // 8 distinct names → 8 candidate ids, C(8,4)=70 legal combos).
@@ -6186,9 +6190,13 @@ fn station_target_candidates(
 /// duplicates are inert because they cannot legally appear in any chosen set
 /// alongside their twin), so the cap collapses sized libraries with many
 /// repeated names down to the unique-name set first. The cap exists strictly
-/// to bound `PlannerServices::validate_candidates`, which clones state per
-/// candidate; without it, multi-card searches against large libraries stall
-/// the AI for hours. Player submissions are validated by the engine
+/// to bound the AI's per-selection work (scoring every issued selection, and
+/// simulating each one `structurally_valid_prompt_answer` defers, or every one
+/// on phase-ai's score-only route, in each determinized sample, and when
+/// phase-ai scores a decision again after an answer its planner legality gate
+/// admitted without simulating it fails); without it,
+/// multi-card searches against large libraries stall the AI for hours. Player
+/// submissions are validated by the engine
 /// submission guard, not by this enumeration, so capping here cannot make a
 /// legal play unsubmittable — it only narrows the AI's *considered* set.
 fn cap_search_choice_pool(

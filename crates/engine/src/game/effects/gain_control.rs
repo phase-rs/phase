@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     ContinuousModification, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
     TargetFilter, TargetRef,

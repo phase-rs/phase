@@ -88,7 +88,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
-use crate::types::events::{ClashResult, PlayerActionKind};
+use crate::types::event_kinds::{ClashResult, PlayerActionKind};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::{Phase, PhaseGroup};
@@ -647,7 +647,7 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
 /// mirror image of the lying green, and just as dishonest.
 fn cost_x_sibling_slot_still_unbound(def: &crate::types::ability::AbilityDefinition) -> bool {
     use crate::types::ability::AbilityCondition;
-    use crate::types::game_state::TargetSelectionConstraint;
+    use crate::types::game_state_kinds::TargetSelectionConstraint;
 
     fn condition_has_bare_x(cond: &AbilityCondition) -> bool {
         match cond {
@@ -735,7 +735,7 @@ fn cost_x_sibling_slot_still_unbound(def: &crate::types::ability::AbilityDefinit
 /// it is correct at both selection time and resolution time.
 fn rewrite_cost_x_in_ability(def: &mut crate::types::ability::AbilityDefinition) {
     use super::oracle_replacement::rewrite_variable_x_to_cost_x_paid;
-    use crate::types::game_state::TargetSelectionConstraint;
+    use crate::types::game_state_kinds::TargetSelectionConstraint;
 
     if let Some(cond) = def.condition.as_mut() {
         rewrite_cost_x_in_condition(cond);
@@ -4447,7 +4447,7 @@ fn parse_illegal_targets_disposition(input: &str) -> OracleResult<'_, IllegalTar
 /// sentence unit of the body. Any other position returns the text unchanged
 /// with the default disposition (fail closed: the sentence stays in the chain
 /// as a strict failure).
-fn extract_illegal_targets_disposition(text: &str) -> (String, IllegalTargetsDisposition) {
+pub fn extract_illegal_targets_disposition(text: &str) -> (String, IllegalTargetsDisposition) {
     let Some(last_unit) = split_sentence_units(text).pop() else {
         return (text.to_string(), IllegalTargetsDisposition::DoesNotResolve);
     };
@@ -6164,9 +6164,23 @@ fn substitute_another_in_aggregate_source(source: &CardTypeSetSource) -> CardTyp
                 .collect(),
         )
         .expect("rewriting preserves union arity"),
-        CardTypeSetSource::TrackedSet { .. }
-        | CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource => source.clone(),
+        CardTypeSetSource::TrackedSet {
+            set,
+            caused_by,
+            filter,
+        } => CardTypeSetSource::TrackedSet {
+            set: *set,
+            caused_by: *caused_by,
+            filter: filter.as_ref().map(substitute_another_in_filter),
+        },
+        // CR 608.2c + CR 115.1: the slot axis carries no `Another` — the
+        // substitution above only rewrites `Typed`/`Not`/`And`/`Or` shapes, so
+        // a targeted-objects population passes through unchanged, provably
+        // (no shape exists that `substitute_another_in_filter` could alter
+        // into a different slot).
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TargetedObjects { .. } => source.clone(),
     }
 }
 
@@ -24295,6 +24309,39 @@ fn parse_control_none_filter(text: &str) -> Option<TargetFilter> {
 #[path = "oracle_trigger_tests.rs"]
 mod tests;
 
+/// Test helpers shared by `oracle_trigger_tests.rs` and the tests relocated out of it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers {
+    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
+
+    /// Verbatim from Scryfall (`cards/named?exact=Gilded%20Drake`).
+    pub const GILDED_DRAKE_TEXT: &str =
+        "Flying\nWhen this creature enters, exchange control of this \
+    creature and up to one target creature an opponent controls. If you don't or can't make an \
+    exchange, sacrifice this creature. This ability still resolves if its target becomes illegal.";
+
+    /// Parse `text` through the whole-card pipeline as a Drake creature and return
+    /// its single trigger's execute.
+    pub fn drake_shaped_trigger_execute(text: &str) -> AbilityDefinition {
+        let parsed = parse_oracle_text(
+            text,
+            "Gilded Drake",
+            &[],
+            &["Creature".to_string()],
+            &["Drake".to_string()],
+        );
+        let [trigger] = parsed.triggers.as_slice() else {
+            panic!("expected exactly one trigger, got {:?}", parsed.triggers);
+        };
+        trigger
+            .execute
+            .as_deref()
+            .cloned()
+            .expect("the trigger has an execute")
+    }
+}
+
 /// Snapshot tests locking current trigger parser output before the IR split.
 /// These verify behavioral parity: identical snapshots before and after the
 /// `parse_trigger_line_with_index_ir` / `lower_trigger_ir` refactor.
@@ -25443,36 +25490,6 @@ mod attached_set_trigger_tests {
             FilterProp::AttachedTo {
                 to: AttachmentReferent::Host { filter }
             } if **filter == TargetFilter::Typed(TypedFilter::creature())
-        ));
-    }
-
-    /// CR 109.2: "a creature card" keeps its `Card` qualifier on a
-    /// becomes-target subject, while "a creature" stays a bare permanent type.
-    #[test]
-    fn becomes_target_subject_keeps_card_qualifier() {
-        let card = parse_trigger_line(
-            "Whenever a creature card becomes the target of a spell or ability, draw a card.",
-            "Test",
-        );
-        let Some(TargetFilter::Typed(typed)) = &card.valid_card else {
-            panic!("expected typed subject, got {:?}", card.valid_card);
-        };
-        assert!(typed.type_filters.contains(&TypeFilter::Card));
-        assert!(typed.type_filters.contains(&TypeFilter::Creature));
-        assert!(!crate::game::filter::filter_denotes_battlefield_permanent(
-            card.valid_card.as_ref().unwrap()
-        ));
-
-        let bare = parse_trigger_line(
-            "Whenever a creature becomes the target of a spell or ability, draw a card.",
-            "Test",
-        );
-        let Some(TargetFilter::Typed(typed)) = &bare.valid_card else {
-            panic!("expected typed subject, got {:?}", bare.valid_card);
-        };
-        assert!(!typed.type_filters.contains(&TypeFilter::Card));
-        assert!(crate::game::filter::filter_denotes_battlefield_permanent(
-            bare.valid_card.as_ref().unwrap()
         ));
     }
 }

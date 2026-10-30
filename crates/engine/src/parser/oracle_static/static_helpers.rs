@@ -555,7 +555,7 @@ pub(crate) fn try_parse_impose_additional_cost(
 pub(crate) fn try_parse_cost_modification(
     text: &str,
     lower: &str,
-    casting_as_variant: Option<crate::types::game_state::CastingVariant>,
+    casting_as_variant: Option<crate::types::game_state_kinds::CastingVariant>,
 ) -> Option<StaticDefinition> {
     let original_text = text;
     let (cost_text, leading_gate) =

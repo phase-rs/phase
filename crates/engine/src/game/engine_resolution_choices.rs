@@ -1,4 +1,5 @@
 // engine-citation-gate: symbol anchors only
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::game_state::RandomDraw;
 use std::collections::{HashMap, HashSet};
 
@@ -2522,6 +2523,10 @@ pub(super) fn handle_resolution_choice(
                 pending,
                 ignore_indices,
                 events,
+                // CR 608.2c: suspension-resume paths have no ability in
+                // scope; the parked frame's targets feed the modifier read
+                // through the parked-targets channel.
+                None,
             );
             // CR 608.2c: drain under the owner before restoring the caller.
             let result = next.map(|next| match next {
@@ -15862,7 +15867,7 @@ mod random_result_resolution_context_tests {
                             let pending = exact.take_active_die_roll_frame().unwrap().unwrap();
                             let ignored = pending.forced_ignored.clone();
                             crate::game::triggers::push_resolving_trigger_context(&mut exact, pending.trigger_context.as_ref().unwrap());
-                            assert_eq!(effects::roll_die::resume_after_ignore(&mut exact, pending, ignored, &mut vec![]), Err(EffectError::ChainTooDeep));
+                            assert_eq!(effects::roll_die::resume_after_ignore(&mut exact, pending, ignored, &mut vec![], None), Err(EffectError::ChainTooDeep));
                         }
                         let mut events = vec![];
                         let result = resume(&mut state, boundary, &mut events);

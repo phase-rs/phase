@@ -3,6 +3,7 @@
 use engine::ai_support::{
     certify_fetch_then_cast, validated_candidate_actions_for_semantic_owner, CandidateAction,
 };
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;

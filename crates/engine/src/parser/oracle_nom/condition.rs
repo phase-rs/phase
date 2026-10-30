@@ -37,8 +37,8 @@ use crate::types::ability::{
     StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::events::PlayerActionKind;
-use crate::types::game_state::DayNight;
+use crate::types::event_kinds::PlayerActionKind;
+use crate::types::game_state_kinds::DayNight;
 use crate::types::keywords::Keyword;
 use crate::types::zones::Zone;
 
@@ -333,6 +333,7 @@ fn parse_creatures_with_total_power_or_greater(input: &str) -> OracleResult<'_, 
                         CardTypeSetSource::TrackedSet {
                             set: TrackedAnaphorSource::TriggeringBatch,
                             caused_by: None,
+                            filter: None,
                         },
                     )
                     .expect("object property aggregate is valid"),
@@ -7923,7 +7924,7 @@ fn parse_spell_history_condition(input: &str) -> OracleResult<'_, StaticConditio
         // for its warp cost this turn.
         value(
             StaticCondition::SpellCastWithVariantThisTurn {
-                variant: crate::types::game_state::CastingVariant::Warp,
+                variant: crate::types::game_state_kinds::CastingVariant::Warp,
             },
             tag("a spell was warped this turn"),
         ),
@@ -24890,6 +24891,7 @@ mod tests {
                             CardTypeSetSource::TrackedSet {
                                 set: TrackedAnaphorSource::TriggeringBatch,
                                 caused_by: None,
+                                filter: None,
                             },
                         )
                         .expect("valid aggregate"),
@@ -25273,7 +25275,7 @@ mod tests {
         assert_eq!(
             c,
             StaticCondition::SpellCastWithVariantThisTurn {
-                variant: crate::types::game_state::CastingVariant::Warp,
+                variant: crate::types::game_state_kinds::CastingVariant::Warp,
             }
         );
     }
@@ -25340,7 +25342,7 @@ mod tests {
                 assert_eq!(
                     conditions[1],
                     StaticCondition::SpellCastWithVariantThisTurn {
-                        variant: crate::types::game_state::CastingVariant::Warp,
+                        variant: crate::types::game_state_kinds::CastingVariant::Warp,
                     }
                 );
             }

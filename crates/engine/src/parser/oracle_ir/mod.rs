@@ -5,7 +5,7 @@
 //! - `doc`: Document-level IR types (OracleDocIr, OracleItemIr)
 
 pub(crate) mod ast;
-pub(crate) mod context;
+pub mod context;
 pub mod diagnostic;
 pub(crate) mod doc;
 pub(crate) mod effect_chain;
