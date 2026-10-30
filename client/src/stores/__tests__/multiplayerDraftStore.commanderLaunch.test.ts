@@ -707,8 +707,10 @@ describe("multiplayerDraftStore Commander launch", () => {
 
     expect(sendCommanderLaunches).toHaveBeenCalledTimes(1);
     const sendOrder = invitationsEmitted.mock.invocationCallOrder[0];
-    // Engine indices must be claimed before invitations, not before entering
-    // the async finalizer that owns those assignments.
+    // Wiring check only: the store's installer reaches `applySeatMutation` for
+    // every engine seat, and the game starts after the finalizer resolves.
+    // The fake orders installs before `invitationsEmitted`; the production
+    // ordering proof is commanderRoster R2 and the host finalization tests.
     const mutationOrders = transport.applySeatMutation.mock.invocationCallOrder;
     expect(mutationOrders).toHaveLength(3);
     expect(Math.max(...mutationOrders)).toBeLessThan(sendOrder);

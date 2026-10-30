@@ -2300,6 +2300,10 @@ export const useMultiplayerDraftStore = create<
       // Bind current pod metadata and deck provenance after signalling. Published
       // connectivity can still lag transport callbacks; the host finalizer owns
       // the recipient/engine split after preparation and initialization.
+      // `seats.length` cannot change across this window (a Complete pod's seat
+      // list is fixed), so the ceiling refusal above stays valid; were that
+      // ever untrue, the constructor's `P2P_PLAYER_COUNT` throw lands in the
+      // catch below as a banner.
       const launchView = get().view;
       // The pod itself can end inside that window: `leave`/`reset` null the
       // view. Both now abort this launch too, so the catch's `signal.aborted`
@@ -2508,10 +2512,11 @@ export const useMultiplayerDraftStore = create<
       console.error("[multiplayerDraftStore] launchCommanderGame failed:", err);
       // The launch state goes with it. This catch covers the WHOLE try, so on
       // most of its paths — `hostRoom`, `commanderSeatDecks`, `initialize()`,
-      // the seat mutations — `commanderLaunch` was never written and the clear
-      // is a harmless no-op. It is load-bearing only past
-      // `sendCommanderLaunches`, where the host's own seat-0 local emit has
-      // already written it: `disposeMatchAdapter`'s clear cannot help there,
+      // the engine-seat installs inside `sendCommanderLaunches` —
+      // `commanderLaunch` was never written and the clear is a harmless no-op.
+      // It is load-bearing once `sendCommanderLaunches` has made the host's own
+      // seat-0 local emit, including a rejected invitation send that it throws
+      // after that emit: `disposeMatchAdapter`'s clear cannot help there,
       // because its opening `matchAdapter` guard excludes this path —
       // `matchAdapter` is `set` only on the success path below. Left set, the
       // host would carry an error banner AND a permanently pending launch.

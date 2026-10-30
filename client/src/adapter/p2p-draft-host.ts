@@ -2646,6 +2646,9 @@ export class P2PDraftHost {
    * Provisional deck-preparation split from the captured view. Bot kind binds
    * deck provenance; connectivity does not bind the eventual recipient set.
    * `sendCommanderLaunches` finalizes that set against current transports.
+   * `is_bot` is load-bearing: the engine reports `connected: true` unconditionally
+   * for bot seats (`draft-core/src/view.rs`, `DraftSeat::Bot => true`), so a
+   * `connected`-only test would prepare bots as live humans.
    */
   private commanderSeatPlan(view: DraftPlayerView): {
     liveHumanSeats: number[];
@@ -2713,6 +2716,8 @@ export class P2PDraftHost {
 
   /**
    * Finalize transport participation using the prepared decks, then invite.
+   * Every engine seat is installed BEFORE any invitation: a guest invited early
+   * takes the first waiting game seat, and a later `SetKind` on that index kicks it.
    * Engine assignments are latched for this attempt, including reconnects
    * during installation. Each missing candidate is removed once, so rescans
    * after assignment awaits are bounded by the pod size.
@@ -2734,11 +2739,7 @@ export class P2PDraftHost {
     let engineSeats: Array<{ seat: number; deck: DraftDeckPayload }> = [];
     for (const entry of [...decks.liveSeatDecks, ...decks.engineSeatDecks]) {
       if (entry.seat === 0) continue;
-      if (
-        this.isBotSeatFromView(view, entry.seat) ||
-        !this.guestSessions.has(entry.seat) ||
-        this.disconnectedSeats.has(entry.seat)
-      ) {
+      if (this.isBotSeatFromView(view, entry.seat) || !this.deliverableSession(entry.seat)) {
         engineSeats.push(entry);
       } else {
         candidates.set(entry.seat, entry.deck);
@@ -2754,8 +2755,8 @@ export class P2PDraftHost {
       engineSeats = [];
       endpoints.length = 0;
       for (const [seat, deck] of candidates) {
-        const session = this.guestSessions.get(seat);
-        if (!session || this.disconnectedSeats.has(seat)) {
+        const session = this.deliverableSession(seat);
+        if (!session) {
           candidates.delete(seat);
           engineSeats.push({ seat, deck });
         } else {
@@ -2773,13 +2774,18 @@ export class P2PDraftHost {
         roomCode,
         localDeck: deck,
         playerCount: view.seats.length,
+        // CR 903.13f(3): carry the host's own value through. The view's field
+        // is optional while the wire's is required-nullable, so `?? null` is
+        // the required narrowing — NOT `?? []`, which would assert "the draft
+        // contained zero sets" where the host already knows the answer.
         draftSetCodes: view.draft_set_codes ?? null,
       },
     });
     const sends = endpoints.map(({ deck, session }) => session.send(launchFor(deck)));
     const hostDeck =
       decks.liveSeatDecks.find(({ seat }) => seat === 0)?.deck ??
-      decks.engineSeatDecks.find(({ seat }) => seat === 0)!.deck;
+      decks.engineSeatDecks.find(({ seat }) => seat === 0)?.deck;
+    if (!hostDeck) throw new Error("Seat 0 has no prepared Commander deck");
     this.sendToSeat(0, launchFor(hostDeck));
     const results = await Promise.allSettled(sends);
     signal.throwIfAborted();
@@ -3489,6 +3495,12 @@ export class P2PDraftHost {
     this.emit({ type: "bo3GameStarted", matchId, gameNumber: state.gameNumber });
   }
 
+  /** Single delivery-eligibility authority shared by the Commander finalizer and sendToSeat. */
+  private deliverableSession(seat: number): DraftPeerSession | undefined {
+    const session = this.guestSessions.get(seat);
+    return session && !this.disconnectedSeats.has(seat) ? session : undefined;
+  }
+
   private sendToSeat(seat: number, msg: DraftP2PMessage): void {
     if (seat === 0) {
       // Host is seat 0 — emit event directly instead of sending over network
@@ -3538,8 +3550,8 @@ export class P2PDraftHost {
       }
       return;
     }
-    const session = this.guestSessions.get(seat);
-    if (session && !this.disconnectedSeats.has(seat)) {
+    const session = this.deliverableSession(seat);
+    if (session) {
       session.send(msg);
     }
   }

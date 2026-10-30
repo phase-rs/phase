@@ -305,6 +305,10 @@ describe("Commander roster finalization through the real store and host", () => 
 
   it("surfaces a selected send rejection and tears down instead of waiting for a full room", async () => {
     const { target } = await openPod();
+    const hostLaunch = vi.fn();
+    (probe.host as P2PDraftHost).onEvent((event) => {
+      if (event.type === "commanderLaunch") hostLaunch(event.launch);
+    });
     target!.send.mockImplementation(async (message) => {
       if (message.type === "draft_commander_launch") throw new Error("launch transport closed");
     });
@@ -313,6 +317,8 @@ describe("Commander roster finalization through the real store and host", () => 
     expect(launches(target!)).toHaveLength(1);
     expect(probe.terminate).toHaveBeenCalledOnce();
     expect(useMultiplayerDraftStore.getState().error).toContain("launch transport closed");
+    expect(hostLaunch).toHaveBeenCalledWith(expect.objectContaining({ localDeck: expectedDeck(0) }));
+    expect(useMultiplayerDraftStore.getState().commanderLaunch).toBeNull();
     expect(probe.start).not.toHaveBeenCalled();
     expect(navigate).not.toHaveBeenCalled();
   });
