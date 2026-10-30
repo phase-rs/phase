@@ -6008,9 +6008,14 @@ pub(crate) fn grown_life_deltas(prior: &GameState, current: &GameState) -> Vec<(
             .find(|p| p.id == after.id)
             .map(|p| p.life)
             .unwrap_or(after.life);
-        let gained = after.life - before_life;
+        // CR 119.3: the gain between two `i32` totals can pass `i32::MAX`; exact in
+        // `i64`, and it always fits `u32` (at most `u32::MAX`, `i32::MIN` → `i32::MAX`).
+        let gained = i64::from(after.life) - i64::from(before_life);
         if gained > 0 {
-            deltas.push((after.id, gained as u32));
+            deltas.push((
+                after.id,
+                crate::game::arithmetic::i64_to_u32_saturating(gained),
+            ));
         }
     }
     deltas
@@ -15478,6 +15483,26 @@ mod tests {
         shrink.players[0].life -= 2;
         assert!(
             grown_life_deltas(&prior, &shrink).is_empty(),
+            "a life LOSS yields no batched gain δ"
+        );
+    }
+
+    /// CR 119.3: a gain from `i32::MIN` to `i32::MAX` is `u32::MAX`, past the
+    /// `i32` range; the δ is computed exactly instead of overflowing. The loss in
+    /// the other direction over the same states is still no gain.
+    #[test]
+    fn grown_life_delta_across_the_whole_i32_range_is_exact() {
+        let mut low = GameState::new_two_player(7);
+        let mut high = low.clone();
+        low.players[0].life = i32::MIN;
+        high.players[0].life = i32::MAX;
+
+        assert_eq!(
+            grown_life_deltas(&low, &high),
+            vec![(high.players[0].id, u32::MAX)]
+        );
+        assert!(
+            grown_life_deltas(&high, &low).is_empty(),
             "a life LOSS yields no batched gain δ"
         );
     }

@@ -3820,7 +3820,8 @@ fn parse_for_each_one_life_changed_this_turn(input: &str) -> OracleResult<'_, Qu
 /// multiplier in a "for each 1 life you gained/lost" clause on a
 /// `Whenever you gain/lose life` trigger. The triggering `GameEvent::LifeChanged`
 /// carries the gained/lost magnitude, which `EventContextAmount` resolves via
-/// `extract_amount_from_event` (`game/targeting.rs`: `LifeChanged` => `amount.abs()`).
+/// `extract_amount_from_event` (`game/targeting.rs`: `LifeChanged` => the amount's
+/// magnitude, saturated at `i32::MAX`).
 /// The leading "1 "/"one " disambiguates from the duration class "life you
 /// gained/lost this turn" (`LifeGainedThisTurn`/`LifeLostThisTurn`), whose
 /// "for each 1 life ... this turn" form `parse_for_each_one_life_changed_this_turn`

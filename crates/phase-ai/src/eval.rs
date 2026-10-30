@@ -269,10 +269,12 @@ pub fn strategic_intent(state: &GameState, player: PlayerId) -> StrategicIntent 
         .min()
         .unwrap_or(i32::MAX);
     let my_life = state.players[player.0 as usize].life;
+    // The sum of two or more `i32` totals can pass `i32::MAX`; the `f64` sum is
+    // exact for every in-range total.
     let avg_opp_life = opponents
         .iter()
-        .map(|&opp| state.players[opp.0 as usize].life)
-        .sum::<i32>() as f64
+        .map(|&opp| f64::from(state.players[opp.0 as usize].life))
+        .sum::<f64>()
         / opponents.len() as f64;
 
     if min_opp_life > 0 && my_power >= min_opp_life {
@@ -2576,6 +2578,24 @@ mod tests {
             strategic_intent(&state, PlayerId(0)),
             StrategicIntent::PreserveAdvantage
         );
+    }
+
+    /// The average opponent life sums two or more `i32` totals; past
+    /// `i32::MAX` the sum is still exact, so the comparison with our own life
+    /// is unchanged by the size of the totals.
+    #[test]
+    fn strategic_intent_averages_opponent_life_past_i32_sum() {
+        let intent_at = |my_life: i32| {
+            let mut state =
+                GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+            state.players[0].life = my_life;
+            state.players[1].life = 2_000_000_000;
+            state.players[2].life = 2_000_000_000;
+            strategic_intent(&state, PlayerId(0))
+        };
+
+        assert_eq!(intent_at(1_900_000_000), StrategicIntent::Develop);
+        assert_eq!(intent_at(2_100_000_000), StrategicIntent::PreserveAdvantage);
     }
 
     #[test]

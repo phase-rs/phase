@@ -97,7 +97,11 @@ pub fn compute_preview_diff(before: &GameState, after: &GameState) -> PreviewDif
             if a.life != b.life {
                 life_deltas.push(LifeDelta {
                     player: a.id,
-                    delta: a.life - b.life,
+                    // Two `i32` totals can differ by more than `i32` holds; the
+                    // reported delta saturates at the field's limits.
+                    delta: crate::game::arithmetic::i64_to_i32_saturating(
+                        i64::from(a.life) - i64::from(b.life),
+                    ),
                 });
             }
         }
@@ -330,6 +334,109 @@ mod tests {
             }]
         );
         assert!(diff.created.is_empty());
+    }
+
+    /// Two life totals at opposite `i32` limits differ by more than `i32`
+    /// holds; the reported delta saturates at the limit in the change's
+    /// direction instead of overflowing.
+    #[test]
+    fn life_delta_between_opposite_i32_limits_saturates() {
+        let mut low = GameState::new_two_player(1);
+        let mut high = low.clone();
+        low.players[0].life = i32::MIN;
+        high.players[0].life = i32::MAX;
+
+        assert_eq!(
+            compute_preview_diff(&low, &high).life_deltas,
+            vec![LifeDelta {
+                player: PlayerId(0),
+                delta: i32::MAX,
+            }]
+        );
+        assert_eq!(
+            compute_preview_diff(&high, &low).life_deltas,
+            vec![LifeDelta {
+                player: PlayerId(0),
+                delta: i32::MIN,
+            }]
+        );
+    }
+
+    /// CR 510.2 + CR 119.3: previewing the pass that deals combat damage from
+    /// two `i32::MAX`-power attackers to a player at `i32::MAX` life reports a
+    /// loss of 2^32 - 2, saturated at `i32::MIN`. The real pass applies each
+    /// source's loss separately (MAX, then 0, then -MAX).
+    #[test]
+    fn combat_preview_life_delta_past_i32_saturates() {
+        use crate::game::combat::AttackTarget;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P1, i32::MAX);
+        let first = scenario.add_vanilla(P0, i32::MAX, 1);
+        let second = scenario.add_vanilla(P0, i32::MAX, 1);
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[
+                (first, AttackTarget::Player(P1)),
+                (second, AttackTarget::Player(P1)),
+            ])
+            .expect("both creatures attack P1");
+
+        for (phase, priority) in [
+            (Phase::DeclareAttackers, P0),
+            (Phase::DeclareAttackers, P1),
+            (Phase::DeclareBlockers, P0),
+        ] {
+            assert_eq!(runner.state().phase, phase);
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == priority),
+                "expected {priority:?}'s priority in {phase:?}: {:?}",
+                runner.state().waiting_for
+            );
+            let preview = preview_action(runner.state(), priority, &GameAction::PassPriority)
+                .expect("an earlier pass previews");
+            assert!(preview.life_deltas.is_empty());
+            runner
+                .act(GameAction::PassPriority)
+                .expect("priority passes");
+        }
+
+        assert_eq!(runner.state().phase, Phase::DeclareBlockers);
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+            "P1's pass is the last before combat damage: {:?}",
+            runner.state().waiting_for
+        );
+        let diff = preview_action(runner.state(), P1, &GameAction::PassPriority)
+            .expect("the damage pass previews");
+        assert_eq!(
+            diff.life_deltas,
+            vec![LifeDelta {
+                player: P1,
+                delta: i32::MIN,
+            }]
+        );
+
+        // Reach guard: the real pass deals both attackers' damage.
+        let result = runner
+            .act(GameAction::PassPriority)
+            .expect("the damage pass applies");
+        assert_eq!(runner.state().players[1].life, -i32::MAX);
+        let losses: Vec<i32> = result
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::LifeChanged {
+                    player_id, amount, ..
+                } if *player_id == P1 => Some(*amount),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(losses, vec![-i32::MAX, -i32::MAX]);
     }
 
     #[test]

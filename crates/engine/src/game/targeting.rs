@@ -3230,7 +3230,7 @@ pub(crate) fn extract_player_from_event(
     }
 }
 
-/// CR 603.7c: Extract a numeric amount from a trigger event.
+/// CR 603.2: Extract a numeric amount from the event that matched a triggered ability's trigger event.
 /// Returns the quantity relevant to the event type (damage dealt, life changed, etc.).
 pub(crate) fn extract_amount_from_event(event: &crate::types::events::GameEvent) -> Option<i32> {
     use crate::types::events::GameEvent;
@@ -3242,7 +3242,11 @@ pub(crate) fn extract_amount_from_event(event: &crate::types::events::GameEvent)
         // class (Phyrexian Hydra, Vigor, Stormwild Capridor, Hostility) when the
         // post-replacement follow-up resolves.
         GameEvent::DamagePrevented { amount, .. } => Some(*amount as i32),
-        GameEvent::LifeChanged { amount, .. } => Some(amount.abs()),
+        // CR 119.3: a life change's amount is its magnitude. A loss may carry
+        // `i32::MIN`, whose magnitude does not fit `i32`; it saturates at `i32::MAX`.
+        GameEvent::LifeChanged { amount, .. } => Some(
+            crate::game::arithmetic::u32_to_i32_saturating(amount.unsigned_abs()),
+        ),
         GameEvent::CardsDrawn { count, .. } => Some(*count as i32),
         GameEvent::CounterAdded { count, .. } => Some(*count as i32),
         GameEvent::CounterRemoved { count, .. } => Some(*count as i32),
@@ -4471,6 +4475,29 @@ mod tests {
             source_incarnations: vec![],
         };
         assert_eq!(extract_amount_from_event(&event), Some(7));
+    }
+
+    /// CR 119.3 + CR 603.2: a life change's trigger amount ("that much") is its
+    /// magnitude. A loss of `i32::MIN` has a magnitude past `i32::MAX`, so the
+    /// amount saturates there instead of overflowing.
+    #[test]
+    fn extract_amount_from_life_changed_is_its_magnitude_at_both_i32_limits() {
+        let life_changed = |amount: i32| GameEvent::LifeChanged {
+            player_id: PlayerId(1),
+            amount,
+            new_total: crate::types::events::LifeTotalReading::default(),
+        };
+        assert_eq!(
+            extract_amount_from_event(&life_changed(i32::MIN)),
+            Some(i32::MAX)
+        );
+        assert_eq!(
+            extract_amount_from_event(&life_changed(-i32::MAX)),
+            Some(i32::MAX)
+        );
+        assert_eq!(extract_amount_from_event(&life_changed(-3)), Some(3));
+        assert_eq!(extract_amount_from_event(&life_changed(3)), Some(3));
+        assert_eq!(extract_amount_from_event(&life_changed(0)), Some(0));
     }
 
     #[test]

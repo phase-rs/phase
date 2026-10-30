@@ -172,7 +172,7 @@ fn resolve_double_life(
         if crate::game::effects::life::apply_life_gain(
             state,
             player_id,
-            current_life as u32,
+            current_life.unsigned_abs(),
             events,
         )
         .is_err()
@@ -180,11 +180,12 @@ fn resolve_double_life(
             return Ok(());
         }
     } else if current_life < 0 {
-        // CR 701.10d: Lose |current_life| additional life so the new total is 2x.
+        // CR 701.10d: Lose |current_life| additional life so the new total is 2x;
+        // `unsigned_abs` keeps `i32::MIN`'s magnitude (2^31) representable.
         if crate::game::effects::life::apply_life_loss(
             state,
             player_id,
-            (-current_life) as u32,
+            current_life.unsigned_abs(),
             events,
         )
         .is_err()
@@ -1083,6 +1084,57 @@ mod tests {
 
         // CR 701.10d: 15 life → 30 life
         assert_eq!(state.players[0].life, 30);
+    }
+
+    /// CR 701.10d: doubling a negative life total loses its magnitude, so the
+    /// new total is twice the old one.
+    #[test]
+    fn double_negative_life_total_loses_its_magnitude() {
+        let mut state = GameState::default();
+        state.players[0].life = -7;
+
+        let mut events = Vec::new();
+        let ability = make_double_ability(
+            DoubleTarget::LifeTotal,
+            TargetFilter::Controller,
+            PlayerId(0),
+            vec![],
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].life, -14);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::LifeChanged { player_id, amount: -7, .. } if *player_id == PlayerId(0)
+        )));
+    }
+
+    /// CR 701.10d: the magnitude of a life total of `i32::MIN` is 2^31, which
+    /// does not fit `i32`; doubling takes it as a `u32` instead of overflowing
+    /// on negation, and the effect resolves.
+    #[test]
+    fn double_life_total_at_i32_min_takes_the_magnitude_without_overflow() {
+        let mut state = GameState::default();
+        state.players[0].life = i32::MIN;
+
+        let mut events = Vec::new();
+        let ability = make_double_ability(
+            DoubleTarget::LifeTotal,
+            TargetFilter::Controller,
+            PlayerId(0),
+            vec![],
+        );
+
+        assert_eq!(resolve(&mut state, &ability, &mut events), Ok(()));
+        assert_eq!(state.players[0].life, i32::MIN);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Double,
+                ..
+            }
+        )));
     }
 
     /// CR 701.10d + CR 119.7: Doubling life routes through `apply_life_gain`, so

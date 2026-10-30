@@ -2819,10 +2819,14 @@ pub(super) fn match_life_gained(
 /// CR 119.3: Check a `LifeChanged` event's magnitude against the trigger's
 /// optional `life_amount` constraint. `amount` is signed (negative for loss);
 /// the comparison uses its magnitude so the same combinator serves gain and
-/// loss triggers. `None` (the common case) imposes no restriction.
+/// loss triggers. A loss of `i32::MIN` has a magnitude past `i32::MAX`; it
+/// saturates there. `None` (the common case) imposes no restriction.
 fn life_amount_matches(trigger: &TriggerDefinition, amount: i32) -> bool {
     match trigger.life_amount {
-        Some((cmp, threshold)) => cmp.evaluate(amount.abs(), threshold as i32),
+        Some((cmp, threshold)) => cmp.evaluate(
+            crate::game::arithmetic::u32_to_i32_saturating(amount.unsigned_abs()),
+            threshold as i32,
+        ),
         None => true,
     }
 }
@@ -11656,6 +11660,42 @@ mod tests {
             &loss_four,
             &trigger,
             &test_trigger_source_context(&state, ObjectId(1)),
+            &state
+        ));
+    }
+
+    #[test]
+    fn life_amount_constraint_reads_an_i32_min_loss_magnitude() {
+        // CR 119.3: a loss of `i32::MIN` has a magnitude past `i32::MAX`; the
+        // `life_amount` comparison reads it saturated at `i32::MAX` instead of
+        // overflowing.
+        let state = setup();
+        let context = test_trigger_source_context(&state, ObjectId(1));
+        let min_loss = GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: i32::MIN,
+            new_total: crate::types::events::LifeTotalReading::default(),
+        };
+
+        // Reach guard: with no magnitude constraint the event matches the
+        // loss trigger, so the constrained rows below reach the comparison.
+        let unconstrained = make_trigger(TriggerMode::LifeLost);
+        assert!(match_life_lost(&min_loss, &unconstrained, &context, &state));
+
+        let mut three_or_more = make_trigger(TriggerMode::LifeLost);
+        three_or_more.life_amount = Some((Comparator::GE, 3));
+        assert!(match_life_lost(&min_loss, &three_or_more, &context, &state));
+
+        let mut exactly_one = make_trigger(TriggerMode::LifeLost);
+        exactly_one.life_amount = Some((Comparator::EQ, 1));
+        assert!(!match_life_lost(&min_loss, &exactly_one, &context, &state));
+
+        let mut changed_three_or_more = make_trigger(TriggerMode::LifeChanged);
+        changed_three_or_more.life_amount = Some((Comparator::GE, 3));
+        assert!(match_life_changed(
+            &min_loss,
+            &changed_three_or_more,
+            &context,
             &state
         ));
     }

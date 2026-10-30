@@ -2703,8 +2703,12 @@ fn race_clock(state: &GameState, attacker: PlayerId, defender: PlayerId) -> u32 
     if attack_power <= 0 {
         return u32::MAX;
     }
-    // Ceiling division: turns to deal lethal
-    ((defender_life + attack_power - 1) / attack_power) as u32
+    // Ceiling division: turns to deal lethal. Both operands are positive past the
+    // guards above, so the unsigned form is exact and cannot overflow near
+    // `i32::MAX` life.
+    defender_life
+        .unsigned_abs()
+        .div_ceil(attack_power.unsigned_abs())
 }
 
 /// Compute the maximum damage an opponent can deal on the crackback,
@@ -3817,6 +3821,53 @@ mod tests {
         obj.keywords = keywords;
         obj.entered_battlefield_turn = Some(1);
         id
+    }
+
+    /// The race clock is the ceiling of the defender's life over the
+    /// attacker's board power; at `i32::MAX` life it is computed without
+    /// overflowing.
+    #[test]
+    fn race_clock_at_i32_max_life_is_ceiling_division() {
+        let mut state = setup();
+        add_creature(&mut state, PlayerId(0), "Attacker", 2, 2, vec![]);
+
+        state.players[1].life = i32::MAX;
+        assert_eq!(race_clock(&state, PlayerId(0), PlayerId(1)), 1_073_741_824);
+
+        // In-range controls.
+        let mut state = setup();
+        add_creature(&mut state, PlayerId(0), "Attacker", 3, 3, vec![]);
+        state.players[1].life = 20;
+        assert_eq!(race_clock(&state, PlayerId(0), PlayerId(1)), 7);
+        state.players[1].life = 1;
+        assert_eq!(race_clock(&state, PlayerId(0), PlayerId(1)), 1);
+    }
+
+    /// `determine_attack_objective` reads both race clocks when neither the
+    /// stabilize nor the preserve-advantage gate decides; the opponent's clock
+    /// at `i32::MAX` life no longer overflows, and both outcomes stay reachable.
+    #[test]
+    fn attack_objective_reads_race_clock_against_i32_max_life() {
+        let objective_at = |my_life: i32| {
+            let mut state = setup();
+            let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 3, 3, vec![]);
+            add_creature(&mut state, PlayerId(1), "Defender", 2, 2, vec![]);
+            state.players[0].life = my_life;
+            state.players[1].life = i32::MAX;
+            determine_attack_objective(
+                &state,
+                PlayerId(0),
+                &[PlayerId(1)],
+                &[attacker],
+                &[],
+                &AiProfile::default(),
+            )
+        };
+
+        // Our clock 10 turns, theirs 715827883: race.
+        assert_eq!(objective_at(20), CombatObjective::Race);
+        // Our clock 2 turns, below theirs: stabilize.
+        assert_eq!(objective_at(4), CombatObjective::Stabilize);
     }
 
     /// Item E (revert-failing perf): the must-attack partition computes the

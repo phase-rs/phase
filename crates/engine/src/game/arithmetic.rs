@@ -16,10 +16,13 @@
 //! the direction of the effect while preventing wrap, which is the only
 //! outcome consistent with the CR's intent.
 //!
-//! Life readings that fold several `i32` life totals into one — a Two-Headed
-//! Giant team's shared total (CR 810.4) — are computed exactly in `i64` and
-//! converted back here: [`i64_to_i32_saturating`] for a reading of the total,
-//! [`i64_to_u32_saturating`] for a payable-life budget.
+//! Life readings that combine `i32` life values — a Two-Headed Giant team's
+//! shared total (CR 810.4), the difference of two totals, a sum of life-change
+//! amounts — are computed exactly in a wider type (`i64`, or a `u32` magnitude
+//! via `unsigned_abs` / `abs_diff`, which holds `i32::MIN`'s magnitude) and
+//! converted back once here: [`i64_to_i32_saturating`] for a reading,
+//! [`i64_to_u32_saturating`] for a payable-life budget or an unsigned delta,
+//! [`u32_to_i32_saturating`] for a magnitude.
 
 /// Saturating add for power/toughness modifications in the layer system.
 ///

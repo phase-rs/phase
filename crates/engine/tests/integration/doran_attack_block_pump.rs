@@ -24,7 +24,7 @@
 //! determined once, on trigger resolution, from post-layer values),
 //! CR 613.4c (the +X/+X pump is a Layer 7c modification). "The difference
 //! between A and B" being unsigned is an Oracle templating convention with no
-//! dedicated CR number — the resolver takes `.abs()` of the gap.
+//! dedicated CR number — the resolver takes the `abs_diff` of the gap.
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::ContinuousModification;
@@ -146,7 +146,7 @@ fn doran_pumps_blocking_creature() {
 
 /// A 3/3 (power == toughness) attacks; X = |3 − 3| = 0; the +0/+0 pump nets
 /// no characteristic change. ("The difference between A and B" is an unsigned
-/// Oracle templating convention — the resolver takes `.abs()` of the gap.)
+/// Oracle templating convention — the resolver takes the `abs_diff` of the gap.)
 #[test]
 fn doran_pump_zero_for_square_creature() {
     let mut scenario = GameScenario::new();

@@ -1409,10 +1409,14 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                     text(" life"),
                 ]
             } else {
+                // A loss may carry `i32::MIN`, whose magnitude does not fit the
+                // `i32` number segment; it saturates at `i32::MAX`.
                 vec![
                     player_seg(state, *player_id),
                     text(" loses "),
-                    num(amount.abs()),
+                    num(crate::game::arithmetic::u32_to_i32_saturating(
+                        amount.unsigned_abs(),
+                    )),
                     text(" life"),
                 ]
             }
@@ -3058,6 +3062,36 @@ mod tests {
             .iter()
             .any(|s| matches!(s, LogSegment::Text(t) if t == " loses ")));
         assert!(segs.iter().any(|s| matches!(s, LogSegment::Number(3))));
+    }
+
+    /// A loss of `i32::MIN` has a magnitude past `i32::MAX`; the log's number
+    /// segment saturates at `i32::MAX` instead of overflowing.
+    #[test]
+    fn life_lost_segments_saturate_an_i32_min_magnitude() {
+        let state = GameState::new_two_player(42);
+        let segments_for = |amount: i32| {
+            format_segments(
+                &GameEvent::LifeChanged {
+                    player_id: PlayerId(0),
+                    amount,
+                    new_total: crate::types::events::LifeTotalReading::default(),
+                },
+                &state,
+            )
+        };
+        for amount in [i32::MIN, -i32::MAX] {
+            let segs = segments_for(amount);
+            assert!(
+                segs.iter()
+                    .any(|s| matches!(s, LogSegment::Text(t) if t == " loses ")),
+                "a loss of {amount} reads as a loss"
+            );
+            assert!(
+                segs.iter()
+                    .any(|s| matches!(s, LogSegment::Number(i32::MAX))),
+                "a loss of {amount} reads its magnitude, saturated at i32::MAX"
+            );
+        }
     }
 
     #[test]
