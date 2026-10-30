@@ -113,7 +113,8 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
     expect(corpus.actions.length).toBeLessThanOrEqual(64);
     expect(corpus.checkpoints.map((row) => row.milestone)).toEqual(MILESTONES);
     expect(corpus.checkpoints[0].after_actions).toBe(0);
-    expect(corpus.checkpoints.at(-1)?.after_actions).toBe(corpus.actions.length);
+    const lastCheckpoint = corpus.checkpoints[corpus.checkpoints.length - 1];
+    expect(lastCheckpoint?.after_actions).toBe(corpus.actions.length);
     for (const [index, checkpoint] of corpus.checkpoints.entries()) {
       expect(Number.isInteger(checkpoint.after_actions)).toBe(true);
       if (index > 0) {
