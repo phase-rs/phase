@@ -4719,14 +4719,11 @@ fn gain_life_replacement_amount(
         return None;
     };
 
-    let Some(execute) = state
+    let execute = state
         .objects
         .get(&rid.source)
         .and_then(|obj| obj.replacement_definitions.get(rid.index))
-        .and_then(|def| def.execute.as_deref())
-    else {
-        return None;
-    };
+        .and_then(|def| def.execute.as_deref())?;
 
     if execute.sub_ability.is_some() {
         return None;
