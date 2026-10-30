@@ -83,7 +83,7 @@ pub fn resolve(
         free_entry: choice_type.free_entry(),
         choice_type,
         options,
-        source: source.map(Box::new),
+        source,
         // CR 607.2d / CR 607.2m (by analogy): `persist_player` is an INDEPENDENT
         // routing discriminator, not a repurposing of source authority. During a
         // `player_scope: All` fan-out (effects/mod.rs `set_scoped_player_recursive`),
@@ -1703,7 +1703,7 @@ mod tests {
                     )
                 );
                 assert!(matches!(
-                    source.as_deref(),
+                    source,
                     Some(NamedChoiceSource {
                         binding: NamedChoiceSourceBinding::ResolutionContext,
                         ..

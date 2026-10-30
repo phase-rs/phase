@@ -92,7 +92,7 @@ fn setup_emissary_choosing_creature(db: &CardDatabase) -> (GameState, ObjectId, 
             "Planeswalker".to_string(),
             "Sorcery".to_string(),
         ],
-        source: Some(Box::new(source)),
+        source: Some(source),
         persist_player: None,
     };
     runner

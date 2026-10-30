@@ -88,7 +88,7 @@ fn drive_siege_choice(
             options: vec!["Jeskai".to_string(), "Temur".to_string()],
         },
         options: vec!["Jeskai".to_string(), "Temur".to_string()],
-        source: Some(Box::new(source)),
+        source: Some(source),
         persist_player: None,
     };
     runner

@@ -7974,7 +7974,7 @@ mod tests {
             player: PlayerId(0),
             choice_type,
             options: vec!["Anchor".to_string()],
-            source: Some(Box::new(source)),
+            source: Some(source),
             persist_player: None,
         };
 

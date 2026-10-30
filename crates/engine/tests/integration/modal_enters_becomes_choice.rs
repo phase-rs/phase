@@ -69,7 +69,7 @@ fn place_and_choose(
             options: labels.iter().map(|s| s.to_string()).collect(),
         },
         options: labels.iter().map(|s| s.to_string()).collect(),
-        source: Some(Box::new(source)),
+        source: Some(source),
         persist_player: None,
     };
     runner

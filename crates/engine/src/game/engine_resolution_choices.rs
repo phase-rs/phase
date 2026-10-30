@@ -8097,7 +8097,7 @@ pub(super) fn handle_resolution_choice(
                 state,
                 &choice_type,
                 &choice,
-                source.as_deref_mut(),
+                source.as_mut(),
                 persist_player,
             );
             // CR 101.4 + CR 608.2d: additionally record a chosen NUMBER on the
@@ -14290,7 +14290,7 @@ mod tests {
             options: ChoiceType::card_predicate_labels(
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
-            source: Some(Box::new(resolution_choice_source(&state, source_id))),
+            source: Some(resolution_choice_source(&state, source_id)),
             persist_player: None,
         };
         let mut events = Vec::new();
@@ -14342,7 +14342,7 @@ mod tests {
             options: ChoiceType::card_predicate_labels(
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
-            source: Some(Box::new(resolution_choice_source(&state, source_id))),
+            source: Some(resolution_choice_source(&state, source_id)),
             persist_player: None,
         };
         let mut events = Vec::new();

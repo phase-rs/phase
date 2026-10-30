@@ -12090,7 +12090,7 @@ fn raise_as_enters_named_choice(
         free_entry: choice_type.free_entry(),
         choice_type,
         options,
-        source: source.map(Box::new),
+        source,
         persist_player: None,
     };
     ReplacementResult::NeedsChoice(player)

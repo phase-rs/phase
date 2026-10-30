@@ -14151,7 +14151,7 @@ mod tests {
             options: ChoiceType::card_predicate_labels(
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
-            source: Some(Box::new(resolution_choice_source(&state, source_id))),
+            source: Some(resolution_choice_source(&state, source_id)),
             persist_player: None,
         };
         let config = create_config(AiDifficulty::Medium, Platform::Native);
@@ -14251,7 +14251,7 @@ mod tests {
             options: ChoiceType::card_predicate_labels(
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
-            source: Some(Box::new(resolution_choice_source(&state, source_id))),
+            source: Some(resolution_choice_source(&state, source_id)),
             persist_player: None,
         };
         let mut rng = SmallRng::seed_from_u64(1);
@@ -17819,7 +17819,7 @@ mod tests {
             options: ChoiceType::card_predicate_labels(
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
-            source: Some(Box::new(resolution_choice_source(&guess, guess_source))),
+            source: Some(resolution_choice_source(&guess, guess_source)),
             persist_player: None,
         };
         rows.push(("NamedChoice::card_predicate_guess", guess, PlayerId(1)));

@@ -5653,10 +5653,10 @@ mod tests {
                 options: predicates.clone(),
             },
             options: ChoiceType::card_predicate_labels(&predicates),
-            source: Some(Box::new(NamedChoiceSource::from_trigger_source(
+            source: Some(NamedChoiceSource::from_trigger_source(
                 context,
                 NamedChoiceSourceBinding::ResolutionContext,
-            ))),
+            )),
             persist_player: None,
         };
         state

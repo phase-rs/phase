@@ -441,7 +441,7 @@ fn ai_candidates_three_pairs_for_greymond_choice() {
             "First Strike, Lifelink".to_string(),
             "Vigilance, Lifelink".to_string(),
         ],
-        source: Some(Box::new(source)),
+        source: Some(source),
         persist_player: None,
     };
 

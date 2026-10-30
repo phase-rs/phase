@@ -163,7 +163,7 @@ pub fn resolve(
         free_entry: choice_type.free_entry(),
         choice_type,
         options,
-        source: source.map(Box::new),
+        source,
         persist_player,
     };
     events.push(resolved());

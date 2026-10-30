@@ -16622,12 +16622,18 @@ pub struct PendingAttackExert {
 
 // clippy::large_enum_variant: Intentional. `WaitingFor` is stored inline in
 // `GameState`; the stack budget that matters is the `GameState` ceiling in
-// `types/game_state_size.rs`, not the gap between its remaining variants.
-// The cold `NamedChoice.source` and `OpponentGuess.owner` carriers are boxed
-// because they embed complete source contexts. Other prompts retain their
-// inline payloads rather than adding an allocation to every common prompt.
-// Follows the documented allows on `StackEntryKind`, `Effect` and
-// `CastingPermission`.
+// `types/game_state_size.rs`, and this enum's inline size is already inside
+// that measurement. Measured on x86_64-pc-windows-msvc at `nightly-2026-04-19`
+// after the exert-as-cost / manual-activation-payment merge: `WaitingFor` is
+// 1,672 B, set by its largest variant `NamedChoice` (dominated by
+// `NamedChoiceSource`, 1,600 B), against roughly 1,456 B for `ChooseOneOfBranch`
+// (each variant measured as a tuple of its fields). These numbers drift with
+// every field change; the `GameState` ceiling is the gate, not this comment.
+// Boxing the cold `OpponentGuess.owner` earlier removed the previous outlier.
+// Boxing the next-largest variant only moves the outlier down and puts an
+// allocation on every common prompt without reducing the inline size any
+// `GameState` pays for. Follows the documented allows on `StackEntryKind`,
+// `Effect` and `CastingPermission`.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -17773,11 +17779,8 @@ pub enum WaitingFor {
         /// Exact source authority when this choice needs one. Source-less
         /// resolution-only choices remain `None` rather than fabricating a
         /// current-object binding.
-        /// Boxed only when a source-bound interactive prompt is parked: its full
-        /// source context would otherwise inflate every `WaitingFor` and
-        /// `GameState`. See `types/game_state_size.rs` for the stack budget.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        source: Option<Box<NamedChoiceSource>>,
+        source: Option<NamedChoiceSource>,
         /// CR 607.2d / CR 607.2m (by analogy): when set, this choice's answer is a
         /// PER-PLAYER persistent anchor label — the answer binds
         /// `ChosenAttribute::Label` onto `state.players[persist_player]`
