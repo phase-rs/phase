@@ -352,5 +352,10 @@
   "deepLink": {
     "gameInProgressTitle": "Game in progress",
     "gameInProgressBody": "Finish or leave your current game, then open the link again."
+  },
+  "terminalRecovery": {
+    "finalViewsUnpublished": "Concede reached a Full terminal state, but the native final views could not be published.",
+    "concedeUnreconciled": "Could not reconcile the Concede outcome; the seat remains fenced.",
+    "receiptUnsent": "The durable terminal receipt could not be sent; waiting for redelivery"
   }
 }

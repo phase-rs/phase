@@ -1,5 +1,6 @@
 //! Final authority for composable per-event ledger facts.
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::TriggerDefinitionRef;
 use crate::types::game_state::{
     AbilityActivationRecord, CastOccurrence, GameState, SpellCastRecord,
@@ -551,6 +552,15 @@ pub fn apply_resolved_ledger_edit(
                     return Err(ResolvedLedgerEditReplayInvariantError::TriggerAlreadyRecorded);
                 }
             }
+            // CR 603.2h: the source's controller took this ability's indicated action.
+            ResolvedTriggerLedgerEdit::IndicatedActionTaken { player } => {
+                if !state
+                    .trigger_indicated_actions_this_turn
+                    .insert((trigger.clone(), *player))
+                {
+                    return Err(ResolvedLedgerEditReplayInvariantError::TriggerAlreadyRecorded);
+                }
+            }
             ResolvedTriggerLedgerEdit::MaxTimesPerTurn { expected_old } => {
                 let found = state
                     .trigger_fire_counts_this_turn
@@ -732,6 +742,50 @@ mod tests {
             Some(3)
         );
         assert_eq!(state.trigger_fire_counts_this_turn.len(), 1);
+    }
+
+    /// CR 603.2h: the indicated-action fact is one (definition, player) pair per turn; a
+    /// second record of the same pair is a replay invariant violation, not a silent no-op.
+    #[test]
+    fn indicated_action_taken_records_once_per_definition_and_player() {
+        let mut state = GameState::new_two_player(42);
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Indicated action source".to_string(),
+            Zone::Battlefield,
+        );
+        let entry = TriggerEntry::new(
+            TriggerDefinitionOccurrenceRef::Printed {
+                base_set: object.trigger_base_set_instance,
+                printed_index: 0,
+            },
+            TriggerDefinition::new(TriggerMode::ChangesZone),
+        );
+        let trigger = object.trigger_definition_ref(&entry);
+        object.trigger_definitions.push(entry);
+        state.objects.insert(ObjectId(1), object);
+        let edit = ResolvedTriggerLedgerEdit::IndicatedActionTaken {
+            player: PlayerId(0),
+        };
+
+        assert!(state.trigger_indicated_actions_this_turn.is_empty());
+        record_trigger_fired(&mut state, trigger.clone(), edit.clone())
+            .expect("first indicated action records");
+        assert_eq!(
+            *state.trigger_indicated_actions_this_turn,
+            std::collections::HashSet::from([(trigger.clone(), PlayerId(0))])
+        );
+        assert!(
+            state.triggers_fired_this_turn.is_empty(),
+            "the indicated-action fact is not a firing"
+        );
+        assert_eq!(
+            record_trigger_fired(&mut state, trigger, edit),
+            Err(ResolvedLedgerEditReplayInvariantError::TriggerAlreadyRecorded)
+        );
+        assert_eq!(state.trigger_indicated_actions_this_turn.len(), 1);
     }
 
     fn activation_source(state: &mut GameState) -> ObjectId {

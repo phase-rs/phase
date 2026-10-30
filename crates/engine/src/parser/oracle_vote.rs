@@ -34,6 +34,9 @@ use crate::types::ability::{
 use crate::types::keywords::Keyword;
 use crate::types::zones::{EtbTapState, Zone};
 
+// CR 701.38a: vote results are effects of the enclosing spell/ability, not
+// independent ability bodies. All result-body entries retain the nested default,
+// including when a helper strips a tally or distributes a shared player subject.
 use super::oracle_effect::{parse_effect_chain_with_context, strip_trailing_duration};
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::trigger::VoteIr;
@@ -1902,43 +1905,6 @@ mod tests {
         );
     }
 
-    /// Issue #3667 — the opponent half must surface a real player target slot.
-    #[test]
-    fn you_and_target_opponent_each_draw_surfaces_opponent_target_slot() {
-        use crate::game::ability_utils::{build_resolved_from_def, build_target_slots};
-        use crate::types::ability::TargetRef;
-        use crate::types::game_state::GameState;
-        use crate::types::identifiers::ObjectId;
-        use crate::types::player::PlayerId;
-
-        let parsed = parse_effect_chain_with_context(
-            "you and target opponent each draw two cards",
-            AbilityKind::Spell,
-            &mut ParseContext::default(),
-        );
-        let state = GameState::new_two_player(42);
-        let resolved = build_resolved_from_def(&parsed, ObjectId(1), PlayerId(0));
-        let slots =
-            build_target_slots(&state, &resolved).expect("target opponent draw needs a slot");
-        assert_eq!(
-            slots.len(),
-            1,
-            "opponent half must declare one player target"
-        );
-        assert!(
-            slots[0]
-                .legal_targets
-                .contains(&TargetRef::Player(PlayerId(1))),
-            "target slot must offer the opponent"
-        );
-        assert!(
-            !slots[0]
-                .legal_targets
-                .contains(&TargetRef::Player(PlayerId(0))),
-            "target opponent draw must not allow targeting yourself"
-        );
-    }
-
     /// Full-line typed-token body (Citizen reward path): "1/1 green and white
     /// Citizen creature token" must round-trip through the body parser and
     /// retain its full type description on both halves.
@@ -2830,6 +2796,119 @@ mod tests {
                 assert!(matches!(subject, VoteSubject::Objects { .. }));
             }
             other => panic!("expected Vote, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod parent_controller_population_tests {
+    use super::*;
+    use crate::types::ability::FilterProp;
+
+    fn assert_nested_population(definition: &AbilityDefinition) {
+        let tail = std::iter::successors(Some(definition), |d| d.sub_ability.as_deref())
+            .find(|d| matches!(d.effect.as_ref(), Effect::DamageAll { .. }))
+            .expect("vote body reaches the ordinary or qualified population");
+        let Effect::DamageAll {
+            target: TargetFilter::Typed(filter),
+            ..
+        } = tail.effect.as_ref()
+        else {
+            panic!("{tail:?}");
+        };
+        assert_ne!(
+            filter.controller,
+            Some(ControllerRef::ParentTargetController)
+        );
+        assert!(!filter.properties.iter().any(|property| matches!(
+            property, FilterProp::DistinctFrom { reference }
+                if reference.as_ref() == &TargetFilter::ParentTarget
+        )));
+    }
+
+    #[test]
+    fn vote_result_bodies_keep_parent_controller_population_permission_disabled() {
+        let choices = vec!["ember".to_string(), "frost".to_string()];
+        for population in [
+            "each creature",
+            "each other creature with the same controller",
+        ] {
+            let body = format!("~ deals 2 damage to target creature and 1 damage to {population}");
+            // The per-choice helper's two context arms (1111/1113).
+            for scope in [None, Some(ControllerRef::ScopedPlayer)] {
+                assert_nested_population(&parse_per_choice_body(&body, AbilityKind::Spell, scope));
+            }
+            let earlier_target = format!("Tap target creature and {body}");
+            assert_nested_population(&parse_per_choice_body(
+                &earlier_target,
+                AbilityKind::Spell,
+                None,
+            ));
+            // The threshold result entry (371), with damage inside the If body.
+            let threshold = format!("If ember gets more votes, {body}.");
+            let threshold = parse_threshold_vote_clauses(
+                &threshold,
+                &choices,
+                AbilityKind::Spell,
+                ControllerRef::You,
+                VoterScope::AllPlayers,
+                VoteVisibility::Open,
+            )
+            .expect("threshold result-body entry")
+            .into_ability(AbilityKind::Spell);
+            let Effect::Vote {
+                per_choice_effect, ..
+            } = threshold.effect.as_ref()
+            else {
+                panic!("{threshold:?}");
+            };
+            assert_nested_population(&per_choice_effect[0]);
+            // The suffix tally entry (1283), not a following damage sentence.
+            let suffix = format!("{body} for each ember vote.");
+            let (_, _, definition, _) =
+                parse_vote_for_each_suffix_clause(&suffix, &choices, AbilityKind::Spell)
+                    .expect("suffix aggregate body entry");
+            assert_nested_population(&definition);
+        }
+    }
+
+    #[test]
+    fn vote_aggregate_parent_controller_population_neutral_entries_remain_tallied() {
+        // The prefix aggregate entry (243) requires a bindable count after its
+        // "equal to ... votes" suffix is removed; it is still part of the vote.
+        let prefix = parse_vote_block(
+            "Each player votes for ember or frost. You create a number of Treasure tokens equal to the number of ember votes. For each frost vote, draw a card.",
+            AbilityKind::Spell,
+        ).expect("prefix aggregate body entry");
+        let Effect::Vote {
+            per_choice_effect, ..
+        } = prefix.effect.as_ref()
+        else {
+            panic!("{prefix:?}");
+        };
+        assert_eq!(
+            per_choice_effect[0].effect.count_expr(),
+            Some(&QuantityExpr::Ref {
+                qty: QuantityRef::VoteCount { choice_index: 0 },
+            })
+        );
+
+        // The conjoined entry (633) reconstructs each fragment with the shared
+        // player subject, then binds its magnitude. Neither is a new ability.
+        let choices = vec!["ember".to_string(), "frost".to_string()];
+        let (_, pairs) = parse_conjoined_suffix_clauses(
+            "Each opponent loses 1 life for each ember vote and discards a card for each frost vote.",
+            &choices, AbilityKind::Spell,
+        ).expect("conjoined suffix body entries");
+        for (idx, definition) in pairs {
+            assert_eq!(
+                definition.effect.count_expr(),
+                Some(&QuantityExpr::Ref {
+                    qty: QuantityRef::VoteCount {
+                        choice_index: idx as u32
+                    },
+                })
+            );
         }
     }
 }

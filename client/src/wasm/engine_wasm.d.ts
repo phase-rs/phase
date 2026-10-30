@@ -666,6 +666,13 @@ export function search_cards_js(query: any): any;
 export function selectAiPod(candidates_js: any, request_js: any): any;
 
 /**
+ * Request (or stop requesting) the "Show AI Hand" disclosure for the local
+ * seat's `get_game_state` projection. The engine honors it only for a seat
+ * with debug identity access; otherwise hands stay hidden.
+ */
+export function set_debug_hand_reveal(enabled: boolean): void;
+
+/**
  * Set the multiplayer enforcement flag directly.
  *
  * Entering multiplayer is *not* done here: the engine claims the flag itself,
@@ -813,6 +820,7 @@ export interface InitOutput {
     readonly resume_restored_game_state: () => [number, number, number];
     readonly search_cards_js: (a: any) => [number, number, number];
     readonly selectAiPod: (a: any, b: any) => [number, number, number];
+    readonly set_debug_hand_reveal: (a: number) => void;
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
     readonly signatureSpellSelectionPolicy: (a: any) => [number, number, number];

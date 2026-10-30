@@ -18,6 +18,7 @@ pub mod deck_knowledge;
 pub mod deck_profile;
 pub mod determinize;
 pub mod draft_eval;
+pub mod draft_guide;
 pub mod duel_suite;
 pub mod eval;
 pub mod features;
@@ -30,6 +31,7 @@ pub mod pod;
 pub mod pod_selection;
 pub mod policies;
 pub mod projection;
+pub(crate) mod reach;
 pub mod saved_state;
 pub mod search;
 pub mod session;
@@ -61,8 +63,9 @@ pub use eval::{
     StrategicIntent,
 };
 pub use search::{
-    choose_action, choose_action_with_session, choose_action_with_session_diagnostic,
-    fallback_action, score_candidates, score_candidates_for_parallel_worker,
-    select_safe_action_from_scores, select_safe_action_index_from_scores,
+    choose_action, choose_action_with_issued_contract, choose_action_with_session,
+    choose_action_with_session_diagnostic, fallback_action, score_candidates,
+    score_candidates_for_parallel_worker, select_safe_action_from_scores,
+    select_safe_action_index_from_scores,
 };
 pub use session::{deck_pools_fingerprint, AiSession, SessionCache};

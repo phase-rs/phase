@@ -10,6 +10,185 @@ use crate::types::*;
 use engine::game::deck_validation::GrantableCommanderFiller;
 use engine::types::match_config::MatchConfig;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FifoProgressView {
+    pub completed_steps: u64,
+    pub round_completed_steps: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FifoPublicView {
+    pub session_id: DraftSessionId,
+    pub revision: u64,
+    pub paused: Option<DraftPausedState>,
+    pub review_clock: Option<DraftClock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FifoHeadView {
+    pub pack_id: DraftPackId,
+    pub opening_seat: u8,
+    pub round: u8,
+    pub original_size: u8,
+}
+
+/// The draft-effect cards a seat may use on its head pack, and the exact
+/// requirements for each number of them it may use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FifoEffectOptions {
+    /// The seat's eligible `AdditionalPick` pool cards, in pool order.
+    pub card_instance_ids: Vec<String>,
+    /// Entry `i` is the exact picks and burns when `i + 1` of those cards are
+    /// used. It ends at the most cards one step on this head can use.
+    pub requirements: Vec<DraftSelectionRequirements>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FifoPlayerView {
+    pub state: FifoPublicView,
+    pub progress: FifoProgressView,
+    pub queue_count: usize,
+    pub head: Option<FifoHeadView>,
+    pub prompt_id: Option<DraftPromptId>,
+    pub requirements: DraftSelectionRequirements,
+    /// `None` when the seat is not drafting, holds no eligible card, or has a
+    /// head that cannot supply one additional card.
+    pub effects: Option<FifoEffectOptions>,
+    pub clock: Option<DraftClock>,
+}
+
+fn fifo_public_view(session: &DraftSession) -> Option<FifoPublicView> {
+    let fifo = session.fifo.as_ref()?;
+    Some(FifoPublicView {
+        session_id: fifo.session_id.clone(),
+        revision: fifo.revision,
+        paused: fifo.paused,
+        review_clock: fifo.review.as_ref().map(|review| review.clock.clone()),
+    })
+}
+
+fn fifo_progress_view(session: &DraftSession, seat: usize) -> Option<FifoProgressView> {
+    let seat = session.fifo.as_ref()?.seats.get(seat)?;
+    Some(FifoProgressView {
+        completed_steps: seat.completed_steps,
+        round_completed_steps: seat.round_completed_steps,
+    })
+}
+
+/// The draft-effect cards `seat` may use on its head pack. Every requirement
+/// is `pick_pass::selection_requirements`'s for that many cards, so no reader
+/// derives a count.
+fn fifo_effect_options(session: &DraftSession, seat: u8) -> Option<FifoEffectOptions> {
+    let card_instance_ids: Vec<String> = session
+        .pools
+        .get(usize::from(seat))?
+        .iter()
+        .filter(|card| {
+            crate::pick_pass::selection_requirements(
+                session,
+                seat,
+                std::slice::from_ref(&card.instance_id),
+            )
+            .is_ok()
+        })
+        .map(|card| card.instance_id.clone())
+        .collect();
+    // Each prefix of the eligible cards in turn, until the head cannot
+    // supply the step.
+    let requirements: Vec<DraftSelectionRequirements> = card_instance_ids
+        .iter()
+        .enumerate()
+        .map_while(|(last, _)| {
+            crate::pick_pass::selection_requirements(session, seat, &card_instance_ids[..=last])
+                .ok()
+        })
+        .collect();
+    (!requirements.is_empty()).then_some(FifoEffectOptions {
+        card_instance_ids,
+        requirements,
+    })
+}
+
+fn fifo_player_view(session: &DraftSession, seat_index: u8) -> Option<FifoPlayerView> {
+    let seat = session.fifo.as_ref()?.seats.get(usize::from(seat_index))?;
+    let active = session.status == DraftStatus::Drafting;
+    let prompt = seat.prompt.as_ref();
+    let requirements = if active {
+        crate::pick_pass::selection_requirements(session, seat_index, &[]).unwrap_or_default()
+    } else {
+        DraftSelectionRequirements::default()
+    };
+    let effects = if active {
+        fifo_effect_options(session, seat_index)
+    } else {
+        None
+    };
+    Some(FifoPlayerView {
+        state: fifo_public_view(session)?,
+        progress: fifo_progress_view(session, usize::from(seat_index))?,
+        queue_count: seat.queue.len(),
+        head: session.head_metadata(seat_index).map(|head| FifoHeadView {
+            pack_id: head.pack_id,
+            opening_seat: head.opening_seat,
+            round: head.round,
+            original_size: head.original_size,
+        }),
+        prompt_id: active
+            .then(|| prompt.map(|prompt| prompt.id.clone()))
+            .flatten(),
+        requirements,
+        effects,
+        clock: prompt.and_then(|prompt| prompt.clock.clone()),
+    })
+}
+
+fn active_pack_count(session: &DraftSession, seat: u8) -> u8 {
+    match session.config.flow {
+        DraftFlow::FifoAsync => session
+            .fifo
+            .as_ref()
+            .and_then(|fifo| fifo.seats.get(usize::from(seat)))
+            .map_or(0, |seat| {
+                u8::try_from(seat.queue.len()).expect("validated FIFO queue bound")
+            }),
+        DraftFlow::LegacyBarrier => u8::from(
+            session.status == DraftStatus::Drafting
+                && session
+                    .head_pack(seat)
+                    .is_some_and(|pack| !pack.0.is_empty())
+                && !session.seats_picked_this_round.get(seat),
+        ),
+    }
+}
+
+fn private_chaos_sizes(session: &DraftSession) -> bool {
+    session.config.flow == DraftFlow::FifoAsync
+        && matches!(
+            session.config.source,
+            DraftSource::Set {
+                layout: SetLayout::Chaos { .. }
+            }
+        )
+}
+
+fn visible_pack_size(session: &DraftSession, seat: Option<u8>) -> u8 {
+    match session.config.flow {
+        DraftFlow::LegacyBarrier => session.cards_in_pack(session.current_pack_number),
+        DraftFlow::FifoAsync => match seat {
+            Some(seat) => session
+                .head_metadata(seat)
+                .map_or(0, |head| head.original_size),
+            None => {
+                if private_chaos_sizes(session) {
+                    0
+                } else {
+                    session.cards_in_pack(session.current_pack_number)
+                }
+            }
+        },
+    }
+}
+
 /// A single entry in the standings table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StandingEntry {
@@ -42,6 +221,8 @@ pub struct PairingView {
 /// Public seat info visible to all players.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeatPublicView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fifo_progress: Option<FifoProgressView>,
     pub seat_index: u8,
     pub display_name: String,
     pub is_bot: bool,
@@ -50,10 +231,9 @@ pub struct SeatPublicView {
     pub pick_status: PickStatus,
     /// Engine-owned presence signal for a pack a seat is actively drafting.
     ///
-    /// This deliberately exposes only `0` or `1`, never the pack's card
-    /// count or identity. It is `1` precisely while the session is drafting
-    /// and this seat has a nonempty current pack that it has not picked from in
-    /// the current round; otherwise it is `0`.
+    /// Legacy flow exposes only `0` or `1` for its pending barrier head.
+    /// FIFO exposes the queue length, including the head, but no tail cards,
+    /// identities or pack sizes. The configured seat bound keeps this in u8.
     pub active_pack_count: u8,
     /// How many cards this seat has drafted so far. A COUNT, never an identity:
     /// which cards are in a pool stays private to its owner.
@@ -515,6 +695,10 @@ pub struct SharedStackDecisionView {
 /// into DraftSession) to prevent accidental hidden state leakage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DraftPlayerView {
+    #[serde(default, skip_serializing_if = "DraftFlow::is_legacy")]
+    pub flow: DraftFlow,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fifo: Option<FifoPlayerView>,
     /// Current draft status
     pub status: DraftStatus,
     /// Draft kind (Quick/Premier/Traditional/Sealed)
@@ -727,17 +911,21 @@ pub use crate::types::{DraftLaunchCapability, SpectatorVisibility};
 
 /// Whether the draft has finished assigning boosters. Only then may a player
 /// learn their completed Chaos sequence and the actual pod-wide set union.
-/// Lobby, drafting, paused, and abandoned sessions can still contain unopened
+/// Lobby, drafting, Review, paused, and abandoned sessions can still contain unopened
 /// boosters, so those states deliberately retain only the candidate intent.
 fn chaos_assignments_are_complete(status: DraftStatus) -> bool {
-    matches!(
-        status,
+    match status {
         DraftStatus::Deckbuilding
-            | DraftStatus::Pairing
-            | DraftStatus::MatchInProgress
-            | DraftStatus::RoundComplete
-            | DraftStatus::Complete
-    )
+        | DraftStatus::Pairing
+        | DraftStatus::MatchInProgress
+        | DraftStatus::RoundComplete
+        | DraftStatus::Complete => true,
+        DraftStatus::Lobby
+        | DraftStatus::Drafting
+        | DraftStatus::Review
+        | DraftStatus::Paused
+        | DraftStatus::Abandoned => false,
+    }
 }
 
 fn set_source_view_for_player(
@@ -788,7 +976,17 @@ fn source_view_for_player(session: &DraftSession, seat_index: u8) -> DraftSource
         DraftSource::Set { layout } => DraftSourceView::Set {
             layout: set_source_view_for_player(
                 layout,
-                session.status,
+                if session.config.flow == DraftFlow::FifoAsync
+                    && session
+                        .fifo
+                        .as_ref()
+                        .and_then(|fifo| fifo.paused)
+                        .is_some_and(|paused| paused.phase == DraftActivePhase::Drafting)
+                {
+                    DraftStatus::Drafting
+                } else {
+                    session.status
+                },
                 seat_index,
                 session.current_pack_number,
                 current_pack_origin(session, seat_index),
@@ -804,6 +1002,11 @@ fn source_view_for_player(session: &DraftSession, seat_index: u8) -> DraftSource
 /// The opening seat of a player's live booster. A Chaos assignment belongs to
 /// this origin, not the seat holding the booster after a pass.
 fn current_pack_origin(session: &DraftSession, seat_index: u8) -> Option<u8> {
+    if session.config.flow == DraftFlow::FifoAsync {
+        return session
+            .head_metadata(seat_index)
+            .map(|head| head.opening_seat);
+    }
     session
         .current_pack
         .get(usize::from(seat_index))
@@ -874,6 +1077,10 @@ fn visible_chaos_concessions(session: &DraftSession) -> bool {
 /// so Chaos keeps every assignment-bearing card view private.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpectatorDraftView {
+    #[serde(default, skip_serializing_if = "DraftFlow::is_legacy")]
+    pub flow: DraftFlow,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fifo: Option<FifoPublicView>,
     pub status: DraftStatus,
     pub kind: DraftKind,
     /// View-safe source metadata. A Chaos spectator receives candidate intent,
@@ -1069,7 +1276,7 @@ fn pick_status_for(session: &DraftSession, seat_index: usize, is_drafting: bool)
         // existed: a seat holding a pack owes a pick, and a seat that has
         // passed it does not.
         PackDistribution::PickAndPass | PackDistribution::AllAtOnce => {
-            if session.current_pack[seat_index].is_some() {
+            if session.head_pack(seat_index as u8).is_some() {
                 PickStatus::Pending
             } else {
                 PickStatus::Picked
@@ -1111,6 +1318,7 @@ pub fn filter_for_spectator(
             let pick_status = pick_status_for(session, i, is_drafting);
 
             SeatPublicView {
+                fifo_progress: fifo_progress_view(session, i),
                 seat_index: i as u8,
                 display_name: match seat {
                     DraftSeat::Human { display_name, .. } => display_name.clone(),
@@ -1136,13 +1344,7 @@ pub fn filter_for_spectator(
                 // `PackDistribution::SharedStackPiles`. Per-seat Winston status
                 // is carried by `pick_status` and `shared_stack.active_seat`,
                 // never by this.
-                active_pack_count: u8::from(
-                    is_drafting
-                        && session.current_pack[i]
-                            .as_ref()
-                            .is_some_and(|pack| !pack.0.is_empty())
-                        && !session.seats_picked_this_round.get(i as u8),
-                ),
+                active_pack_count: active_pack_count(session, i as u8),
                 drafted_card_count: session.pools[i].len(),
                 face_up_draft_cards: face_up_draft_cards(&session.pools[i]),
             }
@@ -1162,11 +1364,16 @@ pub fn filter_for_spectator(
         (_, true) | (SpectatorVisibility::Public, false) => (None, None),
         (SpectatorVisibility::Omniscient, false) => {
             let pools = Some(session.pools.clone());
+            // One entry per seat in `seats`, never `config.pod_size` (see
+            // `play_first_chooser`).
             let packs = Some(
-                session
-                    .current_pack
-                    .iter()
-                    .map(|p| p.as_ref().map(|pack| pack.0.clone()))
+                (0..session.seats.len())
+                    .map(|seat| {
+                        u8::try_from(seat)
+                            .ok()
+                            .and_then(|seat| session.head_pack(seat))
+                            .map(|pack| pack.0.clone())
+                    })
                     .collect(),
             );
             (pools, packs)
@@ -1174,6 +1381,8 @@ pub fn filter_for_spectator(
     };
 
     SpectatorDraftView {
+        flow: session.config.flow,
+        fifo: fifo_public_view(session),
         status: session.status,
         kind: session.kind,
         source: source_view_for_spectator(session),
@@ -1181,14 +1390,22 @@ pub fn filter_for_spectator(
         pick_number: session.pick_number,
         pass_direction: session.pass_direction,
         seats,
-        cards_per_pack: session.cards_in_pack(session.current_pack_number),
-        pack_sizes: session.pack_size_sequence(),
+        cards_per_pack: visible_pack_size(session, None),
+        pack_sizes: if private_chaos_sizes(session) {
+            Vec::new()
+        } else {
+            session.pack_size_sequence()
+        },
         pack_set_codes: visible_pack_set_codes(session),
-        pack_pick_steps: session.pack_pick_step_sequence(),
+        pack_pick_steps: if private_chaos_sizes(session) {
+            Vec::new()
+        } else {
+            session.pack_pick_step_sequence()
+        },
         pick_steps_per_pack: session
             .kind
             .procedure()
-            .pick_steps_per_pack(session.cards_in_pack(session.current_pack_number)),
+            .pick_steps_per_pack(visible_pack_size(session, None)),
         pack_count: session.config.pack_count,
         min_deck_size: session.config.min_deck_size,
         addable_cards: session.config.addable_cards.display_names(),
@@ -1258,15 +1475,12 @@ fn split_by_pack_size(
 pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerView {
     let idx = seat_index as usize;
 
-    let current_pack =
-        session
-            .current_pack
-            .get(idx)
-            .and_then(|p| p.as_ref())
-            .map(|p| match &session.config.source {
-                DraftSource::Set { .. } => set_pack_in_rarity_order(&p.0),
-                DraftSource::Cube { .. } => p.0.clone(),
-            });
+    let current_pack = session
+        .head_pack(seat_index)
+        .map(|p| match &session.config.source {
+            DraftSource::Set { .. } => set_pack_in_rarity_order(&p.0),
+            DraftSource::Cube { .. } => p.0.clone(),
+        });
 
     let pool = session.pools.get(idx).cloned().unwrap_or_default();
     let draft_effects = face_up_draft_cards(&pool);
@@ -1299,6 +1513,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
             let pick_status = pick_status_for(session, i, is_drafting);
 
             SeatPublicView {
+                fifo_progress: fifo_progress_view(session, i),
                 seat_index: i as u8,
                 display_name: match seat {
                     DraftSeat::Human { display_name, .. } => display_name.clone(),
@@ -1324,13 +1539,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
                 // `PackDistribution::SharedStackPiles`. Per-seat Winston status
                 // is carried by `pick_status` and `shared_stack.active_seat`,
                 // never by this.
-                active_pack_count: u8::from(
-                    is_drafting
-                        && session.current_pack[i]
-                            .as_ref()
-                            .is_some_and(|pack| !pack.0.is_empty())
-                        && !session.seats_picked_this_round.get(i as u8),
-                ),
+                active_pack_count: active_pack_count(session, i as u8),
                 drafted_card_count: session.pools[i].len(),
                 face_up_draft_cards: face_up_draft_cards(&session.pools[i]),
             }
@@ -1344,6 +1553,8 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
     let pairings = compute_pairing_views(session);
 
     DraftPlayerView {
+        flow: session.config.flow,
+        fifo: fifo_player_view(session, seat_index),
         status: session.status,
         kind: session.kind,
         source: source_view_for_player(session, seat_index),
@@ -1354,21 +1565,33 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         pick_number: session.pick_number,
         pass_direction: session.pass_direction,
         current_pack,
-        required_pick_count: required_pick_count(session, seat_index),
+        required_pick_count: if session.config.flow == DraftFlow::FifoAsync && !is_drafting {
+            0
+        } else {
+            required_pick_count(session, seat_index)
+        },
         pick_selection_mode: session.kind.procedure().pick_selection_mode,
         pool,
         draft_effects,
         pool_groups,
         sealed_packs,
         seats,
-        cards_per_pack: session.cards_in_pack(session.current_pack_number),
-        pack_sizes: session.pack_size_sequence(),
+        cards_per_pack: visible_pack_size(session, Some(seat_index)),
+        pack_sizes: if private_chaos_sizes(session) {
+            Vec::new()
+        } else {
+            session.pack_size_sequence()
+        },
         pack_set_codes: visible_pack_set_codes(session),
-        pack_pick_steps: session.pack_pick_step_sequence(),
+        pack_pick_steps: if private_chaos_sizes(session) {
+            Vec::new()
+        } else {
+            session.pack_pick_step_sequence()
+        },
         pick_steps_per_pack: session
             .kind
             .procedure()
-            .pick_steps_per_pack(session.cards_in_pack(session.current_pack_number)),
+            .pick_steps_per_pack(visible_pack_size(session, Some(seat_index))),
         pack_count: session.config.pack_count,
         min_deck_size: session.config.min_deck_size,
         addable_cards: session.config.addable_cards.display_names(),
@@ -1874,6 +2097,9 @@ mod tests {
 
     fn test_session(pod_size: u8) -> (DraftSession, FixturePackSource) {
         let config = DraftConfig {
+            flow: crate::types::DraftFlow::LegacyBarrier,
+            selection_policy: crate::types::DraftSelectionPolicy::default(),
+            clock_policy: crate::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
@@ -3050,6 +3276,9 @@ mod tests {
     #[test]
     fn view_bot_seat_shows_as_bot() {
         let config = DraftConfig {
+            flow: crate::types::DraftFlow::LegacyBarrier,
+            selection_policy: crate::types::DraftSelectionPolicy::default(),
+            clock_policy: crate::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Quick,
@@ -3771,6 +4000,9 @@ mod tests {
     /// answers live.
     fn winston_session(pod_size: u8, cards_per_pack: u8) -> (DraftSession, FixturePackSource) {
         let config = DraftConfig {
+            flow: crate::types::DraftFlow::LegacyBarrier,
+            selection_policy: crate::types::DraftSelectionPolicy::default(),
+            clock_policy: crate::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Winston,

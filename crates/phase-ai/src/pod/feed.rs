@@ -52,7 +52,16 @@ pub fn load_commander_decks(
     let decks = feed_json["decks"]
         .as_array()
         .ok_or_else(|| FeedError::new(format!("{} missing decks array", feed_path.display())))?;
+    Ok(select_commander_decks(db, decks, max))
+}
 
+/// Takes the first `max` decks whose primary commander resolves in `db`, in feed
+/// order. Returns them with one message per deck it skipped.
+pub fn select_commander_decks(
+    db: &CardDatabase,
+    decks: &[serde_json::Value],
+    max: Option<usize>,
+) -> (Vec<FeedDeck>, Vec<String>) {
     let mut loaded = Vec::new();
     let mut skipped = Vec::new();
     for deck in decks {
@@ -99,7 +108,7 @@ pub fn load_commander_decks(
             },
         });
     }
-    Ok((loaded, skipped))
+    (loaded, skipped)
 }
 
 #[cfg(test)]

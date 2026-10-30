@@ -335,11 +335,15 @@ pub(in crate::game) fn advance_phase_once(
         // the phase. Simple static-based skips (`StaticMode::SkipStep`) still
         // short-circuit at dedicated call sites (`step_skip`, for untap, upkeep
         // and draw); this path handles event-context-aware replacements.
+        // CR 508.8: a combat step with nothing attacking is skipped before it
+        // could begin, so it proposes no begin event.
         let proposed = ProposedEvent::begin_phase(state.active_player, next);
-        if matches!(
-            replacement::replace_event(state, proposed, events),
-            ReplacementResult::Prevented
-        ) {
+        if combat_step_skipped(state, next)
+            || matches!(
+                replacement::replace_event(state, proposed, events),
+                ReplacementResult::Prevented
+            )
+        {
             // CR 500.11: "To skip a step, phase, or turn is to proceed past it
             // as though it didn't exist." Advance `state.phase` past the skipped
             // phase so the next loop iteration computes the phase AFTER it, then
@@ -408,11 +412,24 @@ pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
     enter_phase(state, Phase::Cleanup, events, None);
 }
 
+/// CR 506.4 + CR 511.3 + CR 724.1d + CR 724.2d: remove every object from combat,
+/// invalidating layers (CR 611.3a) only for a combat that differs from the
+/// untouched default BeginCombat installs.
+pub(crate) fn remove_all_from_combat(state: &mut GameState) {
+    if state
+        .combat
+        .take()
+        .is_some_and(|combat| combat != combat::CombatState::default())
+    {
+        state.layers_dirty.mark_full();
+    }
+}
+
 /// CR 511.2 + CR 511.3: End Combat effects expire and combat objects leave
 /// combat only after the step's priority window has ended. Explicit effects
 /// that skip directly out of combat use the same teardown authority.
 fn complete_end_combat_teardown(state: &mut GameState) {
-    state.combat = None;
+    remove_all_from_combat(state);
     state.current_combat_attacker_restriction = None;
     state.current_combat_attacker_restriction_source = None;
     super::layers::prune_end_of_combat_effects(state);
@@ -471,9 +488,9 @@ fn discard_scheduled_units(state: &mut GameState) {
     state.extra_phase_resume.clear();
 }
 
-/// CR 508.8: Mark the end-of-combat step after no attackers remain, so the
-/// caller can skip the blockers and combat-damage steps through the ordinary
-/// phase interpreter.
+/// CR 508.8: Mark the end-of-combat step after no creature was declared as an
+/// attacker or put onto the battlefield attacking, so the caller can skip the
+/// blockers and combat-damage steps through the ordinary phase interpreter.
 pub(super) fn mark_empty_attackers_end_combat(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.phase = Phase::EndCombat;
     // CR 508.8 + CR 511.1: declare blockers and combat damage are skipped, but
@@ -484,6 +501,17 @@ pub(super) fn mark_empty_attackers_end_combat(state: &mut GameState, events: &mu
     });
 }
 
+/// CR 508.8: the declare blockers and combat damage steps are skipped when no
+/// creature was declared as an attacker or put onto the battlefield attacking
+/// this combat; every such creature is still listed or was removed. The
+/// beginning of combat step creates the combat state this reads.
+fn combat_step_skipped(state: &GameState, step: Phase) -> bool {
+    matches!(step, Phase::DeclareBlockers | Phase::CombatDamage)
+        && state.combat.as_ref().is_some_and(|combat| {
+            combat.attackers.is_empty() && combat.removed_attackers_this_combat.is_empty()
+        })
+}
+
 /// The declaration-continuation form of [`mark_empty_attackers_end_combat`].
 /// CR 508.8 skips only Declare Blockers and Combat Damage; the normal End
 /// Combat step still begins and must run its triggers and priority window.
@@ -491,6 +519,13 @@ pub(super) fn advance_after_empty_attackers(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
+    // CR 508.2 + CR 508.8: abilities triggered at the beginning of this step resolve in it; the skip is decided when the step ends (`advance_phase_once`).
+    if !state.stack.is_empty() {
+        priority::reset_priority(state);
+        return WaitingFor::Priority {
+            player: state.active_player,
+        };
+    }
     mark_empty_attackers_end_combat(state, events);
     auto_advance(state, events)
 }
@@ -1300,7 +1335,7 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     state.lki_copiable_values.clear();
     state.lki_by_incarnation.clear();
     state.lki_copiable_values_by_incarnation.clear();
-    state.departed_stack_spells.clear();
+    state.clear_departed_stack_records();
     // CR 607.2b + CR 113.7a: linked-exile LKI is likewise step-scoped — it only
     // needs to outlive the resolution of the ability whose source just left.
     state.linked_exile_lki.clear();
@@ -1667,6 +1702,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.triggers_fired_this_turn.clear();
     state.trigger_fire_counts_this_turn.clear();
     state.triggers_fired_this_turn_per_opponent.clear();
+    // CR 603.2h: "that turn" — indicated actions reset each turn.
+    state.trigger_indicated_actions_this_turn.clear();
     state.activated_abilities_this_turn.clear();
     // CR 602.5b: "Activate only once each turn" crew restriction resets each turn.
     state.crew_activated_this_turn.clear();
@@ -3426,6 +3463,10 @@ fn should_skip_step_now(state: &mut GameState, step: Phase) -> bool {
 /// CR 500.1 + CR 500.8 + CR 500.9 + CR 500.11: record that `step` begins, unless
 /// it is skipped as it would begin. The only writer of `steps_started_this_turn`.
 pub(super) fn record_step_begin(state: &mut GameState, step: Phase) {
+    // CR 611.3a: a layer result that read the step in progress applies to the new step at once.
+    if state.layers_read_current_step {
+        state.layers_dirty.mark_full();
+    }
     if step_skip(state, step).is_none() {
         state.steps_started_this_turn.record(step);
     }
@@ -3904,6 +3945,15 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             ));
         }
         Phase::DeclareBlockers => {
+            // CR 508.8: a caller that ran this arm after a skip leaves the step unentered.
+            if combat_step_skipped(state, Phase::DeclareBlockers) {
+                return match advance_phase_once(state, events) {
+                    AdvancePhaseOnce::Deferred => AutoAdvanceStep::Deferred,
+                    AdvancePhaseOnce::Entry(_) | AdvancePhaseOnce::Skipped => {
+                        AutoAdvanceStep::Continue
+                    }
+                };
+            }
             // CR 509.1: Defending player declares blockers as a turn-based action.
             super::combat::prune_attackers_not_in_play(state);
             let has_attackers = super::combat::has_attackers_in_play(state);
@@ -3918,13 +3968,24 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 return AutoAdvanceStep::waiting(
                     super::combat::build_declare_blockers_waiting_for(state, defending),
                 );
-            } else {
-                // CR 508.8: Declare blockers and combat damage steps are skipped if no attackers.
-                mark_empty_attackers_end_combat(state, events);
-                // Continue loop to process EndCombat
             }
+            // CR 508.8 + CR 509.2: a creature attacked this combat, so the step happens
+            // even with every attacker gone; nobody declares blockers and the active
+            // player receives priority.
+            return AutoAdvanceStep::waiting(WaitingFor::Priority {
+                player: state.active_player,
+            });
         }
         Phase::CombatDamage => {
+            // CR 508.8: a caller that ran this arm after a skip leaves the step unentered.
+            if combat_step_skipped(state, Phase::CombatDamage) {
+                return match advance_phase_once(state, events) {
+                    AdvancePhaseOnce::Deferred => AutoAdvanceStep::Deferred,
+                    AdvancePhaseOnce::Entry(_) | AdvancePhaseOnce::Skipped => {
+                        AutoAdvanceStep::Continue
+                    }
+                };
+            }
             // CR 510.1a + CR 613.4c: Combat damage equals a creature's power as determined
             // by the layer system (layer 7c applies P/T counters). Flush here so
             // combat_damage_amount reads evaluated power, not stale base power. commit_attackers
@@ -5067,7 +5128,9 @@ card into your hand at the beginning of your next end step.";
             runner.state(),
             &runner.state().objects[&source],
         ));
-        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesController);
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesController {
+            side: crate::types::triggers::ControlChangeSide::Loses,
+        });
         trigger.valid_card = Some(TargetFilter::SpecificObject { id: sword });
         trigger.execute = None;
         runner
@@ -6515,6 +6578,35 @@ card into your hand at the beginning of your next end step.";
         assert!(
             state.cards_exiled_with_source_this_turn.is_empty(),
             "per-turn exiled-with-source pool must reset at turn start"
+        );
+    }
+
+    /// CR 603.2h: "has not yet taken the indicated action that turn" — the
+    /// indicated-action facts reset at turn start. Driven through
+    /// `start_next_turn` so dropping the reset line fails here.
+    #[test]
+    fn start_next_turn_resets_trigger_indicated_actions() {
+        let mut state = setup();
+        let key = crate::types::ability::TriggerDefinitionRef {
+            source: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(42), 0),
+            occurrence: crate::types::ability::TriggerDefinitionOccurrenceRef::Printed {
+                base_set: crate::types::ability::TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 0,
+            },
+        };
+        state
+            .trigger_indicated_actions_this_turn
+            .insert((key, PlayerId(0)));
+        assert!(
+            !state.trigger_indicated_actions_this_turn.is_empty(),
+            "precondition"
+        );
+
+        start_next_turn(&mut state, &mut Vec::new());
+
+        assert!(
+            state.trigger_indicated_actions_this_turn.is_empty(),
+            "CR 603.2h indicated actions must reset at turn start"
         );
     }
 
@@ -11495,14 +11587,32 @@ card into your hand at the beginning of your next end step.";
             "precondition: attacker power is stale before the CombatDamage phase arm runs"
         );
 
+        assert_eq!(
+            state.objects[&attacker].counters[&CounterType::Plus1Plus1],
+            8
+        );
+        let pin = crate::game::combat::bind_attack_target(
+            &state,
+            AttackTarget::Planeswalker(planeswalker),
+        )
+        .expect("staged planeswalker is a live combat destination");
         state.combat = Some(CombatState {
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(planeswalker),
                 PlayerId(1),
             )],
+            attacked_permanents: [(attacker, pin)].into_iter().collect(),
             ..Default::default()
         });
+        assert_eq!(
+            state.combat.as_ref().unwrap().attacked_permanents[&attacker],
+            pin
+        );
+        assert_eq!(
+            state.combat.as_ref().unwrap().attackers[0].resolve_damage_target(&state, false),
+            Some(crate::game::combat::DamageTarget::Object(planeswalker))
+        );
 
         let mut events = Vec::new();
         let _ = auto_advance(&mut state, &mut events);
@@ -11511,7 +11621,14 @@ card into your hand at the beginning of your next end step.";
         // including +1/+1 counters from layer 7c. Without the CombatDamage pre-flush
         // in auto_advance, this remains at 9 because stale base power dealt only 1.
         assert_eq!(state.objects[&planeswalker].loyalty, Some(1));
+        assert_eq!(state.objects[&attacker].power, Some(9));
         assert_eq!(state.players[1].life, 20);
+        assert!(events.iter().any(|event| matches!(event,
+            GameEvent::DamageDealt { source_id, target: crate::types::ability::TargetRef::Object(id), amount: 9, .. }
+                if *source_id == attacker && *id == planeswalker)));
+        assert!(!events.iter().any(|event| matches!(event,
+            GameEvent::DamageDealt { source_id, target: crate::types::ability::TargetRef::Player(_), .. }
+                if *source_id == attacker)));
     }
 
     /// CR 800.4: When the active player is eliminated mid-turn in multiplayer,
@@ -14108,6 +14225,60 @@ mod object_sweep_sharing_tests {
         push_live(&mut state, ids[0], expiring(RestrictionExpiry::EndOfCombat));
         complete_end_combat_teardown(&mut state);
         assert!(state.objects[&ids[0]].replacement_definitions.is_empty());
+    }
+
+    /// CR 508.4 + CR 509.4 + CR 506.4 + CR 511.3 + CR 611.3a: a combat that recorded
+    /// membership (entered attacking, a placed blocker, or a removed attacker)
+    /// invalidates layers when it ends.
+    #[test]
+    fn end_combat_teardown_invalidates_layers_for_recorded_combat() {
+        type Shape = fn(&mut GameState, ObjectId, ObjectId);
+        let shapes: [(&str, Shape); 3] = [
+            ("entered attacking", |_, _, _| {}),
+            (
+                "placed blocking, attacker removed",
+                |state, attacker, blocker| {
+                    assert!(combat::place_blocking(state, blocker, attacker));
+                    assert!(combat::prune_object_from_combat(state, attacker));
+                },
+            ),
+            ("attacker removed", |state, attacker, _| {
+                assert!(combat::prune_object_from_combat(state, attacker));
+            }),
+        ];
+        for (name, shape) in shapes {
+            let (mut state, ids) = battlefield_fixture();
+            state.combat = Some(combat::CombatState::default());
+            combat::enter_attacking_at_target(
+                &mut state,
+                ids[0],
+                P1,
+                combat::AttackTarget::Player(P1),
+            );
+            shape(&mut state, ids[0], ids[1]);
+            state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+            complete_end_combat_teardown(&mut state);
+            assert!(state.combat.is_none(), "{name}");
+            assert_eq!(
+                state.layers_dirty,
+                crate::types::game_state::LayersDirty::Full,
+                "{name}"
+            );
+        }
+    }
+
+    /// CR 611.3a: ending the untouched combat BeginCombat installs leaves the layer cache clean.
+    #[test]
+    fn end_combat_teardown_keeps_layers_clean_for_untouched_combat() {
+        let (mut state, _) = battlefield_fixture();
+        state.combat = Some(combat::CombatState::default());
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+        complete_end_combat_teardown(&mut state);
+        assert!(state.combat.is_none());
+        assert_eq!(
+            state.layers_dirty,
+            crate::types::game_state::LayersDirty::Clean
+        );
     }
 
     /// Call-site pin (S7): the start of a player's turn still expires live

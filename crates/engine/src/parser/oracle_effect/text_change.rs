@@ -13,9 +13,9 @@ use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_target::parse_target;
 use crate::parser::oracle_util::TextPair;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, Duration, Effect,
-    StaticDefinition, TargetFilter, TargetSelectionMode, TextSubstitution, TextSubstitutionSpec,
-    TextWordDomain,
+    AbilityDefinition, AbilityKind, ChoiceType, ContinuousEffectOnset, ContinuousModification,
+    Duration, Effect, StaticDefinition, TargetFilter, TargetSelectionMode, TextSubstitution,
+    TextSubstitutionSpec, TextWordDomain,
 };
 
 /// CR 612.2: the word class named by "one <class> with another".
@@ -98,6 +98,7 @@ pub(super) fn try_parse_text_change_clause(tp: TextPair<'_>) -> Option<ParsedEff
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 

@@ -8,11 +8,8 @@
 //! code must never hand-construct `Effect::Unimplemented { .. }` literals
 //! (enforced for new code by `scripts/check-parser-combinators.sh`).
 
-use nom::IResult;
-
-pub type OracleError<'a> = nom::error::Error<&'a str>;
-
-pub type OracleResult<'a, O> = IResult<&'a str, O, OracleError<'a>>;
+pub use crate::types::text_grammar::OracleError;
+pub use crate::types::text_grammar::OracleResult;
 
 pub fn oracle_err(input: &str) -> nom::Err<OracleError<'_>> {
     nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail))

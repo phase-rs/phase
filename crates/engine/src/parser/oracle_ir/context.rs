@@ -6,9 +6,9 @@
 use super::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::target::{ControllerPhrase, ControllerSubject, PlayerAnaphor};
 use crate::types::ability::{
-    ChosenGroupId, ControllerRef, Duration, MultiTargetSpec, ObjectScope, PlayerFilter, PtValue,
-    QuantityExpr, QuantityRef, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
-    ZoneChoiceCandidateSource,
+    ChosenGroupId, ControllerRef, CostCategory, Duration, MultiTargetSpec, ObjectScope,
+    PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetChoiceTiming, TargetFilter,
+    TargetSelectionMode, ZoneChoiceCandidateSource,
 };
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
@@ -95,7 +95,7 @@ pub(crate) fn bind_controller_phrase(
 
 /// Parser-only lookahead for token body clauses split across adjacent sentences.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TokenPtFollowup {
+pub enum TokenPtFollowup {
     PowerToughness { power: PtValue, toughness: PtValue },
 }
 
@@ -110,7 +110,7 @@ pub(crate) enum TokenPtFollowup {
 /// instead of binding its source to `Any`. A typed scope rather than a bare bool
 /// per the codebase's "typed enum over bool" convention.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum TriggerConditionScope {
+pub enum TriggerConditionScope {
     /// A trigger printed on the card. Delayed-only anaphoric subjects stay `Unknown`.
     #[default]
     Printed,
@@ -160,7 +160,7 @@ pub(crate) enum TriggerConditionScope {
 ///      appears. No other site runs a speculative sub-parse against the real
 ///      `&mut ctx` while this gate is `ChainBound`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum ChosenColorQualifierScope {
+pub enum ChosenColorQualifierScope {
     /// Default, and the value every `ParseContext::default()` carries — which
     /// is every `parse_type_phrase_folding` call site, by construction of the wrapper
     /// in `oracle_target.rs`. The printed form must NOT be consumed here.
@@ -193,7 +193,7 @@ pub(crate) enum ChosenColorQualifierScope {
 /// (including the case where its nearest zone choice is some other shape).
 /// Consumers must match the carried source EXPLICITLY.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PriorZoneChoicePartition {
+pub struct PriorZoneChoicePartition {
     /// The `candidate_source` of that `ChooseFromZone` clause — i.e. where the
     /// partitioned pile came from (`CostPaidObjects` for Coin of Fate's
     /// cost-exiled pair, `Legacy` for Wake to Slaughter's, …).
@@ -226,7 +226,7 @@ pub(crate) struct PriorZoneChoicePartition {
 /// (a speculative probe, a branch alternative). Both reset this field; a plain
 /// `.clone()` continues the same body.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct TriggerZoneChangeProvenance(Option<(Zone, Zone)>);
+pub struct TriggerZoneChangeProvenance(Option<(Zone, Zone)>);
 
 impl TriggerZoneChangeProvenance {
     /// No enclosing zone-change authority.
@@ -246,6 +246,19 @@ impl TriggerZoneChangeProvenance {
     }
 }
 
+/// CR 608.2c + CR 115.1: what a bare card-set aggregate surface (the
+/// demonstrative "those cards" shape) binds to in this chunk — either a
+/// chain-set cause or the ability's own chosen targets. A typed two-leaf
+/// binding rather than a bare `TrackedAnaphorSource`, which under-expresses
+/// the referent axis (a target-set referent is not a chain-set cause).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BareCardAggregateBinding {
+    /// A chain-set cause (mill, discard, sacrifice, …).
+    ChainSet(crate::types::ability::TrackedAnaphorSource),
+    /// The ability's own chosen targets (`TargetedObjects { slot: None }`).
+    AbilityTargets,
+}
+
 /// CR 601.2c + CR 608.2c: the target slots announced by the earlier clauses of
 /// an effect chain, for resolving a demonstrative ("that creature") to the
 /// declared slot it names. Only the stable prefix is numbered: once a clause
@@ -254,7 +267,7 @@ impl TriggerZoneChangeProvenance {
 /// runtime, so that clause's slots and every later slot are recorded without
 /// an index — they still take part in ambiguity checks but cannot be bound.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DeclaredSlotRegistry {
+pub enum DeclaredSlotRegistry {
     /// A clause shape whose declared numbering this walk cannot reproduce
     /// (multi-slot effects, else-branches, …). Nothing binds.
     Indeterminate,
@@ -270,7 +283,7 @@ impl Default for DeclaredSlotRegistry {
 
 /// One announced target slot of an earlier clause.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DeclaredSlotEntry {
+pub struct DeclaredSlotEntry {
     /// The declared-slot index (the `declared_targets_in_chain` numbering),
     /// `None` past the stable prefix.
     pub index: Option<usize>,
@@ -281,7 +294,7 @@ pub(crate) struct DeclaredSlotEntry {
 /// CR 700.2: the body a [`ParseContext`] parses — a whole ability, or one mode
 /// of a modal spell or ability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum BodyScope {
+pub enum BodyScope {
     #[default]
     WholeAbility,
     ModalMode,
@@ -290,7 +303,7 @@ pub(crate) enum BodyScope {
 /// CR 608.2k: the object a trigger condition introduces for its body's bare
 /// object pronouns, where the pinned `TargetFilter` is ambiguous on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConditionObjectAntecedent {
+pub enum ConditionObjectAntecedent {
     /// CR 509.3c: the attacker of a bare "<creature> becomes blocked" condition.
     BlockedAttacker,
 }
@@ -300,7 +313,7 @@ pub(crate) enum ConditionObjectAntecedent {
 ///
 /// Callers set only the fields they need; all fields are Default-able (D-02).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct ParseContext {
+pub struct ParseContext {
     /// The current subject (resolved target — "it", "that creature").
     pub subject: Option<TargetFilter>,
     /// Card name for self-reference (~) normalization.
@@ -320,15 +333,20 @@ pub(crate) struct ParseContext {
     /// Whether we are inside a trigger effect (enables event context refs).
     ///
     /// Consumed by `oracle_replacement::parse_oneshot_target_source_prevent`
-    /// (the Awe Strike one-shot target-source prevention branch): inside a
-    /// trigger body "that creature" is an event-context anaphor resolved by
-    /// the trigger machinery, not a target-source capture, so the branch must
-    /// not claim trigger-body text (Ria Ivor keeps its fall-through shapes).
+    /// (the Awe Strike one-shot target-source prevention branch), which
+    /// rejects the "that creature" anaphor inside a trigger body: there "that
+    /// creature" is an event-context anaphor resolved by the trigger machinery,
+    /// not a target-source capture (Impulsive Maneuvers keeps its fall-through).
+    /// A declared "target creature" subject inside a trigger body fails closed
+    /// to `Unimplemented` (Ria Ivor's shield is not yet supported).
     pub in_trigger: bool,
     /// Contextual source for the exact bare aggregate surface "those cards".
     /// Set per effect-chain chunk from the nearest typed producer, or from a
     /// proven trigger subject batch when no compatible chain producer wins.
-    pub bare_card_aggregate_source: Option<crate::types::ability::TrackedAnaphorSource>,
+    /// A two-leaf binding (never a bare `TrackedAnaphorSource`, which
+    /// under-expresses the referent axis): a chain-set cause or the ability's
+    /// own targets (CR 608.2c + CR 115.1).
+    pub bare_card_aggregate_source: Option<BareCardAggregateBinding>,
     /// CR 611.2a: the durational scope the clause currently being lowered stated
     /// at a printed position the clause BODY can no longer see, because the
     /// positional strip seams peel it before the body parser runs.
@@ -610,6 +628,17 @@ pub(crate) struct ParseContext {
     /// (`TargetFilter::CostPaidObject`) when the ability has a non-self exile
     /// cost, an effect-exiled tracked-set reference (`TrackedSet`) otherwise.
     pub current_ability_exile_cost_zone: Option<Zone>,
+    /// CR 608.2k: One entry per payment component of the enclosing activated
+    /// ability's cost, each that component's categories
+    /// (`AbilityCost::component_categories`). Set by
+    /// `parse_activated_ability_ir` beside `current_ability_exile_cost_zone`
+    /// and restored after the ability; empty outside an activated ability. A
+    /// cost participle ("the discarded card" → `CostCategory::Discards`, "the
+    /// sacrificed creature" → `CostCategory::SacrificesPermanent`) names an
+    /// object paid for the cost only when exactly one component can write the
+    /// cost-paid object and that component has the participle's category;
+    /// otherwise the participle describes an effect's action or is ambiguous.
+    pub current_ability_cost_components: Vec<Vec<CostCategory>>,
     /// CR 608.2c: The current effect-chain chunk has an earlier typed object
     /// referent that `ParentTarget` can legally bind to. Standalone clause
     /// parsing leaves this false so bare "it" defaults to SelfRef instead of

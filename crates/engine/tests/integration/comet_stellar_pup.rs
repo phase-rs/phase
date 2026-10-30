@@ -22,9 +22,11 @@
 
 use std::ops::ControlFlow;
 
+use engine::game::engine::EngineError;
 use engine::game::planeswalker::can_activate_loyalty_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones;
+use engine::game::{create_debug_cards, debug_card_entry_source, DebugCardCreateRequest};
 use engine::parser::oracle::parse_oracle_text;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
@@ -32,10 +34,10 @@ use engine::types::ability::{
     ObjectScope, QuantityExpr, QuantityRef, TargetChoiceTiming, TargetFilter, TargetRef,
 };
 use engine::types::ability_visit::visit_ability_def;
-use engine::types::actions::GameAction;
+use engine::types::actions::{DebugCardCreationKind, GameAction};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameRng, RandomDraw, StackEntryKind, WaitingFor};
+use engine::types::game_state::{ActionResult, GameRng, RandomDraw, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
@@ -43,6 +45,8 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 use rand::Rng;
+
+use crate::support::shared_card_db;
 
 /// Verbatim Oracle text (MTGJSON `text`). The row separators are U+2014 and the
 /// signs of `[−1]` and `[−2]` are U+2212.
@@ -317,6 +321,15 @@ fn pick_recipient(runner: &mut GameRunner, target: TargetRef) -> Vec<GameEvent> 
         })
         .unwrap_or_else(|error| panic!("the pick must be accepted: {error:?}"))
         .events
+}
+
+/// Answer the single-pick recipient prompt the way the board does: one
+/// `ChooseTarget` click (`None` = choose nothing).
+fn click_recipient(
+    runner: &mut GameRunner,
+    target: Option<TargetRef>,
+) -> Result<ActionResult, EngineError> {
+    runner.act(GameAction::ChooseTarget { target })
 }
 
 /// The graveyard prompt the engine is waiting on: its eligible cards, sorted.
@@ -1123,6 +1136,77 @@ fn faces_four_and_five_deal_damage_equal_to_loyalty_then_remove_two() {
     assert_eq!(loyalty(&a.runner, a.comet), 3);
 }
 
+/// Faces 4 and 5 answered by one board click: the single-pick recipient prompt
+/// (`min 1`, `max Some(1)`) takes a `ChooseTarget` as the same answer as a
+/// one-item `SelectTargets` (CR 608.2d), so the damage is the loyalty before the
+/// `[−2]` and the ability finishes. The controller may also pick himself.
+#[test]
+fn faces_four_and_five_take_a_single_board_click_for_the_recipient() {
+    for face in [4u8, 5] {
+        let mut a = arena();
+        roll(&mut a.runner, a.comet, face);
+        let (chooser, eligible) = recipient_prompt(&a.runner);
+        assert_eq!(chooser, P0, "reach-guard: the controller chooses");
+        assert!(eligible.contains(&TargetRef::Player(P1)));
+
+        click_recipient(&mut a.runner, Some(TargetRef::Player(P1)))
+            .unwrap_or_else(|error| panic!("the click must be accepted: {error:?}"));
+        assert_eq!(
+            life(&a.runner, P1),
+            15,
+            "damage equal to the loyalty before the removal"
+        );
+        assert_eq!(loyalty(&a.runner, a.comet), 3, "then [−2]");
+        assert!(is_priority(&a.runner));
+        assert!(a.runner.state().stack.is_empty(), "the ability finished");
+    }
+
+    // Sibling: the controller clicks his own seat.
+    let mut a = arena();
+    roll(&mut a.runner, a.comet, 4);
+    let (_, eligible) = recipient_prompt(&a.runner);
+    assert!(eligible.contains(&TargetRef::Player(P0)));
+    click_recipient(&mut a.runner, Some(TargetRef::Player(P0)))
+        .unwrap_or_else(|error| panic!("the click must be accepted: {error:?}"));
+    assert_eq!(life(&a.runner, P0), 15);
+    assert_eq!(life(&a.runner, P1), 20);
+    assert_eq!(loyalty(&a.runner, a.comet), 3);
+    assert!(is_priority(&a.runner));
+    assert!(a.runner.state().stack.is_empty());
+}
+
+/// CR 115.10a: a board click on the recipient prompt is a choice, not a target, so
+/// a hexproof creature is choosable and nothing becomes the target of anything.
+#[test]
+fn a_board_click_hits_a_hexproof_creature_without_targeting_it() {
+    let mut a = arena();
+    roll(&mut a.runner, a.comet, 4);
+    let (_, eligible) = recipient_prompt(&a.runner);
+    assert!(
+        eligible.contains(&TargetRef::Object(a.hexproof_creature)),
+        "reach-guard: the hexproof creature is offered"
+    );
+
+    let events = click_recipient(&mut a.runner, Some(TargetRef::Object(a.hexproof_creature)))
+        .unwrap_or_else(|error| panic!("the click must be accepted: {error:?}"))
+        .events;
+    assert_eq!(
+        marked_damage(&a.runner, a.hexproof_creature),
+        5,
+        "the clicked hexproof creature takes the damage"
+    );
+    assert_eq!(life(&a.runner, P1), 20, "nobody else was hit");
+    assert_eq!(loyalty(&a.runner, a.comet), 3);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::BecomesTarget { .. })),
+        "the click announces no target"
+    );
+    assert!(is_priority(&a.runner));
+    assert!(a.runner.state().stack.is_empty());
+}
+
 /// Face 4 at loyalty 1 (the card's ruling): Comet deals 1 damage, then the `[−2]`
 /// removes the one counter it can (CR 609.3), and with no loyalty left the state-based
 /// action puts him into the graveyard (CR 704.5i).
@@ -1266,6 +1350,98 @@ fn casting_comet_puts_him_on_the_battlefield_with_one_ability_and_no_prompt() {
     outcome.assert_zone(&[spell], Zone::Battlefield);
     assert_eq!(runner.state().objects[&spell].abilities.len(), 1);
     assert_eq!(loyalty(&runner, spell), 5);
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox entry: the debug Create Card tool
+// ---------------------------------------------------------------------------
+
+/// Comet for P0, put onto the battlefield by the sandbox Create Card tool from the
+/// committed fixture's verbatim face, beside an opposing creature.
+fn debug_table(run_etb: bool, creation_kind: DebugCardCreationKind) -> Table {
+    let mut scenario = scenario();
+    scenario.add_creature(P1, "Opposing Ogre", 3, 9);
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    let db = shared_card_db().expect("the committed integration fixture loads");
+    let face = db
+        .get_face_by_name("Comet, Stellar Pup")
+        .expect("Comet is in the committed fixture");
+    create_debug_cards(
+        runner.state_mut(),
+        DebugCardCreateRequest {
+            actor: P0,
+            source: debug_card_entry_source(db, face),
+            owner: P0,
+            zone: Zone::Battlefield,
+            count: 1,
+            attach_to: None,
+            run_etb,
+            nonlegendary: false,
+            creation_kind,
+        },
+    )
+    .unwrap_or_else(|error| panic!("the debug creation is accepted: {error:?}"));
+    let comet = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].name == "Comet, Stellar Pup")
+        .expect("Comet is on the battlefield");
+    assert!(is_priority(&runner), "reach-guard: the creation settled");
+    Table { runner, comet }
+}
+
+/// CR 306.5b + CR 306.5c: Comet put onto the battlefield by the sandbox Create Card
+/// tool enters with his five loyalty counters, so his rows read and change them as
+/// for a cast Comet: face 4 deals 5 to the clicked recipient, then `[−2]` leaves 3;
+/// face 1's `[+2]` leaves 7, with two Squirrels. Rows: the real entry (`run_etb`),
+/// the raw placement, and the token kind.
+///
+/// Red at base: the created Comet had a loyalty field of 5 but no loyalty counter,
+/// so face 4 dealt 0 damage and left him at 5, and face 1 left him at 2.
+#[test]
+fn debug_created_comet_rolls_read_and_change_its_loyalty_counters() {
+    for (run_etb, kind) in [
+        (true, DebugCardCreationKind::Card),
+        (false, DebugCardCreationKind::Card),
+        (true, DebugCardCreationKind::Token),
+    ] {
+        let row = format!("run_etb={run_etb}, {kind:?}");
+
+        // Face 4: one board click on P1 answers the recipient prompt.
+        let Table { mut runner, comet } = debug_table(run_etb, kind);
+        roll(&mut runner, comet, 4);
+        let (chooser, eligible) = recipient_prompt(&runner);
+        assert_eq!(chooser, P0, "{row}: the controller chooses");
+        assert!(eligible.contains(&TargetRef::Player(P1)), "{row}");
+        click_recipient(&mut runner, Some(TargetRef::Player(P1)))
+            .unwrap_or_else(|error| panic!("{row}: the click must be accepted: {error:?}"));
+        assert_eq!(
+            life(&runner, P1),
+            15,
+            "{row}: damage equal to his five loyalty counters"
+        );
+        assert_eq!(loyalty(&runner, comet), 3, "{row}: then [−2]");
+        assert_eq!(
+            runner.state().objects[&comet].loyalty,
+            Some(3),
+            "{row}: CR 306.5c"
+        );
+        assert!(is_priority(&runner), "{row}");
+        assert!(
+            runner.state().stack.is_empty(),
+            "{row}: the ability finished"
+        );
+
+        // Face 1: [+2], then two Squirrels.
+        let Table { mut runner, comet } = debug_table(run_etb, kind);
+        roll(&mut runner, comet, 1);
+        assert!(is_priority(&runner), "{row}: no prompt");
+        assert_eq!(loyalty(&runner, comet), 7, "{row}: [+2]");
+        assert_eq!(squirrels(&runner).len(), 2, "{row}");
+    }
 }
 
 // ---------------------------------------------------------------------------

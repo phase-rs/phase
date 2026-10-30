@@ -14,13 +14,18 @@ use nom::Parser;
 use super::bridge::nom_on_lower;
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::{parse_color, parse_number, scan_preceded};
-use crate::parser::oracle_util::{parse_subtype, GRANTING_SELF_PLACEHOLDER, OUTLAW_SUBTYPES};
+use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
 use crate::types::ability::{
     Comparator, ControllerRef, FilterProp, StackAbilityKind, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
+
+pub(crate) use crate::types::text_grammar::parse_non_prefix;
+pub use crate::types::text_grammar::{
+    parse_supertype_prefix, parse_supertype_word, parse_type_filter_word,
+};
 
 /// Parse the Oracle prefixes that declare a target slot.
 ///
@@ -152,37 +157,6 @@ fn type_filter_can_name_attacker(filter: &TypeFilter) -> bool {
         | TypeFilter::Any
         | TypeFilter::Non(_) => false,
     }
-}
-
-/// Parse a "non" prefix: "non" or "non-" followed by implicit word boundary.
-pub(crate) fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
-    alt((tag("non-"), tag("non"))).parse(input)
-}
-
-/// CR 205.4a: Parse a bare supertype word ("legendary", "basic", "snow",
-/// "world", "ongoing") without consuming any trailing boundary. Shared building
-/// block for both the adjective-prefix form (`parse_supertype_prefix`, word +
-/// space) and trailing relative-clause forms ("that aren't legendary", where
-/// the word is at end-of-string). Callers that need a boundary apply their own
-/// check. Covers the full CR 205.4a set the engine `Supertype` enum models
-/// (Host is set-supplemental / not CR 205.4a and is excluded here). None of the
-/// five words is a prefix of another, so `alt` ordering is boundary-safe.
-pub fn parse_supertype_word(input: &str) -> OracleResult<'_, Supertype> {
-    alt((
-        value(Supertype::Legendary, tag("legendary")),
-        value(Supertype::Basic, tag("basic")),
-        value(Supertype::Snow, tag("snow")),
-        value(Supertype::World, tag("world")),
-        value(Supertype::Ongoing, tag("ongoing")),
-    ))
-    .parse(input)
-}
-
-/// Parse a supertype prefix ("legendary ", "basic ", "snow ") consuming trailing space.
-pub fn parse_supertype_prefix(input: &str) -> OracleResult<'_, Supertype> {
-    let (rest, st) = parse_supertype_word(input)?;
-    let (rest, _) = space1.parse(rest)?;
-    Ok((rest, st))
 }
 
 /// Parse color-quality adjective prefixes: "colorless ", "monocolored ",
@@ -567,103 +541,6 @@ fn parse_type_list(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
     Ok((remaining, types))
 }
 
-/// Parse a single type filter word (singular or plural).
-///
-/// Uses a manual lookup for core/card types to avoid deep nom `alt` nesting which causes
-/// stack overflow in debug builds, then falls back to the shared subtype table.
-pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
-    // Table of (prefix, TypeFilter) — longest-match-first within shared prefixes.
-    static TYPE_WORDS: &[(&str, TypeFilter)] = &[
-        ("creatures", TypeFilter::Creature),
-        ("creature", TypeFilter::Creature),
-        ("artifacts", TypeFilter::Artifact),
-        ("artifact", TypeFilter::Artifact),
-        ("enchantments", TypeFilter::Enchantment),
-        ("enchantment", TypeFilter::Enchantment),
-        ("instants", TypeFilter::Instant),
-        ("instant", TypeFilter::Instant),
-        ("sorceries", TypeFilter::Sorcery),
-        ("sorcery", TypeFilter::Sorcery),
-        ("planeswalkers", TypeFilter::Planeswalker),
-        ("planeswalker", TypeFilter::Planeswalker),
-        ("lands", TypeFilter::Land),
-        ("land", TypeFilter::Land),
-        // Plural before singular (longest-match-first): the word-boundary guard
-        // rejects "battle" + trailing 's', and BATTLE_SUBTYPES has no "Battle"
-        // entry, so the plural must be an explicit head-noun word here.
-        ("battles", TypeFilter::Battle),
-        ("battle", TypeFilter::Battle),
-        // CR 308: Kindred card type (and legacy Tribal terminology).
-        ("kindreds", TypeFilter::Kindred),
-        ("kindred", TypeFilter::Kindred),
-        ("tribals", TypeFilter::Kindred),
-        ("tribal", TypeFilter::Kindred),
-        ("permanents", TypeFilter::Permanent),
-        ("permanent", TypeFilter::Permanent),
-        ("cards", TypeFilter::Card),
-        ("card", TypeFilter::Card),
-        // CR 112.1: a spell is a card on the stack — "spell"/"spells" → Card.
-        ("spells", TypeFilter::Card),
-        ("spell", TypeFilter::Card),
-    ];
-
-    // CR 700.12: "outlaw"/"outlaws" is a head noun for the Assassin, Mercenary,
-    // Pirate, Rogue, and/or Warlock creature types. Tried before the bare-prefix
-    // TYPE_WORDS scan and the subtype table because it expands to a disjunction
-    // rather than a single subtype. The word-boundary guard prevents "outlawry"
-    // (and similar prefixed words) from matching.
-    if let Ok((rest, tf)) = parse_outlaw_type(input) {
-        return Ok((rest, tf));
-    }
-
-    for &(word, ref tf) in TYPE_WORDS {
-        if let Some(rest) = input.strip_prefix(word) {
-            // Word-boundary guard (mirrors parse_outlaw_type below and
-            // parse_subtype_entry in oracle_util.rs): a head-noun type word must
-            // be followed by end-of-input or a non-alphanumeric char. Without
-            // this, a TYPE_WORD that prefixes a longer subtype shadows it — e.g.
-            // "land" eating "lander" or "spell" eating "spellshaper" instead of
-            // falling through to the boundary-guarded subtype table.
-            if rest.is_empty() || rest.starts_with(|c: char| !c.is_alphanumeric()) {
-                return Ok((rest, tf.clone()));
-            }
-        }
-    }
-
-    if let Some((subtype, consumed)) = parse_subtype(input) {
-        return Ok((&input[consumed..], TypeFilter::Subtype(subtype)));
-    }
-
-    Err(nom::Err::Error(nom::error::Error::new(
-        input,
-        nom::error::ErrorKind::Fail,
-    )))
-}
-
-/// CR 700.12: Parse the "outlaw"/"outlaws" head noun into a disjunction of the
-/// Assassin, Mercenary, Pirate, Rogue, and Warlock creature types. Matches the
-/// plural form first (longest-match), then requires a non-alphanumeric word
-/// boundary so words like "outlawry" never match.
-fn parse_outlaw_type(input: &str) -> OracleResult<'_, TypeFilter> {
-    let (rest, _) = alt((tag("outlaws"), tag("outlaw"))).parse(input)?;
-    match rest.chars().next() {
-        // Word boundary: end of input or non-alphanumeric follower.
-        None => {}
-        Some(c) if !c.is_alphanumeric() => {}
-        _ => {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Fail,
-            )))
-        }
-    }
-    let any_of = OUTLAW_SUBTYPES
-        .iter()
-        .map(|s| TypeFilter::Subtype((*s).to_string()))
-        .collect();
-    Ok((rest, TypeFilter::AnyOf(any_of)))
-}
-
 /// Parse a self-reference from Oracle text: "~", "it", "itself",
 /// "this creature", "this permanent", "this spell", "this enchantment",
 /// "this artifact".
@@ -691,6 +568,7 @@ pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
         value(TargetFilter::SelfRef, tag("this artifact")),
         value(TargetFilter::SelfRef, tag("this land")),
         value(TargetFilter::SelfRef, tag("this attraction")),
+        value(TargetFilter::SelfRef, tag("this source")),
     ))
     .parse(input)
 }
@@ -854,10 +732,35 @@ pub fn parse_attacking_player_event_ref(input: &str) -> OracleResult<'_, TargetF
 }
 
 /// CR 506.3d + CR 508.1: "that opponent" inside an attack trigger's effect —
-/// the opponent being attacked in the triggering event (token enters attacking
-/// that opponent; Adeline / Ellie class).
+/// the opponent being attacked in the triggering event.
 pub fn parse_attacked_opponent_event_ref(input: &str) -> OracleResult<'_, TargetFilter> {
     value(TargetFilter::DefendingPlayer, tag("that opponent")).parse(input)
+}
+
+/// CR 506.3 + CR 115.10a: "the player or planeswalker it's attacking" and its
+/// "that creature is attacking" form: the player or planeswalker the referred-to
+/// attacking creature is attacking, read at resolution (never a declared target).
+///
+/// One `alt` per axis of variation: the copula ("it's" / "it is" / "that creature
+/// is"), then the fixed "attacking". The trailing `not(alphanumeric)` keeps
+/// "attacking" a whole word. Only the printed kind is accepted: an attack-target
+/// SETTER ("also attacks the player or planeswalker ...") never reaches this
+/// combinator, and "target player or planeswalker" keeps its "target" slot.
+pub fn parse_attacked_player_or_planeswalker(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(
+        TargetFilter::AttackedPlayerOrPlaneswalker,
+        terminated(
+            preceded(
+                tag("the player or planeswalker "),
+                terminated(
+                    alt((tag("it's"), tag("it is"), tag("that creature is"))),
+                    tag(" attacking"),
+                ),
+            ),
+            not(satisfy(char::is_alphanumeric)),
+        ),
+    )
+    .parse(input)
 }
 
 /// Matches "that spell", "that player", "that creature", "defending player",
@@ -1426,6 +1329,43 @@ pub(crate) fn parse_object_exclusion_list(input: &str) -> OracleResult<'_, Vec<O
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn attacked_player_or_planeswalker_family() {
+        use super::parse_attacked_player_or_planeswalker as parse;
+        for text in [
+            "the player or planeswalker it's attacking",
+            "the player or planeswalker it is attacking",
+            "the player or planeswalker that creature is attacking",
+        ] {
+            assert_eq!(
+                parse(text).unwrap(),
+                ("", TargetFilter::AttackedPlayerOrPlaneswalker),
+                "{text}"
+            );
+        }
+        // The remainder is left to the caller.
+        assert_eq!(
+            parse("the player or planeswalker it's attacking equal to the number of artifacts")
+                .unwrap(),
+            (
+                " equal to the number of artifacts",
+                TargetFilter::AttackedPlayerOrPlaneswalker
+            )
+        );
+        assert!(TargetFilter::AttackedPlayerOrPlaneswalker.is_context_ref());
+        // Siblings: the combinator is not an anaphor, a slot, a setter or a defender.
+        for text in [
+            "the player",
+            "the player or planeswalker",
+            "the player or planeswalker it's attackingly",
+            "target player or planeswalker it's attacking",
+            "defending player",
+            "the player or planeswalker that creature is attacked by",
+        ] {
+            assert!(parse(text).is_err(), "{text}");
+        }
+    }
+
     use super::*;
 
     /// Each constant is the grammar's reading of its phrase, and the
@@ -2008,6 +1948,10 @@ mod tests {
         let (rest4, f4) = parse_self_reference("this card from your graveyard").unwrap();
         assert_eq!(rest4, " from your graveyard");
         assert_eq!(f4, TargetFilter::SelfRef);
+
+        let (rest5, f5) = parse_self_reference("this source this turn").unwrap();
+        assert_eq!(rest5, " this turn");
+        assert_eq!(f5, TargetFilter::SelfRef);
     }
 
     #[test]

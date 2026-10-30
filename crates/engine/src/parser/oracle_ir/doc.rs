@@ -36,6 +36,7 @@ use crate::types::ability::{
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
+pub use crate::types::oracle_diagnostic::{OracleItemId, OracleSourceSpan, SpanPrecision};
 
 /// Closed category for an unsupported ability residual.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -95,20 +96,6 @@ impl UnsupportedAbilityIr {
 // Source identity
 // ---------------------------------------------------------------------------
 
-/// Stable document-local identity for one parsed item.
-///
-/// Reserved by `OracleDocBuilder::begin_item` *before* branch parsing, so a
-/// nested parser can name its owning item without the item existing yet.
-///
-/// `Deserialize` + `pub`: this id is part of the `OracleDiagnostic::SwallowedClause`
-/// wire payload (`CardFace::parse_warnings` → `card-data.json`), so it must survive a
-/// round-trip through the card DB loaders. Re-exported from `oracle_ir::diagnostic`
-/// so consumers outside this crate-private module can name it.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
-pub struct OracleItemId(pub u32);
-
 /// Document-global identity for one independently auditable unit: an item, a
 /// clause, a modal mode, a trigger/static/replacement execute body, a granted
 /// ability body, or an explicit unsupported fallback.
@@ -118,170 +105,6 @@ pub struct OracleItemId(pub u32);
 pub(crate) struct OracleUnitId {
     pub(crate) item: OracleItemId,
     pub(crate) ordinal: u32,
-}
-
-/// How precisely a span locates its unit.
-///
-/// A span is always *true* — it always contains its unit — but it is not always
-/// *card-absolute*. A consumer that renders a position (Plan 02's per-unit
-/// diagnostics) must be able to tell the difference: printing a chain-local byte
-/// offset as a card position is a precise-looking wrong answer, which is worse
-/// than an admittedly coarse one.
-///
-/// Typed rather than a `bool` per CLAUDE.md: a future `LineOnly` precision (line
-/// known, byte range not) is an enum value, not a second flag.
-// No `Ord`: `Exact < ChainRelative` would be a meaningless magnitude claim on a
-// qualifier this enum's own docs call orthogonal to containment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum SpanPrecision {
-    /// The span is the unit's exact byte/line extent. Safe to render.
-    Exact,
-    /// The span's byte range is exact **within the effect chain** it was parsed
-    /// from, but NOT card-absolute: it is an offset into a single
-    /// `parse_effect_chain_ir` invocation's text, not into the whole Oracle
-    /// document. Minted by the item-scoped `ClauseIrBuilder`, whose local
-    /// allocator is seeded over the chain text because the document allocator is
-    /// not yet threaded through `ParseContext` (same wall `AbilityIr` documents).
-    ///
-    /// It is HONEST, not fabricated: the offset is truthful relative to the
-    /// chain, and the verbatim `fragment` is retained so a later
-    /// allocator-threading unit can upgrade it to a card-absolute
-    /// `SpanPrecision::Exact` by adding the chain's base offset — or, if
-    /// preprocessing was not offset-linear, by re-locating the fragment in the
-    /// card text. A renderer must NOT print `first_line`/`start_byte` as a
-    /// card-absolute position.
-    ///
-    /// U5 DEBT — upgrades to `Exact` when the allocator is threaded.
-    ChainRelative,
-}
-
-/// Position of a unit within the original Oracle text, plus how precisely that
-/// position is known (`precision`).
-///
-/// Byte ranges are required (not just line ranges) so two clauses on one
-/// physical line remain distinguishable. `ordinal_within_span` disambiguates
-/// units that share a byte span — one Oracle line may legitimately yield two
-/// items (e.g. `Kicker {2}{G}` emits a `Keyword` and an `AdditionalCost`).
-// No `PartialOrd`/`Ord`: derived lexicographic order would compare `precision`
-// ahead of `ordinal_within_span`, which is nonsense, and there is no consumer —
-// the item map is keyed by an explicit `(usize, u32)` tuple, not by this type.
-// If a future unit needs ordering, hand-implement it over
-// `(start_byte, end_byte, ordinal_within_span)` and never over `precision`.
-///
-/// `Deserialize` + `pub`: a span is part of the `OracleDiagnostic::SwallowedClause` wire
-/// payload (`CardFace::parse_warnings` → `card-data.json`), so it must survive a
-/// round-trip through the card DB loaders. Re-exported from `oracle_ir::diagnostic`.
-///
-/// # The span an audit diagnostic carries is a UNIT span, and it is LINE-GRANULAR
-///
-/// `Exact` on a diagnostic's `unit_span` means the bounds locate **the audit unit**
-/// exactly — not a clause within it. No producer mints a sub-line ITEM span:
-/// `DocEmitter::exact_span` hands every item on a line the whole line's byte range
-/// (`byte_range(line)`), so two clauses on one physical line are addressed by the same
-/// bytes and are distinguished only by `ordinal_within_span`. `audit_units` therefore
-/// groups them into ONE unit, and both share one `unit_span` — the line-granularity
-/// ceiling `feature.rs` documents. A renderer must not present a `unit_span` as a
-/// *clause* position. When the recognizer bring-up gives items real sub-line spans, the
-/// units subdivide on their own and this narrows with no change here.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct OracleSourceSpan {
-    pub first_line: usize,
-    pub last_line: usize,
-    pub start_byte: usize,
-    pub end_byte: usize,
-    /// Whether the bounds above locate this unit exactly. See `SpanPrecision`.
-    pub precision: SpanPrecision,
-    pub ordinal_within_span: u32,
-}
-
-impl OracleSourceSpan {
-    /// An exactly-located span. The constructor unit 3b uses once emission moves
-    /// into the dispatch loop and the real line/byte range is in hand.
-    pub(crate) fn exact(
-        first_line: usize,
-        last_line: usize,
-        start_byte: usize,
-        end_byte: usize,
-        ordinal_within_span: u32,
-    ) -> Self {
-        Self {
-            first_line,
-            last_line,
-            start_byte,
-            end_byte,
-            precision: SpanPrecision::Exact,
-            ordinal_within_span,
-        }
-    }
-
-    /// A span whose byte range is exact **within one effect chain** but not
-    /// card-absolute. See `SpanPrecision::ChainRelative`. Minted by
-    /// `ClauseIrBuilder` for per-clause provenance; carries a verbatim fragment
-    /// (the guard in `check_fragment_precision` requires it) so the eventual
-    /// allocator-threading unit can upgrade it to `Exact`.
-    pub(crate) fn chain_relative(
-        first_line: usize,
-        last_line: usize,
-        start_byte: usize,
-        end_byte: usize,
-        ordinal_within_span: u32,
-    ) -> Self {
-        Self {
-            first_line,
-            last_line,
-            start_byte,
-            end_byte,
-            precision: SpanPrecision::ChainRelative,
-            ordinal_within_span,
-        }
-    }
-
-    /// True when this span's bounds locate the unit exactly **card-absolutely**.
-    /// A position renderer must consult this before printing a line number or
-    /// byte offset as a card position. `ChainRelative` is deliberately NOT exact:
-    /// its offsets are truthful only within a single chain.
-    ///
-    /// The fragment-precision guard now consults the widened `carries_fragment`
-    /// (which admits `ChainRelative`), so this exact-only accessor has no
-    /// production caller in M1 — it is retained solely as the card-absolute
-    /// distinction the precision-tier tests assert on, hence `#[cfg(test)]`
-    /// rather than a dead-code allow.
-    #[cfg(test)]
-    pub(crate) fn is_exact(&self) -> bool {
-        matches!(self.precision, SpanPrecision::Exact)
-    }
-
-    /// True when this precision tier is allowed to carry a verbatim `fragment`.
-    ///
-    /// Both live tiers — `Exact` (card-absolute) and `ChainRelative` (chain-local
-    /// but honest) — address a concrete byte range and therefore have a real
-    /// verbatim fragment, so this is currently true for every span. That is not a
-    /// tautology to be collapsed into `true`: it is the single authority the
-    /// fail-closed `check_fragment_precision` guard consults, and because the
-    /// match is exhaustive, a future non-locating tier (the `LineOnly` this
-    /// enum's docs anticipate) cannot be added without deciding here whether it
-    /// may carry a fragment. The retired `WholeDocument` tier was the `false`
-    /// case: its sole honest "fragment" would have been the entire card.
-    pub(crate) fn carries_fragment(&self) -> bool {
-        matches!(
-            self.precision,
-            SpanPrecision::Exact | SpanPrecision::ChainRelative
-        )
-    }
-
-    /// True when `self` and `other` cover overlapping bytes *and* claim the same
-    /// `ordinal_within_span`. Co-located siblings with distinct ordinals are
-    /// legal; that is what `ordinal_within_span` exists for.
-    pub(crate) fn conflicts_with(&self, other: &Self) -> bool {
-        self.ordinal_within_span == other.ordinal_within_span
-            && self.start_byte < other.end_byte
-            && other.start_byte < self.end_byte
-    }
-
-    /// True when `self` lies entirely within `other`'s byte range.
-    pub(crate) fn is_contained_by(&self, other: &Self) -> bool {
-        self.start_byte >= other.start_byte && self.end_byte <= other.end_byte
-    }
 }
 
 /// A unit's identity, its source position, and — when that position is exact —
@@ -1640,6 +1463,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::SkipNextStep { .. } => {}
         Effect::AdditionalPhase { .. } => {}
         Effect::Double { .. } => {}
+        Effect::ModifyAnnouncedX { .. } => {}
         Effect::RuntimeHandled { .. } => {}
         Effect::Incubate { .. } => {}
         Effect::Amass { .. } => {}

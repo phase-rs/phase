@@ -1,8 +1,9 @@
 use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::target::PlayerAnaphor;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till, take_until};
+use nom::bytes::complete::{tag, take_till, take_till1, take_until};
 use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, eof, map, opt, peek, rest, value, verify};
+use nom::combinator::{all_consuming, eof, map, not, opt, peek, recognize, rest, value, verify};
 use nom::multi::separated_list1;
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
@@ -17,18 +18,19 @@ use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChooseOneOfKind, ChosenSubtypeKind, ColorChangeMode,
-    ContinuousModification, ControllerRef, CopyRecipient, Duration, EachDamageRecipient, Effect,
-    EffectScope, FilterProp, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, PtValue, QuantityExpr, StaticCondition, StaticDefinition, TargetFilter,
-    TypedFilter,
+    ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRecipient, Duration,
+    EachDamageRecipient, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope,
+    PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr, StaticCondition,
+    StaticDefinition, TargetFilter, TypedFilter,
 };
-use crate::types::game_state::DayNight;
+use crate::types::game_state_kinds::DayNight;
 use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
 use crate::types::statics::{ProhibitionScope, StaticMode};
 
 use super::super::oracle_keyword::parse_granted_keyword_fragment;
 use super::super::oracle_nom::bridge::nom_on_lower;
+use super::super::oracle_nom::condition as nom_condition;
 use super::super::oracle_nom::defender_exception;
 use super::super::oracle_nom::duration::parse_duration;
 use super::super::oracle_nom::error::OracleResult;
@@ -101,6 +103,7 @@ fn subject_phrase_ast(application: Option<SubjectApplication>) -> SubjectPhraseA
             multi_target: application.multi_target,
             inherits_parent: application.inherits_parent,
             is_optional: application.is_optional,
+            player_anaphor: application.player_anaphor,
         },
         None => SubjectPhraseAst {
             affected: None,
@@ -108,6 +111,7 @@ fn subject_phrase_ast(application: Option<SubjectApplication>) -> SubjectPhraseA
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         },
     }
 }
@@ -183,7 +187,7 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
-            |effect, duration, sub_ability| PredicateAst::Restriction {
+            |effect, duration, sub_ability, _onset| PredicateAst::Restriction {
                 effect,
                 duration,
                 sub_ability,
@@ -201,7 +205,7 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
-            |effect, duration, sub_ability| PredicateAst::Restriction {
+            |effect, duration, sub_ability, _onset| PredicateAst::Restriction {
                 effect,
                 duration,
                 sub_ability,
@@ -217,7 +221,7 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
-            |effect, duration, sub_ability| PredicateAst::Restriction {
+            |effect, duration, sub_ability, _onset| PredicateAst::Restriction {
                 effect,
                 duration,
                 sub_ability,
@@ -236,10 +240,13 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
-            |effect, duration, _sub_ability| PredicateAst::Continuous {
+            // CR 701.15b: goaded is a designation, not a characteristic (CR 109.3),
+            // so the copula here states no CR 611.2e "is [characteristic]" onset.
+            |effect, duration, _sub_ability, _onset| PredicateAst::Continuous {
                 effect,
                 duration,
                 sub_ability: None,
+                onset: ContinuousEffectOnset::WhenFollowed,
             },
             ctx,
         ));
@@ -257,14 +264,30 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(clause);
     }
 
+    // Runs before the continuous arm, which would otherwise take "your life total"
+    // as a subject and harvest a later conjunct's keywords onto it.
+    if let Some(clause) = try_parse_life_lock_clause(text) {
+        return Some(subject_predicate_ast_from_clause(
+            text,
+            clause,
+            |effect, duration, sub_ability, _onset| PredicateAst::Restriction {
+                effect,
+                duration,
+                sub_ability,
+            },
+            ctx,
+        ));
+    }
+
     if let Some(clause) = try_parse_subject_continuous_clause(text, ctx) {
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
-            |effect, duration, sub_ability| PredicateAst::Continuous {
+            |effect, duration, sub_ability, onset| PredicateAst::Continuous {
                 effect,
                 duration,
                 sub_ability,
+                onset,
             },
             ctx,
         ));
@@ -291,10 +314,11 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
-            |effect, duration, sub_ability| PredicateAst::Become {
+            |effect, duration, sub_ability, onset| PredicateAst::Become {
                 effect,
                 duration,
                 sub_ability,
+                onset,
             },
             ctx,
         ));
@@ -304,10 +328,11 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
-            |effect, duration, sub_ability| PredicateAst::Become {
+            |effect, duration, sub_ability, onset| PredicateAst::Become {
                 effect,
                 duration,
                 sub_ability,
+                onset,
             },
             ctx,
         ));
@@ -336,7 +361,7 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
-            |effect, duration, sub_ability| PredicateAst::Restriction {
+            |effect, duration, sub_ability, _onset| PredicateAst::Restriction {
                 effect,
                 duration,
                 sub_ability,
@@ -394,7 +419,12 @@ fn subject_predicate_ast_from_clause<F>(
     ctx: &mut ParseContext,
 ) -> ClauseAst
 where
-    F: FnOnce(Effect, Option<Duration>, Option<Box<AbilityDefinition>>) -> PredicateAst,
+    F: FnOnce(
+        Effect,
+        Option<Duration>,
+        Option<Box<AbilityDefinition>>,
+        ContinuousEffectOnset,
+    ) -> PredicateAst,
 {
     // Issue #6965: an unbindable subject stays UNBOUND (see
     // `SubjectPhraseAst::affected`); it used to become `TargetFilter::Any`.
@@ -420,6 +450,7 @@ where
             clause.effect,
             clause.duration,
             clause.sub_ability,
+            clause.entry_onset,
         )),
     }
 }
@@ -465,11 +496,14 @@ fn try_parse_subject_additive_type_clause(text: &str, ctx: &mut ParseContext) ->
             multi_target: application.multi_target,
             inherits_parent: application.inherits_parent,
             is_optional: application.is_optional,
+            player_anaphor: application.player_anaphor,
         }),
         predicate: Box::new(PredicateAst::Continuous {
             effect: clause.effect,
             duration: clause.duration,
             sub_ability: clause.sub_ability,
+            // CR 611.2e: the copula "is/are … in addition" applies with the entry.
+            onset: predicate_onset(predicate_lower),
         }),
     })
 }
@@ -532,6 +566,7 @@ fn try_parse_contracted_subject_additive_type_clause(
                     multi_target: application.multi_target.clone(),
                     inherits_parent: application.inherits_parent,
                     is_optional: application.is_optional,
+                    player_anaphor: application.player_anaphor,
                 }),
                 predicate: Box::new(PredicateAst::Become {
                     effect: Effect::GenericEffect {
@@ -545,6 +580,8 @@ fn try_parse_contracted_subject_additive_type_clause(
                     },
                     duration: Some(Duration::UntilHostLeavesPlay),
                     sub_ability: None,
+                    // CR 611.2e: the contracted copula "it's a …" is an "is" statement.
+                    onset: ContinuousEffectOnset::WithEntry,
                 }),
             });
         }
@@ -561,11 +598,14 @@ fn try_parse_contracted_subject_additive_type_clause(
                     multi_target: application.multi_target,
                     inherits_parent: application.inherits_parent,
                     is_optional: application.is_optional,
+                    player_anaphor: application.player_anaphor,
                 }),
                 predicate: Box::new(PredicateAst::Continuous {
                     effect: clause.effect,
                     duration: clause.duration,
                     sub_ability: clause.sub_ability,
+                    // CR 611.2e: the contracted copula "it's a …" is an "is" statement.
+                    onset: ContinuousEffectOnset::WithEntry,
                 }),
             });
         }
@@ -644,11 +684,16 @@ fn try_parse_contracted_subject_additive_type_clause(
             multi_target: application.multi_target,
             inherits_parent: application.inherits_parent,
             is_optional: application.is_optional,
+            player_anaphor: application.player_anaphor,
         }),
         predicate: Box::new(PredicateAst::Become {
             effect: clause.effect,
             duration: clause.duration,
             sub_ability: clause.sub_ability,
+            // CR 611.2e: the contracted copula ("it's a 3/3 …", "she's a land …") is an
+            // "is" statement, so it applies with the entry even though it lowers through
+            // the shared "becomes" animation builder.
+            onset: ContinuousEffectOnset::WithEntry,
         }),
     })
 }
@@ -685,16 +730,88 @@ fn try_parse_subject_continuous_clause(
     if subject.eq_ignore_ascii_case("you") {
         return None;
     }
-    if let Some(clause) = try_parse_additive_type_continuous_clause(subject, predicate, ctx) {
+    // CR 611.2e: the predicate's verb form ("is/has" vs "gains/gets") decides when the
+    // clause's continuous effect starts relative to an entry of the same resolution.
+    let onset = predicate_onset(&predicate.to_lowercase());
+    if let Some(mut clause) = try_parse_additive_type_continuous_clause(subject, predicate, ctx) {
+        clause.entry_onset = onset;
         return Some(clause);
     }
     let application = parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
-    build_continuous_clause(
+    let mut clause = build_continuous_clause(
         application,
         predicate,
         ctx,
         clause_names_deferred_parser(text),
+    )?;
+    clause.entry_onset = onset;
+    Some(clause)
+}
+
+/// CR 611.2e + CR 205.1b: the onset a subject-predicate continuous clause states. `WithEntry` when
+/// any conjunct of the predicate opens with the "is/has" form (is, are, has, have, isn't, aren't,
+/// is not, is no longer, doesn't have, don't have, does not have, do not have) — at the predicate
+/// start, after "and ", or after a word that ends with ", " (optionally followed by "and ") —
+/// outside double-quoted ability text; the "still a [type]" retention qualifier (CR 205.1b) and
+/// the goaded designation (CR 701.15b) are not such statements. Otherwise `WhenFollowed`. A clause
+/// mixing an "is/has" conjunct with a "gains/gets" conjunct is `WithEntry`: it lowers to one
+/// instruction with one observation point, and the "is/has" part must apply with the entry. Enter
+/// observers then also see the "gains" part; that over-exposure is a known limitation of having one
+/// observation point per instruction.
+///
+/// Also the authority for the token-anaphor rewrite in `lower.rs`
+/// (`rewrite_populated_anaphor_in_def`), which reads the verb phrase that follows "the token(s)".
+pub(super) fn predicate_onset(predicate_lower: &str) -> ContinuousEffectOnset {
+    let text = nom_primitives::strip_double_quoted_spans(predicate_lower);
+    let leading = copular_conjunct_verb(&text).is_ok();
+    if leading || nom_primitives::scan_at_word_boundaries(&text, conjunct_copula).is_some() {
+        ContinuousEffectOnset::WithEntry
+    } else {
+        ContinuousEffectOnset::WhenFollowed
+    }
+}
+
+/// CR 611.2e: the "is/has" verb that opens a conjunct ("is", "has", "doesn't have", …), not
+/// followed by the CR 205.1b "still" retention qualifier or the CR 701.15b goaded designation.
+fn copular_conjunct_verb(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        terminated(
+            alt((
+                tag("is no longer "),
+                tag("is not "),
+                recognize((nom_condition::parse_isnt, tag(" "))),
+                recognize((tag("aren"), nom_condition::parse_apostrophe, tag("t "))),
+                tag("is "),
+                tag("are "),
+                recognize((nom_condition::parse_doesnt, tag(" have "))),
+                tag("does not have "),
+                recognize((nom_condition::parse_dont, tag(" have "))),
+                tag("do not have "),
+                tag("has "),
+                tag("have "),
+            )),
+            not(alt((tag("still "), tag("goaded")))),
+        ),
     )
+    .parse(input)
+}
+
+/// A later conjunct of a predicate that opens with an "is/has" verb: after "and ", or after a
+/// word ending in ", " (optionally followed by "and ") — "gains haste, has base power …".
+fn conjunct_copula(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        preceded(tag("and "), copular_conjunct_verb),
+        preceded(
+            (
+                take_till1(|c: char| c == ' ' || c == ','),
+                tag(", "),
+                opt(tag("and ")),
+            ),
+            copular_conjunct_verb,
+        ),
+    ))
+    .parse(input)
 }
 
 /// CR 611.3a + CR 702.16: A multi-clause conditional protection grant
@@ -768,6 +885,7 @@ fn build_conditional_protection_grant_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -835,6 +953,7 @@ fn build_additive_type_continuous_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -875,6 +994,7 @@ fn try_parse_compound_all_subjects_become_clause(
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         };
         let clause = build_become_clause(application, &predicate_with_verb, ctx)?;
         let Effect::GenericEffect {
@@ -915,6 +1035,7 @@ fn try_parse_compound_all_subjects_become_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -1034,11 +1155,15 @@ fn try_parse_subject_supertype_removal_clause(
             multi_target: application.multi_target,
             inherits_parent: application.inherits_parent,
             is_optional: application.is_optional,
+            player_anaphor: application.player_anaphor,
         }),
         predicate: Box::new(PredicateAst::Become {
             effect,
             duration,
             sub_ability: None,
+            // CR 611.2e: "isn't / is not / is no longer <supertype>" states the permanent
+            // doesn't have a characteristic, so it applies with the entry.
+            onset: ContinuousEffectOnset::WithEntry,
         }),
     })
 }
@@ -1522,11 +1647,14 @@ fn try_parse_subject_base_pt_set_clause_ast(
             multi_target: application.multi_target,
             inherits_parent: application.inherits_parent,
             is_optional: application.is_optional,
+            player_anaphor: application.player_anaphor,
         }),
         predicate: Box::new(PredicateAst::Continuous {
             effect,
             duration,
             sub_ability: None,
+            // CR 611.2e: "base power and toughness become" applies after the entry.
+            onset: ContinuousEffectOnset::WhenFollowed,
         }),
     })
 }
@@ -1657,6 +1785,7 @@ fn try_parse_combat_tax_effect_clause(text: &str) -> Option<ParsedEffectClause> 
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -1743,6 +1872,7 @@ fn try_parse_source_and_other_restriction_clause(
             multi_target: None,
             inherits_parent: primary_application.inherits_parent,
             is_optional: primary_application.is_optional,
+            player_anaphor: primary_application.player_anaphor,
         }),
         predicate: Box::new(PredicateAst::Restriction {
             effect: primary_clause.effect,
@@ -1840,6 +1970,7 @@ fn try_parse_target_and_same_name_pump_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     };
     let mass_def = super::ability_definition_from_clause(AbilityKind::Spell, mass_clause);
 
@@ -1850,11 +1981,14 @@ fn try_parse_target_and_same_name_pump_clause(
             multi_target: None,
             inherits_parent: primary.inherits_parent,
             is_optional: primary.is_optional,
+            player_anaphor: primary.player_anaphor,
         }),
         predicate: Box::new(PredicateAst::Continuous {
             effect: primary_effect,
             duration: duration.or(Some(Duration::UntilEndOfTurn)),
             sub_ability: Some(Box::new(mass_def)),
+            // CR 608.2c: "get -N/-M" is not an "is/has" statement.
+            onset: ContinuousEffectOnset::WhenFollowed,
         }),
     })
 }
@@ -1945,6 +2079,7 @@ fn try_parse_subject_restriction_clause(
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         };
         return build_restriction_clause(application, predicate);
     }
@@ -1976,6 +2111,7 @@ fn try_parse_subject_restriction_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
     }
 
@@ -2025,6 +2161,7 @@ fn try_parse_subject_restriction_clause(
                 condition: None,
                 optional: application.is_optional,
                 unless_pay: None,
+                entry_onset: ContinuousEffectOnset::WhenFollowed,
             });
         }
         // CR 508.1d + CR 701.15b + CR 611.2c: "[subject] attacks each combat if
@@ -2061,6 +2198,7 @@ fn try_parse_subject_restriction_clause(
                 condition: None,
                 optional: application.is_optional,
                 unless_pay: None,
+                entry_onset: ContinuousEffectOnset::WhenFollowed,
             });
         }
         // CR 508.1d + CR 506.3 + CR 611.2c: the defender-bound `ForceAttack` form
@@ -2126,6 +2264,7 @@ fn try_parse_subject_restriction_clause(
                     condition: None,
                     optional: application.is_optional,
                     unless_pay: None,
+                    entry_onset: ContinuousEffectOnset::WhenFollowed,
                 });
             }
         }
@@ -2158,6 +2297,7 @@ fn try_parse_subject_restriction_clause(
                 condition: None,
                 optional: application.is_optional,
                 unless_pay: None,
+                entry_onset: ContinuousEffectOnset::WhenFollowed,
             });
         }
     }
@@ -2225,6 +2365,7 @@ fn try_parse_subject_restriction_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
     }
 
@@ -2272,32 +2413,8 @@ fn try_parse_subject_restriction_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
-    }
-
-    // CR 119.7 + CR 119.8: "[possessor] life total can't change" — bidirectional
-    // life-lock for the named player (Teferi's Protection: "your life total can't
-    // change"). Distinct from the generic " can't " split below because the
-    // subject is a possessive noun phrase ("your") rather than a player subject.
-    if let Some((before, _)) = tp.split_around(" life total can't change") {
-        let possessor = before.original.trim().to_lowercase();
-        let scope_filter = life_lock_scope_from_possessor(&possessor);
-        return Some(build_life_lock_clause(scope_filter));
-    }
-    if let Some((before, _)) = tp.split_around(" life totals can't change") {
-        let possessor = before.original.trim().to_lowercase();
-        let scope_filter = life_lock_scope_from_possessor(&possessor);
-        return Some(build_life_lock_clause(scope_filter));
-    }
-    if let Some((before, _)) = tp.split_around(" life total cannot change") {
-        let possessor = before.original.trim().to_lowercase();
-        let scope_filter = life_lock_scope_from_possessor(&possessor);
-        return Some(build_life_lock_clause(scope_filter));
-    }
-    if let Some((before, _)) = tp.split_around(" life totals cannot change") {
-        let possessor = before.original.trim().to_lowercase();
-        let scope_filter = life_lock_scope_from_possessor(&possessor);
-        return Some(build_life_lock_clause(scope_filter));
     }
 
     // CR 510.1a: "[subject] assigns no combat damage [this turn/this combat]"
@@ -2332,6 +2449,7 @@ fn try_parse_subject_restriction_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
     }
 
@@ -2435,6 +2553,7 @@ fn try_parse_can_attack_with_defender(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -2478,6 +2597,7 @@ fn try_parse_targeting_bypass_clause(text: &str) -> Option<ParsedEffectClause> {
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -2500,6 +2620,7 @@ fn try_parse_can_block_additional(
             multi_target: None,
             inherits_parent: true,
             is_optional: false,
+            player_anaphor: None,
         }
     } else {
         parse_subject_application_for(subject_text.trim(), ctx, AnaphorConsumer::AffectedObject)?
@@ -2542,6 +2663,7 @@ fn try_parse_can_block_additional(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -2874,6 +2996,7 @@ fn parse_subject_application_for(
                 multi_target: None,
                 inherits_parent: false,
                 is_optional: false,
+                player_anaphor: None,
             });
         }
         return subject_filter_application(filter, true);
@@ -3105,6 +3228,7 @@ fn parse_subject_application_for(
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         });
     }
     // CR 303.4b + CR 303.4m + CR 702.5a (issues #5947, #5271): "enchanted
@@ -3207,6 +3331,7 @@ fn parse_subject_application_for(
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         });
     }
     // CR 102.1 + CR 103.1: "the player to your right/left" as subject — a
@@ -3405,6 +3530,17 @@ fn parse_subject_application_for(
                 TargetFilter::ParentTargetController
             } else if matches!(
                 ctx.relative_player_scope,
+                Some(ControllerRef::ParentTargetOwner)
+            ) && matches!(subject_anaphor, PlayerSubjectAnaphor::Player)
+            {
+                // CR 400.3 + CR 608.2c: an owner-keyed head ("put into an opponent's /
+                // a player's graveyard") makes the graveyard's owner, i.e. the moving
+                // card's owner, the antecedent of "that player"; mirrors
+                // `resolve_they_pronoun`'s arm for the same scope. The `Player`
+                // discriminant keeps "that attacking player" on its event-context ref.
+                TargetFilter::ParentTargetOwner
+            } else if matches!(
+                ctx.relative_player_scope,
                 Some(ControllerRef::TriggeringPlayer | ControllerRef::DefendingPlayer)
             ) {
                 // CR 608.2c + CR 106.12a: An explicit triggering/defending player
@@ -3452,6 +3588,8 @@ fn parse_subject_application_for(
                 multi_target: None,
                 inherits_parent: false,
                 is_optional,
+                player_anaphor: matches!(subject_anaphor, PlayerSubjectAnaphor::Player)
+                    .then_some(PlayerAnaphor::ThatPlayer),
             });
         }
     }
@@ -3483,6 +3621,7 @@ fn parse_subject_application_for(
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         });
     }
     // "an opponent" as subject — single opponent (two-player: equivalent to "each opponent").
@@ -3516,6 +3655,7 @@ fn parse_subject_application_for(
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         });
     }
     if lower == "that controller" {
@@ -3525,6 +3665,7 @@ fn parse_subject_application_for(
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         });
     }
     // CR 608.2c + CR 113.7a: "~'s controller" names the controller of the
@@ -3542,6 +3683,7 @@ fn parse_subject_application_for(
                 multi_target: None,
                 inherits_parent: false,
                 is_optional: true,
+                player_anaphor: None,
             });
         }
     }
@@ -3555,6 +3697,7 @@ fn parse_subject_application_for(
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         });
     }
     // CR 608.2c + CR 608.2d: "its controller" / "their controller" as anaphoric
@@ -3581,6 +3724,7 @@ fn parse_subject_application_for(
                 multi_target: None,
                 inherits_parent: false,
                 is_optional: true,
+                player_anaphor: Some(PlayerAnaphor::ItsController),
             });
         }
     }
@@ -3591,6 +3735,7 @@ fn parse_subject_application_for(
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: Some(PlayerAnaphor::ItsController),
         });
     }
     // CR 608.2c + CR 608.2d: "its owner may" / "their owner may" — owner-of-target
@@ -3608,6 +3753,7 @@ fn parse_subject_application_for(
                 multi_target: None,
                 inherits_parent: false,
                 is_optional: true,
+                player_anaphor: None,
             });
         }
     }
@@ -3621,6 +3767,7 @@ fn parse_subject_application_for(
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         });
     }
     // CR 115.1 + CR 608.2c: "[that|the] <noun>'s controller or that player" —
@@ -3648,6 +3795,7 @@ fn parse_subject_application_for(
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         });
     }
     // CR 608.2c: Definite/anaphoric "[the|that] <noun>'s controller" /
@@ -3675,6 +3823,7 @@ fn parse_subject_application_for(
                 multi_target: None,
                 inherits_parent: false,
                 is_optional: true,
+                player_anaphor: Some(PlayerAnaphor::ItsController),
             });
         }
         // CR 108.3: "[the|that] <noun>'s owner may" — owner of the parent target.
@@ -3686,6 +3835,7 @@ fn parse_subject_application_for(
                 multi_target: None,
                 inherits_parent: false,
                 is_optional: true,
+                player_anaphor: None,
             });
         }
         // allow-noncombinator: post-tokenized subject suffix classification
@@ -3696,6 +3846,7 @@ fn parse_subject_application_for(
                 multi_target: None,
                 inherits_parent: false,
                 is_optional: false,
+                player_anaphor: Some(PlayerAnaphor::ItsController),
             });
         }
         // CR 108.3: "[the|that] <noun>'s owner" — owner of the parent target
@@ -3708,6 +3859,7 @@ fn parse_subject_application_for(
                 multi_target: None,
                 inherits_parent: false,
                 is_optional: false,
+                player_anaphor: None,
             });
         }
     }
@@ -3725,6 +3877,7 @@ fn parse_subject_application_for(
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         });
     }
     // CR 608.2k: Bare pronoun "it" — context-dependent. In trigger context,
@@ -3767,6 +3920,7 @@ fn parse_subject_application_for(
                 multi_target: None,
                 inherits_parent: true,
                 is_optional: false,
+                player_anaphor: None,
             });
         }
         if ctx.subject.is_none() && ctx.parent_target_available {
@@ -3776,6 +3930,7 @@ fn parse_subject_application_for(
                 multi_target: None,
                 inherits_parent: true,
                 is_optional: false,
+                player_anaphor: None,
             });
         }
         return Some(SubjectApplication {
@@ -3784,6 +3939,7 @@ fn parse_subject_application_for(
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         });
     }
     // CR 608.2k: Bare pronoun "they" — context-dependent.
@@ -3824,6 +3980,7 @@ fn parse_subject_application_for(
             multi_target: None,
             inherits_parent: false,
             is_optional,
+            player_anaphor: None,
         });
     }
 
@@ -3846,6 +4003,7 @@ fn parse_subject_application_for(
                 multi_target: None,
                 inherits_parent: true,
                 is_optional: false,
+                player_anaphor: None,
             });
         }
     }
@@ -3894,6 +4052,7 @@ fn parse_subject_application_for(
                     multi_target: None,
                     inherits_parent: true,
                     is_optional: false,
+                    player_anaphor: None,
                 });
             }
             return Some(SubjectApplication {
@@ -3902,6 +4061,7 @@ fn parse_subject_application_for(
                 multi_target: None,
                 inherits_parent: true,
                 is_optional: false,
+                player_anaphor: None,
             });
         }
     }
@@ -4022,6 +4182,7 @@ fn parse_conjoined_subject_application(
         multi_target: None,
         inherits_parent: false,
         is_optional: false,
+        player_anaphor: None,
     })
 }
 
@@ -4147,6 +4308,7 @@ pub(super) fn cant_be_regenerated_tracked_set_application() -> SubjectApplicatio
         multi_target: None,
         inherits_parent: false,
         is_optional: false,
+        player_anaphor: None,
     }
 }
 
@@ -4232,6 +4394,7 @@ fn subject_application_for_cant_be_activated(
             multi_target: None,
             inherits_parent: true,
             is_optional: false,
+            player_anaphor: None,
         });
     }
     // Typed possessor noun phrases carry a trailing "'s" ("target creature's",
@@ -4471,6 +4634,7 @@ fn subject_filter_application(filter: TargetFilter, targeted: bool) -> Option<Su
         multi_target: None,
         inherits_parent: false,
         is_optional: false,
+        player_anaphor: None,
     })
 }
 
@@ -4597,7 +4761,7 @@ pub(super) fn prepared_designation_subject(
 /// `become_copy_copy_source_target_index`). That shift is only sound when the
 /// copy source ITSELF claims a declared slot. Two filter shapes claim none, and
 /// this predicate must mirror BOTH arms of the runtime authority
-/// (`game::triggers::extract_target_filter_from_effect`) or the invariant is
+/// (`types::ability::extract_target_filter_from_effect`) or the invariant is
 /// weaker than it reads:
 ///
 /// - a context ref — Cytoshape's and Polymorphous Rush's `ParentTarget` ("that
@@ -4795,6 +4959,7 @@ fn try_split_pump_compound(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -4997,6 +5162,7 @@ fn build_keyword_choice_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -5154,6 +5320,7 @@ fn build_pt_choice_clause(
         multi_target: None,
         inherits_parent: false,
         is_optional: false,
+        player_anaphor: None,
     };
 
     let branches = alternatives
@@ -5199,6 +5366,7 @@ fn build_pt_choice_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -5245,6 +5413,7 @@ fn build_continuous_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
     }
 
@@ -5306,6 +5475,7 @@ fn build_continuous_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
     }
 
@@ -5416,6 +5586,7 @@ fn build_continuous_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
     }
 
@@ -5459,6 +5630,7 @@ fn build_continuous_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -5545,6 +5717,7 @@ pub(super) fn try_parse_exiled_this_way_keyword_grant(
         multi_target: None,
         inherits_parent: false,
         is_optional: false,
+        player_anaphor: None,
     };
     build_continuous_clause(
         application,
@@ -5800,6 +5973,7 @@ fn build_become_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
     }
 
@@ -5831,6 +6005,7 @@ fn build_become_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
     }
 
@@ -5888,6 +6063,7 @@ fn build_become_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
     }
 
@@ -6030,6 +6206,7 @@ fn build_become_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
     }
 
@@ -6070,6 +6247,7 @@ fn build_become_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
     }
 
@@ -6107,6 +6285,7 @@ fn build_become_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
     }
 
@@ -6175,6 +6354,7 @@ fn build_become_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -6316,6 +6496,7 @@ fn try_parse_become_and_attack_if_able(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -6413,6 +6594,7 @@ fn try_parse_set_life_total(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -6678,6 +6860,7 @@ fn try_parse_become_choice(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     };
 
     // CR 611.2a: the clause's PRINTED window — stripped here, or peeled upstream
@@ -6689,6 +6872,22 @@ fn try_parse_become_choice(
             None => clause,
         },
     )
+}
+
+/// CR 119.7 + CR 119.8: "[possessor] life total(s) can't change" — bidirectional
+/// life-lock for the named player (Teferi's Protection: "your life total can't
+/// change"). The subject is a possessive noun phrase rather than a player subject.
+fn try_parse_life_lock_clause(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    let (_, (possessor, _, _)) = (
+        take_until::<_, _, OracleError<'_>>(" life total"),
+        alt((tag(" life totals"), tag(" life total"))),
+        alt((tag(" can't change"), tag(" cannot change"))),
+    )
+        .parse(lower.as_str())
+        .ok()?;
+    let scope_filter = life_lock_scope_from_possessor(possessor.trim());
+    Some(build_life_lock_clause(scope_filter))
 }
 
 /// CR 119.7 + CR 119.8: Map the possessive subject of a "life total can't change"
@@ -6748,6 +6947,7 @@ fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     }
 }
 
@@ -6809,6 +7009,7 @@ fn build_restriction_clause(
             condition: None,
             optional: false,
             unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
     }
 
@@ -6974,6 +7175,7 @@ fn build_restriction_clause(
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::HasChosenName
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }
@@ -7016,6 +7218,7 @@ fn build_restriction_clause(
                 condition: None,
                 optional: false,
                 unless_pay: None,
+                entry_onset: ContinuousEffectOnset::WhenFollowed,
             });
         }
     }
@@ -7127,6 +7330,7 @@ fn build_restriction_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -7670,6 +7874,7 @@ fn try_parse_copula_goaded_clause(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -7992,7 +8197,7 @@ pub(super) fn try_parse_each_source_deals_damage(
     // power") rebinds through every wrapper via
     // `rebind_anaphoric_object_scope`. A uniform dynamic amount (no anaphoric
     // pronoun) stays on the prior `None` path — fail-closed unchanged.
-    if crate::game::quantity::quantity_expr_contains_scope(&amount, ObjectScope::Anaphoric) {
+    if crate::types::ability::quantity_expr_contains_scope(&amount, ObjectScope::Anaphoric) {
         super::rebind_anaphoric_object_scope(&mut amount, ObjectScope::BatchSource);
     } else if !matches!(amount, QuantityExpr::Fixed { .. }) {
         return None;
@@ -9100,7 +9305,7 @@ mod tests {
             panic!("expected pairwise EachSourceDealsDamage, got {effect:?}");
         };
         assert_eq!(sources, TargetFilter::ParentTarget);
-        assert!(crate::game::quantity::quantity_expr_contains_scope(
+        assert!(crate::types::ability::quantity_expr_contains_scope(
             &amount,
             ObjectScope::BatchSource,
         ));
@@ -11028,6 +11233,44 @@ mod tests {
         );
     }
 
+    /// CR 400.3 + CR 608.2c: an owner-keyed trigger head ("put into an opponent's / a
+    /// player's graveyard") scopes "that player" to the graveyard's owner, read from
+    /// the zone-change record as `ParentTargetOwner`. The `Player` anaphors ("that
+    /// player", "that opponent") honour it; "that attacking player" names the attacker
+    /// and keeps its event-context ref, and with no scope "that player" stays the
+    /// triggering player.
+    #[test]
+    fn parse_subject_that_player_honors_parent_target_owner_scope() {
+        let subject_for = |text: &str, scope: Option<ControllerRef>| {
+            let mut ctx = ParseContext {
+                subject: Some(TargetFilter::Typed(TypedFilter::default())),
+                relative_player_scope: scope,
+                ..ParseContext::default()
+            };
+            parse_subject_application(text, &mut ctx)
+                .unwrap_or_else(|| panic!("{text:?} must parse as a player subject"))
+                .affected
+        };
+        let owner = Some(ControllerRef::ParentTargetOwner);
+
+        assert_eq!(
+            subject_for("that player", owner.clone()),
+            TargetFilter::ParentTargetOwner
+        );
+        assert_eq!(
+            subject_for("that opponent", owner.clone()),
+            TargetFilter::ParentTargetOwner
+        );
+        assert_eq!(
+            subject_for("that attacking player", owner),
+            TargetFilter::TriggeringPlayer
+        );
+        assert_eq!(
+            subject_for("that player", None),
+            TargetFilter::TriggeringPlayer
+        );
+    }
+
     // CR 115.1d: "any number of target" subject prefix tests
     #[test]
     fn parse_subject_any_number_of_target_creatures() {
@@ -12493,6 +12736,7 @@ mod tests {
                 multi_target: None,
                 inherits_parent: false,
                 is_optional: false,
+                player_anaphor: None,
             };
             let mut ctx = ParseContext {
                 stated_clause_duration: context_window,
@@ -12532,6 +12776,668 @@ mod tests {
                 clause.duration, expected_embedded,
                 "{predicate:?}: Choose head window"
             );
+        }
+    }
+}
+
+/// CR 611.2e: the onset each clause parser stamps from the verb form it recognized. The
+/// runtime consumer (the entry-observation deferral) is exercised by
+/// `tests/integration/etb_rider_onset.rs`; these rows pin the parse-time stamp per site.
+#[cfg(test)]
+mod entry_onset_tests {
+    use super::*;
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityKind, SubAbilityLink};
+    use ContinuousEffectOnset::{WhenFollowed, WithEntry};
+
+    /// Every node of the parsed chain (`sub_ability` and `else_ability`), in walk order.
+    fn nodes(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+        let mut out = Vec::new();
+        let mut stack = vec![def];
+        while let Some(node) = stack.pop() {
+            out.push(node);
+            stack.extend(node.else_ability.as_deref());
+            stack.extend(node.sub_ability.as_deref());
+        }
+        out
+    }
+
+    /// The onsets of the chain's nodes whose effect `kind` selects, in walk order. Asserts the
+    /// reach guard: at least one such node exists.
+    fn onsets(
+        text: &str,
+        kind: AbilityKind,
+        select: fn(&Effect) -> bool,
+    ) -> Vec<ContinuousEffectOnset> {
+        let def = parse_effect_chain(text, kind);
+        let found: Vec<_> = nodes(&def)
+            .into_iter()
+            .filter(|node| select(&node.effect))
+            .map(|node| node.entry_onset)
+            .collect();
+        assert!(
+            !found.is_empty(),
+            "reach guard: no selected node in {text:?}: {def:#?}"
+        );
+        found
+    }
+
+    fn generic_effect(effect: &Effect) -> bool {
+        matches!(effect, Effect::GenericEffect { .. })
+    }
+
+    fn the_rider(text: &str) -> ContinuousEffectOnset {
+        let found = onsets(text, AbilityKind::Spell, generic_effect);
+        assert_eq!(found.len(), 1, "one rider node in {text:?}: {found:?}");
+        found[0]
+    }
+
+    #[test]
+    fn predicate_onset_reads_the_is_has_form_of_any_conjunct() {
+        for predicate in [
+            "is a black zombie in addition to its other colors and types",
+            "are zombies in addition to their other types",
+            "has base power and toughness 4/4",
+            "have \"sacrifice this token: add {c}.\"",
+            "has flying, lifelink, and \"when this token enters, it deals 3 damage to any target.\"",
+            "isn't legendary",
+            "aren't legendary",
+            "is no longer snow",
+            "doesn't have flying",
+            "gets +1/+0 and is a zombie in addition to its other types",
+            "gains haste, has base power and toughness 4/4",
+            "gains haste, and has base power and toughness 4/4",
+            "is a spirit in addition to its other types and gains flying",
+            "get +1/+0 and aren't legendary",
+        ] {
+            assert_eq!(predicate_onset(predicate), WithEntry, "{predicate:?}");
+        }
+    }
+
+    /// The contracted negations accept the typographic apostrophe (U+2019) exactly as they accept
+    /// the ASCII one, leading or as a later conjunct, and stay inside the still/goaded guard.
+    #[test]
+    fn predicate_onset_reads_typographic_apostrophe_negations() {
+        for predicate in [
+            "isn\u{2019}t legendary",
+            "aren\u{2019}t legendary",
+            "doesn\u{2019}t have flying",
+            "don\u{2019}t have flying",
+            "get +1/+0 and aren\u{2019}t legendary",
+        ] {
+            assert_eq!(predicate_onset(predicate), WithEntry, "{predicate:?}");
+        }
+        for predicate in [
+            "get +1/+0 and aren\u{2019}t goaded",
+            "isn\u{2019}t still a land",
+        ] {
+            assert_eq!(predicate_onset(predicate), WhenFollowed, "{predicate:?}");
+        }
+    }
+
+    #[test]
+    fn predicate_onset_leaves_every_other_form_when_followed() {
+        for predicate in [
+            "gains haste until your next turn",
+            "gets +2/+0 and gains haste until end of turn",
+            "becomes a 4/3 insect creature with reach and haste",
+            "is still a land",
+            "are still lands",
+            "is goaded for the rest of the game",
+            "gets +2/+2 and is goaded",
+            "get +1/+0 and are goaded",
+            "get +1/+0 and aren't goaded",
+            "gets +x/+0 until end of turn, where x is its power",
+            "gets +1/+1 until end of turn for each creature you control that is a zombie",
+            "gets +2/+0 and gains \"when this creature dies or is put into exile from the battlefield, return it to its owner's hand.\"",
+            "loses all abilities",
+            "can't block this turn",
+        ] {
+            assert_eq!(predicate_onset(predicate), WhenFollowed, "{predicate:?}");
+        }
+    }
+
+    /// The subject continuous arm stamps the rider node it builds; a "gains"/"gets" rider stays
+    /// `WhenFollowed`, and the conjunct arms of the same grammar fire on an "is/has" conjunct.
+    #[test]
+    fn subject_continuous_arm_stamps_rider_node() {
+        const RETURN: &str = "Return target creature card from your graveyard to the battlefield.";
+        for (rider, expected) in [
+            ("It has base power and toughness 4/4.", WithEntry),
+            (
+                "It gets +1/+0 and is a Zombie in addition to its other types.",
+                WithEntry,
+            ),
+            ("It gains haste, has base power and toughness 4/4.", WithEntry),
+            (
+                "It gains haste, and has base power and toughness 4/4.",
+                WithEntry,
+            ),
+            ("It gains haste until your next turn.", WhenFollowed),
+            ("It gets +2/+0 and gains haste until end of turn.", WhenFollowed),
+            (
+                "It gets +2/+0 and gains \"When this creature dies or is put into exile from the battlefield, return it to its owner's hand.\"",
+                WhenFollowed,
+            ),
+        ] {
+            assert_eq!(the_rider(&format!("{RETURN} {rider}")), expected, "{rider:?}");
+        }
+    }
+
+    /// The "where X is its power" / "that is a Zombie" hostiles lower to `Pump`, never a
+    /// rider kind; their onset is still the default.
+    #[test]
+    fn pump_hostiles_stay_when_followed() {
+        const RETURN: &str = "Return target creature card from your graveyard to the battlefield.";
+        for rider in [
+            "It gets +X/+0 until end of turn, where X is its power.",
+            "It gets +1/+1 until end of turn for each creature you control that is a Zombie.",
+        ] {
+            let found = onsets(&format!("{RETURN} {rider}"), AbilityKind::Spell, |e| {
+                matches!(e, Effect::Pump { .. })
+            });
+            assert_eq!(found, vec![WhenFollowed], "{rider:?}");
+        }
+    }
+
+    /// Admiral Brass's return text: the "has" rider is `WithEntry`, the trailing "gains" rider
+    /// `WhenFollowed`.
+    #[test]
+    fn has_and_gains_riders_in_one_chain() {
+        let found = onsets(
+            "Return target Pirate creature card from your graveyard to the battlefield with a finality counter on it. It has base power and toughness 4/4. It gains haste until end of turn.",
+            AbilityKind::Spell,
+            generic_effect,
+        );
+        assert_eq!(found, vec![WithEntry, WhenFollowed]);
+    }
+
+    /// Copula sites: the additive "is … in addition", the contracted "it's/he's", the
+    /// type-setting "It's an [type]", and the supertype removal.
+    #[test]
+    fn copula_sites_stamp_with_entry() {
+        for text in [
+            "Put target creature card from a graveyard onto the battlefield under your control. That creature is a black Zombie in addition to its other colors and types.",
+            "Return target creature card from your graveyard to the battlefield. It's a Spirit in addition to its other types.",
+            "Return this card to the battlefield under your control. He's a Spirit in addition to his other types.",
+            "Target snow land is no longer snow.",
+        ] {
+            assert_eq!(the_rider(text), WithEntry, "{text:?}");
+        }
+        let found = onsets(
+            "Return it to the battlefield under its owner's control. It's an enchantment.",
+            AbilityKind::Spell,
+            |e| matches!(e, Effect::Animate { .. } | Effect::GenericEffect { .. }),
+        );
+        assert_eq!(found, vec![WithEntry], "type-setting");
+    }
+
+    /// The `GenericEffect` nodes of `def`'s chain whose first static definition binds
+    /// `affected` and carries a modification `marker` selects.
+    fn become_nodes<'a>(
+        def: &'a AbilityDefinition,
+        affected: &TargetFilter,
+        marker: fn(&ContinuousModification) -> bool,
+    ) -> Vec<&'a AbilityDefinition> {
+        nodes(def)
+            .into_iter()
+            .filter(|node| match &*node.effect {
+                Effect::GenericEffect {
+                    static_abilities, ..
+                } => static_abilities.first().is_some_and(|definition| {
+                    definition.affected.as_ref() == Some(affected)
+                        && definition.modifications.iter().any(marker)
+                }),
+                _ => false,
+            })
+            .collect()
+    }
+
+    /// The contracted-copula arms that lower through `PredicateAst::Become`: the
+    /// type-replacement "It's a Treasure artifact with …, and it loses all other card types"
+    /// (Vraska, the Silencer) and the non-additive animation "it's a 3/3 Robot artifact
+    /// creature with flying" (Brilliance Unleashed). Both are "is" statements.
+    #[test]
+    fn contracted_copula_become_arms_stamp_with_entry() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::card_type::CoreType;
+        let strings = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        let vraska = parse_oracle_text(
+            "Deathtouch\nWhenever a nontoken creature an opponent controls dies, you may pay {1}. If you do, return that card to the battlefield tapped under your control. It's a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana of any color,\" and it loses all other card types.",
+            "Vraska, the Silencer",
+            &strings(&["Deathtouch"]),
+            &strings(&["Legendary", "Creature"]),
+            &strings(&["Gorgon", "Assassin"]),
+        );
+        let execute = vraska
+            .triggers
+            .iter()
+            .find_map(|trigger| trigger.execute.as_deref())
+            .expect("the dies trigger's execute chain");
+        // Reach guard: only the type-replacement arm (`parse_its_a_type_loses_others`)
+        // replaces the card types with `[Artifact]` on the returned `TriggeringSource`.
+        let found = become_nodes(execute, &TargetFilter::TriggeringSource, |m| {
+            matches!(m, ContinuousModification::SetCardTypes { core_types }
+                if core_types == &[CoreType::Artifact])
+        });
+        assert_eq!(found.len(), 1, "type-replacement node: {execute:#?}");
+        assert_eq!(found[0].entry_onset, WithEntry, "type replacement");
+
+        let brilliance = parse_oracle_text(
+            "Choose one or both —\n• Brilliance Unleashed deals 5 damage to target creature.\n• Choose target artifact card in your graveyard. Return it to the battlefield if it's an artifact creature card. Otherwise, return it to the battlefield and it's a 3/3 Robot artifact creature with flying.",
+            "Brilliance Unleashed",
+            &[],
+            &strings(&["Sorcery"]),
+            &[],
+        );
+        let mode = brilliance.abilities.get(1).expect("the return mode");
+        // Reach guard: the animation arm (`build_become_clause`) binds the "it" anaphor to the
+        // chosen card (`ParentTarget`) and sets the Robot spec, in the else branch.
+        let found = become_nodes(
+            mode,
+            &TargetFilter::ParentTarget,
+            |m| matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Robot"),
+        );
+        assert_eq!(found.len(), 1, "animation node: {mode:#?}");
+        assert!(
+            become_nodes(found[0], &TargetFilter::ParentTarget, |m| matches!(
+                m,
+                ContinuousModification::SetPower { value: 3 }
+            ))
+            .iter()
+            .any(|node| std::ptr::eq(*node, found[0])),
+            "the 3/3 animation spec: {mode:#?}"
+        );
+        let otherwise: Vec<_> = nodes(mode)
+            .into_iter()
+            .filter_map(|node| node.else_ability.as_deref())
+            .flat_map(nodes)
+            .collect();
+        assert!(
+            otherwise.iter().any(|node| std::ptr::eq(*node, found[0])),
+            "the animation sits in the Otherwise branch: {mode:#?}"
+        );
+        assert_eq!(found[0].entry_onset, WithEntry, "animation");
+    }
+
+    /// CR 205.1b: "It's still a land" qualifies the governing "becomes"; neither it nor the
+    /// "becomes" applies with the entry.
+    #[test]
+    fn becomes_and_still_a_land_stay_when_followed() {
+        let found = onsets(
+            "Search your library for a basic land card, put it onto the battlefield, then shuffle. Until end of turn, that land becomes a 4/3 Insect creature with reach and haste. It's still a land.",
+            AbilityKind::Spell,
+            generic_effect,
+        );
+        assert!(
+            found.iter().all(|onset| *onset == WhenFollowed),
+            "{found:?}"
+        );
+        let found = onsets(
+            "They're still lands.",
+            AbilityKind::Activated,
+            generic_effect,
+        );
+        assert_eq!(found, vec![WhenFollowed]);
+    }
+
+    /// Return-as-Aura and assimilate both state the "is" form by construction.
+    #[test]
+    fn return_as_aura_and_assimilate_stamp_with_entry() {
+        let found = onsets(
+            "Return it to the battlefield. It's an Aura enchantment with enchant creature you control and \"{G}{W}: Enchanted creature gains indestructible until end of turn,\" and it loses all other abilities.",
+            AbilityKind::Spell,
+            |e| matches!(e, Effect::ReturnAsAura { .. }),
+        );
+        assert_eq!(found, vec![WithEntry]);
+        let found = onsets(
+            "Assimilate target creature card from an opponent's graveyard.",
+            AbilityKind::Spell,
+            generic_effect,
+        );
+        assert_eq!(found, vec![WithEntry]);
+    }
+
+    /// Digital-only perpetual base P/T (no CR; by analogy to CR 611.2e): "has" with the entry,
+    /// "become" after it.
+    #[test]
+    fn perpetual_base_pt_verb_decides_onset() {
+        let perpetual = |e: &Effect| matches!(e, Effect::ApplyPerpetual { .. });
+        assert_eq!(
+            onsets(
+                "The duplicate perpetually has base power and toughness 1/1.",
+                AbilityKind::Spell,
+                perpetual
+            ),
+            vec![WithEntry]
+        );
+        assert_eq!(
+            onsets(
+                "Its base power and toughness perpetually become 2/2.",
+                AbilityKind::Spell,
+                perpetual
+            ),
+            vec![WhenFollowed]
+        );
+    }
+
+    /// CR 701.15b: goaded is a designation, not a characteristic.
+    #[test]
+    fn goaded_copula_stays_when_followed() {
+        let found = onsets(
+            "Put two +1/+1 counters on target creature. It's goaded for the rest of the game.",
+            AbilityKind::Spell,
+            |e| matches!(e, Effect::Goad { .. }),
+        );
+        assert_eq!(found, vec![WhenFollowed]);
+    }
+
+    /// CR 608.2c: the damage compound splitter rebuilds the "and" conjunct as a chained
+    /// continuation definition from its parsed clause; the rebuild carries that clause's onset.
+    /// (The targeted compound splitter copies it the same way, but its conjunct is parsed as an
+    /// imperative, which states no "is/has" onset.)
+    #[test]
+    fn continuation_rebuild_carries_onset() {
+        for (text, expected) in [
+            (
+                "~ deals 2 damage to target creature and it has base power and toughness 1/1.",
+                WithEntry,
+            ),
+            (
+                "~ deals 2 damage to target creature and it gains haste until end of turn.",
+                WhenFollowed,
+            ),
+        ] {
+            let clause =
+                super::super::try_split_damage_compound(text, &mut ParseContext::default())
+                    .unwrap_or_else(|| panic!("reach guard: {text:?} is a damage compound"));
+            let sub = clause.sub_ability.expect("the rebuilt continuation");
+            assert!(
+                matches!(*sub.effect, Effect::GenericEffect { .. }),
+                "{sub:#?}"
+            );
+            assert_eq!(sub.entry_onset, expected, "{text:?}");
+        }
+    }
+
+    /// CR 111.3: Dragonbroods' Relic's "It has …" sentence survives as a sibling node after the
+    /// token creation and is stamped `WithEntry`.
+    #[test]
+    fn token_defining_has_sibling_is_with_entry() {
+        let def = parse_effect_chain(
+            "Create a 4/4 Dragon creature token named Reliquary Dragon that's all colors. It has flying, lifelink, and \"When this token enters, it deals 3 damage to any target.\"",
+            AbilityKind::Activated,
+        );
+        assert!(matches!(*def.effect, Effect::Token { .. }), "{def:#?}");
+        let sibling = def.sub_ability.as_deref().expect("the It has sibling");
+        assert!(matches!(*sibling.effect, Effect::GenericEffect { .. }));
+        assert_eq!(sibling.sub_link, SubAbilityLink::SequentialSibling);
+        assert_eq!(sibling.entry_onset, WithEntry);
+    }
+
+    /// The token-anaphor rewrite's node in a token-creating chain (`lower.rs`
+    /// `rewrite_populated_anaphor_in_def`). Reach guard: the chain's head creates the token, and
+    /// exactly one later node is the rewrite's `GenericEffect` — it targets `LastCreated` and its
+    /// static keeps the whole "the token(s) …" sentence as its description, which only the
+    /// rewrite writes.
+    fn token_anaphor_rider(chain: &AbilityDefinition) -> &AbilityDefinition {
+        assert!(chain.effect.is_token_creator(), "{chain:#?}");
+        let found: Vec<_> = nodes(chain)
+            .into_iter()
+            .filter(|node| match &*node.effect {
+                Effect::GenericEffect {
+                    static_abilities,
+                    target: Some(TargetFilter::LastCreated),
+                    ..
+                } => static_abilities.first().is_some_and(|definition| {
+                    definition.description.as_deref().is_some_and(|text| {
+                        let lower = text.to_lowercase();
+                        let names_the_token = alt((
+                            tag::<_, _, OracleError<'_>>("the token "),
+                            tag("the tokens "),
+                        ))
+                        .parse(lower.as_str())
+                        .is_ok();
+                        names_the_token
+                    })
+                }),
+                _ => false,
+            })
+            .collect();
+        assert_eq!(found.len(), 1, "one token-anaphor rider: {chain:#?}");
+        found[0]
+    }
+
+    /// `oracle` parsed as the card-data pipeline does, with the card's MTGJSON keywords and
+    /// type line.
+    fn card(
+        oracle: &str,
+        name: &str,
+        keywords: &[&str],
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> crate::parser::oracle::ParsedAbilities {
+        let strings = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        crate::parser::oracle::parse_oracle_text(
+            oracle,
+            name,
+            &strings(keywords),
+            &strings(types),
+            &strings(subtypes),
+        )
+    }
+
+    /// CR 111.3 + CR 611.2e: a "the token(s) has/have …" sentence after the token creation
+    /// defines the token, so the rewrite stamps `WithEntry` — Return of the Mole Man (an
+    /// activated ability) and Scriv, the Obligator (a triggered ability), verbatim.
+    #[test]
+    fn token_anaphor_has_rider_is_with_entry() {
+        let mole_man = card(
+            "Landfall — Whenever a land you control enters, you may mill two cards.\n{5}{G}, Sacrifice this enchantment: Create X 1/1 green Minion creature tokens named Moloid, where X is the number of permanent cards in your graveyard. The tokens have \"Whenever this token attacks, you may mill a card.\" Activate only as a sorcery.",
+            "Return of the Mole Man",
+            &["Landfall", "Mill"],
+            &["Enchantment"],
+            &[],
+        );
+        let ability = mole_man
+            .abilities
+            .iter()
+            .find(|ability| ability.effect.is_token_creator())
+            .expect("the token-creating activated ability");
+        assert_eq!(token_anaphor_rider(ability).entry_onset, WithEntry);
+
+        let scriv = card(
+            "Flying, deathtouch\nWhenever Scriv enters or attacks, create a white Aura enchantment token named Contract attached to target creature an opponent controls. The token has enchant creature and \"Whenever enchanted creature attacks, it gets +2/+0 until end of turn if it's attacking one of your opponents. Otherwise, its controller loses 2 life.\"",
+            "Scriv, the Obligator",
+            &["Deathtouch", "Flying"],
+            &["Legendary", "Creature"],
+            &["Inkling", "Bird"],
+        );
+        let execute = scriv
+            .triggers
+            .iter()
+            .find_map(|trigger| trigger.execute.as_deref())
+            .expect("the enters-or-attacks trigger's execute chain");
+        assert_eq!(token_anaphor_rider(execute).entry_onset, WithEntry);
+    }
+
+    /// CR 611.2e: "the token gains haste" applies after the token is on the battlefield; the
+    /// same rewrite leaves it `WhenFollowed` — Inalla's plain "The token", Determined
+    /// Iteration's populate-qualified "The token created this way" and Pietra's mid-sentence
+    /// "the token", verbatim.
+    #[test]
+    fn token_anaphor_gains_rider_stays_when_followed() {
+        let pietra = card(
+            "Haste\nRobots you control get +1/+1.\n{R}{W}, {T}, Tell a joke you haven't told this game to someone outside the game: Create a 1/1 white Clown Robot artifact creature token. If that person laughed, the token gains haste until end of turn.",
+            "Pietra, Crafter of Clowns",
+            &["Haste"],
+            &["Legendary", "Creature"],
+            &["Human", "Clown", "Artificer"],
+        );
+        let ability = pietra
+            .abilities
+            .iter()
+            .flat_map(nodes)
+            .find(|node| node.effect.is_token_creator())
+            .expect("Pietra: the token-creating node");
+        assert_eq!(token_anaphor_rider(ability).entry_onset, WhenFollowed);
+
+        let inalla = card(
+            "Eminence — Whenever another nontoken Wizard you control enters, if Inalla is in the command zone or on the battlefield, you may pay {1}. If you do, create a token that's a copy of that Wizard. The token gains haste. Exile it at the beginning of the next end step.\nTap five untapped Wizards you control: Target player loses 7 life.",
+            "Inalla, Archmage Ritualist",
+            &["Eminence"],
+            &["Legendary", "Creature"],
+            &["Human", "Wizard"],
+        );
+        let determined_iteration = card(
+            "At the beginning of combat on your turn, populate. The token created this way gains haste. Sacrifice it at the beginning of the next end step. (To populate, create a token that's a copy of a creature token you control.)",
+            "Determined Iteration",
+            &["Populate"],
+            &["Enchantment"],
+            &[],
+        );
+        for (name, parsed) in [
+            ("Inalla", inalla),
+            ("Determined Iteration", determined_iteration),
+        ] {
+            let execute = parsed
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_deref())
+                .flat_map(nodes)
+                .find(|node| node.effect.is_token_creator())
+                .unwrap_or_else(|| panic!("{name}: the token-creating node"));
+            assert_eq!(
+                token_anaphor_rider(execute).entry_onset,
+                WhenFollowed,
+                "{name}"
+            );
+        }
+    }
+
+    /// CR 611.2e: every `WithEntry` stamp this module's fixtures produce lands on a kind that
+    /// `ContinuousEffectOnset::kind_admits_with_entry` names, the parser invariant the persisted
+    /// onset admission (`types::resolution::admit_entry_onset_record`) relies on to call every
+    /// other kind decided. Each fixture must yield at least one stamped node (reach guard).
+    #[test]
+    fn every_with_entry_stamp_is_an_onset_admitting_kind() {
+        use crate::types::ability::EffectKind;
+
+        fn assert_stamps_admit(label: &str, roots: &[&AbilityDefinition]) {
+            let stamped: Vec<_> = roots
+                .iter()
+                .flat_map(|root| nodes(root))
+                .filter(|node| node.entry_onset == WithEntry)
+                .collect();
+            assert!(
+                !stamped.is_empty(),
+                "reach guard: {label:?} has a WithEntry node"
+            );
+            for node in stamped {
+                let kind = EffectKind::from(&*node.effect);
+                assert!(
+                    ContinuousEffectOnset::kind_admits_with_entry(kind),
+                    "{label:?}: WithEntry stamped on {kind:?}"
+                );
+            }
+        }
+
+        const RETURN: &str = "Return target creature card from your graveyard to the battlefield.";
+        let mut chains: Vec<(String, AbilityKind)> = [
+            "It has base power and toughness 4/4.",
+            "It gets +1/+0 and is a Zombie in addition to its other types.",
+            "It gains haste, has base power and toughness 4/4.",
+            "It gains haste, and has base power and toughness 4/4.",
+        ]
+        .iter()
+        .map(|rider| (format!("{RETURN} {rider}"), AbilityKind::Spell))
+        .collect();
+        chains.extend(
+            [
+                "Return target Pirate creature card from your graveyard to the battlefield with a finality counter on it. It has base power and toughness 4/4. It gains haste until end of turn.",
+                "Put target creature card from a graveyard onto the battlefield under your control. That creature is a black Zombie in addition to its other colors and types.",
+                "Return target creature card from your graveyard to the battlefield. It's a Spirit in addition to its other types.",
+                "Return this card to the battlefield under your control. He's a Spirit in addition to his other types.",
+                "Target snow land is no longer snow.",
+                "Return it to the battlefield under its owner's control. It's an enchantment.",
+                "Return it to the battlefield. It's an Aura enchantment with enchant creature you control and \"{G}{W}: Enchanted creature gains indestructible until end of turn,\" and it loses all other abilities.",
+                "Assimilate target creature card from an opponent's graveyard.",
+                "The duplicate perpetually has base power and toughness 1/1.",
+            ]
+            .iter()
+            .map(|text| (text.to_string(), AbilityKind::Spell)),
+        );
+        chains.push((
+            "Create a 4/4 Dragon creature token named Reliquary Dragon that's all colors. It has flying, lifelink, and \"When this token enters, it deals 3 damage to any target.\"".to_string(),
+            AbilityKind::Activated,
+        ));
+        for (text, kind) in &chains {
+            let def = parse_effect_chain(text, *kind);
+            assert_stamps_admit(text, &[&def]);
+        }
+
+        let compound =
+            "~ deals 2 damage to target creature and it has base power and toughness 1/1.";
+        let clause =
+            super::super::try_split_damage_compound(compound, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("reach guard: {compound:?} is a damage compound"));
+        let sub = clause.sub_ability.expect("the rebuilt continuation");
+        assert_stamps_admit(compound, &[&sub]);
+
+        for (name, parsed) in [
+            (
+                "Vraska, the Silencer",
+                card(
+                    "Deathtouch\nWhenever a nontoken creature an opponent controls dies, you may pay {1}. If you do, return that card to the battlefield tapped under your control. It's a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana of any color,\" and it loses all other card types.",
+                    "Vraska, the Silencer",
+                    &["Deathtouch"],
+                    &["Legendary", "Creature"],
+                    &["Gorgon", "Assassin"],
+                ),
+            ),
+            (
+                "Brilliance Unleashed",
+                card(
+                    "Choose one or both —\n• Brilliance Unleashed deals 5 damage to target creature.\n• Choose target artifact card in your graveyard. Return it to the battlefield if it's an artifact creature card. Otherwise, return it to the battlefield and it's a 3/3 Robot artifact creature with flying.",
+                    "Brilliance Unleashed",
+                    &[],
+                    &["Sorcery"],
+                    &[],
+                ),
+            ),
+            (
+                "Return of the Mole Man",
+                card(
+                    "Landfall — Whenever a land you control enters, you may mill two cards.\n{5}{G}, Sacrifice this enchantment: Create X 1/1 green Minion creature tokens named Moloid, where X is the number of permanent cards in your graveyard. The tokens have \"Whenever this token attacks, you may mill a card.\" Activate only as a sorcery.",
+                    "Return of the Mole Man",
+                    &["Landfall", "Mill"],
+                    &["Enchantment"],
+                    &[],
+                ),
+            ),
+            (
+                "Scriv, the Obligator",
+                card(
+                    "Flying, deathtouch\nWhenever Scriv enters or attacks, create a white Aura enchantment token named Contract attached to target creature an opponent controls. The token has enchant creature and \"Whenever enchanted creature attacks, it gets +2/+0 until end of turn if it's attacking one of your opponents. Otherwise, its controller loses 2 life.\"",
+                    "Scriv, the Obligator",
+                    &["Deathtouch", "Flying"],
+                    &["Legendary", "Creature"],
+                    &["Inkling", "Bird"],
+                ),
+            ),
+        ] {
+            let roots: Vec<&AbilityDefinition> = parsed
+                .abilities
+                .iter()
+                .chain(
+                    parsed
+                        .triggers
+                        .iter()
+                        .filter_map(|trigger| trigger.execute.as_deref()),
+                )
+                .collect();
+            assert_stamps_admit(name, &roots);
         }
     }
 }

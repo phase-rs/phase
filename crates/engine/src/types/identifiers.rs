@@ -15,14 +15,14 @@ pub struct ObjectId(pub u64);
 /// spell object that will cause this trigger to fire", embedded inside a
 /// `TargetFilter::SpecificObject` leaf of a floating (`TargetFilter::None`)
 /// replacement's `valid_card` tree by `parse_whenever_you_cast_enters_with_trigger`.
-/// `Effect::AddTargetReplacement`'s resolve function (`add_target_replacement.rs`)
-/// concretizes this to the real triggering spell's id (from
-/// `state.current_trigger_event`) — or to `ObjectId(0)` (matches nothing) if
-/// none is extractable — before the install is pushed. Never a real object's
-/// id (the allocator starts well below `u64::MAX`), so this is safe to use as
-/// a sentinel without a dedicated `TargetFilter`/`ReplacementDefinition`
-/// variant, which would ripple through every exhaustive match on those types
-/// across the workspace.
+/// `Effect::AddTargetReplacement` resolves it from the resolving carrier's
+/// captured `ObjectIncarnationRef`, requiring that exact spell to remain live
+/// on the stack. The same pin supplies the concrete selector id and the
+/// installed `ReplacementDefinition::triggering_spell`; missing, departed, or
+/// mismatched authority installs nothing. CR 400.7: later casts sharing the
+/// storage id cannot inherit this rider. Never a real object's id (the
+/// allocator starts well below `u64::MAX`), so no dedicated filter variant is
+/// needed.
 pub(crate) const TRIGGERING_SPELL_PLACEHOLDER: ObjectId = ObjectId(u64::MAX);
 
 /// Monotonic identity for one logical simultaneous zone-change action.
@@ -57,6 +57,20 @@ pub struct ExtraPhaseId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TrackedSetId(pub u64);
+
+/// CR 702.50a: Names one rest-of-game Epic effect by its position in
+/// `GameState::epic_effects`, which only grows, so a position is a stable identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EpicEffectId(pub u64);
+
+/// CR 615.5 + CR 614.6: names one runtime continuation of a resolution-installed
+/// replacement or prevention shield by its position in
+/// `GameState::replacement_continuations`, which only grows, so a position is a
+/// stable identity for the rest of the game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReplacementContinuationId(pub u64);
 
 /// CR 603.7: Monotonic identity of one installed delayed triggered ability.
 ///
@@ -180,26 +194,6 @@ impl ObjectIncarnationRef {
             object_id,
             incarnation,
         }
-    }
-
-    /// Convenience: capture the current incarnation of a live object.
-    pub fn from_object(obj: &GameObject) -> Self {
-        Self {
-            object_id: obj.id,
-            incarnation: obj.incarnation,
-        }
-    }
-
-    /// CR 400.7: True when this pinned reference still names the live object it
-    /// was captured from. An object that changed zones became a new object and
-    /// bumped its incarnation (`GameObject::bump_incarnation`), so a stale pin
-    /// matches nothing even though the engine reuses the `ObjectId` as storage
-    /// identity.
-    pub fn is_current(&self, state: &crate::types::game_state::GameState) -> bool {
-        state
-            .objects
-            .get(&self.object_id)
-            .is_some_and(|object| Self::from_object(object) == *self)
     }
 }
 

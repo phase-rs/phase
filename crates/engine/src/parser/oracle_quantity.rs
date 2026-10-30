@@ -48,7 +48,7 @@ use crate::types::ability::{
     TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
-use crate::types::events::PlayerActionKind;
+use crate::types::event_kinds::PlayerActionKind;
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
@@ -321,6 +321,7 @@ pub(crate) fn parse_quantity_ref_with_context(
                     crate::types::ability::CardTypeSetSource::TrackedSet {
                         set: TrackedAnaphorSource::TriggeringBatch,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .expect("statically valid property aggregate"),
@@ -384,6 +385,7 @@ pub(crate) fn parse_quantity_ref_with_context(
                         crate::types::ability::CardTypeSetSource::TrackedSet {
                             set: TrackedAnaphorSource::ChainSet,
                             caused_by: None,
+                            filter: None,
                         },
                     )
                     .expect("statically valid property aggregate"),
@@ -435,6 +437,7 @@ pub(crate) fn parse_quantity_ref_with_context(
                         crate::types::ability::CardTypeSetSource::TrackedSet {
                             set: TrackedAnaphorSource::TriggeringBatch,
                             caused_by: None,
+                            filter: None,
                         },
                     )
                     .expect("statically valid property aggregate"),
@@ -4114,6 +4117,8 @@ mod tests {
         let (rest, qty) = narrow("card type among cards discarded this way")
             .expect("the tracked-set reading must survive consolidation");
         assert_eq!(rest, "");
+        // Variant-level assertion (is this a tracked-set source?);
+        // a member filter would not change the expected answer.
         assert!(
             matches!(
                 qty,
@@ -6242,7 +6247,8 @@ mod tests {
                     aggregate.source(),
                     CardTypeSetSource::TrackedSet {
                         set: TrackedAnaphorSource::ChainSet,
-                        caused_by: None
+                        caused_by: None,
+                        filter: None
                     }
                 )
         };
@@ -6274,7 +6280,8 @@ mod tests {
             aggregate.source(),
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::TriggeringBatch,
-                caused_by: None
+                caused_by: None,
+                filter: None
             }
         ));
 
@@ -6285,6 +6292,8 @@ mod tests {
         // context-free TriggeringBatch mapping is a rules-incorrect misparse.
         // Keep it out of the batch anaphor until a trigger-context-gated pass.
         let cards = parse_cda_quantity("the total mana value of those cards");
+        // Negative keys on `set` alone: no member filter can rescue a
+        // batch-keyed misparse into acceptance.
         assert!(
             !matches!(
                 cards,
@@ -9255,6 +9264,7 @@ mod tests {
                     scope: CountScope::All,
                 },
                 exclude: SubtypeExclusion::CreatureTypes,
+                restrict: None,
             })
         );
     }
@@ -9271,7 +9281,24 @@ mod tests {
                     scope: CountScope::All,
                 },
                 exclude: SubtypeExclusion::None,
+                restrict: None,
             })
+        );
+    }
+
+    /// CR 205.3 scope cut: unprinted category heads fail closed — "land types"
+    /// and "artifact types" have no producer (only the attested creature /
+    /// planeswalker heads bind) and must stay `None`. Reach-guard: the P2/R4
+    /// positives pass in the same run.
+    #[test]
+    fn cda_unprinted_category_heads_fail_closed() {
+        assert_eq!(
+            parse_cda_quantity("the number of land types among lands you control"),
+            None
+        );
+        assert_eq!(
+            parse_cda_quantity("the number of artifact types among artifacts you control"),
+            None
         );
     }
 
@@ -9290,9 +9317,11 @@ mod tests {
         );
     }
 
-    /// Honest gaps: ETB-snapshot and flavor-text CDA tails have no live ref and
-    /// MUST remain `None` (no green-wash). Forcing a live ref would misread
-    /// these (a live recount reads 0 for sacrificed-Forest / life-paid cards).
+    /// Honest gaps: sacrificed-Forest-style ETB snapshots (which would need a
+    /// live recount that reads 0) and flavor-text CDA tails have no live ref
+    /// and MUST remain `None` (no green-wash). Minion of the Wastes is NOT in
+    /// this class: its "life paid" ref is a pre-entry `ChosenNumber` LATCH
+    /// (correct by construction, not a live recount), so it parses below.
     #[test]
     fn cda_gapped_cards_remain_unparsed() {
         // Graveyard Busybody — "cards with flavor text in your graveyards"
@@ -9305,8 +9334,11 @@ mod tests {
             parse_cda_quantity("the number of Forests sacrificed as it entered"),
             None
         );
-        // Minion of the Wastes — "the life paid as it entered" (ETB snapshot)
-        assert_eq!(parse_cda_quantity("the life paid as it entered"), None);
+        // Minion of the Wastes — "the life paid as it entered" (pre-entry latch)
+        assert_eq!(
+            parse_cda_quantity("the life paid as it entered"),
+            ref_of(QuantityRef::ChosenNumber)
+        );
     }
 
     /// CR 402.1 + CR 109.5 (issue #5637): "for each opponent who has one or fewer

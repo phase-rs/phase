@@ -5,8 +5,8 @@ import {
   detectAndParseDeck,
   exportDeck,
   parsedDeckHasCards,
-  resolveCommander,
 } from "../../services/deckParser";
+import { resolveCommander } from "../../services/commanderResolution";
 import type { ExportFormat } from "../../services/deckParser";
 import { canonicalizeDeckNames } from "../../services/canonicalCardNames";
 import type { DeckCompatibilityResult, UnsupportedCard } from "../../services/deckCompatibility";

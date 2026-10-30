@@ -206,6 +206,7 @@ mod tests {
             replacement_applied: Default::default(),
             sub_link: SubAbilityLink::ContinuationStep,
             target_reads: Default::default(),
+            entry_onset: crate::types::ability::ContinuousEffectOnset::WhenFollowed,
             sibling_condition: SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],

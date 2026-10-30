@@ -4,6 +4,7 @@ use crate::game::effects::deal_damage::{
 };
 use crate::game::effects::life::ReplacementDeferred;
 use crate::game::game_object::GameObject;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::replacement;
 use crate::game::sba;
 use crate::game::triggers;
@@ -863,7 +864,7 @@ fn collect_damage_assignments(
 
             // CR 702.19c: Compute PW loyalty threshold for trample-over-PW spillover
             let (pw_loyalty, pw_controller) = if trample == Some(TrampleKind::OverPlaneswalkers) {
-                compute_pw_loyalty_threshold(state, &attacker_info.attack_target)
+                compute_pw_loyalty_threshold(state, attacker_info)
             } else {
                 (None, None)
             };
@@ -1094,16 +1095,21 @@ pub(crate) fn needs_interactive_assignment(
 
 /// CR 702.19c: Compute effective PW loyalty threshold for trample-over-PW,
 /// accounting for pending damage from other attackers in the same step.
-fn compute_pw_loyalty_threshold(
+pub(crate) fn compute_pw_loyalty_threshold(
     state: &GameState,
-    attack_target: &AttackTarget,
+    attacker_info: &crate::game::combat::AttackerInfo,
 ) -> (Option<u32>, Option<PlayerId>) {
-    if let AttackTarget::Planeswalker(pw_id) = attack_target {
+    if let AttackTarget::Planeswalker(pw_id) = attacker_info.attack_target {
+        // CR 506.4c + CR 702.19e: an ended relation has no current loyalty
+        // threshold; only the original defender remains eligible for spillover.
+        if crate::game::combat::active_attack_target(state, attacker_info).is_none() {
+            return (None, Some(attacker_info.defending_player));
+        }
         // CR 306.8: PW loyalty is tracked via the `loyalty` field (authoritative),
         // synced with counters on damage application. Read the field directly.
         let base_loyalty = state
             .objects
-            .get(pw_id)
+            .get(&pw_id)
             .and_then(|obj| obj.loyalty)
             .unwrap_or(0);
         // CR 702.19c: Account for pending damage from other attackers this step
@@ -1113,13 +1119,13 @@ fn compute_pw_loyalty_threshold(
             .map(|c| {
                 c.pending_damage
                     .iter()
-                    .filter(|(_, da)| da.target == DamageTarget::Object(*pw_id))
+                    .filter(|(_, da)| da.target == DamageTarget::Object(pw_id))
                     .map(|(_, da)| da.amount)
                     .sum()
             })
             .unwrap_or(0);
         let effective = base_loyalty.saturating_sub(pending_to_pw);
-        let controller = state.objects.get(pw_id).map(|obj| obj.controller);
+        let controller = state.objects.get(&pw_id).map(|obj| obj.controller);
         (Some(effective), controller)
     } else {
         (None, None)
@@ -1137,7 +1143,7 @@ fn assign_trample_over_pw_excess(
     if excess == 0 {
         return result;
     }
-    let (pw_loyalty, _) = compute_pw_loyalty_threshold(state, &attacker_info.attack_target);
+    let (pw_loyalty, pw_controller) = compute_pw_loyalty_threshold(state, attacker_info);
     let effective_loyalty = pw_loyalty.unwrap_or(0);
     let to_pw = excess.min(effective_loyalty);
     let to_controller = excess.saturating_sub(to_pw);
@@ -1153,7 +1159,7 @@ fn assign_trample_over_pw_excess(
     }
     if to_controller > 0 {
         result.push(DamageAssignment {
-            target: DamageTarget::Player(attacker_info.defending_player),
+            target: DamageTarget::Player(pw_controller.unwrap_or(attacker_info.defending_player)),
             amount: to_controller,
         });
     }
@@ -1514,7 +1520,11 @@ struct BatchEntry<'a> {
 ///   gates) WITHOUT applying any damage yet.
 /// - **Phase B (Batch replace):** pass the whole proposed-event slice through
 ///   `replace_combat_damage_batch`, which runs the replacement pipeline per
-///   event but aggregates each `Prevention::All` shield's prevented amount.
+///   event but aggregates continuous all-damage and one-shot prevention riders.
+///   `ShieldKind::PreventionOneShot` (Awe Strike) emits real source/recipient
+///   `DamagePrevented` events per portion. `Prevention { All }` with
+///   `consume_on_apply` (Impulsive Maneuvers' lose branch) uses the continuous-All
+///   path and emits its aggregate event at the rider boundary.
 /// - **Phase C (Apply + bookkeeping):** apply each surviving post-replacement
 ///   event via `apply_damage_after_replacement`, then run the player-batching
 ///   and commander-damage bookkeeping. Afterward, fire each prevention shield's
@@ -1891,13 +1901,15 @@ fn drain_combat_lifelink(
 }
 
 /// CR 615.5 + CR 615.13: After a simultaneous combat-damage batch, fire each
-/// `Prevention::All` shield's `runtime_execute` rider exactly once against the
-/// aggregate prevented amount.
+/// continuous all-damage or one-shot prevention shield's runtime rider once with
+/// the aggregate prevented amount.
 ///
-/// Each `DamagePrevented` event for the batch is emitted here (the per-source
-/// applier suppressed them so the rider sees one un-fragmented amount). The
-/// aggregate prevented amount is stamped into `last_effect_count` immediately
-/// before the single rider call so the rider's `QuantityRef::EventContextAmount`
+/// Continuous shields, including `Prevention { All }` with `consume_on_apply`
+/// (Impulsive Maneuvers' lose branch), emit their aggregate `DamagePrevented` here.
+/// `ShieldKind::PreventionOneShot` (Awe Strike) already emitted real
+/// source/recipient events per portion; only its rider amount is aggregated.
+/// The total is stamped into `last_effect_count`
+/// immediately before the rider call so its `QuantityRef::EventContextAmount`
 /// (e.g. Inkshield's "for each 1 damage prevented this way") resolves against
 /// the whole batch total.
 fn fire_combat_prevention_riders(
@@ -1935,19 +1947,22 @@ fn fire_combat_prevention_riders(
             continue;
         };
 
-        // CR 615.13: The `DamagePrevented` event for the whole batch — informational
-        // (no trigger consumes it yet). Target derived from the shield's player scope.
-        let prevented_target = match &repl_def.damage_target_filter {
-            Some(crate::types::ability::DamageTargetFilter::Player {
-                player: crate::types::ability::DamageTargetPlayerScope::Specific(player),
-            }) => TargetRef::Player(*player),
-            _ => TargetRef::Object(rid.source),
-        };
-        events.push(GameEvent::DamagePrevented {
-            source_id: rid.source,
-            target: prevented_target,
-            amount: total_prevented as u32,
-        });
+        // CR 615.13 + CR 615.5: Only ShieldKind::PreventionOneShot retains real
+        // source/recipient provenance in the per-portion applier; aggregate its
+        // rider here without a duplicate floating-shield sentinel-source event.
+        if repl_def.shield_kind != crate::types::ability::ShieldKind::PreventionOneShot {
+            let prevented_target = match &repl_def.damage_target_filter {
+                Some(crate::types::ability::DamageTargetFilter::Player {
+                    player: crate::types::ability::DamageTargetPlayerScope::Specific(player),
+                }) => TargetRef::Player(*player),
+                _ => TargetRef::Object(rid.source),
+            };
+            events.push(GameEvent::DamagePrevented {
+                source_id: rid.source,
+                target: prevented_target,
+                amount: total_prevented as u32,
+            });
+        }
 
         // CR 615.5: Resolve the prevention's additional effect ("for each 1
         // damage prevented this way, create a token"). Stamp the aggregate
@@ -1964,7 +1979,7 @@ fn fire_combat_prevention_riders(
             .damage_source_filter
             .as_ref()
             .and_then(shield_specific_source);
-        let Some(runtime) = repl_def.runtime_execute.clone() else {
+        let Some(runtime) = state.replacement_rider(repl_def).cloned() else {
             continue;
         };
         state.last_effect_count = Some(total_prevented);
@@ -1974,7 +1989,7 @@ fn fire_combat_prevention_riders(
         // that by construction, where the old code had to remember to clear a
         // parallel field.
         state.install_ready_continuation(
-            crate::types::ability::PostReplacementContinuation::Resolved(runtime),
+            crate::types::ability::PostReplacementContinuation::Resolved(Box::new(runtime)),
         );
         if let Some(source) = event_source {
             if let Some(drain) = state
@@ -4157,6 +4172,11 @@ mod tests {
         let pw = create_planeswalker(&mut state, PlayerId(1), "Test Planeswalker", 4);
 
         state.combat = Some(CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(pw),
@@ -4178,6 +4198,107 @@ mod tests {
         assert_eq!(state.players[1].life, 20, "Player life should be unchanged");
     }
 
+    /// CR 510.1b + CR 506.4c + CR 702.19e: every automatic delegation
+    /// uses the same ended relation, including the original-defender exception.
+    #[test]
+    fn ended_relation_automatic_and_as_though_unblocked_routes_agree() {
+        for blocked in [false, true] {
+            for over_pw in [false, true] {
+                for ended in [false, true] {
+                    let mut state = setup();
+                    let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 2, 2);
+                    let pw = create_planeswalker(&mut state, PlayerId(1), "Walker", 10);
+                    let target = AttackTarget::Planeswalker(pw);
+                    let pin = crate::game::combat::bind_attack_target(&state, target).unwrap();
+                    let mut info = AttackerInfo::new(attacker, target, PlayerId(1));
+                    info.blocked = blocked;
+                    if over_pw {
+                        state
+                            .objects
+                            .get_mut(&attacker)
+                            .unwrap()
+                            .keywords
+                            .push(Keyword::TrampleOverPlaneswalkers);
+                    } else if blocked {
+                        state
+                            .objects
+                            .get_mut(&attacker)
+                            .unwrap()
+                            .keywords
+                            .push(Keyword::Trample);
+                    }
+                    state.combat = Some(CombatState {
+                        attackers: vec![info.clone()],
+                        attacked_permanents: std::iter::once((attacker, pin)).collect(),
+                        ..Default::default()
+                    });
+                    assert_eq!(
+                        info.resolve_damage_target(&state, over_pw),
+                        Some(DamageTarget::Object(pw))
+                    );
+                    if ended {
+                        crate::game::effects::remove_from_combat::remove_object_from_combat(
+                            &mut state, pw,
+                        );
+                    }
+                    let trample = if over_pw {
+                        Some(TrampleKind::OverPlaneswalkers)
+                    } else if blocked {
+                        Some(TrampleKind::Standard)
+                    } else {
+                        None
+                    };
+                    let as_unblocked = assign_damage_as_though_unblocked(&state, &info, 2, trample);
+                    assert_eq!(
+                        as_unblocked,
+                        if !ended {
+                            vec![DamageAssignment {
+                                target: DamageTarget::Object(pw),
+                                amount: 2,
+                            }]
+                        } else if over_pw {
+                            vec![DamageAssignment {
+                                target: DamageTarget::Player(PlayerId(1)),
+                                amount: 2,
+                            }]
+                        } else {
+                            vec![]
+                        }
+                    );
+                    let mut events = Vec::new();
+                    assert!(resolve_combat_damage(&mut state, &mut events).is_none());
+                    assert_eq!(state.objects[&pw].loyalty, Some(if ended { 10 } else { 8 }));
+                    assert_eq!(
+                        (state.players[0].life, state.players[1].life),
+                        (20, if ended && over_pw { 18 } else { 20 })
+                    );
+                    let damage: Vec<_> = events
+                        .iter()
+                        .filter_map(|event| match event {
+                            GameEvent::DamageDealt {
+                                source_id,
+                                target,
+                                amount,
+                                ..
+                            } if *source_id == attacker => Some((target.clone(), *amount)),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(
+                        damage,
+                        if !ended {
+                            vec![(TargetRef::Object(pw), 2)]
+                        } else if over_pw {
+                            vec![(TargetRef::Player(PlayerId(1)), 2)]
+                        } else {
+                            vec![]
+                        }
+                    );
+                }
+            }
+        }
+    }
+
     // CR 702.19f: Regular trample excess goes to the PW, not the defending player.
     #[test]
     fn trample_excess_goes_to_planeswalker_not_player() {
@@ -4196,6 +4317,11 @@ mod tests {
         let pw = create_planeswalker(&mut state, PlayerId(1), "Test Planeswalker", 6);
 
         let mut combat = CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(pw),
@@ -4243,6 +4369,11 @@ mod tests {
 
         // Set up combat with attacker targeting the PW
         state.combat = Some(CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(attacker, pw_attack_target, PlayerId(1))],
             ..Default::default()
         });
@@ -4284,6 +4415,11 @@ mod tests {
         let pw = create_planeswalker(&mut state, PlayerId(1), "Jace", 3);
 
         let mut combat = CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(pw),
@@ -4334,6 +4470,11 @@ mod tests {
         let pw = create_planeswalker(&mut state, PlayerId(1), "Jace", 3);
 
         let mut combat = CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(pw),
@@ -4383,6 +4524,11 @@ mod tests {
         let pw = create_planeswalker(&mut state, PlayerId(1), "Doomed PW", 4);
 
         state.combat = Some(CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(pw),
@@ -4481,6 +4627,11 @@ mod tests {
         let pw = create_planeswalker(&mut state, PlayerId(1), "Jace", 3);
 
         let mut combat = CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(pw),
@@ -4537,6 +4688,11 @@ mod tests {
         let pw = create_planeswalker(&mut state, PlayerId(1), "Jace", 3);
 
         let mut combat = CombatState {
+            attacked_permanents: std::iter::once((
+                attacker,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&pw]),
+            ))
+            .collect(),
             attackers: vec![AttackerInfo::new(
                 attacker,
                 AttackTarget::Planeswalker(pw),
@@ -4614,6 +4770,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],

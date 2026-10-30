@@ -18,7 +18,6 @@ type ZoneName = "graveyard" | "exile" | "library";
 interface OpponentSeatPaneProps {
   playerId: PlayerId;
   battlefieldView: PlayerBattlefieldView;
-  showCards: boolean;
   onKickPlayer?: (playerId: PlayerId) => void;
   onViewZone: (
     zone: ZoneName,
@@ -37,7 +36,6 @@ const pileSize = { width: "var(--card-w)", height: "var(--card-h)" };
 export function OpponentSeatPane({
   playerId,
   battlefieldView,
-  showCards,
   onKickPlayer,
   onViewZone,
 }: OpponentSeatPaneProps) {
@@ -117,7 +115,7 @@ export function OpponentSeatPane({
           )}
         </div>
         <div className="pointer-events-none">
-          <OpponentHand playerId={playerId} showCards={showCards} layout="split" />
+          <OpponentHand playerId={playerId} layout="split" />
         </div>
       </div>
       <div className="relative z-30 flex min-h-0 min-w-0 flex-col px-1 pb-1 pt-[calc(var(--game-seat-header-height,2.25rem)+0.45rem)]">

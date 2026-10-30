@@ -199,7 +199,7 @@ mod tests {
     use crate::game::deck_loading::DeckEntry;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Effect, PtValue, QuantityExpr, SearchSelectionConstraint,
-        SpellCastingOption, TargetFilter,
+        SpellCastingOption, TargetFilter, TokenAttackDestination,
     };
     use crate::types::card::CardFace;
     use crate::types::card_type::{CardType, CoreType};
@@ -269,6 +269,7 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination: TokenAttackDestination::ControllerChooses,
                 supertypes: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),

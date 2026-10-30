@@ -1260,14 +1260,18 @@ fn debug_action_rank(a: &DebugAction) -> u16 {
         DebugAction::GrantKeyword { .. } => 18,
         DebugAction::RemoveKeyword { .. } => 19,
         DebugAction::SetLife { .. } => 20,
-        DebugAction::ModifyPlayerCounters { .. } => 21,
-        DebugAction::ModifyEnergy { .. } => 22,
-        DebugAction::AddMana { .. } => 23,
-        DebugAction::SetInfiniteMana { .. } => 24,
-        DebugAction::SetPhase { .. } => 25,
-        DebugAction::RunStateBasedActions => 26,
-        DebugAction::CreateToken { .. } => 27,
-        DebugAction::CreateTokenCopy { .. } => 28,
+        DebugAction::GainLife { .. } => 21,
+        DebugAction::LoseLife { .. } => 22,
+        DebugAction::ModifyPlayerCounters { .. } => 23,
+        DebugAction::ModifyEnergy { .. } => 24,
+        DebugAction::GivePlayerCounters { .. } => 25,
+        DebugAction::GiveEnergy { .. } => 26,
+        DebugAction::AddMana { .. } => 27,
+        DebugAction::SetInfiniteMana { .. } => 28,
+        DebugAction::SetPhase { .. } => 29,
+        DebugAction::RunStateBasedActions => 30,
+        DebugAction::CreateToken { .. } => 31,
+        DebugAction::CreateTokenCopy { .. } => 32,
     }
 }
 
@@ -1554,6 +1558,32 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
             };
             cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
         }
+        DebugAction::GainLife {
+            player_id: a0,
+            amount: a1,
+        } => {
+            let DebugAction::GainLife {
+                player_id: b0,
+                amount: b1,
+            } = b
+            else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+        }
+        DebugAction::LoseLife {
+            player_id: a0,
+            amount: a1,
+        } => {
+            let DebugAction::LoseLife {
+                player_id: b0,
+                amount: b1,
+            } = b
+            else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+        }
         DebugAction::ModifyPlayerCounters {
             player_id: a0,
             counter_kind: a1,
@@ -1578,6 +1608,36 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
             let DebugAction::ModifyEnergy {
                 player_id: b0,
                 delta: b1,
+            } = b
+            else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+        }
+        DebugAction::GivePlayerCounters {
+            player_id: a0,
+            counter_kind: a1,
+            count: a2,
+        } => {
+            let DebugAction::GivePlayerCounters {
+                player_id: b0,
+                counter_kind: b1,
+                count: b2,
+            } = b
+            else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+                .then_with(|| cmp_val(a1, b1))
+                .then_with(|| cmp_val(a2, b2))
+        }
+        DebugAction::GiveEnergy {
+            player_id: a0,
+            count: a1,
+        } => {
+            let DebugAction::GiveEnergy {
+                player_id: b0,
+                count: b1,
             } = b
             else {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");

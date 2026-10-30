@@ -1,9 +1,12 @@
 use std::collections::HashSet;
 
+use super::life::{self, LifeChangeUnrepresentable};
 use crate::game::{quantity, replacement};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
+use crate::types::game_state::{
+    GameState, PendingCounterAddition, PendingEffectResolved, UnrepresentablePolicy,
+};
 use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
 use crate::types::resolved_commands::ResolvedPlayerEdit;
@@ -32,6 +35,12 @@ pub enum PlayerCounterAdditionOutcome {
     NeedsChoice,
 }
 
+/// Adds player counters through the replacement pipeline under the
+/// compatibility (`IgnoreImpossible`) policy.
+///
+/// An engine-unrepresentable final count is not a CR 101.3 impossibility. With
+/// an open ingress window the owning public action rejects and restores its
+/// entry state, and outside one the logged compatibility skip applies.
 pub fn add_player_counter_with_replacement(
     state: &mut GameState,
     actor: PlayerId,
@@ -40,8 +49,53 @@ pub fn add_player_counter_with_replacement(
     count: u32,
     events: &mut Vec<GameEvent>,
 ) -> PlayerCounterAdditionOutcome {
+    life::ordinary_settlement(
+        add_player_counter_core(
+            state,
+            actor,
+            player_id,
+            counter_kind,
+            count,
+            UnrepresentablePolicy::IgnoreImpossible,
+            events,
+        ),
+        PlayerCounterAdditionOutcome::Applied,
+        "ordinary player counter gain",
+    )
+}
+
+/// CR 122.1: Action-ingress player-counter gain. Like
+/// [`add_player_counter_with_replacement`], except that a final result the
+/// engine cannot represent is returned as `Err`, so the caller rejects the
+/// action and the action boundary restores its snapshot. The fresh ingress
+/// window covers the whole call: a park made here is stamped for rejection on
+/// resume (CR 616.1). `actor` is the player who puts the counters.
+pub(crate) fn try_add_player_counter_with_replacement(
+    state: &mut GameState,
+    actor: PlayerId,
+    player_id: PlayerId,
+    counter_kind: PlayerCounterKind,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<PlayerCounterAdditionOutcome, LifeChangeUnrepresentable> {
+    life::within_rejecting_ingress_window(state, |state, policy| {
+        add_player_counter_core(state, actor, player_id, counter_kind, count, policy, events)
+    })
+}
+
+/// The policy-parameterized player-counter add pipeline: replacement, then the
+/// shared settle step (`apply_player_counter_addition`).
+fn add_player_counter_core(
+    state: &mut GameState,
+    actor: PlayerId,
+    player_id: PlayerId,
+    counter_kind: PlayerCounterKind,
+    count: u32,
+    policy: UnrepresentablePolicy,
+    events: &mut Vec<GameEvent>,
+) -> Result<PlayerCounterAdditionOutcome, LifeChangeUnrepresentable> {
     if count == 0 {
-        return PlayerCounterAdditionOutcome::Applied;
+        return Ok(PlayerCounterAdditionOutcome::Applied);
     }
 
     // CR 122.1 + CR 614.17: Player-counter additions pass through the
@@ -70,14 +124,21 @@ pub fn add_player_counter_with_replacement(
                 ..
             } = event
             {
-                apply_player_counter_addition(state, player_id, counter_kind, count, events);
+                apply_player_counter_addition(
+                    state,
+                    player_id,
+                    counter_kind,
+                    count,
+                    policy,
+                    events,
+                )?;
             }
-            PlayerCounterAdditionOutcome::Applied
+            Ok(PlayerCounterAdditionOutcome::Applied)
         }
-        replacement::ReplacementResult::Prevented => PlayerCounterAdditionOutcome::Prevented,
+        replacement::ReplacementResult::Prevented => Ok(PlayerCounterAdditionOutcome::Prevented),
         replacement::ReplacementResult::NeedsChoice(player) => {
             state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-            PlayerCounterAdditionOutcome::NeedsChoice
+            Ok(PlayerCounterAdditionOutcome::NeedsChoice)
         }
     }
 }
@@ -102,11 +163,14 @@ pub enum PlayerCounterAdditionPreview {
     ChoiceRequired { player: PlayerId },
     /// Replacement effects change the proposed counter count (e.g. a doubler).
     Transformed { count: u32 },
-    /// A replacement rewrites the counter event into a different event class.
+    /// A replacement rewrites the counter event into a different event class,
+    /// or a count replacement's arithmetic overflowed `u32`.
     ///
     /// The preview cannot claim that the requested counter was added, so
     /// consumers must handle this explicitly rather than treating it as an
-    /// absent preview.
+    /// absent preview. The preview does not decide whether the final count fits
+    /// an `i32` delta or the player's current total; the settle step decides
+    /// that.
     Unsupported,
 }
 
@@ -166,7 +230,15 @@ pub fn preview_player_counter_addition(
     let mut preview_state = state.clone();
     let mut events = Vec::new();
 
-    match replacement::replace_event(&mut preview_state, proposed, &mut events) {
+    let result = replacement::replace_event(&mut preview_state, proposed, &mut events);
+    // Engine numeric capacity: an applier recorded that the replaced count is
+    // unrepresentable, so the clone's unchanged event is not the count a real
+    // placement would settle. Report it as unsupported rather than `Applied`.
+    if preview_state.replacement_quantity_overflow.is_some() {
+        return PlayerCounterAdditionPreview::Unsupported;
+    }
+
+    match result {
         replacement::ReplacementResult::Execute(ProposedEvent::AddCounter {
             count: resulting_count,
             ..
@@ -190,32 +262,63 @@ pub fn preview_player_counter_addition(
     }
 }
 
+/// CR 122.1: Settle a post-replacement player-counter gain: the one place the
+/// final edit is made and its representability decided, for the add path and
+/// the CR 616.1 resume alike. Same order as `life::settle_life_gain`: a
+/// recorded replacement-quantity overflow, then an already-failed ingress
+/// window, then the amount must fit an `i32` delta, then the checked edit.
+/// An unrepresentable result is an engine numeric limit, not a CR 101.3 /
+/// CR 609.3 impossibility, and is handled per `policy`
+/// (`life::settle_unrepresentable`).
 pub fn apply_player_counter_addition(
     state: &mut GameState,
     player_id: PlayerId,
     counter_kind: PlayerCounterKind,
     amount: u32,
+    policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) {
-    if amount == 0 {
-        return;
+) -> Result<(), LifeChangeUnrepresentable> {
+    if let Some(settled) =
+        life::settle_quantity_overflow(state, player_id, policy, "player counter gain")
+    {
+        return settled.map(|_| ());
     }
-    state
-        .resolve_and_apply_player_edit(
-            player_id,
-            ResolvedPlayerEdit::Counter {
-                kind: counter_kind,
-                delta: amount as i32,
-            },
-        )
-        .expect("post-replacement player counter gain must target a live player");
+    if life::ingress_window_has_failed(state) || amount == 0 {
+        return Ok(());
+    }
+    let edit = i32::try_from(amount)
+        .map_err(|_| LifeChangeUnrepresentable { player: player_id })
+        .and_then(|delta| {
+            life::apply_final_player_resource_edit(
+                state,
+                player_id,
+                ResolvedPlayerEdit::Counter {
+                    kind: counter_kind,
+                    delta,
+                },
+            )
+            .map(|()| delta)
+        });
+    let delta = match edit {
+        Ok(delta) => delta,
+        Err(unrepresentable) => {
+            return life::settle_unrepresentable(
+                state,
+                unrepresentable,
+                policy,
+                "player counter gain",
+            )
+            .map(|_| ());
+        }
+    };
 
     // CR 122.1: Emit event for counter change.
     events.push(GameEvent::PlayerCounterChanged {
         player: player_id,
         counter_kind,
-        delta: amount as i32,
+        delta,
     });
+    Ok(())
 }
 
 /// CR 122.1: Give player counters of a named type.
@@ -524,6 +627,7 @@ mod tests {
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             target_reads: Default::default(),
+            entry_onset: crate::types::ability::ContinuousEffectOnset::WhenFollowed,
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
@@ -741,6 +845,7 @@ mod tests {
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             target_reads: Default::default(),
+            entry_onset: crate::types::ability::ContinuousEffectOnset::WhenFollowed,
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
@@ -820,5 +925,125 @@ mod tests {
         assert!(!events
             .iter()
             .any(|e| matches!(e, GameEvent::PlayerCounterChanged { .. })));
+    }
+
+    /// A two-player state with a P0 `AddCounter` count replacement that applies
+    /// to every player's placement.
+    fn state_with_count_replacement(modification: QuantityModification) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(99);
+        let mut source = GameObject::new(
+            source_id,
+            CardId(99),
+            PlayerId(0),
+            "Counter Scaler".to_string(),
+            Zone::Battlefield,
+        );
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(modification);
+        replacement.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+        source.replacement_definitions = vec![replacement].into();
+        state.objects.insert(source_id, source);
+        state.battlefield.push_back(source_id);
+        state
+    }
+
+    fn experience(state: &GameState, player: PlayerId) -> u32 {
+        state.players[player.0 as usize]
+            .player_counters
+            .get(&PlayerCounterKind::Experience)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// CR 122.1: the no-window compatibility path (direct calls and previews).
+    /// A count replacement past `u32` is neither clamped nor wrapped through an
+    /// `i32` delta: the change is skipped, nothing is mutated or emitted, and
+    /// the overflow record is consumed by the settle step.
+    #[test]
+    fn unrepresentable_replaced_count_is_skipped_without_a_window() {
+        let mut state =
+            state_with_count_replacement(QuantityModification::Plus { value: u32::MAX });
+        state.players[0]
+            .player_counters
+            .insert(PlayerCounterKind::Experience, 1);
+        let mut events = Vec::new();
+
+        let outcome = add_player_counter_with_replacement(
+            &mut state,
+            PlayerId(0),
+            PlayerId(0),
+            PlayerCounterKind::Experience,
+            1,
+            &mut events,
+        );
+
+        assert_eq!(outcome, PlayerCounterAdditionOutcome::Applied);
+        assert_eq!(experience(&state, PlayerId(0)), 1);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PlayerCounterChanged { .. })));
+        assert!(
+            state.replacement_quantity_overflow.is_none(),
+            "the settle step must consume the overflow record"
+        );
+
+        // Control: a representable `Plus` applies through the same path.
+        let mut state = state_with_count_replacement(QuantityModification::Plus { value: 1 });
+        state.players[0]
+            .player_counters
+            .insert(PlayerCounterKind::Experience, 1);
+        let mut events = Vec::new();
+        add_player_counter_with_replacement(
+            &mut state,
+            PlayerId(0),
+            PlayerId(0),
+            PlayerCounterKind::Experience,
+            1,
+            &mut events,
+        );
+        assert_eq!(experience(&state, PlayerId(0)), 3);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerCounterChanged {
+                player: PlayerId(0),
+                counter_kind: PlayerCounterKind::Experience,
+                delta: 2,
+            }
+        )));
+    }
+
+    /// The preview must not report the clone's unchanged event as the count a
+    /// real placement would settle when a replacement's arithmetic overflowed.
+    #[test]
+    fn preview_reports_unsupported_when_the_replaced_count_overflows() {
+        let state = state_with_count_replacement(QuantityModification::Plus { value: u32::MAX });
+        assert_eq!(
+            preview_player_counter_addition(
+                &state,
+                PlayerId(0),
+                PlayerId(0),
+                PlayerCounterKind::Poison,
+                2,
+            ),
+            PlayerCounterAdditionPreview::Unsupported
+        );
+        assert!(
+            state.replacement_quantity_overflow.is_none(),
+            "the preview runs on a clone and must not touch the live record"
+        );
+
+        // Control: a representable replacement is a `Transformed` count.
+        let state = state_with_count_replacement(QuantityModification::Times { factor: 2 });
+        assert_eq!(
+            preview_player_counter_addition(
+                &state,
+                PlayerId(0),
+                PlayerId(0),
+                PlayerCounterKind::Poison,
+                2,
+            ),
+            PlayerCounterAdditionPreview::Transformed { count: 4 }
+        );
     }
 }

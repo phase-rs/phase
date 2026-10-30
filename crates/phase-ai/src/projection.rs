@@ -1504,6 +1504,7 @@ mod tests {
             player: PlayerId(0),
             total: 0,
             resume_at_resolution_depth: 0,
+            pending_entry: None,
         });
         assert_eq!(
             classify_payment_continuation(&state),

@@ -12,7 +12,7 @@ vi.mock("@wasm/engine", () => ({
 
 async function loadRuntime() {
   vi.resetModules();
-  return import("../engineRuntime.ts");
+  return import("../main-thread-engine.ts");
 }
 
 beforeEach(() => {

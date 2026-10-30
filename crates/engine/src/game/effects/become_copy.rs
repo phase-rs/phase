@@ -1,6 +1,7 @@
 use crate::game::effects::token_copy::{copies_own_source, copy_source, CopySourceReferent};
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::DisplayIdentity;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::layers::{remove_subtype_set, subtype_matches_core_types};
 use crate::game::printed_cards::ensure_keyword_triggers_for_copiable_values;
 use crate::types::ability::{
@@ -251,38 +252,20 @@ pub(crate) fn apply_precomputed_copy_values(
     crate::game::layers::flush_layers(state);
 
     if !classified_modifications.is_empty() {
-        let mut additions = Vec::new();
-        for operation in classified_modifications {
-            if let CopyExceptionOperation::AddCounterOnEnter {
-                counter_type,
-                count,
-                if_type,
-            } = operation
-            {
-                let n = crate::game::quantity::resolve_quantity(state, count, controller, source_id)
-                    .max(0) as u32;
-                if n == 0 {
-                    continue;
-                }
-                let gate_passes = match if_type {
-                    None => true,
-                    Some(t) => state
-                        .objects
-                        .get(&recipient_id)
-                        .map(|obj| obj.card_types.core_types.contains(t))
-                        .unwrap_or(false),
-                };
-                if !gate_passes {
-                    continue;
-                }
-                additions.push(PendingCounterAddition::Object {
-                    actor: controller,
-                    object_id: recipient_id,
-                    counter_type: counter_type.clone(),
-                    count: n,
-                });
-            }
-        }
+        let additions: Vec<_> = entry_exception_counters(
+            state,
+            source_id,
+            controller,
+            recipient_id,
+            &additional_modifications,
+        )
+        .map(|(counter_type, count)| PendingCounterAddition::Object {
+            actor: controller,
+            object_id: recipient_id,
+            counter_type,
+            count,
+        })
+        .collect();
         for (index, addition) in additions.iter().cloned().enumerate() {
             let PendingCounterAddition::Object {
                 actor,
@@ -318,6 +301,74 @@ pub(crate) fn apply_precomputed_copy_values(
     });
 
     Ok(())
+}
+
+/// CR 707.9f: evaluate counter exceptions against the realized copy, after layers.
+/// Both immediate copy resolution and merged entry placement use this authority.
+pub(crate) fn entry_exception_counters<'a>(
+    state: &'a GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    recipient_id: ObjectId,
+    modifications: &'a [ContinuousModification],
+) -> impl Iterator<Item = (crate::types::counter::CounterType, u32)> + 'a {
+    modifications.iter().filter_map(move |modification| {
+        let CopyExceptionOperation::AddCounterOnEnter {
+            counter_type,
+            count,
+            if_type,
+        } = CopyExceptionOperation::classify(modification)
+        else {
+            return None;
+        };
+        let count = crate::game::quantity::resolve_quantity(state, count, controller, source_id)
+            .max(0) as u32;
+        if count == 0 {
+            return None;
+        }
+        let gate_passes = if_type.is_none_or(|core_type| {
+            state
+                .objects
+                .get(&recipient_id)
+                .is_some_and(|object| object.card_types.core_types.contains(core_type))
+        });
+        gate_passes.then(|| (counter_type.clone(), count))
+    })
+}
+
+/// CR 614.1c + CR 707.9f: split the resolution-time entry-counter exceptions
+/// from a copy's other modifications. `CopyExceptionOperation::classify` is the
+/// sole authority for which modifications are resolution-time exceptions, so a
+/// caller that places those counters itself (the merged enter-as-copy
+/// placement) cannot drift from the resolver's own classification.
+///
+/// Returns `(entry_counter_exceptions, remaining_modifications)`, each in
+/// their original order.
+pub(crate) fn partition_entry_counter_exceptions(
+    modifications: Vec<ContinuousModification>,
+) -> (Vec<ContinuousModification>, Vec<ContinuousModification>) {
+    modifications.into_iter().partition(|modification| {
+        matches!(
+            CopyExceptionOperation::classify(modification),
+            CopyExceptionOperation::AddCounterOnEnter { .. }
+        )
+    })
+}
+
+/// CR 707.2 + CR 613.1a: whether `recipient` carries a layer-1 copy effect
+/// installed by [`apply_precomputed_copy_values`]. A `BecomeCopy` that errored
+/// (for example because its source is gone) installs none, so entry-time copy
+/// exceptions must not be evaluated against the uncopied object.
+pub(crate) fn has_installed_copy_effect(
+    state: &GameState,
+    recipient: ObjectIncarnationRef,
+) -> bool {
+    state.transient_continuous_effects.iter().any(|effect| {
+        effect.affected_recipient == Some(recipient)
+            && effect.modifications.iter().any(|modification| {
+                matches!(modification, ContinuousModification::CopyValues { .. })
+            })
+    })
 }
 
 /// Fold the permanent `BecomeCopy` exception vocabulary into `values`.
@@ -1648,6 +1699,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],

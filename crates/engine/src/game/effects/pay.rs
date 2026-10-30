@@ -2,7 +2,7 @@ use crate::game::costs::{self, PaymentFailure, PaymentOutcome};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::targeting::resolve_effect_player_ref;
 use crate::game::{casting, casting_costs};
-use crate::types::ability::{AbilityCost, Effect, QuantityExpr, QuantityRef};
+use crate::types::ability::{is_pay_any_amount, AbilityCost, Effect};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PayableResource, WaitingFor};
 use crate::types::mana::ManaCost;
@@ -14,13 +14,19 @@ use super::{EffectError, ResolvedAbility};
 /// emits `QuantityExpr::Ref { QuantityRef::Variable { name: "X" } }` for
 /// these prompts (Galvanic Discharge, etc.). A fixed or dynamic reference
 /// (e.g., `Fixed { 2 }` or `Power { CostPaidObject }`) is paid unconditionally.
-fn is_pay_any_amount(amount: &QuantityExpr) -> bool {
-    matches!(
-        amount,
-        QuantityExpr::Ref {
-            qty: QuantityRef::Variable { name },
-        } if name == "X"
-    )
+/// CR 119.4a + CR 810.9a: max payable for "pay any amount of life" is the
+/// TEAM total; guard on team_life (a member may be individually <= 0 while
+/// the team is positive, CR 810.9 — life loss lands on each Player::life
+/// individually), clamped to 0 when a CantLoseLife / can't-pay-life lock
+/// applies. Shared by the resolution prompt below and the pre-entry prompt
+/// (`replacement::as_enters_pay_terms`).
+pub(crate) fn max_pay_any_life_amount(state: &GameState, payer: PlayerId) -> u32 {
+    let team_life = crate::game::players::team_life_total(state, payer);
+    if team_life > 0 && crate::game::life_costs::can_pay_life_cost(state, payer, 1) {
+        u32::try_from(team_life).unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 /// CR 118.1 + CR 119.4b: Resolve the life-payment channel owned by a concrete
@@ -204,17 +210,9 @@ pub fn resolve(
         // `life_costs::pay_life_as_cost` and stamps `last_effect_count` so the
         // downstream "draw/look at that many" step reads the chosen amount.
         AbilityCost::PayLife { amount } if is_pay_any_amount(amount) => {
-            // CR 119.4a + CR 810.9a: max payable for "pay any amount of life" is
-            // the TEAM total; guard on team_life (a member may be individually
-            // <= 0 while the team is positive, CR 810.9 — life loss lands on
-            // each Player::life individually).
-            let team_life = crate::game::players::team_life_total(state, payer);
-            let max =
-                if team_life > 0 && crate::game::life_costs::can_pay_life_cost(state, payer, 1) {
-                    u32::try_from(team_life).unwrap_or(0)
-                } else {
-                    0
-                };
+            // CR 119.4a + CR 810.9a: max payable is the TEAM total (see
+            // `max_pay_any_life_amount`); the pre-entry prompt shares it.
+            let max = max_pay_any_life_amount(state, payer);
             state.waiting_for = WaitingFor::PayAmountChoice {
                 player: payer,
                 resource: PayableResource::Life,
@@ -437,7 +435,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ChooseOneOfKind, ManaProduction, ManaSpendRestriction,
-        TargetFilter,
+        QuantityExpr, QuantityRef, TargetFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};

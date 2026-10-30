@@ -1159,7 +1159,7 @@ mod tests {
     /// activated ability on the Saga itself (#5978).
     #[test]
     fn roar_chapter_two_grants_creature_tap_mana_ability() {
-        use crate::game::mana_abilities::is_mana_ability;
+        use crate::types::ability::is_mana_ability;
         use crate::types::ability::{
             ContinuousModification, ControllerRef, ManaProduction, TypeFilter,
         };

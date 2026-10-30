@@ -495,10 +495,11 @@ fn parse_name_override<'a>(
 /// CR 707.9b + CR 107.1a: "their power is half that creature's power and
 /// their toughness is half that creature's toughness" — Saw in Half class.
 ///
-/// Token-copy exceptions are applied after the copied copiable values have
-/// been stamped onto the new token, so `ObjectScope::Source` deliberately
-/// points at the synthesized token. At that point its source P/T equals the
-/// copied object's copiable P/T, which is the value the exception halves.
+/// `ObjectScope::Source` in a copy exception names the DONOR ("that
+/// creature's power", Saw Oracle): at the stamp the evaluator binds it via
+/// `CopyTokenSpec.donor` and reads the donor live, else its LKI (CR 608.2h;
+/// Saw ruling: "Use the power and toughness of the creature from when it was
+/// last on the battlefield"), never the token's own copied base.
 fn parse_half_pt_override(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
     let (rest, _) = parse_possessive_subject(input).ok()?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" power is half ")

@@ -6,6 +6,7 @@ use super::oracle_trigger::NthEventTimingKind;
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::parser::oracle_effect::parse_effect_chain_with_context_ability_root;
 use crate::parser::oracle_nom::defender_exception;
 use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 use crate::types::ability::PlayerFilter;
@@ -1756,8 +1757,12 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
             in_granted_activated_ability: true,
             ..ParseContext::default()
         };
-        let mut def =
-            parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
+        // CR 602.1: the cost separator starts this granted ability's own effect body.
+        let mut def = parse_effect_chain_with_context_ability_root(
+            &effect_text,
+            AbilityKind::Activated,
+            &mut ctx,
+        );
         def.cost = Some(cost);
         def.activation_restrictions.extend(constraints.restrictions);
         // CR 606.2 + CR 606.3: an activated ability with a loyalty symbol in
@@ -1787,10 +1792,10 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
         crate::parser::oracle::extract_cost_reduction_from_chain(&mut def);
         // CR 201.5a: the granter self-reference marker is rendered to the granting
         // object's printed name by `oracle_util::render_granting_self_reference`, at
-        // the two parse entry points (`parse_oracle_text`,
-        // `catalog_rules_text_abilities`) — NOT collapsed to the host token `~` here,
-        // which is what made a granted "Sacrifice <granter>" print as the equipped
-        // creature's name.
+        // the three parse entry points (`parse_oracle_text`,
+        // `catalog_rules_text_abilities`, `oracle_effect::token::push_parsed_statics`)
+        // — NOT collapsed to the host token `~` here, which is what made a granted
+        // "Sacrifice <granter>" print as the equipped creature's name.
         def.description = Some(text.to_string());
         crate::parser::oracle_effect::refuse_linked_paid_cast_in_activated_mana_ability(
             &mut def, text,

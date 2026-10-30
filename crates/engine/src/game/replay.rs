@@ -252,7 +252,12 @@ impl ReplayPlayer {
                                 .to_string(),
                     });
                 }
-                resolve_all_ready_prefix(&mut state, boundary.requester);
+                resolve_all_ready_prefix(&mut state, boundary.requester).map_err(|error| {
+                    ReplayError::Desync {
+                        index: recorded.seq,
+                        message: format!("Resolve All boundary is not reproducible: {error}"),
+                    }
+                })?;
             }
         }
         Ok(state)
@@ -747,7 +752,8 @@ mod tests {
             WaitingFor::ResolveAllReady { .. }
         ));
 
-        resolve_all_ready_prefix(&mut live, PlayerId(0));
+        resolve_all_ready_prefix(&mut live, PlayerId(0))
+            .expect("the fixture's Resolve All prefix is representable");
         log.push_resolve_all_boundary(PlayerId(0));
 
         let mut replay = ReplayPlayer::load(log, None, &ComboTable::default())

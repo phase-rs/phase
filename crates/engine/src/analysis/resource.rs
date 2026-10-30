@@ -29,7 +29,9 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
-use crate::types::game_state::{loop_states_equal, GameState, StackEntry, StackEntryKind};
+use crate::types::game_state::{
+    loop_states_equal, GameState, LKISnapshot, StackEntry, StackEntryKind, TrackedMemberOrigin,
+};
 use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
 use crate::types::mana::ManaType;
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
@@ -5274,7 +5276,8 @@ macro_rules! history_members {
         pub(crate) enum HistoryMember {
             $($sv,)*
             $($pv,)*
-            /// The tracked object set store (CR 608.2c), with its id counter and member causes.
+            /// The tracked object set store (CR 608.2c), with its id counter,
+            /// member causes, and member departure origins.
             TrackedObjectSets,
             /// The id-keyed last-known records of objects that left their zone (CR 608.2h).
             LastKnownRecords,
@@ -5298,9 +5301,14 @@ macro_rules! history_members {
                             &mut into.tracked_set_member_causes,
                             &from.tracked_set_member_causes,
                         );
+                        let origins = equalize_field(
+                            &mut into.tracked_set_member_origins,
+                            &from.tracked_set_member_origins,
+                        );
                         equalize_field(&mut into.next_tracked_set_id, &from.next_tracked_set_id)
                             || sets
                             || causes
+                            || origins
                     }
                     HistoryMember::LastKnownRecords => {
                         let records = equalize_field(&mut into.lki_cache, &from.lki_cache);
@@ -5356,6 +5364,7 @@ history_members! {
         PlayersWhoDiscardedCardThisTurn => players_who_discarded_card_this_turn: true,
         PlayersWhoSearchedLibraryThisTurn => players_who_searched_library_this_turn: false,
         TriggerFireCountsThisTurn => trigger_fire_counts_this_turn: true,
+        TriggerIndicatedActionsThisTurn => trigger_indicated_actions_this_turn: true,
         TriggersFiredThisTurn => triggers_fired_this_turn: true,
         TriggersFiredThisTurnPerOpponent => triggers_fired_this_turn_per_opponent: true,
         CityBlessing => city_blessing: false,
@@ -5479,10 +5488,14 @@ fn history_covers_reading(prior: &GameState, current: &GameState, reads: History
 /// stacks are empty.
 fn last_known_records_grow_unread(prior: &GameState, current: &GameState) -> bool {
     let gone = |id: &ObjectId| !prior.objects.contains_key(id) && !current.objects.contains_key(id);
-    let naming = |frame| {
+    // CR 615.5: each frame's definitions are compared as their by-value views, so two frames
+    // whose shields differ only in which arena position names an `==` rider compare equal.
+    let naming = |frame: &GameState| {
         live_floating_replacement_defs(frame)
             .map(|(_, def)| def)
             .filter(|def| floating_replacement_can_name_object(def, [prior, current]))
+            .map(|def| frame.split_replacement_rider(def))
+            .collect::<Vec<_>>()
     };
     prior
         .lki_cache
@@ -5500,7 +5513,7 @@ fn last_known_records_grow_unread(prior: &GameState, current: &GameState) -> boo
             .lki_copiable_values
             .keys()
             .all(|id| prior.lki_copiable_values.contains_key(id) || gone(id))
-        && naming(prior).eq(naming(current))
+        && naming(prior) == naming(current)
 }
 
 /// Whether a floating replacement holds anything that can name an object by id, and so ask for
@@ -5516,6 +5529,7 @@ fn floating_replacement_can_name_object(
         runtime_execute,
         mode,
         valid_card,
+        triggering_spell,
         condition,
         damage_modification,
         damage_source_filter,
@@ -5532,6 +5546,7 @@ fn floating_replacement_can_name_object(
         destination_zone: _,
         active_zones: _,
         damage_target_filter: _,
+        target_recipient_incarnation: _,
         combat_scope: _,
         draw_scope: _,
         die_ignore_rule: _,
@@ -5551,11 +5566,14 @@ fn floating_replacement_can_name_object(
         source_controller: _,
         origin: _,
         counter_replacement_subject: _,
+        entry_payment_max,
     } = def;
     execute.is_some()
         || runtime_execute.is_some()
         || !matches!(mode, crate::types::ability::ReplacementMode::Mandatory)
         || valid_card.is_some()
+        // Conservatively retain object-naming authority carried by the pin.
+        || triggering_spell.is_some()
         || condition.is_some()
         || damage_modification.is_some()
         || damage_source_filter.is_some()
@@ -5563,6 +5581,8 @@ fn floating_replacement_can_name_object(
         || additional_token_spec.is_some()
         || ensure_token_specs.is_some()
         || granting_object.is_some()
+        // CR 614.12a: a capped entry payment reads the cap live (Nameless Race).
+        || entry_payment_max.is_some()
         // A host both frames hold is read live, as an object the comparison compares.
         || source_object
             .is_some_and(|host| frames.iter().any(|frame| !frame.objects.contains_key(&host)))
@@ -5690,8 +5710,54 @@ fn turn_stamps_keep_their_relation(prior: &GameState, current: &GameState) -> bo
     })
 }
 
+/// CR 608.2c: what one origin selects for member reads — the fallback kind
+/// on a record gap plus the selected snapshot's content. Incarnation numbers
+/// advance as members re-depart; comparing selection rather than identity
+/// keeps immaterial re-stamps (same characteristics) covered while a changed
+/// snapshot still refuses. Mirrors [`tracked_member_read_authority`]'s
+/// selection exactly (snapshot presence first, zone recording-kind second).
+fn origin_read_key<'s>(
+    state: &'s GameState,
+    member: ObjectId,
+    origin: &TrackedMemberOrigin,
+) -> (bool, Option<&'s LKISnapshot>) {
+    let snapshot = state
+        .lki_by_incarnation
+        .get(&member)
+        .and_then(|history| history.get(&origin.departure_incarnation));
+    (
+        crate::game::quantity::zone_departure_records_lki(origin.departed_from),
+        snapshot,
+    )
+}
+
+/// CR 608.2c: `prior`'s origins read the same in `current` — same key sets,
+/// same selected snapshot content per member. A re-stamp naming an
+/// identical snapshot stays covered; a changed snapshot, a changed fallback
+/// kind, or an asymmetric stamp refuses.
+fn origins_read_same(prior: &GameState, current: &GameState) -> bool {
+    prior
+        .tracked_set_member_origins
+        .iter()
+        .all(|(id, origins)| {
+            current
+                .tracked_set_member_origins
+                .get(id)
+                .is_some_and(|cur| {
+                    cur.len() == origins.len()
+                        && origins.iter().all(|(member, origin)| {
+                            cur.get(member).is_some_and(|candidate| {
+                                origin_read_key(prior, *member, origin)
+                                    == origin_read_key(current, *member, candidate)
+                            })
+                        })
+                })
+        })
+}
+
 /// CR 608.2c: the period only appended tracked sets, and the latest non-empty set, which the
-/// sentinel's fallback reads, holds the same members for the same causes in both frames.
+/// sentinel's fallback reads, holds the same members for the same causes and origin-selected
+/// reads in both frames.
 fn tracked_sets_grow_unread(prior: &GameState, current: &GameState) -> bool {
     let floor = prior.next_tracked_set_id;
     let earlier_unchanged = current
@@ -5707,7 +5773,8 @@ fn tracked_sets_grow_unread(prior: &GameState, current: &GameState) -> bool {
         && prior
             .tracked_set_member_causes
             .iter()
-            .all(|(id, causes)| current.tracked_set_member_causes.get(id) == Some(causes));
+            .all(|(id, causes)| current.tracked_set_member_causes.get(id) == Some(causes))
+        && origins_read_same(prior, current);
     let latest = |state: &GameState| {
         crate::game::targeting::latest_tracked_set_id(state).map(|id| {
             (
@@ -5716,7 +5783,35 @@ fn tracked_sets_grow_unread(prior: &GameState, current: &GameState) -> bool {
             )
         })
     };
-    earlier_unchanged && latest(prior) == latest(current)
+    // The sentinel fallback reads the latest set's member characteristics
+    // through origins: same members and causes plus same selected reads.
+    // Latest sets differ by id across appended periods, so origins compare
+    // by selection (see `origins_read_same`), never by raw incarnation.
+    let latest_origins_same = match (
+        crate::game::targeting::latest_tracked_set_id(prior),
+        crate::game::targeting::latest_tracked_set_id(current),
+    ) {
+        (Some(a), Some(b)) => {
+            let ao = prior.tracked_set_member_origins.get(&a);
+            let bo = current.tracked_set_member_origins.get(&b);
+            match (ao, bo) {
+                (Some(ao), Some(bo)) => {
+                    ao.len() == bo.len()
+                        && ao.iter().all(|(member, origin)| {
+                            bo.get(member).is_some_and(|candidate| {
+                                origin_read_key(prior, *member, origin)
+                                    == origin_read_key(current, *member, candidate)
+                            })
+                        })
+                }
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    earlier_unchanged && latest(prior) == latest(current) && latest_origins_same
 }
 
 /// CR 500.8 + CR 500.9 + CR 500.10: when `copy`'s inserted-unit records extend `prior`'s by
@@ -5792,7 +5887,10 @@ fn live_history_reads(state: &GameState) -> HistoryReads {
         }
     }
     for (_source, _idx, def) in loop_window_replacement_defs(state) {
-        reads = reads.or(scan::replacement_definition_history(def));
+        reads = reads.or(scan::replacement_definition_history(
+            def,
+            state.replacement_rider(def),
+        ));
     }
     for effect in &state.transient_continuous_effects {
         reads = reads.or(scan::transient_effect_history(effect));
@@ -6153,7 +6251,7 @@ fn grown_objects_are_inert(current: &GameState, grown: &HashSet<ObjectId>) -> bo
 /// The growth-invariant non-object remainder of the two projected frames, through
 /// `impl PartialEq for GameState`: strip the grown ids from both object maps and clear the
 /// battlefield ordering + stack, with its per-entry tables and the `lki_by_incarnation` and
-/// departed-spell records only they carry
+/// departed stack records (spells and activated abilities) only they carry
 /// (the grown ids live there, and those axes are covered by `board_covers` / the stack gate), so
 /// what is left for `PartialEq` to answer is
 /// `objects.len()` plus the non-object axes it compares.
@@ -6198,15 +6296,16 @@ fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>)
     b.battlefield.clear(); // allow-raw-zone: clears a discarded comparison CLONE for loop-cover equality (fn takes &GameState, mutates a local clone) - not a gameplay zone event
 
     // The stack leaves the remainder with its per-entry tables, and the `lki_by_incarnation` and
-    // departed-spell records only they carry go with them; last-known copiable values stay.
+    // departed stack records (spells and activated abilities) only they carry go with them;
+    // last-known copiable values stay.
     // CR 405.5 + CR 608.2h: an entry beneath the recurrence resolves only after it and reads its
     // LKI then.
     crate::game::stack::clear_stack_with_entry_tables(&mut a);
     crate::game::stack::clear_stack_with_entry_tables(&mut b);
     a.retain_carrier_referenced_lki();
     b.retain_carrier_referenced_lki();
-    a.retain_trigger_referenced_departed_spells();
-    b.retain_trigger_referenced_departed_spells();
+    a.retain_trigger_referenced_departed_stack_records();
+    b.retain_trigger_referenced_departed_stack_records();
     a.canonicalize_loop_identities();
     b.canonicalize_loop_identities();
     // AFTER the battlefield/stack clears, which makes those two arms no-ops by construction —
@@ -6239,6 +6338,8 @@ fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>)
     let window_floor = pa.next_tracked_set_id;
     b.tracked_object_sets.retain(|id, _| id.0 < window_floor);
     b.tracked_set_member_causes
+        .retain(|id, _| id.0 < window_floor);
+    b.tracked_set_member_origins
         .retain(|id, _| id.0 < window_floor);
     b.next_tracked_set_id = a.next_tracked_set_id;
     a == b
@@ -6359,10 +6460,9 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
         {
             return true;
         }
-        if def
-            .runtime_execute
-            .as_ref()
-            .is_some_and(|a| scan::ability_reads_sibling_mutable(a))
+        if state
+            .replacement_rider(def)
+            .is_some_and(scan::ability_reads_sibling_mutable)
         {
             return true;
         }
@@ -7158,10 +7258,9 @@ fn fire_time_conditions_read_projected_resource_scoped(
         {
             return true;
         }
-        if def
-            .runtime_execute
-            .as_ref()
-            .is_some_and(|a| crate::game::ability_scan::ability_reads_projected_resource(a))
+        if state
+            .replacement_rider(def)
+            .is_some_and(crate::game::ability_scan::ability_reads_projected_resource)
         {
             return true;
         }
@@ -8046,18 +8145,22 @@ fn project_out_resources(state: &GameState) -> GameState {
     s.triggered_abilities_added_mana_this_turn.clear();
     s.loyalty_abilities_activated_this_turn.clear();
     s.extra_loyalty_activations_this_turn.clear();
-    // CR 603.2h: trigger once-per-turn / N-times-per-turn limits. These maps have
-    // EXACTLY ONE writer each — the constraint-keyed `record_trigger_fired`
-    // (triggers.rs), which returns early for an unconstrained trigger:
-    // `triggers_fired_this_turn` is written ONLY for `TriggerConstraint::OncePerTurn`,
-    // `trigger_fire_counts_this_turn` ONLY for `MaxTimesPerTurn`. An UNRESTRICTED
-    // (repeatable) trigger inserts into NEITHER, so a legitimate unrestricted-trigger
-    // loop never touches them and PRESERVING them cannot break legit-loop equality.
-    // For a GATED trigger the key/count is present/grows, so two cycles compare
-    // DIFFERENT — exactly the soundness the gate enforces (a once-per-turn trigger
-    // cannot drive an infinite loop). `triggers_fired_this_turn_per_opponent`
-    // (OncePerOpponentPerTurn) and `triggers_fired_this_game` (OncePerGame) are
-    // likewise NOT cleared here — consistent with the preserved `crew_activated_this_turn`.
+    // CR 603.2 + CR 603.2h: trigger once-per-turn / N-times-per-turn limits. These maps
+    // have EXACTLY ONE writer each. The constraint-keyed `record_trigger_fired`
+    // (triggers.rs) returns early for an unconstrained trigger and writes
+    // `triggers_fired_this_turn` ONLY for `OncePerTurn { spent_by: Triggering }` at
+    // admission, and `trigger_fire_counts_this_turn` ONLY for `MaxTimesPerTurn`.
+    // `trigger_indicated_actions_this_turn` is written ONLY by
+    // `triggers::record_indicated_action`, on acceptance of a non-cast instruction or
+    // when a CR 603.2h resolution cast becomes cast. An UNRESTRICTED (repeatable) trigger, or a CR 603.2h trigger
+    // that is always declined, inserts into NONE of them, so a legitimate
+    // unrestricted-trigger loop never touches them and PRESERVING them cannot break
+    // legit-loop equality. For a GATED trigger the key/count is present/grows, so two
+    // cycles compare DIFFERENT — exactly the soundness the gate enforces (a once-per-turn
+    // trigger cannot drive an infinite loop). `trigger_indicated_actions_this_turn`,
+    // `triggers_fired_this_turn_per_opponent` (OncePerOpponentPerTurn) and
+    // `triggers_fired_this_game` (OncePerGame) are likewise NOT cleared here — consistent
+    // with the preserved `crew_activated_this_turn`.
     // CR 120: who has dealt damage + the per-turn damage event log.
     s.objects_that_dealt_damage.clear();
     s.damage_dealt_this_turn.clear();
@@ -8434,6 +8537,7 @@ fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usiz
 
 #[cfg(test)]
 mod tests {
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use std::sync::Arc;
 
     /// CR 508.1d + CR 604.1: only a LIVE required-defender class is a growing-class
@@ -8484,6 +8588,11 @@ mod tests {
     use crate::analysis::decision_template::ChoicePoint;
     use crate::game::game_object::GameObject;
     use crate::types::ability::TriggerDefinitionRef;
+    use crate::types::actions::ReplacementAutoChoice;
+    use crate::types::game_state::{
+        ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
+        ReplacementAutoChoiceRecord, ReplacementChoiceKind,
+    };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ExtraPhaseId,
     };
@@ -8517,8 +8626,10 @@ mod tests {
         flate2::read::GzDecoder::new(gz)
             .read_to_string(&mut json)
             .expect("fixture .json.gz must inflate to UTF-8 JSON");
-        let envelope: serde_json::Value =
+        let mut envelope: serde_json::Value =
             serde_json::from_str(&json).expect("dump envelope parses as JSON");
+        // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+        crate::types::game_state::record_captured_onsets(&mut envelope);
         serde_json::from_value::<crate::types::game_state::PersistedGameState>(
             envelope["gameState"].clone(),
         )
@@ -11158,7 +11269,7 @@ mod tests {
 
         // ── (b) ZERO announcement choices, two ways. `Effect::target_filter()` returns
         // `Some` for both, but the SLOT BUILDER surfaces no stack slot: CR 701.21a
-        // `Sacrifice` is carved out of `triggers::extract_target_filter_from_effect` (the
+        // `Sacrifice` is carved out of `types::ability::extract_target_filter_from_effect` (the
         // accessor the builder actually uses), and a CR 601.2c choice made at resolution
         // (`TargetChoiceTiming::Resolution`) is not announced at all.
         let zero_slot_cases: [(&str, ResolvedAbility); 2] = [
@@ -13712,9 +13823,17 @@ mod tests {
             // (which scans `runtime_execute` only for projected reads) lets the def
             // through — only clause (b) rejects.
             assert!(!crate::game::ability_scan::ability_reads_projected_resource(&runtime_body));
-            let def = ReplacementDefinition::new(ReplacementEvent::GainLife)
-                .runtime_execute(runtime_body);
-            let (prior, current) = with_object_def(def);
+            let handle = crate::types::identifiers::ReplacementContinuationId(0);
+            let def =
+                ReplacementDefinition::new(ReplacementEvent::GainLife).runtime_execute(handle);
+            let (mut prior, mut current) = with_object_def(def);
+            for state in [&mut prior, &mut current] {
+                assert_eq!(
+                    state.install_replacement_continuation(runtime_body.clone()),
+                    handle,
+                    "reach guard: each frame's arena names the body at the def's handle"
+                );
+            }
             assert!(
                 !loop_states_cover_modulo_growth(&prior, &current),
                 "arm4 mandatory GainLife with runtime_execute body"
@@ -18416,8 +18535,10 @@ mod tests {
         flate2::read::GzDecoder::new(&gz[..])
             .read_to_string(&mut json)
             .expect("fixture .json.gz must inflate to UTF-8 JSON");
-        let envelope: serde_json::Value =
+        let mut envelope: serde_json::Value =
             serde_json::from_str(&json).expect("dump envelope parses as JSON");
+        // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+        crate::types::game_state::record_captured_onsets(&mut envelope);
         // Cross the dump through the PRODUCTION decoder rather than a bare `GameState`
         // decode wrapped in `Raw`: `PersistedGameState`'s own `Deserialize` runs
         // `reject_legacy_raw_prompt_authority` and `decode_persisted_resolution_state`
@@ -23344,6 +23465,8 @@ mod tests {
                         owner: TargetFilter::Controller,
                         attach_to: None,
                         enters_attacking: false,
+                        attack_destination:
+                            crate::types::ability::TokenAttackDestination::ControllerChooses,
                         supertypes: vec![],
                         static_abilities: vec![],
                         enter_with_counters: vec![],
@@ -24202,15 +24325,16 @@ mod tests {
                 // pipeline debug-asserts on one that declares neither.
                 definition.draw_scope = Some(DrawReplacementScope::IndividualDraw);
                 if with_body {
-                    definition.runtime_execute = Some(Box::new(ResolvedAbility::new(
-                        Effect::LoseLife {
-                            amount: QuantityExpr::Fixed { value: 1 },
-                            target: None,
-                        },
-                        vec![],
-                        DEF_SRC,
-                        PlayerId(0),
-                    )));
+                    definition.runtime_execute =
+                        Some(board.install_replacement_continuation(ResolvedAbility::new(
+                            Effect::LoseLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                target: None,
+                            },
+                            vec![],
+                            DEF_SRC,
+                            PlayerId(0),
+                        )));
                 }
                 let mut object = GameObject::new(
                     DEF_SRC,
@@ -26121,6 +26245,175 @@ mod tests {
         ));
     }
 
+    /// CR 608.2c: cover compares origins by what they select for member reads,
+    /// not by incarnation identity. A re-stamp naming an identical snapshot
+    /// (a blink with no characteristic change) stays covered; a changed
+    /// snapshot, a changed fallback kind, or an asymmetric stamp refuses.
+    #[test]
+    fn origins_read_same_ignores_immaterial_restamps_but_catches_changed_reads() {
+        use crate::types::game_state::TrackedMemberOrigin;
+        use crate::types::identifiers::TrackedSetId;
+        use crate::types::zones::Zone;
+
+        fn snapshot(power: i32) -> LKISnapshot {
+            LKISnapshot {
+                name: "Member".to_string(),
+                token_image_ref: None,
+                power: Some(power),
+                toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
+                mana_value: 2,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: Vec::new(),
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
+                was_prepared: false,
+                attachments: Vec::new(),
+                intensity: 0,
+            }
+        }
+
+        fn staged(incarnation: u64, power: Option<i32>, zone: Zone) -> GameState {
+            let mut state = GameState::new_two_player(42);
+            let member = ObjectId(50);
+            state
+                .tracked_object_sets
+                .insert(TrackedSetId(1), vec![member]);
+            if let Some(power) = power {
+                state
+                    .lki_by_incarnation
+                    .entry(member)
+                    .or_default()
+                    .insert(incarnation, snapshot(power));
+            }
+            state
+                .tracked_set_member_origins
+                .entry(TrackedSetId(1))
+                .or_default()
+                .insert(
+                    member,
+                    TrackedMemberOrigin {
+                        departed_from: zone,
+                        departure_incarnation: incarnation,
+                    },
+                );
+            state
+        }
+
+        let prior = staged(7, Some(5), Zone::Battlefield);
+        // Same characteristics under a new incarnation: covered.
+        assert!(origins_read_same(
+            &prior,
+            &staged(9, Some(5), Zone::Battlefield)
+        ));
+        // Changed snapshot content: refuses.
+        assert!(!origins_read_same(
+            &prior,
+            &staged(9, Some(2), Zone::Battlefield)
+        ));
+        // Changed fallback kind (recording to non-recording): refuses.
+        assert!(!origins_read_same(&prior, &staged(9, Some(5), Zone::Hand)));
+        // Asymmetric stamp (no origins at all): refuses.
+        let mut unstamped = GameState::new_two_player(42);
+        unstamped
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![ObjectId(50)]);
+        assert!(!origins_read_same(&prior, &unstamped));
+    }
+
+    /// B2 — FRESH-SET accumulation: a blink board appends one tracked set per
+    /// cycle, each stamping the same member's newest departure (Board A:
+    /// set 2 names M@2, set 4 names M@4, all even departures reading
+    /// identically). The growth-invariant remainder must cover the pair:
+    /// older sets' superseded stamps are history, not position, so loop
+    /// normalization must not accumulate every stamp's snapshot across
+    /// periods (prior retaining {M@2} while current retains {M@2, M@4}
+    /// compares artefactually unequal maps). Fails while retention keeps
+    /// every set's stamps.
+    #[test]
+    fn growth_remainder_covers_fresh_set_restamps_without_accumulating_snapshots() {
+        use crate::types::ability::ThisWayCause;
+        use crate::types::game_state::TrackedMemberOrigin;
+        use crate::types::identifiers::TrackedSetId;
+        use crate::types::zones::Zone;
+
+        fn snapshot(name: &str, power: i32) -> LKISnapshot {
+            LKISnapshot {
+                name: name.to_string(),
+                token_image_ref: None,
+                power: Some(power),
+                toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
+                mana_value: 2,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: Vec::new(),
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
+                was_prepared: false,
+                attachments: Vec::new(),
+                intensity: 0,
+            }
+        }
+
+        // Set ids 2, 4, ... each naming the member's departure incarnation,
+        // with that departure's snapshot in history. Every staged departure
+        // reads identically (Board A's every aura departure).
+        fn staged(stamps: &[(u64, u64)]) -> GameState {
+            let mut state = GameState::new_two_player(42);
+            let member = ObjectId(50);
+            for (set, incarnation) in stamps {
+                let set = TrackedSetId(*set);
+                state.tracked_object_sets.insert(set, vec![member]);
+                state.tracked_set_member_causes.insert(
+                    set,
+                    [(member, ThisWayCause::Discarded)].into_iter().collect(),
+                );
+                state
+                    .tracked_set_member_origins
+                    .entry(set)
+                    .or_default()
+                    .insert(
+                        member,
+                        TrackedMemberOrigin {
+                            departed_from: Zone::Battlefield,
+                            departure_incarnation: *incarnation,
+                        },
+                    );
+                state.next_tracked_set_id = state.next_tracked_set_id.max(set.0 + 1);
+                let even = incarnation % 2 == 0;
+                state
+                    .lki_by_incarnation
+                    .entry(member)
+                    .or_default()
+                    .insert(*incarnation, snapshot("Member", if even { 5 } else { 2 }));
+            }
+            state
+        }
+
+        let prior = staged(&[(2, 2)]);
+        let current = staged(&[(2, 2), (4, 4)]);
+        assert!(
+            eq_except_growable(&prior, &current, &HashSet::new()),
+            "a fresh set re-stamping the same member's identical departure must stay covered"
+        );
+    }
+
     /// CR 500.8: a run of identical self-resuming inserted units unwinds to the same step at any
     /// depth, so the history disjunct collapses the deeper run; a unit resuming elsewhere stays.
     #[test]
@@ -26240,6 +26533,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
         s
@@ -26350,6 +26644,74 @@ mod tests {
         };
         let (pa, pb) = (frame(2), frame(4));
         assert_ne!(pa.departed_stack_spells, pb.departed_stack_spells);
+        assert!(eq_except_growable(&pa, &pb, &HashSet::new()));
+    }
+
+    /// CR 104.4b + CR 602.2a + CR 608.2h: a departed activated ability only a stack entry's
+    /// activation trigger names leaves `eq_except_growable`'s remainder with the stack.
+    #[test]
+    fn eq_except_growable_drops_a_departed_activation_record_only_a_stack_entry_names() {
+        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::events::{
+            ActivatedAbilityKind, ActivationTriggerState, BoundActivationCost, GameEvent,
+        };
+        use crate::types::game_state::StackEntryKind;
+        let activation_source = ObjectId(30);
+        let trigger_source = ObjectId(31);
+        let activation = ObjectId(41);
+        let frame = |x: u32| {
+            let mut s = GameState::new_two_player(7);
+            s.stack.push_back(StackEntry {
+                id: ObjectId(40),
+                source_id: trigger_source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: trigger_source,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        trigger_source,
+                        PlayerId(0),
+                    )),
+                    condition: None,
+                    trigger_event: Some(GameEvent::AbilityActivated {
+                        player_id: PlayerId(0),
+                        source_id: activation_source,
+                        kind: ActivatedAbilityKind::Normal,
+                        departed_source_lki: None,
+                        trigger_state: ActivationTriggerState::Pending,
+                        stack_entry: Some(activation),
+                        activation_cost: BoundActivationCost::Unknown,
+                    }),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            let mut ability =
+                ResolvedAbility::new(Effect::NoOp, vec![], activation_source, PlayerId(0));
+            ability.chosen_x = Some(x);
+            s.departed_activated_abilities.insert(
+                activation,
+                StackEntry {
+                    id: activation,
+                    source_id: activation_source,
+                    controller: PlayerId(0),
+                    kind: StackEntryKind::ActivatedAbility {
+                        source_id: activation_source,
+                        ability: Box::new(ability),
+                    },
+                },
+            );
+            s.normalize_for_loop()
+        };
+        let (pa, pb) = (frame(2), frame(4));
+        assert_ne!(
+            pa.departed_activated_abilities, pb.departed_activated_abilities,
+            "reach-guard: the named record survives normalization and differs"
+        );
         assert!(eq_except_growable(&pa, &pb, &HashSet::new()));
     }
 
@@ -27972,5 +28334,137 @@ mod tests {
             certify(&prior, &stray).is_none(),
             "a stray id in the non-holder container refuses"
         );
+    }
+
+    /// CR 615.5: a floating prevention shield naming `rider` through a freshly
+    /// installed arena entry, after `padding` earlier entries.
+    fn floating_rider_frame(padding: usize, rider_amount: i32) -> GameState {
+        let rider = |amount| {
+            crate::types::ability::ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: amount },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let mut state = GameState::new_two_player(42);
+        for _ in 0..padding {
+            state.install_replacement_continuation(rider(rider_amount));
+        }
+        let id = state.install_replacement_continuation(rider(rider_amount));
+        state.pending_damage_replacements.push(
+            ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
+                .runtime_execute(id),
+        );
+        state
+    }
+
+    /// CR 104.4b: two loop samples taken after 3 and 4 iterations, each of which
+    /// installed an `==` rider and re-pointed the pending shield at it, are the same
+    /// game position: the arena is allocation history and is not compared, at loop
+    /// equality or at the CR 732.2a cover gate. Positive control: a remembered CR 616.1
+    /// choice whose rider differs is still compared, and makes the samples unequal.
+    #[test]
+    fn loop_samples_differing_only_in_continuation_allocation_compare_equal() {
+        let a = floating_rider_frame(2, 5);
+        let b = floating_rider_frame(3, 5);
+        assert_ne!(
+            a.pending_damage_replacements[0].runtime_execute,
+            b.pending_damage_replacements[0].runtime_execute,
+            "reach-guard: the samples' shields name different arena positions"
+        );
+        assert_eq!(
+            a.replacement_rider(&a.pending_damage_replacements[0]),
+            b.replacement_rider(&b.pending_damage_replacements[0]),
+            "reach-guard: the named riders are equal"
+        );
+        let (na, nb) = (a.normalize_for_loop(), b.normalize_for_loop());
+        assert!(loop_states_equal(&na, &nb));
+        assert!(eq_except_growable(&na, &nb, &HashSet::new()));
+
+        let remembered = |state: &mut GameState, amount: i32| {
+            let (definition, rider) = {
+                let mut frame = floating_rider_frame(0, amount);
+                let def = frame.pending_damage_replacements.remove(0);
+                frame.split_replacement_rider(&def)
+            };
+            state
+                .replacement_auto_choices
+                .push(ReplacementAutoChoiceRecord {
+                    id: ReplacementAutoChoiceId("r0".to_string()),
+                    key: ReplacementAutoChoiceKey {
+                        player: PlayerId(0),
+                        event: crate::types::replacements::ReplacementEvent::DamageDone,
+                        kind: ReplacementChoiceKind::Order,
+                        candidates: vec![ReplacementAutoChoiceIdentity::Definition {
+                            source: crate::types::identifiers::ObjectIncarnationRef::of(
+                                ObjectId(5),
+                                0,
+                            ),
+                            index: 0,
+                            definition: Box::new(definition),
+                            rider,
+                        }],
+                    },
+                    choice: ReplacementAutoChoice::Order { order: vec![0] },
+                    descriptions: vec![],
+                });
+        };
+        let (mut ra, mut rb) = (a.clone(), b.clone());
+        remembered(&mut ra, 5);
+        remembered(&mut rb, 7);
+        let (ra, rb) = (ra.normalize_for_loop(), rb.normalize_for_loop());
+        assert!(!loop_states_equal(&ra, &rb));
+        assert!(!eq_except_growable(&ra, &rb, &HashSet::new()));
+    }
+
+    /// CR 608.2h + CR 615.5: two frames whose live floating shields differ only in which
+    /// arena position names an `==` rider read the same last-known information, so the
+    /// "records grow unread" verdict is the one for identical frames. Control: frames
+    /// whose riders differ are not the same.
+    #[test]
+    fn floating_shields_differing_only_in_continuation_allocation_grow_unread() {
+        let prior = floating_rider_frame(0, 5);
+        let current = floating_rider_frame(1, 5);
+        assert_ne!(
+            prior.pending_damage_replacements[0].runtime_execute,
+            current.pending_damage_replacements[0].runtime_execute,
+            "reach-guard: the frames' shields name different arena positions"
+        );
+        assert!(last_known_records_grow_unread(&prior, &current));
+        assert!(!last_known_records_grow_unread(
+            &prior,
+            &floating_rider_frame(1, 9)
+        ));
+    }
+
+    /// CR 732.2a + CR 615.5: a live shield's history reads include those of the runtime
+    /// continuation its handle names. The scanner walks the rider it is passed, and
+    /// `live_history_reads` resolves the handle to that rider. Control: the same shield
+    /// naming no continuation reads nothing.
+    #[test]
+    fn replacement_history_reads_the_named_continuation() {
+        let mut state = GameState::new_two_player(42);
+        state
+            .pending_damage_replacements
+            .push(ReplacementDefinition::new(ReplacementEvent::DamageDone));
+        assert!(!live_history_reads(&state).reads(HistoryMember::PlayerTurnsTaken));
+        let id = state.install_replacement_continuation(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::TurnsTaken,
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        ));
+        state.pending_damage_replacements[0] =
+            ReplacementDefinition::new(ReplacementEvent::DamageDone).runtime_execute(id);
+        assert!(live_history_reads(&state).reads(HistoryMember::PlayerTurnsTaken));
     }
 }

@@ -24,6 +24,7 @@ use crate::support::shared_card_db;
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::functioning_abilities::active_trigger_definitions;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::printed_cards::{
     install_card_db, rehydrate_game_from_card_db_with_finalization, CardDbRehydrationFinalization,
 };
