@@ -911,8 +911,8 @@ pub fn validate_starting_life_bounds(config: &FormatConfig) -> Result<(), String
     if config.starting_life > MAX_STARTING_LIFE {
         return Err(format!(
             "FormatConfig.starting_life is {}, but the engine caps a declared starting life at \
-             {MAX_STARTING_LIFE} to keep in-game life-total arithmetic (raw i32) from overflowing \
-             — this is an engine invariant, not a Comprehensive Rules limit",
+             {MAX_STARTING_LIFE} to leave in-game life gain room below the i32 limit at which life \
+             totals saturate — this is an engine invariant, not a Comprehensive Rules limit",
             config.starting_life,
         ));
     }

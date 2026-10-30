@@ -245,7 +245,7 @@ pub fn resolve_all_ready_prefix_with(
 ) -> Result<ResolveAllFastForwardResult, EngineError> {
     // A rejected public batch must leave the game exactly as its caller found
     // it. Prefix progress made by earlier iterations is not committed if a
-    // later iteration proves a life change unrepresentable.
+    // later iteration proves a player-resource change unrepresentable.
     //
     // The frame also owns the lifecycle observations emitted by accepted inner
     // boundaries: they are held until this whole public call succeeds, so a
@@ -842,7 +842,7 @@ pub fn resolve_all_fast_forward<F>(
 where
     F: FnMut(&GameState, PlayerId) -> ResolveAllCallbackDecision,
 {
-    // An unrepresentable life change rejects the public batch atomically.
+    // An unrepresentable player-resource change rejects the public batch atomically.
     // Non-representability is the only failure that escalates out of the
     // per-boundary stop policy; every other engine error keeps the established
     // greatest-safe-prefix stop below. The public frame owns the lifecycle
@@ -1159,7 +1159,7 @@ mod tests {
 
     fn life_batch_entries(amount: u32) -> Vec<StackEntry> {
         // Stack entries are stored bottom-to-top: the delayed-trigger install is
-        // the first successful item, followed by the representability boundary.
+        // the first successful item, followed by the later life-gain boundary.
         vec![
             life_gain_entry(22, PlayerId(0), amount),
             delayed_trigger_entry(21, PlayerId(0)),

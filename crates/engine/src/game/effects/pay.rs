@@ -16,8 +16,9 @@ use super::{EffectError, ResolvedAbility};
 /// (e.g., `Fixed { 2 }` or `Power { CostPaidObject }`) is paid unconditionally.
 /// CR 119.4a + CR 810.9a: max payable for "pay any amount of life" is the
 /// general payable-life budget, [`crate::game::life_costs::max_payable_life`]:
-/// the TEAM's exact total (a member may be individually <= 0 while the team is
-/// positive, CR 810.9 — life loss lands on each Player::life individually), 0
+/// the TEAM's exact total (CR 810.4: a member's stored `Player::life` may be <= 0
+/// while the team is positive; how the team's total is split across its members'
+/// fields is storage only, CR 810.9a), 0
 /// under a CantLoseLife lock (CR 119.8). Shared by the resolution prompt below
 /// and the pre-entry prompt (`replacement::as_enters_pay_terms`).
 pub(crate) fn max_pay_any_life_amount(state: &GameState, payer: PlayerId) -> u32 {
@@ -532,8 +533,8 @@ mod tests {
     /// CR 119.4a + CR 810.9a: "pay any amount of life" surfaces a
     /// `PayAmountChoice` whose `max` is the payer's TEAM total in 2HG. Payer P0
     /// individually at -2, teammate P1 at 9 → team total 7, so `max == 7` even
-    /// though the payer's individual life is negative (a member may be below 0
-    /// while the team is positive, CR 810.9). Reverting Site 9 to the
+    /// though the payer's stored field is negative (a member's field may be below 0
+    /// while the team is positive; the split is storage only, CR 810.9a). Reverting Site 9 to the
     /// individual `p.life` read (-2, not > 0) would set `max == 0`.
     #[test]
     fn pay_any_amount_life_max_is_team_total_in_2hg() {

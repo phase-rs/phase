@@ -55,10 +55,10 @@ pub enum PayLifeCostResult {
     },
     /// CR 118.3: Player's life total is below `amount` — cost can't be paid.
     /// Also returned when the post-replacement deduction is not representable
-    /// (an overflowed replacement quantity, or a nested player-counter or
-    /// energy settlement that overflows; a deduction of any `u32` amount is
-    /// carried exactly, and the life total and the lost-this-turn counter
-    /// saturate instead).
+    /// (only a nested player-counter or energy settlement that overflows; a
+    /// deduction of any `u32` amount is carried exactly, a life replacement
+    /// quantity saturates at `u32::MAX`, and the life total and the
+    /// lost-this-turn counter saturate instead).
     InsufficientLife,
     /// CR 119.8 / CR 118.3: A static prohibition makes the cost unpayable.
     Prohibited,

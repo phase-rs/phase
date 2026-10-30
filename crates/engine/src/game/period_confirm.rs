@@ -67,9 +67,9 @@ pub enum OfferRefusal {
     /// CR 704.5a: the period moves some player toward losing the game, and the threshold
     /// authority refused its replayed frames.
     LossAxis,
-    /// The replayed play or answer settled a life change the engine cannot represent. This is
-    /// an engine limit, not a rules outcome: the replay propagates it so the public shortcut
-    /// entry can reject the take instead of silently stopping the repetition.
+    /// The replayed play or answer settled a player-counter or energy change the engine cannot
+    /// represent. This is an engine limit, not a rules outcome: the replay propagates it so the
+    /// public shortcut entry can reject the take instead of silently stopping the repetition.
     LifeChangeUnrepresentable { player: PlayerId },
 }
 

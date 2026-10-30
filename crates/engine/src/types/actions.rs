@@ -1159,11 +1159,9 @@ fn default_true() -> bool {
 pub const MAX_DEBUG_CREATE_COUNT: u32 = 100;
 
 /// Maximum amount for one sandbox `GainLife` / `LoseLife` debug action. A sanity
-/// bound on the request, not the representability authority: it leaves about 2^11
-/// headroom under `i32::MAX` for doubling replacements, but a stack of replacements
-/// can still carry the result past what the engine represents. That result is never
-/// clamped: the checked quantity resolver and the checked `Times` / `Plus` appliers
-/// report it as an unrepresentable life change and the action is rejected unchanged.
+/// bound on the request, not a representability limit: replacements may scale the
+/// final amount past it, a life replacement quantity past `u32::MAX` saturates
+/// there, and the life total stops at the `i32` limit the change moves toward.
 pub const MAX_DEBUG_LIFE_AMOUNT: u32 = 1_000_000;
 
 /// Maximum count for one sandbox `GivePlayerCounters` / `GiveEnergy` debug

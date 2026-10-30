@@ -419,7 +419,7 @@ mod external_format_config_tests {
             resolve_and_validate_custom_format_config(&rules_with_starting_life(
                 MAX_STARTING_LIFE + 1
             ))
-            .expect_err("a starting_life above MAX_STARTING_LIFE risks i32 overflow")
+            .expect_err("a starting_life above MAX_STARTING_LIFE exceeds the engine's saturation-headroom ceiling")
             .contains("starting_life"),
         );
     }
@@ -1477,7 +1477,7 @@ pub fn custom_format_from_lobby_config(
 /// there is no unresolvable input. This wrapper is fallible anyway — beyond
 /// deserializing the JS payload, it also bounds the resolved config's
 /// `starting_life` (CR 704.5a / CR 810.8c playability floor, and the engine's
-/// `MAX_STARTING_LIFE` overflow-safety ceiling) via
+/// `MAX_STARTING_LIFE` saturation-headroom ceiling) via
 /// `validate_starting_life_bounds`. `custom_rules` is user-editable
 /// localStorage data, so this bound fails early with a readable lobby-level
 /// message rather than a raw `FormatConfig::deserialize` error at game

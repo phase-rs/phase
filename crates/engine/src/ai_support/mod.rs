@@ -272,7 +272,7 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
 /// [`structurally_valid_search_selection`].
 ///
 /// The verdict is the submission guard's, not the apply's: an admitted answer
-/// can still fail later in the action, as a life gain the engine cannot
+/// can still fail later in the action, as an energy gain the engine cannot
 /// represent does (`EngineError::LifeChangeUnrepresentable`).
 ///
 /// This is load-bearing for creature-type prompts: each of the several hundred

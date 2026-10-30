@@ -2930,7 +2930,7 @@ mod tests {
     // `structurally_valid_named_choice_answer` — the sixth structural hatch.
     //
     // The hatch decides the submission guard's verdict, not the apply's: an
-    // answer it admits can still fail later in the action (a life gain the
+    // answer it admits can still fail later in the action (an energy gain the
     // engine cannot represent), so the condition is agreement on the fixtures
     // below, not a general implication as for the pass-priority hatch above:
     //
@@ -3321,7 +3321,7 @@ mod tests {
     //
     // Agreement on the fixtures below, against both simulation entries (not a
     // general implication: an admitted answer can still fail when applied, e.g.
-    // a life gain the engine cannot represent, which is why phase-ai's chooser
+    // an energy gain the engine cannot represent, which is why phase-ai's chooser
     // simulates the answer it submits):
     //
     //   structurally_valid_prompt_answer(state, action) == true
