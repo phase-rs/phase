@@ -968,13 +968,17 @@ fn intrinsic_equip_abilities_from_token_statics(
 /// [`attach::authority_is_aura`]: super::attach::authority_is_aura
 /// [`attach::can_attach_to_object`]: super::attach::can_attach_to_object
 /// [`attach::can_attach_to_player`]: super::attach::can_attach_to_player
-fn aura_token_entry_denied(state: &GameState, entrant: ObjectId, host: TokenHostRequest) -> bool {
+pub(crate) fn aura_token_entry_denied(
+    state: &GameState,
+    entrant: ObjectId,
+    host: TokenHostRequest,
+    authority: super::attach::AttachmentAuthority<'_>,
+) -> bool {
     // CR 303.4h: "If an effect attempts to put a permanent that isn't an Aura,
     // Equipment, or Fortification onto the battlefield attached to an object or
     // player, it enters the battlefield unattached." It is created either way,
     // so CR 303.4i is not its rule.
-    if !super::attach::authority_is_aura(state, entrant, super::attach::AttachmentAuthority::Stored)
-    {
+    if !super::attach::authority_is_aura(state, entrant, authority) {
         return false;
     }
     match host {
@@ -992,10 +996,49 @@ fn aura_token_entry_denied(state: &GameState, entrant: ObjectId, host: TokenHost
         // CR 303.4i, "can't legally enchant": the host is defined, so the
         // question is legality, and legality is `attach`'s to answer.
         TokenHostRequest::Bound(AttachTarget::Object(host_id)) => {
-            !super::attach::can_attach_to_object(state, entrant, host_id)
+            !super::attach::can_attach_to_object_with_authority(state, entrant, host_id, authority)
         }
         TokenHostRequest::Bound(AttachTarget::Player(host_player)) => {
-            !super::attach::can_attach_to_player(state, entrant, host_player)
+            !super::attach::can_attach_to_player_with_authority(
+                state,
+                entrant,
+                host_player,
+                authority,
+            )
+        }
+    }
+}
+
+/// CR 303.4h/i + CR 701.3b: consume the fixed host after birth, once the body
+/// is realized. The attachment authority owns legality and same-host attachment
+/// remains a no-op across counter and attacking continuations.
+pub(crate) fn consume_token_host(state: &mut GameState, entrant: ObjectId, host: TokenHostRequest) {
+    let TokenHostRequest::Bound(host) = host else {
+        return;
+    };
+    if state
+        .objects
+        .get(&entrant)
+        .is_some_and(|object| object.attached_to == Some(host))
+    {
+        return;
+    }
+    match host {
+        AttachTarget::Object(id) => {
+            super::attach::attach_to_with_authority(
+                state,
+                entrant,
+                id,
+                super::attach::AttachmentAuthority::Stored,
+            );
+        }
+        AttachTarget::Player(player) => {
+            super::attach::attach_to_player_with_authority(
+                state,
+                entrant,
+                player,
+                super::attach::AttachmentAuthority::Stored,
+            );
         }
     }
 }
@@ -1240,6 +1283,17 @@ fn drive_token_event_delivery(
             position,
             mut batch,
         } = cursor.remaining.remove(0);
+        let mut instructions = batch.instructions.unwrap_or_else(|| {
+            crate::types::proposed_event::TokenCreationInstructions::from_legacy(
+                EtbTapState::from_seeded_tapped(batch.spec.tapped),
+                batch.spec.enters_attacking,
+            )
+        });
+        let host = *instructions
+            .host_request
+            .get_or_insert(batch.spec.attach_to);
+        batch.spec.attach_to = host;
+        batch.instructions = Some(instructions);
         match batch.copy.take() {
             None => {
                 let event = batch.into_event(HashSet::new());
@@ -1472,7 +1526,7 @@ fn apply_create_token_batch(
         creation_frame,
         instructions,
         owner,
-        spec,
+        mut spec,
         copy,
         enter_tapped,
         count: final_count,
@@ -1484,6 +1538,14 @@ fn apply_create_token_batch(
         };
     };
 
+    let mut instructions = instructions.unwrap_or_else(|| {
+        crate::types::proposed_event::TokenCreationInstructions::from_legacy(
+            EtbTapState::from_seeded_tapped(spec.tapped),
+            spec.enters_attacking,
+        )
+    });
+    spec.attach_to = *instructions.host_request.get_or_insert(spec.attach_to);
+    let instructions = Some(instructions);
     if let Some(copy) = copy {
         let status = super::token_copy::apply_copy_token_after_replacement_with_created_ids(
             state,
@@ -1592,7 +1654,12 @@ fn apply_create_token_batch(
         // publishes only the tokens that were actually created, so a later
         // `TargetFilter::LastCreated` cannot read a denied one — or, when the
         // whole batch is denied, an earlier unrelated batch.
-        if aura_token_entry_denied(state, obj_id, spec.attach_to) {
+        if aura_token_entry_denied(
+            state,
+            obj_id,
+            spec.attach_to,
+            super::attach::AttachmentAuthority::Stored,
+        ) {
             uncreate_unentered_aura_token(state, obj_id, owner);
             continue;
         }
@@ -2704,7 +2771,11 @@ fn commit_liminal_token_entry_with_continuation(
     // explicitly by `legal_aura_attachment_targets`, and `FilterProp::Another` is
     // source-relative to the Aura itself, so both already exclude the entrant on
     // either side. No card in the pool carries a counting enchant ability.
-    let hosts = if entry.attach_to.is_none() {
+    let host_request = entry
+        .instructions
+        .and_then(|instruction| instruction.host_request)
+        .unwrap_or_else(|| TokenHostRequest::from_binding(false, entry.attach_to));
+    let hosts = if matches!(host_request, TokenHostRequest::NotRequested) {
         crate::game::zone_pipeline::entering_aura_hosts(state, entry_ref)
     } else {
         crate::game::zone_pipeline::EnteringAuraHosts::NotApplicable
@@ -2722,7 +2793,12 @@ fn commit_liminal_token_entry_with_continuation(
     // observes it: no CR 733 birth record (`birth_command` is still unrecorded
     // here), no `TokenCreated`, no battlefield `ZoneChanged`, and no
     // `last_created_token_ids` row.
-    if matches!(
+    if aura_token_entry_denied(
+        state,
+        entry_ref,
+        host_request,
+        super::attach::AttachmentAuthority::Stored,
+    ) || matches!(
         &hosts,
         crate::game::zone_pipeline::EnteringAuraHosts::Hosts { legal_targets, .. }
             if legal_targets.is_empty()
@@ -2990,16 +3066,13 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
     // the `Suppress` route) — recording it here too double-counts.
     crate::game::restrictions::record_token_created(state, object_id);
 
-    if let Some(host) = attach_to {
-        match host {
-            AttachTarget::Object(id) => {
-                super::attach::attach_to(state, object_id, id);
-            }
-            AttachTarget::Player(pid) => {
-                super::attach::attach_to_player(state, object_id, pid);
-            }
-        };
-    }
+    consume_token_host(
+        state,
+        object_id,
+        instructions
+            .and_then(|instruction| instruction.host_request)
+            .unwrap_or_else(|| TokenHostRequest::from_binding(false, attach_to)),
+    );
 
     // CR 400.7 + CR 608.2i + CR 614.12a: the entry RECORD and the entry EVENTS are one indivisible
     // operation over one snapshot, and both wait until the object IS the thing that entered.
@@ -3057,6 +3130,8 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
                             crate::types::proposed_event::TokenCreationInstructions {
                                 tapped: EtbTapState::Unspecified,
                                 attack_destination: Some(attack_destination),
+                                host_request: instructions
+                                    .and_then(|instruction| instruction.host_request),
                             }
                         })
                     }),

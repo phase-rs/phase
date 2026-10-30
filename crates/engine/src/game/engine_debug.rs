@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
-    ContinuousModification, Effect, EntryAttackDestination, LibraryPosition, QuantityExpr,
-    ResolvedAbility, TargetFilter, TargetRef, TokenAttackDestination,
+    ContinuousModification, Effect, LibraryPosition, QuantityExpr, ResolvedAbility, TargetFilter,
+    TargetRef, TokenAttackDestination,
 };
 use crate::types::action_rejection::ActionRejection;
 use crate::types::actions::{DebugAction, DebugCardCreationKind, DebugTokenRequest, GameAction};
@@ -12,8 +12,7 @@ use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, DebugCardEntrySource, GameState, LiminalEntry, PendingDebugCardEntries,
-    PendingLiminalEntryResume, WaitingFor,
+    ActionResult, DebugCardEntrySource, GameState, PendingDebugCardEntries, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::{PlayerCounterKind, PlayerId};
@@ -1128,8 +1127,8 @@ fn enter_battlefield_with_etb(
 
 /// CR 111.1 + CR 614.12: A token does not move from a staging zone onto the
 /// battlefield. Convert the debug-selected printed characteristics into the
-/// same liminal token projection used by copy-token effects, then consult the
-/// standard token-entry replacement and delivery pipeline.
+/// complete copy recipe used by copy-token effects. The shared creation owner
+/// consults creation replacements before its per-entrant entry pipeline.
 fn route_debug_token_to_battlefield(
     state: &mut GameState,
     object_id: ObjectId,
@@ -1145,7 +1144,7 @@ fn route_debug_token_to_battlefield(
 
     let values = super::printed_cards::intrinsic_copiable_values(&staged);
     let copy = CopyTokenSpec {
-        values: Box::new(values.clone()),
+        values: Box::new(values),
         display: super::game_object::DisplayIdentity {
             token_art: None,
             ..staged.display_identity()
@@ -1161,94 +1160,37 @@ fn route_debug_token_to_battlefield(
         // Debug-token route stages no donor; empty mods are stamp-proof.
         donor: None,
     };
-    let mut token = super::game_object::GameObject::new(
-        object_id,
-        CardId(0),
-        staged.owner,
-        values.name.clone(),
-        Zone::Battlefield,
+    let mut work = super::effects::token_copy::copy_batches_to_work(
+        state,
+        std::collections::VecDeque::from([crate::types::game_state::PendingCopyTokenBatch {
+            owner: staged.owner,
+            count: 1,
+            copy: Box::new(copy),
+        }]),
     );
-    let entry_timestamp = state.next_timestamp();
-    super::effects::token::materialize_token_copy_body(
-        &mut token,
-        &copy,
-        &crate::types::resolved_commands::ResolvedCopyBodyModifications::NoExceptions,
-        state.turn_number,
-        entry_timestamp,
-        false,
-    );
-    state.liminal_entries.insert(
-        object_id,
-        LiminalEntry {
-            installed_copy_effects: Vec::new(),
-            copy_exception_counters: None,
-            creation_frame: None,
-            instructions: None,
-            object: crate::types::game_state::LiminalEntrant::Token(
-                crate::types::game_state::TokenProjection::materialize(token),
-            ),
-            name: values.name,
-            source_id: object_id,
-            controller: staged.controller,
-            enters_attacking: false,
-            attack_destination: EntryAttackDestination::AnyDefender,
-            attach_to,
-            sacrifice_at: None,
-            remaining_count: 0,
-            created_ids: Vec::new(),
-            copy_resume: Some(Box::new(copy)),
-            spec_resume: None,
-            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-            enter_with_counters: Vec::new(),
-            kind: crate::types::game_state::LiminalEntryKind::Token,
-            replacement_applied: HashSet::new(),
-        },
-    );
-
-    let proposed = ProposedEvent::TokenEntry {
-        entry_ref: object_id,
-        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-        enter_with_counters: Vec::new(),
-        enter_with_choices: None,
-        applied: HashSet::new(),
-    };
-    match replacement::replace_event(state, proposed, &mut events) {
-        ReplacementResult::Execute(event) => {
-            if state.has_post_replacement_drain() {
-                if let Some(waiting_for) =
-                    super::engine_replacement::apply_pending_post_replacement_effect(
-                        state,
-                        Some(object_id),
-                        None,
-                        Some(crate::types::replacements::ReplacementEvent::Moved),
-                        &mut events,
-                    )
-                {
-                    state.pending_liminal_entry_resume = Some(PendingLiminalEntryResume::Token {
-                        source_id: object_id,
-                        player: waiting_for.acting_player().unwrap_or(staged.controller),
-                        event,
-                    });
-                    state.waiting_for = waiting_for;
-                    return ActionResult::applied(events, state.waiting_for.clone());
-                }
-            }
-            if super::effects::token::commit_liminal_token_entry_and_continue_copy_batch(
-                state,
-                event,
-                &mut events,
-            ) {
-                super::triggers::process_triggers(state, &events);
-                super::sba::check_state_based_actions(state, &mut events);
-            }
-        }
-        ReplacementResult::Prevented => {
-            state.liminal_entries.remove(&object_id);
-        }
-        ReplacementResult::NeedsChoice(player) => {
-            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-        }
+    let host = crate::types::proposed_event::TokenHostRequest::from_binding(false, attach_to);
+    for item in &mut work {
+        let batch = match item {
+            crate::types::game_state::TokenCreationWork::Proposed(batch)
+            | crate::types::game_state::TokenCreationWork::Approved(batch) => batch,
+        };
+        batch.instructions.host_request = Some(host);
+        batch.spec.attach_to = host;
     }
+    let creator = ResolvedAbility::new(Effect::NoOp, Vec::new(), object_id, staged.controller);
+    super::effects::token_copy::begin_creation(
+        state,
+        &creator,
+        work,
+        crate::types::ability::EffectKind::Token,
+        crate::types::game_state::TokenCreationCallerState::Debug {
+            run_etb: true,
+            preset: None,
+            body: None,
+        },
+        &mut events,
+    )
+    .expect("fixed debug face creator has no instruction-result readers or producers");
 
     ActionResult::applied(events, state.waiting_for.clone())
 }
@@ -3250,10 +3192,54 @@ mod tests {
                     .into_game_state()
                     .unwrap();
                 }
+                let mut counter_proposals = 0;
                 for _ in 0..60 {
                     let action = match state.waiting_for {
-                        WaitingFor::ReplacementChoice { .. } => {
-                            GameAction::ChooseReplacement { index: 0 }
+                        WaitingFor::ReplacementChoice {
+                            player,
+                            ref candidates,
+                            ..
+                        } => {
+                            assert_eq!(player, PlayerId(0));
+                            let pending = state.pending_replacement.as_ref().unwrap();
+                            let index = if let ProposedEvent::AddCounter { count, .. } =
+                                pending.proposed
+                            {
+                                if counter_proposals == 0 {
+                                    assert_eq!(count, 1, "one contained-entry contribution");
+                                    assert_eq!(pending.candidates.len(), 2);
+                                    assert_eq!(candidates.len(), 2);
+                                    assert!(candidates.iter().any(|candidate| candidate
+                                        .source_name
+                                        == "Double counters"));
+                                    assert!(candidates
+                                        .iter()
+                                        .any(|candidate| candidate.source_name == "Plus counters"));
+                                }
+                                counter_proposals += 1;
+                                candidates
+                                    .iter()
+                                    .position(|candidate| {
+                                        candidate.source_name
+                                            == if copy {
+                                                "Plus counters"
+                                            } else {
+                                                "Double counters"
+                                            }
+                                    })
+                                    .unwrap_or(0)
+                            } else {
+                                assert!(matches!(
+                                    pause,
+                                    CreationPauseCase::Queued | CreationPauseCase::ReloadQueued
+                                ));
+                                assert!(candidates
+                                    .iter()
+                                    .any(|candidate| candidate.source_name
+                                        == "Queued optional Squirrel"));
+                                0
+                            };
+                            GameAction::ChooseReplacement { index }
                         }
                         WaitingFor::ChooseOneOfBranch { .. } => {
                             GameAction::ChooseBranch { index: 1 }
@@ -3289,6 +3275,21 @@ mod tests {
                     }
                 );
                 assert!(state.resolution_stack.is_empty());
+                assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+                assert!(state.pending_replacement.is_none());
+                assert!(state.liminal_entries.is_empty());
+                assert!(state.pending_liminal_entry_resume.is_none());
+                assert!(state.pending_token_battlefield_entry.is_none());
+                assert!(!state.has_post_replacement_drain());
+                if matches!(
+                    pause,
+                    CreationPauseCase::Counter | CreationPauseCase::ReloadCounter
+                ) {
+                    assert_eq!(
+                        counter_proposals, 1,
+                        "the remaining mandatory arithmetic candidate resolves inline"
+                    );
+                }
                 for id in births {
                     let object = &state.objects[&id];
                     assert_eq!(object.zone, Zone::Battlefield);
@@ -3297,16 +3298,504 @@ mod tests {
                         pause,
                         CreationPauseCase::Counter | CreationPauseCase::ReloadCounter
                     ) {
-                        assert!(
+                        assert_eq!(
                             object
                                 .counters
                                 .get(&CounterType::Plus1Plus1)
                                 .copied()
-                                .unwrap_or(0)
-                                >= 3
+                                .unwrap_or(0),
+                            if copy { 4 } else { 3 }
                         );
                     }
                 }
+            }
+        }
+    }
+
+    fn parsed_debug_entry_face(mut face: CardFace, oracle: &str, keywords: &[&str]) -> CardFace {
+        let names = keywords
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        let types = face
+            .card_type
+            .core_types
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let parsed = crate::parser::parse_oracle_text(
+            oracle,
+            &face.name,
+            &names,
+            &types,
+            &face.card_type.subtypes,
+        );
+        face.oracle_text = Some(oracle.into());
+        face.abilities = parsed.abilities;
+        face.triggers = parsed.triggers;
+        face.static_abilities = parsed.statics;
+        face.replacements = parsed.replacements;
+        crate::database::synthesis::merge_extracted_keywords(
+            &mut face.keywords,
+            parsed.extracted_keywords,
+        );
+        crate::database::synthesis::synthesize_all(&mut face);
+        face
+    }
+
+    #[test]
+    fn complete_debug_real_entry_counters_tap_and_serial_reload_are_once_per_entrant() {
+        use crate::game::effects::token_copy::tests::{
+            install_creation_fixture_replacements, CreationPauseCase,
+        };
+        use crate::types::ability::{PtValue, QuantityModification};
+        let land_type = crate::types::card_type::CardType {
+            core_types: vec![CoreType::Land],
+            ..Default::default()
+        };
+        let llanowar = parsed_debug_entry_face(CardFace { name: "Llanowar Reborn".into(), card_type: land_type.clone(), ..Default::default() },
+            "This land enters tapped.\n{T}: Add {G}.\nGraft 1 (This land enters with a +1/+1 counter on it. Whenever a creature enters, you may move a +1/+1 counter from this land onto it.)", &["Graft"]);
+        let skyshroud = parsed_debug_entry_face(CardFace { name: "Skyshroud Behemoth".into(), mana_cost: crate::types::mana::parse_mtgjson_mana_cost("{5}{G}{G}"), card_type: crate::types::card_type::CardType { core_types: vec![CoreType::Creature], subtypes: vec!["Beast".into()], ..Default::default() }, power: Some(PtValue::Fixed(10)), toughness: Some(PtValue::Fixed(10)), ..Default::default() },
+            "Fading 2 (This creature enters with two fade counters on it. At the beginning of your upkeep, remove a fade counter from it. If you can't, sacrifice it.)\nThis creature enters tapped.", &["Fading"]);
+        let guildgate = parsed_debug_entry_face(
+            CardFace {
+                name: "Azorius Guildgate".into(),
+                card_type: crate::types::card_type::CardType {
+                    subtypes: vec!["Gate".into()],
+                    ..land_type
+                },
+                ..Default::default()
+            },
+            "This land enters tapped.\n{T}: Add {W} or {U}.",
+            &[],
+        );
+        let grumgully = parsed_debug_entry_face(CardFace { name: "Grumgully, the Generous".into(), mana_cost: crate::types::mana::parse_mtgjson_mana_cost("{1}{R}{G}"), card_type: crate::types::card_type::CardType { core_types: vec![CoreType::Creature], subtypes: vec!["Goblin".into(), "Shaman".into()], supertypes: vec![Supertype::Legendary] }, power: Some(PtValue::Fixed(3)), toughness: Some(PtValue::Fixed(3)), ..Default::default() }, "Each other non-Human creature you control enters with an additional +1/+1 counter on it.", &[]);
+        assert!(grumgully
+            .replacements
+            .iter()
+            .any(
+                |definition| definition.event == ReplacementEvent::ChangeZone
+                    && definition
+                        .valid_card
+                        .as_ref()
+                        .is_some_and(|filter| filter != &TargetFilter::SelfRef)
+                    && definition.execute.as_ref().is_some_and(|ability| matches!(
+                        &*ability.effect,
+                        Effect::PutCounter {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            ..
+                        }
+                    ))
+            ));
+        let TargetFilter::Typed(filter) = grumgully.replacements[0].valid_card.as_ref().unwrap()
+        else {
+            panic!("real controlled non-Human entry filter")
+        };
+        assert_eq!(
+            filter.controller,
+            Some(crate::types::ability::ControllerRef::You)
+        );
+        assert!(filter
+            .properties
+            .contains(&crate::types::ability::FilterProp::Another));
+        assert!(filter
+            .type_filters
+            .contains(&crate::types::ability::TypeFilter::Creature));
+        assert!(filter
+            .type_filters
+            .contains(&crate::types::ability::TypeFilter::Non(Box::new(
+                crate::types::ability::TypeFilter::Subtype("Human".into())
+            ))));
+        for (face, own_counter, own_count) in [
+            (&llanowar, CounterType::Plus1Plus1, 1),
+            (&skyshroud, CounterType::Fade, 2),
+            (&guildgate, CounterType::Plus1Plus1, 0),
+        ] {
+            assert!(!face.replacements.is_empty());
+            if own_count > 0 {
+                assert_eq!(
+                    super::super::printed_cards::self_etb_counter_replacements(&face.replacements),
+                    vec![(own_counter.clone(), own_count)]
+                );
+                assert!(
+                    face.replacements.len() >= 2,
+                    "counter and separate tap definitions are retained"
+                );
+            }
+            for reload in [false, true] {
+                let mut state = sandbox_state();
+                if face.name == skyshroud.name {
+                    create_debug_cards(
+                        &mut state,
+                        DebugCardCreateRequest {
+                            actor: PlayerId(0),
+                            source: debug_card_entry_source(&CardDatabase::default(), &grumgully),
+                            owner: PlayerId(0),
+                            zone: Zone::Battlefield,
+                            count: 1,
+                            attach_to: None,
+                            run_etb: false,
+                            nonlegendary: false,
+                            creation_kind: DebugCardCreationKind::Card,
+                        },
+                    )
+                    .unwrap();
+                }
+                if face.name == llanowar.name && reload {
+                    install_creation_fixture_replacements(&mut state, CreationPauseCase::Counter);
+                    for object in state
+                        .objects
+                        .values_mut()
+                        .filter(|object| object.name == "Entry counter")
+                    {
+                        object.replacement_definitions.clear();
+                        object.base_replacement_definitions = std::sync::Arc::new(Vec::new());
+                    }
+                    crate::game::layers::mark_layers_full(&mut state);
+                }
+                let source = debug_card_entry_source(&CardDatabase::default(), &face.clone());
+                let result = create_debug_cards(
+                    &mut state,
+                    DebugCardCreateRequest {
+                        actor: PlayerId(0),
+                        source: source.clone(),
+                        owner: PlayerId(0),
+                        zone: Zone::Battlefield,
+                        count: 2,
+                        attach_to: None,
+                        run_etb: true,
+                        nonlegendary: false,
+                        creation_kind: DebugCardCreationKind::Token,
+                    },
+                )
+                .unwrap();
+                let mut events = result.events;
+                let mut counter_pauses = 0;
+                let mut restored = false;
+                for _ in 0..80 {
+                    let action = match &state.waiting_for {
+                        WaitingFor::ReplacementChoice {
+                            player, candidates, ..
+                        } => {
+                            assert_eq!(*player, PlayerId(0));
+                            let pending = state.pending_replacement.as_ref().unwrap();
+                            let index = if let ProposedEvent::AddCounter { count, .. } =
+                                &pending.proposed
+                            {
+                                assert_eq!(*count, 1);
+                                assert_eq!(pending.candidates.len(), 2);
+                                assert!(pending.candidates.iter().all(|id| state.objects
+                                    [&id.source]
+                                    .replacement_definitions[id.index]
+                                    .event
+                                    == ReplacementEvent::AddCounter));
+                                assert!(pending.candidates.iter().any(|id| state.objects
+                                    [&id.source]
+                                    .replacement_definitions[id.index]
+                                    .quantity_modification
+                                    == Some(QuantityModification::DOUBLE)));
+                                counter_pauses += 1;
+                                candidates
+                                    .iter()
+                                    .position(|candidate| candidate.source_name == "Plus counters")
+                                    .unwrap()
+                            } else {
+                                0
+                            };
+                            GameAction::ChooseReplacement { index }
+                        }
+                        WaitingFor::Priority { .. } if state.resolution_stack.is_empty() => break,
+                        other => panic!("real debug entry must finish its child: {other:?}"),
+                    };
+                    if reload && !restored && (face.name != llanowar.name || counter_pauses == 1) {
+                        let parent = state
+                            .resolution_stack
+                            .iter()
+                            .find_map(|frame| match frame {
+                                crate::types::resolution::ResolutionFrame::DebugCardEntries(
+                                    parent,
+                                ) => Some(parent),
+                                _ => None,
+                            })
+                            .unwrap();
+                        assert_eq!(parent.source, source);
+                        assert_eq!(parent.remaining, 1);
+                        let before = state.clone();
+                        drain_pending_debug_card_entries(&mut state, &mut Vec::new());
+                        assert_eq!(
+                            state, before,
+                            "a live whole child protects its serial parent"
+                        );
+                        let forms =
+                            crate::game::effects::token_copy::tests::liminal_copy_reader_forms(
+                                &state,
+                            );
+                        assert!(forms.len() >= 8);
+                        for form in &forms {
+                            assert_eq!(form.liminal_entries, state.liminal_entries);
+                            assert_eq!(form.resolution_stack, state.resolution_stack);
+                        }
+                        state = forms.into_iter().last().unwrap();
+                        restored = true;
+                    }
+                    events.extend(
+                        crate::game::apply_as_current(&mut state, action)
+                            .unwrap()
+                            .events,
+                    );
+                }
+                let births = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(births.len(), 2);
+                assert_ne!(births[0], births[1]);
+                for id in births {
+                    let object = &state.objects[&id];
+                    assert!(object.tapped);
+                    assert!(object.is_token);
+                    assert_eq!(object.name, face.name);
+                    // CR 702.32a + CR 702.58a + CR 614.5: each own entry contribution applies once.
+                    assert_eq!(
+                        object.counters.get(&own_counter).copied().unwrap_or(0),
+                        if reload && face.name == llanowar.name {
+                            4
+                        } else {
+                            own_count
+                        }
+                    );
+                    if face.name == skyshroud.name {
+                        assert_eq!(
+                            object.counters.get(&CounterType::Plus1Plus1).copied(),
+                            Some(1)
+                        );
+                    }
+                }
+                if reload && face.name == llanowar.name {
+                    assert_eq!(counter_pauses, 2);
+                }
+                assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+                assert!(state.resolution_stack.is_empty());
+                assert!(state.stack.is_empty());
+                assert!(state.pending_replacement.is_none());
+                assert!(state.liminal_entries.is_empty());
+                assert!(state.pending_token_battlefield_entry.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn complete_debug_face_retains_body_public_activation_and_actual_etb_for_two_births() {
+        use crate::game::scenario::GameRunner;
+        let face = parsed_debug_entry_face(CardFace {
+            name: "Synthetic complete Debug face".into(),
+            mana_cost: crate::types::mana::parse_mtgjson_mana_cost("{2}{U}"),
+            card_type: crate::types::card_type::CardType { core_types: vec![CoreType::Creature], subtypes: vec!["Wizard".into()], ..Default::default() },
+            power: Some(crate::types::ability::PtValue::Fixed(2)),
+            toughness: Some(crate::types::ability::PtValue::Fixed(3)),
+            keywords: vec![Keyword::Flying],
+            ..Default::default()
+        }, "Flying\nWhen this creature enters, you gain 2 life.\n{0}: You gain 1 life.\nOther creatures you control get +1/+1.", &["Flying"]);
+        assert!(
+            !face.abilities.is_empty()
+                && !face.triggers.is_empty()
+                && !face.static_abilities.is_empty()
+        );
+        let mut state = sandbox_state();
+        let result = create_debug_cards(
+            &mut state,
+            DebugCardCreateRequest {
+                actor: PlayerId(0),
+                source: debug_card_entry_source(&CardDatabase::default(), &face),
+                owner: PlayerId(0),
+                zone: Zone::Battlefield,
+                count: 2,
+                attach_to: None,
+                run_etb: true,
+                nonlegendary: false,
+                creation_kind: DebugCardCreationKind::Token,
+            },
+        )
+        .unwrap();
+        let births = result
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(births.len(), 2);
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::DebugActionUsed { .. }))
+                .count(),
+            1
+        );
+        let mut runner = GameRunner::from_state(state);
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            runner.state().players[0].life,
+            24,
+            "actual entry events create both triggers"
+        );
+        for id in &births {
+            let token = &runner.state().objects[id];
+            assert_eq!(token.mana_cost, face.mana_cost);
+            assert_eq!(token.base_card_types, face.card_type);
+            assert_eq!((token.base_power, token.base_toughness), (Some(2), Some(3)));
+            assert!(token.keywords.contains(&Keyword::Flying));
+            assert_eq!(token.abilities.as_ref(), &face.abilities);
+            assert_eq!(token.base_trigger_definitions.as_ref(), &face.triggers);
+            assert_eq!(
+                token.base_static_definitions.as_ref(),
+                &face.static_abilities
+            );
+        }
+        runner.activate(births[1], 0).resolve();
+        assert_eq!(runner.state().players[0].life, 25);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+    }
+
+    #[test]
+    fn complete_debug_aura_keeps_explicit_object_or_player_host_through_counter_reload() {
+        use crate::game::effects::token_copy::tests::{
+            install_creation_fixture_replacements, liminal_copy_reader_forms, CreationPauseCase,
+        };
+        for player_host in [false, true] {
+            for legal in [false, true] {
+                let mut state = sandbox_state();
+                let first = create_object(
+                    &mut state,
+                    CardId(80),
+                    PlayerId(0),
+                    "First host".into(),
+                    Zone::Battlefield,
+                );
+                let second = create_object(
+                    &mut state,
+                    CardId(81),
+                    PlayerId(0),
+                    "Chosen host".into(),
+                    Zone::Battlefield,
+                );
+                for id in [first, second] {
+                    let object = state.objects.get_mut(&id).unwrap();
+                    object.card_types.core_types = vec![CoreType::Creature];
+                    object.base_card_types = object.card_types.clone();
+                    object.power = Some(4);
+                    object.toughness = Some(4);
+                    object.base_power = Some(4);
+                    object.base_toughness = Some(4);
+                }
+                if !legal {
+                    let object = state.objects.get_mut(&first).unwrap();
+                    object.card_types.core_types = vec![CoreType::Artifact];
+                    object.base_card_types = object.card_types.clone();
+                }
+                let host = if player_host {
+                    AttachTarget::Player(if legal { PlayerId(1) } else { PlayerId(0) })
+                } else {
+                    AttachTarget::Object(if legal { second } else { first })
+                };
+                let face = parsed_debug_entry_face(
+                    CardFace {
+                        name: "Synthetic hosted face".into(),
+                        card_type: crate::types::card_type::CardType {
+                            core_types: vec![CoreType::Enchantment],
+                            subtypes: vec!["Aura".into()],
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    if player_host {
+                        "Enchant opponent"
+                    } else {
+                        "Enchant creature"
+                    },
+                    &["Enchant"],
+                );
+                assert!(face
+                    .keywords
+                    .iter()
+                    .any(|keyword| matches!(keyword, Keyword::Enchant(_))));
+                install_creation_fixture_replacements(&mut state, CreationPauseCase::Counter);
+                let result = create_debug_cards(
+                    &mut state,
+                    DebugCardCreateRequest {
+                        actor: PlayerId(0),
+                        source: debug_card_entry_source(&CardDatabase::default(), &face),
+                        owner: PlayerId(0),
+                        zone: Zone::Battlefield,
+                        count: 1,
+                        attach_to: Some(host),
+                        run_etb: true,
+                        nonlegendary: false,
+                        creation_kind: DebugCardCreationKind::Token,
+                    },
+                )
+                .unwrap();
+                let mut events = result.events;
+                if legal {
+                    assert!(matches!(
+                        state.waiting_for,
+                        WaitingFor::ReplacementChoice {
+                            player: PlayerId(0),
+                            ..
+                        }
+                    ));
+                    assert!(matches!(
+                        state.pending_replacement.as_ref().unwrap().proposed,
+                        ProposedEvent::AddCounter { count: 1, .. }
+                    ));
+                    let forms = liminal_copy_reader_forms(&state);
+                    state = forms.into_iter().last().unwrap();
+                    let WaitingFor::ReplacementChoice { candidates, .. } = &state.waiting_for
+                    else {
+                        unreachable!()
+                    };
+                    let index = candidates
+                        .iter()
+                        .position(|candidate| candidate.source_name == "Plus counters")
+                        .unwrap();
+                    events.extend(
+                        crate::game::apply_as_current(
+                            &mut state,
+                            GameAction::ChooseReplacement { index },
+                        )
+                        .unwrap()
+                        .events,
+                    );
+                }
+                let births = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(births.len(), usize::from(legal));
+                if let Some(id) = births.first() {
+                    assert_eq!(state.objects[id].attached_to, Some(host));
+                    assert_eq!(
+                        state.objects[id].counters.get(&CounterType::Plus1Plus1),
+                        Some(&4)
+                    );
+                    assert!(!state.objects[&first].attachments.contains(id));
+                }
+                assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+                assert!(state.stack.is_empty() && state.resolution_stack.is_empty());
+                assert!(state.liminal_entries.is_empty());
             }
         }
     }

@@ -33482,6 +33482,130 @@ fn recover_saved_display_baselines(state: &mut GameState) {
 }
 
 pub(crate) fn normalize_saved_liminal_copy_authority(state: &mut GameState) -> Result<(), String> {
+    // Retained original specs and the same entry's independent host are exact
+    // legacy evidence. Absence on an already-performed copy tail does not
+    // authorize replaying its entry, counters, or creation replacements.
+    fn normalize_host_batch(batch: &mut TokenBatch) {
+        let instructions = batch.instructions.get_or_insert_with(|| {
+            crate::types::proposed_event::TokenCreationInstructions::from_legacy(
+                EtbTapState::from_seeded_tapped(batch.spec.tapped),
+                batch.spec.enters_attacking,
+            )
+        });
+        batch.spec.attach_to = *instructions
+            .host_request
+            .get_or_insert(batch.spec.attach_to);
+    }
+    fn normalize_host_event(event: &mut ProposedEvent) {
+        if let ProposedEvent::CreateToken {
+            instructions,
+            spec,
+            appended,
+            ..
+        } = event
+        {
+            let instructions = instructions.get_or_insert_with(|| {
+                crate::types::proposed_event::TokenCreationInstructions::from_legacy(
+                    EtbTapState::from_seeded_tapped(spec.tapped),
+                    spec.enters_attacking,
+                )
+            });
+            spec.attach_to = *instructions.host_request.get_or_insert(spec.attach_to);
+            for batch in appended {
+                normalize_host_batch(batch);
+            }
+        }
+    }
+    fn normalize_host_actions(actions: &mut [PendingCounterPostAction]) {
+        for action in actions {
+            match action {
+                PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+                    instructions: Some(instructions),
+                    attach_to,
+                    ..
+                } => {
+                    instructions.host_request.get_or_insert_with(|| {
+                        crate::types::proposed_event::TokenHostRequest::from_binding(
+                            false, *attach_to,
+                        )
+                    });
+                }
+                PendingCounterPostAction::ContinueTokenCreation {
+                    instructions: Some(instructions),
+                    spec,
+                    ..
+                } => {
+                    instructions.host_request.get_or_insert(spec.attach_to);
+                    spec.attach_to = instructions.host_request.expect("host determined");
+                }
+                PendingCounterPostAction::ContinueTokenEventDelivery { delivery } => {
+                    for positioned in &mut delivery.remaining {
+                        normalize_host_batch(&mut positioned.batch);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(pending) = state.pending_replacement.as_mut() {
+        normalize_host_event(&mut pending.proposed);
+    }
+    if let Some(PendingLiminalEntryResume::Token { event, .. }) =
+        state.pending_liminal_entry_resume.as_mut()
+    {
+        normalize_host_event(event);
+    }
+    for entry in state.liminal_entries.values_mut() {
+        if let Some(instructions) = entry.instructions.as_mut() {
+            instructions.host_request.get_or_insert_with(|| {
+                crate::types::proposed_event::TokenHostRequest::from_binding(false, entry.attach_to)
+            });
+            entry.attach_to = instructions.host_request.and_then(|host| host.bound());
+        }
+    }
+    // Decode-time typed traversal preserves frame order and every allocator;
+    // no gameplay resumer searches through a resident child for its parent.
+    let mut frames = Vec::with_capacity(state.resolution_stack.len());
+    while let Some(kind) = state
+        .resolution_stack
+        .last()
+        .map(crate::types::resolution::ResolutionFrame::kind)
+    {
+        let mut frame = state
+            .resolution_stack
+            .pop_expected(kind)
+            .expect("observed decode frame");
+        match &mut frame {
+            crate::types::resolution::ResolutionFrame::CopyToken(pending) => {
+                for item in &mut pending.work {
+                    let batch = match item {
+                        TokenCreationWork::Proposed(batch) | TokenCreationWork::Approved(batch) => {
+                            batch
+                        }
+                    };
+                    batch
+                        .instructions
+                        .host_request
+                        .get_or_insert(batch.spec.attach_to);
+                    batch.spec.attach_to =
+                        batch.instructions.host_request.expect("host determined");
+                    for appended in &mut batch.appended {
+                        normalize_host_batch(appended);
+                    }
+                }
+            }
+            crate::types::resolution::ResolutionFrame::CounterAdditions(pending) => {
+                if let Some(completion) = pending.completion.as_mut() {
+                    normalize_host_actions(&mut completion.post_actions);
+                }
+            }
+            _ => {}
+        }
+        frames.push(frame);
+    }
+    for frame in frames.into_iter().rev() {
+        state.resolution_stack.push_inner(frame);
+    }
     if state.viewer_projection.is_none() {
         recover_saved_display_baselines(state);
     }

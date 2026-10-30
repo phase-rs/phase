@@ -1076,6 +1076,13 @@ fn apply_pending_counter_post_action(
                 return false;
             }
             super::token::inject_predefined_token_abilities(state, object_id);
+            super::token::consume_token_host(
+                state,
+                object_id,
+                instructions
+                    .and_then(|instruction| instruction.host_request)
+                    .unwrap_or(crate::types::proposed_event::TokenHostRequest::NotRequested),
+            );
             crate::game::layers::mark_layers_entered(state, object_id);
             crate::game::restrictions::record_token_created(state, object_id);
             // CR 400.7 + CR 608.2i + CR 603.2c: route the record and the entry pair through the

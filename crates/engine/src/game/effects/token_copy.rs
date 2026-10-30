@@ -25,7 +25,7 @@ use crate::types::identifiers::TokenCreationFrameId;
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::proposed_event::TokenCreationInstructions;
 use crate::types::proposed_event::{
-    CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
+    CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics, TokenHostRequest,
 };
 use crate::types::resolution::ChildStackDepth;
 use crate::types::resolved_commands::{
@@ -722,6 +722,16 @@ pub(crate) fn install_creation_owned(
             }
         }
     }
+    for item in &mut work {
+        let batch = match item {
+            TokenCreationWork::Proposed(batch) | TokenCreationWork::Approved(batch) => batch,
+        };
+        let host = *batch
+            .instructions
+            .host_request
+            .get_or_insert(batch.spec.attach_to);
+        batch.spec.attach_to = host;
+    }
     let mut pending =
         PendingCopyTokenResolution::legacy(VecDeque::new(), effect_kind, ability.source_id);
     pending.result_parent = parent.map(|context| context.frame);
@@ -852,13 +862,18 @@ pub(crate) fn drive_creation(
             }
             return finish_creation(state, id, events);
         };
-        let (batch, proposed) = match item {
+        let (mut batch, proposed) = match item {
             TokenCreationWork::Proposed(batch) => (batch, true),
             TokenCreationWork::Approved(batch) => (batch, false),
         };
         if batch.count == 0 && batch.appended.is_empty() {
             continue;
         }
+        let host = *batch
+            .instructions
+            .host_request
+            .get_or_insert(batch.spec.attach_to);
+        batch.spec.attach_to = host;
         let event = ProposedEvent::CreateToken {
             appended: batch.appended,
             creation_frame: Some(id),
@@ -1458,13 +1473,10 @@ pub(crate) fn copy_token_entry_counters(
 }
 
 /// CR 614.12: the current copy proposal has a later exact TokenEntry only
-/// when its immediate exceptions and its complete counter work permit it.
-pub(crate) fn copy_token_uses_liminal_entry(
-    copy: &CopyTokenSpec,
-    explicit: &[(crate::types::counter::CounterType, u32)],
-) -> bool {
+/// when its exceptions can be realized before entry. Counters use that entry's
+/// replacement consultation and do not select a different materializer.
+pub(crate) fn copy_token_uses_liminal_entry(copy: &CopyTokenSpec) -> bool {
     copy_token_modifications_are_liminal_immediate(&copy.additional_modifications)
-        && copy_token_entry_counters(copy, explicit).is_empty()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1491,8 +1503,19 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             completion: CopyTokenApplyCompletion::Completed,
         };
     }
-    let etb_counters = copy_token_entry_counters(&copy, &enter_with_counters);
-    let liminal_immediate = copy_token_uses_liminal_entry(&copy, &enter_with_counters);
+    let liminal_immediate = copy_token_uses_liminal_entry(&copy);
+    // CR 306.5b + CR 614.12: only intrinsic loyalty lacks an explicit copied
+    // replacement definition. Own entry definitions contribute on TokenEntry;
+    // separate creating instructions stay on the entry and its batch remainder.
+    let intrinsic_counters = crate::game::printed_cards::intrinsic_face_counters(
+        copy_starting_loyalty_override(&copy.additional_modifications).or(copy.values.loyalty),
+        None,
+    );
+    let etb_counters = if liminal_immediate {
+        Vec::new()
+    } else {
+        copy_token_entry_counters(&copy, &enter_with_counters)
+    };
     let CopyTokenSpec {
         mut values,
         display,
@@ -1518,24 +1541,11 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         values.printed_loyalty = Some(PrintedLoyalty::Fixed(loyalty));
     }
 
-    // CR 306.5b + CR 707.2 + CR 707.9b: A token that's a copy of a planeswalker
-    // enters with loyalty counters equal to the copied loyalty, except a copy
-    // exception may set that starting loyalty to a different value. CR 306.5c
-    // makes the counter map the single source of truth for loyalty. The copy
-    // path builds the object directly (not through the ZoneChange ETB-counter
-    // seeding used by cast/play/effect entries), so seed the intrinsic loyalty
-    // counters here, ahead of any explicit `enter_with_counters`, routing them
-    // through `add_counter_with_replacement` below so Doubling Season etc. apply
-    // (CR 614.1a). Without this a copied planeswalker enters with 0 loyalty
-    // counters and dies immediately to CR 704.5i. Copies don't track battle
-    // defense (`CopiableValues` has no defense field), so only loyalty is seeded.
-    // CR 306.5b loyalty + CR 614.1c "~ enters with N counters" self-replacement
-    // (Atraxa's Skitterfang's three oil counters, Hangarback/Walking Ballista
-    // +1/+1, etc.) + any explicit counters the creating effect added. The copy
-    // path bypasses the ZoneChange replacement pass, so the copied card's
-    // intrinsic "enters with counters" replacement is seeded here from its
-    // copiable replacement set rather than firing during entry.
-    // The shared admission predicate above uses this same exact counter list.
+    // CR 306.5b + CR 614.12: immediate entries carry intrinsic loyalty on
+    // TokenEntry, consult copied own definitions there, and retain only the
+    // creating instruction's explicit counters on their per-entrant remainder.
+    // The nonimmediate branch retains its already-merged counter work and
+    // deferred modification/payment tails.
     // CR 205.3m: the live creature-type list the CR 707.9 subtype exceptions
     // resolve against. Loop-invariant, and cloned once so the per-token CR
     // 303.4f/g projection below can be built while `state` is borrowed.
@@ -1605,14 +1615,21 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                     controller,
                     enters_attacking,
                     attack_destination: attack_destination.clone(),
-                    attach_to: None,
+                    attach_to: instructions.and_then(|instruction| {
+                        match instruction.host_request {
+                            Some(crate::types::proposed_event::TokenHostRequest::Bound(host)) => {
+                                Some(host)
+                            }
+                            _ => None,
+                        }
+                    }),
                     sacrifice_at: sacrifice_at.clone(),
                     remaining_count: final_count.saturating_sub(index + 1),
                     created_ids: created_ids.clone(),
                     copy_resume: Some(resume_copy),
                     spec_resume: None,
                     enter_tapped,
-                    enter_with_counters: Vec::new(),
+                    enter_with_counters: enter_with_counters.clone(),
                     kind: crate::types::game_state::LiminalEntryKind::Token,
                     replacement_applied: std::collections::HashSet::new(),
                 },
@@ -1621,7 +1638,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             let proposed = ProposedEvent::TokenEntry {
                 entry_ref: token_id,
                 enter_tapped,
-                enter_with_counters: Vec::new(),
+                enter_with_counters: intrinsic_counters.clone(),
                 enter_with_choices: None,
                 applied: std::collections::HashSet::new(),
             };
@@ -1823,13 +1840,23 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         // can withhold the birth and the attach can never take a lower journal
         // ordinal than the birth it depends on. Same decide/act split the liminal
         // seam uses in `token::commit_liminal_token_entry_with_post_actions`.
+        let host_request = instructions
+            .and_then(|instruction| instruction.host_request)
+            .unwrap_or(TokenHostRequest::NotRequested);
         let hosts = match entrant_projection.as_ref() {
-            Some(entrant) => {
+            Some(entrant) if matches!(host_request, TokenHostRequest::NotRequested) => {
                 crate::game::zone_pipeline::entering_aura_hosts_projected(state, token_id, entrant)
             }
-            None => crate::game::zone_pipeline::EnteringAuraHosts::NotApplicable,
+            Some(_) | None => crate::game::zone_pipeline::EnteringAuraHosts::NotApplicable,
         };
-        if matches!(
+        if entrant_projection.as_ref().is_some_and(|entrant| {
+            super::token::aura_token_entry_denied(
+                state,
+                token_id,
+                host_request,
+                super::attach::AttachmentAuthority::Projected(entrant),
+            )
+        }) || matches!(
             &hosts,
             crate::game::zone_pipeline::EnteringAuraHosts::Hosts { legal_targets, .. }
                 if legal_targets.is_empty()
@@ -2235,6 +2262,13 @@ fn finish_non_liminal_copy_token_entry(
     // replay by convention only. Switching it to the catalog-wide
     // `inject_resolved_token_abilities` would silently desync replay from live.
     super::token::inject_predefined_token_abilities(state, token_id);
+    super::token::consume_token_host(
+        state,
+        token_id,
+        instructions
+            .and_then(|instruction| instruction.host_request)
+            .unwrap_or(TokenHostRequest::NotRequested),
+    );
     // Battlefield entry of a copy token: request an incremental re-derive
     // for just this token. `flush_layers` escalates to a full pass when
     // the copied object sources a continuous effect, carries a CDA, etc.
@@ -2365,13 +2399,24 @@ pub(crate) fn continue_copy_token_after_entry_payment(
             );
             projection
         });
+        let host_request = tail
+            .instructions
+            .and_then(|instruction| instruction.host_request)
+            .unwrap_or(TokenHostRequest::NotRequested);
         let hosts = match entrant_projection.as_ref() {
-            Some(entrant) => {
+            Some(entrant) if matches!(host_request, TokenHostRequest::NotRequested) => {
                 crate::game::zone_pipeline::entering_aura_hosts_projected(state, token_id, entrant)
             }
-            None => crate::game::zone_pipeline::EnteringAuraHosts::NotApplicable,
+            Some(_) | None => crate::game::zone_pipeline::EnteringAuraHosts::NotApplicable,
         };
-        if matches!(
+        if entrant_projection.as_ref().is_some_and(|entrant| {
+            super::token::aura_token_entry_denied(
+                state,
+                token_id,
+                host_request,
+                super::attach::AttachmentAuthority::Projected(entrant),
+            )
+        }) || matches!(
             &hosts,
             crate::game::zone_pipeline::EnteringAuraHosts::Hosts { legal_targets, .. }
                 if legal_targets.is_empty()
@@ -2631,6 +2676,13 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
         return false;
     }
     super::token::inject_predefined_token_abilities(state, token_id);
+    super::token::consume_token_host(
+        state,
+        token_id,
+        instructions
+            .and_then(|instruction| instruction.host_request)
+            .unwrap_or(TokenHostRequest::NotRequested),
+    );
     crate::game::layers::mark_layers_entered(state, token_id);
     crate::game::restrictions::record_token_created(state, token_id);
     // CR 400.7 + CR 608.2i + CR 603.2c: route the record and the entry pair through the single
@@ -8542,14 +8594,10 @@ pub(crate) mod tests {
         let copy = batch.copy.as_deref().unwrap();
         let body = super::super::token::copy_probe_object_for(copy, &state.all_creature_types);
         assert_eq!(body.effective_mana_value(), 3);
-        assert!(!copy_token_uses_liminal_entry(copy, &[]));
+        assert!(!copy_token_uses_liminal_entry(copy));
         let mut immediate = copy.clone();
         immediate.additional_modifications.clear();
-        assert!(copy_token_uses_liminal_entry(&immediate, &[]));
-        assert!(!copy_token_uses_liminal_entry(
-            &immediate,
-            &[(CounterType::Plus1Plus1, 1)]
-        ));
+        assert!(copy_token_uses_liminal_entry(&immediate));
         assert_eq!(
             copy_token_entry_counters(&immediate, &[(CounterType::Plus1Plus1, 1)]),
             vec![(CounterType::Plus1Plus1, 1)]
@@ -8558,14 +8606,14 @@ pub(crate) mod tests {
         immediate
             .additional_modifications
             .push(ContinuousModification::SetStartingLoyalty { value: 2 });
-        assert!(!copy_token_uses_liminal_entry(&immediate, &[]));
+        assert!(copy_token_uses_liminal_entry(&immediate));
         assert_eq!(
             copy_token_entry_counters(&immediate, &[]),
             vec![(CounterType::Loyalty, 2)]
         );
         immediate.values.loyalty = None;
         immediate.additional_modifications = vec![ContinuousModification::RemoveManaCost];
-        assert!(copy_token_uses_liminal_entry(&immediate, &[]));
+        assert!(copy_token_uses_liminal_entry(&immediate));
         assert_eq!(
             super::super::token::copy_probe_object_for(&immediate, &[]).effective_mana_value(),
             0
@@ -8579,7 +8627,7 @@ pub(crate) mod tests {
         );
         assert_eq!(parsed_counter.replacements.len(), 1);
         immediate.values.replacement_definitions = parsed_counter.replacements.into();
-        assert!(!copy_token_uses_liminal_entry(&immediate, &[]));
+        assert!(copy_token_uses_liminal_entry(&immediate));
         assert_eq!(
             copy_token_entry_counters(&immediate, &[]),
             vec![(CounterType::Plus1Plus1, 1)]
@@ -9475,7 +9523,7 @@ pub(crate) mod tests {
             .contains(&TargetRef::Object(gift_id)));
         assert_eq!(state.objects[&gift_id].controller, PlayerId(1));
     }
-    fn liminal_copy_reader_forms(state: &GameState) -> Vec<GameState> {
+    pub(crate) fn liminal_copy_reader_forms(state: &GameState) -> Vec<GameState> {
         use crate::types::game_state::{PersistedGameState, TrustedGameStateEnvelope};
         use crate::types::resolution::ResolutionFrame;
         let mut forms = vec![
@@ -9495,10 +9543,17 @@ pub(crate) mod tests {
             .unwrap()
             .into_game_state(),
         ];
-        let nested = state
+        let nested = state.resolution_stack.iter().any(|frame| {
+            matches!(
+                frame,
+                ResolutionFrame::MultiDraw(_) | ResolutionFrame::DebugCardEntries(_)
+            )
+        }) || state
             .resolution_stack
             .iter()
-            .any(|frame| matches!(frame, ResolutionFrame::MultiDraw(_)))
+            .filter(|frame| matches!(frame, ResolutionFrame::CopyToken(_)))
+            .count()
+            > 1
             || state.resolution_stack.ability_continuations().count() > 1
             || state.objects.values().any(|object| {
                 object
@@ -9568,6 +9623,181 @@ pub(crate) mod tests {
             );
         }
         forms
+    }
+
+    #[test]
+    fn public_substituted_copy_preserves_named_host_on_both_materializers_and_counter_reload() {
+        use crate::game::game_object::AttachTarget;
+        use crate::game::scenario::{GameRunner, GameScenario, P0};
+        for deferred in [false, true] {
+            for bound in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+                let first = scenario.add_creature(P0, "First host", 4, 4).id();
+                let second = scenario.add_creature(P0, "Selected host", 5, 5).id();
+                let substitution = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                    .condition(
+                        crate::types::ability::ReplacementCondition::TokenSubtypeMatches {
+                            subtypes: vec!["Soldier".into()],
+                        },
+                    )
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::CopyTokenOf {
+                            target: TargetFilter::SelfRef,
+                            owner: TargetFilter::Controller,
+                            source_filter: None,
+                            enters_attacking: false,
+                            attack_destination:
+                                crate::types::ability::TokenAttackDestination::ControllerChooses,
+                            tapped: false,
+                            count: QuantityExpr::Fixed { value: 1 },
+                            extra_keywords: Vec::new(),
+                            additional_modifications: if deferred {
+                                vec![ContinuousModification::SetPowerDynamic {
+                                    value: QuantityExpr::Fixed { value: 2 },
+                                }]
+                            } else {
+                                Vec::new()
+                            },
+                        },
+                    ));
+                let donor = scenario
+                    .add_enchantment_from_oracle(
+                        P0,
+                        "Synthetic copy substitution Aura",
+                        "Enchant creature\nThis enchantment enters with a charge counter on it.",
+                    )
+                    .with_subtypes(vec!["Aura"])
+                    .with_replacement_definition(substitution)
+                    .id();
+                let mut counter = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .quantity_modification(QuantityModification::Prevent);
+                counter.mode = ReplacementMode::Optional { decline: None };
+                scenario
+                    .add_artifact_from_oracle(P0, "Optional counter choice", "")
+                    .with_replacement_definition(counter);
+                let spell = scenario
+                    .add_spell_to_hand_from_oracle(P0, "Synthetic attached creation", false, "")
+                    .with_mana_cost(crate::types::mana::ManaCost::generic(0))
+                    .with_ability(Effect::Token {
+                        name: "Seed".into(),
+                        power: PtValue::Fixed(2),
+                        toughness: PtValue::Fixed(2),
+                        types: vec!["Creature".into(), "Soldier".into()],
+                        colors: Vec::new(),
+                        keywords: Vec::new(),
+                        tapped: false,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        owner: TargetFilter::Controller,
+                        attach_to: Some(if bound {
+                            TargetFilter::Typed(TypedFilter::creature())
+                        } else {
+                            TargetFilter::ParentTarget
+                        }),
+                        enters_attacking: false,
+                        attack_destination:
+                            crate::types::ability::TokenAttackDestination::ControllerChooses,
+                        supertypes: Vec::new(),
+                        static_abilities: Vec::new(),
+                        enter_with_counters: Vec::new(),
+                    })
+                    .id();
+                let mut runner = scenario.build();
+                crate::game::effects::attach::attach_to(runner.state_mut(), donor, first);
+                if bound {
+                    runner
+                        .cast(spell)
+                        .target_object(second)
+                        .stop_at_optional()
+                        .resolve();
+                } else {
+                    runner.cast(spell).stop_at_optional().resolve();
+                    assert!(runner
+                        .state()
+                        .objects
+                        .values()
+                        .all(|object| !object.is_token));
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(
+                        runner.state().stack.is_empty()
+                            && runner.state().resolution_stack.is_empty()
+                    );
+                    continue;
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { player: P0, .. }
+                ));
+                assert!(matches!(
+                    runner
+                        .state()
+                        .pending_replacement
+                        .as_ref()
+                        .unwrap()
+                        .proposed,
+                    ProposedEvent::AddCounter { count: 1, .. }
+                ));
+                let forms = liminal_copy_reader_forms(runner.state());
+                for form in forms {
+                    let mut resumed = GameRunner::from_state(form);
+                    for _ in 0..8 {
+                        match resumed.state().waiting_for {
+                            WaitingFor::ReplacementChoice { player: P0, .. } => {
+                                resumed
+                                    .act(GameAction::ChooseReplacement { index: 1 })
+                                    .unwrap();
+                            }
+                            WaitingFor::Priority { .. } => {
+                                resumed.advance_until_stack_empty();
+                                break;
+                            }
+                            ref other => panic!(
+                                "named host must never become a generic host choice: {other:?}"
+                            ),
+                        }
+                    }
+                    let tokens = resumed
+                        .state()
+                        .battlefield
+                        .iter()
+                        .filter_map(|id| {
+                            resumed
+                                .state()
+                                .objects
+                                .get(id)
+                                .filter(|object| object.is_token)
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(tokens.len(), 1);
+                    let token = tokens[0];
+                    assert_eq!(token.name, "Synthetic copy substitution Aura");
+                    assert_eq!(token.attached_to, Some(AttachTarget::Object(second)));
+                    assert_eq!(
+                        token.counters.get(&CounterType::Generic("charge".into())),
+                        Some(&1)
+                    );
+                    assert_eq!(token.base_power, deferred.then_some(2));
+                    assert!(!resumed.state().objects[&first]
+                        .attachments
+                        .contains(&token.id));
+                    assert!(resumed.state().objects[&second]
+                        .attachments
+                        .contains(&token.id));
+                    assert!(matches!(
+                        resumed.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(
+                        resumed.state().stack.is_empty()
+                            && resumed.state().resolution_stack.is_empty()
+                    );
+                }
+            }
+        }
     }
 
     const PRINTED_MISHRA: &str = "At the beginning of combat on your turn, create a token that's a copy of target noncreature artifact you control, except its name is Mishra's Warform and it's a 4/4 Construct artifact creature in addition to its other types. It gains haste until end of turn. Sacrifice it at the beginning of the next end step.";

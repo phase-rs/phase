@@ -29,6 +29,8 @@ pub use super::zones::{ChainReferentIntent, EtbTapState};
 pub struct TokenCreationInstructions {
     pub tapped: EtbTapState,
     pub attack_destination: Option<EntryAttackDestination>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_request: Option<TokenHostRequest>,
 }
 
 impl TokenCreationInstructions {
@@ -37,6 +39,7 @@ impl TokenCreationInstructions {
         Self {
             tapped,
             attack_destination: enters_attacking.then_some(EntryAttackDestination::AnyDefender),
+            host_request: None,
         }
     }
 }
@@ -49,12 +52,16 @@ impl<'de> Deserialize<'de> for TokenCreationInstructions {
             tapped: EtbTapState,
             #[serde(deserialize_with = "Option::<EntryAttackDestination>::deserialize")]
             attack_destination: Option<EntryAttackDestination>,
+            #[serde(default)]
+            host_request: Option<TokenHostRequest>,
         }
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Legacy {
             tapped: EtbTapState,
             enters_attacking: bool,
+            #[serde(default)]
+            host_request: Option<TokenHostRequest>,
         }
         #[derive(Deserialize)]
         #[serde(untagged)]
@@ -66,8 +73,12 @@ impl<'de> Deserialize<'de> for TokenCreationInstructions {
             Wire::Current(value) => Self {
                 tapped: value.tapped,
                 attack_destination: value.attack_destination,
+                host_request: value.host_request,
             },
-            Wire::Legacy(value) => Self::from_legacy(value.tapped, value.enters_attacking),
+            Wire::Legacy(value) => Self {
+                host_request: value.host_request,
+                ..Self::from_legacy(value.tapped, value.enters_attacking)
+            },
         })
     }
 }
@@ -1711,6 +1722,7 @@ mod tests {
             let instructions = TokenCreationInstructions {
                 tapped: EtbTapState::Untapped,
                 attack_destination: destination,
+                host_request: None,
             };
             let json = serde_json::to_value(instructions).unwrap();
             assert!(json.get("enters_attacking").is_none());
@@ -1725,6 +1737,32 @@ mod tests {
                 serde_json::from_value::<TokenCreationInstructions>(legacy).unwrap(),
                 TokenCreationInstructions::from_legacy(EtbTapState::Untapped, flag)
             );
+        }
+        for host_request in [
+            None,
+            Some(TokenHostRequest::NotRequested),
+            Some(TokenHostRequest::Bound(AttachTarget::Object(ObjectId(41)))),
+            Some(TokenHostRequest::Bound(AttachTarget::Player(PlayerId(1)))),
+            Some(TokenHostRequest::Unbound),
+        ] {
+            let instructions = TokenCreationInstructions {
+                host_request,
+                ..TokenCreationInstructions::from_legacy(EtbTapState::Untapped, true)
+            };
+            let current = serde_json::to_value(instructions).unwrap();
+            assert_eq!(
+                serde_json::from_value::<TokenCreationInstructions>(current.clone()).unwrap(),
+                instructions
+            );
+            let mut legacy = current;
+            legacy.as_object_mut().unwrap().remove("attack_destination");
+            legacy["enters_attacking"] = serde_json::json!(true);
+            assert_eq!(
+                serde_json::from_value::<TokenCreationInstructions>(legacy.clone()).unwrap(),
+                instructions
+            );
+            legacy["attack_destination"] = serde_json::Value::Null;
+            assert!(serde_json::from_value::<TokenCreationInstructions>(legacy).is_err());
         }
         for bad in [
             serde_json::json!({ "tapped": "Untapped" }),

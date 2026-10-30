@@ -979,7 +979,10 @@ fn token_substitution_parent(
     };
     Some(crate::types::proposed_event::TokenCreationParentContext {
         frame: *frame,
-        instructions: *instructions,
+        instructions: crate::types::proposed_event::TokenCreationInstructions {
+            host_request: Some(instructions.host_request.unwrap_or(spec.attach_to)),
+            ..*instructions
+        },
         attack_request: copy.as_ref().map_or_else(
             || spec.attack_request.clone(),
             |copy| copy.attack_request.clone(),
@@ -5156,6 +5159,15 @@ fn create_token_applier(
         applied,
     } = event
     {
+        let mut seed = instructions.unwrap_or(
+            crate::types::proposed_event::TokenCreationInstructions::from_legacy(
+                EtbTapState::from_seeded_tapped(spec.tapped),
+                spec.enters_attacking,
+            ),
+        );
+        let host = *seed.host_request.get_or_insert(spec.attach_to);
+        let instructions = Some(seed);
+        spec.attach_to = host;
         // CR 111.2 + CR 614.1a: Apply controller redirect (Crafty Cutpurse).
         // CR 111.2: "The token enters the battlefield under that player's
         // control" — the default the replacement is overriding.
@@ -5238,6 +5250,7 @@ fn create_token_applier(
                 crate::game::effects::token::resolve_token_spec(state, &ability)
             {
                 spec = Box::new(substitute_spec);
+                spec.attach_to = host;
                 spec.attack_request = attack_request.clone();
                 if let Some(seed) = instructions {
                     spec.tapped = seed.tapped.resolve(false);
@@ -5275,6 +5288,7 @@ fn create_token_applier(
                 selected.tapped = seed.tapped.resolve(false);
                 selected.enters_attacking = seed.attack_destination.is_some();
                 selected.attack_request = attack_request.clone();
+                selected.attach_to = host;
                 spec = Box::new(selected);
                 copy = None;
                 remaining_specs = Some(specs);
@@ -5301,6 +5315,7 @@ fn create_token_applier(
                 .unwrap_or(owner);
             extra.source_id = rid.source;
             extra.controller = source_controller;
+            extra.attach_to = host;
             // CR 614.1c: the added batch has its own entry state — it does not
             // inherit an `enter_tapped` override applied to the event's own
             // batch. The appended spec's own `tapped` field (from the parser)
@@ -5311,12 +5326,13 @@ fn create_token_applier(
                 &applied,
                 TokenBatch {
                     creation_frame,
-                    instructions: Some(
-                        crate::types::proposed_event::TokenCreationInstructions::from_legacy(
+                    instructions: Some(crate::types::proposed_event::TokenCreationInstructions {
+                        host_request: Some(host),
+                        ..crate::types::proposed_event::TokenCreationInstructions::from_legacy(
                             EtbTapState::from_seeded_tapped(extra.tapped),
                             extra.enters_attacking,
-                        ),
-                    ),
+                        )
+                    }),
                     owner,
                     spec: extra,
                     copy: None,
@@ -5354,6 +5370,7 @@ fn create_token_applier(
                 extra.tapped = seed.tapped.resolve(false);
                 extra.enters_attacking = seed.attack_destination.is_some();
                 extra.attack_request = attack_request.clone();
+                extra.attach_to = host;
                 push_appended_token_batch(
                     &mut appended,
                     &applied,
@@ -6938,17 +6955,27 @@ fn replacement_definition_event_matches(
     state: &GameState,
     matcher: ReplacementMatcher,
 ) -> bool {
+    // CR 614.12 + CR 616.1g: an immediate copy consults the complete contained
+    // entry definition on its actual TokenEntry, including counters and
+    // postwork. Genuine CreateToken instructions still run on this event.
+    if let ProposedEvent::CreateToken {
+        copy: Some(copy),
+        count,
+        ..
+    } = event
+    {
+        if (*count == 0 || super::effects::token_copy::copy_token_uses_liminal_entry(copy))
+            && replacement_event_layer(def, event) == ReplacementEventLayer::ContainedEntry
+        {
+            return false;
+        }
+    }
     if is_external_battlefield_entry_tap_modifier(def) {
         match event {
-            ProposedEvent::CreateToken {
-                copy, spec, count, ..
-            } => {
+            ProposedEvent::CreateToken { copy, count, .. } => {
                 return *count > 0
                     && copy.as_deref().is_none_or(|copy| {
-                        !super::effects::token_copy::copy_token_uses_liminal_entry(
-                            copy,
-                            &spec.enter_with_counters,
-                        )
+                        !super::effects::token_copy::copy_token_uses_liminal_entry(copy)
                     })
             }
             ProposedEvent::TokenEntry { .. } => return true,
@@ -15860,8 +15887,19 @@ mod tests {
         }
         assert!(change_zone_matcher(&liminal, ObjectId(10), &state));
         let mut nonliminal = liminal.clone();
-        if let ProposedEvent::CreateToken { spec, .. } = &mut nonliminal {
+        if let ProposedEvent::CreateToken {
+            spec,
+            copy: Some(copy),
+            ..
+        } = &mut nonliminal
+        {
             spec.enter_with_counters.push((CounterType::Plus1Plus1, 1));
+            copy.additional_modifications
+                .push(ContinuousModification::AddCounterOnEnter {
+                    counter_type: CounterType::Time,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    if_type: None,
+                });
         }
         let mut suppressed = ordinary.clone();
         if let ProposedEvent::CreateToken { count, .. } = &mut suppressed {
@@ -16181,8 +16219,12 @@ mod tests {
             spec.enter_with_counters.push((CounterType::Plus1Plus1, 1));
             *enter_tapped = EtbTapState::Tapped;
         }
+        assert!(
+            find_applicable_replacements(&state, &counter_modified, replacement_registry())
+                .is_empty()
+        );
         assert_eq!(
-            find_applicable_replacements(&state, &counter_modified, replacement_registry()).len(),
+            find_applicable_replacements(&state, &inner, replacement_registry()).len(),
             2
         );
         let mut body_substituted = liminal.clone();
@@ -16228,11 +16270,102 @@ mod tests {
         assert!(
             matches!(&changed, ProposedEvent::CreateToken { spec, copy: Some(copy), .. }
             if spec.enter_with_counters == [(CounterType::Plus1Plus1, 1)]
-                && !crate::game::effects::token_copy::copy_token_uses_liminal_entry(copy, &spec.enter_with_counters))
+                && crate::game::effects::token_copy::copy_token_uses_liminal_entry(copy))
         );
+        assert!(find_applicable_replacements(&state, &changed, replacement_registry()).is_empty());
         assert_eq!(
-            find_applicable_replacements(&state, &changed, replacement_registry()).len(),
+            find_applicable_replacements(&state, &inner, replacement_registry()).len(),
             2
+        );
+        let fixed_counter = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .valid_card(TargetFilter::Any)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+            ));
+        let mut mixed_prefix = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+        );
+        mixed_prefix.sub_ability = fixed_counter.execute.clone();
+        mixed_prefix.sub_ability.as_mut().unwrap().sub_ability =
+            Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )));
+        let mixed = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .valid_card(TargetFilter::Any)
+            .execute(mixed_prefix);
+        let dynamic = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .valid_card(TargetFilter::Any)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Time,
+                    count: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::HandSize {
+                            player: crate::types::ability::PlayerScope::Controller,
+                        },
+                    },
+                    target: TargetFilter::SelfRef,
+                },
+            ));
+        let grumgully = crate::parser::parse_oracle_text("Each other non-Human creature you control enters with an additional +1/+1 counter on it.", "Grumgully, the Generous", &[], &["Creature".into()], &["Goblin".into(), "Shaman".into()]);
+        assert_eq!(grumgully.replacements.len(), 1);
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .replacement_definitions = grumgully.replacements.into();
+        state.pending_damage_replacements = vec![fixed_counter, mixed, dynamic];
+        let expected = vec![
+            ReplacementId {
+                source: ObjectId(0),
+                index: 0,
+            },
+            ReplacementId {
+                source: ObjectId(0),
+                index: 1,
+            },
+            ReplacementId {
+                source: ObjectId(0),
+                index: 2,
+            },
+            ReplacementId {
+                source: ObjectId(10),
+                index: 0,
+            },
+        ];
+        for event in [&ordinary, &nonliminal, &inner] {
+            let mut candidates =
+                find_applicable_replacements(&state, event, replacement_registry());
+            candidates.sort_by_key(|id| (id.source.0, id.index));
+            assert_eq!(
+                candidates, expected,
+                "whole typed contained-entry class is positively admitted on its selected boundary"
+            );
+        }
+        assert!(find_applicable_replacements(&state, &liminal, replacement_registry()).is_empty());
+        let mut once = inner.clone();
+        once.mark_applied_in_state(&state, expected[1]);
+        let candidates = find_applicable_replacements(&state, &once, replacement_registry());
+        assert_eq!(candidates.len(), 3);
+        assert!(!candidates.contains(&expected[1]));
+        assert!(
+            candidates.contains(&expected[0])
+                && candidates.contains(&expected[2])
+                && candidates.contains(&expected[3])
         );
         state.pending_damage_replacements.clear();
         let parsed = crate::parser::parse_oracle_text(

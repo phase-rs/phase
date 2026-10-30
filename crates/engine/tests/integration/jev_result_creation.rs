@@ -1274,6 +1274,7 @@ fn set_typed_attack_instruction(
     *instructions = Some(TokenCreationInstructions {
         tapped: EtbTapState::Untapped,
         attack_destination: destination,
+        host_request: Some(engine::types::proposed_event::TokenHostRequest::NotRequested),
     });
 }
 
