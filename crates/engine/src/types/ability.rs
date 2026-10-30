@@ -43308,8 +43308,9 @@ impl ResolvedAbility {
     }
 
     /// CR 104.4b: Rewrites every `Effect::EpicCopy` handle on this chain (root,
-    /// then the `sub_ability` / `else_ability` nesting
-    /// `clear_trigger_identity_recursive` descends) through `rename`. Used by
+    /// then every live child link: `sub_ability`, `else_ability` and bound coin
+    /// outcomes, the nesting `clear_trigger_identity_recursive` descends) through
+    /// `rename`. Used by
     /// `GameState::normalize_for_loop` to compare in-flight upkeep copies by
     /// the snapshot their handles name rather than by position.
     pub(crate) fn rename_epic_effect_handles_recursive(

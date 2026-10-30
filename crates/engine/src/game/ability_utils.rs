@@ -106,8 +106,11 @@ pub fn build_resolved_from_def_with_targets_and_chain_root(
     resolved
 }
 
-/// CR 113.7a + CR 400.7: inherit only the source identity of a newly materialized
-/// dice/coin result branch, never its actor, targets, pins, or other context.
+/// CR 113.7a + CR 400.7: inherit only the source identity of a dice/coin result
+/// branch (newly materialized, or announced at cast and bound to its coin), never
+/// its actor, targets, pins, or other context. A projection the branch already
+/// carries that names the same source incarnation is kept, so a choice published
+/// before the flip still reaches the outcome (CR 608.2c).
 /// Both the resolving entry and its contained ability must name this source.
 /// Activated carriers supply only their post-cost `source_incarnation`, never
 /// `announced_source_incarnation`. Triggered carriers supply the full
