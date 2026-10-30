@@ -171,7 +171,7 @@ mod tests {
             .id();
         scenario.with_mana_pool(
             P0,
-            vec![ManaUnit::new(ManaType::Colorless, false, false, vec![]); 2],
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]); 2],
         );
         let mut runner = scenario.build();
         let outcome = runner.cast(spell).resolve();

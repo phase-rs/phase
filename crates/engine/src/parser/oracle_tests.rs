@@ -34443,7 +34443,7 @@ fn temporary_comma_grant_must_attack_if_able_does_not_emit_condition_warning() {
         "Math is for Blockers".into(),
         Zone::Hand,
     );
-    object.abilities = parsed.abilities;
+    object.abilities = parsed.abilities.into();
     child.sub_link = SubAbilityLink::SequentialSibling;
     assert_eq!(
         crate::game::casting::combined_spell_ability_def(&object),

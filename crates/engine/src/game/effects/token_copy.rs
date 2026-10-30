@@ -3812,7 +3812,10 @@ pub(crate) mod tests {
             std::slice::from_ref(&prevention_definition)
         );
         assert_eq!(
-            installed.replacement_definitions.iter().collect::<Vec<_>>(),
+            installed
+                .replacement_definitions
+                .iter_all()
+                .collect::<Vec<_>>(),
             vec![&prevention_definition]
         );
         denied_events.extend(
@@ -4542,7 +4545,7 @@ pub(crate) mod tests {
             .id();
         scenario.with_mana_pool(
             P0,
-            vec![ManaUnit::new(ManaType::Red, false, false, vec![]); 2],
+            vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]); 2],
         );
         let mut runner = scenario.build();
         {
@@ -9727,10 +9730,11 @@ pub(crate) mod tests {
                     runner
                         .cast(spell)
                         .target_object(second)
+                        .commit()
                         .stop_at_optional()
                         .resolve();
                 } else {
-                    runner.cast(spell).stop_at_optional().resolve();
+                    runner.cast(spell).commit().stop_at_optional().resolve();
                     assert!(runner
                         .state()
                         .objects
@@ -12302,8 +12306,8 @@ pub(crate) mod tests {
             };
             events.extend(runner.act(action).unwrap_or_else(|error| {
                 let state = runner.state();
-                panic!("Cogwork next-End action failed: {error:?}; phase={:?}; turn={}; wait={:?}; winner={:?}; eliminated={:?}; libraries={:?}; stack={:?}; registered={registered:?}; births={births:?}; delayed={:?}; events={events:?}",
-                    state.phase, state.turn_number, state.waiting_for, state.winner, state.eliminated_players,
+                panic!("Cogwork next-End action failed: {error:?}; phase={:?}; turn={}; wait={:?}; game_end={:?}; eliminated={:?}; libraries={:?}; stack={:?}; registered={registered:?}; births={births:?}; delayed={:?}; events={events:?}",
+                    state.phase, state.turn_number, state.waiting_for, state.game_end, state.eliminated_players,
                     state.players.iter().map(|player| (player.id, player.library.len(), player.is_eliminated)).collect::<Vec<_>>(),
                     state.stack, state.delayed_triggers);
             }).events);
@@ -12325,8 +12329,8 @@ pub(crate) mod tests {
             ));
             events.extend(runner.act(GameAction::PassPriority).unwrap_or_else(|error| {
                 let state = runner.state();
-                panic!("Cogwork delayed resolution failed: {error:?}; phase={:?}; turn={}; wait={:?}; winner={:?}; eliminated={:?}; libraries={:?}; stack={:?}; registered={registered:?}; births={births:?}; delayed={:?}; events={events:?}",
-                    state.phase, state.turn_number, state.waiting_for, state.winner, state.eliminated_players,
+                panic!("Cogwork delayed resolution failed: {error:?}; phase={:?}; turn={}; wait={:?}; game_end={:?}; eliminated={:?}; libraries={:?}; stack={:?}; registered={registered:?}; births={births:?}; delayed={:?}; events={events:?}",
+                    state.phase, state.turn_number, state.waiting_for, state.game_end, state.eliminated_players,
                     state.players.iter().map(|player| (player.id, player.library.len(), player.is_eliminated)).collect::<Vec<_>>(),
                     state.stack, state.delayed_triggers);
             }).events);

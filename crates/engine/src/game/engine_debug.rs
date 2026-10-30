@@ -3443,10 +3443,10 @@ mod tests {
                 }
                 if face.name == llanowar.name && reload {
                     install_creation_fixture_replacements(&mut state, CreationPauseCase::Counter);
-                    for object in state
+                    for (_, object) in state
                         .objects
-                        .values_mut()
-                        .filter(|object| object.name == "Entry counter")
+                        .iter_mut()
+                        .filter(|(_, object)| object.name == "Entry counter")
                     {
                         object.replacement_definitions.clear();
                         object.base_replacement_definitions = std::sync::Arc::new(Vec::new());
@@ -3532,7 +3532,10 @@ mod tests {
                             );
                         assert!(forms.len() >= 8);
                         for form in &forms {
-                            assert_eq!(form.liminal_entries, state.liminal_entries);
+                            assert_eq!(
+                                serde_json::to_value(&form.liminal_entries).unwrap(),
+                                serde_json::to_value(&state.liminal_entries).unwrap()
+                            );
                             assert_eq!(form.resolution_stack, state.resolution_stack);
                         }
                         state = forms.into_iter().last().unwrap();
