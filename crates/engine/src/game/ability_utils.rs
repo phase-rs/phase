@@ -2706,6 +2706,23 @@ pub fn assign_selected_slots_in_chain(
     assign_cleared_selected_slots(state, ability, selected_slots, announced.as_ref())
 }
 
+/// CR 601.2c: assign one legal completion from `walk_target_completions`,
+/// whose declined optional slots stay `None` at their own index. A coin chain
+/// with a multi-target node goes through the slot authority so a mid-vector
+/// decline keeps its position; every other chain keeps the flattened reading
+/// it has always used.
+pub(crate) fn assign_target_completion_in_chain(
+    state: &GameState,
+    ability: &mut ResolvedAbility,
+    selected_slots: &[Option<TargetRef>],
+) -> Result<(), EngineError> {
+    if chain_needs_announced_group_ends(ability) {
+        return assign_selected_slots_in_chain(state, ability, selected_slots);
+    }
+    let targets: Vec<TargetRef> = selected_slots.iter().flatten().cloned().collect();
+    assign_targets_in_chain(state, ability, &targets)
+}
+
 /// The slot-wise assignment and finishing pass shared by the chain entry
 /// points, after their early-outs and `clear_chosen_target_slots`.
 fn assign_cleared_selected_slots(

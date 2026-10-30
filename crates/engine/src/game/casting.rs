@@ -32595,9 +32595,14 @@ struct ActivationCostVisitor<'a> {
 
 impl super::ability_utils::CompletionVisitor for ActivationCostVisitor<'_> {
     fn accept(&mut self, selected_slots: &[Option<TargetRef>]) -> bool {
-        let targets: Vec<TargetRef> = selected_slots.iter().flatten().cloned().collect();
         let mut candidate = self.ability.clone();
-        if assign_targets_in_chain(self.state, &mut candidate, &targets).is_err() {
+        if super::ability_utils::assign_target_completion_in_chain(
+            self.state,
+            &mut candidate,
+            selected_slots,
+        )
+        .is_err()
+        {
             return false;
         }
         // The SAME collector target settlement uses, so the offer and the
