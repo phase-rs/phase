@@ -15785,15 +15785,15 @@ mod tests {
     /// beam answer the legality gate admitted without simulating it whose
     /// simulation fails: it returns that answer, simulates (and so evaluates)
     /// no beam answer after it, and records rung 0 as not completed. The board
-    /// is Luminescent Rain (its Oracle text verbatim) for a P0 at
-    /// `i32::MAX - 1` life controlling an Ally and an Elf, so those two types
-    /// fail and Advisor and Angel apply. The paired reach guard runs the same
-    /// beam under `EachCandidate`.
+    /// is the synthetic Energy Rain (`ENERGY_RAIN_ORACLE` in `planner::tests`)
+    /// for a P0 at `u32::MAX - 1` energy controlling an Ally and an Elf, so
+    /// those two types fail and Advisor and Angel apply. The paired reach guard
+    /// runs the same beam under `EachCandidate`.
     ///
     /// Fails if rung 0 goes on past the failure, or reports a later failure.
     #[test]
     fn rung_zero_stops_at_the_first_admitted_answer_that_fails() {
-        let state = crate::planner::tests::luminescent_rain_prompt_rejecting(&["Ally", "Elf"]);
+        let state = crate::planner::tests::energy_rain_prompt_rejecting(&["Ally", "Elf"]);
         let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
         assert!(
             matches!(config.search.planner_mode, PlannerMode::BeamPlusRollout)
