@@ -38494,6 +38494,7 @@ fn zone_choice_is_a_chosen_object_boundary_for_the_event_source_lift() {
         chooser: ZoneChoiceChooser::default(),
         candidate_source: ZoneChoiceCandidateSource::default(),
         reciprocal_role: None,
+        gather_role: None,
         up_to: false,
         selection,
         constraint: None,

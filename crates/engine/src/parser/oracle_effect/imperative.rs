@@ -5,10 +5,11 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until, take_while1};
 use nom::character::complete::{anychar, one_of, satisfy, space0, space1, u8 as parse_u8};
 use nom::combinator::{
-    all_consuming, eof, map, map_res, not, opt, peek, recognize, rest, value, verify,
+    all_consuming, eof, map, map_opt, map_res, not, opt, peek, recognize, rest, success, value,
+    verify,
 };
 use nom::error::ParseError;
-use nom::multi::{many1, many_till, separated_list0};
+use nom::multi::{many0, many1, many_till, separated_list0};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -5987,6 +5988,7 @@ pub(super) fn parse_for_each_player_exile_controlled(
         chooser: Chooser::Controller.into(),
         candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
         reciprocal_role: None,
+        gather_role: None,
         up_to,
         selection: CardSelectionMode::Chosen,
         constraint: None,
@@ -6119,6 +6121,7 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
         chooser: Chooser::Controller.into(),
         candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Direct,
         reciprocal_role: None,
+        gather_role: None,
         up_to: false,
         selection: if random.is_some() {
             CardSelectionMode::Random
@@ -6150,6 +6153,149 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
         exile_all,
     )));
     Some(clause)
+}
+
+/// CR 701.13a + CR 401.1: the count and library owner of one library object of
+/// a third-person "<player> exile[s] …" instruction, composed from the shared
+/// grammars rather than re-parsed here — one `alt` over the three forms:
+///   * "the top half of <owner> library, rounded up|down" — the fraction
+///     combinator `parse_half_rounded` reads the count (CR 107.1a); the
+///     "<owner> library" it counts names the library, read ahead by `peek`
+///     because the fraction grammar consumes it as its counted quantity;
+///   * "the top N|X card(s) of <owner> library" — the shared count head
+///     [`parse_exile_top_count`] plus the "card[s] of <owner> library" suffix
+///     [`parse_library_player_suffix`];
+///   * "that many cards from the top of <owner> library" and the other
+///     dynamic-count forms — [`parse_dynamic_exile_from_top`].
+///
+/// Every owner comes from `parse_library_owner_phrase`, the single authority
+/// for whose library a possessive names; the caller maps it against the
+/// subject. FAIL-CLOSED: an owner that table does not name fails the parse.
+/// The remainder is the post-library tail.
+fn parse_subject_exile_library_source<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, (QuantityExpr, TargetFilter)> {
+    let owner_library =
+        |i: &'a str| parse_library_owner_phrase(i, ctx).ok_or_else(|| oracle_err(i));
+    let cards_of_owner_library =
+        |i: &'a str| parse_library_player_suffix(i, ctx).ok_or_else(|| oracle_err(i));
+    let dynamic_count = |i: &'a str| {
+        parse_dynamic_exile_from_top(i, ctx)
+            .map(|(rest, owner, count)| (rest, (count, owner)))
+            .ok_or_else(|| oracle_err(i))
+    };
+    alt((
+        preceded(
+            tag::<_, _, OracleError<'_>>("the top "),
+            alt((
+                map(
+                    (
+                        // The owner the fraction then consumes as its counted quantity.
+                        peek(preceded(
+                            (nom_quantity::parse_fraction_divisor, opt(tag("of "))),
+                            owner_library,
+                        )),
+                        nom_quantity::parse_half_rounded,
+                    ),
+                    |(owner, count)| (count, owner),
+                ),
+                (parse_exile_top_count, cards_of_owner_library),
+            )),
+        ),
+        dynamic_count,
+    ))
+    .parse(input)
+}
+
+/// CR 701.13a: To exile an object, move it to the exile zone.
+///
+/// The library object of a "<player> exile[s] …" instruction (see
+/// [`parse_subject_exile_library_source`]), optionally "face down" (CR 406.3,
+/// via the shared `strip_exile_top_face_down` suffix).
+fn parse_subject_exile_library_top<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, SubjectExileLibraryTopAst> {
+    let (after_lib, (count, owner)) = parse_subject_exile_library_source(input, ctx)?;
+    let (rest, face_down) = strip_exile_top_face_down(after_lib);
+    Ok((
+        rest,
+        SubjectExileLibraryTopAst {
+            count,
+            face_down,
+            owner,
+        },
+    ))
+}
+
+/// CR 701.13a: "a card at random from their graveyard|hand" — one object of a
+/// "<player> exile[s] …" instruction, read from the zone of the player "their"
+/// names (the subject). The zone is read by `parse_choose_zone_list`, the zone
+/// axis of the choose-from-zone connector; a union of zones is not an object
+/// this list models. No CR rule governs random selection; the selection
+/// follows the printed instruction (CR 608.2c).
+fn parse_subject_exile_random_zone_object(input: &str) -> OracleResult<'_, Zone> {
+    map_opt(
+        preceded(
+            (
+                alt((tag::<_, _, OracleError<'_>>("a "), tag("one "))),
+                tag("card at random from their "),
+            ),
+            parse_choose_zone_list,
+        ),
+        |zones| match zones.as_slice() {
+            [zone @ (Zone::Graveyard | Zone::Hand)] => Some(*zone),
+            _ => None,
+        },
+    )
+    .parse(input)
+}
+
+/// CR 701.13a: one object of a "<player> exile[s] …" instruction — the top
+/// cards of a library, or a card at random from the subject's graveyard or
+/// hand.
+fn parse_subject_exile_object<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, SubjectExileObjectAst> {
+    alt((
+        map(
+            |i| parse_subject_exile_library_top(i, ctx),
+            SubjectExileObjectAst::LibraryTop,
+        ),
+        map(
+            parse_subject_exile_random_zone_object,
+            SubjectExileObjectAst::AtRandomFrom,
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 701.13a + CR 608.2f: the objects of a third-person "<player> exile[s]
+/// A[, B][, and C]" instruction, in printed order and in any order of kinds.
+/// An action taken on multiple objects is processed simultaneously (CR
+/// 608.2f), so the caller lowers two or more objects as one exile action. The
+/// remainder is returned unconsumed; the caller decides whether it is
+/// terminal.
+pub(super) fn parse_subject_exile_object_list<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, SubjectExileObjectsAst> {
+    map(
+        preceded(
+            alt((tag::<_, _, OracleError<'_>>("exiles "), tag("exile "))),
+            (
+                |i| parse_subject_exile_object(i, ctx),
+                many0(preceded(
+                    alt((tag(", and "), tag(", "), tag(" and "))),
+                    |i| parse_subject_exile_object(i, ctx),
+                )),
+            ),
+        ),
+        |(first, rest)| SubjectExileObjectsAst { first, rest },
+    )
+    .parse(input)
 }
 
 /// CR 102.2 + CR 102.3 + CR 608.2c + CR 608.2d: "For each opponent, choose [up
@@ -6198,6 +6344,7 @@ pub(super) fn parse_for_each_opponent_choose_controlled(
         chooser: Chooser::Controller.into(),
         candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
         reciprocal_role: None,
+        gather_role: None,
         up_to,
         selection: CardSelectionMode::Chosen,
         constraint: None,
@@ -6820,6 +6967,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             chooser: chooser.into(),
             candidate_source,
             reciprocal_role: None,
+            gather_role: None,
             up_to: false,
             selection,
             constraint: None,
@@ -6848,6 +6996,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
                 chooser: chooser.into(),
                 candidate_source,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to,
                 selection,
                 constraint: None,
@@ -11269,6 +11418,21 @@ fn parse_dynamic_exile_from_top<'a>(
     None
 }
 
+/// CR 107.3 + CR 701.13a: the count head of "the top N|X card(s) of …" — a
+/// number or an X placeholder, read by the shared
+/// `nom_quantity::parse_quantity_expr_number` (`Fixed` / `Variable("X")`, bound
+/// by the spell's chosen X or a where-X definition), or no count at all ("the
+/// top card") for one card. The single count grammar of the positional
+/// top-of-library exile, shared by the imperative form (`parse_exile_ast`) and
+/// the third-person subject form (`parse_subject_exile_library_top`). Never fails.
+fn parse_exile_top_count(input: &str) -> OracleResult<'_, QuantityExpr> {
+    alt((
+        terminated(nom_quantity::parse_quantity_expr_number, space0),
+        success(QuantityExpr::Fixed { value: 1 }),
+    ))
+    .parse(input)
+}
+
 /// Parse the two library edges that a positional exile instruction currently
 /// supports. Keeping the edge separate from its surrounding sentence lets a
 /// caller preserve `LibraryPosition` rather than degrading a bottom instruction
@@ -11468,21 +11632,7 @@ pub(super) fn parse_exile_ast(
     }
 
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exile the top ").parse(lower) {
-        let (initial_count, remainder) =
-            if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest) {
-                (QuantityExpr::Fixed { value: n as i32 }, rem.trim_start())
-            } else if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("x").parse(rest) {
-                (
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::Variable {
-                            name: "X".to_string(),
-                        },
-                    },
-                    rem.trim_start(),
-                )
-            } else {
-                (QuantityExpr::Fixed { value: 1 }, rest)
-            };
+        let (remainder, initial_count) = parse_exile_top_count(rest).ok()?;
         // CR 608.2 + CR 400.12 + CR 115.1: Match the "[card|cards] of [a player]'s
         // library" suffix and resolve the library owner via the shared
         // `parse_library_player_suffix` helper (also used by the manifest
@@ -17226,6 +17376,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 constraint: None,
@@ -17265,6 +17416,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 constraint: None,
@@ -17349,6 +17501,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 chooser: Chooser::Controller.into(),
                 candidate_source: ZoneChoiceCandidateSource::Direct,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: true,
                 selection: CardSelectionMode::Chosen,
                 constraint,

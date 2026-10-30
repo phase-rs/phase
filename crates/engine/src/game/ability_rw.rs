@@ -4055,7 +4055,10 @@ fn member_bound_read() -> RwProfile {
 /// the ones still in the declared zone(s), so it carries both channels too.
 fn zone_choice_candidate_source_read(source: ZoneChoiceCandidateSource) -> RwProfile {
     match source {
-        ZoneChoiceCandidateSource::Direct => reads_zone_membership(),
+        // `LibraryTop` reads the top of the declared library: live zone membership.
+        ZoneChoiceCandidateSource::Direct | ZoneChoiceCandidateSource::LibraryTop => {
+            reads_zone_membership()
+        }
         ZoneChoiceCandidateSource::Tracked
         | ZoneChoiceCandidateSource::Legacy
         | ZoneChoiceCandidateSource::CostPaidObjects
@@ -5599,6 +5602,10 @@ fn rw_effect(
             filter,
             candidate_source,
             reciprocal_role,
+            // `..` covers `gather_role`: it names only the tracked set the pick
+            // is published into (a `SetMembership` write, below); the pool is
+            // read via `candidate_source`, and neither role reads the set's
+            // members.
             ..
         } => {
             let mut p = ext_write(StateKind::SetMembership);
@@ -8248,6 +8255,7 @@ mod tests {
             chooser: ZoneChoiceChooser::Controller,
             candidate_source,
             reciprocal_role,
+            gather_role: None,
             up_to: false,
             selection: Default::default(),
             constraint: None,

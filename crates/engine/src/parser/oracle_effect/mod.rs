@@ -64,8 +64,8 @@ use lower::{
     strip_optional_effect_prefix, strip_player_scope_subject, strip_redundant_flip_win_quantifier,
     strip_repeat_count_suffix, strip_return_destination_ext,
     strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
-    trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
-    try_parse_distribute_counters, try_parse_distribute_damage,
+    strip_terminal_where_x, trim_dangling_target_word, try_parse_damage,
+    try_parse_damage_with_remainder, try_parse_distribute_counters, try_parse_distribute_damage,
 };
 
 pub(crate) use self::token::parse_token_description;
@@ -90,6 +90,7 @@ use nom::combinator::{
 use nom::multi::{many0, many1, many_till, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
+use std::collections::HashSet;
 
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::parse_reflexive_conditional_connector;
@@ -101,7 +102,7 @@ use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
 use super::oracle_nom::target::{controller_phrase_among, ControllerPhrase, ControllerSubject};
 use super::oracle_quantity::{
-    parse_event_context_quantity, parse_for_each_clause, parse_for_each_clause_expr_with_context,
+    parse_for_each_clause, parse_for_each_clause_expr_with_context,
     parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
@@ -146,7 +147,7 @@ use crate::types::ability::{
     ThisWayCause, TokenAttackDestination, TrackedAnaphorSource, TriggerCondition,
     TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier, UnloweredGuard,
     UntilCondition, VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser,
-    ZoneOwner,
+    ZoneChoiceGatherRole, ZoneOwner,
 };
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
@@ -9103,6 +9104,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
             chooser: crate::types::ability::Chooser::Controller.into(),
             candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
             reciprocal_role: None,
+            gather_role: None,
             up_to: true,
             selection: crate::types::ability::CardSelectionMode::Chosen,
             constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),
@@ -17173,6 +17175,15 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     } else {
         original_tp
     };
+    // CR 400.7j: "this card" is the card this ability's source became in exile
+    // (moved there by the ability's own cost, or found through the
+    // resolution-source relatch). CR 611.2a: the grant is bounded by that
+    // card's exile lifetime (zone-exit cleanup). A self-reference is not an
+    // anaphor, so it never binds a chosen target or the tracked exile set.
+    let self_grant = owns_exile_lifetime
+        .then(|| parse_self_card_play_grant(tp.lower).ok())
+        .flatten()
+        .map(|(_, mode)| mode);
 
     // Try full forms first: "you may play/cast that card/it/those cards ..."
     // Then bare forms (after "you may" has been stripped): "play that card ..."
@@ -17206,7 +17217,9 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         .map(|(mode, _)| *mode)
         .unwrap_or(CardPlayMode::Play);
 
-    if let Some((_, rest)) = full_rest {
+    if let Some(self_mode) = self_grant {
+        mode = self_mode;
+    } else if let Some((_, rest)) = full_rest {
         // Full form: rest must start with a card reference
         // CR 400.7i + CR 603.7: "(the) cards exiled this way" is the impulse-set
         // anaphor used by Escape to the Wilds — semantically identical to "those
@@ -17331,7 +17344,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     // without inspecting clause text (a lexical "that card this turn" guard would
     // misroute the entire impulse class and silently drop its `PlayFromExile`
     // shape).
-    if ctx.parent_target_is_chosen {
+    if ctx.parent_target_is_chosen && self_grant.is_none() {
         return None;
     }
 
@@ -17370,7 +17383,11 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         // source object. `TargetFilter::Any` causes `grant_permission::resolve`
         // to attach the permission to the source itself, which is wrong for
         // impulse-draw chains like Act on Impulse, Light Up the Stage, etc.
-        target: tracked_set_filter(),
+        // CR 400.7j: a "this card" grant attaches to the exiled card itself.
+        target: match self_grant {
+            Some(_) => TargetFilter::SelfRef,
+            None => tracked_set_filter(),
+        },
         grantee: Default::default(),
     });
 
@@ -17384,6 +17401,23 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         None => clause,
         Some(_) => clause,
     })
+}
+
+/// CR 400.7j: "[you may] play/cast this card" — the whole permission text of a
+/// grant whose referent is this ability's own source card ("~" after self-name
+/// normalization). Both the full form and the bare form left once the clause
+/// shell has peeled "you may " are read. Returns the granted play mode.
+fn parse_self_card_play_grant(input: &str) -> OracleResult<'_, CardPlayMode> {
+    all_consuming((
+        opt(tag("you may ")),
+        alt((
+            value(CardPlayMode::Play, tag("play ")),
+            value(CardPlayMode::Cast, tag("cast ")),
+        )),
+        alt((tag("this card"), tag("~"))),
+    ))
+    .map(|(_, mode, _)| mode)
+    .parse(input)
 }
 
 fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClause> {
@@ -21719,6 +21753,7 @@ fn try_parse_put_one_exiled_card_into_hand(
         chooser: crate::types::ability::Chooser::Controller.into(),
         candidate_source,
         reciprocal_role: None,
+        gather_role: None,
         up_to: false,
         selection: crate::types::ability::CardSelectionMode::Chosen,
         constraint: None,
@@ -21764,6 +21799,7 @@ fn try_parse_return_opponent_choice_from_graveyard(text: &str) -> Option<ParsedE
         chooser: Chooser::Opponent.into(),
         candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
         reciprocal_role: None,
+        gather_role: None,
         up_to: false,
         selection: crate::types::ability::CardSelectionMode::Chosen,
         constraint: None,
@@ -29689,26 +29725,31 @@ fn lower_subject_predicate_ast_body(
                 return parsed_clause(imperative::lower_zone_counter_ast(ast));
             }
             // CR 701.13a: "<player> exiles the top [N] card(s) of their library"
-            if alt((tag::<_, _, OracleError<'_>>("exile "), tag("exiles ")))
-                .parse(pred_lower.as_str())
-                .is_ok()
-                && scan_contains_phrase(&pred_lower, "top")
-                && scan_contains_phrase(&pred_lower, "library")
+            // and the object-list form "<player> exiles A, B, and C". The strict
+            // grammar claims the predicate only when the verb and a library
+            // object or two or more objects parse (a lone at-random object is
+            // not this form); an unconsumed tail is a recorded gap, never
+            // dropped.
             {
-                let count = parse_subject_exile_top_count(&pred_lower);
-                // CR 406.3: a trailing "face down" marks a hidden-information
-                // exile (Outrageous Robbery: "exiles the top X cards of their
-                // library face down"). The resolver propagates this to the
-                // moved object's `face_down` flag so `visibility.rs` redacts it.
-                let face_down = scan_contains_phrase(&pred_lower, "face down");
-                return parsed_clause(Effect::ExileTop {
-                    player: affected,
-                    count,
-                    position: crate::types::ability::LibraryPosition::Top,
-                    face_down,
-                    // CR 608.2c: the subject exiles from their own library.
-                    actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
-                });
+                let pred_tp = TextPair::new(text.as_str(), pred_lower.as_str());
+                // The sentence-level where-X binder owns X.
+                let head = strip_terminal_where_x(pred_tp).map_or(pred_tp, |(head, _)| head);
+                if let Some((rem, objects)) =
+                    imperative::parse_subject_exile_object_list(head.lower, ctx)
+                        .ok()
+                        .filter(|(_, objects)| {
+                            !objects.rest.is_empty()
+                                || matches!(objects.first, SubjectExileObjectAst::LibraryTop(_))
+                        })
+                {
+                    if !imperative::terminal_punctuation_only(rem) {
+                        return parsed_clause(Effect::unimplemented(
+                            "subject_exile_object_list",
+                            &text,
+                        ));
+                    }
+                    return lower_subject_exile_objects(objects, &affected, &subject, ctx, &text);
+                }
             }
             // CR 701.40a + CR 608.2c: "<player> manifests the top [N] card(s) of
             // their library" — Reality Shift's "its controller manifests the top
@@ -29822,6 +29863,7 @@ fn lower_subject_predicate_ast_body(
                                 candidate_source:
                                     crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                                 reciprocal_role: None,
+                                gather_role: None,
                                 up_to: false,
                                 selection: crate::types::ability::CardSelectionMode::Chosen,
                                 constraint: None,
@@ -31591,44 +31633,220 @@ fn wrap_target_subject_damage(
     })
 }
 
-fn parse_subject_exile_top_count(pred_lower: &str) -> QuantityExpr {
-    if let Ok((_, qty_text)) = preceded(
-        alt((tag::<_, _, OracleError<'_>>("exile "), tag("exiles "))),
-        take_until(" from the top"),
-    )
-    .parse(pred_lower)
-    {
-        if let Some(expr) = parse_event_context_quantity(qty_text.trim()) {
-            return expr;
-        }
-    }
+/// CR 608.2c + CR 109.5: does `owner` — the library owner the shared authority
+/// `parse_library_owner_phrase` mapped the printed possessive to — name the
+/// exiling subject? "their" / "that player's" is the anaphor for the player
+/// named earlier in the instruction, which in a subject-predicate clause is the
+/// subject; "your" names the subject only when the subject is "you" (CR 109.5).
+/// Any other owner ("target opponent's", "each player's") names a different
+/// player or scope.
+fn library_owner_names_subject(
+    owner: &TargetFilter,
+    affected: &TargetFilter,
+    ctx: &ParseContext,
+) -> bool {
+    *owner == imperative::that_player_library_filter(ctx)
+        || matches!(
+            (owner, affected),
+            (TargetFilter::Controller, TargetFilter::Controller)
+        )
+}
 
-    if let Some(after_top) = strip_after(pred_lower, "top ") {
-        // CR 107.1a: "half of their library, rounded up/down" composes over
-        // `TargetZoneCardCount` via the shared quantity combinator.
-        if let Ok((_, expr)) = super::oracle_nom::quantity::parse_half_rounded(after_top) {
-            expr
-        } else if let Ok((_, n)) = nom_primitives::parse_number.parse(after_top) {
-            QuantityExpr::Fixed { value: n as i32 }
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("x").parse(after_top) {
-            // CR 107.3: X placeholder — "exiles the top X cards" (Outrageous
-            // Robbery) binds to the spell's chosen X, resolved at effect time by
-            // `resolve_quantity_with_targets`. Word-boundary guard after the nom
-            // `tag` accepted so a longer identifier does not slice to a bare X.
-            match rest.chars().next() {
-                None | Some(' ') => QuantityExpr::Ref {
-                    qty: crate::types::ability::QuantityRef::Variable {
-                        name: "X".to_string(),
-                    },
-                },
-                _ => QuantityExpr::Fixed { value: 1 },
-            }
-        } else {
-            QuantityExpr::Fixed { value: 1 }
+/// CR 701.13a + CR 608.2f: lower the objects of a third-person "<player>
+/// exiles …" instruction.
+///
+/// A lone library object of the subject's own library is the base
+/// `Effect::ExileTop`. Two or more objects are one simultaneous exile action
+/// (CR 608.2f): a `TargetOnly` root announces the subject player, non-moving
+/// selection legs gather each object into one tracked set, then one
+/// `ChangeZoneAll` exiles that set. A form this lowering can't express is a
+/// recorded gap.
+///
+/// Two bindings make the gathered set exactly this instruction's objects:
+///   * the subject — every leg reads the player the root announces through the
+///     chosen-group link (`reads_chosen_group`, CR 608.2c "their"), so a
+///     leg's own pick handed on as its target never names the next leg's zone
+///     owner, and no other announced player can stand in for it;
+///   * the scope — each leg carries its typed gather role: the first object
+///     `Opens` a fresh tracked set and every later object `Joins` it
+///     (`ZoneChoiceGatherRole`), whatever kinds of object come in which order,
+///     so a set an earlier instruction of the same resolution published is
+///     never gathered.
+fn lower_subject_exile_objects(
+    objects: SubjectExileObjectsAst,
+    affected: &TargetFilter,
+    subject: &SubjectPhraseAst,
+    ctx: &mut ParseContext,
+    text: &str,
+) -> ParsedEffectClause {
+    let SubjectExileObjectsAst { first, rest } = objects;
+    if rest.is_empty() {
+        let SubjectExileObjectAst::LibraryTop(SubjectExileLibraryTopAst {
+            count,
+            face_down,
+            owner,
+        }) = first
+        else {
+            // The caller claims a lone object only when it is a library object.
+            return parsed_clause(Effect::unimplemented("subject_exile_object_list", text));
+        };
+        // CR 109.5: "target opponent exiles the top card of your library"
+        // reads the controller's library, not the subject's; exiling from
+        // the subject's own library would act on the wrong library.
+        if !library_owner_names_subject(&owner, affected, ctx) {
+            return parsed_clause(Effect::unimplemented("subject_exile_object_list", text));
         }
-    } else {
-        QuantityExpr::Fixed { value: 1 }
+        return parsed_clause(Effect::ExileTop {
+            player: affected.clone(),
+            count,
+            position: crate::types::ability::LibraryPosition::Top,
+            // CR 406.3: a trailing "face down" marks a hidden-information
+            // exile (Outrageous Robbery: "exiles the top X cards of their
+            // library face down"). The resolver propagates this to the
+            // moved object's `face_down` flag so `visibility.rs` redacts it.
+            face_down,
+            // CR 608.2c: the subject exiles from their own library.
+            actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
+        });
     }
+    // CR 115.1 + CR 608.2c: "their" names the targeted subject player.
+    let Some(owner_target) = subject
+        .target
+        .as_ref()
+        .filter(|t| target_filter_can_target_player(t))
+    else {
+        return parsed_clause(Effect::unimplemented(
+            "subject_exile_object_list_owner",
+            text,
+        ));
+    };
+    let objects: Vec<SubjectExileObjectAst> = std::iter::once(first).chain(rest).collect();
+    // Two objects from one zone would both read that zone before the single
+    // exile moves any of them — two library objects read the same top cards,
+    // and two at-random picks from one graveyard can select the same card —
+    // so one card could fill both; that form is not modelled.
+    let mut read_zones = HashSet::new();
+    if !objects.iter().all(|object| {
+        read_zones.insert(match object {
+            SubjectExileObjectAst::LibraryTop(_) => Zone::Library,
+            SubjectExileObjectAst::AtRandomFrom(zone) => *zone,
+        })
+    }) {
+        return parsed_clause(Effect::unimplemented("subject_exile_object_list", text));
+    }
+    // Each object's pool: (count, zone, candidate provenance, selection).
+    let mut pools = Vec::with_capacity(objects.len());
+    for object in objects {
+        pools.push(match object {
+            SubjectExileObjectAst::LibraryTop(SubjectExileLibraryTopAst {
+                count,
+                face_down,
+                owner,
+            }) => {
+                // CR 109.5: every leg reads the targeted subject's zones, so the
+                // library object must be the subject's own library through the
+                // anaphor; "your" names the controller.
+                if owner != imperative::that_player_library_filter(ctx) {
+                    return parsed_clause(Effect::unimplemented("subject_exile_object_list", text));
+                }
+                let library_count = match (count, face_down) {
+                    (QuantityExpr::Fixed { value: n }, false) if n >= 1 => n as u32,
+                    _ => {
+                        return parsed_clause(Effect::unimplemented(
+                            "subject_exile_object_list",
+                            text,
+                        ))
+                    }
+                };
+                // CR 401.2: the top cards are a pool the library's order fixes,
+                // taken whole — a candidate provenance, not a selection. No
+                // player looks at or chooses them, so the leg's `chooser` and
+                // default `selection` are inert placeholders that `LibraryTop`'s
+                // resolver pins (`library_top_shape`); neither enum has a "no
+                // player chooses" value.
+                (
+                    library_count,
+                    Zone::Library,
+                    ZoneChoiceCandidateSource::LibraryTop,
+                    crate::types::ability::CardSelectionMode::default(),
+                )
+            }
+            SubjectExileObjectAst::AtRandomFrom(zone) => (
+                1,
+                zone,
+                ZoneChoiceCandidateSource::Direct,
+                crate::types::ability::CardSelectionMode::Random,
+            ),
+        });
+    }
+    // CR 608.2c + CR 115.1: the group the root announces the subject under; the
+    // chunk loop takes it onto this clause (`clause_declared_group`) as the
+    // group its `TargetOnly` root declares.
+    let group = ChosenGroupId::declared_player(ctx.next_declared_player_group);
+    ctx.next_declared_player_group += 1;
+    ctx.clause_declared_group = Some(group);
+    // CR 608.2c + CR 608.2f: the first object opens the instruction's tracked
+    // set and every later object joins it, so the single exile moves exactly
+    // this instruction's objects.
+    let legs =
+        pools
+            .into_iter()
+            .enumerate()
+            .map(|(index, (count, zone, candidate_source, selection))| {
+                let gather_role = if index == 0 {
+                    ZoneChoiceGatherRole::Opens
+                } else {
+                    ZoneChoiceGatherRole::Joins
+                };
+                let mut def = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChooseFromZone {
+                        count,
+                        zone,
+                        additional_zones: vec![],
+                        zone_owner: ZoneOwner::TargetedPlayer,
+                        filter: None,
+                        chooser: Chooser::Controller.into(),
+                        candidate_source,
+                        reciprocal_role: None,
+                        gather_role: Some(gather_role),
+                        up_to: false,
+                        selection,
+                        constraint: None,
+                    },
+                );
+                def.reads_chosen_group = Some(group);
+                def
+            });
+    // CR 608.2f: the listed objects are exiled by one simultaneous action.
+    let exile_all = Effect::ChangeZoneAll {
+        origin: None,
+        destination: Zone::Exile,
+        target: TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        },
+        enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+        enter_with_counters: vec![],
+        face_down_profile: None,
+        library_position: None,
+        library_shuffle: Default::default(),
+        random_order: false,
+    };
+    // Chain the legs in printed order, ending in the single exile.
+    let chain = legs.rev().fold(
+        AbilityDefinition::new(AbilityKind::Spell, exile_all),
+        |tail, mut def| {
+            def.sub_ability = Some(Box::new(tail));
+            def
+        },
+    );
+    let mut clause = parsed_clause(Effect::TargetOnly {
+        target: owner_target.clone(),
+    });
+    clause.sub_ability = Some(Box::new(chain));
+    clause
 }
 
 /// Bind the intrinsic mass-move/library continuation of a library zone move to
@@ -43899,6 +44117,7 @@ fn parse_reciprocal_graveyard_choice_ir(text: &str, kind: AbilityKind) -> Option
             chooser: ZoneChoiceChooser::ImmediatePriorSelectedCardOwner { player: None },
             candidate_source: ZoneChoiceCandidateSource::Direct,
             reciprocal_role: Some(ReciprocalZoneChoiceRole::Consume),
+            gather_role: None,
             up_to: false,
             selection: crate::types::ability::CardSelectionMode::Chosen,
             constraint: None,
@@ -43933,6 +44152,7 @@ fn parse_reciprocal_graveyard_choice_ir(text: &str, kind: AbilityKind) -> Option
         chooser: ZoneChoiceChooser::Controller,
         candidate_source: ZoneChoiceCandidateSource::Direct,
         reciprocal_role: Some(ReciprocalZoneChoiceRole::Produce),
+        gather_role: None,
         up_to: false,
         selection: crate::types::ability::CardSelectionMode::Chosen,
         constraint: None,
@@ -48860,6 +49080,7 @@ fn parse_effect_chain_ir_body(
                             chooser: (*chooser).into(),
                             candidate_source: ZoneChoiceCandidateSource::Legacy,
                             reciprocal_role: None,
+                            gather_role: None,
                             up_to: false,
                             selection: crate::types::ability::CardSelectionMode::Chosen,
                             constraint: None,
@@ -48919,6 +49140,7 @@ fn parse_effect_chain_ir_body(
                             chooser: (*chooser).into(),
                             candidate_source: ZoneChoiceCandidateSource::Legacy,
                             reciprocal_role: None,
+                            gather_role: None,
                             up_to: false,
                             selection: crate::types::ability::CardSelectionMode::Chosen,
                             constraint: None,

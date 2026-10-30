@@ -146,13 +146,10 @@ impl CandidateFilter for SimulationFilter {
         if structurally_valid_pass_priority(state, candidate) {
             return true;
         }
-        if super::structurally_valid_search_selection(state, &candidate.action) {
+        if super::structurally_valid_prompt_answer(state, &candidate.action) {
             return true;
         }
         if super::structurally_valid_tap_for_convoke_payment(state, &candidate.action) {
-            return true;
-        }
-        if super::structurally_valid_named_choice_answer(state, &candidate.action) {
             return true;
         }
         if structurally_valid_priority_activation(state, &candidate.action) {
@@ -173,13 +170,10 @@ impl CandidateFilter for SimulationFilter {
         if structurally_valid_pass_priority(state, candidate) {
             return true;
         }
-        if super::structurally_valid_search_selection(state, &candidate.action) {
+        if super::structurally_valid_prompt_answer(state, &candidate.action) {
             return true;
         }
         if super::structurally_valid_tap_for_convoke_payment(state, &candidate.action) {
-            return true;
-        }
-        if super::structurally_valid_named_choice_answer(state, &candidate.action) {
             return true;
         }
         if structurally_valid_priority_activation(state, &candidate.action) {
@@ -2935,7 +2929,10 @@ mod tests {
     // ------------------------------------------------------------------
     // `structurally_valid_named_choice_answer` — the sixth structural hatch.
     //
-    // Soundness condition, as for the pass-priority hatch above:
+    // The hatch decides the submission guard's verdict, not the apply's: an
+    // answer it admits can still fail later in the action (a life gain the
+    // engine cannot represent), so the condition is agreement on the fixtures
+    // below, not a general implication as for the pass-priority hatch above:
     //
     //   structurally_valid_named_choice_answer(state, action) == true
     //     ⇒ fallback_simulation(state, candidate) == true
@@ -3254,11 +3251,19 @@ mod tests {
                 !hatch(&paying, &choose(option)),
                 "the hatch must decline answer {option} while an activation is pending"
             );
+            assert!(
+                !crate::ai_support::structurally_valid_prompt_answer(&paying, &choose(option)),
+                "the planner-facing authority must decline answer {option} while an activation is pending"
+            );
             let mut not_paying = paying.clone();
             not_paying.pending_cast = None;
             assert!(
                 hatch(&not_paying, &choose(option)),
                 "only the pending activation refuses answer {option}"
+            );
+            assert!(
+                crate::ai_support::structurally_valid_prompt_answer(&not_paying, &choose(option)),
+                "only the pending activation makes the planner-facing authority refuse answer {option}"
             );
         }
 
@@ -3308,5 +3313,157 @@ mod tests {
                 "`accept_with_probe` must answer an enumerated named choice without cloning"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // `structurally_valid_prompt_answer` — the prompt-answer authority that
+    // both `SimulationFilter` and phase-ai's planner legality gate consult.
+    //
+    // Agreement on the fixtures below, against both simulation entries (not a
+    // general implication: an admitted answer can still fail when applied, e.g.
+    // a life gain the engine cannot represent, which is why phase-ai's chooser
+    // simulates the answer it submits):
+    //
+    //   structurally_valid_prompt_answer(state, action) == true
+    //     ⇒ fallback_simulation(state, candidate) == true
+    //     ∧ apply_as_current_for_simulation(state.clone(), action).is_ok()
+    // ------------------------------------------------------------------
+
+    /// Demonic Tutor ("Search your library for a card, put that card into your
+    /// hand, then shuffle."), cast and resolved up to its CR 701.23a/d
+    /// quantity search over a four-card library: an ordinary (non-scoped)
+    /// search that must find exactly one card.
+    fn demonic_tutor_search_state() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.with_library_top(PlayerId(0), &["Card A", "Card B", "Card C", "Card D"]);
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Demonic Tutor",
+            false,
+            "Search your library for a card, put that card into your hand, then shuffle.",
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Black],
+        });
+        let tutor = builder.id();
+        scenario.with_mana_pool(
+            PlayerId(0),
+            vec![
+                ManaUnit::new(ManaType::Colorless, tutor, false, vec![]),
+                ManaUnit::new(ManaType::Black, tutor, false, vec![]),
+            ],
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = PlayerId(0);
+        runner.state_mut().priority_player = PlayerId(0);
+        let outcome = runner.cast(tutor).resolve();
+        let state = outcome.state().clone();
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::SearchChoice {
+                    player: PlayerId(0),
+                    count: 1,
+                    up_to: false,
+                    cards,
+                    ..
+                } if cards.len() == 4
+            ),
+            "Demonic Tutor must halt on its exact-one search over the four-card library, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.pending_scoped_library_search.is_none(),
+            "Demonic Tutor's search is an ordinary (non-scoped) search"
+        );
+        state
+    }
+
+    fn prompt_answer_candidates(state: &GameState) -> Vec<CandidateAction> {
+        candidate_actions(state)
+            .into_iter()
+            .filter(|candidate| {
+                matches!(
+                    candidate.action,
+                    GameAction::ChooseOption { .. } | GameAction::SelectCards { .. }
+                )
+            })
+            .collect()
+    }
+
+    /// E1. Every enumerated answer the authority admits is one both simulation
+    /// entries accept: `SimulationFilter`'s probe (`pass_oracle_accepts`) and
+    /// `apply_as_current_for_simulation`, the entry phase-ai's planner
+    /// legality gate simulates with. Covers a source-less, a `PendingEntry`
+    /// and two `ExactObjectAndResolution` named-choice prompts plus an
+    /// ordinary library search. The `true` assertion on the authority is the
+    /// positive reach guard.
+    #[test]
+    fn prompt_answer_authority_is_sound_against_both_simulation_entries() {
+        for state in [
+            brave_the_elements_named_choice_state(),
+            distant_melody_named_choice_state(),
+            thriving_grove_named_choice_state(),
+            stave_off_named_choice_state(),
+            demonic_tutor_search_state(),
+        ] {
+            let candidates = prompt_answer_candidates(&state);
+            assert!(
+                !candidates.is_empty(),
+                "the prompt must enumerate ChooseOption/SelectCards candidates, got {:?}",
+                state.waiting_for
+            );
+            for candidate in &candidates {
+                assert!(
+                    crate::ai_support::structurally_valid_prompt_answer(&state, &candidate.action),
+                    "the authority must admit enumerated answer {:?}",
+                    candidate.action
+                );
+                assert!(
+                    pass_oracle_accepts(&state, candidate),
+                    "SimulationFilter's probe must accept enumerated answer {:?}",
+                    candidate.action
+                );
+                assert!(
+                    crate::game::engine::apply_as_current_for_simulation(
+                        &mut state.clone(),
+                        candidate.action.clone()
+                    )
+                    .is_ok(),
+                    "the planner's simulation entry must accept enumerated answer {:?}",
+                    candidate.action
+                );
+            }
+        }
+    }
+
+    /// E3. The search-selection hatch must be wired into BOTH `accept` and
+    /// `accept_with_probe` through the prompt-answer authority. The verdict
+    /// asserts are reach guards; the per-method zero counters are the evidence.
+    #[test]
+    fn search_selection_hatch_is_wired_into_both_accept_methods() {
+        let state = demonic_tutor_search_state();
+        let candidate = candidate_actions(&state)
+            .into_iter()
+            .find(|candidate| matches!(candidate.action, GameAction::SelectCards { .. }))
+            .expect("the search must enumerate SelectCards candidates");
+
+        crate::game::perf_counters::reset();
+        assert!(SimulationFilter.accept(&state, &candidate));
+        assert_eq!(
+            crate::game::perf_counters::snapshot().raw_validation_state_clones,
+            0,
+            "`accept` must answer an enumerated search selection without cloning"
+        );
+
+        crate::game::perf_counters::reset();
+        assert!(SimulationFilter.accept_with_probe(&state, &candidate, None));
+        assert_eq!(
+            crate::game::perf_counters::snapshot().raw_validation_state_clones,
+            0,
+            "`accept_with_probe` must answer an enumerated search selection without cloning"
+        );
     }
 }
