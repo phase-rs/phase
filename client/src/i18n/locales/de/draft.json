@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Bot-Schwierigkeit",
+    "pickEnhancements": {
+      "label": "Integrierte KI mit Draft-Pick-Verbesserungen verwenden",
+      "hint": "Bots folgen für Formate mit Leitfaden einer geschriebenen Pick-Reihenfolge (derzeit Mirrodin, Darksteel und Fifth Dawn). Gilt ab mittlerem Schwierigkeitsgrad."
+    },
     "difficultyLevels": {
       "VeryEasy": "Sehr leicht",
       "Easy": "Leicht",
@@ -162,6 +166,7 @@
     "startSealed": "Sealed starten"
   },
   "pack": {
+    "label": "Draft-Booster",
     "confirmPick": "Pick bestätigen",
     "selected": "Ausgewählt",
     "draftEffects": "Draft-Effekte:",

@@ -16,7 +16,7 @@ import { PopoverMenu } from "../menu/PopoverMenu.tsx";
  * actor scoping on the write, and each remove echoes the stored selector verbatim.
  */
 export function MayTriggerAutoChoiceList() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const choices = useGameStore((s) => s.gameState?.may_trigger_auto_choices) ?? [];
   const replacementChoices = useGameStore((s) => s.gameState?.replacement_auto_choices) ?? [];
   const objects = useGameStore((s) => s.gameState?.objects);

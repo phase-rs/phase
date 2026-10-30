@@ -123,6 +123,9 @@ pub struct LoopCertificate {
     /// Non-empty on every certificate but a counted offer's, whose take repeats nothing without
     /// bound.
     pub unbounded: Vec<ResourceAxis>,
+    /// The subset of `unbounded` the loop drives up, from the same `ResourceVector` derivation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rising: Vec<ResourceAxis>,
     /// The classified win condition, derived from `unbounded`, or for a counted offer from what
     /// its counting replay performed; `None` when that take does not end the game with its
     /// proposer the winner.
@@ -202,6 +205,9 @@ pub struct ShortcutProposal {
     pub count: IterationCount,
     /// The confirmed unbounded axes (from the certificate) — display only.
     pub unbounded: Vec<ResourceAxis>,
+    /// The certificate's `rising`, copied at the mint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rising: Vec<ResourceAxis>,
     /// How the loop wins (from the certificate) — display only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub win_kind: Option<WinKind>,
@@ -371,6 +377,7 @@ pub fn detect_loop(
     let win_kind = Some(classify_win_kind(controller, delta, Some(cycle_end)));
     Some(LoopCertificate {
         unbounded,
+        rising: delta.rising_unbounded_axes_for(controller),
         win_kind,
         win_kind_at: None,
         mandatory,
@@ -1083,6 +1090,10 @@ mod tests {
     fn covers_is_superset_semantics() {
         let cert = LoopCertificate {
             unbounded: vec![
+                ResourceAxis::DamageDealt(pid(1)),
+                ResourceAxis::Life(pid(0)),
+            ],
+            rising: vec![
                 ResourceAxis::DamageDealt(pid(1)),
                 ResourceAxis::Life(pid(0)),
             ],

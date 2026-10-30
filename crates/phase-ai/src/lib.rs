@@ -18,6 +18,7 @@ pub mod deck_knowledge;
 pub mod deck_profile;
 pub mod determinize;
 pub mod draft_eval;
+pub mod draft_guide;
 pub mod duel_suite;
 pub mod eval;
 pub mod features;

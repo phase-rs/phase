@@ -12224,6 +12224,7 @@ mod tests {
                 predicted_winner: Some(viewer),
                 certificate: LoopCertificate {
                     unbounded: Vec::new(),
+                    rising: Vec::new(),
                     win_kind: Some(WinKind::LethalDamage),
                     win_kind_at: None,
                     mandatory: false,

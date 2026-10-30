@@ -367,7 +367,7 @@ function buildPlayerOnlyDeckList(player: ExpandedDeckWithTier): DeckListPayload 
 }
 
 async function buildLocalAiDeckList(
-  t: TFunction,
+  t: TFunction<["game", "multiplayer"]>,
   deck: ParsedDeck | null,
   playerCount: number,
   formatConfig: FormatConfig | undefined,
@@ -520,7 +520,7 @@ let pendingStoreReset: ReturnType<typeof setTimeout> | null = null;
  * `new Notification()` outside a ServiceWorker (Safari, some mobile).
  * Shared by the WS and P2P host-side join paths.
  */
-function notifyOpponentJoined(t: TFunction, opponentName?: string): void {
+function notifyOpponentJoined(t: TFunction<"game">, opponentName?: string): void {
   if (
     typeof Notification === "undefined"
     || Notification.permission !== "granted"
@@ -623,7 +623,7 @@ export function GameProvider({
   onResumeReset,
   children,
 }: GameProviderProps) {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common", "draft", "multiplayer"]);
 
   // Sync persistent gameplay preferences into engine-owned state so the
   // engine remains the single authority for priority recommendations.

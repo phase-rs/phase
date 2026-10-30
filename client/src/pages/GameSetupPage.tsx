@@ -76,7 +76,7 @@ function setupDefaults(format: GameFormat): FormatConfig | null {
 // --- Component ---
 
 export function GameSetupPage() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();

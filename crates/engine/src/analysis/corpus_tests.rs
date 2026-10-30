@@ -363,6 +363,7 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
     // Wrong win_kind ⇒ Failed. Revert "classify any Some(cert) as Confirmed" flips this.
     let wrong_win = LoopCertificate {
         unbounded: vec![ResourceAxis::DamageDealt(P1)],
+        rising: vec![ResourceAxis::DamageDealt(P1)],
         win_kind: Some(WinKind::LethalDamage),
         win_kind_at: None,
         mandatory: false,
@@ -380,6 +381,7 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
     // Right win_kind but wrong family ⇒ Failed. Revert "drop the family check" flips this.
     let wrong_family = LoopCertificate {
         unbounded: vec![ResourceAxis::TokensCreated],
+        rising: vec![ResourceAxis::TokensCreated],
         win_kind: Some(WinKind::Advantage),
         win_kind_at: None,
         mandatory: false,
@@ -407,6 +409,7 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
     // the three Failed assertions above are discriminating, not always-Failed.
     let right = LoopCertificate {
         unbounded: vec![ResourceAxis::Mana(ManaType::Green)],
+        rising: vec![ResourceAxis::Mana(ManaType::Green)],
         win_kind: Some(WinKind::Advantage),
         win_kind_at: None,
         mandatory: false,

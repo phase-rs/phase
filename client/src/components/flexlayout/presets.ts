@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import {
   defaultFlexLayout,
   type FlexLayoutConfig,
@@ -8,8 +9,8 @@ import {
  *  opponent HUD. `labelKey` is an i18n key under the `settings` namespace. */
 export interface FlexPreset {
   id: "default" | "layout2" | "layout3";
-  labelKey: string;
-  descriptionKey: string;
+  labelKey: ParseKeys<"settings">;
+  descriptionKey: ParseKeys<"settings">;
   config: FlexLayoutConfig;
 }
 
