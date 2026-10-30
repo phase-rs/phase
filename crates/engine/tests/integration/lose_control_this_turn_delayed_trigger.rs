@@ -374,8 +374,18 @@ fn gain_to_you_does_not_fire_only_loss() {
         "no trigger on the stack after a gain"
     );
 
+    // From here P0 controls the Sword, so both loss events below describe a
+    // real P0 -> P1 loss.
+    gain_until_eot(&mut runner, source, P0, sword);
+    assert_eq!(
+        runner.state().objects[&sword].controller,
+        P0,
+        "REACH: P0 controls the Sword for both loss events"
+    );
+
     // LEGACY LOSS (a pre-evidence payload): `Unrecorded` authorizes nothing,
-    // even in the losing direction, and is never rebuilt from the board.
+    // even in the losing direction while P0 really controls the Sword, and is
+    // never rebuilt from the board.
     let legacy_loss = GameEvent::ControllerChanged {
         object_id: sword,
         old_controller: P0,
@@ -391,12 +401,6 @@ fn gain_to_you_does_not_fire_only_loss() {
 
     // LOSS from P0 (old = P0, new = owner P1): P0 loses control — fires. The
     // evidence is captured while P0 controls the Sword, as the event says.
-    gain_until_eot(&mut runner, source, P0, sword);
-    assert_eq!(
-        runner.state().objects[&sword].controller,
-        P0,
-        "REACH: P0 controls the Sword when the loss evidence is captured"
-    );
     let loss = GameEvent::ControllerChanged {
         object_id: sword,
         old_controller: P0,
