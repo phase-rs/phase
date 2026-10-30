@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import type { AttachTarget, CardType, GameObject, Keyword, ManaColor, ObjectId } from "../adapter/types";
 import { isChangeling } from "./keywordProps";
 
@@ -162,24 +163,24 @@ export function counterIconClass(type: string): string | null {
 }
 
 type CounterTooltipTranslator = (
-  key: string,
+  key: ParseKeys<"game">,
   options?: { count?: number; label?: string; description?: string },
 ) => string;
 
-const COUNTER_DESCRIPTION_KEYS: Record<string, string> = {
-  P1P1: "counterTooltip.descriptions.p1p1",
-  M1M1: "counterTooltip.descriptions.m1m1",
-  loyalty: "counterTooltip.descriptions.loyalty",
-  lore: "counterTooltip.descriptions.lore",
-  stun: "counterTooltip.descriptions.stun",
-};
+const COUNTER_DESCRIPTION_KEYS: ReadonlyMap<string, ParseKeys<"game">> = new Map([
+  ["P1P1", "counterTooltip.descriptions.p1p1"],
+  ["M1M1", "counterTooltip.descriptions.m1m1"],
+  ["loyalty", "counterTooltip.descriptions.loyalty"],
+  ["lore", "counterTooltip.descriptions.lore"],
+  ["stun", "counterTooltip.descriptions.stun"],
+]);
 
 export function formatCounterDescription(
   type: string,
   translate: CounterTooltipTranslator,
 ): string {
   const label = formatCounterType(type);
-  const key = COUNTER_DESCRIPTION_KEYS[type];
+  const key = COUNTER_DESCRIPTION_KEYS.get(type);
   return key
     ? translate(key)
     : translate("counterTooltip.descriptions.generic", { label });

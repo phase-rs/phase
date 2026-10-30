@@ -166,6 +166,7 @@
     "startSealed": "Lancer le scellé"
   },
   "pack": {
+    "label": "Booster de draft",
     "confirmPick": "Confirmer le choix",
     "selected": "Sélection",
     "draftEffects": "Effets de draft :",

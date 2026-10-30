@@ -336,6 +336,23 @@ describe("AttackTargetPicker", () => {
     expect(screen.getAllByText("Opp 2 (Player — 2 → 0 · Lethal)").length).toBeGreaterThan(0);
   });
 
+  it("shows the engine's unbounded life as ∞ with no projection or lethal state", () => {
+    const state = makeState();
+    state.players = state.players.map((player) =>
+      player.id === 1 ? { ...player, life: 2 } : player,
+    );
+    useGameStore.setState({ gameState: { ...state, derived: { life_magnitude: { 1: "Unbounded" } } } });
+    renderPicker();
+    enterDistribute();
+
+    fireEvent.click(screen.getByRole("button", { name: /Assign one to Opp 2/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Assign one to Opp 2/ }));
+
+    expect(screen.getAllByText("Opp 2 (Player — ∞ life)").length).toBeGreaterThan(0);
+    expect(screen.queryAllByText(/Lethal/)).toHaveLength(0);
+    expect(screen.getAllByText("Opp 3 (Player — 20 life)").length).toBeGreaterThan(0);
+  });
+
   it("'-1' releases the highest-id member back to Unassigned", () => {
     const { onConfirm } = renderPicker();
     enterDistribute();

@@ -14834,15 +14834,6 @@ fn parse_damage_prevention_replacement(
     // SelfRef` on one definition — AND semantics that silently narrow the
     // shield (plan review round 1's Fog Bank regression).
     let valid_card_filter: Option<TargetFilter> = if nom_primitives::scan_contains(working_lower, "dealt to ~")
-            // CR 615.1: Active-voice self-recipient form — "If a source would
-            // deal damage to ~, prevent that damage ..." (Swans of Bryn Argoll —
-            // #5652). A prevention effect is a "shield around whatever it's
-            // affecting"; here that is `~`, the source card. The passive "dealt
-            // to ~" scan above misses the active-voice phrasing because the
-            // recipient trails the verb. Without `SelfRef` `valid_card` stays
-            // None and the shield also prevents damage the source DEALS (Swans
-            // prevented its own combat damage and drew off it).
-            || nom_primitives::scan_contains(working_lower, "deal damage to ~")
             // CR 615.1a: Subject-first self-recipient form — "If ~ would be dealt
             // damage, prevent that damage ..." (Unbreathing Horde — issue #2888).
             // `~` is the source card, so the shield is self-scoped; without
@@ -14876,6 +14867,7 @@ fn parse_damage_prevention_replacement(
                 parse_subject_first_prevention_recipient,
             )
         })
+        // CR 615.1: active-voice self recipient ("a source/creature would deal [combat] damage to ~") resolves here via the anchored self leg.
         .or_else(|| parse_damage_recipient_valid_card_filter(working_lower))
     };
 
@@ -15110,6 +15102,9 @@ fn parse_damage_prevention_replacement(
 /// follow-up rider). The `peek(", prevent")` boundary keeps the filter scoped
 /// to the recipient phrase without consuming the comma + imperative, leaving
 /// the follow-up extractor (`extract_prevention_followup`) to claim it.
+/// The recipient is either the self leg (`~` → `SelfRef`: Swans of Bryn
+/// Argoll, Ironscale Hydra) or a typed filter — see
+/// `parse_damage_recipient_object`.
 fn parse_damage_recipient_valid_card_filter(working_lower: &str) -> Option<TargetFilter> {
     parse_damage_recipient_after_prefix(working_lower, "dealt to ")
         .or_else(|| parse_damage_recipient_after_prefix(working_lower, "would deal damage to "))
@@ -15213,17 +15208,38 @@ fn parse_damage_recipient_scope(working_lower: &str) -> Option<DamageTargetFilte
 fn parse_damage_recipient_after_prefix(working_lower: &str, prefix: &str) -> Option<TargetFilter> {
     nom_primitives::scan_at_word_boundaries(working_lower, |input| {
         let (after_to, _) = tag::<_, _, OracleError<'_>>(prefix).parse(input)?;
-        let (filter, rest) = parse_type_phrase_folding(after_to);
-        if matches!(filter, TargetFilter::Any) {
-            return Err(nom::Err::Error(OracleError::new(
-                after_to,
-                nom::error::ErrorKind::Verify,
-            )));
-        }
-
+        let (rest, filter) = parse_damage_recipient_object(after_to)?;
         let (rest, _) = parse_damage_recipient_terminator(rest)?;
         Ok((rest, filter))
     })
+}
+
+/// CR 615.1 + CR 615.1a: the damage-recipient object of an anchored recipient
+/// clause ("would deal [combat] damage to <recipient>", "dealt to <recipient>").
+/// Recipient text is `replace_self_refs`-normalized, so every self-reference
+/// ("this creature", the card's name) arrives as `~` → `SelfRef`: a prevention
+/// effect is a shield around the source itself (Swans of Bryn Argoll, #5652;
+/// Ironscale Hydra). The bare pronoun "it" is deliberately NOT a self leg — in
+/// a recipient clause it is an event/target anaphor. Otherwise a typed filter.
+fn parse_damage_recipient_object(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        value(TargetFilter::SelfRef, tag::<_, _, OracleError<'_>>("~")),
+        parse_damage_recipient_type_phrase,
+    ))
+    .parse(input)
+}
+
+/// Typed recipient leg: `parse_type_phrase_folding` is infallible, so refuse
+/// its `Any` fallback explicitly (unchanged guard, moved from the caller).
+fn parse_damage_recipient_type_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (filter, rest) = parse_type_phrase_folding(input);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((rest, filter))
 }
 
 /// CR 615.5 + CR 609.7: Walk an `AbilityDefinition` tree and rewrite every
@@ -18453,6 +18469,99 @@ mod tests {
         assert!(
             def.damage_target_filter.is_none(),
             "must not use broad CreatureOnly damage_target_filter: {text}"
+        );
+    }
+
+    /// CR 615.1a + CR 615.5: Ironscale Hydra (verbatim Oracle text) — the
+    /// active-voice self recipient "would deal combat damage to ~" reads through
+    /// the anchored recipient grammar's self leg to a self-scoped, creature-
+    /// sourced, combat-only full-prevention shield whose "and put a +1/+1
+    /// counter on this creature" rider targets the shield's host.
+    #[test]
+    fn ironscale_hydra_combat_self_prevention_with_counter_rider() {
+        let text = "If a creature would deal combat damage to this creature, prevent that damage and put a +1/+1 counter on this creature.";
+        let def = parse_replacement_line(text, "Ironscale Hydra")
+            .expect("Ironscale Hydra prevention should parse");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(
+            def.damage_target_filter.is_none(),
+            "self recipient must not also carry a broad damage_target_filter"
+        );
+        match def.damage_source_filter.as_ref() {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                assert_eq!(tf.controller, None);
+            }
+            other => panic!("expected Typed creature source filter, got {other:?}"),
+        }
+        let execute = def.execute.as_ref().expect("counter rider present");
+        assert_eq!(
+            *execute.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            }
+        );
+
+        // Adjacent grammar: a compound recipient must not silently narrow to
+        // the self leg — the clause terminator refuses " or a creature …" and
+        // the recipient guard declines the line.
+        assert_eq!(
+            parse_damage_prevention_replacement(
+                "if a creature would deal combat damage to ~ or a creature you control, prevent that damage.",
+                "If a creature would deal combat damage to ~ or a creature you control, prevent that damage.",
+            )
+            .err(),
+            Some(PreventionDecline::NotThisShape)
+        );
+    }
+
+    /// CR 615.1 + CR 615.1a: building block — the anchored recipient grammar's
+    /// self leg (`~` → `SelfRef`) composes with every source subject, both the
+    /// any-damage and combat-damage prefixes, and a trailing duration window,
+    /// while the clause terminator still refuses a possessive continuation.
+    #[test]
+    fn damage_recipient_valid_card_filter_reads_self_reference_across_scope_axis() {
+        for text in [
+            "if a source would deal damage to ~, prevent that damage.",
+            "if a creature would deal combat damage to ~, prevent that damage.",
+            "if a source would deal combat damage to ~ this turn, prevent that damage.",
+        ] {
+            assert_eq!(
+                parse_damage_recipient_valid_card_filter(text),
+                Some(TargetFilter::SelfRef),
+                "{text}"
+            );
+        }
+
+        // Possessive continuation: "~'s controller" is not the self object.
+        assert_eq!(
+            parse_damage_recipient_valid_card_filter(
+                "if a source would deal damage to ~'s controller, prevent that damage."
+            ),
+            None
+        );
+
+        // Reach guard: the typed leg behind the `alt` still reads a typed
+        // recipient through the same prefix.
+        assert!(
+            matches!(
+                parse_damage_recipient_valid_card_filter(
+                    "if a creature would deal combat damage to a creature you control, prevent that damage."
+                ),
+                Some(TargetFilter::Typed(_))
+            ),
+            "typed recipient leg must still parse after the self leg"
         );
     }
 

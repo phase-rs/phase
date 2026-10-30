@@ -5637,7 +5637,11 @@ fn t8_the_token_axis_reaches_the_certificate_while_the_unbounded_channel_stays_c
         state.unbounded_resources
     );
     let mut marked = state.clone();
-    marked.mark_unbounded_loop(proposer, &[ResourceAxis::TokensCreated]);
+    marked.mark_unbounded_loop(
+        proposer,
+        &[ResourceAxis::TokensCreated],
+        &[ResourceAxis::TokensCreated],
+    );
     assert!(
         !marked.unbounded_resources.is_empty(),
         "POSITIVE CONTROL: the same reader returns non-empty on a hand-marked state, so the \
@@ -6715,7 +6719,11 @@ fn e1_a_narrowed_offer_publishes_its_bound_beside_an_untouched_infinity_channel(
             views.unbounded_resources
         );
         let mut marked = state.clone();
-        marked.mark_unbounded_loop(proposer, &[ResourceAxis::TokensCreated]);
+        marked.mark_unbounded_loop(
+            proposer,
+            &[ResourceAxis::TokensCreated],
+            &[ResourceAxis::TokensCreated],
+        );
         let marked_views = derive_views(&marked, None);
         assert_eq!(
             marked_views

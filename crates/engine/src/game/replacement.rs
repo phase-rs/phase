@@ -7948,7 +7948,13 @@ fn object_replacement_candidate_applies(
     if is_damage_prevention_replacement(state, &rid, &repl_def.event)
         && is_prevention_disabled(state, event)
     {
-        // CR 615.12: effects that disable prevention suppress prevention replacements.
+        // CR 615.12: unpreventable damage is still subject to applicable prevention
+        // effects — they prevent nothing, but "any additional effects they have will
+        // take place". strict-failure: skipping the shield here also drops its rider
+        // (Ironscale Hydra / Nine Lives / Gloom Surgeon / Polukranos rulings); the
+        // rules-correct path needs a typed "that many" vs "prevented this way" rider
+        // amount and is tracked as Command Zone #86. Shield counters already follow
+        // CR 615.12 (`apply_shield_counter_replacement`).
         return false;
     }
     if let Some(ref scope) = repl_def.token_owner_scope {
@@ -9126,6 +9132,14 @@ pub fn find_applicable_replacements(
                     if is_damage_prevention_replacement(state, &rid, &repl_def.event)
                         && is_prevention_disabled(state, event)
                     {
+                        // CR 615.12: unpreventable damage is still subject to applicable
+                        // prevention effects — they prevent nothing, but "any additional
+                        // effects they have will take place". strict-failure: skipping the
+                        // shield here also drops its rider (Ironscale Hydra / Nine Lives /
+                        // Gloom Surgeon / Polukranos rulings); the rules-correct path needs a
+                        // typed "that many" vs "prevented this way" rider amount and is
+                        // tracked as Command Zone #86. Shield counters already follow
+                        // CR 615.12 (`apply_shield_counter_replacement`).
                         continue;
                     }
                     if let Some(ref cond) = repl_def.condition {

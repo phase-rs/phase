@@ -1162,6 +1162,7 @@
     }
   },
   "costReductionOrder": {
+    "announcedHybrids": "已宣告的混血法术力支付",
     "appliedFirst": "最先应用",
     "appliedLast": "最后应用",
     "cancel": "取消",
@@ -2508,7 +2509,7 @@
     "selectedModes": "已选模式",
     "targetingLabel": "正在指定目标：{{label}}",
     "title": "堆叠",
-    "titleContext": "上下文：{{context}}",
+    "titleContext": "上下文：{{items}}",
     "titlePaid": "已支付：{{paid}}",
     "titleTargets": "目标：{{targets}}",
     "triggered": "触发式",

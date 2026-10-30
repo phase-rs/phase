@@ -166,6 +166,7 @@
     "startSealed": "シールドを開始"
   },
   "pack": {
+    "label": "ドラフトパック",
     "confirmPick": "ピックを確定",
     "selected": "選択中",
     "draftEffects": "ドラフト中の効果：",

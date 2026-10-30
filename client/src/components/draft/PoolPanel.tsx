@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useTranslation } from "react-i18next";
 import type { ReactNode } from "react";
 
@@ -82,7 +83,7 @@ function ColorPips({ colors }: { colors: string[] }) {
 
 // ── Sort mode tabs ──────────────────────────────────────────────────────
 
-const SORT_MODES: Array<{ mode: PoolSortMode; labelKey: string }> = [
+const SORT_MODES: Array<{ mode: PoolSortMode; labelKey: ParseKeys<"draft"> }> = [
   { mode: "color", labelKey: "pool.sortColor" },
   { mode: "type", labelKey: "pool.sortType" },
   { mode: "cmc", labelKey: "pool.sortCmc" },

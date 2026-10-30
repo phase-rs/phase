@@ -578,6 +578,7 @@ mod tests {
     fn cert() -> LoopCertificate {
         LoopCertificate {
             unbounded: vec![],
+            rising: vec![],
             win_kind: Some(WinKind::LethalDamage),
             win_kind_at: None,
             mandatory: false,

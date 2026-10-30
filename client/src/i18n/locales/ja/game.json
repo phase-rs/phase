@@ -878,7 +878,7 @@
     "targetingLabel": "{{label}}を対象指定中",
     "titleTargets": "対象: {{targets}}",
     "titlePaid": "支払い: {{paid}}",
-    "titleContext": "文脈: {{context}}",
+    "titleContext": "文脈: {{items}}",
     "revealedCards": "公開中: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}}マナ",
@@ -2698,6 +2698,7 @@
     }
   },
   "costReductionOrder": {
+    "announcedHybrids": "宣言済みの混成マナの支払い",
     "eyebrow": "コスト軽減の順序",
     "title": "コスト軽減の順序を選択",
     "subtitle": "これらの軽減を適用する順序によって、確定する総コストが変わります（CR 601.2f）。リストの上から順に適用されます。",

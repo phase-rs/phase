@@ -5521,7 +5521,7 @@ card into your hand at the beginning of your next end step.";
         // P0 is debug-toggled (SetInfiniteMana marks `debug_infinite_mana`) AND holds the
         // recorded Mana axes — the multi-authority case: the debug marker dominates.
         state.debug_infinite_mana.insert(p0);
-        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES);
+        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES, &INFINITE_MANA_AXES);
         state.players[0].mana_pool.add(ManaUnit::new(
             ManaType::Blue,
             ObjectId(11),

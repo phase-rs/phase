@@ -166,6 +166,7 @@
     "startSealed": "Empezar sellado"
   },
   "pack": {
+    "label": "Sobre de draft",
     "confirmPick": "Confirmar elección",
     "selected": "Seleccionada",
     "draftEffects": "Efectos de draft:",

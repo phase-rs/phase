@@ -166,6 +166,7 @@
     "startSealed": "Sealed starten"
   },
   "pack": {
+    "label": "Draft-Booster",
     "confirmPick": "Pick bestätigen",
     "selected": "Ausgewählt",
     "draftEffects": "Draft-Effekte:",
