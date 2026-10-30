@@ -824,13 +824,14 @@ impl Serialize for FormatConfig {
 /// `HostChoiceWithin` row admits (see that row, below). This is an ENGINE
 /// INVARIANT, not a Comprehensive Rules limit — no CR caps how high a
 /// variant's starting life total may be, so this constant is never cited
-/// with a `CR` annotation. It exists because life-total arithmetic is raw,
-/// non-saturating `i32` (e.g. `player.life += (frames - i) as i32;` in
-/// `game::engine`'s SBA/effect application), so a `starting_life` admitted
-/// at or near `i32::MAX` would overflow the very first time any effect adds
-/// to it. The value only bounds the STARTING dial — it leaves the rest of
-/// the `i32` range free for in-game life gain/loss to grow into, which is
-/// the property that actually matters; it does not re-cap `Player::life`
+/// with a `CR` annotation. Life totals are stored as `i32` and saturate at
+/// its limits (`game::arithmetic::saturating_life_total`), so a gain that
+/// would pass `i32::MAX` lands on it instead of moving the total by the
+/// amount gained; a `starting_life` admitted at or near `i32::MAX` would pin
+/// the game at that limit from the first gain. The value only bounds the
+/// STARTING dial — it leaves the rest of the `i32` range free for in-game
+/// life gain/loss to move in exactly, which is the property that actually
+/// matters; it does not re-cap `Player::life`
 /// itself. 1,000,000 comfortably clears every real starting total in the
 /// registry (Standard 20, Commander/Archenemy 40, Two-Headed Giant 30 shared
 /// / 15 per seat) with vast headroom left for house-rule variant play (e.g.
@@ -844,7 +845,7 @@ impl Serialize for FormatConfig {
 pub const MAX_STARTING_LIFE: i32 = 1_000_000;
 
 /// CR 704.5a / CR 810.8c playability floor, and the `MAX_STARTING_LIFE`
-/// overflow-safety ceiling, on a resolved `FormatConfig`. This is the single
+/// saturation-headroom ceiling, on a resolved `FormatConfig`. This is the single
 /// shared authority for both bounds. `FormatConfig::deserialize` calls it
 /// from both of its arms:
 ///
@@ -854,7 +855,7 @@ pub const MAX_STARTING_LIFE: i32 = 1_000_000;
 ///   `custom_rules.structural.starting_life` — that arm's blanket-equality
 ///   check against `FormatConfig::for_custom_rules` only proves internal
 ///   self-consistency, not that the declared life total is playable or
-///   within the engine's arithmetic-safety ceiling, so this call is what
+///   within the engine's saturation-headroom ceiling, so this call is what
 ///   actually bounds it.
 ///
 /// Two more callers bound a `FormatConfig` before it ever reaches
@@ -891,7 +892,7 @@ pub const MAX_STARTING_LIFE: i32 = 1_000_000;
 /// `MAX_STARTING_LIFE`'s own doc comment. It is checked against the raw
 /// declared field, not `starting_life_for_seat`, because the floor's
 /// playability concern (a seat that cannot survive the first SBA check) is a
-/// per-seat question but the overflow concern is about the field's own
+/// per-seat question but the headroom concern is about the field's own
 /// magnitude before it is ever divided.
 ///
 /// `pub` (not `pub(crate)`): both of the two additional callers above are
@@ -949,7 +950,7 @@ pub fn validate_starting_life_bounds(config: &FormatConfig) -> Result<(), String
 ///   registry's closed option list), `commander_damage_threshold`'s magnitude
 ///   (`>= 1`, playability), `starting_life` (resolved per-seat total `>= 1`
 ///   for playability; raw declared value `<= MAX_STARTING_LIFE` as an engine
-///   overflow-safety invariant, not a rules bound).
+///   saturation-headroom invariant, not a rules bound).
 ///
 /// `validate_for_player_count` is the runtime pair of the `max_players` row:
 /// that row bounds the format invariant a payload may declare, the other
@@ -968,7 +969,7 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
     // starting_life: HostChoiceWithin — free, except that every seat must be
     // able to start the game (CR 704.5a; CR 810.8c for shared-life team
     // formats) and the declared value must not cross the engine's
-    // arithmetic-safety ceiling (`MAX_STARTING_LIFE`, no CR — it is not a
+    // saturation-headroom ceiling (`MAX_STARTING_LIFE`, no CR — it is not a
     // rules bound). Both bounds are enforced by `validate_starting_life_
     // bounds`, the single shared authority called from BOTH arms of
     // `FormatConfig::deserialize` — see that function's own doc comment for
@@ -1348,7 +1349,7 @@ impl<'de> Deserialize<'de> for FormatConfig {
                 // the same floor/ceiling a built-in payload gets (see
                 // `validate_starting_life_bounds`'s own doc comment), so a
                 // Custom format cannot post an unplayable (CR 704.5a / CR
-                // 810.8c) or overflow-prone (`MAX_STARTING_LIFE`) starting
+                // 810.8c) or headroom-exhausting (`MAX_STARTING_LIFE`) starting
                 // life just because it is internally consistent about it.
                 validate_starting_life_bounds(&config).map_err(serde::de::Error::custom)?;
             }
@@ -4313,7 +4314,7 @@ mod tests {
 
     /// Pins both ends of the `starting_life` admission row: the existing
     /// floor (a per-seat total that cannot survive the first SBA check) and
-    /// the new `MAX_STARTING_LIFE` ceiling (an engine overflow-safety
+    /// the new `MAX_STARTING_LIFE` ceiling (an engine saturation-headroom
     /// invariant, not a rules bound). Exercised through the same
     /// `serde_json` round trip as `deserialize_admission_and_validate_for_
     /// player_count_are_independent_layers`, since `built_in_axes_no_looser_

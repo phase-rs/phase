@@ -173,26 +173,17 @@ fn browser_partial_priority_equip_state() -> (GameState, ObjectId, ObjectId) {
     (state, equipment, creature)
 }
 
-/// A Resolve All batch whose first item resolves an unrepresentable life change
-/// rejects the public batch and restores the game exactly as the caller found it:
-/// the stack entry, the consent session, and the life total are all unchanged.
-#[test]
-fn resolve_all_rejects_unrepresentable_life_and_restores_the_batch_entry() {
+/// A two-player `Priority{P0}` board at `life` / `energy` with `entries` on the
+/// stack (bottom to top) and a shared Resolve All begun by P0. Returns the board
+/// and the consent epoch P1's final grant answers.
+fn resolve_all_gain_batch(life: i32, energy: u32, entries: Vec<StackEntry>) -> (GameState, u64) {
     let mut state = GameState::new_two_player(0x0A11_E0A2);
     state.active_player = P0;
     state.priority_player = P0;
     state.waiting_for = WaitingFor::Priority { player: P0 };
-    state.players[P0.0 as usize].life = i32::MAX - 1;
-    state.stack = vec![ability_entry(
-        101,
-        P0,
-        Effect::GainLife {
-            amount: QuantityExpr::Fixed { value: 2 },
-            player: TargetFilter::Controller,
-        },
-        vec![],
-    )]
-    .into();
+    state.players[P0.0 as usize].life = life;
+    state.players[P0.0 as usize].energy = energy;
+    state.stack = entries.into();
 
     apply(
         &mut state,
@@ -207,33 +198,149 @@ fn resolve_all_rejects_unrepresentable_life_and_restores_the_batch_entry() {
         WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
         ref waiting_for => panic!("expected queued consent, got {waiting_for:?}"),
     };
-    let life_before = state.players[P0.0 as usize].life;
-    let stack_before = state.stack.clone();
-    let session_before = state.stack_resolution_session.clone();
-    let waiting_before = state.waiting_for.clone();
+    (state, epoch)
+}
 
-    // The final grant is the public action that materializes the run, so the
-    // unrepresentable gain rejects the grant itself and restores its snapshot.
-    let error = apply(
-        &mut state,
+/// P1's final grant: the public action that materializes the run.
+fn grant_resolve_all(
+    state: &mut GameState,
+    epoch: u64,
+) -> Result<engine::types::game_state::ActionResult, engine::game::engine::EngineError> {
+    apply(
+        state,
         P1,
         GameAction::RespondResolveAllConsent {
             epoch,
             decision: ResolveAllConsentDecision::Grant,
         },
     )
-    .expect_err("the unrepresentable gain must reject the public grant");
+}
+
+fn gain_life_entry(id: u64, amount: i32) -> StackEntry {
+    ability_entry(
+        id,
+        P0,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: amount },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+    )
+}
+
+fn gain_energy_entry(id: u64, amount: i32) -> StackEntry {
+    ability_entry(
+        id,
+        P0,
+        Effect::GainEnergy {
+            amount: QuantityExpr::Fixed { value: amount },
+        },
+        vec![],
+    )
+}
+
+/// A Resolve All batch whose item gains life past `i32::MAX` finishes the public
+/// batch: the total lands on the limit, the gain reports the rules amount, and
+/// the run ends back at P0's priority with no session left.
+#[test]
+fn resolve_all_saturates_life_at_the_cap_and_finishes_the_batch() {
+    let (mut state, epoch) = resolve_all_gain_batch(i32::MAX - 1, 0, vec![gain_life_entry(101, 2)]);
+
+    let result = grant_resolve_all(&mut state, epoch)
+        .expect("the saturating gain completes the public grant");
+
+    assert_eq!(state.players[P0.0 as usize].life, i32::MAX);
+    assert_eq!(state.players[P0.0 as usize].life_gained_this_turn, 2);
+    assert!(state.stack.is_empty(), "the batch resolves");
+    assert_eq!(state.stack_resolution_session, None);
+    assert_eq!(state.waiting_for, WaitingFor::Priority { player: P0 });
+    assert!(
+        result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::LifeChanged {
+                player_id,
+                amount: 2,
+                new_total,
+            } if *player_id == P0 && new_total.0 == Some(i32::MAX)
+        )),
+        "the grant reports the rules amount at the cap: {:?}",
+        result.events
+    );
+}
+
+/// A Resolve All batch whose first item resolves an unrepresentable energy
+/// change rejects the public batch and restores the game exactly as the caller
+/// found it: the stack entry, the consent session, and the energy total are all
+/// unchanged. A batch that saturates life before that energy change is rolled
+/// back with it, and with room for the energy both items resolve in order.
+#[test]
+fn resolve_all_rejects_unrepresentable_energy_and_restores_the_batch_entry() {
+    // Row A: the energy gain alone.
+    let (mut state, epoch) =
+        resolve_all_gain_batch(20, u32::MAX - 1, vec![gain_energy_entry(101, 2)]);
+    let energy_before = state.players[P0.0 as usize].energy;
+    let stack_before = state.stack.clone();
+    let session_before = state.stack_resolution_session.clone();
+    let waiting_before = state.waiting_for.clone();
+
+    // The final grant is the public action that materializes the run, so the
+    // unrepresentable gain rejects the grant itself and restores its snapshot.
+    let error = grant_resolve_all(&mut state, epoch)
+        .expect_err("the unrepresentable gain must reject the public grant");
     assert!(
         matches!(
             error,
             engine::game::engine::EngineError::LifeChangeUnrepresentable { player } if player == P0
         ),
-        "expected the typed unrepresentable-life rejection, got {error:?}"
+        "expected the typed unrepresentable rejection, got {error:?}"
     );
-    assert_eq!(state.players[P0.0 as usize].life, life_before);
+    assert_eq!(state.players[P0.0 as usize].energy, energy_before);
     assert_eq!(state.stack, stack_before, "the batch entry is restored");
     assert_eq!(state.stack_resolution_session, session_before);
     assert_eq!(state.waiting_for, waiting_before);
+
+    // Row B: a life gain that saturates at the cap resolves first (top), then
+    // the energy gain overflows; the whole grant is rolled back.
+    let (mut state, epoch) = resolve_all_gain_batch(
+        i32::MAX - 1,
+        u32::MAX - 1,
+        vec![gain_energy_entry(101, 2), gain_life_entry(102, 2)],
+    );
+    let entry = state.clone();
+    let error = grant_resolve_all(&mut state, epoch)
+        .expect_err("the later energy overflow must reject the public grant");
+    assert!(
+        matches!(
+            error,
+            engine::game::engine::EngineError::LifeChangeUnrepresentable { player } if player == P0
+        ),
+        "expected the typed unrepresentable rejection, got {error:?}"
+    );
+    assert_eq!(
+        state, entry,
+        "the saturated life gain is rolled back with the batch"
+    );
+
+    // Row C (reach guard for row B): with room for the energy, the life item
+    // saturates first and the energy item then lands on the limit.
+    let (mut state, epoch) = resolve_all_gain_batch(
+        i32::MAX - 1,
+        u32::MAX - 2,
+        vec![gain_energy_entry(101, 2), gain_life_entry(102, 2)],
+    );
+    let result = grant_resolve_all(&mut state, epoch).expect("both items resolve");
+    let changes: Vec<(&str, i32)> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::LifeChanged { amount, .. } => Some(("life", *amount)),
+            GameEvent::EnergyChanged { delta, .. } => Some(("energy", *delta)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(changes, vec![("life", 2), ("energy", 2)]);
+    assert_eq!(state.players[P0.0 as usize].life, i32::MAX);
+    assert_eq!(state.players[P0.0 as usize].energy, u32::MAX);
 }
 
 #[test]

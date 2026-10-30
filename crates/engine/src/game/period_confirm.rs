@@ -1201,11 +1201,7 @@ mod tests {
     use crate::types::actions::DebugAction;
     use crate::types::player::PlayerId;
 
-    /// A replayed play whose final life edit is unrepresentable carries its own
-    /// refusal, so the public shortcut entry can reject the take rather than
-    /// treating it as an illegal play or silently stopping the repetition.
-    #[test]
-    fn step_carries_an_unrepresentable_life_change_as_its_own_refusal() {
+    fn debug_priority_state() -> GameState {
         let mut state = GameState::new_two_player(7);
         state.debug_mode = true;
         state.active_player = PlayerId(0);
@@ -1213,9 +1209,17 @@ mod tests {
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
+        state
+    }
+
+    /// A replayed play whose life gain would pass `i32::MAX` replays like any
+    /// other: the total lands on the limit and the gain counts the rules amount.
+    #[test]
+    fn step_replays_a_life_gain_at_the_cap() {
+        let mut state = debug_priority_state();
         state.players[0].life = i32::MAX - 1;
         let mut events = Vec::new();
-        let refusal = step(
+        step(
             &mut state,
             PlayerId(0),
             GameAction::Debug(DebugAction::GainLife {
@@ -1225,7 +1229,31 @@ mod tests {
             OfferRefusal::IllegalReplayedPlay,
             &mut events,
         )
-        .expect_err("the impossible gain must refuse the replay");
+        .expect("the saturating gain replays");
+        assert_eq!(state.players[0].life, i32::MAX);
+        assert_eq!(state.players[0].life_gained_this_turn, 2);
+    }
+
+    /// A replayed play whose final player-resource edit is unrepresentable (an
+    /// energy total past `u32::MAX`) carries its own refusal, so the public
+    /// shortcut entry can reject the take rather than treating it as an
+    /// illegal play or silently stopping the repetition.
+    #[test]
+    fn step_carries_an_unrepresentable_energy_change_as_its_own_refusal() {
+        let mut state = debug_priority_state();
+        state.players[0].energy = u32::MAX - 1;
+        let mut events = Vec::new();
+        let refusal = step(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::GiveEnergy {
+                player_id: PlayerId(0),
+                count: 2,
+            }),
+            OfferRefusal::IllegalReplayedPlay,
+            &mut events,
+        )
+        .expect_err("the impossible energy gain must refuse the replay");
         assert_eq!(
             refusal,
             OfferRefusal::LifeChangeUnrepresentable {

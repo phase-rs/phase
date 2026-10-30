@@ -126,9 +126,9 @@ pub enum EngineError {
         pending: Box<crate::types::game_state::PendingCast>,
     },
     /// A life, player-counter or energy change in this action proved
-    /// unrepresentable (the final amount, the life total, the per-turn
-    /// gained/lost counter, or the counter/energy total does not fit the
-    /// engine's `i32`/`u32` storage). Representability is an engine limit, not
+    /// unrepresentable (the final amount, or the counter/energy total, does not
+    /// fit the engine's `i32`/`u32` storage; a life total and its per-turn
+    /// counters saturate instead). Representability is an engine limit, not
     /// a game rule; the action boundary rejects the whole action and restores
     /// its pre-action snapshot rather than silently skipping the change.
     #[error("Player-resource change is not representable for player {player:?}")]
@@ -22331,6 +22331,10 @@ mod stage2_injector_tests {
     const P2: PlayerId = PlayerId(2);
     const TARGET_DRAIN: &str = "Whenever you gain life, target opponent loses that much life.";
     const FEEDBACK: &str = "Whenever an opponent loses life, you gain that much life.";
+    /// Synthetic `FEEDBACK` variant that also gives energy, so a ring cycle
+    /// moves an energy total the edit authority still checks.
+    const FEEDBACK_ENERGY: &str =
+        "Whenever an opponent loses life, you gain that much life and you get {E}.";
     const KICKOFF: &str = "You gain 1 life.";
 
     fn life(state: &GameState, p: PlayerId) -> i32 {
@@ -22498,6 +22502,11 @@ mod stage2_injector_tests {
     /// `drive_one_shortcut_cycle` and `apply_until_lethal_shortcut` need — so the rows below
     /// build one board from one authority instead of two copies.
     fn two_drainer_rig() -> (GameState, GameState, DecisionTemplate, usize) {
+        two_drainer_rig_with(FEEDBACK)
+    }
+
+    /// [`two_drainer_rig`] with `feedback` as the feedback engine's Oracle text.
+    fn two_drainer_rig_with(feedback: &str) -> (GameState, GameState, DecisionTemplate, usize) {
         let mut scenario = GameScenario::new_n_player(3, 7);
         scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
         scenario.with_life(P0, 20);
@@ -22509,7 +22518,7 @@ mod stage2_injector_tests {
         let drainer_b = scenario
             .add_creature_from_oracle(P0, "Drainer B", 2, 2, TARGET_DRAIN)
             .id();
-        scenario.add_creature_from_oracle(P0, "Feedback", 3, 4, FEEDBACK);
+        scenario.add_creature_from_oracle(P0, "Feedback", 3, 4, feedback);
         let kickoff = scenario
             .add_spell_to_hand_from_oracle(P0, "Kickoff", false, KICKOFF)
             .id();
@@ -22609,10 +22618,15 @@ mod stage2_injector_tests {
     /// Attach a ring-road proposal to the existing real two-drainer board and keep all
     /// declaration validation live by publishing the template's two target points.
     fn two_drainer_ring_offer() -> (GameState, DecisionTemplate) {
+        two_drainer_ring_offer_with(FEEDBACK)
+    }
+
+    /// [`two_drainer_ring_offer`] on [`two_drainer_rig_with`]`(feedback)`.
+    fn two_drainer_ring_offer_with(feedback: &str) -> (GameState, DecisionTemplate) {
         use crate::analysis::decision_template::{DecisionPoint, DecisionPointKind};
         use crate::types::ability::TargetRef;
 
-        let (mut state, _, template, _) = two_drainer_rig();
+        let (mut state, _, template, _) = two_drainer_rig_with(feedback);
         let points = template
             .decisions
             .iter()
@@ -22637,49 +22651,48 @@ mod stage2_injector_tests {
         (state, template)
     }
 
-    /// The real two-drainer ring board's representable lethal take is the reach guard. The
-    /// hostile public take has one less unit of loss-counter headroom than that cycle consumes,
-    /// probing whether a work-clone failure can be lost through an Abort/fallback. This is a
-    /// single-cycle probe; later-cycle whole-action rollback is covered by the recorded Replay row.
-    #[test]
-    fn public_ring_take_rejects_unrepresentable_life_before_fallback() {
-        fn declare(state: &mut GameState, template: DecisionTemplate, count: u32) {
+    fn declare_ring_take(state: &mut GameState, template: DecisionTemplate, count: u32) {
+        apply(
+            state,
+            P0,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(count),
+                template: Some(template),
+            },
+        )
+        .expect("the published target points admit the fixture's declaration");
+        let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for else {
+            panic!("the declaration reaches the real public response window");
+        };
+        assert!(matches!(
+            take_route(state, proposal, count),
+            TakeRoute::Ring
+        ));
+        assert!(proposal.period.is_empty());
+    }
+
+    fn accept_ring_take_until_done(state: &mut GameState) -> Result<(), EngineError> {
+        for _ in 0..4 {
+            let player = match &state.waiting_for {
+                WaitingFor::RespondToShortcut { player, .. } => *player,
+                _ => return Ok(()),
+            };
             apply(
                 state,
-                P0,
-                GameAction::DeclareShortcut {
-                    count: IterationCount::Fixed(count),
-                    template: Some(template),
+                player,
+                GameAction::RespondToShortcut {
+                    response: crate::analysis::loop_check::ShortcutResponse::Accept,
                 },
-            )
-            .expect("the published target points admit the fixture's declaration");
-            let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for else {
-                panic!("the declaration reaches the real public response window");
-            };
-            assert!(matches!(
-                take_route(state, proposal, count),
-                TakeRoute::Ring
-            ));
-            assert!(proposal.period.is_empty());
+            )?;
         }
+        panic!("the three-opponent response window must finish within four accepts")
+    }
 
-        fn accept_until_done(state: &mut GameState) -> Result<(), EngineError> {
-            for _ in 0..4 {
-                let player = match &state.waiting_for {
-                    WaitingFor::RespondToShortcut { player, .. } => *player,
-                    _ => return Ok(()),
-                };
-                apply(
-                    state,
-                    player,
-                    GameAction::RespondToShortcut {
-                        response: crate::analysis::loop_check::ShortcutResponse::Accept,
-                    },
-                )?;
-            }
-            panic!("the three-opponent response window must finish within four accepts")
-        }
-
+    /// The real two-drainer ring board's lethal take is the reach guard. The hostile public
+    /// take has one less unit of loss-counter headroom than that cycle consumes; the counter
+    /// saturates at `u32::MAX` and the take settles like the control.
+    #[test]
+    fn public_ring_take_saturates_the_lost_counter_like_the_control() {
         let (mut control, control_template) = two_drainer_ring_offer();
         let p2_life_before = life(&control, P2);
         let p2_counter_before = control
@@ -22688,8 +22701,9 @@ mod stage2_injector_tests {
             .find(|player| player.id == P2)
             .unwrap()
             .life_lost_this_turn;
-        declare(&mut control, control_template, 1);
-        accept_until_done(&mut control).expect("the real lethal ring cycle is representable");
+        declare_ring_take(&mut control, control_template, 1);
+        accept_ring_take_until_done(&mut control)
+            .expect("the real lethal ring cycle is representable");
         let p2_life_lost = u32::try_from(p2_life_before - life(&control, P2))
             .expect("the positive control loses a nonnegative amount");
         let p2_counter_delta = control
@@ -22712,7 +22726,67 @@ mod stage2_injector_tests {
             .find(|player| player.id == P2)
             .unwrap()
             .life_lost_this_turn = u32::MAX - (p2_counter_delta - 1);
-        declare(&mut hostile, hostile_template, 1);
+        declare_ring_take(&mut hostile, hostile_template, 1);
+        accept_ring_take_until_done(&mut hostile)
+            .expect("every Accept of the saturating ring take is accepted");
+        assert_eq!(
+            life(&hostile, P2),
+            life(&control, P2),
+            "the saturated counter does not change the drained amount"
+        );
+        assert_eq!(
+            hostile
+                .players
+                .iter()
+                .find(|player| player.id == P2)
+                .unwrap()
+                .life_lost_this_turn,
+            u32::MAX
+        );
+        assert_eq!(
+            std::mem::discriminant(&hostile.waiting_for),
+            std::mem::discriminant(&control.waiting_for),
+            "the hostile take settles like the control: {:?} vs {:?}",
+            hostile.waiting_for,
+            control.waiting_for
+        );
+    }
+
+    /// The same ring take with a feedback engine that also gives energy: the control's energy
+    /// gain is the reach guard, and the hostile public take has one less unit of energy
+    /// headroom than that cycle consumes, probing whether a work-clone failure can be lost
+    /// through an Abort/fallback. This is a single-cycle probe; later-cycle whole-action
+    /// rollback is covered by the recorded Replay row.
+    #[test]
+    fn public_ring_take_rejects_unrepresentable_energy_before_fallback() {
+        let energy = |state: &GameState| {
+            state
+                .players
+                .iter()
+                .find(|player| player.id == P0)
+                .unwrap()
+                .energy
+        };
+
+        let (mut control, control_template) = two_drainer_ring_offer_with(FEEDBACK_ENERGY);
+        let energy_before = energy(&control);
+        declare_ring_take(&mut control, control_template, 1);
+        accept_ring_take_until_done(&mut control)
+            .expect("the real lethal ring cycle is representable");
+        let energy_delta = energy(&control) - energy_before;
+        assert!(
+            energy_delta > 0,
+            "reach guard: the real cycle gives P0 energy"
+        );
+
+        let (mut hostile, hostile_template) = two_drainer_ring_offer_with(FEEDBACK_ENERGY);
+        hostile
+            .players
+            .iter_mut()
+            .find(|player| player.id == P0)
+            .unwrap()
+            .energy = u32::MAX - (energy_delta - 1);
+        declare_ring_take(&mut hostile, hostile_template, 1);
         let mut rejection = None;
         for _ in 0..4 {
             let player = match &hostile.waiting_for {
@@ -22728,17 +22802,17 @@ mod stage2_injector_tests {
                 },
             ) {
                 Ok(_) => {}
-                Err(error @ EngineError::LifeChangeUnrepresentable { player: P2 }) => {
+                Err(error @ EngineError::LifeChangeUnrepresentable { player: P0 }) => {
                     assert_eq!(hostile, entry, "the final public Accept restores its entry");
                     rejection = Some(error);
                     break;
                 }
-                Err(error) => panic!("expected typed P2 loss-counter rejection, got {error:?}"),
+                Err(error) => panic!("expected typed P0 energy rejection, got {error:?}"),
             }
         }
         assert!(
             rejection.is_some(),
-            "reach guard: the public ring drive must reject rather than fall back when its P2 loss exceeds the remaining headroom"
+            "reach guard: the public ring drive must reject rather than fall back when its P0 energy exceeds the remaining headroom"
         );
     }
 

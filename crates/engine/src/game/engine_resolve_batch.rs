@@ -1166,6 +1166,35 @@ mod tests {
         ]
     }
 
+    fn energy_gain_entry(id: u64, controller: PlayerId, amount: i32) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::GainEnergy {
+                        amount: QuantityExpr::Fixed { value: amount },
+                    },
+                    vec![],
+                    object_id,
+                    controller,
+                )),
+            },
+        }
+    }
+
+    fn energy_batch_entries(amount: i32) -> Vec<StackEntry> {
+        // As `life_batch_entries`, with an energy gain as the later boundary: an
+        // energy total past `u32::MAX` is still unrepresentable.
+        vec![
+            energy_gain_entry(22, PlayerId(0), amount),
+            delayed_trigger_entry(21, PlayerId(0)),
+        ]
+    }
+
     fn active_restored_state(stack: Vec<StackEntry>) -> GameState {
         let mut state = priority_state(PlayerId(0), stack);
         super::super::engine::install_stack_resolution_session(
@@ -1732,9 +1761,27 @@ mod tests {
     }
 
     #[test]
-    fn ready_prefix_rejects_a_later_overflow_and_discards_prefix_lifecycle_facts() {
+    fn ready_prefix_saturates_a_later_life_counter_and_merges_prefix_lifecycle_facts() {
         let mut state = ready_state(life_batch_entries(2));
         state.players[0].life_gained_this_turn = u32::MAX - 1;
+        let parent = super::super::lifecycle::enter_action_frame();
+
+        let result = resolve_all_ready_prefix_with(
+            &mut state,
+            PlayerId(0),
+            ResolveAllContinuation::StopAtPriority,
+        )
+        .expect("the later gain saturates the gained-this-turn counter");
+
+        assert_eq!(result.items_resolved, 2);
+        assert_eq!(state.players[0].life_gained_this_turn, u32::MAX);
+        assert_delayed_installation_merged(parent, "Ready-prefix saturated counter");
+    }
+
+    #[test]
+    fn ready_prefix_rejects_a_later_energy_overflow_and_discards_prefix_lifecycle_facts() {
+        let mut state = ready_state(energy_batch_entries(2));
+        state.players[0].energy = u32::MAX - 1;
         let entry = state.clone();
         let parent = super::super::lifecycle::enter_action_frame();
 
@@ -1755,7 +1802,7 @@ mod tests {
             state, entry,
             "the rejected call restores its full Ready entry state, including revision, journal, RNG, consent, and session"
         );
-        assert_no_delayed_installation(parent, "Ready-prefix overflow");
+        assert_no_delayed_installation(parent, "Ready-prefix energy overflow");
     }
 
     #[test]
@@ -1777,9 +1824,25 @@ mod tests {
     }
 
     #[test]
-    fn fast_forward_rejects_a_later_overflow_and_discards_prefix_lifecycle_facts() {
+    fn fast_forward_saturates_a_later_life_counter_and_merges_prefix_lifecycle_facts() {
         let mut state = priority_state(PlayerId(0), life_batch_entries(2));
         state.players[0].life_gained_this_turn = u32::MAX - 1;
+        let parent = super::super::lifecycle::enter_action_frame();
+
+        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, |_, _| {
+            ResolveAllCallbackDecision::Action(GameAction::PassPriority)
+        })
+        .expect("the later gain saturates the gained-this-turn counter");
+
+        assert_eq!(result.items_resolved, 2);
+        assert_eq!(state.players[0].life_gained_this_turn, u32::MAX);
+        assert_delayed_installation_merged(parent, "fast-forward saturated counter");
+    }
+
+    #[test]
+    fn fast_forward_rejects_a_later_energy_overflow_and_discards_prefix_lifecycle_facts() {
+        let mut state = priority_state(PlayerId(0), energy_batch_entries(2));
+        state.players[0].energy = u32::MAX - 1;
         let entry = state.clone();
         let parent = super::super::lifecycle::enter_action_frame();
 
@@ -1798,7 +1861,7 @@ mod tests {
             state, entry,
             "the rejected call restores its full public entry state, including revision, journal, RNG, and stack"
         );
-        assert_no_delayed_installation(parent, "fast-forward overflow");
+        assert_no_delayed_installation(parent, "fast-forward energy overflow");
     }
 
     #[test]
@@ -1818,7 +1881,7 @@ mod tests {
     }
 
     #[test]
-    fn restored_resume_rolls_back_after_later_overflow_for_active_and_legacy_states() {
+    fn restored_resume_saturates_a_later_life_counter_for_active_and_legacy_states() {
         for legacy in [false, true] {
             let make_state = || {
                 if legacy {
@@ -1833,16 +1896,61 @@ mod tests {
                 RestoredStackAutomation::ActiveSession
             };
 
+            let mut saturated = make_state();
+            assert_eq!(
+                classify_restored_stack_automation(&saturated),
+                expected_class
+            );
+            saturated.players[0].life_gained_this_turn = u32::MAX - 1;
+            let parent = super::super::lifecycle::enter_action_frame();
+            resume_restored_stack_automation(&mut saturated)
+                .expect("the resumed runner saturates the later gained-this-turn counter");
+            assert!(
+                saturated.stack.is_empty(),
+                "legacy={legacy}: both entries resolve"
+            );
+            assert_eq!(saturated.players[0].life_gained_this_turn, u32::MAX);
+            assert_delayed_installation_merged(parent, "restored-resume saturated counter");
+
+            let mut control = make_state();
+            control.players[0].life_gained_this_turn = u32::MAX - 3;
+            let parent = super::super::lifecycle::enter_action_frame();
+            resume_restored_stack_automation(&mut control)
+                .expect("the adjacent counter value is representable");
+            assert!(
+                control.stack.is_empty(),
+                "legacy={legacy}: both entries resolve"
+            );
+            assert_delayed_installation_merged(parent, "restored-resume control");
+        }
+    }
+
+    #[test]
+    fn restored_resume_rolls_back_after_a_later_energy_overflow_for_active_and_legacy_states() {
+        for legacy in [false, true] {
+            let make_state = || {
+                if legacy {
+                    ready_state(energy_batch_entries(2))
+                } else {
+                    active_restored_state(energy_batch_entries(2))
+                }
+            };
+            let expected_class = if legacy {
+                RestoredStackAutomation::LegacyResolveAllReady
+            } else {
+                RestoredStackAutomation::ActiveSession
+            };
+
             let mut rejected = make_state();
             assert_eq!(
                 classify_restored_stack_automation(&rejected),
                 expected_class
             );
-            rejected.players[0].life_gained_this_turn = u32::MAX - 1;
+            rejected.players[0].energy = u32::MAX - 1;
             let entry = rejected.clone();
             let parent = super::super::lifecycle::enter_action_frame();
             let error = resume_restored_stack_automation(&mut rejected)
-                .expect_err("the resumed runner must reject the later counter overflow");
+                .expect_err("the resumed runner must reject the later energy overflow");
 
             assert!(matches!(
                 error,
@@ -1854,13 +1962,13 @@ mod tests {
                 rejected, entry,
                 "legacy={legacy}: restore-resume must restore the whole pre-materialization state"
             );
-            assert_no_delayed_installation(parent, "restored-resume overflow");
+            assert_no_delayed_installation(parent, "restored-resume energy overflow");
 
             let mut control = make_state();
-            control.players[0].life_gained_this_turn = u32::MAX - 3;
+            control.players[0].energy = u32::MAX - 3;
             let parent = super::super::lifecycle::enter_action_frame();
             resume_restored_stack_automation(&mut control)
-                .expect("the adjacent counter value is representable");
+                .expect("the adjacent energy value is representable");
             assert!(
                 control.stack.is_empty(),
                 "legacy={legacy}: both entries resolve"

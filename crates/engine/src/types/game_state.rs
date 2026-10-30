@@ -10,6 +10,7 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::database::card_db::CardDbHandle;
+use crate::game::arithmetic;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::parser::oracle::{
     parse_attack_exert_header, parse_unknown_conditioned_attack_exert_header,
@@ -27954,9 +27955,9 @@ pub struct PendingReplacement {
 }
 
 /// Who owns a player-resource change (life, player counter, energy) whose final
-/// result the engine cannot represent (final amount beyond an `i32` delta, life
-/// total overflow, per-turn gained/lost counter overflow, or counter/energy
-/// total overflow).
+/// result the engine cannot represent (a final amount beyond an `i32` delta, or
+/// a counter/energy total overflow; a life total and its per-turn gained/lost
+/// counters saturate instead).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnrepresentablePolicy {
     /// Action ingress: return the typed error so the caller rejects the
@@ -30917,6 +30918,12 @@ impl GameState {
 
     /// Applies one final player-resource edit without replacements, quantity
     /// evaluation, or an implicit player selection.
+    ///
+    /// The life arm saturates: a gain stops at `i32::MAX` and a loss at
+    /// `i32::MIN` (`arithmetic::saturating_life_total`), and the per-turn
+    /// gained/lost counters add the reported magnitude, saturating at
+    /// `u32::MAX`. Energy and player counters keep the checked edit. Replaying
+    /// a recorded command on the same prefix reproduces the same result.
     pub fn apply_resolved_player_edit(
         &mut self,
         command: &ResolvedPlayerEditCommand,
@@ -30931,25 +30938,27 @@ impl GameState {
 
         match &command.edit {
             ResolvedPlayerEdit::Life { delta } => {
-                let amount = nonzero_delta_magnitude(*delta)?;
-                let life = player
-                    .life
-                    .checked_add(*delta)
-                    .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
-                if *delta > 0 {
-                    let gained = player
-                        .life_gained_this_turn
-                        .checked_add(amount)
-                        .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
-                    player.life = life;
-                    player.life_gained_this_turn = gained;
+                let rules = nonzero_delta_magnitude(*delta)?;
+                let current = i64::from(player.life);
+                // CR 119.3 + CR 107.1b: the gain or loss adjusts the total,
+                // which stops at the `i32` limit the change moves toward.
+                let total = arithmetic::saturating_life_total(current, i64::from(*delta));
+                // A saturating total never leaves `i32` for a player's own
+                // field. This checked narrowing is where a refusing answer at a
+                // limit would surface, through the settle's retained refusal
+                // routing.
+                let life = i32::try_from(total)
+                    .map_err(|_| ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
+                // The per-turn counters add the reported magnitude, saturating.
+                let counted = arithmetic::u64_to_u32_saturating(
+                    arithmetic::reported_life_magnitude(u64::from(rules), total.abs_diff(current)),
+                );
+                player.life = life;
+                if delta.is_positive() {
+                    player.life_gained_this_turn =
+                        player.life_gained_this_turn.saturating_add(counted);
                 } else {
-                    let lost = player
-                        .life_lost_this_turn
-                        .checked_add(amount)
-                        .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
-                    player.life = life;
-                    player.life_lost_this_turn = lost;
+                    player.life_lost_this_turn = player.life_lost_this_turn.saturating_add(counted);
                 }
             }
             ResolvedPlayerEdit::Energy { delta } => {

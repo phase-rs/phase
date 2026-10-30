@@ -20,6 +20,7 @@ use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent, TokenAttackRequ
 use crate::types::resolved_commands::ResolvedPlayerEdit;
 use crate::types::zones::Zone;
 
+use super::arithmetic::LifeDirection;
 use super::effects::attach::{attach_to as attach_object_to, attach_to_player};
 use super::effects::change_zone::shuffle_library;
 use super::effects::energy::try_add_energy_with_replacement;
@@ -505,11 +506,11 @@ pub fn apply_debug_action(
         }
 
         DebugAction::GainLife { player_id, amount } => {
-            apply_debug_life_change(state, player_id, amount, DebugLifeChange::Gain, events)?;
+            apply_debug_life_change(state, player_id, amount, LifeDirection::Gain, events)?;
         }
 
         DebugAction::LoseLife { player_id, amount } => {
-            apply_debug_life_change(state, player_id, amount, DebugLifeChange::Loss, events)?;
+            apply_debug_life_change(state, player_id, amount, LifeDirection::Loss, events)?;
         }
 
         DebugAction::ModifyPlayerCounters {
@@ -792,13 +793,6 @@ pub fn apply_debug_action(
     ))
 }
 
-/// CR 119.3: Direction of a sandbox life change routed through the real life-change event.
-#[derive(Debug, Clone, Copy)]
-enum DebugLifeChange {
-    Gain,
-    Loss,
-}
-
 /// CR 119.3: Apply a sandbox life gain/loss through `try_apply_life_gain` /
 /// `try_apply_life_loss`, so replacement (CR 614.1a, CR 616.1) and can't (CR 101.2)
 /// effects apply, then settle the action the way the reducer settles any action.
@@ -806,7 +800,7 @@ fn apply_debug_life_change(
     state: &mut GameState,
     player_id: PlayerId,
     amount: u32,
-    change: DebugLifeChange,
+    change: LifeDirection,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     validate_player(state, player_id)?;
@@ -817,12 +811,14 @@ fn apply_debug_life_change(
         )));
     }
     let event_start = events.len();
-    // The final edit is the single representability authority: an unrepresentable
-    // result (after any replacement) rejects the action and the action boundary
-    // restores its snapshot — no wrap, no clamp, nothing settles.
+    // The settle step is the single authority: a life total and its per-turn
+    // counters saturate at their limits, and a result that is still
+    // unrepresentable (a final amount past an `i32` delta, an overflowed
+    // replacement quantity, or a nested counter/energy settlement) rejects the
+    // action and the action boundary restores its snapshot — nothing wraps.
     let outcome = match change {
-        DebugLifeChange::Gain => try_apply_life_gain(state, player_id, amount, events),
-        DebugLifeChange::Loss => try_apply_life_loss(state, player_id, amount, events),
+        LifeDirection::Gain => try_apply_life_gain(state, player_id, amount, events),
+        LifeDirection::Loss => try_apply_life_loss(state, player_id, amount, events),
     };
     match outcome {
         Ok(_) => {
@@ -3782,68 +3778,81 @@ mod tests {
             assert_eq!(p1p1(&runner, mate), 0);
         }
 
-        /// CR 608.2c + CR 614.6: an unrepresentable branch answer restores the
-        /// live prompt and interaction; a legal alternate branch may re-pause,
-        /// then its nested choice and the replacement tail each resolve once.
-        #[test]
-        fn interactive_lich_branch_rejects_loss_overflow_then_resumes_valid_nested_choice() {
-            let setup = |life_lost_this_turn| {
-                let mut scenario = scenario();
-                scenario.with_library_top(P0, &["Forest", "Island", "Mountain"]);
-                let mut runner = debug_runner(scenario);
-                runner.state_mut().players[0].life_lost_this_turn = life_lost_this_turn;
-                let lich = create_object(
-                    runner.state_mut(),
-                    CardId(9_703),
-                    P0,
-                    "Interactive Lich".to_string(),
-                    Zone::Battlefield,
-                );
-                let loss = AbilityDefinition::new(
+        /// A P0 "Interactive Lich" whose replacement substitutes a choice for a
+        /// life gain (CR 614.6): branch 0 is `first_branch`, branch 1 opens a
+        /// nested one-branch draw choice, and a draw tail follows either branch.
+        /// `preset` adjusts the runner before the source is created.
+        fn interactive_lich(
+            first_branch: Effect,
+            preset: impl FnOnce(&mut GameRunner),
+        ) -> (GameRunner, ObjectId) {
+            let mut scenario = scenario();
+            scenario.with_library_top(P0, &["Forest", "Island", "Mountain"]);
+            let mut runner = debug_runner(scenario);
+            preset(&mut runner);
+            let lich = create_object(
+                runner.state_mut(),
+                CardId(9_703),
+                P0,
+                "Interactive Lich".to_string(),
+                Zone::Battlefield,
+            );
+            let first = AbilityDefinition::new(AbilityKind::Spell, first_branch);
+            let nested = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    )],
+                    kind: ChooseOneOfKind::Ordinary,
+                },
+            );
+            let tail = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            let substitution = ReplacementDefinition::new(ReplacementEvent::GainLife).execute(
+                AbilityDefinition::new(
                     AbilityKind::Spell,
+                    Effect::ChooseOneOf {
+                        chooser: PlayerFilter::Controller,
+                        branches: vec![first, nested],
+                        kind: ChooseOneOfKind::Ordinary,
+                    },
+                )
+                .sub_ability(tail),
+            );
+            {
+                let obj = runner.state_mut().objects.get_mut(&lich).unwrap();
+                obj.replacement_definitions = vec![substitution.clone()].into();
+                obj.base_replacement_definitions = std::sync::Arc::new(vec![substitution]);
+            }
+            (runner, lich)
+        }
+
+        /// CR 608.2c + CR 614.6: a substitute's loss branch whose life-lost
+        /// counter would pass `u32::MAX` saturates the counter and resolves its
+        /// tail once, like the in-range control.
+        #[test]
+        fn interactive_lich_loss_branch_saturates_the_lost_counter() {
+            let setup = |life_lost_this_turn| {
+                interactive_lich(
                     Effect::LoseLife {
                         amount: QuantityExpr::Fixed { value: 2 },
                         target: None,
                     },
-                );
-                let nested = AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::ChooseOneOf {
-                        chooser: PlayerFilter::Controller,
-                        branches: vec![AbilityDefinition::new(
-                            AbilityKind::Spell,
-                            Effect::Draw {
-                                count: QuantityExpr::Fixed { value: 1 },
-                                target: TargetFilter::Controller,
-                            },
-                        )],
-                        kind: ChooseOneOfKind::Ordinary,
+                    |runner| {
+                        runner.state_mut().players[0].life_lost_this_turn = life_lost_this_turn
                     },
-                );
-                let tail = AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::Draw {
-                        count: QuantityExpr::Fixed { value: 1 },
-                        target: TargetFilter::Controller,
-                    },
-                );
-                let substitution = ReplacementDefinition::new(ReplacementEvent::GainLife).execute(
-                    AbilityDefinition::new(
-                        AbilityKind::Spell,
-                        Effect::ChooseOneOf {
-                            chooser: PlayerFilter::Controller,
-                            branches: vec![loss, nested],
-                            kind: ChooseOneOfKind::Ordinary,
-                        },
-                    )
-                    .sub_ability(tail),
-                );
-                {
-                    let obj = runner.state_mut().objects.get_mut(&lich).unwrap();
-                    obj.replacement_definitions = vec![substitution.clone()].into();
-                    obj.base_replacement_definitions = std::sync::Arc::new(vec![substitution]);
-                }
-                (runner, lich)
+                )
             };
 
             // Positive control: the loss branch completes with its tail once.
@@ -3871,7 +3880,69 @@ mod tests {
                 1
             );
 
-            // Hostile path: a real life-loss counter overflow rejects the answer
+            // Hostile path: the life-lost counter saturates at u32::MAX and the
+            // answer completes like the control.
+            let (mut runner, lich) = setup(u32::MAX - 1);
+            let initial_hand = runner.state().players[0].hand.len();
+            act_ok(&mut runner, gain(P0, 4));
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ChooseOneOfBranch { .. }
+            ));
+            assert_eq!(
+                runner.state().objects[&lich].replacement_definitions.len(),
+                1
+            );
+
+            runner
+                .act(GameAction::ChooseBranch { index: 0 })
+                .expect("the loss branch saturates the life-lost counter");
+            assert_eq!(life(&runner, P0), 18);
+            assert_eq!(runner.state().players[0].life_lost_this_turn, u32::MAX);
+            assert_eq!(
+                runner.state().players[0].hand.len(),
+                initial_hand + 1,
+                "the replacement tail runs once"
+            );
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(!runner.state().has_post_replacement_drain());
+            assert_eq!(
+                runner.state().objects[&lich].replacement_definitions.len(),
+                1
+            );
+        }
+
+        /// CR 608.2c + CR 614.6: an unrepresentable branch answer (an energy
+        /// total past `u32::MAX`) restores the live prompt and interaction; a
+        /// legal alternate branch may re-pause, then its nested choice and the
+        /// replacement tail each resolve once.
+        #[test]
+        fn interactive_lich_branch_rejects_energy_overflow_then_resumes_valid_nested_choice() {
+            let setup = |energy| {
+                interactive_lich(
+                    Effect::GainEnergy {
+                        amount: QuantityExpr::Fixed { value: 2 },
+                    },
+                    |runner| runner.state_mut().players[0].energy = energy,
+                )
+            };
+
+            // Positive control: the energy branch reaches u32::MAX exactly.
+            let (mut control, _) = setup(u32::MAX - 2);
+            act_ok(&mut control, gain(P0, 4));
+            assert!(matches!(
+                control.state().waiting_for,
+                WaitingFor::ChooseOneOfBranch { .. }
+            ));
+            control
+                .act(GameAction::ChooseBranch { index: 0 })
+                .expect("the representable energy branch completes");
+            assert_eq!(control.state().players[0].energy, u32::MAX);
+
+            // Hostile path: a real energy-total overflow rejects the answer
             // without deleting the replacement source to force the outcome.
             let (mut runner, lich) = setup(u32::MAX - 1);
             let initial_hand = runner.state().players[0].hand.len();
@@ -3888,8 +3959,14 @@ mod tests {
 
             let error = runner
                 .act(GameAction::ChooseBranch { index: 0 })
-                .expect_err("the loss branch overflows the life-lost counter");
-            assert_not_representable(&error);
+                .expect_err("the energy branch overflows the energy total");
+            assert!(
+                matches!(
+                    error,
+                    EngineError::LifeChangeUnrepresentable { player } if player == P0
+                ),
+                "expected the typed unrepresentable rejection for P0, got {error:?}"
+            );
             assert_eq!(
                 runner.state(),
                 &prompt_entry,
@@ -3911,7 +3988,7 @@ mod tests {
                 "the valid alternate opens its nested choice"
             );
             assert_eq!(life(&runner, P0), 20);
-            assert_eq!(runner.state().players[0].life_lost_this_turn, u32::MAX - 1);
+            assert_eq!(runner.state().players[0].energy, u32::MAX - 1);
             assert_eq!(runner.state().players[0].hand.len(), initial_hand);
 
             runner
@@ -3923,7 +4000,7 @@ mod tests {
             ));
             assert_eq!(runner.state().players[0].hand.len(), initial_hand + 2);
             assert_eq!(life(&runner, P0), 20);
-            assert_eq!(runner.state().players[0].life_lost_this_turn, u32::MAX - 1);
+            assert_eq!(runner.state().players[0].energy, u32::MAX - 1);
             assert!(!runner.state().has_post_replacement_drain());
             assert_eq!(
                 runner.state().objects[&lich].replacement_definitions.len(),
@@ -3932,10 +4009,10 @@ mod tests {
         }
 
         /// Older parked replacement payloads omit the policy and deserialize
-        /// as `IgnoreImpossible`; a resumed public action still rejects and
-        /// restores on the ingress life window's recorded failure.
+        /// as `IgnoreImpossible`; a resumed public action whose gain would pass
+        /// `i32::MAX` lands on the limit and reports the rules amount.
         #[test]
-        fn legacy_pending_replacement_policy_still_rejects_public_overflow() {
+        fn legacy_pending_replacement_policy_resumes_and_saturates() {
             let mut scenario = scenario();
             scenario.with_life(P0, i32::MAX - 1);
             add_card(&mut scenario, P0, "Boon Reflection");
@@ -3973,30 +4050,37 @@ mod tests {
                 UnrepresentablePolicy::IgnoreImpossible
             );
 
-            let mut rejected = false;
+            let mut events = Vec::new();
             for _ in 0..4 {
-                let prompt_entry = runner.state().clone();
-                match runner.act(GameAction::ChooseReplacement { index: 0 }) {
-                    Ok(_)
-                        if matches!(
-                            runner.state().waiting_for,
-                            WaitingFor::ReplacementChoice { .. }
-                        ) =>
-                    {
-                        continue
-                    }
-                    Ok(_) => panic!("the overflowed legacy gain must not complete"),
-                    Err(error) => {
-                        assert_not_representable(&error);
-                        assert_eq!(runner.state(), &prompt_entry);
-                        rejected = true;
-                        break;
-                    }
+                if !replacement_prompt_open(&runner) {
+                    break;
                 }
+                let result = runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("every answer of the saturating legacy gain is accepted");
+                events.extend(result.events);
             }
             assert!(
-                rejected,
-                "the old policy must not turn public overflow into success"
+                !replacement_prompt_open(&runner),
+                "the legacy gain must complete"
+            );
+            assert_eq!(life(&runner, P0), i32::MAX);
+            let gained = runner.state().players[0].life_gained_this_turn;
+            assert!(
+                gained == 7 || gained == 8,
+                "Boon first 3→6→7, Leyline first 3→4→8; got {gained}"
+            );
+            let amounts: Vec<i32> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::LifeChanged { amount, .. } => Some(*amount),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                amounts,
+                vec![i32::try_from(gained).unwrap()],
+                "one LifeChanged reports the rules amount"
             );
         }
 
@@ -4027,58 +4111,78 @@ mod tests {
             assert_eq!(life(&runner, P0), expected);
         }
 
-        /// Unrepresentable final results are rejected unchanged by the action
-        /// boundary — no wrap, no clamp.
+        /// A debug life change whose result would pass a limit saturates: the
+        /// life total stops at the `i32` limit it moves toward and the per-turn
+        /// counters at `u32::MAX`, and the change is still a real life-change
+        /// event.
         #[test]
-        fn debug_life_change_rejects_unrepresentable_results_unchanged() {
+        fn debug_life_change_saturates_at_the_limits() {
             type Setup = fn(&mut GameState);
-            let cases: [(Setup, GameAction); 4] = [
-                (|s| s.players[0].life = i32::MAX - 1, gain(P0, 2)),
-                (|s| s.players[0].life = i32::MIN + 1, lose(P0, 2)),
-                (
-                    |s| s.players[0].life_gained_this_turn = u32::MAX - 1,
-                    gain(P0, 2),
-                ),
-                (
-                    |s| s.players[0].life_lost_this_turn = u32::MAX - 1,
-                    lose(P0, 2),
-                ),
-            ];
-            for (index, (setup, action)) in cases.into_iter().enumerate() {
+            let run = |setup: Setup, action: GameAction| {
                 let mut scenario = scenario();
                 let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
                 let mut runner = debug_runner(scenario);
                 setup(runner.state_mut());
-                let before = runner.state().players[0].clone();
-                let revision = runner.state().state_revision;
+                act_ok(&mut runner, action);
+                (runner, mate)
+            };
 
-                let error = runner
-                    .act(action)
-                    .expect_err(&format!("case {index} must be rejected"));
-                assert_not_representable(&error);
-                let after = &runner.state().players[0];
-                assert_eq!(after.life, before.life, "case {index}");
-                assert_eq!(
-                    after.life_gained_this_turn, before.life_gained_this_turn,
-                    "case {index}"
-                );
-                assert_eq!(
-                    after.life_lost_this_turn, before.life_lost_this_turn,
-                    "case {index}"
-                );
-                assert_eq!(runner.state().state_revision, revision, "case {index}");
-                assert!(runner.state().stack.is_empty(), "case {index}");
-                assert_eq!(p1p1(&runner, mate), 0, "case {index}");
-            }
+            // Gain 2 at i32::MAX - 1 lands on i32::MAX and still triggers.
+            let (mut runner, mate) = run(|s| s.players[0].life = i32::MAX - 1, gain(P0, 2));
+            assert_eq!(life(&runner, P0), i32::MAX);
+            assert_eq!(runner.state().players[0].life_gained_this_turn, 2);
+            assert_eq!(
+                runner.state().stack.len(),
+                1,
+                "the Pridemate trigger is on the stack"
+            );
+            runner.advance_until_stack_empty();
+            assert_eq!(p1p1(&runner, mate), 1);
+
+            // CR 704.5a: lose 2 at i32::MIN + 1 lands on i32::MIN and P0 loses.
+            let (runner, mate) = run(|s| s.players[0].life = i32::MIN + 1, lose(P0, 2));
+            assert_eq!(life(&runner, P0), i32::MIN);
+            assert_eq!(runner.state().players[0].life_lost_this_turn, 2);
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::GameOver { winner: Some(winner) } if winner == P1
+                ),
+                "got {:?}",
+                runner.state().waiting_for
+            );
+            assert_eq!(p1p1(&runner, mate), 0);
+
+            // The gained-this-turn counter saturates at u32::MAX.
+            let (mut runner, mate) = run(
+                |s| s.players[0].life_gained_this_turn = u32::MAX - 1,
+                gain(P0, 2),
+            );
+            assert_eq!(life(&runner, P0), 22);
+            assert_eq!(runner.state().players[0].life_gained_this_turn, u32::MAX);
+            runner.advance_until_stack_empty();
+            assert_eq!(p1p1(&runner, mate), 1);
+
+            // The lost-this-turn counter saturates at u32::MAX.
+            let (runner, mate) = run(
+                |s| s.players[0].life_lost_this_turn = u32::MAX - 1,
+                lose(P0, 2),
+            );
+            assert_eq!(life(&runner, P0), 18);
+            assert_eq!(runner.state().players[0].life_lost_this_turn, u32::MAX);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert_eq!(p1p1(&runner, mate), 0);
         }
 
-        /// The final gain edit is the representability authority: Rhox Faithmender
-        /// ("If you would gain life, you gain twice that much life instead.")
-        /// doubles a requested 1 to 2, and a life total of `i32::MAX - 1` cannot
-        /// take it. The action is rejected unchanged; one below the limit it
-        /// applies in full.
+        /// Rhox Faithmender ("If you would gain life, you gain twice that much
+        /// life instead.") doubles a requested 1 to 2. One below the limit it
+        /// applies in full; at `i32::MAX - 1` the total lands on `i32::MAX` and
+        /// the gain reports the doubled rules amount.
         #[test]
-        fn debug_gain_final_life_overflow_after_a_parsed_doubler_is_rejected_unchanged() {
+        fn debug_gain_after_a_parsed_doubler_saturates_the_life_total() {
             // Accepted control: 1 doubled to 2 reaches i32::MAX exactly.
             let mut scenario = scenario();
             scenario.with_life(P0, i32::MAX - 2);
@@ -4095,17 +4199,30 @@ mod tests {
             let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
             add_card(&mut scenario, P0, "Rhox Faithmender");
             let mut runner = debug_runner(scenario);
-            let before = rollback_set(&runner, mate);
-            let error = runner
-                .act(gain(P0, 1))
-                .expect_err("a doubled gain past i32::MAX must be rejected, not panic");
-            assert_not_representable(&error);
-            assert_eq!(rollback_set(&runner, mate), before);
+            let result = act_ok(&mut runner, gain(P0, 1));
+            assert_eq!(life(&runner, P0), i32::MAX);
+            assert_eq!(runner.state().players[0].life_gained_this_turn, 2);
+            let amounts: Vec<i32> = result
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::LifeChanged { amount, .. } => Some(*amount),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                amounts,
+                vec![2],
+                "the gain reports the doubled rules amount"
+            );
+            runner.advance_until_stack_empty();
+            assert_eq!(p1p1(&runner, mate), 1);
         }
 
-        /// The gained-this-turn counter is checked by the same final edit.
+        /// The gained-this-turn counter saturates at `u32::MAX` in the same
+        /// final edit.
         #[test]
-        fn debug_gain_final_counter_overflow_after_a_parsed_doubler_is_rejected_unchanged() {
+        fn debug_gain_after_a_parsed_doubler_saturates_the_gained_counter() {
             let mut scenario = scenario();
             let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
             add_card(&mut scenario, P0, "Rhox Faithmender");
@@ -4121,21 +4238,19 @@ mod tests {
             add_card(&mut scenario, P0, "Rhox Faithmender");
             let mut runner = debug_runner(scenario);
             runner.state_mut().players[0].life_gained_this_turn = u32::MAX - 1;
-            let before = rollback_set(&runner, mate);
-            let error = runner
-                .act(gain(P0, 1))
-                .expect_err("a doubled gain past the per-turn counter must be rejected");
-            assert_not_representable(&error);
-            assert_eq!(rollback_set(&runner, mate), before);
+            act_ok(&mut runner, gain(P0, 1));
+            assert_eq!(runner.state().players[0].life_gained_this_turn, u32::MAX);
+            assert_eq!(life(&runner, P0), 22);
+            runner.advance_until_stack_empty();
+            assert_eq!(p1p1(&runner, mate), 1);
         }
 
-        /// A choice-resumed delivery is rejected the same way: Rhox Faithmender
+        /// A choice-resumed delivery saturates the same way: Rhox Faithmender
         /// and Boon Reflection make the player order the doublers (CR 616.1),
-        /// 1 doubled twice is 4, and `i32::MAX - 3` cannot take it. The
-        /// delivering answer is rejected, the accepted proposal and prompt are
-        /// restored and stay answerable.
+        /// 1 doubled twice is 4, and from `i32::MAX - 3` the total lands on
+        /// `i32::MAX` while the gain counts 4.
         #[test]
-        fn debug_gain_choice_resumed_overflow_is_rejected_and_the_prompt_stays_answerable() {
+        fn debug_gain_choice_resumed_gain_saturates() {
             // Accepted control: i32::MAX - 4 + 4 reaches i32::MAX.
             let mut scenario = scenario();
             scenario.with_life(P0, i32::MAX - 4);
@@ -4171,16 +4286,19 @@ mod tests {
                 Some(UnrepresentablePolicy::Reject),
                 "reach guard: a debug gain's parked proposal is stamped for rejection"
             );
-            assert_choice_rejected_and_still_answerable(&mut runner, mate);
-            assert_eq!(life(&runner, P0), i32::MAX - 3);
+            answer_to_completion(&mut runner);
+            assert_eq!(life(&runner, P0), i32::MAX);
+            assert_eq!(runner.state().players[0].life_gained_this_turn, 4);
+            runner.advance_until_stack_empty();
+            assert_eq!(p1p1(&runner, mate), 1);
         }
 
         /// CR 616.1f: a re-parked record keeps the rejection stamp. Three
         /// doublers re-park the ordering prompt after the first answer; the
-        /// delivering (third) application of 1 -> 2 -> 4 -> 8 overflows
-        /// `i32::MAX - 7` and is rejected.
+        /// delivering (third) application of 1 -> 2 -> 4 -> 8 from
+        /// `i32::MAX - 7` lands on `i32::MAX` and counts 8.
         #[test]
-        fn debug_gain_reparked_choice_keeps_the_rejection_stamp() {
+        fn debug_gain_reparked_choice_keeps_the_rejection_stamp_then_saturates() {
             // Accepted control: i32::MAX - 8 + 8 reaches i32::MAX.
             let mut scenario = scenario();
             scenario.with_life(P0, i32::MAX - 8);
@@ -4227,8 +4345,11 @@ mod tests {
                 UnrepresentablePolicy::Reject,
                 "the re-parked record must keep the rejection stamp"
             );
-            assert_choice_rejected_and_still_answerable(&mut runner, mate);
-            assert_eq!(life(&runner, P0), i32::MAX - 7);
+            answer_to_completion(&mut runner);
+            assert_eq!(life(&runner, P0), i32::MAX);
+            assert_eq!(runner.state().players[0].life_gained_this_turn, 8);
+            runner.advance_until_stack_empty();
+            assert_eq!(p1p1(&runner, mate), 1);
         }
 
         /// Puts one P0 permanent per entry of `factors` in play, each carrying a
@@ -4430,100 +4551,106 @@ mod tests {
             assert_eq!(runner.state().replacement_quantity_overflow, None);
         }
 
-        /// One parsed doubler: the final loss overflows the life total
-        /// (`i32::MIN + 3` losing 2 doubled to 4) or the lost-this-turn counter
-        /// (`u32::MAX - 3` losing 2 doubled to 4), and is rejected unchanged; one
-        /// below each limit applies.
+        /// One parsed doubler: the final loss (2 doubled to 4) reaches or would
+        /// pass the life total's limit (`i32::MIN + 4` / `i32::MIN + 3`) or the
+        /// lost-this-turn counter's (`u32::MAX - 4` / `u32::MAX - 3`); each lands
+        /// on the limit and counts the rules amount. CR 704.5a: a P1 life total
+        /// at or below 0 ends the game for P0.
         #[test]
-        fn debug_lose_final_overflow_after_a_parsed_doubler_is_rejected_unchanged() {
-            // (case, P1 life, P1 lost-this-turn counter, accepted result)
-            type LossCase = (&'static str, i32, u32, Option<(i32, u32)>);
+        fn debug_lose_final_after_a_parsed_doubler_saturates() {
+            // (case, P1 life, P1 lost-this-turn counter, result)
+            type LossCase = (&'static str, i32, u32, (i32, u32));
             let cases: [LossCase; 4] = [
-                ("life total, accepted", i32::MIN + 4, 0, Some((i32::MIN, 4))),
-                ("life total, rejected", i32::MIN + 3, 0, None),
-                ("counter, accepted", 20, u32::MAX - 4, Some((16, u32::MAX))),
-                ("counter, rejected", 20, u32::MAX - 3, None),
+                ("life total, exact", i32::MIN + 4, 0, (i32::MIN, 4)),
+                ("life total, saturated", i32::MIN + 3, 0, (i32::MIN, 4)),
+                ("counter, exact", 20, u32::MAX - 4, (16, u32::MAX)),
+                ("counter, saturated", 20, u32::MAX - 3, (16, u32::MAX)),
             ];
-            for (name, start_life, lost_counter, accepted) in cases {
+            for (name, start_life, lost_counter, (life_after, counter_after)) in cases {
                 let mut scenario = scenario();
                 scenario.with_life(P1, start_life);
-                let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
+                add_card(&mut scenario, P0, "Ajani's Pridemate");
                 let mut runner = debug_runner(scenario);
                 runner.state_mut().players[1].life_lost_this_turn = lost_counter;
                 add_bloodletters(&mut runner, 1);
-                match accepted {
-                    Some((life_after, counter_after)) => {
-                        act_ok(&mut runner, lose(P1, 2));
-                        answer_to_completion(&mut runner);
-                        let player = &runner.state().players[1];
-                        assert_eq!(
-                            (player.life, player.life_lost_this_turn),
-                            (life_after, counter_after),
-                            "{name}: the doubled loss (2 -> 4) must apply in full"
-                        );
-                    }
-                    None => submit_expecting_rejection(&mut runner, mate, lose(P1, 2)),
-                }
+                act_ok(&mut runner, lose(P1, 2));
+                answer_to_completion(&mut runner);
+                let player = &runner.state().players[1];
+                assert_eq!(
+                    (player.life, player.life_lost_this_turn),
+                    (life_after, counter_after),
+                    "{name}: the doubled loss (2 -> 4) must apply, stopping at the limit"
+                );
+                assert_eq!(
+                    matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::GameOver { winner: Some(winner) } if winner == P0
+                    ),
+                    life_after <= 0,
+                    "{name}: got {:?}",
+                    runner.state().waiting_for
+                );
             }
         }
 
-        /// A cross-event substitute of the ingress gain is held to the same rule:
+        /// A cross-event substitute of the ingress gain saturates the same way:
         /// Tainted Remedy ("If an opponent would gain life, that player loses
         /// that much life instead.") turns P0's gain of 2 into a loss of 2, and
-        /// that substituted loss is not representable, so the action is rejected
-        /// instead of the loss being silently skipped.
+        /// that substituted loss stops at `i32::MIN` and at a lost-this-turn
+        /// counter of `u32::MAX`. CR 704.5a: a P0 life total at or below 0 ends
+        /// the game for P1.
         #[test]
-        fn debug_gain_replaced_by_an_unrepresentable_substitute_loss_is_rejected() {
-            // (life total, per-turn lost counter, gain, accepted)
+        fn debug_gain_replaced_by_a_substitute_loss_saturates() {
+            // (life total, per-turn lost counter, gain, expected life, expected lost)
             let cases = [
-                (i32::MIN + 2, 0, 2, true),
-                (i32::MIN + 1, 0, 2, false),
-                (20, u32::MAX - 2, 2, true),
-                (20, u32::MAX - 1, 2, false),
+                (i32::MIN + 2, 0, 2, i32::MIN, 2),
+                (i32::MIN + 1, 0, 2, i32::MIN, 2),
+                (20, u32::MAX - 2, 2, 18, u32::MAX),
+                (20, u32::MAX - 1, 2, 18, u32::MAX),
             ];
-            for (start_life, lost_counter, amount, accepted) in cases {
+            for (start_life, lost_counter, amount, expected_life, expected_lost) in cases {
                 let mut scenario = scenario();
                 scenario.with_life(P0, start_life);
                 let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
                 add_card(&mut scenario, P1, "Tainted Remedy");
                 let mut runner = debug_runner(scenario);
                 runner.state_mut().players[0].life_lost_this_turn = lost_counter;
-                if accepted {
-                    act_ok(&mut runner, gain(P0, amount));
-                    let player = &runner.state().players[0];
-                    assert_eq!(
-                        player.life_gained_this_turn, 0,
-                        "reach guard: the gain was replaced by a loss (start {start_life})"
-                    );
-                    assert_eq!(
-                        player.life,
-                        start_life - amount as i32,
-                        "the substituted loss applies when representable"
-                    );
-                    assert_eq!(p1p1(&runner, mate), 0, "no gain occurred, so no trigger");
-                } else {
-                    let before = rollback_set(&runner, mate);
-                    let error = runner
-                        .act(gain(P0, amount))
-                        .expect_err("an unrepresentable substituted loss must reject the action");
-                    assert_not_representable(&error);
-                    assert_eq!(rollback_set(&runner, mate), before);
-                }
+                act_ok(&mut runner, gain(P0, amount));
+                let player = &runner.state().players[0];
+                assert_eq!(
+                    player.life_gained_this_turn, 0,
+                    "reach guard: the gain was replaced by a loss (start {start_life})"
+                );
+                assert_eq!(
+                    (player.life, player.life_lost_this_turn),
+                    (expected_life, expected_lost),
+                    "the substituted loss applies, stopping at the limit (start {start_life})"
+                );
+                assert_eq!(p1p1(&runner, mate), 0, "no gain occurred, so no trigger");
+                assert_eq!(
+                    matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::GameOver { winner: Some(winner) } if winner == P1
+                    ),
+                    expected_life <= 0,
+                    "start {start_life}: got {:?}",
+                    runner.state().waiting_for
+                );
             }
         }
 
         /// The substitute can also be chosen at the ordering prompt. Tainted
         /// Remedy and Boon Reflection ("If you would gain life, you gain twice
         /// that much life instead.") both apply to P0's gain, so the player
-        /// orders them (CR 616.1). The overflow is in the lost-this-turn counter
-        /// (`u32::MAX`), never the life total: a life total at or below 0 would
+        /// orders them (CR 616.1). The limit is the lost-this-turn counter's
+        /// (`u32::MAX`), never the life total's: a life total at or below 0 would
         /// make the action boundary's state-based actions end the game before
         /// the prompt could be observed (CR 704.5a), so P0 stays at 20 life.
-        /// At `u32::MAX` both orders end in an unrepresentable loss (lose 1, or
-        /// gain 2 then lose 2); whichever answer delivers it is rejected and the
-        /// prompt stays answerable. At `u32::MAX - 2` both orders apply.
+        /// At `u32::MAX` both orders end in a loss (lose 1, or gain 2 then lose
+        /// 2) whose counter stays at `u32::MAX`. At `u32::MAX - 2` both orders
+        /// apply in full.
         #[test]
-        fn debug_gain_resumed_substitute_loss_overflow_is_rejected_and_answerable() {
+        fn debug_gain_resumed_substitute_loss_saturates_the_lost_counter() {
             let mut scenario = scenario();
             add_card(&mut scenario, P0, "Boon Reflection");
             add_card(&mut scenario, P1, "Tainted Remedy");
@@ -4563,9 +4690,17 @@ mod tests {
                 Some(UnrepresentablePolicy::Reject),
                 "reach guard: a debug gain's parked proposal is stamped for rejection"
             );
-            assert_choice_rejected_and_still_answerable(&mut runner, mate);
+            answer_to_completion(&mut runner);
             let player = &runner.state().players[0];
-            assert_eq!((player.life, player.life_lost_this_turn), (20, u32::MAX));
+            assert!(
+                (player.life, player.life_lost_this_turn) == (19, u32::MAX)
+                    || (player.life, player.life_lost_this_turn) == (18, u32::MAX),
+                "Tainted first loses 1 (19, MAX); Boon first gains 2 then loses 2 (18, MAX); \
+                 got ({}, {})",
+                player.life,
+                player.life_lost_this_turn
+            );
+            assert_eq!(p1p1(&runner, mate), 0, "no gain occurred, so no trigger");
         }
 
         /// The sandbox audit log describes both actions (engine-owned wording).
@@ -6037,6 +6172,56 @@ mod tests {
                 // (an opponent's counters, halved, rounded down) turns 1 into 0;
                 // P1's own Halving Season does not apply to P1's counters.
                 assert_eq!(p1p1(&runner, bears), 0);
+            }
+
+            /// Older parked replacement payloads omit the policy and deserialize
+            /// as `IgnoreImpossible`; a resumed public energy give still rejects
+            /// and restores on the ingress window's recorded failure.
+            #[test]
+            fn legacy_pending_energy_policy_still_rejects_public_overflow() {
+                let park_legacy = |preset: u32| {
+                    let (mut runner, p0_vorinclex, _) =
+                        parked_pair_give(Resource::Energy, preset, 3);
+                    let mut legacy_json = serde_json::to_value(
+                        runner
+                            .state()
+                            .pending_replacement
+                            .as_ref()
+                            .expect("the ordering prompt owns a pending replacement"),
+                    )
+                    .expect("pending replacement serializes");
+                    legacy_json
+                        .as_object_mut()
+                        .expect("pending replacement serializes as an object")
+                        .remove("unrepresentable_life_change");
+                    runner.state_mut().pending_replacement = Some(
+                        serde_json::from_value::<PendingReplacement>(legacy_json)
+                            .expect("old payload shape deserializes"),
+                    );
+                    assert_eq!(
+                        parked_policy(&runner),
+                        Some(UnrepresentablePolicy::IgnoreImpossible),
+                        "reach guard: the stripped field deserializes as the legacy policy"
+                    );
+                    let doubler = candidate_index(&runner, p0_vorinclex);
+                    (runner, doubler)
+                };
+
+                // Doubler first: 3 -> 6 -> 3 passes u32::MAX from u32::MAX - 2.
+                let (mut runner, doubler) = park_legacy(u32::MAX - 2);
+                let entry = runner.state().clone();
+                let error = runner
+                    .act(GameAction::ChooseReplacement { index: doubler })
+                    .expect_err("the old policy must not turn public overflow into success");
+                assert_unrepresentable_for(&error, P1);
+                assert_eq!(runner.state(), &entry);
+
+                // Control: one lower lands exactly on the limit.
+                let (mut runner, doubler) = park_legacy(u32::MAX - 3);
+                runner
+                    .act(GameAction::ChooseReplacement { index: doubler })
+                    .expect("a representable legacy delivery must be accepted");
+                assert_eq!(Resource::Energy.get(&runner, P1), u32::MAX);
             }
         }
     }

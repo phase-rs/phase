@@ -1175,6 +1175,7 @@ mod lictor_opponent_entered_this_turn;
 mod life_and_limb_sylvan_advocate;
 mod life_at_stake_both_choosers_6965;
 mod life_changed_this_turn_quantity;
+mod life_total_saturation;
 mod lifeblood_hydra_shared_equal_to_quantity;
 mod lightning_dart_disjunctive_color_instead;
 mod liliana_dreadhorde_multi_dies;

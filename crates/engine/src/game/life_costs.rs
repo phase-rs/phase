@@ -55,7 +55,10 @@ pub enum PayLifeCostResult {
     },
     /// CR 118.3: Player's life total is below `amount` — cost can't be paid.
     /// Also returned when the post-replacement deduction is not representable
-    /// (life total or lost-this-turn counter overflow).
+    /// (a final amount past the engine's `i32` delta, an overflowed replacement
+    /// quantity, or a nested player-counter or energy settlement that
+    /// overflows; the life total and the lost-this-turn counter saturate
+    /// instead).
     InsufficientLife,
     /// CR 119.8 / CR 118.3: A static prohibition makes the cost unpayable.
     Prohibited,
@@ -238,7 +241,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ChooseOneOfKind, ControllerRef, Effect, PlayerFilter,
-        QuantityModification, ReplacementDefinition, StaticDefinition, TargetFilter, TypedFilter,
+        QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition, StaticDefinition,
+        TargetFilter, TypedFilter,
     };
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
@@ -420,32 +424,31 @@ mod tests {
         assert!(events.is_empty());
     }
 
-    /// A payment that is affordable but whose deduction the engine cannot
-    /// record (the lost-this-turn counter would overflow) reports the existing
-    /// unpayable variant and leaves life and counters untouched; one below the
-    /// limit pays normally.
+    /// CR 119.4: a payment whose deduction would pass the lost-this-turn
+    /// counter's `u32::MAX` is paid: the counter saturates and the payment
+    /// reports the full amount; one below the limit pays normally.
     #[test]
-    fn pay_life_unrepresentable_deduction_returns_insufficient_unmutated() {
+    fn pay_life_deduction_saturates_the_lost_counter() {
         let mut state = GameState::new_two_player(42);
         state.players[0].life_lost_this_turn = u32::MAX - 1;
         let mut events = Vec::new();
 
-        assert!(
-            can_pay_life_cost(&state, PlayerId(0), 2),
-            "reach guard: the payment is affordable, so only representability fails"
-        );
         let result = pay_life_as_cost(&mut state, PlayerId(0), 2, &mut events);
 
-        assert_eq!(result, PayLifeCostResult::InsufficientLife);
-        assert_eq!(state.players[0].life, 20);
-        assert_eq!(state.players[0].life_lost_this_turn, u32::MAX - 1);
+        assert_eq!(result, PayLifeCostResult::Paid { amount: 2 });
+        assert_eq!(state.players[0].life, 18);
+        assert_eq!(state.players[0].life_lost_this_turn, u32::MAX);
         assert_eq!(state.players[0].life_gained_this_turn, 0);
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, GameEvent::LifeChanged { .. })),
-            "no life change may be announced for an unrepresentable payment: {events:?}"
-        );
+        let life_changes: Vec<(PlayerId, i32)> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::LifeChanged {
+                    player_id, amount, ..
+                } => Some((*player_id, *amount)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(life_changes, vec![(PlayerId(0), -2)]);
         assert_eq!(
             state.ingress_life_window, None,
             "the ingress window must be closed after the call"
@@ -454,8 +457,79 @@ mod tests {
         state.players[0].life_lost_this_turn = u32::MAX - 2;
         let result = pay_life_as_cost(&mut state, PlayerId(0), 2, &mut events);
         assert_eq!(result, PayLifeCostResult::Paid { amount: 2 });
-        assert_eq!(state.players[0].life, 18);
+        assert_eq!(state.players[0].life, 16);
         assert_eq!(state.players[0].life_lost_this_turn, u32::MAX);
+    }
+
+    /// A payment that is affordable but whose replaced deduction the engine
+    /// cannot record reports the existing unpayable variant and leaves the
+    /// state untouched. The synthetic substitute turns the loss into an energy
+    /// gain of the same amount (CR 614.6), and an energy total past `u32::MAX`
+    /// is unrepresentable. Reach-guard control: with room for the energy, the
+    /// substitute replaces the loss and the cost is still paid (CR 118.11).
+    #[test]
+    fn pay_life_reports_a_nested_unrepresentable_settlement_as_insufficient_life() {
+        let board = |energy: u32| {
+            let mut state = GameState::new_two_player(42);
+            state.players[0].energy = energy;
+            let source = create_object(
+                &mut state,
+                CardId(905),
+                PlayerId(0),
+                "Energy Substitute".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .replacement_definitions =
+                vec![
+                    ReplacementDefinition::new(ReplacementEvent::LoseLife).execute(
+                        AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::GainEnergy {
+                                amount: QuantityExpr::Ref {
+                                    qty: QuantityRef::EventContextAmount,
+                                },
+                            },
+                        ),
+                    ),
+                ]
+                .into();
+            state
+        };
+
+        let mut control = board(0);
+        let mut events = Vec::new();
+        let result = pay_life_as_cost(&mut control, PlayerId(0), 2, &mut events);
+        assert_eq!(result, PayLifeCostResult::Paid { amount: 2 });
+        assert_eq!(control.players[0].life, 20);
+        assert_eq!(control.players[0].energy, 2);
+
+        let mut state = board(u32::MAX);
+        let mut events = Vec::new();
+        assert!(
+            can_pay_life_cost(&state, PlayerId(0), 2),
+            "reach guard: the payment is affordable, so only representability fails"
+        );
+        let result = pay_life_as_cost(&mut state, PlayerId(0), 2, &mut events);
+
+        assert_eq!(result, PayLifeCostResult::InsufficientLife);
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.players[0].life_lost_this_turn, 0);
+        assert_eq!(state.players[0].energy, u32::MAX);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::LifeChanged { .. } | GameEvent::EnergyChanged { .. }
+            )),
+            "no resource change may be announced for an unrepresentable payment: {events:?}"
+        );
+        assert_eq!(
+            state.ingress_life_window, None,
+            "the ingress window must be closed after the call"
+        );
     }
 
     /// CR 119.8: CantLoseLife → cost can't be paid; life total unchanged.

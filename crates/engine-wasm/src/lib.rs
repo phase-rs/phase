@@ -3490,9 +3490,14 @@ fn resume_multiplayer_host_state_inner(
 mod restored_card_db_requirements_tests {
     use super::*;
 
-    fn legacy_ready_gain_state_json(life_gained_this_turn: u32) -> String {
+    /// A trusted legacy Resolve All Ready host state whose stack entry is P0's
+    /// ability with `effect`, after `preset` adjusts P0.
+    fn legacy_ready_effect_state_json(
+        effect: engine::types::ability::Effect,
+        preset: impl FnOnce(&mut engine::types::player::Player),
+    ) -> String {
         let mut state = legacy_ready_state();
-        state.players[0].life_gained_this_turn = life_gained_this_turn;
+        preset(&mut state.players[0]);
         let entry = state
             .stack
             .front_mut()
@@ -3502,10 +3507,7 @@ mod restored_card_db_requirements_tests {
         entry.kind = engine::types::game_state::StackEntryKind::ActivatedAbility {
             source_id: source,
             ability: Box::new(engine::types::ability::ResolvedAbility::new(
-                engine::types::ability::Effect::GainLife {
-                    amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
-                    player: engine::types::ability::TargetFilter::Controller,
-                },
+                effect,
                 vec![],
                 source,
                 PlayerId(0),
@@ -3514,6 +3516,78 @@ mod restored_card_db_requirements_tests {
         state.capture_rng_word_pos();
         serde_json::to_string(&TrustedGameStateEnvelope::capture(state))
             .expect("trusted host state serializes")
+    }
+
+    fn legacy_ready_gain_state_json(life_gained_this_turn: u32) -> String {
+        legacy_ready_effect_state_json(
+            engine::types::ability::Effect::GainLife {
+                amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                player: engine::types::ability::TargetFilter::Controller,
+            },
+            |player| player.life_gained_this_turn = life_gained_this_turn,
+        )
+    }
+
+    fn legacy_ready_energy_state_json(energy: u32) -> String {
+        legacy_ready_effect_state_json(
+            engine::types::ability::Effect::GainEnergy {
+                amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+            },
+            |player| player.energy = energy,
+        )
+    }
+
+    /// The AI session the cache holds for `state` now.
+    fn cached_ai_session(state: &GameState) -> Arc<AiSession> {
+        AI_SESSION_CACHE.with(|cell| {
+            let mut cache = cell.take();
+            let session = cache.get_or_build(state);
+            cell.set(cache);
+            session
+        })
+    }
+
+    /// The host-resume authorities a fresh-host install resets, as seeded by
+    /// [`seed_host_resume_authorities`].
+    struct SeededHostAuthorities {
+        cached_state: GameState,
+        cached_before: Arc<AiSession>,
+        token: String,
+        generation_before: u64,
+    }
+
+    /// Seeds a cached AI session, a replay recording and an outstanding AI
+    /// proposal, with reach guards that each is live.
+    fn seed_host_resume_authorities() -> SeededHostAuthorities {
+        let cached_state = legacy_ready_state();
+        let cached_before = cached_ai_session(&cached_state);
+        REPLAY_LOG.with(|cell| {
+            cell.set(Some(ReplayLog::new(ReplayHeader {
+                format_config: FormatConfig::standard(),
+                match_config: MatchConfig::default(),
+                player_count: 2,
+                first_player: Some(0),
+                seed: 7,
+                deck_data: None,
+            })));
+        });
+        let token = AI_PROPOSALS.with(|registry| {
+            registry.borrow_mut().insert(AiDecisionContract {
+                semantic_owner: PlayerId(0),
+                authorized_actor: PlayerId(0),
+                state_revision: 0,
+                candidates: Vec::new(),
+            })
+        });
+        let generation_before = AI_PROPOSALS.with(|registry| registry.borrow().generation);
+        assert!(has_replay_recording());
+        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_some()));
+        SeededHostAuthorities {
+            cached_state,
+            cached_before,
+            token,
+            generation_before,
+        }
     }
 
     #[test]
@@ -3630,44 +3704,65 @@ mod restored_card_db_requirements_tests {
         assert!(!is_multiplayer_mode());
     }
 
+    /// A saved legacy Ready gain whose gained-this-turn counter would pass
+    /// `u32::MAX` installs: the counter saturates, the host game is installed
+    /// and claimed, and the install resets the host-resume authorities.
     #[test]
-    fn multiplayer_host_resume_clears_failed_automation_install_and_allows_retry() {
+    fn multiplayer_host_resume_installs_a_saved_gain_that_saturates_the_gained_counter() {
         clear_game_state();
         set_multiplayer_mode(false);
         load_minimal_test_card_database();
+        let seeded = seed_host_resume_authorities();
 
-        let cached_state = legacy_ready_state();
-        let cached_before = AI_SESSION_CACHE.with(|cell| {
-            let mut cache = cell.take();
-            let session = cache.get_or_build(&cached_state);
-            cell.set(cache);
-            session
-        });
-        REPLAY_LOG.with(|cell| {
-            cell.set(Some(ReplayLog::new(ReplayHeader {
-                format_config: FormatConfig::standard(),
-                match_config: MatchConfig::default(),
-                player_count: 2,
-                first_player: Some(0),
-                seed: 7,
-                deck_data: None,
-            })));
-        });
-        let token = AI_PROPOSALS.with(|registry| {
-            registry.borrow_mut().insert(AiDecisionContract {
-                semantic_owner: PlayerId(0),
-                authorized_actor: PlayerId(0),
-                state_revision: 0,
-                candidates: Vec::new(),
-            })
-        });
-        let generation_before = AI_PROPOSALS.with(|registry| registry.borrow().generation);
-        assert!(has_replay_recording());
-        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_some()));
+        let at_cap = legacy_ready_gain_state_json(u32::MAX);
+        let presentation = resume_multiplayer_host_state_inner(&at_cap)
+            .expect("host automation applies the gain and saturates the gained counter");
+        assert_eq!(
+            presentation.outcome,
+            RestoredStackAutomationOutcome::Progressed
+        );
+        assert!(game_state_present(), "the host state is installed");
+        assert!(is_multiplayer_mode(), "the host claim is kept");
+        assert!(
+            !has_replay_recording(),
+            "the abandoned recording is cleared"
+        );
+        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&seeded.token).is_none()));
+        assert_eq!(
+            AI_PROPOSALS.with(|registry| registry.borrow().generation),
+            seeded.generation_before.wrapping_add(1),
+            "the installed host invalidates outstanding proposals"
+        );
+        let cached_after = cached_ai_session(&seeded.cached_state);
+        assert!(
+            !Arc::ptr_eq(&seeded.cached_before, &cached_after),
+            "the installed host clears the cached AI session"
+        );
+        with_state(|state| {
+            assert_eq!(state.players[0].life_gained_this_turn, u32::MAX);
+            assert_eq!(state.players[0].life, 21);
+            assert!(state.stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        })
+        .expect("the resumed host game is installed");
 
-        let overflow = legacy_ready_gain_state_json(u32::MAX);
+        clear_game_state();
+        set_multiplayer_mode(false);
+    }
+
+    /// A saved legacy Ready energy gain past `u32::MAX` fails the host install:
+    /// the install is cleared, the claim released and the host-resume
+    /// authorities reset, and a representable retry installs immediately.
+    #[test]
+    fn multiplayer_host_resume_clears_failed_energy_automation_install_and_allows_retry() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let seeded = seed_host_resume_authorities();
+
+        let overflow = legacy_ready_energy_state_json(u32::MAX);
         let error = resume_multiplayer_host_state_inner(&overflow)
-            .expect_err("host automation must return the life-counter overflow");
+            .expect_err("host automation must return the energy overflow");
         assert_eq!(
             error,
             "Player-resource change is not representable for player PlayerId(0)"
@@ -3681,25 +3776,20 @@ mod restored_card_db_requirements_tests {
             !has_replay_recording(),
             "the abandoned recording is cleared"
         );
-        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_none()));
+        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&seeded.token).is_none()));
         assert_eq!(
             AI_PROPOSALS.with(|registry| registry.borrow().generation),
-            generation_before.wrapping_add(1),
+            seeded.generation_before.wrapping_add(1),
             "failed host installation invalidates outstanding proposals"
         );
-        let cached_after = AI_SESSION_CACHE.with(|cell| {
-            let mut cache = cell.take();
-            let session = cache.get_or_build(&cached_state);
-            cell.set(cache);
-            session
-        });
+        let cached_after = cached_ai_session(&seeded.cached_state);
         assert!(
-            !std::sync::Arc::ptr_eq(&cached_before, &cached_after),
+            !Arc::ptr_eq(&seeded.cached_before, &cached_after),
             "failed host installation clears the cached AI session"
         );
 
         // A second fresh-host attempt must work without an intervening clear/reset.
-        let representable = legacy_ready_gain_state_json(u32::MAX - 1);
+        let representable = legacy_ready_energy_state_json(u32::MAX - 1);
         let presentation = resume_multiplayer_host_state_inner(&representable)
             .expect("the representable saved automation can retry immediately");
         assert_eq!(
@@ -3709,8 +3799,8 @@ mod restored_card_db_requirements_tests {
         assert!(game_state_present());
         assert!(is_multiplayer_mode());
         with_state(|state| {
-            assert_eq!(state.players[0].life_gained_this_turn, u32::MAX);
-            assert_eq!(state.players[0].life, 21);
+            assert_eq!(state.players[0].energy, u32::MAX);
+            assert_eq!(state.players[0].life, 20);
             assert!(state.stack.is_empty());
             assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         })
