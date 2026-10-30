@@ -1264,7 +1264,10 @@ impl AcceptedOptionalMove {
 /// The result is read only from this producer's event slice (`producer_events`),
 /// restricted to the occurrences it selected and its requested destination. A
 /// completed instruction that moved nothing consumes its immediate dependent
-/// return locally with `NoOp` and clears that node's forwarded context; an
+/// return locally with `NoOp` and clears that node's forwarded context (a
+/// defensive fallback: a `SelfRef` move whose source can no longer move is
+/// declined before it is offered, CR 608.2d + CR 400.7, so no current fixture
+/// reaches this arm); an
 /// independent later sibling still resolves. An ineligible delivery (a
 /// replacement, or no completion witness) keeps its pre-existing route.
 ///
@@ -16425,9 +16428,11 @@ fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
 /// CR 608.2d: "A player can't choose an impossible option." An optional effect
 /// whose only reachable outcome is a no-op must not be offered as a "you may"
 /// prompt at all. Each arm below proves infeasibility through its authoritative
-/// typed state: a missing chosen counter kind, no removable matching counter, or
-/// an exact `ParentTarget` hand-off that records no produced object. Suppressing
-/// the prompt lets the effect resolve as its defined no-op instead.
+/// typed state: a missing chosen counter kind, no removable matching counter,
+/// an exact `ParentTarget` hand-off that records no produced object, a
+/// self-referent or event-referent move whose object can no longer move, or a
+/// reveal of a library top that would reveal no card. Suppressing the prompt
+/// lets the effect resolve as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     match &ability.effect {
         Effect::PutSticker { .. } => stickers::optional_is_infeasible(state, ability),
@@ -16514,6 +16519,41 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             target: TargetFilter::ParentTarget,
             ..
         } => ability.parent_target_missing_reason.is_some(),
+        // CR 608.2d + CR 400.7: "you may return this card from your graveyard to
+        // the battlefield" is impossible once the source can no longer move.
+        // Hydrate event-context targets first, exactly as resolution does.
+        Effect::ChangeZone {
+            origin,
+            target: TargetFilter::SelfRef,
+            ..
+        } => {
+            let effective = hydrate_event_context_targets(state, ability);
+            change_zone::optional_self_move_is_infeasible(state, effective.as_ref(), *origin)
+        }
+        // CR 608.2d + CR 400.7: "you may put that card onto the battlefield"
+        // (The Reaper, King No More) / "you may exile it. If you do, …" (Academy
+        // Rector) is impossible once the event's object has left the zone the
+        // event put it in. Hydrate event-context targets first, exactly as
+        // resolution does.
+        Effect::ChangeZone {
+            origin,
+            target: TargetFilter::TriggeringSource,
+            ..
+        } => {
+            let effective = hydrate_event_context_targets(state, ability);
+            change_zone::optional_triggering_source_move_is_infeasible(
+                state,
+                effective.as_ref(),
+                *origin,
+            )
+        }
+        // CR 608.2d + CR 701.20a: "you may reveal the top card of your library"
+        // (Priority Boarding) is impossible when it would reveal no card. Hydrate
+        // event-context targets first, exactly as resolution does.
+        Effect::RevealTop { .. } => {
+            let effective = hydrate_event_context_targets(state, ability);
+            reveal_top::optional_reveal_is_infeasible(state, effective.as_ref())
+        }
         // CR 608.2d: "The player can’t choose an option that’s illegal or impossible".
         // An optional placement from a private zone (e.g. Fire Prophecy / Volcanic Spite:
         // "You may put a card from your hand on the bottom of your library. If
@@ -22708,6 +22748,13 @@ fn resolve_chain_body(
     // tail semantics: dependent "if you do" riders stay gated while independent
     // sequential siblings and explicit decline branches continue. Other
     // infeasible optional effects retain their established resolver no-op.
+    //
+    // CR 118.12: `ChangeZone` covers every referent shape, so an impossible
+    // self- or event-referent move declines and its "If you do" rider stays
+    // gated. `RevealTop` is deliberately absent (CR 608.2c): its resolver's
+    // empty-library no-op publishes the empty reveal and the `Dig` missing
+    // reason that later "it"/revealed-card instructions read, which the decline
+    // path would skip.
     let auto_decline_infeasible_optional = matches!(
         &ability.effect,
         Effect::CastFromZone { .. }
@@ -56450,6 +56497,136 @@ mod tests {
             state.waiting_for
         );
         assert!(state.objects[&attacker].counters.is_empty());
+    }
+
+    /// An optional `ChangeZone` of `target` onto the battlefield under P0's
+    /// control, from source `source` controlled by P0.
+    fn optional_referent_move(
+        target: TargetFilter,
+        origin: Option<Zone>,
+        source: ObjectId,
+    ) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin,
+                destination: Zone::Battlefield,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability
+    }
+
+    /// CR 608.2d + CR 400.7 + CR 701.20a: the "would it prompt" authority
+    /// (`upfront_optional_gate` with `Probe`) agrees with production's
+    /// feasibility arms for an impossible event-referent move, an impossible
+    /// self-referent move, and an impossible library-top reveal — and still
+    /// opens for each feasible twin.
+    #[test]
+    fn upfront_optional_gate_agrees_an_impossible_move_or_reveal_is_not_offered() {
+        // (a) "you may put that card onto the battlefield": the died card was
+        // exiled from the graveyard the event put it in.
+        let died = |exiled: bool| {
+            let mut state = GameState::new_two_player(42);
+            let card = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(1),
+                "Died Card".to_string(),
+                Zone::Graveyard,
+            );
+            state.current_trigger_event = Some(GameEvent::ZoneChanged {
+                object_id: card,
+                from: Some(Zone::Battlefield),
+                to: Zone::Graveyard,
+                record: Box::new(ZoneChangeRecord::test_minimal(
+                    card,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )),
+            });
+            if exiled {
+                crate::game::zones::move_to_zone(&mut state, card, Zone::Exile, &mut Vec::new());
+            }
+            state
+        };
+        let return_that_card =
+            optional_referent_move(TargetFilter::TriggeringSource, None, ObjectId(100));
+        assert!(
+            upfront_optional_gate(&died(false), &return_that_card, OptionalFeasibility::Probe)
+                .is_some(),
+            "reach: the card still in the graveyard can be returned"
+        );
+        assert!(
+            upfront_optional_gate(&died(true), &return_that_card, OptionalFeasibility::Probe)
+                .is_none(),
+            "a card exiled from the graveyard can't be returned"
+        );
+
+        // (b) "you may return this card from your graveyard to the battlefield":
+        // the source is a stale incarnation.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Graveyard Source".to_string(),
+            Zone::Graveyard,
+        );
+        let incarnation = state.objects[&source].incarnation;
+        let mut return_this_card =
+            optional_referent_move(TargetFilter::SelfRef, Some(Zone::Graveyard), source);
+        return_this_card.source_incarnation = Some(incarnation);
+        assert!(
+            upfront_optional_gate(&state, &return_this_card, OptionalFeasibility::Probe).is_some(),
+            "reach: the exact source in the graveyard can be returned"
+        );
+        return_this_card.source_incarnation = Some(incarnation + 1);
+        assert!(
+            upfront_optional_gate(&state, &return_this_card, OptionalFeasibility::Probe).is_none(),
+            "a stale source names nothing to return"
+        );
+
+        // (c) "you may reveal the top card of your library" with an empty library.
+        let mut reveal = ResolvedAbility::new(
+            Effect::RevealTop {
+                player: TargetFilter::Controller,
+                count: 1,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        reveal.optional = true;
+        let mut state = GameState::new_two_player(42);
+        assert!(
+            upfront_optional_gate(&state, &reveal, OptionalFeasibility::Probe).is_none(),
+            "an empty library has no top card to reveal"
+        );
+        create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Library Card".to_string(),
+            Zone::Library,
+        );
+        assert!(
+            upfront_optional_gate(&state, &reveal, OptionalFeasibility::Probe).is_some(),
+            "reach: one library card makes the reveal offerable"
+        );
     }
 
     /// CR 118.3: "you may discard two cards. If you do, draw three cards." with one
