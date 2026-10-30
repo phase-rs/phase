@@ -2171,6 +2171,40 @@ describe("draft attachment settlement", () => {
     if (type === "close") expect(events).not.toHaveBeenCalledWith({ type: "disconnected" });
   });
 
+  it("D1 settles the owning init before close notification listeners run (failing-before regression)", async () => {
+    enterAcceptedFullMatch(adapter, established);
+    const submission = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+    const reconnect = start("reconnect");
+    const b = await completeHandshake();
+    expect(frames(b)).toContain("ReconnectDraft");
+    expect(b.onclose).toBeTypeOf("function");
+
+    const sentinel = new Error("close notification listener sentinel");
+    let listenerThrew = false;
+    adapter.onEvent((event) => {
+      // One-shot: `dispose()` re-emits `pending: false` in teardown and must
+      // not turn this listener into a hook failure.
+      if (event.type === "actionPendingChanged" && !event.pending && !listenerThrew) {
+        listenerThrew = true;
+        throw sentinel;
+      }
+    });
+    // The listener runs and its exception escapes `onclose`. The owning init
+    // must already be settled by then, so this rejection is observable.
+    expect(() => b.onclose!()).toThrow(sentinel);
+    expect(listenerThrew).toBe(true);
+    expect(await reconnect()).toMatchObject({
+      code: "WS_CLOSED",
+      message: "Connection closed before draft started",
+      recoverable: true,
+    });
+    expect(await submission()).toMatchObject({
+      code: "WS_CLOSED",
+      message: "Connection closed during action",
+      recoverable: true,
+    });
+  });
+
   it("H5 established socket close without a pending init emits disconnected once", () => {
     const events = vi.fn();
     adapter.onEvent(events);
@@ -2217,6 +2251,39 @@ describe("draft attachment settlement", () => {
     expect(await read()).toMatchObject({ code: "WS_CLOSED", message: "Failed to send setup frame" });
     expect(failed.close).toHaveBeenCalled();
     const view = createMockDraftView({ pick_number: 5 });
+    receive(established, "DraftStateUpdate", { view });
+    expect(await pick()).toEqual({ resolvedWith: view });
+  });
+
+  it("S1 a throwing error listener during a failed setup send still rejects the reconnect (failing-before regression)", async () => {
+    const pick = trackRejection(adapter.submitPick("card-1"));
+    expect(frames(established)).toContain("DraftAction");
+    const reconnect = start("reconnect");
+    const failed = MockWebSocket.last!;
+    let setupSendAttempted = false;
+    let listenerEntered = false;
+    failed.send.mockImplementation((raw: string) => {
+      const frame: { type: string } = JSON.parse(raw);
+      if (frame.type === "ReconnectDraft") {
+        setupSendAttempted = true;
+        throw new Error("setup send sentinel");
+      }
+    });
+    const listenerSentinel = new Error("setup-send error listener sentinel");
+    adapter.onEvent((event) => {
+      if (event.type === "error") {
+        listenerEntered = true;
+        throw listenerSentinel;
+      }
+    });
+    await completeHandshake();
+    expect(setupSendAttempted).toBe(true);
+    expect(listenerEntered).toBe(true);
+    // The send failure is reported through `error`, and that listener's
+    // exception must not strand the reconnect: settlement precedes notification.
+    expect(await reconnect()).toBe(listenerSentinel);
+    expect(failed.close).toHaveBeenCalled();
+    const view = createMockDraftView({ pick_number: 6 });
     receive(established, "DraftStateUpdate", { view });
     expect(await pick()).toEqual({ resolvedWith: view });
   });

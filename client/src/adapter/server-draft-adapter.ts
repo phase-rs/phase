@@ -700,6 +700,14 @@ export class ServerDraftAdapter implements EngineAdapter {
           clearInterval(this.pingInterval);
           this.pingInterval = null;
         }
+        // Settle this socket's own init before any notification below: `emit`
+        // runs listeners synchronously, so a throwing close listener must not
+        // strand the operation's promise.
+        // A close that settles this socket's own init is the failure signal for
+        // that operation; it must not also surface as a lost established
+        // connection (the pre-fix behavior emitted only with no init pending).
+        const settledOwn = this.ws === sourceSocket
+          && this.settleInit(initOwner, new AdapterError("WS_CLOSED", "Connection closed before draft started", true));
         const dropped = this.submission.drop();
         if (dropped) {
           dropped.reject(new AdapterError("WS_CLOSED", "Connection closed during action", true));
@@ -718,11 +726,6 @@ export class ServerDraftAdapter implements EngineAdapter {
           this.draftResolve = null;
           this.draftReject = null;
         }
-        // A close that settles this socket's own init is the failure signal for
-        // that operation; it must not also surface as a lost established
-        // connection (the pre-fix behavior emitted only with no init pending).
-        const settledOwn = this.ws === sourceSocket
-          && this.settleInit(initOwner, new AdapterError("WS_CLOSED", "Connection closed before draft started", true));
         if (!settledOwn && this.pendingInit === null && this.draftToken && !this.disposed) {
           this.emit({ type: "disconnected" });
         }
