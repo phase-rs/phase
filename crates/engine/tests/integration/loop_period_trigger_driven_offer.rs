@@ -331,12 +331,10 @@ fn offered(board: Board) -> Option<(Drive, Vec<Apply>)> {
     let mut applies = drive.drive_to_window();
     // An attendant's trigger lands above Preston's, so that board passes one recurrence window
     // before its offer stands.
-    if matches!(board, Board::BAttendant | Board::BEnergyAttendant) {
-        if !is_offer(drive.state()) {
-            let action = drive.next_action();
-            applies.push(drive.apply(action));
-            applies.extend(drive.drive_to_window());
-        }
+    if matches!(board, Board::BAttendant | Board::BEnergyAttendant) && !is_offer(drive.state()) {
+        let action = drive.next_action();
+        applies.push(drive.apply(action));
+        applies.extend(drive.drive_to_window());
     }
     let state = drive.state();
     assert!(
