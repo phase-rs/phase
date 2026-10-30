@@ -2089,6 +2089,31 @@ describe("draft attachment settlement", () => {
     expect(await created!()).toEqual({ resolvedWith: undefined });
   });
 
+  it("J6 preserves a join whose pair was settled by another socket before its handshake resumes", async () => {
+    const events = vi.fn();
+    adapter.onEvent(events);
+    const join = trackRejection(adapter.joinDraft("NEXT12", "Alice"));
+    const j = MockWebSocket.last!;
+    // The join holds the draft pair while its handshake is still open, so no
+    // hello has been accepted and no setup frame can have gone out yet.
+    expect(await join()).toBe("never settled");
+    expect(frames(j)).toEqual([]);
+    expect(events.mock.calls.filter(([event]) => event.type === "serverHello")).toHaveLength(0);
+
+    // Draft replies are uncorrelated: the established socket's authoritative
+    // update settles the pending join promise before J resumes its handshake.
+    const view = createMockDraftView({ pick_number: 7 });
+    receive(established, "DraftStateUpdate", { view });
+    expect(await join()).toEqual({ resolvedWith: view });
+
+    // The pair is released, but the join attachment still owes its setup
+    // frame: continuation rests on attachment identity + signal, not on the
+    // pair still being installed.
+    const resumed = await completeHandshake();
+    expect(resumed).toBe(j);
+    expect(frames(j)).toContain("JoinDraftWithPassword");
+  });
+
   it.each(["create", "reconnect", "join"] as const)("L1 dispose fences queued %s continuation", async (kind) => {
     const read = kind === "join"
       ? trackRejection(adapter.joinDraft("NEXT12", "Alice"))
