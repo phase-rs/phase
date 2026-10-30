@@ -166,6 +166,16 @@ fn awe_strike_zero_damage_event_does_not_consume_shield_or_fire_rider() {
             .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
         "a 0-damage event must not emit DamagePrevented"
     );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, GameEvent::ReplacementApplied { .. })),
+        "CR 120.8: a 0-damage event has no replacement to apply"
+    );
+    assert!(
+        !runner.state().has_post_replacement_drain(),
+        "CR 120.8: a 0-damage event must not queue a replacement rider"
+    );
     let shield = runner
         .state()
         .pending_damage_replacements

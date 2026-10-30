@@ -5375,12 +5375,25 @@ fn instruction_outlives_declined_gate(
         activation_cost_reduction: _,
         activation_record: _,
     } = node;
-    let unbound = instruction_actor.as_ref().is_none_or(|actor| {
-        matches!(
-            actor.as_controller(),
-            Some(ControllerRef::You | ControllerRef::SpecificPlayer { .. })
-        )
-    }) && condition.is_none()
+    // CR 601.2c + CR 608.2c: an actor announced on the stack exists even if
+    // the earlier optional action was declined. Resolution-created choices
+    // and event/result actors still depend on that earlier action.
+    let actor_announces_player = node.target_choice_timing == TargetChoiceTiming::Stack
+        && node.effect.target_filter().is_some_and(|filter| {
+            is_multi_target_player_filter(filter)
+                || matches!(filter, TargetFilter::DeclaredPlayer { .. })
+        });
+    let unbound = instruction_actor
+        .as_ref()
+        .is_none_or(|actor| match actor.as_controller() {
+            Some(ControllerRef::You | ControllerRef::SpecificPlayer { .. }) => true,
+            Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => {
+                actor_announces_player
+            }
+            Some(ControllerRef::DeclaredPlayer { group }) => group.is_declared_player(),
+            _ => false,
+        })
+        && condition.is_none()
         && declares_chosen_group
             .is_none_or(crate::types::ability::ChosenGroupId::is_declared_player)
         && reads_chosen_group.is_none()
@@ -21473,7 +21486,12 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::SpellCastWithVariantThisTurn { variant } => {
             crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
         }
-        AbilityCondition::IsMonarch => eval_is_monarch(state, ability.controller),
+        // CR 109.5: "if you're the monarch" reads the ability's printed
+        // controller, independently of the player carrying out this instruction.
+        AbilityCondition::IsMonarch => eval_is_monarch(
+            state,
+            ability.original_controller.unwrap_or(ability.controller),
+        ),
         // CR 903.3d: "If an effect refers to controlling a commander, it refers to
         // a permanent on the battlefield that is a commander." CR 903.3 + CR 109.5
         // narrow the Lieutenant reading ("your commander") to a commander the

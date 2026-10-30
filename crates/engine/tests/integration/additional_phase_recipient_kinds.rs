@@ -150,9 +150,9 @@ fn targeted_player_is_rechecked_at_resolution() {
 /// CR 608.2b + CR 500.10a: with two targets, losing the player target leaves
 /// the spell resolving for its creature target, and the grant that needed the
 /// player adds nothing, even though the spell's controller (P0) is the active
-/// player. Reach guards: P1 has hexproof at resolution, the creature got
-/// +1/+1, and the additional-phase effect resolved. Paired positive: the same
-/// spell targeting P0 adds the phase.
+/// player. Reach guards: P1 has hexproof at resolution, and the independent
+/// creature-pump instruction resolves and gives +1/+1. Paired positive: the
+/// same spell targeting P0 resolves its phase instruction and adds the phase.
 #[test]
 fn a_lost_player_target_is_not_replaced_by_the_controller() {
     for (target, hexproof, added) in [(P0, false, 1), (P1, true, 0)] {
@@ -173,8 +173,19 @@ fn a_lost_player_target_is_not_replaced_by_the_controller() {
             "target {target:?}: the creature target was pumped"
         );
         assert!(
+            outcome.events().iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Pump,
+                    ..
+                }
+            )),
+            "target {target:?}: reach guard, the independent pump resolved"
+        );
+        assert_eq!(
             resolved_additional_phase(outcome.events()),
-            "target {target:?}: reach guard, the effect resolved"
+            !hexproof,
+            "target {target:?}: only a legal player target runs the phase instruction"
         );
         assert_eq!(
             outcome.state().extra_phases.len(),

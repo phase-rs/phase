@@ -1311,7 +1311,9 @@ fn skipped_return_publishes_empty_before_independent_delayed_reader() {
             producer.sub_ability.as_ref().unwrap().condition
         );
         if alternative_returns {
-            producer.else_ability = Some(Box::new(producer.clone()));
+            let mut alternative = producer.clone();
+            alternative.sub_ability = None;
+            producer.else_ability = Some(Box::new(alternative));
         }
         producer.condition = Some(AbilityCondition::WasCast {
             zone: Some(cast_zone),

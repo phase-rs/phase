@@ -11970,6 +11970,13 @@ fn pipeline_loop(
             break;
         }
 
+        // CR 120.8 + CR 614.7a: zero damage has no event for prevention,
+        // damage increases, or redirection to replace. Recheck after each
+        // replacement so reducing damage to zero also stops the pipeline.
+        if matches!(proposed, ProposedEvent::Damage { amount: 0, .. }) {
+            break;
+        }
+
         let candidates = find_applicable_replacements(state, &proposed, registry);
 
         if candidates.is_empty() {

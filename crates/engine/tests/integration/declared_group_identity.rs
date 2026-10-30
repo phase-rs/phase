@@ -491,6 +491,42 @@ struct Out {
     delayed_left: usize,
 }
 
+fn player_fingerprint(state: &GameState, creating_spell: ObjectId) -> String {
+    // A same-chain choice can pause with its creating spell on the stack;
+    // a delayed choice happens after that spell has reached the graveyard.
+    // Preserve every other player field and card in the comparison.
+    let mut players = state.players.clone();
+    for player in players.iter_mut() {
+        player.graveyard.retain(|id| *id != creating_spell);
+    }
+    serde_json::to_string(&players).unwrap()
+}
+
+#[test]
+fn player_fingerprint_omits_only_the_creating_spell_graveyard_entry() {
+    let mut scenario = GameScenario::new();
+    let creating_spell = scenario.add_card_to_hand(P0, "Probe").id();
+    let other_card = scenario.add_card_to_hand(P1, "Other Card").id();
+    let mut state = scenario.build().state().clone();
+    let initial = player_fingerprint(&state, creating_spell);
+    state
+        .players
+        .get_mut(0)
+        .unwrap()
+        .graveyard
+        .push_back(creating_spell);
+    assert_eq!(player_fingerprint(&state, creating_spell), initial);
+    assert!(state.players[0].graveyard.contains(&creating_spell));
+    state
+        .players
+        .get_mut(1)
+        .unwrap()
+        .graveyard
+        .push_back(other_card);
+    assert_ne!(player_fingerprint(&state, creating_spell), initial);
+    assert!(state.players[1].graveyard.contains(&other_card));
+}
+
 fn grant_hexproof(state: &mut GameState, player: PlayerId) {
     let grantor = engine::game::zones::create_object(
         state,
@@ -867,7 +903,7 @@ fn run_on(
             .collect(),
         fingerprint: format!(
             "{}|{:?}|{:?}",
-            serde_json::to_string(&state.players).unwrap(),
+            player_fingerprint(state, spell),
             {
                 let mut revealed: Vec<_> = state.revealed_cards.iter().copied().collect();
                 revealed.sort();

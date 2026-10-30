@@ -377,8 +377,8 @@ pub(crate) fn resolve_enters_under_player(
     // CR 110.2a: Resolve the controller-override reference to a concrete
     // `PlayerId` exactly once at the resolver boundary, then carry it through
     // zone movement. Delegates to the canonical `ControllerRef` resolver so
-    // every player reference resolves consistently: `You` (and the per-iteration
-    // controller under `player_scope`), `ScopedPlayer` ("each player … under
+    // every player reference resolves consistently: `You` names the printed
+    // controller (CR 109.5), while `ScopedPlayer` ("each player … under
     // their control"), `TargetPlayer` ("under target player's control"),
     // `ParentTargetController`, etc. `None` keeps the default (owner's control).
     match enters_under {
@@ -386,7 +386,7 @@ pub(crate) fn resolve_enters_under_player(
         Some(cref) => crate::game::filter::controller_ref_player(
             state,
             ability.source_id,
-            Some(ability.controller),
+            Some(ability.original_controller.unwrap_or(ability.controller)),
             Some(ability),
             cref,
         )

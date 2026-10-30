@@ -1971,9 +1971,13 @@ pub(crate) fn controller_ref_player(
         // controller sacrifices a noncreature, nonland permanent").
         ControllerRef::EventTargetController => event_target_controller_player(state, ability),
         ControllerRef::ParentTargetOwner => parent_target_owner_player(state, ability),
-        ControllerRef::DefendingPlayer => {
-            crate::game::combat::resolve_defending_player(state, source_id)
-        }
+        // CR 508.5: the defending player belongs to the attack event, including
+        // after the source leaves combat or an observing Aura changes hosts.
+        ControllerRef::DefendingPlayer => crate::game::combat::defending_player_cr508_5(
+            state,
+            source_id,
+            ability.and_then(|ability| ability.trigger_source.as_ref()),
+        ),
         // CR 608.2c + CR 109.4: The player chosen by the Nth `Choose(Player)`
         // in this resolution — read from the resolution-scoped list.
         ControllerRef::ChosenPlayer { index } => {
