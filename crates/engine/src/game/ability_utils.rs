@@ -624,6 +624,11 @@ struct SlotAccumulator {
     path: Vec<ChainStep>,
     declarations: Option<Vec<CoinDeclaration>>,
     multi_target_pools: Vec<(*const ResolvedAbility, CoinDeclarationRole, usize)>,
+    /// CR 601.2c: the absolute slot offset at which each multi-target node's own
+    /// group ends in this walk (its sub-chain, later sibling coin outcomes and
+    /// ancestor continuations all start at or after it), keyed by node address
+    /// like `multi_target_pools`. Recorded only in coin mode.
+    multi_target_group_ends: Vec<(*const ResolvedAbility, usize)>,
 }
 
 impl Default for SlotAccumulator {
@@ -647,6 +652,7 @@ impl Default for SlotAccumulator {
             path: Vec::new(),
             declarations: None,
             multi_target_pools: Vec::new(),
+            multi_target_group_ends: Vec::new(),
         }
     }
 }
@@ -688,6 +694,16 @@ impl SlotAccumulator {
         if self.coin_depth > 0 {
             self.multi_target_pools
                 .push((std::ptr::from_ref(ability), role, count));
+        }
+    }
+
+    /// Records where `ability`'s own slot group ends, i.e. the current slot
+    /// count once the node has pushed all of its own slots. Coin mode only
+    /// (`declarations` is `Some` exactly for coin chains).
+    fn record_group_end(&mut self, ability: &ResolvedAbility) {
+        if self.declarations.is_some() && ability.multi_target.is_some() {
+            self.multi_target_group_ends
+                .push((std::ptr::from_ref(ability), self.slots.len()));
         }
     }
 
@@ -2569,6 +2585,63 @@ pub fn assign_targets_in_chain(
     Ok(())
 }
 
+/// CR 601.2c + CR 608.2c: same-state reconstruction, at assignment time, of the
+/// announced slot partition of a coin chain. No table survives from the
+/// announcement itself: the walk reruns from the targeting root, so every node
+/// sees its complete declaration prefix (a coin outcome's lexical antecedent),
+/// and each multi-target node's window ends at the absolute offset where its
+/// own group ended, not at a count relative to its sub-chain, which would
+/// swallow a later sibling outcome's slots.
+///
+/// Applicability: the reconstruction reproduces the prompt's slot partition
+/// only if it runs on the same game state and the same unassigned ability tree
+/// that built the prompt's slots. Every production caller builds the slots
+/// from the current state immediately before assigning. The walk total is
+/// checked against the selection length (`assign_selected_slots_in_chain`), so
+/// a differing rebuild is refused rather than assigned by a different
+/// announcement. Modal prompts come from `build_target_slots_labelled` (one
+/// accumulator, path-emulated per mode) and are tied to the chained walk only
+/// by a debug count assertion; this table is used only when the chained walk
+/// and the prompt agree, and a divergence surfaces as that refusal.
+struct AnnouncedGroupEnds {
+    /// Keyed by node address like `SlotAccumulator::multi_target_pools`; never
+    /// dereferenced.
+    ends: Vec<(*const ResolvedAbility, usize)>,
+    total: usize,
+}
+
+impl AnnouncedGroupEnds {
+    fn build(state: &GameState, root: &ResolvedAbility) -> Result<Self, EngineError> {
+        let mut acc = SlotAccumulator::for_ability(root);
+        collect_target_slots(state, root, &mut acc).map_err(EngineError::from)?;
+        Ok(Self {
+            total: acc.slots.len(),
+            ends: acc.multi_target_group_ends,
+        })
+    }
+
+    /// The absolute slot offset at which `node`'s own announced group ends.
+    fn group_end(&self, node: &ResolvedAbility) -> Option<usize> {
+        let node = std::ptr::from_ref(node);
+        self.ends
+            .iter()
+            .find(|(key, _)| *key == node)
+            .map(|(_, end)| *end)
+    }
+}
+
+/// CR 601.2c: the reconstructed announcement does not match the selection.
+fn announced_partition_mismatch() -> EngineError {
+    EngineError::InvalidAction("Target selection does not match the announced target slots".into())
+}
+
+fn chain_has_multi_target_node(ability: &ResolvedAbility) -> bool {
+    ability.multi_target.is_some()
+        || ability
+            .child_links()
+            .any(|(_, child)| chain_has_multi_target_node(child))
+}
+
 pub fn assign_selected_slots_in_chain(
     state: &GameState,
     ability: &mut ResolvedAbility,
@@ -2582,8 +2655,28 @@ pub fn assign_selected_slots_in_chain(
         return Ok(());
     }
     clear_chosen_target_slots(ability);
+    // CR 601.2c: built from the unassigned tree the announcement saw. Only coin
+    // chains with a multi-target node need it; every other chain keeps the
+    // established sub-chain recount in the multi-target window.
+    let announced = (chain_has_coin_branches(ability) && chain_has_multi_target_node(ability))
+        .then(|| AnnouncedGroupEnds::build(state, ability))
+        .transpose()?;
+    // CR 601.2c: the reconstruction applies only if it reproduces the prompt's
+    // slot vector (same state, same unassigned tree).
+    if announced
+        .as_ref()
+        .is_some_and(|table| table.total != selected_slots.len())
+    {
+        return Err(announced_partition_mismatch());
+    }
     let mut next_slot = 0usize;
-    assign_selected_slots_recursive(state, ability, selected_slots, &mut next_slot)?;
+    assign_selected_slots_recursive(
+        state,
+        ability,
+        selected_slots,
+        &mut next_slot,
+        announced.as_ref(),
+    )?;
     if next_slot != selected_slots.len() {
         return Err(EngineError::InvalidAction(
             "Unused selected target slots".to_string(),
@@ -5747,6 +5840,10 @@ fn collect_sub_chain_slots(
     ability: &ResolvedAbility,
     acc: &mut SlotAccumulator,
 ) -> Result<(), TargetSlotBuildError> {
+    // CR 601.2c: the node has pushed every one of its own slots by the time it
+    // descends, so this offset is the end of its multi-target window; in a coin
+    // chain the assignment window ends exactly here.
+    acc.record_group_end(ability);
     for (edge, child, disposition) in announced_child_links(ability) {
         let enters_coin = matches!(edge, ChainStep::CoinFlipBranch { .. });
         if acc.declarations.is_some() {
@@ -11519,13 +11616,14 @@ fn assign_selected_slots_recursive(
     ability: &mut ResolvedAbility,
     selected_slots: &[Option<TargetRef>],
     next_slot: &mut usize,
+    announced: Option<&AnnouncedGroupEnds>,
 ) -> Result<(), EngineError> {
     if let Some(sub_ability) = ability
         .sub_ability
         .as_deref_mut()
         .filter(|sub| is_paid_instead_sub(&ability.context, sub))
     {
-        assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
+        assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot, announced)?;
         // The paid-"instead" delegator mirrors its delegate's occurrences.
         let mirrored = sub_ability.target_occurrences();
         let bindings = sub_ability.context.attach_target_bindings.clone();
@@ -11563,7 +11661,7 @@ fn assign_selected_slots_recursive(
             *next_slot += 1;
         }
 
-        assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot)?;
+        assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot, announced)?;
         return Ok(());
     }
 
@@ -11592,7 +11690,7 @@ fn assign_selected_slots_recursive(
             *next_slot += 1;
         }
 
-        assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot)?;
+        assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot, announced)?;
         return Ok(());
     }
 
@@ -11637,7 +11735,7 @@ fn assign_selected_slots_recursive(
                 *next_slot += 1;
             }
 
-            assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot)?;
+            assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot, announced)?;
             return Ok(());
         }
     }
@@ -11681,7 +11779,7 @@ fn assign_selected_slots_recursive(
             }
             *next_slot += 1;
         }
-        assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot)?;
+        assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot, announced)?;
         return Ok(());
     }
 
@@ -11715,7 +11813,7 @@ fn assign_selected_slots_recursive(
             }
             *next_slot += 1;
         }
-        assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot)?;
+        assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot, announced)?;
         return Ok(());
     }
 
@@ -11740,7 +11838,7 @@ fn assign_selected_slots_recursive(
                 }
                 *next_slot += 1;
             }
-            assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot)?;
+            assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot, announced)?;
             return Ok(());
         }
     }
@@ -11860,26 +11958,49 @@ fn assign_selected_slots_recursive(
             let remaining_after_current = selected_slots.len().saturating_sub(*next_slot);
             // CR 601.2c + CR 115.1: each instance of "target" has its own announced
             // choice, so a multi-target node receives exactly the declared slots of
-            // its own slot group. That group is the declared window minus the slots
-            // the collector produces for the rest of this chain: the same
+            // its own slot group. CR 601.2c also fixes that number once announced.
+            //
+            // Coin chains (`announced` is `Some`): the window ends at the group
+            // boundary the root walk reconstructed at assignment time with the
+            // complete declaration prefix. A recount of this node's sub-chain alone
+            // both lacks the coin outcome's lexical antecedent (CR 608.2c) and
+            // ignores the sibling outcomes and continuation that follow this node
+            // without being in its sub-chain, so it could claim their slots.
+            //
+            // Every other chain keeps the recount: the declared window minus the
+            // slots the collector produces for the rest of this chain (the same
             // `collect_sub_chain_slots` walk that built the prompt, which already
-            // skips an inheriting rider (Solitude, #3864) and deferred sub-targets.
+            // skips an inheriting rider (Solitude, #3864) and deferred sub-targets).
             // Sizing from the chain's *minimum* instead let an unlimited node, or one
             // bounded above its legal pool, claim a later min-0 group's declared
             // slots (issue #321's class). CR 115.6 + CR 107.1c: that later group may
             // legally be empty, and it keeps its own empty window.
-            let mut later_slots = SlotAccumulator::for_ability(ability);
-            collect_sub_chain_slots(state, ability, &mut later_slots)?;
             let bounds = resolve_multi_target_bounds(state, ability, spec, remaining_after_current)
                 .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
-            // The window's two terms divide the work: the collector's slot group
-            // sizes it, and the node's own resolved maximum still bounds it, as at
-            // base. The clamp is what keeps a re-collection that under-reports the
-            // rest of this chain from pushing this node past its own maximum.
-            let current_slots = remaining_after_current
-                .saturating_sub(later_slots.slots.len())
-                .min(bounds.max);
-            let end_slot = *next_slot + current_slots;
+            let end_slot = match announced.and_then(|table| table.group_end(ability)) {
+                // CR 601.2c: the window is exactly this node's announced group, whose
+                // width the announcement already bounded by the node's own maximum.
+                // No `bounds.max` clamp: it would shift every later group.
+                Some(group_end) if group_end >= *next_slot => group_end,
+                Some(_) => return Err(announced_partition_mismatch()),
+                None => {
+                    debug_assert!(
+                        announced.is_none(),
+                        "the reconstruction walk recorded every assigned multi-target node"
+                    );
+                    let mut later_slots = SlotAccumulator::for_ability(ability);
+                    collect_sub_chain_slots(state, ability, &mut later_slots)?;
+                    // The window's two terms divide the work: the collector's slot
+                    // group sizes it, and the node's own resolved maximum still bounds
+                    // it, as at base. The clamp is what keeps a re-collection that
+                    // under-reports the rest of this chain from pushing this node past
+                    // its own maximum.
+                    *next_slot
+                        + remaining_after_current
+                            .saturating_sub(later_slots.slots.len())
+                            .min(bounds.max)
+                }
+            };
             let Some(window) = selected_slots.get(*next_slot..end_slot) else {
                 return Err(EngineError::InvalidAction(
                     "Missing required target".to_string(),
@@ -11913,7 +12034,7 @@ fn assign_selected_slots_recursive(
             *next_slot += 1;
         }
     }
-    assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot)
+    assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot, announced)
 }
 
 /// Slot-walk mirror of [`assign_sub_chain_targets`]: an inheriting rider takes a
@@ -11924,6 +12045,7 @@ fn assign_sub_chain_selected_slots(
     ability: &mut ResolvedAbility,
     selected_slots: &[Option<TargetRef>],
     next_slot: &mut usize,
+    announced: Option<&AnnouncedGroupEnds>,
 ) -> Result<(), EngineError> {
     let parent_creature_target = ability.targets.iter().find_map(|target| match target {
         TargetRef::Object(id) => Some(TargetRef::Object(*id)),
@@ -11932,19 +12054,26 @@ fn assign_sub_chain_selected_slots(
     for (_, child, disposition) in announced_child_links_mut(ability) {
         match disposition {
             AnnouncementDisposition::Declare => {
-                assign_selected_slots_recursive(state, child, selected_slots, next_slot)?
+                assign_selected_slots_recursive(state, child, selected_slots, next_slot, announced)?
             }
             AnnouncementDisposition::Inherited => {
                 if let Some(target) = parent_creature_target.clone() {
                     child.push_target(target);
                 }
-                assign_sub_chain_selected_slots(state, child, selected_slots, next_slot)?;
+                assign_sub_chain_selected_slots(
+                    state,
+                    child,
+                    selected_slots,
+                    next_slot,
+                    announced,
+                )?;
             }
             AnnouncementDisposition::AfterDeferred => assign_selected_slots_after_deferred_effect(
                 state,
                 Some(child),
                 selected_slots,
                 next_slot,
+                announced,
             )?,
         }
     }
@@ -11979,6 +12108,7 @@ fn assign_selected_slots_after_deferred_effect(
     sub_ability: Option<&mut ResolvedAbility>,
     selected_slots: &[Option<TargetRef>],
     next_slot: &mut usize,
+    announced: Option<&AnnouncedGroupEnds>,
 ) -> Result<(), EngineError> {
     let Some(sub_ability) = sub_ability else {
         return Ok(());
@@ -11992,9 +12122,10 @@ fn assign_selected_slots_after_deferred_effect(
             sub_ability.sub_ability.as_deref_mut(),
             selected_slots,
             next_slot,
+            announced,
         );
     }
-    assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)
+    assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot, announced)
 }
 
 /// CR 115.3: Validate targeting constraints — e.g., different target players must be distinct.
