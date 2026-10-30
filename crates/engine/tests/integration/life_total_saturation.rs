@@ -4,17 +4,31 @@
 //! Energy and player counters keep refusing a total past `u32::MAX`. A life
 //! amount past `i32::MAX` is carried exactly, set/exchange/redistribute land
 //! exactly across the whole range, and in Two-Headed Giant a change caps the
-//! team's shared total (CR 810.4 + CR 810.9).
+//! team's shared total (CR 810.4 + CR 810.9). A life replacement quantity past
+//! `u32` lands on `u32::MAX`. A mandatory life-gain loop at the cap is drawn
+//! (CR 104.4b + CR 732.4), as is a mandatory loop that drains a seat held at
+//! `i32::MIN`; an optional one is never drawn or offered a shortcut; a
+//! shortcut's lump gain past `i32::MAX` saturates; and a shortcut whose period
+//! crosses the cap collapses at the rules amount.
 
+use engine::analysis::decision_template::IterationCount;
+use engine::analysis::loop_check::ShortcutResponse;
+use engine::analysis::resource::ResourceAxis;
+use engine::game::mana_abilities::is_mana_ability;
 use engine::game::players::team_life_sum;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{EffectKind, QuantityModification, ReplacementDefinition};
+use engine::types::ability::{
+    Effect, EffectKind, QuantityModification, ReplacementDefinition, TapStateChange, TargetRef,
+};
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{GameState, PayableResource, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, GameState, LoopDetectionMode, PayableResource, PersistentAxisMaterialization,
+    WaitingFor,
+};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -1197,4 +1211,810 @@ fn doubling_a_life_total_at_i32_min_reports_the_saturated_loss() {
     assert!(!runner.state().players[0].is_eliminated);
     assert!(runner.state().stack.is_empty());
     assert!(is_priority(runner.state()));
+}
+
+/// The brief's self-feeding life-gain trigger (synthetic text, as in
+/// `loop_shortcut.rs`): with one copy every gain triggers another, so the loop
+/// is mandatory and never stops.
+const SELF_LIFE_ENGINE: &str = "Whenever you gain life, you gain 1 life.";
+
+/// The synthetic kickoff gain that starts a life-gain loop.
+const KICKOFF: &str = "You gain 1 life.";
+
+/// A synthetic drain trigger: each gain makes every opponent lose 1 life.
+const DRAIN_ENGINE: &str = "Whenever you gain life, each opponent loses 1 life.";
+
+/// A synthetic free life-gain engine (as in `combo_infinite_pile.rs`): tap for
+/// {C}, gain `n` life, untap, repeat. The mana and the life are its unbounded
+/// axes.
+fn lifedynamo(n: u32) -> String {
+    format!("{{T}}: Add {{C}}.\n{{0}}: You gain {n} life.\n{{0}}: Untap Lifedynamo.")
+}
+
+/// A two-player game in P0's precombat main phase.
+fn two_player() -> GameScenario {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+}
+
+/// Passes priority while priority is open, at most `beats` times, each pass
+/// accepted; returns every event.
+fn pass_beats(runner: &mut GameRunner, beats: usize) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..beats {
+        if !is_priority(runner.state()) {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority is accepted")
+                .events,
+        );
+    }
+    events
+}
+
+/// Activates `source`'s ability `index`, then passes until the stack is empty
+/// at priority or a loop shortcut is offered.
+fn activate_and_settle(runner: &mut GameRunner, source: ObjectId, index: usize) {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the activation is accepted");
+    for _ in 0..16 {
+        match &runner.state().waiting_for {
+            WaitingFor::LoopShortcut { .. } => return,
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority is accepted");
+            }
+            other => panic!("unexpected prompt while settling an activation: {other:?}"),
+        }
+    }
+    panic!("the activation never settled");
+}
+
+/// Passes priority until the current step ends and its boundary runs: returns
+/// as soon as a non-priority prompt surfaces (the `LoopCollapse` amount
+/// choice) or the phase advances (as
+/// `combo_infinite_pile::drive_priority_to_next_boundary`).
+fn pass_to_next_boundary(runner: &mut GameRunner) {
+    let start_phase = runner.state().phase;
+    for _ in 0..64 {
+        if !is_priority(runner.state()) {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority toward the next boundary is accepted");
+        if !is_priority(runner.state()) || runner.state().phase != start_phase {
+            return;
+        }
+    }
+    panic!("no phase boundary reached within 64 passes");
+}
+
+/// The brief's mandatory loop in Interactive loop detection: P0 controls one
+/// `SELF_LIFE_ENGINE` creature and holds the `KICKOFF` spell, with the given
+/// stored life fields and P0's gained-this-turn counter preset to `gained`.
+fn mandatory_life_gain_loop(
+    mut scenario: GameScenario,
+    life_fields: &[(PlayerId, i32)],
+    gained: u32,
+) -> (GameRunner, ObjectId) {
+    for &(player, life) in life_fields {
+        scenario.with_life(player, life);
+    }
+    scenario.add_creature_from_oracle(P0, "Test Life Engine", 2, 2, SELF_LIFE_ENGINE);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    runner.state_mut().players[0].life_gained_this_turn = gained;
+    (runner, kickoff)
+}
+
+/// A P0 Lifedynamo (`lifedynamo(n)`) in Interactive loop detection, with the
+/// given stored life fields and P0's gained-this-turn counter preset to
+/// `gained`. Returns the runner, the Lifedynamo and its mana, life-gain and
+/// untap ability indices, in activation order.
+fn lifedynamo_board(
+    mut scenario: GameScenario,
+    life_fields: &[(PlayerId, i32)],
+    n: u32,
+    gained: u32,
+) -> (GameRunner, ObjectId, [usize; 3]) {
+    for &(player, life) in life_fields {
+        scenario.with_life(player, life);
+    }
+    let dynamo = scenario
+        .add_creature_from_oracle(P0, "Lifedynamo", 2, 2, &lifedynamo(n))
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    runner.state_mut().players[0].life_gained_this_turn = gained;
+    let abilities = &runner.state().objects[&dynamo].abilities;
+    let mana = abilities
+        .iter()
+        .position(is_mana_ability)
+        .expect("reach guard: Lifedynamo's mana ability parses");
+    let gain = abilities
+        .iter()
+        .position(|ability| matches!(&*ability.effect, Effect::GainLife { .. }))
+        .expect("reach guard: Lifedynamo's life-gain ability parses");
+    let untap = abilities
+        .iter()
+        .position(|ability| {
+            matches!(
+                &*ability.effect,
+                Effect::SetTapState {
+                    state: TapStateChange::Untap,
+                    ..
+                }
+            )
+        })
+        .expect("reach guard: Lifedynamo's untap ability parses");
+    (runner, dynamo, [mana, gain, untap])
+}
+
+/// Performs one Lifedynamo cycle (mana, gain, untap) and asserts the shortcut
+/// offer that follows: P0's, with exactly `unbounded` as its unbounded axes.
+fn cycle_to_the_shortcut_offer(
+    runner: &mut GameRunner,
+    dynamo: ObjectId,
+    indices: [usize; 3],
+    unbounded: &[ResourceAxis],
+) {
+    for index in indices {
+        activate_and_settle(runner, dynamo, index);
+    }
+    let WaitingFor::LoopShortcut {
+        proposer,
+        certificate,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "reach guard: one cycle offers the loop shortcut, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*proposer, P0);
+    assert_eq!(certificate.unbounded, unbounded);
+}
+
+/// Answers each `RespondToShortcut` with `Accept`, asserting that the
+/// responders are exactly `expected`, in order.
+fn accept_for_every_responder(runner: &mut GameRunner, expected: &[PlayerId]) {
+    for &responder in expected {
+        let WaitingFor::RespondToShortcut { player, .. } = &runner.state().waiting_for else {
+            panic!(
+                "expected {responder:?} to respond to the shortcut, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, responder);
+        runner
+            .act(GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            })
+            .expect("accepting the shortcut is accepted");
+    }
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ),
+        "no further responder: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// P0's stashed persistent-growth items.
+fn stash(runner: &GameRunner) -> Option<&Vec<PersistentAxisMaterialization>> {
+    runner.state().pending_unbounded_materialization.get(&P0)
+}
+
+/// Passes to the step boundary, asserts P0's `LoopCollapse` amount prompt
+/// capped at `max`, and submits `max`; returns the submission's events.
+fn collapse(runner: &mut GameRunner, max: u32) -> Vec<GameEvent> {
+    pass_to_next_boundary(runner);
+    let WaitingFor::PayAmountChoice {
+        player,
+        resource: PayableResource::LoopCollapse { .. },
+        max: offered,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected the loop-collapse amount prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*offered, max);
+    runner
+        .act(GameAction::SubmitPayAmount { amount: max })
+        .expect("the collapse amount is accepted")
+        .events
+}
+
+/// CR 616.1 + CR 616.1f + CR 119.3: Dazzling Reflection ("You gain life equal
+/// to target creature's power. The next time that creature would deal damage
+/// this turn, prevent that damage.") on a creature of power `i32::MAX`, doubled
+/// by Boon Reflection ("If you would gain life, you gain twice that much life
+/// instead.") alone and with Rhox Faithmender (the same doubler) in either
+/// order: the gain past `u32` lands on `u32::MAX`, the total stops at
+/// `i32::MAX`, and the rest of the spell resolves. The control at power 100
+/// with both doublers gains 400.
+#[test]
+fn boon_reflection_doubles_a_gain_past_u32_and_the_total_saturates() {
+    let Some(db) = crate::support::shared_card_db() else {
+        return;
+    };
+    // (doublers, power, ordering answer, life after, gained after, event amount)
+    type Row = (&'static [&'static str], i32, Option<usize>, i32, u32, i32);
+    let rows: [Row; 4] = [
+        (
+            &["Boon Reflection"],
+            i32::MAX,
+            None,
+            i32::MAX,
+            4_294_967_294,
+            i32::MAX,
+        ),
+        (
+            &["Rhox Faithmender", "Boon Reflection"],
+            i32::MAX,
+            Some(0),
+            i32::MAX,
+            u32::MAX,
+            i32::MAX,
+        ),
+        (
+            &["Rhox Faithmender", "Boon Reflection"],
+            i32::MAX,
+            Some(1),
+            i32::MAX,
+            u32::MAX,
+            i32::MAX,
+        ),
+        (
+            &["Rhox Faithmender", "Boon Reflection"],
+            100,
+            Some(0),
+            420,
+            400,
+            400,
+        ),
+    ];
+    for (doublers, power, answer, life_after, gained_after, amount) in rows {
+        let label = format!("{doublers:?} power {power} answer {answer:?}");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for doubler in doublers {
+            scenario.add_real_card(P0, doubler, Zone::Battlefield, db);
+        }
+        let creature = scenario.add_creature(P0, "Test Behemoth", power, 1).id();
+        let spell = scenario.add_real_card(P0, "Dazzling Reflection", Zone::Hand, db);
+        scenario.with_mana_pool(P0, vec![mana(ManaType::White), mana(ManaType::White)]);
+        let mut runner = scenario.build();
+
+        // Both of the spell's target slots name the creature.
+        let outcome = runner
+            .cast(spell)
+            .target_object(creature)
+            .target_object(creature)
+            .try_resolve()
+            .expect("Dazzling Reflection resolves to its gain");
+        let mut events = outcome.events().to_vec();
+        match answer {
+            Some(index) => {
+                let WaitingFor::ReplacementChoice {
+                    player,
+                    candidate_count,
+                    ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!(
+                        "{label}: two doublers ask the CR 616.1 ordering prompt, got {:?}",
+                        runner.state().waiting_for
+                    );
+                };
+                assert_eq!(*player, P0, "{label}");
+                assert_eq!(*candidate_count, 2, "{label}");
+                events.extend(
+                    runner
+                        .act(GameAction::ChooseReplacement { index })
+                        .expect("the ordering answer is accepted")
+                        .events,
+                );
+            }
+            None => assert!(
+                !matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ),
+                "{label}: one doubler asks no prompt"
+            ),
+        }
+
+        assert_eq!(runner.life(P0), life_after, "{label}");
+        assert_eq!(
+            runner.state().players[0].life_gained_this_turn,
+            gained_after,
+            "{label}: the gain counts the rules amount"
+        );
+        assert_eq!(
+            life_changes(&events),
+            vec![(P0, amount, Some(life_after))],
+            "{label}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::PreventDamage,
+                    ..
+                }
+            )),
+            "{label}: the prevention clause resolves"
+        );
+        assert_eq!(
+            runner.state().objects[&spell].zone,
+            Zone::Graveyard,
+            "{label}: the spell finishes resolving"
+        );
+        assert!(runner.state().stack.is_empty(), "{label}");
+        assert!(is_priority(runner.state()), "{label}");
+    }
+}
+
+/// CR 104.4b: an optional loop is never drawn. Heliod, Sun-Crowned ("Whenever
+/// you gain life, put a +1/+1 counter on target creature or enchantment you
+/// control.") and Spike Feeder ("Remove a +1/+1 counter from this creature:
+/// You gain 2 life.") make one: each activation gains 2 and Heliod puts the
+/// counter back. Below the cap the loop is offered as a shortcut after one
+/// cycle (CR 732.2a). At `i32::MAX` the life axis is held by the cap, so the
+/// loop offers no growth: it is never offered or drawn, while every gain still
+/// counts its rules amount and triggers Heliod (CR 119.3).
+#[test]
+fn an_optional_life_gain_loop_at_the_cap_is_never_drawn_or_offered() {
+    let Some(db) = crate::support::shared_card_db() else {
+        return;
+    };
+    // (start life, cycles, offered after the first cycle)
+    for (start_life, cycles, offered) in [(20, 1, true), (i32::MAX, 12, false)] {
+        let mut scenario = two_player();
+        scenario.with_life(P0, start_life);
+        scenario.add_real_card(P0, "Heliod, Sun-Crowned", Zone::Battlefield, db);
+        let feeder = scenario.add_real_card(P0, "Spike Feeder", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+        // Fixture setup: `add_real_card` does not run "This creature enters
+        // with two +1/+1 counters on it.", so the counters are placed here.
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&feeder)
+            .expect("Spike Feeder is on the battlefield")
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+        let gain = runner.state().objects[&feeder]
+            .abilities
+            .iter()
+            .position(|ability| matches!(&*ability.effect, Effect::GainLife { .. }))
+            .expect("reach guard: Spike Feeder's life-gain ability parses");
+
+        for cycle in 0..cycles {
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: feeder,
+                    ability_index: gain,
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .expect("the activation is accepted");
+            pass_beats(&mut runner, 2);
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::TriggerTargetSelection { player, .. } if player == P0
+                ),
+                "{start_life}, cycle {cycle}: Heliod triggers on the gain, got {:?}",
+                runner.state().waiting_for
+            );
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(feeder)),
+                })
+                .expect("Spike Feeder is a legal target");
+            pass_beats(&mut runner, 2);
+            if offered {
+                break;
+            }
+            assert!(
+                is_priority(runner.state()) && runner.state().stack.is_empty(),
+                "{start_life}, cycle {cycle}: never offered or drawn, got {:?}",
+                runner.state().waiting_for
+            );
+        }
+
+        if offered {
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::LoopShortcut { proposer, .. } if proposer == P0
+                ),
+                "below the cap the loop is offered, got {:?}",
+                runner.state().waiting_for
+            );
+            continue;
+        }
+        assert_eq!(runner.state().unbounded_resources.get(&P0), None);
+        assert_eq!(
+            runner.state().objects[&feeder]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&2)
+        );
+        assert_eq!(runner.life(P0), i32::MAX);
+        assert_eq!(runner.state().players[0].life_gained_this_turn, 24);
+    }
+}
+
+/// CR 104.4b + CR 732.4: the brief's mandatory loop (one "Whenever you gain
+/// life, you gain 1 life." trigger after one kickoff gain) is a draw. At
+/// `i32::MAX` the stored total cannot move, but every gain still carries its
+/// rules amount, so the loop is drawn exactly as it is at 20, including from
+/// one below the cap and for a Two-Headed Giant team whose shared total is at
+/// the cap (CR 810.4). Residuals: a gained counter pinned at `u32::MAX` gives
+/// the cycle nothing to read, so the loop is not detected and keeps firing; and
+/// with loop detection off nothing is drawn.
+#[test]
+fn a_mandatory_life_gain_loop_at_the_cap_is_drawn() {
+    // Two players: (start life, life when drawn).
+    for (start_life, drawn_life) in [(20, 22), (i32::MAX, i32::MAX), (i32::MAX - 1, i32::MAX)] {
+        let (mut runner, kickoff) = mandatory_life_gain_loop(two_player(), &[(P0, start_life)], 0);
+        runner.cast(kickoff).resolve();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::GameOver { winner: None }
+            ),
+            "{start_life}: drawn, got {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(runner.life(P0), drawn_life, "{start_life}");
+        assert_eq!(
+            runner.state().players[0].life_gained_this_turn,
+            2,
+            "{start_life}"
+        );
+    }
+
+    // Two-Headed Giant: (P0 and P1 fields, fields when drawn, team total).
+    type TeamRow = ((i32, i32), (i32, i32), i64);
+    let rows: [TeamRow; 2] = [
+        ((i32::MAX - 5, 5), (i32::MAX - 5, 5), i64::from(i32::MAX)),
+        ((20, 20), (22, 20), 42),
+    ];
+    for ((p0, p1), fields, team) in rows {
+        let (mut runner, kickoff) = mandatory_life_gain_loop(
+            two_headed_giant(),
+            &[(P0, p0), (P1, p1), (P2, 20), (PlayerId(3), 20)],
+            0,
+        );
+        runner.cast(kickoff).resolve();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::GameOver { winner: None }
+            ),
+            "team ({p0}, {p1}): drawn, got {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(team_a_fields(runner.state()), fields, "team ({p0}, {p1})");
+        assert_eq!(team_life_sum(runner.state(), P0), team, "team ({p0}, {p1})");
+        assert_eq!(runner.state().players[0].life_gained_this_turn, 2);
+    }
+
+    // Residual: the gained counter is pinned at `u32::MAX`.
+    let (mut runner, kickoff) = mandatory_life_gain_loop(two_player(), &[(P0, i32::MAX)], u32::MAX);
+    runner.cast(kickoff).resolve();
+    let events = pass_beats(&mut runner, 100);
+    assert!(
+        is_priority(runner.state()),
+        "the pinned counter is not drawn, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::LifeChanged {
+                player_id,
+                amount: 1,
+                ..
+            } if *player_id == P0
+        )),
+        "reach guard: the loop keeps gaining life"
+    );
+    assert_eq!(runner.state().players[0].life_gained_this_turn, u32::MAX);
+    assert_eq!(runner.life(P0), i32::MAX);
+
+    // Loop detection off: nothing is drawn.
+    let (mut runner, kickoff) = mandatory_life_gain_loop(two_player(), &[(P0, i32::MAX)], 0);
+    runner.state_mut().loop_detection = LoopDetectionMode::Off;
+    runner.cast(kickoff).resolve();
+    pass_beats(&mut runner, 100);
+    assert!(
+        is_priority(runner.state()),
+        "detection off: not drawn, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.life(P0), i32::MAX);
+}
+
+/// CR 104.4b: P0's two mandatory triggers feed each other (Exquisite Blood,
+/// "Whenever an opponent loses life, you gain that much life.", and a
+/// synthetic "Whenever you gain life, each opponent loses 1 life."), P1 can't
+/// lose and P0 can't win (Platinum Angel), so the loop has no way to stop and
+/// is a draw. P1's life total is held at `i32::MIN`, which Path B's at-limit
+/// reading does not read.
+#[test]
+fn a_mandatory_drain_loop_against_a_seat_held_at_i32_min_is_drawn() {
+    let Some(db) = crate::support::shared_card_db() else {
+        return;
+    };
+    let mut scenario = two_player();
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, i32::MIN);
+    scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Exquisite Blood", Zone::Battlefield, db);
+    scenario.add_creature_from_oracle(P0, "Test Drain Engine", 2, 2, DRAIN_ENGINE);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+
+    runner.cast(kickoff).resolve();
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::GameOver { winner: None }
+        ),
+        "drawn, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.life(P1), i32::MIN);
+    assert!(
+        !runner.state().players[1].is_eliminated,
+        "reach guard: Platinum Angel keeps P1 in the game"
+    );
+    assert!(
+        runner.state().players[1].life_lost_this_turn >= 1,
+        "reach guard: the drain reached P1"
+    );
+    assert_eq!(runner.life(P0), 22);
+    assert_eq!(runner.state().players[0].life_gained_this_turn, 2);
+}
+
+/// CR 119.3 + CR 732.1b: a shortcut of 1,000 Lifedynamo cycles at 3,000,000
+/// life each gains 3,000,000,000 in one lump at the step boundary: the total
+/// stops at `i32::MAX`, the gained counter counts the whole lump, and the event
+/// reports the rules amount clamped to its field.
+#[test]
+fn a_life_shortcut_lump_gain_past_i32_max_saturates() {
+    let (mut runner, dynamo, indices) = lifedynamo_board(two_player(), &[(P0, 20)], 3_000_000, 0);
+    cycle_to_the_shortcut_offer(
+        &mut runner,
+        dynamo,
+        indices,
+        &[
+            ResourceAxis::Mana(ManaType::Colorless),
+            ResourceAxis::Life(P0),
+        ],
+    );
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(1000),
+            template: None,
+        })
+        .expect("the shortcut declaration is accepted");
+    accept_for_every_responder(&mut runner, &[P1]);
+    assert_eq!(
+        stash(&runner),
+        Some(&vec![PersistentAxisMaterialization::Life {
+            player: P0,
+            per_cycle_delta: 3_000_000,
+        }])
+    );
+
+    let events = collapse(&mut runner, 1000);
+
+    assert_eq!(runner.life(P0), i32::MAX);
+    assert_eq!(
+        runner.state().players[0].life_gained_this_turn,
+        3_003_000_000
+    );
+    assert_eq!(life_changes(&events), vec![(P0, i32::MAX, Some(i32::MAX))]);
+    assert!(is_priority(runner.state()));
+}
+
+/// CR 104.4b + CR 732.2a: at `i32::MAX` a Lifedynamo cycle's gain cannot grow
+/// the stored total, so the shortcut offer carries no life axis and accepting
+/// it stashes no life growth to collapse.
+#[test]
+fn a_life_shortcut_offer_at_the_cap_carries_no_life_axis() {
+    let (mut runner, dynamo, indices) =
+        lifedynamo_board(two_player(), &[(P0, i32::MAX)], 3_000_000, 0);
+    cycle_to_the_shortcut_offer(
+        &mut runner,
+        dynamo,
+        indices,
+        &[ResourceAxis::Mana(ManaType::Colorless)],
+    );
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(1000),
+            template: None,
+        })
+        .expect("the shortcut declaration is accepted");
+    accept_for_every_responder(&mut runner, &[P1]);
+    assert!(
+        !stash(&runner).is_some_and(|items| items
+            .iter()
+            .any(|item| matches!(item, PersistentAxisMaterialization::Life { .. }))),
+        "no life growth is stashed: {:?}",
+        stash(&runner)
+    );
+    pass_to_next_boundary(&mut runner);
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayAmountChoice { .. }
+        ),
+        "the boundary asks no collapse amount, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.life(P0), i32::MAX);
+}
+
+/// CR 119.3 + CR 732.1b: each of the 1000 elided cycles gains 2 life, so the
+/// collapse gains 2000 and reports 2000 even though the stored total stops at
+/// `i32::MAX`. The period is measured from one below the cap, where the cap
+/// holds the stored gain to 1; in Two-Headed Giant the cap is the team's shared
+/// total (CR 810.4). Control: from 22 the stored gain is the rules amount.
+/// Residual: with the gained counter pinned at `u32::MAX` the period carries
+/// no reading, so the collapse falls back to the stored gain of 1 per cycle
+/// while the total still lands on `i32::MAX`.
+#[test]
+fn a_life_shortcut_period_crossing_the_cap_collapses_at_the_rules_amount() {
+    struct Row {
+        name: &'static str,
+        two_headed_giant: bool,
+        fields: Vec<(PlayerId, i32)>,
+        gained: u32,
+        unbounded: Vec<ResourceAxis>,
+        p0_life_at_offer: i32,
+        responders: Vec<PlayerId>,
+        per_cycle_delta: u32,
+        p0_life_after: i32,
+        gained_after: u32,
+        amount: i32,
+    }
+    let mana = ResourceAxis::Mana(ManaType::Colorless);
+    let rows = [
+        Row {
+            name: "crossing the cap",
+            two_headed_giant: false,
+            fields: vec![(P0, i32::MAX - 3)],
+            gained: 0,
+            unbounded: vec![mana],
+            p0_life_at_offer: i32::MAX - 1,
+            responders: vec![P1],
+            per_cycle_delta: 2,
+            p0_life_after: i32::MAX,
+            gained_after: 2002,
+            amount: 2000,
+        },
+        Row {
+            name: "Two-Headed Giant team crossing the cap",
+            two_headed_giant: true,
+            fields: vec![(P0, i32::MAX - 8), (P1, 5)],
+            gained: 0,
+            unbounded: vec![mana],
+            p0_life_at_offer: i32::MAX - 6,
+            responders: vec![P1, P2, PlayerId(3)],
+            per_cycle_delta: 2,
+            p0_life_after: i32::MAX - 5,
+            gained_after: 2002,
+            amount: 2000,
+        },
+        Row {
+            name: "control below the cap",
+            two_headed_giant: false,
+            fields: vec![(P0, 20)],
+            gained: 0,
+            unbounded: vec![mana, ResourceAxis::Life(P0)],
+            p0_life_at_offer: 22,
+            responders: vec![P1],
+            per_cycle_delta: 2,
+            p0_life_after: 2022,
+            gained_after: 2002,
+            amount: 2000,
+        },
+        Row {
+            name: "gained counter pinned at u32::MAX",
+            two_headed_giant: false,
+            fields: vec![(P0, i32::MAX - 3)],
+            gained: u32::MAX,
+            unbounded: vec![mana],
+            p0_life_at_offer: i32::MAX - 1,
+            responders: vec![P1],
+            per_cycle_delta: 1,
+            p0_life_after: i32::MAX,
+            gained_after: u32::MAX,
+            amount: 1000,
+        },
+    ];
+    for row in rows {
+        let name = row.name;
+        let scenario = if row.two_headed_giant {
+            two_headed_giant()
+        } else {
+            two_player()
+        };
+        let (mut runner, dynamo, indices) = lifedynamo_board(scenario, &row.fields, 2, row.gained);
+        cycle_to_the_shortcut_offer(&mut runner, dynamo, indices, &row.unbounded);
+        assert_eq!(runner.life(P0), row.p0_life_at_offer, "{name}");
+        runner
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(1000),
+                template: None,
+            })
+            .expect("the shortcut declaration is accepted");
+        accept_for_every_responder(&mut runner, &row.responders);
+        assert_eq!(
+            stash(&runner),
+            Some(&vec![PersistentAxisMaterialization::Life {
+                player: P0,
+                per_cycle_delta: row.per_cycle_delta,
+            }]),
+            "{name}"
+        );
+
+        let events = collapse(&mut runner, 1000);
+
+        assert_eq!(runner.life(P0), row.p0_life_after, "{name}");
+        if row.two_headed_giant {
+            assert_eq!(team_a_fields(runner.state()), (i32::MAX - 5, 5), "{name}");
+            assert_eq!(
+                team_life_sum(runner.state(), P0),
+                i64::from(i32::MAX),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            runner.state().players[0].life_gained_this_turn,
+            row.gained_after,
+            "{name}"
+        );
+        assert_eq!(
+            life_changes(&events),
+            vec![(P0, row.amount, Some(row.p0_life_after))],
+            "{name}"
+        );
+        assert!(is_priority(runner.state()), "{name}");
+        assert_eq!(stash(&runner), None, "{name}: the stash is cleared");
+    }
 }

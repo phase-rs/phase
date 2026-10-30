@@ -22432,11 +22432,12 @@ declare_game_state! {
     /// ingress caller rejects. Transient — never serialized.
     #[serde(skip)]
     pub(crate) ingress_life_window: Option<IngressLifeWindow>,
-    /// A replacement's computed life, player-counter or energy quantity
-    /// overflowed while the current event was being replaced (see
-    /// `ReplacementQuantityOverflow`). Recorded by the life and player/energy
-    /// counter appliers, taken by that event's settle step inside one
-    /// synchronous action. Transient — never serialized.
+    /// A replacement's computed player-counter or energy quantity overflowed
+    /// while the current event was being replaced (see
+    /// `ReplacementQuantityOverflow`). Recorded by the player/energy counter
+    /// applier, taken by that event's settle step inside one synchronous
+    /// action; a life applier saturates instead and records nothing.
+    /// Transient — never serialized.
     #[serde(skip)]
     pub(crate) replacement_quantity_overflow: Option<ReplacementQuantityOverflow>,
     /// CR 601.2g + CR 605.3b: the row policy of the automatic mana payment that
@@ -27980,11 +27981,13 @@ pub struct PendingReplacement {
     /// boundary methods below.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_boundary: Option<Box<ProposedEvent>>,
-    /// Whether an engine-unrepresentable final player-resource edit (life,
-    /// player counter, energy) on resume rejects the
-    /// public action and restores its entry state (`Reject`), or uses the
-    /// compatibility skip when no ingress window owns it (`IgnoreImpossible`).
-    /// Older payloads omit this field and retain that compatibility policy.
+    /// Whether an engine-unrepresentable player-resource settlement on resume
+    /// (a player counter or energy, including one a resumed life event's
+    /// substitute or continuation reaches; a life change saturates instead)
+    /// rejects the public action and restores its entry state (`Reject`), or
+    /// uses the compatibility skip when no ingress window owns it
+    /// (`IgnoreImpossible`). Older payloads omit this field and retain that
+    /// compatibility policy.
     #[serde(
         default,
         skip_serializing_if = "UnrepresentablePolicy::is_ignore_impossible"
@@ -27994,10 +27997,11 @@ pub struct PendingReplacement {
 
 /// Who owns a player-resource change (life, player counter, energy) whose final
 /// result the engine cannot represent (a player-counter or energy amount beyond
-/// an `i32` delta or total past `u32::MAX`, or a replacement quantity that
-/// overflowed while the event was replaced; a life change carries any `u32`
-/// amount exactly, and its total and per-turn gained/lost counters saturate
-/// instead).
+/// an `i32` delta or total past `u32::MAX`, or a player-counter or energy
+/// replacement quantity that overflowed while the event was replaced). A life
+/// change is never unrepresentable: it carries any `u32` amount exactly, a life
+/// replacement quantity saturates at `u32::MAX`, and the total and per-turn
+/// gained/lost counters saturate at their limits.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnrepresentablePolicy {
     /// Action ingress: return the typed error so the caller rejects the
@@ -28029,22 +28033,24 @@ pub(crate) struct IngressLifeWindow {
     pub(crate) failed_player: Option<PlayerId>,
 }
 
-/// A replacement's computed life, player-counter or energy quantity overflowed
-/// the engine's numeric range, so the modified event cannot be represented. This
-/// is an engine capacity limit, NOT a CR 101.3 impossibility: the applier
-/// records the overflowing replacement's source (diagnostic) and that event's
-/// settle step takes the record and routes it through the existing
+/// A replacement's computed player-counter or energy quantity overflowed the
+/// engine's numeric range, so the modified event cannot be represented. This is
+/// an engine capacity limit, NOT a CR 101.3 impossibility: the applier records
+/// the overflowing replacement's source (diagnostic) and that event's settle
+/// step takes the record and routes it through the existing
 /// unrepresentable-player-resource-change authority. A public action boundary
 /// rejects and restores; the ordinary fallback outside one skips the change for
-/// compatibility (never clamping, and never inventing a CR 119.3 amount).
+/// compatibility. A life replacement quantity is never recorded: it lands on
+/// `u32::MAX` (CR 119.3), which the life settle carries exactly while the life
+/// total saturates at its `i32` limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReplacementQuantityOverflow {
     pub(crate) source: ObjectId,
 }
 
 impl GameState {
-    /// Record that a replacement's computed life, player-counter or energy
-    /// quantity overflowed. The first writer wins: the loop stops at the first
+    /// Record that a replacement's computed player-counter or energy quantity
+    /// overflowed. The first writer wins: the loop stops at the first
     /// overflow, so a later record can only be the same event.
     pub(crate) fn record_replacement_quantity_overflow(&mut self, source: ObjectId) {
         if self.replacement_quantity_overflow.is_none() {

@@ -2476,6 +2476,61 @@ impl ResourceVector {
         }
     }
 
+    /// CR 104.4b + CR 732.4 + CR 119.3: this cycle delta (`prior` to `current`)
+    /// with the `life` axis of every seat whose life total sits at `i32::MAX` at
+    /// both ends of the cycle read from the rules amount the cycle carried — the
+    /// change in that seat's per-turn counters, gained minus lost
+    /// ([`life_counter_change`]) — in place of the stored delta, which the cap
+    /// holds at 0. A life total saturates at `i32::MAX` as an engine capacity, not
+    /// a rule, so the cycle is classified as the rules see it. In a shared-life
+    /// format the life total is the team's shared total (CR 810.4 + CR 810.9a).
+    ///
+    /// `i32::MIN` is not read. A seat still alive there has an effect that keeps
+    /// it from losing (CR 704.5a, CR 810.8c for a team, would otherwise have
+    /// removed it); its reading could only add a loss axis, and that axis would
+    /// veto the draw CR 104.4b gives a mandatory loop that drains it with no way
+    /// to stop.
+    ///
+    /// A seat across whose cycle a counter fell (a turn boundary reset it) gives
+    /// no reading and keeps the stored delta; a counter pinned at `u32::MAX` moves
+    /// no further, so its reading is the stored 0. A zero reading has no entry, as
+    /// in [`map_delta`]. Every other seat and every other axis is `self`'s, so a
+    /// cycle with no life total at `i32::MAX` reads exactly as `self`.
+    ///
+    /// Read only by Path B (`game::engine::interactive_loop_bridge`'s CR 732.4
+    /// draw walk): an optional loop is never drawn (CR 104.4b), and a life axis
+    /// held at the cap offers no growth to shortcut.
+    pub(crate) fn with_at_limit_life_reading(
+        &self,
+        prior: &GameState,
+        current: &GameState,
+    ) -> ResourceVector {
+        let cap = i64::from(i32::MAX);
+        let mut read = self.clone();
+        for after in &current.players {
+            let Some(before) = prior.players.iter().find(|p| p.id == after.id) else {
+                continue;
+            };
+            if crate::game::players::life_change_total(current, after.id) != cap
+                || crate::game::players::life_change_total(prior, after.id) != cap
+            {
+                continue;
+            }
+            let Some(rules) = life_counter_change(before, after) else {
+                continue;
+            };
+            match rules {
+                0 => {
+                    read.life.remove(&after.id);
+                }
+                rules => {
+                    read.life.insert(after.id, rules);
+                }
+            }
+        }
+        read
+    }
+
     /// Iterate every scalar component of this vector as a signed value, paired
     /// with whether that axis is **consumed** (may legitimately be spent inside a
     /// beneficial loop, e.g. mana and life) — see [`Self::is_net_progress`].
@@ -6083,26 +6138,55 @@ pub(crate) fn grown_beneficial_counter_deltas(
 /// (`current` vs `prior`) — the batched-collapse δ source for the life axis. A life LOSS
 /// stays a loss/SBA axis (CR 704.5a) and is not returned. Mirrors the counter δ source:
 /// snapshot the per-cycle delta once, multiply by the controller-named N at the boundary.
+///
+/// CR 119.3 + CR 732.1b: a player is returned only when their stored total grew across the
+/// period, and δ is that stored gain, except where the period ends with the player's life
+/// total at `i32::MAX` (the team's shared total in a shared-life format, CR 810.4 +
+/// CR 810.9a). There the cap can hold the stored gain below what the period gained, so δ is
+/// the rules amount the period carried, read from the player's per-turn counters
+/// ([`life_counter_change`]): each elided cycle's lump gain then reports what performing it
+/// would (`game::arithmetic::reported_life_magnitude`). The stored gain stays the floor,
+/// because a counter that fell or stopped at `u32::MAX` reads less and the lump must still
+/// take the total where performing the cycles would. A total held at the cap across the
+/// whole period grows no stored total, so it offers no growth to collapse; below the cap
+/// every δ is the stored gain, exactly.
 pub(crate) fn grown_life_deltas(prior: &GameState, current: &GameState) -> Vec<(PlayerId, u32)> {
     let mut deltas = Vec::new();
     for after in &current.players {
-        let before_life = prior
-            .players
-            .iter()
-            .find(|p| p.id == after.id)
-            .map(|p| p.life)
-            .unwrap_or(after.life);
+        let before = prior.players.iter().find(|p| p.id == after.id);
         // CR 119.3: the gain between two `i32` totals can pass `i32::MAX`; exact in
         // `i64`, and it always fits `u32` (at most `u32::MAX`, `i32::MIN` → `i32::MAX`).
-        let gained = i64::from(after.life) - i64::from(before_life);
-        if gained > 0 {
-            deltas.push((
-                after.id,
-                crate::game::arithmetic::i64_to_u32_saturating(gained),
-            ));
+        let stored = i64::from(after.life) - i64::from(before.map_or(after.life, |p| p.life));
+        if stored <= 0 {
+            continue;
         }
+        let ends_at_cap =
+            crate::game::players::life_change_total(current, after.id) == i64::from(i32::MAX);
+        let rules = before
+            .filter(|_| ends_at_cap)
+            .and_then(|before| life_counter_change(before, after));
+        let gained = rules.map_or(stored, |rules| rules.max(stored));
+        deltas.push((
+            after.id,
+            crate::game::arithmetic::i64_to_u32_saturating(gained),
+        ));
     }
     deltas
+}
+
+/// CR 119.3: the life `after` gained minus the life it lost since `before`, read from the
+/// per-turn counters, which count the rules amount of every gain and loss
+/// (`game::arithmetic::reported_life_magnitude`), saturating at `u32::MAX`, even where the
+/// stored total stops at an `i32` limit. `None` when a counter fell: a turn boundary reset
+/// it in between.
+fn life_counter_change(before: &Player, after: &Player) -> Option<i64> {
+    let gained = after
+        .life_gained_this_turn
+        .checked_sub(before.life_gained_this_turn)?;
+    let lost = after
+        .life_lost_this_turn
+        .checked_sub(before.life_lost_this_turn)?;
+    Some(i64::from(gained) - i64::from(lost))
 }
 
 /// CR 122.1: return a clone of `current` with every SHARED object's `Generic`
@@ -15595,6 +15679,148 @@ mod tests {
             grown_life_deltas(&high, &low).is_empty(),
             "a life LOSS yields no batched gain δ"
         );
+    }
+
+    /// CR 104.4b + CR 732.4 + CR 119.3: Path B's at-limit reading replaces a seat's
+    /// `life` axis with the cycle's rules amount (gained minus lost, from the per-turn
+    /// counters) only where that seat's life total sits at `i32::MAX` at both ends of the
+    /// cycle. A cycle that moves the total, a cycle across which a counter fell, a pinned
+    /// counter and a seat held at `i32::MIN` all read exactly as the stored delta.
+    #[test]
+    fn at_limit_life_reading_reads_the_rules_amount_only_at_a_held_cap() {
+        let stored = |prior: &GameState, current: &GameState| {
+            ResourceVector::delta(
+                &ResourceVector::snapshot(prior),
+                &ResourceVector::snapshot(current),
+            )
+        };
+        // (P0 life before/after, P0 gained before/after, P0 lost before/after)
+        type Seat = (i32, i32, u32, u32, u32, u32);
+        let board = |(
+            life_before,
+            life_after,
+            gained_before,
+            gained_after,
+            lost_before,
+            lost_after,
+        ): Seat| {
+            let mut prior = GameState::new_two_player(42);
+            prior.players[0].life = life_before;
+            prior.players[0].life_gained_this_turn = gained_before;
+            prior.players[0].life_lost_this_turn = lost_before;
+            let mut current = prior.clone();
+            current.players[0].life = life_after;
+            current.players[0].life_gained_this_turn = gained_after;
+            current.players[0].life_lost_this_turn = lost_after;
+            (prior, current)
+        };
+        let p0 = PlayerId(0);
+
+        // Held at the cap: the stored delta is empty; the reading is the +2 the cycle
+        // carried (+3 gained, +1 lost), and every other axis is unchanged.
+        let (prior, current) = board((i32::MAX, i32::MAX, 0, 3, 0, 1));
+        let delta = stored(&prior, &current);
+        assert!(delta.life.is_empty(), "the cap holds the stored delta at 0");
+        assert_eq!(
+            delta.with_at_limit_life_reading(&prior, &current),
+            ResourceVector {
+                life: BTreeMap::from([(p0, 2)]),
+                ..delta.clone()
+            }
+        );
+
+        // Every other row reads exactly as the stored delta.
+        let unchanged: [(&str, Seat, BTreeMap<PlayerId, i64>); 4] = [
+            (
+                "a counter fell (a turn boundary reset it)",
+                (i32::MAX, i32::MAX, 10, 2, 0, 0),
+                BTreeMap::new(),
+            ),
+            (
+                "below the cap",
+                (20, 22, 0, 2, 0, 0),
+                BTreeMap::from([(p0, 2)]),
+            ),
+            (
+                "reaching the cap within the cycle",
+                (i32::MAX - 1, i32::MAX, 0, 2, 0, 0),
+                BTreeMap::from([(p0, 1)]),
+            ),
+            (
+                "a counter pinned at u32::MAX",
+                (i32::MAX, i32::MAX, u32::MAX, u32::MAX, 0, 0),
+                BTreeMap::new(),
+            ),
+        ];
+        for (name, seat, life) in unchanged {
+            let (prior, current) = board(seat);
+            let delta = stored(&prior, &current);
+            assert_eq!(delta.life, life, "{name}: stored");
+            assert_eq!(
+                delta.with_at_limit_life_reading(&prior, &current),
+                delta,
+                "{name}"
+            );
+        }
+
+        // A seat held at `i32::MIN` (alive only under a can't-lose effect) is not read.
+        let mut prior = GameState::new_two_player(42);
+        prior.players[1].life = i32::MIN;
+        let mut current = prior.clone();
+        current.players[1].life_lost_this_turn = 4;
+        let delta = stored(&prior, &current);
+        assert!(delta.life.is_empty());
+        assert_eq!(delta.with_at_limit_life_reading(&prior, &current), delta);
+    }
+
+    /// CR 119.3 + CR 732.1b: where an accepted period ends with the life total at
+    /// `i32::MAX`, the batched-collapse δ is the rules amount the period carried (the
+    /// per-turn counters, gained minus lost), never below the stored gain, which stays
+    /// the floor for a counter that fell or is pinned at `u32::MAX`. Below the cap the
+    /// stored gain is kept even where the counters disagree, and a total held at the cap
+    /// across the whole period grows no stored total, so it has no δ.
+    #[test]
+    fn grown_life_delta_reads_the_rules_amount_where_the_period_ends_at_the_cap() {
+        // (name, P0 life before/after, P0 gained before/after, expected δ)
+        type Row = (&'static str, (i32, i32), (u32, u32), Vec<(PlayerId, u32)>);
+        let p0 = PlayerId(0);
+        let rows: [Row; 6] = [
+            (
+                "crossing the cap",
+                (i32::MAX - 1, i32::MAX),
+                (0, 2),
+                vec![(p0, 2)],
+            ),
+            ("below the cap", (20, 22), (0, 2), vec![(p0, 2)]),
+            (
+                "below the cap, counters disagree",
+                (20, 22),
+                (0, 5),
+                vec![(p0, 2)],
+            ),
+            (
+                "crossing with a pinned counter",
+                (i32::MAX - 1, i32::MAX),
+                (u32::MAX, u32::MAX),
+                vec![(p0, 1)],
+            ),
+            (
+                "crossing after a counter fell",
+                (i32::MAX - 1, i32::MAX),
+                (10, 2),
+                vec![(p0, 1)],
+            ),
+            ("held at the cap", (i32::MAX, i32::MAX), (0, 3), vec![]),
+        ];
+        for (name, (life_before, life_after), (gained_before, gained_after), expected) in rows {
+            let mut prior = GameState::new_two_player(42);
+            prior.players[0].life = life_before;
+            prior.players[0].life_gained_this_turn = gained_before;
+            let mut current = prior.clone();
+            current.players[0].life = life_after;
+            current.players[0].life_gained_this_turn = gained_after;
+            assert_eq!(grown_life_deltas(&prior, &current), expected, "{name}");
+        }
     }
 
     /// A battlefield permanent carrying ONE `TriggerMode::Phase` trigger whose step

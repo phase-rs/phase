@@ -125,12 +125,15 @@ pub enum EngineError {
         player: PlayerId,
         pending: Box<crate::types::game_state::PendingCast>,
     },
-    /// A life, player-counter or energy change in this action proved
-    /// unrepresentable (the final amount, or the counter/energy total, does not
-    /// fit the engine's `i32`/`u32` storage; a life total and its per-turn
-    /// counters saturate instead). Representability is an engine limit, not
-    /// a game rule; the action boundary rejects the whole action and restores
-    /// its pre-action snapshot rather than silently skipping the change.
+    /// A player-counter or energy change in this action (including one nested
+    /// under a life change) proved unrepresentable: its amount does not fit an
+    /// `i32` delta, its total would pass `u32::MAX`, or a replacement quantity
+    /// for it overflowed. A life change never does: it carries any `u32` amount
+    /// exactly, a life replacement quantity saturates at `u32::MAX`, and a life
+    /// total and its per-turn counters saturate at their limits.
+    /// Representability is an engine limit, not a game rule; the action
+    /// boundary rejects the whole action and restores its pre-action snapshot
+    /// rather than silently skipping the change.
     #[error("Player-resource change is not representable for player {player:?}")]
     LifeChangeUnrepresentable { player: PlayerId },
 }
@@ -2803,7 +2806,12 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
 
     // Path B: CR 732.4 all-mandatory, net-progress, no-loss draw. Only reached when Path A
     // found no determinate winner. `mandatory` gates it (CR 732.5); a loss axis or an
-    // optional loop falls through to the pre-feature halt.
+    // optional loop falls through to the pre-feature halt. A seat whose life total sits at
+    // `i32::MAX` at both ends of the compared cycle has its life axis read from the cycle's
+    // rules amount (`ResourceVector::with_at_limit_life_reading`), so a mandatory loop that
+    // only gains life at the cap is drawn as it is below the cap. `i32::MIN` is not read: a
+    // seat alive there has an effect keeping it from losing (CR 704.5a), and a loss axis
+    // there would veto the CR 104.4b draw of a loop that drains it.
     if mandatory {
         let _timed = crate::analysis::resource::CostTimer::start(|cost| {
             (
@@ -2826,7 +2834,12 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
                 let delta = crate::analysis::resource::ResourceVector::delta(
                     &crate::analysis::resource::ResourceVector::snapshot(prior),
                     &cur,
-                );
+                )
+                // CR 104.4b + CR 732.4: a life total held at `i32::MAX` at both ends of the
+                // cycle reads the cycle's rules amount, not the stored 0. `i32::MIN` is not
+                // read (CR 704.5a + CR 104.4b: a seat alive there cannot lose, and a loss
+                // axis would veto the draw of a loop that drains it).
+                .with_at_limit_life_reading(prior, frames.current());
                 // CR 732.2a board-recurrence (constant-depth OR ω growing cascade) + net
                 // progress + NO loss axis for anyone ⇒ the loop grinds forever with nobody
                 // able to win or lose ⇒ CR 732.4 / 104.4b draw.
@@ -2881,7 +2894,9 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
                     &cur,
                 );
                 // Same recurrence + net-progress predicate as Path B (byte-reused), minus the
-                // `mandatory` gate. The object-growth disjunct is the SHARED-BUT-DORMANT arm
+                // `mandatory` gate and Path B's at-limit life reading (an optional loop is
+                // never drawn, CR 104.4b, and a life axis held at the cap offers no growth to
+                // mark). The object-growth disjunct is the SHARED-BUT-DORMANT arm
                 // (empty residual today; lights up under 4a-live with no further edit).
                 //
                 // REDUNDANCY PROOF (R6, team-lead-verified): `has_no_loss_axis` (conjunct 3
@@ -6339,8 +6354,9 @@ fn drive_one_shortcut_cycle(
             }) => {
                 ev.append(&mut beat_events);
                 let answer = inject_pinned_answer(&mut work, template, iteration, &other);
-                // The injector's low-level action can also have recorded an unrepresentable life
-                // change in this work clone without returning an error. Preserve it at the same
+                // The injector's low-level action can also have recorded an unrepresentable
+                // player-counter or energy change (a life change saturates instead) in this
+                // work clone without returning an error. Preserve it at the same
                 // public-cycle seam before an ordinary injector refusal maps to `Abort`.
                 if let Some(player) = boundary_life_change_failure(&work) {
                     return Err(EngineError::LifeChangeUnrepresentable { player });
@@ -7984,9 +8000,11 @@ fn current_period_counter_growth(
 }
 
 /// CR 119.3 + CR 732.2a: the per-player life GAIN δ of the accepted period, diffed off the one
-/// driven iteration's frames (`grown_life_deltas`). The batched-collapse δ source for the life
-/// axis. Empty when the period gains no life. Only reached in the UNOBSERVED batched route (the
-/// firewall gates it).
+/// driven iteration's frames (`grown_life_deltas`): the stored gain or, where the period ends
+/// with the player's life total (the team's shared total in a shared-life format) at
+/// `i32::MAX`, the larger of that gain and the rules amount the period carried. The
+/// batched-collapse δ source for the life axis. Empty when no player's stored total grows
+/// across the period. Only reached in the UNOBSERVED batched route (the firewall gates it).
 fn current_period_life_growth(before: &GameState, after: &GameState) -> Vec<(PlayerId, u32)> {
     crate::analysis::resource::grown_life_deltas(before, after)
 }
@@ -10798,10 +10816,11 @@ fn priority_pass_will_close_window(state: &GameState) -> bool {
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
 /// automatically pass for them until the goal condition is met or interrupted.
 ///
-/// Returns the typed action-ingress life failure when a pass settled a life
-/// change the engine cannot represent: the caller restores its boundary
-/// snapshot and rejects the action. Every other error keeps the established
-/// policy (restore the iteration checkpoint and stop the drive).
+/// Returns the typed action-ingress failure when a pass settled a player-counter
+/// or energy change the engine cannot represent (a life change saturates
+/// instead): the caller restores its boundary snapshot and rejects the action.
+/// Every other error keeps the established policy (restore the iteration
+/// checkpoint and stop the drive).
 fn run_auto_pass_loop(
     state: &mut GameState,
     result: &mut ActionResult,

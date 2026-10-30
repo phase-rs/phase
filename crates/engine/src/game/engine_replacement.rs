@@ -884,9 +884,11 @@ fn handle_replacement_choice_inner(
                     }
                 }
                 // CR 119.3: Life gain accepted after replacement choice. The
-                // parked record's policy decides an unrepresentable final edit:
-                // `Reject` fails the answer (the boundary restores the record and
-                // its prompt), `IgnoreImpossible` skips the change and resumes.
+                // settle saturates the total and never refuses a life change, so
+                // the parked record's policy reaches only the shared settle
+                // routing; a nested player-counter or energy settlement this
+                // answer reaches is held to it by `handle_replacement_choice`'s
+                // ingress window.
                 gain @ ProposedEvent::LifeGain { .. } => {
                     settle_life_gain_after_choice(state, gain, parked_life_policy, events)?;
                 }

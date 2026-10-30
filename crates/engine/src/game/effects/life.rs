@@ -38,12 +38,13 @@ pub enum ReplacementDeferred {
     SubstitutionContinuation { applied: u32 },
 }
 
-/// A player-resource change (life, a player counter, or energy) whose final
-/// result the engine cannot represent: a player-counter or energy amount does
-/// not fit an `i32` delta or its total would pass `u32::MAX`, or a replacement
-/// quantity overflowed while the event was replaced (a life change carries any
-/// `u32` amount exactly; its total and per-turn gained/lost counters saturate
-/// at their limits instead). Nothing was mutated.
+/// A player-resource change (a player counter or energy) whose final result the
+/// engine cannot represent: its amount does not fit an `i32` delta, its total
+/// would pass `u32::MAX`, or a replacement quantity overflowed while the event
+/// was replaced. A life change is never unrepresentable: it carries any `u32`
+/// amount exactly, a life replacement quantity saturates at `u32::MAX`, and its
+/// total and per-turn gained/lost counters saturate at their limits. Nothing
+/// was mutated.
 ///
 /// Representability is an engine limit, not a game rule: how the change is
 /// then treated is chosen by the caller's [`UnrepresentablePolicy`].
@@ -416,8 +417,8 @@ pub fn apply_life_gain(
     ))
 }
 
-/// Action-ingress life gain: like [`apply_life_gain`], except that a final
-/// result the engine cannot represent is reported as
+/// Action-ingress life gain: like [`apply_life_gain`], except that a nested player-counter
+/// or energy result the engine cannot represent (the life gain itself saturates) is reported as
 /// [`LifeChangeError::Unrepresentable`] so the caller rejects the action and
 /// the action boundary restores its snapshot. Opens the ingress window for the
 /// whole call, so a record parked here is stamped for rejection on resume and
@@ -480,8 +481,9 @@ fn drain_substitution_continuation(
 /// CR 119.3: Settle a post-replacement `ProposedEvent::LifeGain`: the one
 /// place the final gain edit is made and the gain is reported.
 ///
-/// Order before anything observable: a recorded replacement-quantity overflow,
-/// then the edit authority applies the whole amount as an exact `i64` delta,
+/// Order before anything observable: the shared replacement-quantity overflow
+/// consumer (no life applier records one; a life replacement quantity saturates
+/// at `u32::MAX`), then the edit authority applies the whole amount as an exact `i64` delta,
 /// saturating the total it adjusts (the player's own life, or in Two-Headed
 /// Giant the team's shared total, CR 810.9) at `i32::MAX` and the
 /// gained-this-turn counter at `u32::MAX`; the `LifeChanged` amount and the
@@ -631,8 +633,10 @@ pub(crate) fn settle_unrepresentable(
     }
 }
 
-/// Consumes a replacement-quantity overflow recorded while this life, player
-/// counter or energy event was replaced. The overflowed result exceeds the
+/// Consumes a replacement-quantity overflow recorded while this player-counter
+/// or energy event was replaced. The life settles call it as the same shared
+/// consumer, but a life applier saturates and never records one. The
+/// overflowed result exceeds the
 /// engine's numeric range, so it takes the same failure branch as any other
 /// engine-unrepresentable player-resource change: `Reject` returns the typed error; `IgnoreImpossible` returns `Ok(0)`
 /// and either records failure for an open ingress window to reject and restore,
@@ -2974,12 +2978,12 @@ mod tests {
             })
         }
 
-        /// A replacement-quantity overflow (Boon Reflection doubling
-        /// 1,100,000,000 to 2,200,000,000, past `i32::MAX`) rejects the resolving
-        /// action: the whole spell rolls back, so the gain, the prevention, and
-        /// the graveyard move all wait for an explicit caller decision.
+        /// Boon Reflection doubling 1,100,000,000 to 2,200,000,000 (past
+        /// `i32::MAX`) resolves the whole spell: the total stops at `i32::MAX`,
+        /// the gain counts the rules amount (CR 119.3), and the prevention and
+        /// the graveyard move happen.
         #[test]
-        fn ordinary_replacement_quantity_overflow_rejects_the_resolution() {
+        fn ordinary_replacement_quantity_past_i32_resolves_and_saturates() {
             // Control A: no doubler — the whole power is gained.
             let (runner, events, _) = cast_dazzling_reflection(1_100_000_000, &[]);
             let events = events.expect("the representable cast must resolve");
@@ -2992,35 +2996,35 @@ mod tests {
             assert_eq!(runner.life(P0), 1_000_000_020);
             assert!(prevent_damage_resolved(&events));
 
-            // The overflow: the resolving action is rejected and restored whole.
+            // Past `i32::MAX`: the whole spell resolves and the total saturates.
             let (runner, events, spell) =
                 cast_dazzling_reflection(1_100_000_000, &["Boon Reflection"]);
-            let error = events.expect_err("the overflow must reject the resolution");
-            assert!(
-                matches!(
-                    error,
-                    EngineError::LifeChangeUnrepresentable { player } if player == P0
-                ),
-                "expected the typed unrepresentable-life rejection, got {error:?}"
-            );
-            assert_eq!(runner.life(P0), 20);
-            assert_eq!(runner.state().players[0].life_gained_this_turn, 0);
-            assert!(
-                !runner.state().players[0].graveyard.contains(&spell),
-                "the rejected resolution leaves the spell on the stack"
-            );
-            assert_eq!(runner.state().stack.len(), 1);
+            let events = events.expect("a doubled gain past i32::MAX must resolve");
+            assert_eq!(runner.life(P0), i32::MAX);
             assert_eq!(
-                runner.state().replacement_quantity_overflow,
-                None,
-                "the rejected action restores the pre-resolution record"
+                runner.state().players[0].life_gained_this_turn,
+                2_200_000_000,
+                "the gained counter counts the rules amount"
             );
+            assert_eq!(life_changed_amounts(&events), vec![i32::MAX]);
+            assert!(prevent_damage_resolved(&events));
+            assert!(
+                runner.state().players[0].graveyard.contains(&spell),
+                "the resolved spell moves to the graveyard"
+            );
+            assert!(runner.state().stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert_eq!(runner.state().replacement_quantity_overflow, None);
         }
 
-        /// A choice-resumed ordinary delivery whose later answer overflows
-        /// rejects the answering action and restores its ordering prompt.
+        /// A choice-resumed ordinary delivery whose later application passes
+        /// `i32::MAX` (600,000,000 → 1,200,000,000 → 2,400,000,000) is accepted
+        /// and saturates.
         #[test]
-        fn choice_resumed_ordinary_quantity_overflow_rejects_the_answer() {
+        fn choice_resumed_ordinary_quantity_past_i32_accepts_the_answer() {
             // Reach guard: the same setup, left unanswered, halts at the CR 616.1
             // ordering prompt for the two doublers, so the answer below is a real
             // prompt answer rather than a no-prompt degenerate path.
@@ -3041,23 +3045,23 @@ mod tests {
                 prompted.state().waiting_for
             );
 
-            // 600,000,000 doubled is 1,200,000,000; doubled again overflows i32.
+            // 600,000,000 doubled is 1,200,000,000; doubled again passes i32::MAX.
             let (runner, events, spell) =
                 cast_dazzling_reflection(600_000_000, &["Rhox Faithmender", "Boon Reflection"]);
-            let error = events.expect_err("the overflow must reject the answer");
-            assert!(
-                matches!(
-                    error,
-                    EngineError::LifeChangeUnrepresentable { player } if player == P0
-                ),
-                "expected the typed unrepresentable-life rejection, got {error:?}"
+            let events = events.expect("the answer past i32::MAX must be accepted");
+            assert_eq!(runner.life(P0), i32::MAX);
+            assert_eq!(
+                runner.state().players[0].life_gained_this_turn,
+                2_400_000_000,
+                "the gained counter counts the rules amount"
             );
-            assert_eq!(runner.life(P0), 20);
+            assert_eq!(life_changed_amounts(&events), vec![i32::MAX]);
             assert!(matches!(
                 runner.state().waiting_for,
-                WaitingFor::ReplacementChoice { .. }
+                WaitingFor::Priority { .. }
             ));
-            assert!(!runner.state().players[0].graveyard.contains(&spell));
+            assert!(runner.state().players[0].graveyard.contains(&spell));
+            assert!(runner.state().stack.is_empty());
             assert_eq!(runner.state().replacement_quantity_overflow, None);
         }
 
