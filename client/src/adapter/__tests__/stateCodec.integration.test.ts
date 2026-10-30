@@ -78,8 +78,18 @@ function assertExact(handle: StateCodecHandle, row: ExactRow, context: string) {
   }
 }
 
+/**
+ * Proof lines go straight to stdout, not through `console`. In agent harnesses
+ * Vitest auto-selects its "agent" reporter (`silent: "passed-only"`), which
+ * drops intercepted console output for every non-failed test — including a
+ * wholly skipped file, so an unset gate would print nothing at all.
+ */
+function report(line: string): void {
+  process.stdout.write(`${line}\n`);
+}
+
 if (!ENABLED) {
-  console.info(
+  report(
     "stateCodec portability skipped: STATE_CODEC_CORPUS is unset. Produce an absolute-path corpus, build same-HEAD WASM, and run the manual command in this file's header.",
   );
 }
@@ -166,7 +176,7 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
     }
     expect(checkpointIndex).toBe(5);
     expect(comparisons).toBe(20);
-    console.info(`portability replay: accepted_actions=${corpus.actions.length} checkpoints=${checkpointIndex} audience_comparisons=${comparisons}`);
+    report(`portability replay: accepted_actions=${corpus.actions.length} checkpoints=${checkpointIndex} audience_comparisons=${comparisons}`);
   }, 300_000);
 
   it("preserves all five lexical literals through FULL encode and decode", () => {
@@ -185,7 +195,7 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
         handle.free();
       }
     }
-    console.info("portability lexical: five exact literal/FULL rows passed");
+    report("portability lexical: five exact literal/FULL rows passed");
   });
 
   it("detects an altered byte with the same exact-row comparator", () => {
@@ -203,7 +213,7 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
       control.free();
       candidate.free();
     }
-    console.info("portability mutation: altered byte detected");
+    report("portability mutation: altered byte detected");
   });
 
   it("detects semantically equal reordered keys without normalizing the comparison", () => {
@@ -222,7 +232,7 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
       control.free();
       candidate.free();
     }
-    console.info("portability mutation: normalized ordering detected");
+    report("portability mutation: normalized ordering detected");
   });
 
   it("consumes real baseline handles on DELTA success and decode error, retaining clones", () => {
@@ -273,6 +283,6 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
       base.free();
       current.free();
     }
-    console.info("portability ownership: real DELTA encode/decode consumption and decode-error consumption passed");
+    report("portability ownership: real DELTA encode/decode consumption and decode-error consumption passed");
   });
 });
