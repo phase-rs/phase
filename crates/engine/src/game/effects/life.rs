@@ -3231,7 +3231,8 @@ mod tests {
         }
 
         /// CR 119.5 + CR 701.12c: the difference helper is exact across the
-        /// whole `i32` range of targets and the `i64` range of current totals.
+        /// whole `i32` range of targets and any current total a sum of `i32`
+        /// life fields can hold.
         #[test]
         fn life_total_difference_is_exact_across_the_range() {
             assert_eq!(life_total_difference(7, 20), -13);
