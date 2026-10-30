@@ -408,6 +408,7 @@ fn cleanup(source: ObjectId) -> ResolutionCastCleanup {
             instance: DelayedTriggerInstanceId(41),
             source_id: source,
         }],
+        indicated_action: None,
     }
 }
 
