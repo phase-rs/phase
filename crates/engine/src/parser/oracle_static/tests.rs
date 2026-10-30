@@ -40546,38 +40546,23 @@ fn inverted_bare_self_accepts_tilde_subject() {
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
-/// 5.3a #5 — NEGATIVE: a fully-consuming NON-self subject ("creatures you
-/// control") must not be CLAIMED BY THIS BRANCH. Pins fail-closed note 1 on the
-/// subject strip, which accepts only "it " / "~ ".
-///
-/// SCOPE NOTE (deliberate deviation from the plan's literal wording): the plan
-/// asked for "must NOT produce a def with affected == SelfRef". That is not
-/// satisfiable here and never was — the line declines out of this branch and
-/// lands on the PRE-EXISTING generic try_split_and_must_attack_block fallback,
-/// which has always emitted SelfRef defs gated on an Unrecognized condition for
-/// non-self subjects. Repairing that fallback is out of this plan's scope: it is
-/// the same always-true fallback the Frodo class used to hit, but for a subject
-/// shape this branch deliberately does not claim. What IS assertable, and what
-/// actually pins the subject gate, is that the branch did not claim it — no def
-/// carries this branch's signature output (a TYPED condition bound to SelfRef).
-/// The Unrecognized-gated shape is asserted too, so that if that fallback is
-/// ever fixed this test fails loudly and gets re-tightened rather than silently
-/// drifting.
+/// SHAPE: the Ring-bearer condition names the source, while the complete
+/// non-self subject names every creature its controller controls. The bare-self
+/// branch must not replace that population with SelfRef.
 #[test]
 fn inverted_bare_self_declines_non_self_subject() {
-    let defs = parse_static_line_multi(
-        "As long as ~ is your Ring-bearer, creatures you control attack each combat if able.",
-    );
-    // Anti-vacuous reach-guard: both negatives below are `!any`/`all` shapes that
-    // are trivially true on an empty `defs`. This line must still be claimed by
-    // the pre-existing try_split_and_must_attack_block fallback, so a future
-    // upstream change that routes it to zero defs fails here loudly and
-    // specifically instead of silently turning both assertions into no-ops.
-    assert!(
-        !defs.is_empty(),
-        "line must still produce defs via the pre-existing \
-         try_split_and_must_attack_block fallback; zero defs would make the \
-         negatives below vacuous"
+    let text =
+        "As long as ~ is your Ring-bearer, creatures you control attack each combat if able.";
+    let defs = parse_static_line_multi(text);
+    assert_eq!(
+        defs,
+        vec![StaticDefinition::new(StaticMode::MustAttack)
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+            .condition(StaticCondition::IsRingBearer)
+            .description(text.into())],
+        "one complete population rule, with ordinary static defaults"
     );
     assert!(
         !defs
@@ -40586,12 +40571,6 @@ fn inverted_bare_self_declines_non_self_subject() {
                 && matches!(d.mode, StaticMode::MustAttack)
                 && d.condition == Some(StaticCondition::IsRingBearer)),
         "this branch must not claim a non-self subject: {defs:#?}"
-    );
-    // Unchanged pre-existing fallback shape (see SCOPE NOTE above).
-    assert!(
-        defs.iter()
-            .all(|d| matches!(d.condition, Some(StaticCondition::Unrecognized { .. }))),
-        "non-self subjects still ride today's Unrecognized fallback: {defs:#?}"
     );
 }
 

@@ -11544,14 +11544,9 @@ fn marble_priest_wall_filtered_forced_block_is_permanent_static() {
     );
 }
 
-/// Cavernous Maw (std BATCH 12): the `{2}` activated ability animates the
-/// land into a 3/3 Elemental creature, and the confirmatory "It's still a
-/// Cave land" sentence (CR 205.1b, CR 305.7) must NOT remain
-/// `Effect::Unimplemented`. The retention clause lowers to a `GenericEffect`
-/// continuous modification that re-asserts the Land card type and Cave
-/// subtype (additive, CR 613.1d). Revert-discriminating: if the
-/// `try_parse_still_a_type` subtype-aware fix is reverted, the sub_ability is
-/// `Effect::Unimplemented` and the zero-Unimplemented walk below fails.
+/// SHAPE: CR 205.1b: the whole Cavernous Maw animation retains all prior
+/// types, supertypes and subtypes. Its stated window owns the complete additive
+/// 3/3 Elemental creature effect; no separate Land/Cave grant is necessary.
 #[test]
 fn cavernous_maw_still_a_cave_land_clause_has_no_unimplemented() {
     use crate::types::card_type::CoreType;
@@ -11588,32 +11583,130 @@ fn cavernous_maw_still_a_cave_land_clause_has_no_unimplemented() {
         "Cavernous Maw must not emit Effect::Unimplemented, got {effects:#?}"
     );
 
-    // The retention clause must produce a continuous GenericEffect that
-    // re-asserts BOTH the Land core type AND the Cave subtype.
-    let retention = effects.iter().find_map(|e| match e {
-            Effect::GenericEffect {
-                static_abilities, ..
-            } if static_abilities.iter().any(|sd| {
-                sd.modifications
-                    .iter()
-                    .any(|m| matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Cave"))
-            }) =>
-            {
-                Some(static_abilities)
-            }
-            _ => None,
-        });
-    let retention = retention.expect("expected a Cave-retention GenericEffect");
+    assert_eq!(
+        r.abilities.len(),
+        2,
+        "independent mana and animation activations"
+    );
+    let mana = &r.abilities[0];
+    assert_eq!(mana.kind, AbilityKind::Activated);
+    assert_eq!(mana.cost, Some(AbilityCost::Tap));
+    let Effect::Mana {
+        produced,
+        restrictions,
+        grants,
+        expiry,
+        target,
+    } = mana.effect.as_ref()
+    else {
+        panic!("independent colorless mana ability: {mana:#?}")
+    };
+    assert_eq!(
+        *produced,
+        ManaProduction::Colorless {
+            count: QuantityExpr::Fixed { value: 1 },
+        }
+    );
+    assert!(restrictions.is_empty() && grants.is_empty());
+    assert_eq!(*expiry, None);
+    assert_eq!(*target, None);
+    assert!(mana.sub_ability.is_none());
+    let animation = &r.abilities[1];
+    assert_eq!(animation.kind, AbilityKind::Activated);
+    assert_eq!(
+        animation.cost,
+        Some(AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::Cost {
+                generic: 2,
+                shards: vec![]
+            },
+        })
+    );
+    assert_eq!(animation.duration, Some(Duration::UntilEndOfTurn));
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        target,
+        end_cost,
+    } = animation.effect.as_ref()
+    else {
+        panic!("one complete animation: {animation:#?}")
+    };
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(*target, None);
+    assert_eq!(*end_cost, None);
+    let [definition] = static_abilities.as_slice() else {
+        panic!("one complete static")
+    };
+    assert_eq!(definition.mode, StaticMode::Continuous);
+    assert_eq!(definition.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(definition.condition, None);
+    assert_eq!(
+        definition.modifications,
+        vec![
+            ContinuousModification::SetPower { value: 3 },
+            ContinuousModification::SetToughness { value: 3 },
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature
+            },
+            ContinuousModification::AddSubtype {
+                subtype: "Elemental".into()
+            },
+        ]
+    );
     assert!(
-        retention
-            .iter()
-            .any(|sd| sd.modifications.iter().any(|m| matches!(
-                m,
-                ContinuousModification::AddType {
-                    core_type: CoreType::Land
-                }
-            ))),
-        "retention clause must re-assert the Land core type, got {retention:#?}"
+        !definition.modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::SetCardTypes { .. }
+                | ContinuousModification::RemoveType { .. }
+                | ContinuousModification::RemoveAllSubtypes { .. }
+                | ContinuousModification::RemoveAllAbilities
+        )),
+        "retention must preserve prior Artifact/Land/Cave and abilities"
+    );
+    assert!(
+        animation.sub_ability.is_none(),
+        "no separate permanent retention grant"
+    );
+    let [ActivationRestriction::RequiresCondition {
+        condition:
+            Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Sum { exprs },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            }),
+    }] = animation.activation_restrictions.as_slice()
+    else {
+        panic!("complete cross-zone Sum >= 3 restriction: {animation:#?}")
+    };
+    let [QuantityExpr::Ref {
+        qty:
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(other_caves),
+            },
+    }, QuantityExpr::Ref {
+        qty:
+            QuantityRef::ZoneCardCount {
+                zone: crate::types::ability::ZoneRef::Graveyard,
+                scope: crate::types::ability::CountScope::Controller,
+                filter: Some(TargetFilter::Typed(graveyard_caves)),
+                ..
+            },
+    }] = exprs.as_slice()
+    else {
+        panic!("other controlled Caves plus own graveyard Cave cards: {exprs:#?}")
+    };
+    assert_eq!(
+        *other_caves,
+        TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Cave".into())],
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::Another],
+        }
+    );
+    assert_eq!(
+        graveyard_caves.type_filters,
+        vec![TypeFilter::Subtype("Cave".into())]
     );
 }
 
@@ -24471,12 +24564,9 @@ fn mixed_anaphor_for_each_drawn_this_way_rider_is_not_folded_onto_a_prevention()
     );
 }
 
-/// #8777 (VM-5) — HOSTILE / scalar sibling: Reverse Damage's rider stays
-/// `SequentialSibling` (charter constraint: this fix must not change its
-/// behaviour). Reverse Damage is measured BROKEN independent of this change
-/// — see `printed_damage_prevention_survives_turn.rs`'s assertion "the
-/// shield must prevent the chosen source's damage in its own turn" — so this
-/// row is not "protecting a working card".
+/// SHAPE: CR 615.5: Reverse Damage's scalar payoff belongs to the future
+/// prevention opportunity, immediately after actual prevention. It is a whole
+/// continuation on the shield, with no clause-level repetition.
 #[test]
 fn scalar_prevented_this_way_rider_is_not_folded() {
     // Verbatim, matching printed_damage_prevention_survives_turn.rs's REVERSE_DAMAGE_TEXT.
@@ -24484,6 +24574,8 @@ fn scalar_prevented_this_way_rider_is_not_folded() {
                    turn, prevent that damage. You gain life equal to the damage \
                    prevented this way.";
     let parsed = parse_oracle_text(oracle, "Reverse Damage", &[], &["Instant".into()], &[]);
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(!parsed_has_unimplemented(&parsed));
     let root = parsed
         .abilities
         .iter()
@@ -24495,10 +24587,31 @@ fn scalar_prevented_this_way_rider_is_not_folded() {
         .sub_ability
         .as_deref()
         .expect("Reverse Damage: PreventDamage root must carry a sub_ability");
-    assert!(
-        matches!(sub.effect.as_ref(), Effect::GainLife { .. }),
-        "Reverse Damage: sub_ability must be the GainLife rider, got {:?}",
-        sub.effect
+    assert_eq!(
+        root.effect.as_ref(),
+        &Effect::PreventDamage {
+            lifetime: crate::types::ability::RedirectionLifetime::OneOpportunity,
+            amount: crate::types::ability::PreventionAmount::All,
+            amount_dynamic: None,
+            target: TargetFilter::Controller,
+            recipient_scope: EffectScope::Single,
+            scope: crate::types::ability::PreventionScope::AllDamage,
+            damage_source_filter: Some(TargetFilter::ChosenDamageSource {
+                chooser: Some(crate::types::ability::Chooser::Controller),
+                filter: None,
+            }),
+            prevention_duration: Some(Duration::UntilEndOfTurn),
+        }
+    );
+    assert_eq!(
+        sub.effect.as_ref(),
+        &Effect::GainLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            },
+            player: TargetFilter::Controller,
+        },
+        "the complete payoff reads the actual prevented amount"
     );
     assert!(
         sub.repeat_for.is_none(),
@@ -24508,11 +24621,11 @@ fn scalar_prevented_this_way_rider_is_not_folded() {
     );
     assert_eq!(
         sub.sub_link,
-        SubAbilityLink::SequentialSibling,
-        "Reverse Damage: bare scalar rider over a ChosenDamageSource root must stay \
-         SequentialSibling (this fix must not change Reverse Damage's behaviour), got {:?}",
+        SubAbilityLink::ContinuationStep,
+        "Reverse Damage: the chosen-source shield must install its complete payoff, got {:?}",
         sub.sub_link
     );
+    assert!(sub.sub_ability.is_none() && sub.else_ability.is_none());
 }
 
 #[test]
@@ -25676,9 +25789,10 @@ fn discard_self_cost_beats_graveyard_effect_origin() {
     );
 }
 
-/// CR 113.6j + CR 113.6m: a self-sacrifice cost puts the source into its
-/// graveyard, so it keeps battlefield activation authority over a later
-/// graveyard self-return effect.
+/// SHAPE: CR 113.6m + CR 400.7j: this ability finds its cost-moved source in
+/// the graveyard, while the sacrifice cost retains default battlefield
+/// activation. The cost-paid-source conjunction is not a bare SelfRef from
+/// which the effect helper can infer a competing activation zone.
 #[test]
 fn sacrifice_self_cost_beats_graveyard_effect_origin() {
     let r = parse(
@@ -25690,19 +25804,60 @@ fn sacrifice_self_cost_beats_graveyard_effect_origin() {
     );
     assert_eq!(r.abilities.len(), 1);
     let ability = &r.abilities[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+    assert!(!parsed_has_unimplemented(&r));
     let cost = ability.cost.as_ref().expect("the ability has a cost");
-    assert!(
-        matches!(
-            cost,
-            AbilityCost::Composite { costs }
-                if costs.iter().any(|cost| matches!(
-                    cost,
-                    AbilityCost::Sacrifice(sacrifice)
-                        if sacrifice.target == TargetFilter::SelfRef
-                ))
-        ),
-        "reach-guard: expected a self-sacrifice cost, got {cost:?}"
+    assert_eq!(
+        cost,
+        &AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::Cost {
+                        generic: 0,
+                        shards: vec![crate::types::mana::ManaCostShard::Black],
+                    },
+                },
+                AbilityCost::Sacrifice(crate::types::ability::SacrificeCost::count(
+                    TargetFilter::SelfRef,
+                    1,
+                )),
+            ],
+        },
+        "complete black-mana and one-source-sacrifice cost"
     );
+    assert_eq!(
+        ability.effect.as_ref(),
+        &Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Hand,
+            target: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::CostPaidObject {
+                        reference: crate::types::ability::CostPaidObjectRef::Source,
+                    },
+                    TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard
+                        },
+                        FilterProp::Owned {
+                            controller: ControllerRef::You
+                        },
+                    ])),
+                ],
+            },
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        }
+    );
+    assert!(ability.sub_ability.is_none() && ability.multi_target.is_none());
     assert_eq!(
         activation_zone_from_self_cost(cost),
         Some(Zone::Battlefield),
@@ -25710,13 +25865,12 @@ fn sacrifice_self_cost_beats_graveyard_effect_origin() {
     );
     assert_eq!(
         activation_zone_from_self_effect(ability),
-        Some(Zone::Graveyard),
-        "the later self-return alone would derive Graveyard"
+        None,
+        "the cost-paid-source conjunction does not match the helper's bare-SelfRef guard"
     );
     assert_eq!(
-        ability.activation_zone,
-        Some(Zone::Battlefield),
-        "cost-side source-zone authority must beat the later effect-side origin"
+        ability.activation_zone, None,
+        "Battlefield remains implicit when there is no competing effect-derived zone"
     );
 }
 
@@ -36263,6 +36417,63 @@ fn granted_trigger_execute(r: &ParsedAbilities) -> &AbilityDefinition {
         .unwrap_or_else(|| panic!("no granted trigger with a body: {r:#?}"))
 }
 
+/// SHAPE: a refused acquired program owns its whole quote once; the independent
+/// Equip instruction retains its complete cost, target and timing restriction.
+fn assert_inert_comparative_grant(text: &str, normalized_grant: &str) {
+    let mut doc = parse_oracle_ir(
+        text,
+        "Test Shuriken",
+        &[],
+        &["Artifact".into()],
+        &["Equipment".into()],
+    );
+    assert_eq!(doc.source_text, text);
+    assert_eq!(doc.items.len(), 2, "whole grant and independent Equip");
+    let diagnostic =
+        format!("Static pattern matched but line failed static parser: {normalized_grant}");
+    assert_complete_static_structure_refusal(&doc, normalized_grant, &diagnostic);
+    assert_eq!(doc.items[1].source.fragment(), Some("Equip {2}"));
+    let parsed = lower_oracle_ir(&mut doc);
+    let mut equip = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Attach {
+            attachment: TargetFilter::SelfRef,
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            selection: crate::types::ability::AttachSelection::AtResolution {
+                count: crate::types::ability::AttachCardinality::One,
+            },
+        },
+    )
+    .cost(AbilityCost::Mana {
+        cost: crate::types::mana::ManaCost::Cost {
+            generic: 2,
+            shards: vec![],
+        },
+    })
+    .activation_restrictions(vec![ActivationRestriction::AsSorcery])
+    .description("Equip {2}".into());
+    equip.ability_tag = Some(crate::types::ability::AbilityTag::Equip);
+    assert_eq!(
+        parsed.abilities,
+        vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented("static_structure", diagnostic),
+            )
+            .description(normalized_grant.into()),
+            equip,
+        ]
+    );
+    assert!(
+        parsed.statics.is_empty()
+            && parsed.triggers.is_empty()
+            && parsed.replacements.is_empty()
+            && parsed.extracted_keywords.is_empty(),
+        "no executable partial grant: {parsed:#?}"
+    );
+    assert!(parsed.parse_warnings.is_empty());
+}
+
 /// Asserts the complete Conformer-class chain: tap target creature defending
 /// player controls, then a `QuantityCheck`-gated `PutCounter` of +1/+1 counters
 /// on the source whose count is the `Difference` of the gate's two operands.
@@ -36411,15 +36622,19 @@ fn comparative_pt_gate_without_a_target_antecedent_fails_closed() {
 /// exists and either keeps its own default-origin `Target` read or fails closed.
 #[test]
 fn comparative_gate_naming_a_new_target_is_not_linked_to_the_parent() {
-    let r = parse(
-        "Equipped creature has \"Whenever this creature attacks, tap target creature defending player controls. If target creature has greater power than this creature, put a number of +1/+1 counters on this creature equal to the difference.\"\nEquip {2}",
-        "Test Shuriken",
-        &[],
-        &["Artifact"],
-        &["Equipment"],
+    // SHAPE: the same inner trigger tests binding independently of complete
+    // acquired-program refusal at the document boundary.
+    let text = "Equipped creature has \"Whenever this creature attacks, tap target creature defending player controls. If target creature has greater power than this creature, put a number of +1/+1 counters on this creature equal to the difference.\"\nEquip {2}";
+    assert_inert_comparative_grant(
+        text,
+        "Equipped creature has \"Whenever ~ attacks, tap target creature defending player controls. If target creature has greater power than ~, put a number of +1/+1 counters on ~ equal to the difference.\"",
     );
-    let execute = granted_trigger_execute(&r);
-    // REACH GUARD: the granted trigger and its tap parsed.
+    let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+        "Whenever this creature attacks, tap target creature defending player controls. If target creature has greater power than this creature, put a number of +1/+1 counters on this creature equal to the difference.",
+        "Test Shuriken",
+    );
+    let execute = trigger.execute.as_deref().expect("same inner trigger body");
+    // REACH GUARD: the original inner trigger and its tap parsed.
     assert!(
         matches!(&*execute.effect, Effect::SetTapState { .. }),
         "reach guard: the tap clause parsed: {execute:#?}"
@@ -36472,16 +36687,40 @@ fn comparative_gate_after_a_non_announcing_producer_fails_closed() {
         "tap target creature defending player controls. You draw a card.",
         "tap target creature defending player controls and you draw a card.",
     ] {
-        let r = parse(
-            &shape(head),
-            "Test Shuriken",
-            &[],
-            &["Artifact"],
-            &["Equipment"],
+        let text = shape(head);
+        assert_inert_comparative_grant(
+            &text,
+            &format!(
+                "Equipped creature has \"Whenever ~ attacks, {head} If that creature has greater power than ~, put a number of +1/+1 counters on ~ equal to the difference.\""
+            ),
         );
+        let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+            &format!(
+                "Whenever this creature attacks, {head} If that creature has greater power than this creature, put a number of +1/+1 counters on this creature equal to the difference."
+            ),
+            "Test Shuriken",
+        );
+        let execute = trigger.execute.as_deref().expect("same inner trigger body");
+        let r = ParsedAbilities {
+            triggers: vec![trigger.clone()],
+            ..ParsedAbilities::default()
+        };
         assert!(
             has_unimplemented_mentioning(&r, "comparative_pt_anaphor_unbound"),
             "{head}: no single immediate announced antecedent, must fail closed: {r:#?}"
+        );
+        assert!(
+            !crate::types::ability_visit::ability_tree_any(execute, &|node| matches!(
+                node.effect.as_ref(),
+                Effect::PutCounter {
+                    count: QuantityExpr::Ref { qty: QuantityRef::Variable { name } },
+                    ..
+                } | Effect::PutCounterAll {
+                    count: QuantityExpr::Ref { qty: QuantityRef::Variable { name } },
+                    ..
+                } if name == "difference"
+            )),
+            "{head}: an unbound difference must not survive as executable counters"
         );
     }
     let control = parse(
@@ -36504,14 +36743,20 @@ fn comparative_gate_after_a_non_announcing_producer_fails_closed() {
 /// naming two objects; it fails closed. Control: the printed rider binds.
 #[test]
 fn rider_declaring_its_own_target_fails_closed() {
-    let r = parse(
-        "Equipped creature has \"Whenever this creature attacks, tap target creature defending player controls. If that creature has greater power than this creature, put a number of +1/+1 counters on target creature you control equal to the difference.\"\nEquip {2}",
-        "Test Shuriken",
-        &[],
-        &["Artifact"],
-        &["Equipment"],
+    let text = "Equipped creature has \"Whenever this creature attacks, tap target creature defending player controls. If that creature has greater power than this creature, put a number of +1/+1 counters on target creature you control equal to the difference.\"\nEquip {2}";
+    assert_inert_comparative_grant(
+        text,
+        "Equipped creature has \"Whenever ~ attacks, tap target creature defending player controls. If that creature has greater power than ~, put a number of +1/+1 counters on target creature you control equal to the difference.\"",
     );
-    let execute = granted_trigger_execute(&r);
+    let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+        "Whenever this creature attacks, tap target creature defending player controls. If that creature has greater power than this creature, put a number of +1/+1 counters on target creature you control equal to the difference.",
+        "Test Shuriken",
+    );
+    let execute = trigger.execute.as_deref().expect("same inner trigger body");
+    let r = ParsedAbilities {
+        triggers: vec![trigger.clone()],
+        ..ParsedAbilities::default()
+    };
     // REACH GUARD: the root tap parsed.
     assert!(
         matches!(&*execute.effect, Effect::SetTapState { .. }),
@@ -38684,6 +38929,14 @@ fn source_counter_gate_over_prior_target_keeps_parent_not_self_ref() {
     let text = "Target creature gets +2/+2 until end of turn. If it has a counter on it, \
                 it also gains flying and lifelink until end of turn.";
     let parsed = parse(text, "Revelation of Power", &[], &["Instant"], &[]);
+    let doc = parse_oracle_ir(text, "Revelation of Power", &[], &["Instant".into()], &[]);
+    assert_eq!(doc.source_text, text);
+    assert_eq!(doc.items.len(), 1);
+    assert_eq!(doc.items[0].source.fragment(), Some(text));
+    assert!(
+        parsed.statics.is_empty() && parsed.triggers.is_empty() && parsed.replacements.is_empty()
+    );
+    assert!(parsed.extracted_keywords.is_empty() && parsed.modal.is_none());
 
     // Reach-guards: the parse succeeded with zero warnings and zero Unimplemented,
     // so the shape assertions below are not vacuous.
@@ -38702,12 +38955,23 @@ fn source_counter_gate_over_prior_target_keeps_parent_not_self_ref() {
         parsed.abilities
     );
 
-    // The flying/lifelink grant is the sub-ability of the +2/+2 pump.
+    // SHAPE: the complete +2/+2 head can use one continuous definition.
+    assert_eq!(parsed.abilities.len(), 1);
     let pump = &parsed.abilities[0];
-    assert!(
-        matches!(pump.effect.as_ref(), Effect::Pump { .. }),
-        "head effect is the +2/+2 pump, got {:?}",
-        pump.effect
+    assert_eq!(
+        pump.effect.as_ref(),
+        &Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::ParentTarget)
+                .modifications(vec![
+                    ContinuousModification::AddPower { value: 2 },
+                    ContinuousModification::AddToughness { value: 2 },
+                ])],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            end_cost: None,
+        },
+        "complete targeted +2/+2 head with ordinary static defaults"
     );
     let grant = pump
         .sub_ability
@@ -38716,7 +38980,8 @@ fn source_counter_gate_over_prior_target_keeps_parent_not_self_ref() {
     let Effect::GenericEffect {
         static_abilities,
         target,
-        ..
+        duration,
+        end_cost,
     } = grant.effect.as_ref()
     else {
         panic!(
@@ -38738,22 +39003,48 @@ fn source_counter_gate_over_prior_target_keeps_parent_not_self_ref() {
         "the flying/lifelink continuous grant must affect the target creature (ParentTarget), \
          not the source Instant (SelfRef) — the #6559 regression this guard prevents"
     );
-    assert!(
-        matches!(
-            &static_abilities[0].condition,
-            Some(StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::CountersOn {
-                        scope: ObjectScope::Recipient,
-                        ..
-                    },
+    let counter_gate = StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::Recipient,
+                counter_type: None,
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    };
+    assert_eq!(
+        static_abilities,
+        &vec![StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTarget)
+            .modifications(vec![
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying
                 },
-                ..
-            })
-        ),
-        "the bare counter-condition pronoun must gate the recipient, got {:?}",
-        static_abilities[0].condition
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Lifelink
+                },
+            ])
+            .condition(counter_gate)
+            .description("gain flying and lifelink".into())],
+        "complete recipient-any-counter GE 1 grant, printed keyword order and every static default"
     );
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(*end_cost, None);
+    assert_eq!(pump.description.as_deref(), Some(text));
+    assert_eq!(grant.description, None);
+    assert_eq!(grant.sub_link, SubAbilityLink::SequentialSibling);
+    for definition in [pump, grant] {
+        assert_eq!(definition.kind, AbilityKind::Spell);
+        assert_eq!(definition.duration, Some(Duration::UntilEndOfTurn));
+        assert!(definition.cost.is_none() && definition.condition.is_none());
+        assert!(!definition.optional && !definition.optional_targeting);
+        assert!(definition.repeat_for.is_none() && definition.multi_target.is_none());
+        assert!(definition.mode_abilities.is_empty() && definition.else_ability.is_none());
+    }
+    assert!(grant.sub_ability.is_none());
+    // The exact gate above is checked once by effect::resolve, which clears it
+    // on the registered transient; later counter changes cannot toggle it.
 }
 
 /// CR 122.1 + CR 608.2c: A prior typed target does not rewrite an explicit
@@ -44466,29 +44757,39 @@ fn u14_full_extinction_retains_local_choice_and_complete_residue() {
     )));
     let parsed = lower_oracle_ir(&mut doc);
     assert_eq!(parsed.abilities.len(), 1);
-    assert!(matches!(
+    assert_eq!(
         parsed.abilities[0].effect.as_ref(),
-        Effect::Choose {
+        &Effect::Choose {
             choice_type: ChoiceType::OddOrEven,
             persist: false,
-            ..
+            selection: crate::types::ability::TargetSelectionMode::Chosen,
         }
-    ));
+    );
     let tail = parsed.abilities[0].sub_ability.as_deref().unwrap();
-    let Effect::ChangeZone {
-        target,
-        destination: Zone::Exile,
-        ..
-    } = tail.effect.as_ref()
-    else {
-        panic!("local exile tail")
-    };
-    assert!(target_filter_uses_filter_prop(target, &|p| matches!(
-        p,
-        FilterProp::ManaValueParity {
-            parity: ParitySource::LastNamedChoice
+    // SHAPE: "each" is an untargeted mass move; the local choice does not
+    // become a durable source-owned choice or a one-object announcement.
+    assert_eq!(
+        tail.effect.as_ref(),
+        &Effect::ChangeZoneAll {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::ManaValueParity {
+                    parity: ParitySource::LastNamedChoice
+                },
+            ])),
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: crate::types::ability::MassLibraryShuffleMode::PerObject,
+            random_order: false,
         }
-    )));
+    );
+    assert!(tail.multi_target.is_none() && !tail.optional && !tail.optional_targeting);
+    assert!(tail.sub_ability.is_none());
     for (head, quality) in [
         ("with", "the chosen quality"),
         ("that have", "that quality"),
@@ -45646,12 +45947,14 @@ fn complete_publication_full_native_companion_population() {
         } else { assert!(grants.is_empty(), "no unexplained granted body: {name}"); }
         actual.retain(|modification| !matches!(modification, ContinuousModification::GrantAbility { .. }));
         let mut expected = Vec::new();
-        if matches!(name, "Deep Freeze" | "Stasis Field") { expected.push(ContinuousModification::RemoveAllAbilities); }
         if name == "Alpine Moon" {
             expected.extend([ContinuousModification::RemoveAllSubtypes { set: SubtypeSet::Land }, ContinuousModification::RemoveAllAbilities]);
         }
         if let Some(value) = power { expected.push(ContinuousModification::SetPower { value }); }
         if let Some(value) = toughness { expected.push(ContinuousModification::SetToughness { value }); }
+        // CR 613.1f + CR 613.4b: ability removal precedes its own Defender
+        // grant within Layer 6; fixed P/T setters belong to separate Layer 7b.
+        if matches!(name, "Deep Freeze" | "Stasis Field") { expected.push(ContinuousModification::RemoveAllAbilities); }
         if matches!(name, "Mirror Entity" | "Mirror Entity Avatar") {
             expected.extend([ContinuousModification::SetPowerDynamic { value: QuantityExpr::Ref { qty: QuantityRef::CostXPaid } },
                 ContinuousModification::SetToughnessDynamic { value: QuantityExpr::Ref { qty: QuantityRef::CostXPaid } }]);
