@@ -563,6 +563,12 @@
     "candidateSets": "候选系列",
     "chooseSet": "选择系列",
     "clearPacks": "清除",
+    "randomSet": "随机系列",
+    "randomSetHint": "用一个随机选择的系列填满所有补充包",
+    "randomPacks": "随机补充包",
+    "randomPacksHint": "为每个补充包各自随机选择一个系列",
+    "randomCandidates": "随机系列组",
+    "randomCandidatesHint": "随机选择不同的候选系列",
     "difficultyLevels": {
       "Easy": "简单",
       "Hard": "困难",

@@ -33,7 +33,7 @@ use crate::types::game_state::{
     PostReplacementFrameId, RepeatIterationChoice, ResidentDrainPolicy, ResolvingTriggerContext,
     WaitingFor, ABILITY_ONSET_RECORD_FIELD,
 };
-use crate::types::identifiers::{DiscardFrameId, ObjectId};
+use crate::types::identifiers::{DiscardFrameId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::EtbTapState;
@@ -243,6 +243,33 @@ pub struct PendingCoinFlip {
 /// CR 706.6 + CR 614.1a: Full resolution context for a die-roll resolver paused
 /// at an "ignore the lowest roll" choice (Barbarian Class, Pixie Guide, Wyll).
 ///
+/// CR 608.2c: the declared slot-context capture of a suspending ability,
+/// taken through the single capture authority
+/// (`targeting::capture_parked_slot_context`) while the ability is still in
+/// scope. Carried as `Option` on the parked die-roll frames: `None` means no
+/// capture ran (pre-M2 frames keep the legacy root path), while `Some` — even
+/// with empty lists — is an authoritative capture the resume path must honor
+/// instead of the legacy lists. The presence bit is structural: a `bool`
+/// alongside separately writable lists cannot express "recorded empty".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapturedDeclarationPayload {
+    /// CR 608.2c: the declared (target, pin) entries counted from the slot
+    /// base. Resume indexes these — never the legacy chain-root list — so
+    /// modal bases, downstream offsets, and repeated IDs resolve exactly
+    /// like the live authority.
+    #[serde(default)]
+    pub targets: Vec<TargetRef>,
+    /// CR 400.7: the announced pin of each declared entry, aligned with
+    /// `targets`. Positional — repeated IDs keep distinct pins.
+    #[serde(default)]
+    pub target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 608.2b: the slot base's offset in root numbering, so resume judges
+    /// the root-numbered illegality stamp at `ahead + index` like the live
+    /// authority.
+    #[serde(default)]
+    pub ahead: usize,
+}
+
 /// The dice have all been rolled (`results` holds their NATURAL values) but no
 /// `GameEvent::DieRolled` has been emitted yet: CR 706.6 says an ignored roll
 /// "is considered to have never happened", so emission is deferred to
@@ -254,6 +281,20 @@ pub struct PendingDieRoll {
     /// CR 706.6: the player who rolled, and therefore the player who chooses
     /// which of several tied-lowest rolls to ignore.
     pub roller: PlayerId,
+    /// CR 109.5 + CR 706.2: the printed controller the inline modifier read
+    /// (`original_controller.unwrap_or(controller)`), captured independently
+    /// of the roller so a scoped seat keeps reading "you" as the printed
+    /// player after a suspension. `None` on pre-field frames, which keep the
+    /// acting controller (the legacy read). Skipped on the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_controller: Option<PlayerId>,
+    /// CR 109.5 + CR 706.2: the ability's scoped-player binding, captured
+    /// independently of the roller so a resumed `ControllerRef::ScopedPlayer`
+    /// member read measures the same seat the inline path measured instead
+    /// of falling back to the triggering player or printed controller.
+    /// `None` on pre-field frames, which keep the legacy fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped_player: Option<PlayerId>,
     pub targets: Vec<TargetRef>,
     pub sides: u8,
     /// CR 706.2 + CR 706.6: the NATURAL results — "the number indicated on the
@@ -337,6 +378,51 @@ pub struct PendingDieRoll {
     /// distinct from unavailable authority in legacy frames.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_context: Option<ResolvingTriggerContext>,
+    /// CR 608.2b: declared slots (chain-root numbering) stamped illegal as
+    /// the chain began to resolve, captured at park time so a resumed
+    /// indexed read applies the same legality the live slot authority
+    /// would. `#[serde(default)]` for in-flight states serialized before
+    /// this field existed.
+    #[serde(default)]
+    pub illegal_target_slots: Vec<usize>,
+    /// CR 400.7: announced pins aligned position-for-position with
+    /// `chain_root_targets` (`None` for players and unpinned occurrences),
+    /// captured at park time so a resumed indexed read applies the same
+    /// incarnation check the live slot authority would. Currency is
+    /// evaluated at resume, not at park. `#[serde(default)]` for
+    /// in-flight states serialized before this field existed.
+    #[serde(default)]
+    pub chain_root_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 608.2c: the declared slot-context capture (see
+    /// `CapturedDeclarationPayload`). `None` on pre-M2 frames — which keep
+    /// the legacy root path — and on frames built without a capture;
+    /// `Some`, even with empty lists, is authoritative on resume. Skipped on
+    /// the wire when absent; `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_capture: Option<CapturedDeclarationPayload>,
+    /// CR 400.7: the suspending node's own positional pins, aligned with
+    /// `targets`, for the local fallback and occurrence-aware parked reads.
+    #[serde(default)]
+    pub local_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 400.7 + CR 603.7c: the keyed delayed-referent pins
+    /// (`ResolvedAbility::target_incarnations`), captured at park time so a
+    /// resumed indexed read applies the same eligibility guard the live
+    /// slot authority would. Keyed by object id, not positional — an id
+    /// with no entry passes (fail-open). Currency is evaluated at resume,
+    /// not at park. `#[serde(default)]` for in-flight states serialized
+    /// before this field existed.
+    #[serde(default)]
+    pub keyed_target_incarnations: Vec<ObjectIncarnationRef>,
+    /// CR 608.2c: the live declared-player verdict
+    /// (`filter::declared_target_player`), captured at park time so a
+    /// resumed player-axis read answers exactly what the live path would.
+    /// Carried separately from the mode-relative declared list, which
+    /// cannot see an earlier mode's player. `None` (pre-capture frames and
+    /// in-flight states serialized before this field existed) resumes
+    /// through the legacy reconstruction.
+    #[serde(default)]
+    pub declared_player: Option<crate::game::filter::DeclaredPlayerTarget>,
 }
 
 /// CR 706.1 + CR 616.1: A die-roll INSTRUCTION parked across a replacement
@@ -369,6 +455,20 @@ pub struct PendingDieRollInstruction {
     /// CR 706.6: the player who rolls, and therefore the player who breaks an
     /// ignore tie once the dice exist.
     pub roller: PlayerId,
+    /// CR 109.5 + CR 706.2: the printed controller the inline modifier
+    /// reads, carried across the CR 616.1 choice so it survives into the
+    /// `PendingDieRoll` this instruction produces. `None` for frames built
+    /// without a capture. Skipped on the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_controller: Option<PlayerId>,
+    /// CR 109.5 + CR 706.2: the ability's scoped-player binding, carried
+    /// across the CR 616.1 choice so a resumed `ControllerRef::ScopedPlayer`
+    /// member read measures the same seat the inline path measured instead
+    /// of falling back to the triggering player or printed controller.
+    /// `None` for frames built without a capture. Skipped on the wire when
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped_player: Option<PlayerId>,
     pub targets: Vec<TargetRef>,
     pub results_table: Vec<DieResultBranch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -393,6 +493,41 @@ pub struct PendingDieRollInstruction {
     /// for in-flight states serialized before this field existed.
     #[serde(default)]
     pub chain_root_targets: Vec<TargetRef>,
+    /// CR 608.2b: declared slots stamped illegal, carried across the CR
+    /// 616.1 choice so they survive into the `PendingDieRoll` this
+    /// instruction produces. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub illegal_target_slots: Vec<usize>,
+    /// CR 400.7: announced pins aligned with `chain_root_targets`, carried
+    /// across the CR 616.1 choice so they survive into the `PendingDieRoll`
+    /// this instruction produces. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub chain_root_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 608.2c: the declared slot-context capture (see
+    /// `CapturedDeclarationPayload`), carried across the CR 616.1 choice so
+    /// it survives into the `PendingDieRoll` this instruction produces.
+    /// Skipped on the wire when absent; `#[serde(default)]` for in-flight
+    /// states serialized before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_capture: Option<CapturedDeclarationPayload>,
+    /// CR 400.7: the suspending node's positional pins aligned with
+    /// `targets`, carried across the CR 616.1 choice. `#[serde(default)]`
+    /// for in-flight states serialized before this field existed.
+    #[serde(default)]
+    pub local_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 400.7 + CR 603.7c: the keyed delayed-referent pins, carried
+    /// across the CR 616.1 choice so they survive into the `PendingDieRoll`
+    /// this instruction produces. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub keyed_target_incarnations: Vec<ObjectIncarnationRef>,
+    /// CR 608.2c: the live declared-player verdict, carried across the
+    /// CR 616.1 choice so it survives into the `PendingDieRoll` this
+    /// instruction produces. `None` for frames built without a capture.
+    #[serde(default)]
+    pub declared_player: Option<crate::game::filter::DeclaredPlayerTarget>,
 }
 
 /// CR 706.1: Which caller finishes a parked die-roll instruction once a CR 616.1
@@ -8538,6 +8673,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: true,
                 selection: CardSelectionMode::Chosen,
                 constraint: None,
@@ -9912,6 +10048,8 @@ mod tests {
                         source_id: ObjectId(7),
                         controller: PlayerId(0),
                         roller: PlayerId(0),
+                        quantity_controller: None,
+                        scoped_player: None,
                         targets: vec![],
                         sides: 1,
                         results: vec![1, 1],
@@ -9925,6 +10063,12 @@ mod tests {
                         forced_ignored: vec![],
                         chain_root_targets: vec![],
                         trigger_context: context.clone(),
+                        illegal_target_slots: vec![],
+                        chain_root_target_pins: vec![],
+                        declared_capture: None,
+                        local_target_pins: vec![],
+                        keyed_target_incarnations: vec![],
+                        declared_player: None,
                     });
                     state.waiting_for = WaitingFor::DieKeepChoice {
                         player: PlayerId(0),

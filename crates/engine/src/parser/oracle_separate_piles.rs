@@ -77,6 +77,8 @@ pub(crate) fn parse_separate_into_piles_ir(
         //
         // CR 700.3b: the pile is not an object — the sub-effect's target is
         // wired by the resolver per-object, not via the parsed `target_filter`.
+        // CR 608.2c: this continues the partition/choice instruction; it is
+        // applied per selected object, not placed on the stack as a new ability.
         let parsed = parse_effect_chain_with_context(trailing, kind, &mut ParseContext::default());
         // Reject if the trailing sentence didn't yield a real effect (the parser
         // returns an Unimplemented stub on failure).
@@ -725,5 +727,51 @@ mod tests {
     fn mid_chain_rejects_non_matching() {
         let text = "Destroy target creature.";
         assert!(try_parse_mid_chain_opponent_separates(text, AbilityKind::Spell).is_none());
+    }
+}
+
+#[cfg(test)]
+mod parent_controller_population_tests {
+    use super::*;
+    use crate::types::ability::FilterProp;
+
+    #[test]
+    fn chosen_pile_parent_controller_population_keeps_permission_disabled() {
+        for population in [
+            "each creature",
+            "each other creature with the same controller",
+        ] {
+            let text = format!("Each opponent separates the creatures they control into two piles. For each opponent, you choose one of their piles. ~ deals 2 damage to target creature and 1 damage to {population}.");
+            let pile =
+                parse_separate_into_piles_ir(&text, AbilityKind::Spell, &ParseContext::default())
+                    .expect("partition's trailing-body entry");
+            let chain = pile.effect_chain(AbilityKind::Spell);
+            let Effect::SeparateIntoPiles {
+                chosen_pile_effect, ..
+            } = &chain.clauses[0].parsed.effect
+            else {
+                panic!("{chain:?}");
+            };
+            let tail = chosen_pile_effect
+                .sub_ability
+                .as_deref()
+                .expect("population");
+            let Effect::DamageAll {
+                target: TargetFilter::Typed(filter),
+                ..
+            } = tail.effect.as_ref()
+            else {
+                panic!("{tail:?}");
+            };
+            assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+            assert_ne!(
+                filter.controller,
+                Some(ControllerRef::ParentTargetController)
+            );
+            assert!(!filter.properties.iter().any(|property| matches!(
+                property, FilterProp::DistinctFrom { reference }
+                    if reference.as_ref() == &TargetFilter::ParentTarget
+            )));
+        }
     }
 }

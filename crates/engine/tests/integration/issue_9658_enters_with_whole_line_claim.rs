@@ -16,13 +16,14 @@
 //!     that permanent or a general subset of permanents.
 //!   - CR 608.2c: instructions are followed in the order written; a later
 //!     instruction refers to what an earlier one produced.
-//!   - CR 603.1: a "When/Whenever …" ability is a triggered ability; Dark
-//!     Intimations' second paragraph is one, left as an explicit gap.
+//!   - CR 603.1: Dark Intimations' second paragraph is a cast trigger whose
+//!     resolution exiles its source and installs a floating entry replacement.
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{AbilityDefinition, Effect, TargetFilter};
 use engine::types::counter::CounterType;
+use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
@@ -259,16 +260,10 @@ fn loyalty_of(state: &engine::types::game_state::GameState, name: &str) -> u32 {
         .unwrap_or(0)
 }
 
-/// Dark Intimations' second paragraph ("When you cast a Bolas planeswalker
-/// spell, exile this card from your graveyard. That planeswalker enters with an
-/// additional loyalty counter on it.") is one honest gap: the card parses to its
-/// first paragraph plus exactly one `Unimplemented` ability for the second, with
-/// no trigger and no replacement. At runtime the first paragraph resolves as
-/// printed; afterwards a Bolas planeswalker cast with the card in the graveyard
-/// enters with only its printed loyalty, and the card stays in the graveyard —
-/// no self-exile trigger and no loyalty rider are ever published on their own.
+/// CR 113.6m + CR 608.2c: after the printed first paragraph resolves, the
+/// graveyard-only cast trigger exiles Dark Intimations, then installs the rider.
 #[test]
-fn dark_intimations_second_paragraph_is_an_honest_gap() {
+fn dark_intimations_self_exiles_and_adds_loyalty_after_its_spell_resolves() {
     let parsed = parse_oracle_text(
         DARK_INTIMATIONS,
         "Dark Intimations",
@@ -276,41 +271,33 @@ fn dark_intimations_second_paragraph_is_an_honest_gap() {
         &["Sorcery".to_string()],
         &[],
     );
-    assert!(parsed.triggers.is_empty(), "got {:?}", parsed.triggers);
+    assert_eq!(parsed.triggers.len(), 1, "{parsed:?}");
+    assert_eq!(parsed.triggers[0].mode, TriggerMode::SpellCast);
+    assert_eq!(parsed.triggers[0].trigger_zones, vec![Zone::Graveyard]);
+    assert!(parsed.replacements.is_empty(), "{parsed:?}");
     assert!(
-        parsed.replacements.is_empty(),
-        "got {:?}",
-        parsed.replacements
+        all_effects(&parsed)
+            .iter()
+            .all(|e| !matches!(e, Effect::Unimplemented { .. })),
+        "{parsed:?}"
     );
-    let gaps: Vec<_> = parsed
-        .abilities
-        .iter()
-        .filter(|def| {
-            chain_effects(def)
-                .iter()
-                .any(|effect| matches!(effect, Effect::Unimplemented { .. }))
-        })
-        .collect();
-    assert_eq!(gaps.len(), 1, "one gap, got {:?}", parsed.abilities);
-    let paragraph_two = DARK_INTIMATIONS
-        .lines()
-        .nth(1)
-        .expect("Dark Intimations has two paragraphs");
-    assert!(
-        matches!(
-            gaps[0].effect.as_ref(),
-            Effect::Unimplemented { description: Some(text), .. } if text == paragraph_two
-        ) && gaps[0].sub_ability.is_none(),
-        "the gap is the whole second paragraph, got {:?}",
-        gaps[0]
-    );
-    assert!(
-        all_effects(&parsed).iter().all(|effect| !matches!(
-            effect,
-            Effect::AddTargetReplacement { .. } | Effect::PutCounter { .. }
-        )),
-        "no install or loyalty placement, got {parsed:?}"
-    );
+    let exile = parsed.triggers[0].execute.as_deref().unwrap();
+    assert!(matches!(
+        exile.effect.as_ref(),
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Exile,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ));
+    assert!(matches!(
+        exile.sub_ability.as_deref().unwrap().effect.as_ref(),
+        Effect::AddTargetReplacement {
+            target: TargetFilter::None,
+            ..
+        }
+    ));
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -347,26 +334,54 @@ fn dark_intimations_second_paragraph_is_an_honest_gap() {
         Zone::Graveyard,
         "the sorcery resolved"
     );
-    assert!(
-        runner.state().objects[&dark]
-            .trigger_definitions
-            .as_slice()
-            .iter()
-            .all(|entry| entry.definition.mode != TriggerMode::SpellCast),
-        "no cast trigger is registered on the card"
-    );
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().objects[&dark]
+        .trigger_definitions
+        .as_slice()
+        .iter()
+        .any(|entry| entry.definition.mode == TriggerMode::SpellCast));
 
-    let outcome = runner.cast(walker).resolve();
+    runner.cast(walker).commit();
     assert_eq!(
-        loyalty_of(outcome.state(), "Test Bolas Walker"),
-        BOLAS_LOYALTY,
-        "the planeswalker enters with its printed loyalty only"
+        runner.state().stack.len(),
+        2,
+        "cast spell plus graveyard trigger"
+    );
+    assert_eq!(runner.state().objects[&dark].zone, Zone::Graveyard);
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().objects[&dark].zone,
+        Zone::Exile,
+        "exile happens before entry"
+    );
+    assert_eq!(runner.state().objects[&walker].zone, Zone::Stack);
+    runner.advance_until_stack_empty();
+    // CR 306.5b + CR 306.5c: intrinsic four plus one additional loyalty.
+    assert_eq!(
+        loyalty_of(runner.state(), "Test Bolas Walker"),
+        BOLAS_LOYALTY + 1
     );
     assert_eq!(
-        outcome.zone_of(dark),
-        Zone::Graveyard,
-        "the card is not exiled"
+        runner.state().objects[&walker].loyalty,
+        Some(BOLAS_LOYALTY + 1)
     );
+    assert_eq!(
+        runner.state().objects[&walker]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        0
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 // Synthetic (no corpus member): a keyword-qualified distributive subject.

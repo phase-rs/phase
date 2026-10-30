@@ -217,7 +217,7 @@ fi
 
 while IFS= read -r label; do
   [ -n "$label" ] || continue
-  if ! printf '%s\n' "$section" | grep -qF "| \`$label\`"; then
+  if ! grep -qF "| \`$label\`" <<< "$section"; then
     err "priority slot '$label' exists in $ORACLE but has no \`$label\` row in SKILL.md §3"
   fi
 done < <(grep -oE '// Priority [^:]+:' "$ORACLE" | sed -E 's#// Priority ##; s#:$##' | sort -u)

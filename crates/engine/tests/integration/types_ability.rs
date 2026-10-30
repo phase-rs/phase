@@ -373,6 +373,7 @@ fn target_filter_mut_is_target_filters_twin() {
             chooser: Default::default(),
             candidate_source: Default::default(),
             reciprocal_role: None,
+            gather_role: None,
             up_to: false,
             selection: Default::default(),
             constraint: None,

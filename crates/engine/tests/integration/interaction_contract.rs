@@ -1937,6 +1937,7 @@ fn zone_opponent_chooser_exact_choices_surface_distinct_opponents_and_action_cod
                 chooser: Chooser::Opponent.into(),
                 candidate_source: ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: CardSelectionMode::Chosen,
                 constraint: None,

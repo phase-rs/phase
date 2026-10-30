@@ -5,6 +5,8 @@ import { useTranslation } from "react-i18next";
 import type { DraftPackChoice } from "../../stores/draftStore";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { BotDifficultySelector } from "./BotDifficultySelector";
+import { randomPackLineup } from "./randomPacks";
+import type { RandomPackMode } from "./randomPacks";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -209,6 +211,17 @@ export function SetSelector({
     });
   }, [defaultPackCount]);
 
+  /**
+   * Replace the list with boosters picked at random from the offered sets.
+   * A candidate pool takes as many distinct sets as the event opens boosters.
+   */
+  const randomize = useCallback(
+    (mode: RandomPackMode) => {
+      setPacks(randomPackLineup(sets, defaultPackCount, mode));
+    },
+    [sets, defaultPackCount],
+  );
+
   const removePack = useCallback((index: number) => {
     setPacks((current) => current.filter((_, i) => i !== index));
   }, []);
@@ -243,6 +256,8 @@ export function SetSelector({
           onRemove={removePack}
           onClear={() => setPacks([])}
           onFillRemaining={fillRemaining}
+          canRandomize={sets.length > 0}
+          onRandomize={randomize}
         />
       )}
 
@@ -324,6 +339,8 @@ function PackList({
   onRemove,
   onClear,
   onFillRemaining,
+  canRandomize,
+  onRandomize,
 }: {
   containerRef: RefObject<HTMLDivElement | null>;
   packs: DraftPackChoice[];
@@ -338,6 +355,8 @@ function PackList({
   onRemove: (index: number) => void;
   onClear: () => void;
   onFillRemaining: () => void;
+  canRandomize: boolean;
+  onRandomize: (mode: RandomPackMode) => void;
 }) {
   const { t } = useTranslation("draft");
 
@@ -350,7 +369,30 @@ function PackList({
         <h3 className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
           {candidatePool ? t("setSelector.candidateSets") : t("setSelector.packOrder")}
         </h3>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {candidatePool ? (
+            <RandomButton
+              label={t("setSelector.randomCandidates")}
+              title={t("setSelector.randomCandidatesHint")}
+              disabled={!canRandomize}
+              onClick={() => onRandomize("DistinctSets")}
+            />
+          ) : (
+            <>
+              <RandomButton
+                label={t("setSelector.randomSet")}
+                title={t("setSelector.randomSetHint")}
+                disabled={!canRandomize}
+                onClick={() => onRandomize("OneSet")}
+              />
+              <RandomButton
+                label={t("setSelector.randomPacks")}
+                title={t("setSelector.randomPacksHint")}
+                disabled={!canRandomize}
+                onClick={() => onRandomize("EachPack")}
+              />
+            </>
+          )}
           {packs.length > 0 && (
             <button
               type="button"
@@ -474,6 +516,36 @@ function PackList({
             })}
       </p>
     </div>
+  );
+}
+
+function RandomButton({
+  label,
+  title,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  title: string;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={menuButtonClass({
+        tone: "neutral",
+        size: "xs",
+        ghost: true,
+        disabled,
+        className: "min-h-11",
+      })}
+    >
+      {label}
+    </button>
   );
 }
 

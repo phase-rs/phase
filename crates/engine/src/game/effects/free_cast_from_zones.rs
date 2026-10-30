@@ -64,6 +64,11 @@ pub(in crate::game) fn free_cast_window_resolution_request(
                 member_pool,
             },
         delayed_trigger_receipts: Vec::new(),
+        // CR 603.2h: a free-cast window is never a CR 603.2h indicated instruction:
+        // the lowering guard admits only a single-card `DuringResolution`
+        // `CastFromZone`, so a `ResolutionWindow` driver and a `FreeCastFromZones`
+        // node strict-fail.
+        indicated_action: None,
     };
     crate::game::casting::ResolutionCastRequest {
         face_policy,

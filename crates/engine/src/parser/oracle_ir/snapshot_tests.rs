@@ -3442,3 +3442,382 @@ fn krumar_initiate_preserves_full_activation_in_both_layers() {
     insta::assert_json_snapshot!("krumar_initiate_ir", &ir);
     insta::assert_json_snapshot!("krumar_initiate_lowered", &lowered);
 }
+/// Phase 2 PR A: does any lowered ability tree contain a `RollDie` node?
+/// Mirrors `ability_has_unimplemented`'s traversal (effect + sub + else).
+fn ability_tree_has_roll_die(def: &crate::types::ability::AbilityDefinition) -> bool {
+    matches!(def.effect.as_ref(), Effect::RollDie { .. })
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_tree_has_roll_die)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_tree_has_roll_die)
+}
+
+fn lowered_has_roll_die(lowered: &ParsedAbilities) -> bool {
+    lowered.abilities.iter().any(ability_tree_has_roll_die)
+        || lowered
+            .triggers
+            .iter()
+            .any(|t| t.execute.as_deref().is_some_and(ability_tree_has_roll_die))
+}
+
+/// Phase 2 PR A: every honest-failure marker name in the lowered output, in
+/// walk order. Naming the marker names the first production branch reached.
+fn collect_unimplemented_names(lowered: &ParsedAbilities) -> Vec<String> {
+    fn walk(def: &crate::types::ability::AbilityDefinition, out: &mut Vec<String>) {
+        if let Effect::Unimplemented { name, .. } = def.effect.as_ref() {
+            out.push(name.clone());
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            walk(sub, out);
+        }
+        if let Some(els) = def.else_ability.as_deref() {
+            walk(els, out);
+        }
+    }
+    let mut out = Vec::new();
+    for def in &lowered.abilities {
+        walk(def, &mut out);
+    }
+    for t in &lowered.triggers {
+        if let Some(execute) = t.execute.as_deref() {
+            walk(execute, &mut out);
+        }
+    }
+    out
+}
+
+/// Row A-1 / charter 2.B' — CR 706.2: a line-initial die-roll header with an
+/// unrecognized tail REFUSES the whole header instead of being silently
+/// dropped. Pre-PR-A the line-initial authority accepted both fixtures below
+/// and emitted `RollDie { sides: 20, modifier: None }` with the tail gone; the
+/// consolidated authority refuses, leaving the honest refusal marker
+/// (rebase taxonomy: `unparsed_verb_arguments`; the first production branch
+/// reached after the die-table dispatch refuses) and no `RollDie` node.
+///
+/// The two hostile tails exercise the deleted
+/// `parse_optional_modifier_suffix`'s two distinct failure paths: one tail
+/// begins `and ` but fails the add/subtract alternative, the other fails the
+/// `and ` tag itself.
+#[test]
+fn header_with_unrecognized_tail_refuses_instead_of_dropping_it() {
+    // Per-fixture honest markers (rebase taxonomy): the `and` tail refuses on
+    // the verb arguments, the distributive `for each player` tail on the
+    // quantity — both red, neither a RollDie.
+    for (label, header, marker) in [
+        (
+            "and-tail",
+            "Roll a d20 and ignore the lower roll.",
+            "unparsed_verb_arguments",
+        ),
+        (
+            "non-and-tail",
+            "Roll a d20 for each player.",
+            "unparsed_quantity",
+        ),
+    ] {
+        let text = format!("{header}\n1\u{2014}14 | Draw a card.\n15\u{2014}20 | Draw two cards.");
+        let (_, lowered) = parse_two_layer(&text, "Unrecognized Tail Fixture", &["Sorcery"], &[]);
+        assert!(
+            !lowered_has_roll_die(&lowered),
+            "{label}: an unrecognized header tail must refuse the whole header \
+             (CR 706.2) — no RollDie may survive with the tail dropped; got {:?}",
+            lowered.abilities,
+        );
+        let names = collect_unimplemented_names(&lowered);
+        assert!(
+            names.iter().any(|name| name == marker),
+            "{label}: the refused header must leave its honest refusal \
+             marker; got {names:?}",
+        );
+    }
+
+    // PAIRED POSITIVE REACH-GUARD (same fixture family): a recognized
+    // modifier still parses — proves the dispatch is selective, not inert.
+    // Verbatim Diviner's Portent header + rows.
+    let (_, lowered) = parse_two_layer(
+        "Roll a d20 and add the number of cards in your hand.\n1\u{2014}14 | Draw X cards.\n15+ | Scry X, then draw X cards.",
+        "Diviner's Portent",
+        &["Instant"],
+        &[],
+    );
+    let Effect::RollDie {
+        count,
+        sides,
+        modifier,
+        results,
+    } = lowered.abilities[0].effect.as_ref()
+    else {
+        panic!(
+            "the recognized-modifier header must still lower to RollDie, got {:?}",
+            lowered.abilities[0].effect
+        );
+    };
+    assert!(
+        matches!(
+            count,
+            crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        ),
+        "single-die header keeps count 1 (the count axis belongs to Phase 5), got {count:?}"
+    );
+    assert_eq!(*sides, 20);
+    assert_eq!(results.len(), 2);
+    assert_eq!((results[0].min, results[0].max), (1, 14));
+    assert_eq!((results[1].min, results[1].max), (15, u8::MAX));
+    let crate::types::ability::DieRollModifier::Add { value } = modifier
+        .as_ref()
+        .expect("the recognized modifier must survive consolidation")
+    else {
+        panic!("expected an Add modifier, got {modifier:?}");
+    };
+    let crate::types::ability::QuantityExpr::Ref { qty } = value else {
+        panic!("expected a Ref quantity, got {value:?}");
+    };
+    let crate::types::ability::QuantityRef::ZoneCardCount {
+        zone,
+        card_types,
+        filter,
+        scope,
+    } = qty
+    else {
+        panic!("expected the hand-count quantity Diviner's Portent prints, got {qty:?}");
+    };
+    assert!(
+        matches!(zone, crate::types::ability::ZoneRef::Hand),
+        "modifier must count the hand, got {zone:?}"
+    );
+    assert!(card_types.is_empty());
+    assert!(filter.is_none());
+    assert!(
+        matches!(scope, crate::types::ability::CountScope::Controller),
+        "modifier must count the controller's hand, got {scope:?}"
+    );
+}
+
+/// Row A-2 — REGRESSION GUARD (not revert-failing): CR 706.1a word-form
+/// headers with a trailing instruction keep their chain-path d6 roll plus a
+/// `SequentialSibling` trailing instruction. The pin is that the trailing
+/// instruction survives as the sibling (Box of Free-Range Goblins keeps its
+/// token creation, Growth Spurt its pump). Printed tables attach with
+/// row-covering spans (main #10127's attach predicate); only cases with no
+/// printed table keep `results` empty.
+///
+/// The empty-tail arm at the end is likewise a guard, NOT revert-failing:
+/// measured at the base, the chain path already attaches a following pipe
+/// table to the word-form roll, so the lowered shape (one ability, two
+/// branches) is identical before and after. The arm pins that accepted shape
+/// so the delegation cannot silently break word-form acceptance.
+#[test]
+fn word_form_header_does_not_swallow_its_trailing_instruction() {
+    use crate::types::ability::SubAbilityLink;
+
+    // (card, verbatim Oracle text, types, expected sibling check, expected
+    // attached-table spans — the printed rows, or empty when the card prints
+    // no table)
+    type WordFormCase = (
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        &'static str,
+        &'static [(u8, u8)],
+    );
+    let cases: &[WordFormCase] = &[
+        (
+            "Box of Free-Range Goblins",
+            "Roll a six-sided die. Create a number of 1/1 red Goblin creature tokens equal to the result.",
+            &["Sorcery"],
+            "token",
+            &[],
+        ),
+        (
+            "Goblin Tutor",
+            "Roll a six-sided die. If you roll a 1, Goblin Tutor has no effect. Otherwise, search your library for the indicated card, reveal it, put it into your hand, then shuffle.\n2 \u{2014} A card named Goblin Tutor\n3 \u{2014} An enchantment\n4 \u{2014} An artifact\n5 \u{2014} A creature\n6 \u{2014} An instant or sorcery",
+            &["Instant"],
+            // Rebase taxonomy note: main's evolved row-body vocabulary names
+            // this `unparsed_verb_arguments` where our tree said `have` —
+            // equally red; the roll header and sub-link asserts above are unchanged.
+            "unparsed_verb_arguments",
+            &[(2, 2), (3, 3), (4, 4), (5, 5), (6, 6)],
+        ),
+        (
+            "Growth Spurt",
+            "Roll a six-sided die. Target creature gets +X/+X until end of turn, where X is the result.",
+            &["Instant"],
+            "pump",
+            &[],
+        ),
+        (
+            "Steamfloggery",
+            "Roll a six-sided die. Assemble a number of Contraptions equal to the result. (To assemble a Contraption, put the top card of your Contraption deck face up onto one of your sprockets.)",
+            &["Instant"],
+            "assemble",
+            &[],
+        ),
+        (
+            "Strategy, Schmategy",
+            "Roll a six-sided die. Strategy, Schmategy has the indicated effect.\n1 \u{2014} Do nothing.\n2 \u{2014} Destroy all artifacts.\n3 \u{2014} Destroy all lands.\n4 \u{2014} Strategy, Schmategy deals 3 damage to each creature and each player.\n5 \u{2014} Each player discards their hand and draws seven cards.\n6 \u{2014} Repeat this process two more times.",
+            &["Sorcery"],
+            // Rebase taxonomy note: same `unparsed_verb_arguments`
+            // vocabulary as the Goblin Tutor row above.
+            "unparsed_verb_arguments",
+            &[(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)],
+        ),
+        (
+            "Time Out",
+            "Roll a six-sided die. Put target nonland permanent into its owner's library just beneath the top X cards of that library, where X is the result.",
+            &["Instant"],
+            // Rebase taxonomy note: same `unparsed_verb_arguments`
+            // vocabulary as the rows above.
+            "unparsed_verb_arguments",
+            &[],
+        ),
+    ];
+    for (card, text, types, sibling, spans) in cases {
+        let (_, lowered) = parse_two_layer(text, card, types, &[]);
+        let Effect::RollDie {
+            count,
+            sides,
+            modifier,
+            results,
+        } = lowered.abilities[0].effect.as_ref()
+        else {
+            panic!(
+                "{card}: ability[0] must stay the chain-path d6 roll, got {:?}",
+                lowered.abilities[0].effect
+            );
+        };
+        assert!(
+            matches!(
+                count,
+                crate::types::ability::QuantityExpr::Fixed { value: 1 }
+            ),
+            "{card}: single-die roll keeps count 1 (the count axis belongs to Phase 5), got {count:?}"
+        );
+        assert_eq!(*sides, 6, "{card}: sides");
+        // Printed tables attach via main #10127's row-covering predicate;
+        // the branch pins that the header attaches exactly the printed rows.
+        // Cards with no printed table keep `results` empty.
+        let got: Vec<(u8, u8)> = results
+            .iter()
+            .map(|branch| (branch.min, branch.max))
+            .collect();
+        assert_eq!(got.as_slice(), *spans, "{card}: attached table spans");
+        assert!(
+            modifier.is_none(),
+            "{card}: no modifier may appear, got {modifier:?}"
+        );
+        let sub = lowered.abilities[0]
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| {
+                panic!("{card}: the trailing instruction must survive as a sub-ability")
+            });
+        assert_eq!(
+            sub.sub_link,
+            SubAbilityLink::SequentialSibling,
+            "{card}: the trailing instruction is the next printed instruction"
+        );
+        match *sibling {
+            "token" => assert!(
+                matches!(sub.effect.as_ref(), Effect::Token { .. }),
+                "{card}: must keep its token creation, got {:?}",
+                sub.effect
+            ),
+            "pump" => assert!(
+                matches!(sub.effect.as_ref(), Effect::Pump { .. }),
+                "{card}: must keep its pump, got {:?}",
+                sub.effect
+            ),
+            "assemble" => assert!(
+                matches!(sub.effect.as_ref(), Effect::AssembleContraptions { .. }),
+                "{card}: must keep its assembly, got {:?}",
+                sub.effect
+            ),
+            expected_name => match sub.effect.as_ref() {
+                Effect::Unimplemented { name, .. } => assert_eq!(
+                    name, expected_name,
+                    "{card}: sibling marker must be unchanged"
+                ),
+                other => {
+                    panic!("{card}: expected the `{expected_name}` sibling marker, got {other:?}")
+                }
+            },
+        }
+    }
+
+    // EMPTY-TAIL WORD-FORM ARM (guard — passes at the base too, via the
+    // chain path): with no trailing instruction the word-form header is a
+    // clean table header and must be accepted.
+    let (_, lowered) = parse_two_layer(
+        "Roll a six-sided die.\n1\u{2014}3 | Draw a card.\n4\u{2014}6 | Draw two cards.",
+        "Empty Tail Word-Form Fixture",
+        &["Sorcery"],
+        &[],
+    );
+    assert_eq!(
+        lowered.abilities.len(),
+        1,
+        "the header plus its table must lower to one ability, got {:?}",
+        lowered.abilities
+    );
+    let branches =
+        die_branches(&lowered.abilities[0]).expect("the word-form roll must own its table");
+    assert_eq!(
+        branches
+            .iter()
+            .map(|b| (b.min, b.max))
+            .collect::<Vec<(u8, u8)>>(),
+        vec![(1, 3), (4, 6)]
+    );
+}
+
+/// Row D-2 — CR 706.1: the roll-and-choose header (Reckless Endeavor, Phase 6's
+/// shape) still refuses honestly through the consolidated authority. Verbatim
+/// card text, taken from `card-data.json` at the base. The first production
+/// branch reached is the honest refusal marker on ability[0] (rebase taxonomy:
+/// `unparsed_verb_arguments`); the paired reach-guard is the rest of the
+/// chain (`deal`, `create`), proving the fixture reaches dispatch rather
+/// than going inert.
+#[test]
+fn roll_and_choose_header_refuses_honestly() {
+    let (_, lowered) = parse_two_layer(
+        "Roll two d12 and choose one result. Reckless Endeavor deals damage equal to that result to each creature. Then create a number of Treasure tokens equal to the other result.",
+        "Reckless Endeavor",
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        !lowered_has_roll_die(&lowered),
+        "the multi-die roll-and-choose header must stay refused (Phase 6 owns it); got {:?}",
+        lowered.abilities
+    );
+    let Effect::Unimplemented { name, description } = lowered.abilities[0].effect.as_ref() else {
+        panic!(
+            "ability[0] must be the honest refusal marker, got {:?}",
+            lowered.abilities[0].effect
+        );
+    };
+    // Rebase taxonomy note: main's evolved header vocabulary names this
+    // `unparsed_verb_arguments` where our tree said `roll` — equally red; the
+    // no-RollDie assert above and the trailing-clause description below are unchanged.
+    assert_eq!(name, "unparsed_verb_arguments");
+    assert!(
+        description
+            .as_deref()
+            .is_some_and(|d| d.contains("choose one result")),
+        "the marker must carry the trailing choice clause (the shape Phase 6 will lower), got {description:?}"
+    );
+    // Rebase taxonomy note: both clauses refuse on their unbound result
+    // quantities ("equal to that/other result" — the roll result Phase 6 will
+    // park) rather than on the `deal`/`create` verbs our tree named. Still
+    // honestly red per clause; the chain still reaches dispatch per clause.
+    let names = collect_unimplemented_names(&lowered);
+    assert_eq!(
+        names.iter().filter(|n| *n == "unparsed_quantity").count(),
+        2,
+        "both the damage and the Treasure clause must refuse on their result quantity, got {names:?}"
+    );
+}

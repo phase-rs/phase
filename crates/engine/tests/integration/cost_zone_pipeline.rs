@@ -14,8 +14,8 @@ use engine::types::ability::{
     IterationCategory, ManaContribution, ManaProduction, ManaSpendRestriction, ModalChoice,
     OpponentMayScope, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
     ResolvedAbility, SacrificeCost, SpellCastingOption, TargetFilter, TargetRef,
-    TargetSelectionMode, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, WheneverEventExpiry,
+    TargetSelectionMode, TriggerConstraint, TriggerDefinition, TriggerLimitSpend, TypeFilter,
+    TypedFilter, UnlessPayModifier, WheneverEventExpiry,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -7531,7 +7531,9 @@ fn add_mana_added_observer(scenario: &mut GameScenario, label: &str, body: Effec
         .with_trigger_definition(
             TriggerDefinition::new(TriggerMode::ManaAdded)
                 .execute(AbilityDefinition::new(AbilityKind::Database, body))
-                .constraint(TriggerConstraint::OncePerTurn)
+                .constraint(TriggerConstraint::OncePerTurn {
+                    spent_by: TriggerLimitSpend::Triggering,
+                })
                 .trigger_zones(vec![Zone::Battlefield]),
         )
         .id()
@@ -15592,7 +15594,9 @@ fn optional_mana_added_bonus_observer(scenario: &mut GameScenario, label: &str) 
                     AbilityDefinition::new(AbilityKind::Database, mana_added_bonus_mana_body())
                         .optional(),
                 )
-                .constraint(TriggerConstraint::OncePerTurn)
+                .constraint(TriggerConstraint::OncePerTurn {
+                    spent_by: TriggerLimitSpend::Triggering,
+                })
                 .trigger_zones(vec![Zone::Battlefield]),
         )
         .id()
@@ -15787,7 +15791,9 @@ fn opponent_may_mana_added_bonus_observer(scenario: &mut GameScenario, label: &s
         .with_trigger_definition(
             TriggerDefinition::new(TriggerMode::ManaAdded)
                 .execute(body)
-                .constraint(TriggerConstraint::OncePerTurn)
+                .constraint(TriggerConstraint::OncePerTurn {
+                    spent_by: TriggerLimitSpend::Triggering,
+                })
                 .trigger_zones(vec![Zone::Battlefield]),
         )
         .id()

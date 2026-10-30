@@ -6,14 +6,15 @@ use crate::game::effects::{append_to_pending_continuation, mark_pending_continua
 use crate::game::filter;
 use crate::game::keywords;
 use crate::game::quantity::{
-    quantity_expr_uses_recipient, resolve_quantity_with_targets,
-    resolve_quantity_with_targets_and_recipient, resolve_quantity_with_targets_slice,
+    resolve_quantity_with_targets, resolve_quantity_with_targets_and_recipient,
+    resolve_quantity_with_targets_slice,
 };
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    names_resolution_chosen_recipient, DamageContextSnapshot, DamageSource, EachDamageRecipient,
-    Effect, EffectError, EffectKind, ExcessRecipient, PlayerFilter, QuantityExpr, ResolvedAbility,
-    TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetRef,
+    names_resolution_chosen_recipient, quantity_expr_uses_recipient, DamageContextSnapshot,
+    DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind, ExcessRecipient,
+    PlayerFilter, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetDamageSourceBinding,
+    TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;

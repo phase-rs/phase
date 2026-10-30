@@ -19,7 +19,9 @@ use super::oracle_cost::{
     parse_colored_mana_only_clause, parse_or_separated_mana_costs, parse_single_cost,
     ColoredManaOnlyScope,
 };
-use super::oracle_effect::imperative::try_parse_die_result_line;
+use super::oracle_effect::imperative::{
+    try_parse_die_result_line, try_parse_roll_die_with_modifier,
+};
 use super::oracle_effect::{capitalize, lower_ability_ir, parse_ability_ir_standalone};
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::effect_chain::{AbilityIr, AbilityShellIr, DieResultBranchIr, EffectChainIr};
@@ -27,7 +29,6 @@ use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
-use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_util::{
     normalize_card_name_refs, parse_mana_symbols, parse_subtype, strip_reminder_text,
 };
@@ -291,7 +292,11 @@ pub(super) fn try_parse_die_roll_table(
     kind: AbilityKind,
 ) -> Option<(AbilityDefinition, usize)> {
     let lower = line.to_lowercase();
-    let (sides, modifier) = parse_roll_die_sides_with_modifier(&lower)?;
+    // Bare-card binding is `None` here by construction: the line-initial table
+    // dispatch only fires on a first-clause roll header, which has no preceding
+    // publisher in its chain (CR 608.2c). Later-clause headers route through
+    // the chain dispatch, which passes its own binding.
+    let (sides, modifier) = try_parse_roll_die_with_modifier(&lower, None)?;
 
     let (branches, next_line) = parse_die_result_branches_ir(lines, i + 1, kind);
 
@@ -320,80 +325,6 @@ pub(super) fn try_parse_die_roll_table(
         root_transforms: vec![],
     };
     Some((lower_ability_ir(&ir), next_line))
-}
-
-/// CR 706.1a + CR 706.2: Parse the header line of a die-roll table, returning
-/// `(sides, optional_modifier)`. The modifier captures "and add/subtract X"
-/// suffixes attached to the roll command. Used by `try_parse_die_roll_table`
-/// so the same shape works at every parsing entry point (spell text, trigger
-/// text, activated effect text).
-fn parse_roll_die_sides_with_modifier(
-    lower: &str,
-) -> Option<(u8, Option<crate::types::ability::DieRollModifier>)> {
-    let ((), rest) = nom_on_lower(lower, lower, |i| {
-        value((), alt((tag("roll a d"), tag("rolls a d")))).parse(i)
-    })?;
-    // Numeric form first; word-form below.
-    let digit_end = rest
-        .bytes()
-        .position(|b| !b.is_ascii_digit())
-        .unwrap_or(rest.len());
-    if digit_end > 0 {
-        if let Ok(sides) = rest[..digit_end].parse::<u8>() {
-            let after = &rest[digit_end..];
-            return Some((sides, parse_optional_modifier_suffix(after)));
-        }
-    }
-    let sides = parse_roll_die_sides_word_form(lower)?;
-    Some((sides, None))
-}
-
-/// CR 706.2: Parse an optional " and (add|subtract) X" suffix attached to a
-/// die roll header. Returns `None` when the suffix is empty / purely
-/// punctuation; returns `None` (suffix dropped) when the suffix is non-empty
-/// but doesn't shape as a recognized modifier — the caller's outer parsing
-/// has already captured `sides`, and any wider trailing clause is handled by
-/// downstream chain parsing.
-fn parse_optional_modifier_suffix(after: &str) -> Option<crate::types::ability::DieRollModifier> {
-    let trimmed = after.trim().trim_end_matches(['.', ',', ';']).trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let (after_and, _) = tag::<_, _, OracleError<'_>>("and ").parse(trimmed).ok()?;
-    let (modifier_text, sign) = alt((
-        value(true, tag::<_, _, OracleError<'_>>("add ")),
-        value(false, tag("subtract ")),
-    ))
-    .parse(after_and)
-    .ok()?;
-    let (_, qty) = nom_quantity::parse_quantity_ref_complete(modifier_text).ok()?;
-    let value = crate::types::ability::QuantityExpr::Ref { qty };
-    Some(if sign {
-        crate::types::ability::DieRollModifier::Add { value }
-    } else {
-        crate::types::ability::DieRollModifier::Subtract { value }
-    })
-}
-
-/// CR 706: Parse word-form die patterns like "roll a six-sided die".
-fn parse_roll_die_sides_word_form(lower: &str) -> Option<u8> {
-    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("roll a "), tag("rolls a ")))
-        .parse(lower)
-        .ok()?;
-    let (_, sides) = alt((
-        value(
-            4_u8,
-            alt((tag::<_, _, OracleError<'_>>("four-sided"), tag("4-sided"))),
-        ),
-        value(6, alt((tag("six-sided"), tag("6-sided")))),
-        value(8, alt((tag("eight-sided"), tag("8-sided")))),
-        value(10, alt((tag("ten-sided"), tag("10-sided")))),
-        value(12, alt((tag("twelve-sided"), tag("12-sided")))),
-        value(20, alt((tag("twenty-sided"), tag("20-sided")))),
-    ))
-    .parse(rest)
-    .ok()?;
-    Some(sides)
 }
 
 fn strip_die_table_flavor_label(text: &str) -> &str {

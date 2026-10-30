@@ -431,7 +431,7 @@ pub fn root_may_yield_adverse_exchange(state: &GameState, action: &GameAction) -
 /// the ability's first object target rather than to its source, which is the
 /// wording class `is_target_sourced_self_damage` gates. `DamageAll` shares that
 /// one axis with `DealDamage` (see
-/// `ability_utils::one_sided_fight_source_supplies_quantity_creature`), so it is
+/// `types::ability::one_sided_fight_source_supplies_quantity_creature`), so it is
 /// admitted here to keep the guard no tighter than the class.
 fn effect_may_yield_adverse_exchange(effect: &Effect) -> bool {
     matches!(

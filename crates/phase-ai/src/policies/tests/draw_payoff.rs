@@ -12,7 +12,7 @@ use engine::types::ability::{
     AbilityDefinition, AbilityKind, CastVariantPaid, DrawReplacementScope, Effect, ModalChoice,
     QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
     ReplacementMode, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition,
+    TriggerDefinition, TriggerLimitSpend,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -313,7 +313,11 @@ fn once_per_turn_engine(state: &mut GameState) -> ObjectId {
     let obj = state.objects.get_mut(&id).unwrap();
     obj.card_types.core_types.push(CoreType::Creature);
     obj.trigger_definitions
-        .push(drawn_engine_trigger().constraint(TriggerConstraint::OncePerTurn));
+        .push(
+            drawn_engine_trigger().constraint(TriggerConstraint::OncePerTurn {
+                spent_by: TriggerLimitSpend::Triggering,
+            }),
+        );
     id
 }
 

@@ -2204,6 +2204,35 @@ pub(crate) enum ZoneCounterImperativeAst {
     },
 }
 
+/// CR 701.13a + CR 608.2f: the objects of a "<player> exiles A[, B][, and C]"
+/// instruction, in printed order. The list is non-empty by construction: a
+/// first object, then any further ones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct SubjectExileObjectsAst {
+    pub(crate) first: SubjectExileObjectAst,
+    pub(crate) rest: Vec<SubjectExileObjectAst>,
+}
+
+/// CR 701.13a: one object of a "<player> exiles …" instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum SubjectExileObjectAst {
+    /// The top cards of a library.
+    LibraryTop(SubjectExileLibraryTopAst),
+    /// One card selected at random from the subject's graveyard or hand.
+    AtRandomFrom(Zone),
+}
+
+/// CR 401.2 + CR 701.13a: the top N cards of `owner`'s library. `owner` is the
+/// filter the shared library-owner authority (`parse_library_owner_phrase`) maps
+/// the printed possessive to; the lowering decides whether it names the exiling
+/// subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct SubjectExileLibraryTopAst {
+    pub(crate) count: QuantityExpr,
+    pub(crate) face_down: bool,
+    pub(crate) owner: TargetFilter,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum ClauseBoundary {
     Sentence,

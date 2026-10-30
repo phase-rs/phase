@@ -164,6 +164,30 @@ class SkillDocGate(unittest.TestCase):
         )
 
     @gate
+    def test_long_priority_section_keeps_present_labels(self, g: Gate) -> None:
+        text = g.read(SKILL)
+        section_end = text.index("\n### ", text.index("\n## 3."))
+        # Leave more than a pipe buffer after every valid label.
+        g.write(
+            SKILL,
+            text[:section_end] + "\n" + "padding " * 200_000 + "\n" + text[section_end:],
+        )
+        result = g.run()
+        self.assertEqual(
+            result.returncode,
+            0,
+            "a long valid section must preserve every existing priority label: "
+            + result.stderr,
+        )
+        priority_row = "| `8b (early)`"
+        text = g.read(SKILL)
+        self.assertIn(priority_row, text)
+        g.write(SKILL, text.replace(priority_row, "| `missing-priority`", 1))
+        result = g.run()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("priority slot '8b (early)'", result.stderr)
+
+    @gate
     def test_every_anchor_row_is_discriminating(self, g: Gate) -> None:
         """The property the table exists to have.
 

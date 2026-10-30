@@ -952,7 +952,7 @@ pub struct ResolvedInformationCommand {
 /// One exact constrained-trigger ledger fact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolvedTriggerLedgerEdit {
-    /// CR 603.2c: This trigger occurrence has used its one-per-turn fact.
+    /// CR 603.2: This trigger occurrence has used its once-each-turn trigger limit.
     OncePerTurn,
     /// CR 603.2c: This trigger occurrence has used its one-per-game fact.
     OncePerGame,
@@ -960,6 +960,8 @@ pub enum ResolvedTriggerLedgerEdit {
     OncePerOpponentPerTurn { opponent: PlayerId },
     /// Increment from the captured prior count for MaxTimesPerTurn.
     MaxTimesPerTurn { expected_old: u32 },
+    /// CR 603.2h: this player took this ability's indicated action this turn.
+    IndicatedActionTaken { player: PlayerId },
 }
 
 /// A named once-per-turn permission slot consumed by a completed play or cast.

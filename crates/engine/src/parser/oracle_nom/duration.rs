@@ -7,8 +7,8 @@
 //! ("until your next end step", "until the next end step", "until your next
 //! upkeep", "until its controller's next untap step"), "until ~/this creature
 //! leaves the battlefield", "until you exile another card with ~/this
-//! ability", "until a player casts <a|an> <filter> spell", "for the rest of
-//! the game", "for as long as [condition]", "this turn", "this/that combat",
+//! ability", "until a player casts <a|an> <filter> spell", "until ~/this card
+//! is cast from <zone>", "for the rest of the game", "for as long as [condition]", "this turn", "this/that combat",
 //! and the "during target opponent's/player's next turn" WINDOW (Gideon Jura).
 //!
 //! A phrase added here is taken away from every clause-level grammar that owned
@@ -32,10 +32,12 @@ use nom::Parser;
 use super::condition::{parse_inner_condition, parse_recipient_has_counters};
 use super::context::ParseContext;
 use super::error::{oracle_err, OracleError, OracleResult};
+use super::filter::parse_enters_origin_zone;
 use super::primitives::scan_contains;
 use crate::parser::oracle_trigger::parse_trigger_condition;
 use crate::types::ability::{
-    ControllerRef, Duration, ObjectScope, PlayerScope, StaticCondition, TargetFilter,
+    ControllerRef, Duration, ObjectScope, OriginConstraint, PlayerScope, StaticCondition,
+    TargetFilter, TriggerDefinition,
 };
 use crate::types::phase::Phase;
 use crate::types::triggers::TriggerMode;
@@ -220,8 +222,35 @@ fn parse_until_body(input: &str) -> OracleResult<'_, Duration> {
         // CR 611.2a + CR 601.2i: an event deadline, "until a player casts
         // <a|an> <filter> spell", which ends when such a spell becomes cast.
         parse_until_player_casts_spell,
+        // CR 611.2a + CR 601.2i: an event deadline on this very card's cast,
+        // "until ~/this card is cast from <zone>".
+        parse_until_self_is_cast,
     ))
     .parse(input)
+}
+
+/// CR 611.2a + CR 601.2i: "until ~/this card is cast from <zone>" — an event
+/// deadline whose event is this very card becoming cast from that zone; ended
+/// by `casting_costs::end_until_event_durations_on_cast`, which matches it
+/// against the spell the card became (CR 601.2a). The zone is read by the
+/// shared "from <zone>" origin combinator and carried as the event's cast-origin
+/// constraint, so a cast of the card from any other zone does not end it.
+fn parse_until_self_is_cast(input: &str) -> OracleResult<'_, Duration> {
+    let (rest, (_, _, zone)) = (
+        alt((tag("~"), tag("this card"))),
+        tag(" is cast "),
+        parse_enters_origin_zone,
+    )
+        .parse(input)?;
+    let event = TriggerDefinition::new(TriggerMode::SpellCast)
+        .valid_card(TargetFilter::SelfRef)
+        .spell_cast_origin(OriginConstraint::Equals(zone));
+    Ok((
+        rest,
+        Duration::UntilEvent {
+            event: Box::new(event),
+        },
+    ))
 }
 
 /// CR 611.2a + CR 601.2i: "a player casts <a|an> <filter> spell". The span is
@@ -794,10 +823,10 @@ mod tests {
     use super::*;
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::{
-        AbilityKind, Comparator, FilterProp, OriginConstraint, StaticCondition, TriggerDefinition,
-        TypeFilter, TypedFilter,
+        AbilityKind, Comparator, Effect, FilterProp, StaticCondition, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
+    use crate::types::zones::Zone;
 
     #[test]
     fn test_parse_duration_end_of_turn() {
@@ -1537,7 +1566,6 @@ mod tests {
         for text in [
             "until an opponent casts a creature spell",
             "until they cast them for the first time",
-            "until this card is cast from exile",
         ] {
             assert!(
                 !matches!(parse_duration(text), Ok((_, Duration::UntilEvent { .. }))),
@@ -1552,6 +1580,61 @@ mod tests {
         ] {
             assert!(
                 !matches!(clause_duration(text), Some(Duration::UntilEvent { .. })),
+                "{text}"
+            );
+        }
+    }
+
+    /// The deadline "until this card is cast from <zone>" carries: this very
+    /// card's cast, from exactly that zone.
+    fn self_cast_deadline(zone: Zone) -> Duration {
+        Duration::UntilEvent {
+            event: Box::new(
+                TriggerDefinition::new(TriggerMode::SpellCast)
+                    .valid_card(TargetFilter::SelfRef)
+                    .spell_cast_origin(OriginConstraint::Equals(zone)),
+            ),
+        }
+    }
+
+    /// A-5 (CR 611.2a + CR 601.2i): "until ~/this card is cast from <zone>" is
+    /// an event deadline on this very card's cast from that zone, read alone
+    /// and trailing a whole grant clause. The negatives are paired with these
+    /// positives: another subject, or no origin zone, is not this deadline.
+    #[test]
+    fn until_self_is_cast_from_a_zone_is_a_self_cast_deadline() {
+        for (text, zone) in [
+            ("until this card is cast from exile", Zone::Exile),
+            ("until ~ is cast from exile", Zone::Exile),
+            (
+                "until this card is cast from your graveyard",
+                Zone::Graveyard,
+            ),
+        ] {
+            assert_eq!(
+                parse_duration(text).unwrap(),
+                ("", self_cast_deadline(zone)),
+                "{text}"
+            );
+        }
+
+        // Whole-clause reach: the trailing deadline is stripped off a "gains"
+        // grant and becomes the continuous effect's duration.
+        let def = parse_effect_chain(
+            "Target land gains \"{T}: Add {C}{C}\" until this card is cast from exile.",
+            AbilityKind::Activated,
+        );
+        let Effect::GenericEffect { duration, .. } = &*def.effect else {
+            panic!("expected a continuous grant, got {:?}", def.effect);
+        };
+        assert_eq!(duration, &Some(self_cast_deadline(Zone::Exile)));
+
+        for text in [
+            "until this creature is cast from exile",
+            "until this card is cast",
+        ] {
+            assert!(
+                !matches!(parse_duration(text), Ok((_, Duration::UntilEvent { .. }))),
                 "{text}"
             );
         }

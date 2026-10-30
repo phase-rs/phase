@@ -11623,6 +11623,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 chooser: Chooser::Controller.into(),
                 candidate_source: ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: true,
                 selection: CardSelectionMode::Chosen,
                 constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes {
