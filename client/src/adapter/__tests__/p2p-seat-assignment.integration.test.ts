@@ -185,7 +185,7 @@ describe("conditional waiting-seat assignments through the real WASM reducer (lo
     await host.applySeatMutation({ type: "SetKind", data: { seatIndex: 1, kind: ai } });
     expect(host.getPlayerSlots()[1].kind.type).toBe("Ai");
     expect(privateState(host).playerTokens.has(1)).toBe(false);
-    expect(guest.open).toBe(false);
+    await vi.waitFor(() => expect(guest.open).toBe(false));
     expect(privateState(host).playerTokens.get(2)).toBe(otherToken);
     expect(other.open).toBe(true);
   });
@@ -247,11 +247,9 @@ describe("conditional waiting-seat assignments through the real WASM reducer (lo
   });
 
   it("ordinary setup succeeds, skips the AI at an early guest's seat, and assigns the remaining AI", async () => {
-    let active: P2PHostAdapter | undefined;
     let guest: FakeDataConnection | undefined;
     const initialize = P2PHostAdapter.prototype.initialize;
     vi.spyOn(P2PHostAdapter.prototype, "initialize").mockImplementation(async function (this: P2PHostAdapter) {
-      active = this;
       hosts.push(this);
       await initialize.call(this);
       guest = await join();
@@ -265,6 +263,7 @@ describe("conditional waiting-seat assignments through the real WASM reducer (lo
     };
     const ok = await useMultiplayerStore.getState().startP2PHostingSession(settings, deck, { brokerUrl: null });
     expect(ok).toBe(true);
+    const active = hosts[hosts.length - 1];
     expect(active).toBeDefined();
     expect(guest).toBeDefined();
     retainGuest(active!, guest!);
