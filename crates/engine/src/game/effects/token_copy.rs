@@ -3794,13 +3794,26 @@ pub(crate) mod tests {
         };
         assert!(valid_targets.contains(&target_id));
         let prevention_source = ObjectId(denied_state.next_object_id);
+        let prevention_definition = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .valid_card(TargetFilter::Any)
+            .quantity_modification(QuantityModification::Prevent)
+            .mode(ReplacementMode::Optional { decline: None });
         install_test_replacement(
             &mut denied_state,
             "Ordinal entry prevention",
-            ReplacementDefinition::new(ReplacementEvent::ChangeZone)
-                .valid_card(TargetFilter::Any)
-                .quantity_modification(QuantityModification::Prevent)
-                .mode(ReplacementMode::Optional { decline: None }),
+            prevention_definition.clone(),
+        );
+        let installed = denied_state
+            .objects
+            .get(&prevention_source)
+            .expect("the prevention source was installed at the expected allocator position");
+        assert_eq!(
+            installed.base_replacement_definitions.as_slice(),
+            std::slice::from_ref(&prevention_definition)
+        );
+        assert_eq!(
+            installed.replacement_definitions.iter().collect::<Vec<_>>(),
+            vec![&prevention_definition]
         );
         denied_events.extend(
             apply_as_current(
@@ -3822,7 +3835,12 @@ pub(crate) mod tests {
         let pending = denied_state.pending_replacement.as_ref().unwrap();
         assert!(pending.is_optional);
         assert_eq!(pending.candidates.len(), 1);
-        assert_eq!(pending.candidates[0].source, prevention_source);
+        assert_eq!(pending.candidates[0].source, prevention_source,
+            "ordinal prevention: keys={:?}; candidates={:?}; proposed={:?}; applied={:?}; expected definition={prevention_definition:?}; actual definitions={:?}; live entrant={:?}; liminal entrant={:?}; installed effects={:?}; next_object_id={}; events={denied_events:?}",
+            pending.candidate_keys, pending.candidates, pending.proposed, pending.proposed.applied_set(),
+            pending.candidate_keys.iter().map(|key| crate::game::replacement::replacement_definition_for_key(&denied_state, *key, &pending.damage_opportunity)).collect::<Vec<_>>(),
+            denied_state.objects.get(&denied_entrant), denied_state.liminal_entries.get(&denied_entrant),
+            denied_state.transient_continuous_effects, denied_state.next_object_id);
         let opportunity = Default::default();
         let definition = crate::game::replacement::replacement_definition_for_key(
             &denied_state,
@@ -11373,6 +11391,11 @@ pub(crate) mod tests {
                     cause: retirement.cause,
                 };
                 let mut prior_birth = before_cancel.resolved_rules_journal.clone();
+                let birth_cause = prior_birth.begin_proposal().unwrap();
+                assert_eq!(
+                    birth_cause, retirement.cause,
+                    "the counterfactual birth must occupy the real cancellation proposal"
+                );
                 prior_birth.record_token_creation(birth.clone()).unwrap();
                 let unchanged = serde_json::to_value(&prior_birth).unwrap();
                 assert!(prior_birth
@@ -12277,7 +12300,13 @@ pub(crate) mod tests {
                 },
                 _ => GameAction::PassPriority,
             };
-            events.extend(runner.act(action).unwrap().events);
+            events.extend(runner.act(action).unwrap_or_else(|error| {
+                let state = runner.state();
+                panic!("Cogwork next-End action failed: {error:?}; phase={:?}; turn={}; wait={:?}; winner={:?}; eliminated={:?}; libraries={:?}; stack={:?}; registered={registered:?}; births={births:?}; delayed={:?}; events={events:?}",
+                    state.phase, state.turn_number, state.waiting_for, state.winner, state.eliminated_players,
+                    state.players.iter().map(|player| (player.id, player.library.len(), player.is_eliminated)).collect::<Vec<_>>(),
+                    state.stack, state.delayed_triggers);
+            }).events);
         }
         assert_eq!(runner.state().phase, Phase::End,
             "Cogwork observation: registered={registered:?}; births={births:?}; stack={:?}; delayed={:?}; wait={:?}; events={events:?}",
@@ -12294,7 +12323,13 @@ pub(crate) mod tests {
                 runner.state().waiting_for,
                 WaitingFor::Priority { .. }
             ));
-            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+            events.extend(runner.act(GameAction::PassPriority).unwrap_or_else(|error| {
+                let state = runner.state();
+                panic!("Cogwork delayed resolution failed: {error:?}; phase={:?}; turn={}; wait={:?}; winner={:?}; eliminated={:?}; libraries={:?}; stack={:?}; registered={registered:?}; births={births:?}; delayed={:?}; events={events:?}",
+                    state.phase, state.turn_number, state.waiting_for, state.winner, state.eliminated_players,
+                    state.players.iter().map(|player| (player.id, player.library.len(), player.is_eliminated)).collect::<Vec<_>>(),
+                    state.stack, state.delayed_triggers);
+            }).events);
         }
         let state = runner.state();
         assert!(!state.battlefield.contains(&copy), "the copy is exiled");

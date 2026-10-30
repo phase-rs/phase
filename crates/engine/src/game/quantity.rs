@@ -2065,38 +2065,8 @@ pub(crate) fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::SharedCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => card_type_set_source_recipient_read(source),
-        QuantityRef::PlayerCount { filter } => match filter {
-            // Only this top-level player filter preserves the quantity context.
-            PlayerFilter::PlayerAttribute { value, .. } => quantity_expr_recipient_read(value),
-            PlayerFilter::Controller
-            | PlayerFilter::Opponent
-            | PlayerFilter::DefendingPlayer
-            | PlayerFilter::OpponentLostLife
-            | PlayerFilter::OpponentGainedLife
-            | PlayerFilter::HasLostTheGame
-            | PlayerFilter::OpponentAttacked { .. }
-            | PlayerFilter::OpponentAttackingEnchantedPlayer
-            | PlayerFilter::All
-            | PlayerFilter::AllExcept { .. }
-            | PlayerFilter::HighestSpeed
-            | PlayerFilter::ZoneChangedThisWay
-            | PlayerFilter::PerformedActionThisWay { .. }
-            | PlayerFilter::OwnersOfCardsExiledBySource
-            | PlayerFilter::TriggeringPlayer
-            | PlayerFilter::OpponentOtherThanTriggering
-            | PlayerFilter::OpponentOfTriggeringPlayer
-            | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
-            | PlayerFilter::VotedFor { .. }
-            | PlayerFilter::ParentObjectTargetController
-            | PlayerFilter::ChosenPlayer { .. }
-            | PlayerFilter::ParentObjectTargetOwner
-            | PlayerFilter::TargetPlayer
-            | PlayerFilter::GrantingObjectCaster
-            | PlayerFilter::OpponentDealtDamage { .. }
-            | PlayerFilter::ControlsCount { .. }
-            | PlayerFilter::TrackedSetPossessor { .. }
-            | PlayerFilter::AnyOf { .. } => RecipientRead::Unread,
-        },
+        QuantityRef::PlayerCount { filter }
+        | QuantityRef::EventContextPlayerCount { filter } => player_filter_recipient_read(filter),
         // Filter-bearing members use records, fresh contexts, or target-slot
         // metadata, not the live recipient binding. Sacrifice/token/entry filters
         // above are likewise record-based; only their player scopes can read it.
@@ -2108,7 +2078,6 @@ pub(crate) fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::TargetObjectManaValue { .. }
-        | QuantityRef::EventContextPlayerCount { .. }
         // Remaining leaves have no recipient-bearing payload.
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::LifeAboveStarting
@@ -2150,6 +2119,52 @@ pub(crate) fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::CommanderCastFromCommandZoneCount
         | QuantityRef::CommanderManaValue { .. }
         | QuantityRef::VoteCount { .. } => RecipientRead::Unread,
+    }
+}
+
+/// CR 608.2c: player predicates keep the quantity's recipient context in
+/// their population filters and comparison values, including nested predicates.
+fn player_filter_recipient_read(filter: &PlayerFilter) -> RecipientRead {
+    match filter {
+        PlayerFilter::ControlsCount { filter, count, .. } => {
+            filter_recipient_read(filter).max(quantity_expr_recipient_read(count))
+        }
+        // The attribute is read directly from each candidate player; only the
+        // comparison value is evaluated through the inherited quantity context.
+        PlayerFilter::PlayerAttribute { value, .. } => quantity_expr_recipient_read(value),
+        PlayerFilter::AnyOf { filters } => filters
+            .iter()
+            .map(player_filter_recipient_read)
+            .max()
+            .unwrap_or(RecipientRead::Unread),
+        PlayerFilter::AllExcept { exclude } => player_filter_recipient_read(exclude),
+        PlayerFilter::TrackedSetPossessor { filter, .. } => filter_recipient_read(filter),
+        PlayerFilter::OpponentDealtDamage { source, .. } => source
+            .as_deref()
+            .map_or(RecipientRead::Unread, filter_recipient_read),
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
+        | PlayerFilter::GrantingObjectCaster => RecipientRead::Unread,
     }
 }
 
@@ -13421,6 +13436,181 @@ mod tests {
                 exclude: Some(Box::new(recipient)),
             })),
         };
+        let controls = |filter, count| PlayerFilter::ControlsCount {
+            relation: PlayerRelation::All,
+            filter,
+            comparator: Comparator::GE,
+            count: Box::new(count),
+        };
+        let fixed_one = || QuantityExpr::Fixed { value: 1 };
+        let player_rows = vec![
+            (
+                PlayerFilter::AnyOf {
+                    filters: vec![PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::All,
+                        attr: Box::new(QuantityRef::LifeTotal {
+                            player: PlayerScope::ScopedPlayer,
+                        }),
+                        comparator: Comparator::GE,
+                        value: Box::new(power(ObjectScope::Recipient)),
+                    }],
+                },
+                RecipientRead::Characteristics,
+            ),
+            (
+                PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::Controller),
+                },
+                RecipientRead::Unread,
+            ),
+            (
+                controls(other(), fixed_one()),
+                RecipientRead::PopulationIdentity,
+            ),
+            (
+                controls(TargetFilter::Any, count(vec![FilterProp::Another])),
+                RecipientRead::PopulationIdentity,
+            ),
+            (
+                controls(other(), count(vec![FilterProp::Another])),
+                RecipientRead::PopulationIdentity,
+            ),
+            (
+                controls(other(), power(ObjectScope::Recipient)),
+                RecipientRead::Characteristics,
+            ),
+            (
+                controls(TargetFilter::Any, fixed_one()),
+                RecipientRead::Unread,
+            ),
+            (
+                PlayerFilter::AnyOf { filters: vec![] },
+                RecipientRead::Unread,
+            ),
+            (
+                PlayerFilter::AnyOf {
+                    filters: vec![PlayerFilter::Controller],
+                },
+                RecipientRead::Unread,
+            ),
+            (
+                PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::AnyOf { filters: vec![] }),
+                },
+                RecipientRead::Unread,
+            ),
+            (
+                PlayerFilter::AnyOf {
+                    filters: vec![controls(other(), fixed_one())],
+                },
+                RecipientRead::PopulationIdentity,
+            ),
+            (
+                PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::AllExcept {
+                        exclude: Box::new(controls(other(), fixed_one())),
+                    }),
+                },
+                RecipientRead::PopulationIdentity,
+            ),
+            (
+                PlayerFilter::AnyOf {
+                    filters: vec![
+                        controls(other(), fixed_one()),
+                        PlayerFilter::PlayerAttribute {
+                            relation: PlayerRelation::All,
+                            attr: Box::new(QuantityRef::LifeTotal {
+                                player: PlayerScope::ScopedPlayer,
+                            }),
+                            comparator: Comparator::GE,
+                            value: Box::new(power(ObjectScope::Recipient)),
+                        },
+                    ],
+                },
+                RecipientRead::Characteristics,
+            ),
+            (
+                PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::AnyOf {
+                        filters: vec![controls(other(), power(ObjectScope::Recipient))],
+                    }),
+                },
+                RecipientRead::Characteristics,
+            ),
+            (
+                PlayerFilter::TrackedSetPossessor {
+                    relation: PlayerRelation::All,
+                    possession: PossessionAxis::Controller,
+                    filter: other(),
+                    caused_by: None,
+                },
+                RecipientRead::PopulationIdentity,
+            ),
+            (
+                PlayerFilter::TrackedSetPossessor {
+                    relation: PlayerRelation::All,
+                    possession: PossessionAxis::Owner,
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![shares_name_with_parent()]),
+                    ),
+                    caused_by: None,
+                },
+                RecipientRead::Characteristics,
+            ),
+            (
+                PlayerFilter::OpponentDealtDamage {
+                    kind: DamageKindFilter::Any,
+                    source: Some(Box::new(other())),
+                    min_sources: 1,
+                },
+                RecipientRead::PopulationIdentity,
+            ),
+            (
+                PlayerFilter::OpponentDealtDamage {
+                    kind: DamageKindFilter::Any,
+                    source: Some(Box::new(TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![shares_name_with_parent()]),
+                    ))),
+                    min_sources: 1,
+                },
+                RecipientRead::Characteristics,
+            ),
+            (
+                PlayerFilter::OpponentDealtDamage {
+                    kind: DamageKindFilter::Any,
+                    source: None,
+                    min_sources: 1,
+                },
+                RecipientRead::Unread,
+            ),
+            (
+                PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::All,
+                    attr: Box::new(QuantityRef::Power {
+                        scope: ObjectScope::Recipient,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(fixed_one()),
+                },
+                RecipientRead::Unread,
+            ),
+        ];
+        for (filter, grade) in player_rows {
+            rows.push((
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: filter.clone(),
+                    },
+                },
+                grade,
+            ));
+            rows.push((
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextPlayerCount { filter },
+                },
+                grade,
+            ));
+        }
         let unread_refs = [
             QuantityRef::HandSize {
                 player: nested_exclusion,
@@ -13517,34 +13707,6 @@ mod tests {
             },
             QuantityRef::TargetObjectManaValue {
                 filter: Box::new(other()),
-            },
-            QuantityRef::PlayerCount {
-                filter: PlayerFilter::ControlsCount {
-                    relation: PlayerRelation::All,
-                    filter: other(),
-                    comparator: Comparator::GE,
-                    count: Box::new(count(vec![FilterProp::Another])),
-                },
-            },
-            QuantityRef::PlayerCount {
-                filter: PlayerFilter::AnyOf {
-                    filters: vec![PlayerFilter::PlayerAttribute {
-                        relation: PlayerRelation::All,
-                        attr: Box::new(QuantityRef::LifeTotal {
-                            player: PlayerScope::ScopedPlayer,
-                        }),
-                        comparator: Comparator::GE,
-                        value: Box::new(power(ObjectScope::Recipient)),
-                    }],
-                },
-            },
-            QuantityRef::EventContextPlayerCount {
-                filter: PlayerFilter::ControlsCount {
-                    relation: PlayerRelation::All,
-                    filter: other(),
-                    comparator: Comparator::GE,
-                    count: Box::new(QuantityExpr::Fixed { value: 1 }),
-                },
             },
         ];
         for qty in unread_refs {
@@ -13804,17 +13966,6 @@ mod tests {
                 1,
             ),
             (
-                QuantityRef::PlayerCount {
-                    filter: PlayerFilter::ControlsCount {
-                        relation: PlayerRelation::Controller,
-                        filter: filter.clone(),
-                        comparator: Comparator::EQ,
-                        count: Box::new(QuantityExpr::Fixed { value: 1 }),
-                    },
-                },
-                1,
-            ),
-            (
                 QuantityRef::BattlefieldEntriesThisTurn {
                     player: PlayerScope::Controller,
                     filter: filter.clone(),
@@ -13865,7 +14016,7 @@ mod tests {
                 QuantityRef::ManaSpentToCast {
                     scope: CastManaObjectScope::SelfObject,
                     metric: CastManaSpentMetric::FromSource {
-                        source_filter: filter,
+                        source_filter: filter.clone(),
                     },
                 },
                 1,
@@ -13919,6 +14070,263 @@ mod tests {
                     resolve_quantity_with_recipient(&state, &expr, PlayerId(0), source, recipient),
                     expected,
                     "nonzero recipient-invariant result for {expr:?}, recipient {recipient:?}",
+                );
+            }
+        }
+        // With the counted creature as recipient only the source remains; with
+        // the artifact as recipient both creatures remain. Only P0 is eligible.
+        let dependent = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::ControlsCount {
+                    relation: PlayerRelation::Controller,
+                    filter: filter.clone(),
+                    comparator: Comparator::EQ,
+                    count: Box::new(QuantityExpr::Fixed { value: 1 }),
+                },
+            },
+        };
+        let control = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        };
+        assert_eq!(
+            [counted, outside_population].map(|recipient| resolve_quantity_with_recipient(
+                &state,
+                &control,
+                PlayerId(0),
+                source,
+                recipient
+            )),
+            [1, 2]
+        );
+        assert_eq!(
+            quantity_expr_recipient_read(&dependent),
+            RecipientRead::PopulationIdentity
+        );
+        assert_eq!(
+            [counted, outside_population].map(|recipient| resolve_quantity_with_recipient(
+                &state,
+                &dependent,
+                PlayerId(0),
+                source,
+                recipient
+            )),
+            [1, 0]
+        );
+
+        // The triggering player is genuinely P0, so the event-count reader
+        // reaches the same inherited predicate rather than an empty event set.
+        state.current_trigger_event = Some(GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(0),
+            source_amounts: vec![(source, 1)],
+            total_damage: 1,
+            source_incarnations: vec![],
+        });
+        let QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount { filter: predicate },
+        } = &dependent
+        else {
+            unreachable!();
+        };
+        let event_count = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextPlayerCount {
+                filter: predicate.clone(),
+            },
+        };
+        assert_eq!(
+            quantity_expr_recipient_read(&event_count),
+            RecipientRead::PopulationIdentity
+        );
+        assert_eq!(
+            [counted, outside_population].map(|recipient| resolve_quantity_with_recipient(
+                &state,
+                &event_count,
+                PlayerId(0),
+                source,
+                recipient
+            )),
+            [1, 0]
+        );
+        let threshold_only = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::ControlsCount {
+                    relation: PlayerRelation::Controller,
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                    comparator: Comparator::EQ,
+                    count: Box::new(control.clone()),
+                },
+            },
+        };
+        assert_eq!(
+            [counted, outside_population].map(|recipient| resolve_quantity_with_recipient(
+                &state,
+                &threshold_only,
+                PlayerId(0),
+                source,
+                recipient
+            )),
+            [0, 1]
+        );
+
+        let other =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Another]));
+        let set = crate::types::identifiers::TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set, vec![counted]);
+        state.chain_tracked_set_id = Some(set);
+        let possessed = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::TrackedSetPossessor {
+                    relation: PlayerRelation::Controller,
+                    possession: PossessionAxis::Controller,
+                    filter: other.clone(),
+                    caused_by: None,
+                },
+            },
+        };
+        for departed in [false, true] {
+            if departed {
+                let lki = state.objects[&counted].snapshot_public_characteristics();
+                state.lki_cache.insert(counted, lki);
+                state.battlefield.retain(|id| *id != counted);
+                state.objects.get_mut(&counted).unwrap().zone = Zone::Hand;
+            }
+            assert_eq!(
+                quantity_expr_recipient_read(&possessed),
+                RecipientRead::PopulationIdentity
+            );
+            assert_eq!(
+                [counted, outside_population].map(|recipient| resolve_quantity_with_recipient(
+                    &state,
+                    &possessed,
+                    PlayerId(0),
+                    source,
+                    recipient
+                )),
+                [0, 1],
+                "the actual tracked member is filtered with recipient context, departed={departed}"
+            );
+        }
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: counted,
+            source_controller: PlayerId(0),
+            source_core_types: vec![CoreType::Creature],
+            target: TargetRef::Player(PlayerId(1)),
+            target_controller: PlayerId(1),
+            amount: 1,
+            ..Default::default()
+        });
+        let damaged = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentDealtDamage {
+                    kind: DamageKindFilter::Any,
+                    source: Some(Box::new(other)),
+                    min_sources: 1,
+                },
+            },
+        };
+        assert_eq!(
+            quantity_expr_recipient_read(&damaged),
+            RecipientRead::PopulationIdentity
+        );
+        assert_eq!(
+            [counted, outside_population].map(|recipient| resolve_quantity_with_recipient(
+                &state,
+                &damaged,
+                PlayerId(0),
+                source,
+                recipient
+            )),
+            [0, 1],
+            "the actual damage record source retains recipient context"
+        );
+    }
+
+    #[test]
+    fn player_predicate_pump_all_binds_each_actual_recipient() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::{EffectKind, PlayerRelation, PtValue};
+        use crate::types::game_state::WaitingFor;
+
+        // Synthetic typed spell: no printed Oracle or parser claim is made.
+        for has_elf in [true, false] {
+            for wrapper in 0..3 {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+                let first = scenario
+                    .add_creature(P0, "First recipient", 2, 2)
+                    .with_subtypes(vec![if has_elf { "Elf" } else { "Dwarf" }])
+                    .id();
+                let human = scenario
+                    .add_creature(P0, "Human recipient", 2, 2)
+                    .with_subtypes(vec!["Human"])
+                    .id();
+                let foreign = scenario
+                    .add_creature(P1, "Foreign Elf", 2, 2)
+                    .with_subtypes(vec!["Elf"])
+                    .id();
+                let predicate = PlayerFilter::ControlsCount {
+                    relation: PlayerRelation::Controller,
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .subtype("Elf".into())
+                            .properties(vec![FilterProp::Another]),
+                    ),
+                    comparator: Comparator::EQ,
+                    count: Box::new(QuantityExpr::Fixed { value: 1 }),
+                };
+                let filter = match wrapper {
+                    0 => predicate,
+                    1 => PlayerFilter::AnyOf {
+                        filters: vec![predicate],
+                    },
+                    _ => PlayerFilter::AllExcept {
+                        exclude: Box::new(PlayerFilter::AllExcept {
+                            exclude: Box::new(predicate),
+                        }),
+                    },
+                };
+                let spell = scenario
+                    .add_spell_to_hand(P0, "Synthetic recipient pump", false)
+                    .with_ability(Effect::PumpAll {
+                        power: PtValue::Quantity(QuantityExpr::Ref {
+                            qty: QuantityRef::PlayerCount { filter },
+                        }),
+                        toughness: PtValue::Fixed(0),
+                        target: TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::You),
+                        ),
+                    })
+                    .id();
+                let mut runner = scenario.build();
+                let outcome = runner.cast(spell).resolve();
+                assert!(
+                    outcome.events().iter().any(|event| matches!(event,
+                    GameEvent::EffectResolved { kind: EffectKind::PumpAll, source_id, .. }
+                    if *source_id == spell)),
+                    "the actual PumpAll resolver ran"
+                );
+                assert_eq!(outcome.state().objects[&first].power, Some(2));
+                assert_eq!(
+                    outcome.state().objects[&human].power,
+                    Some(if has_elf { 3 } else { 2 })
+                );
+                assert_eq!(outcome.state().objects[&foreign].power, Some(2));
+                for id in [first, human, foreign] {
+                    let object = &outcome.state().objects[&id];
+                    assert_eq!(object.zone, Zone::Battlefield);
+                    assert_eq!(object.owner, if id == foreign { P1 } else { P0 });
+                }
+                assert!(matches!(
+                    outcome.final_waiting_for(),
+                    WaitingFor::Priority { .. }
+                ));
+                let state = outcome.state();
+                assert!(state.stack.is_empty() && state.resolution_stack.is_empty());
+                assert!(
+                    state.resolving_stack_entry.is_none()
+                        && state.pending_resolution_completion.is_none()
+                        && state.return_result_frames.is_empty()
+                        && state.active_return_result_occurrence.is_none()
                 );
             }
         }

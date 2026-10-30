@@ -12383,6 +12383,13 @@ fn candidate_materiality(
         // Unknown definition — be conservative.
         return CandidateMateriality::Unconditional;
     };
+
+    // CR 616.1: an arena-backed substitute is a full resolved program, just
+    // like an unrecognized execute chain. Its effects have not been proved to
+    // commute, even when execute is absent or a side field also writes an event.
+    if repl_def.runtime_execute.is_some() {
+        return CandidateMateriality::Unconditional;
+    }
     // CR 616.1b + CR 614.12: a definition-level entry-controller override rewrites the
     // `ZoneChange`'s `controller_override`, which every later-applied entry replacement
     // reads, and another override rewrites it again (last applied wins).
@@ -18597,6 +18604,131 @@ mod tests {
             panic!("expected NeedsChoice for enter_tapped field collision, got {result:?}");
         };
         assert_eq!(player, PlayerId(0));
+    }
+
+    #[test]
+    fn runtime_substitute_materiality_preserves_candidate_admission() {
+        use crate::types::ability::{DrawReplacementScope, ReplacementPlayerScope};
+        let source = ObjectId(10);
+        let mut state = test_state_with_object(source, Zone::Battlefield, vec![]);
+        let handle = state
+            .install_replacement_continuation(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            ))
+            .unwrap();
+        let mut runtime = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .draw_scope(DrawReplacementScope::IndividualDraw);
+        runtime.runtime_execute = Some(handle);
+        runtime.source_controller = Some(PlayerId(0));
+        runtime.valid_player = Some(ReplacementPlayerScope::You);
+        state.pending_damage_replacements.push(runtime.clone());
+        let floating = ReplacementId {
+            source: ObjectId(0),
+            index: 0,
+        };
+        let individual = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        };
+        let applicable = find_applicable_replacements(&state, &individual, replacement_registry());
+        assert_eq!(
+            applicable,
+            vec![floating],
+            "an actual eligible runtime candidate is present"
+        );
+        assert!(matches!(
+            candidate_materiality(&state, floating, &individual),
+            CandidateMateriality::Unconditional
+        ));
+        assert!(replacement_ordering_is_material(
+            &state,
+            &applicable,
+            &individual
+        ));
+        assert!(!replacement_last_applied_decides(
+            &state,
+            &applicable,
+            &individual
+        ));
+        let mut opponent = individual.clone();
+        if let ProposedEvent::Draw { player_id, .. } = &mut opponent {
+            *player_id = PlayerId(1);
+        }
+        assert!(find_applicable_replacements(&state, &opponent, replacement_registry()).is_empty());
+        let mut instruction = individual.clone();
+        if let ProposedEvent::Draw { stage, .. } = &mut instruction {
+            *stage = DrawEventStage::Instruction;
+        }
+        assert!(
+            find_applicable_replacements(&state, &instruction, replacement_registry()).is_empty()
+        );
+        state.pending_damage_replacements[0].is_consumed = true;
+        assert!(
+            find_applicable_replacements(&state, &individual, replacement_registry()).is_empty()
+        );
+
+        // The same arena-backed program can reside on an object, or accompany
+        // a side-field modifier. Neither representation proves commutativity.
+        state.pending_damage_replacements.clear();
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(runtime.clone());
+        let stored = ReplacementId { source, index: 0 };
+        assert_eq!(
+            find_applicable_replacements(&state, &individual, replacement_registry()),
+            vec![stored]
+        );
+        assert!(matches!(
+            candidate_materiality(&state, stored, &individual),
+            CandidateMateriality::Unconditional
+        ));
+        runtime.quantity_modification = Some(QuantityModification::DOUBLE);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions = vec![runtime].into();
+        assert!(matches!(
+            candidate_materiality(&state, stored, &individual),
+            CandidateMateriality::Unconditional
+        ));
+
+        let pure = ReplacementDefinition::new(ReplacementEvent::Draw)
+            .quantity_modification(QuantityModification::DOUBLE);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions = vec![pure.clone(), pure].into();
+        let count_candidates = [stored, ReplacementId { source, index: 1 }];
+        assert!(!replacement_ordering_is_material(
+            &state,
+            &count_candidates,
+            &individual
+        ));
+        let tap = tap_self_moved_replacement();
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions = vec![tap.clone(), tap].into();
+        let entry = ProposedEvent::zone_change(source, Zone::Hand, Zone::Battlefield, None);
+        assert!(!replacement_ordering_is_material(
+            &state,
+            &count_candidates,
+            &entry
+        ));
     }
 
     /// CR 616.1f: `replacement_last_applied_decides` must distinguish a
