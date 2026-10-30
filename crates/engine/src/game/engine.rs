@@ -8420,6 +8420,7 @@ pub(crate) fn drive_persistent_axis_collapse(
     events: &mut Vec<GameEvent>,
 ) -> Result<u32, EngineError> {
     let _guard = SimulationProbeGuard::enter(); // held across the whole drive
+    let _take = super::engine_casting::ConfirmedTakeGuard::enter();
     #[cfg(feature = "test-support")]
     let mut take_cost = crate::game::perf_counters::TakeCostRecorder::begin(n);
     // One rollback snapshot per take: every cycle drives `state` in place, and a failed cycle

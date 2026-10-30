@@ -19301,7 +19301,7 @@ fn announce_spell_on_stack(
 ) -> Result<(), EngineError> {
     // CR 601.2 + CR 733.1: the action boundary records sparse inverse edits
     // for this cast; the declaration retains only its identity and journal mark.
-    if state.spell_cast_reversal.is_none() {
+    if state.spell_cast_reversal.is_none() && !super::engine_casting::in_confirmed_take() {
         // CR 608.2g + CR 733.1: only the elected resolution-owned permission
         // can have consumed a parent choice inside this input. Other casts use
         // the existing action boundary directly, without serializing a prefix.
