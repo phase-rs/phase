@@ -15,6 +15,11 @@
 //! semantics are rules-correct: clamping to `i32::MAX` / `i32::MIN` preserves
 //! the direction of the effect while preventing wrap, which is the only
 //! outcome consistent with the CR's intent.
+//!
+//! Life readings that fold several `i32` life totals into one — a Two-Headed
+//! Giant team's shared total (CR 810.4) — are computed exactly in `i64` and
+//! converted back here: [`i64_to_i32_saturating`] for a reading of the total,
+//! [`i64_to_u32_saturating`] for a payable-life budget.
 
 /// Saturating add for power/toughness modifications in the layer system.
 ///
@@ -48,6 +53,33 @@ pub fn usize_to_i32_saturating(n: usize) -> i32 {
 #[inline]
 pub fn u32_to_i32_saturating(n: u32) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
+}
+
+/// Convert an exact `i64` value — e.g. the sum of a Two-Headed Giant team's
+/// life fields (CR 810.4) — to `i32`, saturating at `i32::MIN` / `i32::MAX`.
+///
+/// CR 107.1b: a game value such as a life total may be negative, so the bottom
+/// saturates as well as the top; saturation keeps the value's sign.
+#[inline]
+pub fn i64_to_i32_saturating(n: i64) -> i32 {
+    match i32::try_from(n) {
+        Ok(value) => value,
+        Err(_) if n.is_negative() => i32::MIN,
+        Err(_) => i32::MAX,
+    }
+}
+
+/// Convert an exact `i64` value to `u32`: a negative value reads 0 and a value
+/// past `u32::MAX` saturates. Used for payable-life budgets, where a life total
+/// of 0 or less affords no positive payment (CR 119.4) and 0 is always payable
+/// (CR 119.4b).
+#[inline]
+pub fn i64_to_u32_saturating(n: i64) -> u32 {
+    match u32::try_from(n) {
+        Ok(value) => value,
+        Err(_) if n.is_negative() => 0,
+        Err(_) => u32::MAX,
+    }
 }
 
 #[cfg(test)]
@@ -85,5 +117,27 @@ mod tests {
         assert_eq!(u32_to_i32_saturating(0), 0);
         assert_eq!(u32_to_i32_saturating(1_000), 1_000);
         assert_eq!(u32_to_i32_saturating(u32::MAX), i32::MAX);
+    }
+
+    #[test]
+    fn i64_to_i32_conversion_saturates_at_both_limits() {
+        assert_eq!(i64_to_i32_saturating(0), 0);
+        assert_eq!(i64_to_i32_saturating(-5), -5);
+        assert_eq!(i64_to_i32_saturating(i64::from(i32::MAX)), i32::MAX);
+        assert_eq!(i64_to_i32_saturating(i64::from(i32::MIN)), i32::MIN);
+        assert_eq!(i64_to_i32_saturating(i64::from(i32::MAX) + 1), i32::MAX);
+        assert_eq!(i64_to_i32_saturating(i64::from(i32::MIN) - 1), i32::MIN);
+        assert_eq!(i64_to_i32_saturating(i64::MAX), i32::MAX);
+        assert_eq!(i64_to_i32_saturating(i64::MIN), i32::MIN);
+    }
+
+    #[test]
+    fn i64_to_u32_conversion_floors_negatives_and_saturates() {
+        assert_eq!(i64_to_u32_saturating(0), 0);
+        assert_eq!(i64_to_u32_saturating(-1), 0);
+        assert_eq!(i64_to_u32_saturating(i64::MIN), 0);
+        assert_eq!(i64_to_u32_saturating(4_294_967_294), 4_294_967_294);
+        assert_eq!(i64_to_u32_saturating(i64::from(u32::MAX)), u32::MAX);
+        assert_eq!(i64_to_u32_saturating(i64::from(u32::MAX) + 1), u32::MAX);
     }
 }

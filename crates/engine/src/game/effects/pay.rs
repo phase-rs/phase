@@ -15,18 +15,13 @@ use super::{EffectError, ResolvedAbility};
 /// these prompts (Galvanic Discharge, etc.). A fixed or dynamic reference
 /// (e.g., `Fixed { 2 }` or `Power { CostPaidObject }`) is paid unconditionally.
 /// CR 119.4a + CR 810.9a: max payable for "pay any amount of life" is the
-/// TEAM total; guard on team_life (a member may be individually <= 0 while
-/// the team is positive, CR 810.9 — life loss lands on each Player::life
-/// individually), clamped to 0 when a CantLoseLife / can't-pay-life lock
-/// applies. Shared by the resolution prompt below and the pre-entry prompt
-/// (`replacement::as_enters_pay_terms`).
+/// general payable-life budget, [`crate::game::life_costs::max_payable_life`]:
+/// the TEAM's exact total (a member may be individually <= 0 while the team is
+/// positive, CR 810.9 — life loss lands on each Player::life individually), 0
+/// under a CantLoseLife lock (CR 119.8). Shared by the resolution prompt below
+/// and the pre-entry prompt (`replacement::as_enters_pay_terms`).
 pub(crate) fn max_pay_any_life_amount(state: &GameState, payer: PlayerId) -> u32 {
-    let team_life = crate::game::players::team_life_total(state, payer);
-    if team_life > 0 && crate::game::life_costs::can_pay_life_cost(state, payer, 1) {
-        u32::try_from(team_life).unwrap_or(0)
-    } else {
-        0
-    }
+    crate::game::life_costs::max_payable_life(state, payer)
 }
 
 /// CR 118.1 + CR 119.4b: Resolve the life-payment channel owned by a concrete
@@ -204,9 +199,13 @@ pub fn resolve(
         }
         // CR 119.4 + CR 118.3 + CR 119.8: "pay any amount of life" — suspend the
         // chain and surface a `PayAmountChoice` prompt (mirrors the energy "any
-        // amount" arm above). `max` = payer's current life, clamped to 0 when a
-        // CantLoseLife / can't-pay-life lock applies (can_pay_life_cost is false
-        // for any amount > 0). On submit the engine deducts life via
+        // amount" arm above). `max` is the general payable-life budget
+        // (`max_pay_any_life_amount`): the team's exact total in Two-Headed
+        // Giant, and 0 under a CantLoseLife lock. A direct "can't pay life"
+        // static does not lower it: that prohibition covers only costs paid to
+        // cast a spell or activate an ability
+        // (`life_costs::can_pay_life_cast_or_activation_cost`), and this is a
+        // resolution-time payment. On submit the engine deducts life via
         // `life_costs::pay_life_as_cost` and stamps `last_effect_count` so the
         // downstream "draw/look at that many" step reads the chosen amount.
         AbilityCost::PayLife { amount } if is_pay_any_amount(amount) => {
@@ -567,6 +566,44 @@ mod tests {
                 assert_eq!(*player, PlayerId(0));
                 assert!(matches!(resource, PayableResource::Life));
                 assert_eq!(*max, 7, "max payable is the team total (7), not 0");
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+    }
+
+    /// CR 119.4a + CR 810.9a: the "pay any amount of life" prompt offers the
+    /// team's EXACT total even when it exceeds `i32::MAX`: two members at
+    /// `i32::MAX` offer 4,294,967,294, not a saturated or wrapped reading.
+    #[test]
+    fn pay_any_amount_life_max_is_the_exact_team_total_at_the_cap() {
+        let mut state =
+            GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 0);
+        state.players[0].life = i32::MAX;
+        state.players[1].life = i32::MAX;
+
+        let ability = make_ability(Effect::PayCost {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        assert!(resolve(&mut state, &ability, &mut events).is_ok());
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice {
+                player,
+                resource,
+                max,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert!(matches!(resource, PayableResource::Life));
+                assert_eq!(*max, 4_294_967_294, "max payable is the exact team total");
             }
             other => panic!("expected PayAmountChoice, got {other:?}"),
         }

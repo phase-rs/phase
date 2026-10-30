@@ -7,7 +7,10 @@
 //!
 //! Pre-validation sites (`can_activate_ability_now`, Defiler offer, legal-action
 //! generation) consult [`can_pay_life_cost`] so the UI never offers a cost the
-//! player cannot actually pay.
+//! player cannot actually pay. Prompts and probes that need the largest payable
+//! amount (Phyrexian life payments, "pay X life", "pay any amount of life") read
+//! [`max_payable_life`] / [`max_payable_life_cast_or_activation`], the budget
+//! [`can_pay_life_cost`] tests against.
 //!
 //! # Rules
 //!
@@ -18,6 +21,9 @@
 //!   life total; in other words, the player loses that much life." Paying life IS
 //!   losing life, so the deduction routes through
 //!   [`effects::life::try_apply_life_loss`] which runs the replacement pipeline.
+//! - **CR 119.4a** — In Two-Headed Giant the team's life total must cover the
+//!   payment. Affordability reads the team's exact `i64` total and compares it
+//!   with the whole `u32` payment, so no payment wraps into an affordable one.
 //! - **CR 119.4b** — Players can always pay 0 life, even under a pay-life prohibition.
 //! - **CR 119.8** — "A cost that involves having that player pay life can't be paid."
 
@@ -82,34 +88,53 @@ impl PayLifeCostResult {
 ///
 /// Returns 0 under CantLoseLife (CR 119.8), direct can't-pay-life statics, or
 /// when the player isn't found.
-/// Otherwise floor-divides current life by 2 (CR 118.3: must have the resource
-/// to pay fully).
+/// Otherwise floor-divides the cast/activation life budget
+/// ([`max_payable_life_cast_or_activation`]) by 2 (CR 107.4f: each Phyrexian
+/// payment is 2 life; CR 118.3: must have the resource to pay fully).
 pub fn max_phyrexian_life_payments(state: &GameState, player: PlayerId) -> u32 {
-    // CR 119.8 / CR 118.3: A cost that involves paying life can't be paid while prohibited.
-    if player_has_cant_lose_life(state, player) || player_cant_pay_life_as_cost(state, player) {
-        return 0;
-    }
-    // CR 119.4a: in a team format the payable budget is bounded by the team total.
-    u32::try_from((crate::game::players::team_life_total(state, player) / 2).max(0)).unwrap_or(0)
+    max_payable_life_cast_or_activation(state, player) / 2
 }
 
-/// CR 118.3 + CR 119.4b + CR 119.8: Pure predicate — can this player pay `amount` life?
+/// CR 118.3 + CR 119.4 + CR 119.4a + CR 119.8: The largest amount of life
+/// `player` can pay as a cost — the budget [`can_pay_life_cost`] tests every
+/// payment against. It is the exact life total that pays (the team's shared
+/// total in Two-Headed Giant, CR 810.9a; the player's own life otherwise),
+/// clamped into `u32`: a total of 0 or less affords no positive payment, and
+/// under a can't-lose-life lock only 0 is payable (CR 119.4b).
+pub fn max_payable_life(state: &GameState, player: PlayerId) -> u32 {
+    // CR 119.8: "a cost that involves having that player pay life can't be paid."
+    if player_has_cant_lose_life(state, player) {
+        return 0;
+    }
+    // CR 119.4 + CR 119.4a: the exact `i64` team total — a Two-Headed Giant
+    // team can hold more than `i32::MAX` life between its members.
+    crate::game::arithmetic::i64_to_u32_saturating(crate::game::players::team_life_sum(
+        state, player,
+    ))
+}
+
+/// CR 118.3 + CR 601.2h + CR 602.2b: The cast/activation twin of
+/// [`max_payable_life`]: 0 while a direct "can't pay life" static applies, as
+/// [`can_pay_life_cast_or_activation_cost`] then refuses any positive amount.
+pub fn max_payable_life_cast_or_activation(state: &GameState, player: PlayerId) -> u32 {
+    if player_cant_pay_life_as_cost(state, player) {
+        return 0;
+    }
+    max_payable_life(state, player)
+}
+
+/// CR 118.3 + CR 119.4 + CR 119.4a + CR 119.4b + CR 119.8: Pure predicate —
+/// can this player pay `amount` life?
 ///
 /// General cost-resource predicate. Cast/activation validation that must also
 /// honor direct "can't pay life" statics uses
 /// [`can_pay_life_cast_or_activation_cost`].
 pub fn can_pay_life_cost(state: &GameState, player: PlayerId, amount: u32) -> bool {
     // CR 119.4b: 0 life is always payable, even under pay-life prohibitions.
-    if amount == 0 {
-        return true;
-    }
-    // CR 119.8: "a cost that involves having that player pay life can't be paid."
-    if player_has_cant_lose_life(state, player) {
-        return false;
-    }
-    // CR 119.4a: in a team format affordability is bounded by the team's
-    // shared life total (off-team this is the player's own life).
-    crate::game::players::team_life_total(state, player) >= amount as i32
+    // CR 118.3 + CR 119.4 + CR 119.4a: a positive payment needs a (team) life
+    // total at least that large. The budget is the exact total clamped into
+    // `u32`, which answers `total >= amount` exactly for every `u32` amount.
+    amount == 0 || amount <= max_payable_life(state, player)
 }
 
 /// CR 118.3b + CR 119.4 + CR 119.8: Pay `amount` life from `player` as a cost.
@@ -142,12 +167,13 @@ pub fn pay_life_as_cost(
         return PayLifeCostResult::Prohibited;
     }
 
-    // CR 119.4a: Resource check — affordability is bounded by the team's
-    // shared total. The DEDUCTION below lands on the individual `Player::life`
-    // (CR 810.9: life loss happens to each player individually) and may go
-    // negative — only the affordability gate reads the team total.
-    let has_life = crate::game::players::team_life_total(state, player) >= amount as i32;
-    if !has_life {
+    // CR 118.3 + CR 119.4a: Resource check through the single affordability
+    // authority, on the unreplaced payment and before any replacement sees the
+    // loss — affordability is bounded by the team's exact shared total. The
+    // DEDUCTION below lands on the individual `Player::life` (CR 810.9: life
+    // loss happens to each player individually) and may go negative — only the
+    // affordability gate reads the team total.
+    if !can_pay_life_cost(state, player, amount) {
         return PayLifeCostResult::InsufficientLife;
     }
 
@@ -578,6 +604,248 @@ mod tests {
         assert_eq!(
             crate::game::players::team_life_total(&state, PlayerId(0)),
             2
+        );
+    }
+
+    fn two_headed_giant_with_team_a_life(first: i32, second: i32) -> GameState {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        state.players[0].life = first;
+        state.players[1].life = second;
+        state
+    }
+
+    /// CR 118.3 + CR 119.4 + CR 119.4a: affordability compares the exact (team)
+    /// life total with the whole `u32` payment — no amount at or above 2^31
+    /// wraps into an affordable negative, and a Two-Headed Giant team above
+    /// `i32::MAX` affords exactly its exact total.
+    #[test]
+    fn life_payment_affordability_is_exact_for_every_u32_amount() {
+        let mut state = GameState::new_two_player(42);
+        assert!(can_pay_life_cost(&state, PlayerId(0), 20), "reach guard");
+        for amount in [2_147_483_648, 3_000_000_000, u32::MAX] {
+            assert!(
+                !can_pay_life_cost(&state, PlayerId(0), amount),
+                "life 20 cannot pay {amount}"
+            );
+        }
+
+        state.players[0].life = i32::MAX;
+        assert!(can_pay_life_cost(&state, PlayerId(0), i32::MAX as u32));
+        assert!(!can_pay_life_cost(&state, PlayerId(0), 2_147_483_648));
+
+        // 2HG (MAX, MAX): the team's exact total is 4,294,967,294 for either member.
+        let state = two_headed_giant_with_team_a_life(i32::MAX, i32::MAX);
+        assert!(can_pay_life_cost(&state, PlayerId(0), 4_294_967_294));
+        assert!(can_pay_life_cost(&state, PlayerId(1), 4_294_967_294));
+        assert!(!can_pay_life_cost(&state, PlayerId(0), u32::MAX));
+
+        // 2HG (MAX, MIN): the team total is -1, so only 0 is payable (CR 119.4b).
+        let state = two_headed_giant_with_team_a_life(i32::MAX, i32::MIN);
+        assert!(can_pay_life_cost(&state, PlayerId(0), 0));
+        assert!(!can_pay_life_cost(&state, PlayerId(0), 1));
+        assert!(!can_pay_life_cost(&state, PlayerId(0), u32::MAX));
+    }
+
+    /// CR 118.3 + CR 119.4: an unaffordable payment is refused on its
+    /// unreplaced amount, before any life-loss replacement sees it — CR 118.11
+    /// lets a replacement modify a cost's action, not make an unaffordable cost
+    /// payable. The replacements below are synthetic fixtures, not a card.
+    #[test]
+    fn unaffordable_wide_life_payment_is_refused_before_any_replacement() {
+        let board_with = |replacements: Vec<ReplacementDefinition>| {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(904),
+                PlayerId(0),
+                "Life-Loss Modifiers".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .replacement_definitions = replacements.into();
+            state
+        };
+
+        // (a) Two competing replacements: the wide payment never parks a choice.
+        let mut state = board_with(vec![
+            ReplacementDefinition::new(ReplacementEvent::LoseLife)
+                .quantity_modification(QuantityModification::DOUBLE)
+                .description("Double".to_string()),
+            ReplacementDefinition::new(ReplacementEvent::LoseLife)
+                .quantity_modification(QuantityModification::Plus { value: 1 })
+                .description("Plus one".to_string()),
+        ]);
+        let waiting_before = state.waiting_for.clone();
+        let mut events = Vec::new();
+        let result = pay_life_as_cost(&mut state, PlayerId(0), 3_000_000_000, &mut events);
+        assert_eq!(result, PayLifeCostResult::InsufficientLife);
+        assert_eq!(state.waiting_for, waiting_before);
+        assert!(state.pending_replacement.is_none());
+        assert_eq!(state.players[0].life, 20);
+        assert!(
+            events.is_empty(),
+            "no events for a refused payment: {events:?}"
+        );
+        assert_eq!(state.ingress_life_window, None);
+        // Reach guard: an affordable payment on the same board reaches the
+        // replacements and parks their ordering choice.
+        let result = pay_life_as_cost(&mut state, PlayerId(0), 3, &mut events);
+        assert_eq!(
+            result,
+            PayLifeCostResult::DeferredReplacementChoice {
+                amount: 3,
+                choice_player: PlayerId(0),
+            }
+        );
+
+        // (b) A halving replacement cannot make a wide payment affordable.
+        let mut state = board_with(vec![ReplacementDefinition::new(ReplacementEvent::LoseLife)
+            .quantity_modification(QuantityModification::Half)]);
+        let mut events = Vec::new();
+        let result = pay_life_as_cost(&mut state, PlayerId(0), 3_000_000_000, &mut events);
+        assert_eq!(result, PayLifeCostResult::InsufficientLife);
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.players[0].life_lost_this_turn, 0);
+        assert!(
+            events.is_empty(),
+            "no events for a refused payment: {events:?}"
+        );
+        // Reach guard: an affordable payment on the same board is halved.
+        let result = pay_life_as_cost(&mut state, PlayerId(0), 10, &mut events);
+        assert_eq!(result, PayLifeCostResult::Paid { amount: 10 });
+        assert_eq!(state.players[0].life, 15);
+    }
+
+    /// CR 107.4f + CR 119.4a + CR 119.8: the general and cast/activation
+    /// payable-life budgets, and the Phyrexian count derived from the latter,
+    /// read the exact team total; each budget is the largest amount its
+    /// predicate accepts.
+    #[test]
+    fn payable_life_budgets_read_the_exact_team_sum() {
+        let mut boards = Vec::new();
+
+        let state = two_headed_giant_with_team_a_life(i32::MAX, i32::MAX);
+        assert_eq!(max_payable_life(&state, PlayerId(0)), 4_294_967_294);
+        assert_eq!(
+            max_payable_life_cast_or_activation(&state, PlayerId(0)),
+            4_294_967_294
+        );
+        assert_eq!(
+            max_phyrexian_life_payments(&state, PlayerId(0)),
+            2_147_483_647
+        );
+        boards.push(state);
+
+        let state = two_headed_giant_with_team_a_life(i32::MAX, i32::MIN);
+        assert_eq!(max_payable_life(&state, PlayerId(0)), 0);
+        assert_eq!(max_payable_life_cast_or_activation(&state, PlayerId(0)), 0);
+        assert_eq!(max_phyrexian_life_payments(&state, PlayerId(0)), 0);
+        boards.push(state);
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = i32::MAX;
+        assert_eq!(max_payable_life(&state, PlayerId(0)), 2_147_483_647);
+        assert_eq!(
+            max_payable_life_cast_or_activation(&state, PlayerId(0)),
+            2_147_483_647
+        );
+        assert_eq!(
+            max_phyrexian_life_payments(&state, PlayerId(0)),
+            1_073_741_823
+        );
+        boards.push(state);
+
+        // CR 118.3 + CR 601.2h: a direct "can't pay life" static zeroes only
+        // the cast/activation budget (and the Phyrexian count read from it).
+        let mut state = two_headed_giant_with_team_a_life(i32::MAX, i32::MAX);
+        add_cant_pay_life_permanent(&mut state, PlayerId(0));
+        assert_eq!(max_payable_life(&state, PlayerId(0)), 4_294_967_294);
+        assert_eq!(max_payable_life_cast_or_activation(&state, PlayerId(0)), 0);
+        assert_eq!(max_phyrexian_life_payments(&state, PlayerId(0)), 0);
+        boards.push(state.clone());
+
+        // CR 119.8: can't lose life zeroes the general budget too.
+        add_cant_lose_life_permanent(&mut state, PlayerId(0));
+        assert_eq!(max_payable_life(&state, PlayerId(0)), 0);
+        boards.push(state);
+
+        for state in &boards {
+            let budget = max_payable_life(state, PlayerId(0));
+            assert!(can_pay_life_cost(state, PlayerId(0), budget));
+            assert!(budget == u32::MAX || !can_pay_life_cost(state, PlayerId(0), budget + 1));
+
+            let cast_budget = max_payable_life_cast_or_activation(state, PlayerId(0));
+            assert!(can_pay_life_cast_or_activation_cost(
+                state,
+                PlayerId(0),
+                cast_budget
+            ));
+            assert!(
+                cast_budget == u32::MAX
+                    || !can_pay_life_cast_or_activation_cost(state, PlayerId(0), cast_budget + 1)
+            );
+        }
+    }
+
+    /// CR 119.4 + CR 119.4a + CR 810.9: paying life at the `i32` cap is exact.
+    /// In Two-Headed Giant the payment lands on the payer's own life field
+    /// while the team's exact total covers it; off-team a payment one past the
+    /// cap is refused at the affordability gate with nothing changed.
+    #[test]
+    fn pay_life_at_the_cap_is_exact() {
+        let mut state = two_headed_giant_with_team_a_life(i32::MAX, i32::MAX);
+        let mut events = Vec::new();
+        let result = pay_life_as_cost(&mut state, PlayerId(0), i32::MAX as u32, &mut events);
+        assert_eq!(
+            result,
+            PayLifeCostResult::Paid {
+                amount: i32::MAX as u32
+            }
+        );
+        assert_eq!(state.players[0].life, 0);
+        assert_eq!(state.players[1].life, i32::MAX);
+        assert_eq!(
+            crate::game::players::team_life_sum(&state, PlayerId(0)),
+            i64::from(i32::MAX)
+        );
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(0)),
+            i32::MAX
+        );
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = i32::MAX;
+        let mut events = Vec::new();
+        let result = pay_life_as_cost(&mut state, PlayerId(0), i32::MAX as u32, &mut events);
+        assert_eq!(
+            result,
+            PayLifeCostResult::Paid {
+                amount: i32::MAX as u32
+            }
+        );
+        assert_eq!(state.players[0].life, 0);
+        assert_eq!(state.players[0].life_lost_this_turn, i32::MAX as u32);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::LifeChanged {
+                player_id: PlayerId(0),
+                amount: -2_147_483_647,
+                ..
+            }
+        )));
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = i32::MAX;
+        let mut events = Vec::new();
+        let result = pay_life_as_cost(&mut state, PlayerId(0), 2_147_483_648, &mut events);
+        assert_eq!(result, PayLifeCostResult::InsufficientLife);
+        assert_eq!(state.players[0].life, i32::MAX);
+        assert!(
+            events.is_empty(),
+            "no events for a refused payment: {events:?}"
         );
     }
 }
