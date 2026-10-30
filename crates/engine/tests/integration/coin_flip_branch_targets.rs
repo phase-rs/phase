@@ -8323,3 +8323,149 @@ fn bulk_declaration_keeps_a_coin_outcome_group_off_the_continuation_target() {
         assert_finished(&runner);
     }
 }
+
+/// Synthetic; no printed card has this shape. Pins that a divided-damage coin
+/// chain is refused, not mis-assigned, when the pool caps the prompt.
+/// CR 601.2d: the root divides a fixed pool of one damage, so
+/// `cap_distribution_target_slots` trims the "up to two target creatures"
+/// prompt to a single slot. That trim is positional: it also drops the coin
+/// outcome's trailing required slot (CR 705.2, CR 608.2c). The announced
+/// targets (CR 601.2c) can then no longer fill every required slot, and the
+/// engine fails closed on both the slot-by-slot (CR 115.1,
+/// `GameAction::ChooseTarget`) and the bulk (`GameAction::SelectTargets`)
+/// entries, instead of silently putting the one chosen target on the losing
+/// outcome's slot and leaving the divided node with none. The refusal is
+/// deliberate and tracked as a follow-up; it must not regress to a silent
+/// mis-assignment, and a refused cast must leave the game state untouched.
+#[test]
+fn divided_damage_coin_chain_is_refused_not_mis_assigned_when_the_pool_caps_the_prompt() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, MultiTargetSpec, QuantityExpr, TypedFilter,
+    };
+    use engine::types::game_state::DistributionUnit;
+
+    fn definition() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: None,
+                excess: None,
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: None,
+                lose_effect: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Destroy {
+                        target: TargetFilter::Typed(TypedFilter::creature()),
+                        cant_regenerate: false,
+                    },
+                ))),
+                flipper: TargetFilter::Controller,
+            },
+        ))
+        // CR 601.2c: "up to two targets" is announced with the spell; the pool
+        // of one (CR 601.2d) caps that prompt to a single damage slot.
+        .multi_target(MultiTargetSpec::fixed(0, 2))
+        .distribute(DistributionUnit::Damage)
+    }
+
+    /// Object ids: damage target 1, distractor 2, spell 3.
+    fn scenario() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let damage_target = scenario
+            .add_creature(P1, "Divided damage target", 4, 4)
+            .id();
+        let distractor = scenario.add_creature(P0, "Never selected", 2, 2).id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic divided damage coin chain", true)
+            .with_ability_definition(definition())
+            .id();
+        (scenario.build(), damage_target, distractor, spell)
+    }
+
+    /// CR 601.2c: a refused target choice changes nothing. The target prompt is
+    /// still open and neither creature was touched. (The spell itself is
+    /// already on the stack: CR 601.2a moves it there when the cast begins,
+    /// before its targets are chosen.)
+    fn assert_state_did_not_advance(
+        runner: &GameRunner,
+        damage_target: ObjectId,
+        distractor: ObjectId,
+        label: &str,
+    ) {
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { .. }
+            ),
+            "{label}: the refusal leaves the declaration open, got {:?}",
+            runner.state().waiting_for
+        );
+        for (id, name) in [(damage_target, "damage target"), (distractor, "distractor")] {
+            assert_eq!(
+                runner.state().objects[&id].damage_marked,
+                0,
+                "{label}: {name} was not damaged"
+            );
+            assert_eq!(
+                runner.state().objects[&id].zone,
+                Zone::Battlefield,
+                "{label}: {name} is still on the battlefield"
+            );
+        }
+    }
+
+    for won in [false, true] {
+        let outcome = if won { "win" } else { "lose" };
+
+        // Leg 1: the production slot-by-slot entry (`GameAction::ChooseTarget`).
+        // The capped prompt has a single slot, so the damage target is the final
+        // submission and the partition check refuses it.
+        let (mut runner, damage_target, distractor, spell) = scenario();
+        let label = format!("{outcome}/choose-target");
+        pin_outcomes(&mut runner, &[won]);
+        cast_for_prompts(&mut runner, spell);
+        let err = runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(damage_target)),
+            })
+            .err()
+            .unwrap_or_else(|| {
+                panic!("{label}: the capped single-slot announcement must be refused")
+            });
+        assert_eq!(
+            format!("{err:?}"),
+            r#"InvalidAction("Target selection does not match the announced target slots")"#,
+            "{label}"
+        );
+        assert_state_did_not_advance(&runner, damage_target, distractor, &label);
+
+        // Leg 2: the bulk entry (`GameAction::SelectTargets`) on a fresh runner
+        // is refused for the same reason: the coin outcome's required slot is
+        // left undeclared.
+        let (mut runner, damage_target, distractor, spell) = scenario();
+        let label = format!("{outcome}/bulk");
+        pin_outcomes(&mut runner, &[won]);
+        cast_for_prompts(&mut runner, spell);
+        let err = runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(damage_target)],
+            })
+            .err()
+            .unwrap_or_else(|| {
+                panic!("{label}: the capped single-target submission must be refused")
+            });
+        assert!(
+            format!("{err:?}").contains("Missing required target"),
+            "{label}: unexpected refusal {err:?}"
+        );
+        assert_state_did_not_advance(&runner, damage_target, distractor, &label);
+    }
+}
