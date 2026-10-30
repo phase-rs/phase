@@ -33470,7 +33470,7 @@ fn recover_saved_display_baselines(state: &mut GameState) {
             }
         }
     };
-    for object in state.objects.values_mut() {
+    for (_, object) in state.objects.iter_mut() {
         recover(object);
     }
     for entry in state.liminal_entries.values_mut() {
@@ -33479,8 +33479,8 @@ fn recover_saved_display_baselines(state: &mut GameState) {
             LiminalEntrant::Card(object) => recover(object),
         }
     }
-    for records in state.departed_stack_spells.values_mut() {
-        for record in records.values_mut() {
+    for (_, records) in state.departed_stack_spells.iter_mut() {
+        for (_, record) in records.iter_mut() {
             recover(&mut record.object);
         }
     }
@@ -41688,7 +41688,7 @@ impl GameState {
                     as u64
                     + 1;
             };
-            for object in clone.objects.values_mut() {
+            for (_, object) in clone.objects.iter_mut() {
                 if let Some(work) = object.ordinary_entry_counter_work.as_mut() {
                     work.dispatch_frame = work.dispatch_frame.map(dispatch);
                     work.completed_dispatch = work.completed_dispatch.map(dispatch);
@@ -42092,7 +42092,7 @@ impl GameState {
                 .expect("every incarnation was collected above");
             rank as u64 + 1
         };
-        for object in self.objects.values_mut() {
+        for (_, object) in self.objects.iter_mut() {
             if pending_entry_sources.contains(&object.id) {
                 object.incarnation = canonical(object.id, object.incarnation);
             }

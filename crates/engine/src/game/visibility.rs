@@ -57,11 +57,31 @@ fn redact_waiting_for_iteration_members(waiting_for: &mut WaitingFor) {
 /// `state`.
 pub(crate) fn project_paid_cast_cleanup_authority(state: &GameState) -> GameState {
     let mut projected = state.clone();
-    for object in projected.objects.values_mut() {
-        object.ordinary_entry_counter_work = None;
-    }
-    for entries in projected.departed_stack_spells.values_mut() {
-        for departed in entries.values_mut() {
+    projected.objects.update_where(
+        |_, object| object.ordinary_entry_counter_work.is_some(),
+        |_, object| object.ordinary_entry_counter_work = None,
+    );
+    let departed_entry_redactions: Vec<_> = state
+        .departed_stack_spells
+        .iter()
+        .flat_map(|(object_id, incarnations)| {
+            incarnations
+                .iter()
+                .filter_map(move |(incarnation, departed)| {
+                    departed
+                        .object
+                        .ordinary_entry_counter_work
+                        .is_some()
+                        .then_some((*object_id, *incarnation))
+                })
+        })
+        .collect();
+    for (object_id, incarnation) in departed_entry_redactions {
+        if let Some(departed) = projected
+            .departed_stack_spells
+            .get_mut(&object_id)
+            .and_then(|incarnations| incarnations.get_mut(&incarnation))
+        {
             departed.object.ordinary_entry_counter_work = None;
         }
     }
