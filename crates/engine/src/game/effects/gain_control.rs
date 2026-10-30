@@ -294,7 +294,14 @@ pub fn resolve_give(
     // filter only if it identifies exactly one legal player. CR 608.2d choices
     // are made while applying the effect; arbitrary first-match selection would
     // be wrong in multiplayer when several opponents are legal.
-    let recipient_id = if let Some(pid) = ability.targets.iter().find_map(|t| {
+    let recipient_id = if matches!(recipient, TargetFilter::DeclaredPlayer { .. }) {
+        // CR 608.2b + CR 608.2c + CR 800.4a: the named announcement is the
+        // recipient authority. An illegal, absent or departed player supplies
+        // no information; a different local player must never replace it.
+        crate::game::targeting::resolve_effect_player_ref(state, ability, recipient).ok_or_else(
+            || EffectError::MissingParam("GiveControl declared recipient".to_string()),
+        )?
+    } else if let Some(pid) = ability.targets.iter().find_map(|t| {
         if let TargetRef::Player(pid) = t {
             Some(*pid)
         } else {

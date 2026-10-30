@@ -17,11 +17,12 @@ use super::lower::BOUNDED_TARGET_CARDINALITIES;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, ChooseOneOfKind, ChosenSubtypeKind,
-    ColorChangeMode, ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRecipient,
-    Duration, EachDamageRecipient, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope,
-    PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr, SiblingCondition,
-    StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter, TargetReadOrigin, TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, ChooseOneOfKind, ChosenGroupId,
+    ChosenSubtypeKind, ColorChangeMode, ContinuousEffectOnset, ContinuousModification,
+    ControllerRef, CopyRecipient, Duration, EachDamageRecipient, Effect, EffectScope, FilterProp,
+    MultiTargetSpec, ObjectScope, PlayerBindingAxis, PlayerFilter, PlayerRelation, PlayerScope,
+    PtValue, QuantityExpr, SiblingCondition, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetFilter, TargetReadOrigin, TypedFilter,
 };
 use crate::types::game_state_kinds::DayNight;
 use crate::types::keywords::Keyword;
@@ -3104,6 +3105,96 @@ pub(super) fn subject_player_antecedent(subject: &SubjectPhraseAst) -> Option<Co
             | ControllerRef::SpecificPlayer { .. }) => Some(other.clone()),
         },
         _ => None,
+    }
+}
+
+/// CR 601.2c + CR 608.2c: bind a control recipient to its own explicit player
+/// declaration. The caller supplies the declaring head, rather than finding a
+/// player by filter equality among other instructions.
+pub(super) fn bind_declared_control_recipient(
+    effect: &mut Effect,
+    declaration: &TargetFilter,
+    ctx: &mut ParseContext,
+) -> Option<ChosenGroupId> {
+    super::declared_player_controller_ref(declaration)?;
+    let Effect::GiveControl { target, recipient } = effect else {
+        return None;
+    };
+    if recipient != declaration
+        || crate::types::ability::filter_binds_target_player(
+            target,
+            PlayerBindingAxis::ControllerOrOwner,
+        )
+    {
+        // A target-player companion no longer retains whether its printed
+        // controller phrase declared another player or referred to this subject.
+        // Leave that incumbent route intact; neither aliasing nor another slot
+        // can be justified by these operands.
+        return None;
+    }
+    let group = ChosenGroupId::declared_player(ctx.next_declared_player_group);
+    ctx.next_declared_player_group += 1;
+    ctx.clause_declared_group = Some(group);
+    *recipient = TargetFilter::DeclaredPlayer { group };
+    Some(group)
+}
+
+/// CR 601.2c: the player and the transferred objects are separate target
+/// occurrences. Only the object child carries its count and selection metadata.
+pub(super) fn wrap_target_subject_control(
+    mut clause: ParsedEffectClause,
+    subject: &SubjectPhraseAst,
+    ctx: &mut ParseContext,
+) -> ParsedEffectClause {
+    let Some(declaration) = subject
+        .target
+        .as_ref()
+        .filter(|_| subject.multi_target.is_none())
+    else {
+        return clause;
+    };
+    if bind_declared_control_recipient(&mut clause.effect, declaration, ctx).is_none() {
+        return clause;
+    }
+    let ParsedEffectClause {
+        effect,
+        duration,
+        sub_ability,
+        distribute,
+        multi_target,
+        optional_targeting,
+        condition,
+        optional,
+        unless_pay,
+        unlowered_guard,
+        entry_onset,
+    } = clause;
+    let mut transfer = AbilityDefinition::new(AbilityKind::Spell, effect);
+    transfer.duration = duration;
+    transfer.sub_ability = sub_ability;
+    transfer.distribute = distribute;
+    transfer.multi_target = multi_target;
+    transfer.optional_targeting = optional_targeting;
+    transfer.entry_onset = entry_onset;
+    transfer.target_selection_mode = std::mem::take(&mut ctx.target_selection_mode);
+    transfer.target_chooser = ctx.target_chooser.take();
+    transfer.target_choice_timing = ctx.declared_target_choice_timing.take().unwrap_or_default();
+    // CR 608.2c: instruction-wide guards and optional/unless choices have one
+    // owner; the mandatory singular declaration must not inherit an object count.
+    ParsedEffectClause {
+        effect: Effect::TargetOnly {
+            target: declaration.clone(),
+        },
+        duration: None,
+        sub_ability: Some(Box::new(transfer)),
+        distribute: None,
+        multi_target: None,
+        optional_targeting: false,
+        condition,
+        optional,
+        unless_pay,
+        unlowered_guard,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     }
 }
 

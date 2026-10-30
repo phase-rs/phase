@@ -11371,7 +11371,8 @@ fn try_parse_player_draws_and_gains_control(
         Ok((input, (subject.to_string(), draw_quantity.to_string())))
     })?;
 
-    let recipient = parse_subject_application(subject.trim(), ctx)?.affected;
+    let application = parse_subject_application(subject.trim(), ctx)?;
+    let recipient = application.affected;
     // CR 121.1: the draw count is the shared count position.
     let count = parse_verb_count_slot(&draw_text, ctx)
         .filter(|slot| imperative::is_draw_noun(slot.noun))?
@@ -11382,6 +11383,27 @@ fn try_parse_player_draws_and_gains_control(
         return None;
     }
 
+    let mut transfer = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GiveControl {
+            target,
+            recipient: recipient.clone(),
+        },
+    );
+    if application
+        .target
+        .as_ref()
+        .filter(|_| application.multi_target.is_none())
+        .and_then(|declaration| {
+            subject::bind_declared_control_recipient(&mut transfer.effect, declaration, ctx)
+        })
+        .is_some()
+    {
+        transfer.target_selection_mode = std::mem::take(&mut ctx.target_selection_mode);
+        transfer.target_chooser = ctx.target_chooser.take();
+        transfer.target_choice_timing =
+            ctx.declared_target_choice_timing.take().unwrap_or_default();
+    }
     Some(ParsedEffectClause {
         optional_targeting: false,
         unlowered_guard: None,
@@ -11390,10 +11412,7 @@ fn try_parse_player_draws_and_gains_control(
             target: recipient.clone(),
         },
         duration: None,
-        sub_ability: Some(Box::new(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::GiveControl { target, recipient },
-        ))),
+        sub_ability: Some(Box::new(transfer)),
         distribute: None,
         multi_target: None,
         condition: None,
@@ -30219,7 +30238,7 @@ fn lower_subject_predicate_ast_body(
             // the player. This is the Teferi's-Protection-clause-2 hook.
             retarget_player_scoped_keyword_grant(&mut clause.effect, &affected);
             if clause.multi_target.is_none() {
-                clause.multi_target = subject.multi_target;
+                clause.multi_target = subject.multi_target.clone();
             }
             // CR 608.2c + CR 608.2d: Propagate the subject phrase's "may" modal
             // so the lowered ability is marked optional (e.g., "its controller
@@ -30227,7 +30246,7 @@ fn lower_subject_predicate_ast_body(
             if subject.is_optional {
                 clause.optional = true;
             }
-            clause
+            subject::wrap_target_subject_control(clause, &subject, ctx)
         }
     }
 }
