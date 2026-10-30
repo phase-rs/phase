@@ -2205,6 +2205,31 @@ describe("draft attachment settlement", () => {
     });
   });
 
+  it("D2 a throwing waitingForPlayers listener does not strand a successful create (failing-before regression)", async () => {
+    const create = start("create");
+    const b = await completeHandshake();
+    expect(frames(b)).toContain("CreateDraftWithSettings");
+    expect(b.onmessage).toBeTypeOf("function");
+
+    const sentinel = new Error("waitingForPlayers listener sentinel");
+    let listenerThrew = false;
+    adapter.onEvent((event) => {
+      // One-shot: teardown emits other events, and a listener that fires twice
+      // would blur which dispatch this row pins.
+      if (event.type === "waitingForPlayers" && !listenerThrew) {
+        listenerThrew = true;
+        throw sentinel;
+      }
+    });
+    // The listener runs and its exception escapes the message handler. The
+    // create init must already be settled by then: the base adapter emitted
+    // `waitingForPlayers` BEFORE resolving the create, so this row is
+    // base-failing (the promise never settles there), not parent-failing.
+    expect(() => receive(b, "DraftCreated", credentials)).toThrow(sentinel);
+    expect(listenerThrew).toBe(true);
+    expect(await create()).toEqual({ resolvedWith: undefined });
+  });
+
   it("H5 established socket close without a pending init emits disconnected once", () => {
     const events = vi.fn();
     adapter.onEvent(events);
