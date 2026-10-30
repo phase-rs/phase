@@ -23,9 +23,8 @@ use crate::types::ability::{
 #[cfg(test)]
 use crate::types::ability::{
     filter_target_slot_filter, quantity_expr_target_slot_filter, quantity_ref_target_slot_spec,
-    CardTypeSetSource, CastManaSpentMetric, ContinuousModification, CountBinding,
-    CounterMoveSelection, DamageSource, GameRestriction, PlayerScope, QuantitySlotDerivation,
-    RestrictionPlayerScope, TapStateChange,
+    CountBinding, CounterMoveSelection, DamageSource, PlayerScope, QuantitySlotDerivation,
+    TapStateChange,
 };
 use crate::types::game_state::RandomDraw;
 // CR 601.2c: mana recipient / count-source role slot gate.
