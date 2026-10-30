@@ -2211,9 +2211,9 @@ describe("draft attachment settlement", () => {
     // beforeEach awaited the real DraftCreated create, so no init is pending
     // and `established` is the installed socket holding the draft token.
     // Dispatch the close event only: production listens through the `onclose`
-    // IDL property, and a spec-compliant EventTarget (happy-dom included)
-    // routes a dispatched "close" to that property. `dispatchSynthetic("close")`
-    // also invokes `onclose` directly, which delivers this one close twice.
+    // property, and this test environment (happy-dom) routes a dispatched
+    // "close" event to that property. `dispatchSynthetic("close")` also invokes
+    // `onclose` directly, which delivers this one close twice.
     established.dispatchEvent(new Event("close"));
     expect(events.mock.calls.filter(([event]) => event.type === "disconnected")).toHaveLength(1);
   });
@@ -2279,8 +2279,9 @@ describe("draft attachment settlement", () => {
     await completeHandshake();
     expect(setupSendAttempted).toBe(true);
     expect(listenerEntered).toBe(true);
-    // The send failure is reported through `error`, and that listener's
-    // exception must not strand the reconnect: settlement precedes notification.
+    // `send()` emits `error` before the attachment catch runs, so the listener's
+    // exception escapes through that catch; the catch must still reject the
+    // owning reconnect and close the incomplete socket.
     expect(await reconnect()).toBe(listenerSentinel);
     expect(failed.close).toHaveBeenCalled();
     const view = createMockDraftView({ pick_number: 6 });
