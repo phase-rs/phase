@@ -203,6 +203,20 @@ pub enum ZoneChoiceCandidateSource {
     /// tracked set an earlier clause published. A member of the batch that has
     /// since left the zone (cast from exile onto the stack) is not offered.
     ParentTargets,
+    /// CR 401.2: read only the top `count` cards of the single owner's library,
+    /// top first, and take them whole. This is candidate provenance, not a
+    /// selection mode: the library's order fixes the pool and the whole pool is
+    /// taken, so no player looks at or chooses the cards and no random draw
+    /// selects among them. The node's `selection` and `chooser` are therefore
+    /// inert placeholders (the default `Chosen` and `Controller`; neither enum
+    /// has a "no player chooses" value). The resolver pins the shape
+    /// (`library_top_shape`): the declared `zone` must be `Library`, with no
+    /// `additional_zones`, no `filter`, the default `selection` and `chooser`,
+    /// no `up_to`, no `constraint` and no reciprocal role. A per-player
+    /// `zone_owner` is refused. It exists only inside a gathering instruction,
+    /// so a `gather_role` is required: the pick publishes into the instruction's
+    /// tracked set as that role says ([`ZoneChoiceGatherRole`]).
+    LibraryTop,
 }
 
 impl ZoneChoiceCandidateSource {
@@ -216,6 +230,22 @@ impl ZoneChoiceCandidateSource {
 pub enum ReciprocalZoneChoiceRole {
     Produce,
     Consume,
+}
+
+/// CR 608.2c + CR 608.2f: how one object pick of a gathering instruction
+/// ("<player> exiles A, B, and C") joins the tracked set the instruction's
+/// single action then moves. The objects of one instruction are gathered and
+/// moved in one action, so the set must hold exactly that instruction's picks.
+/// The lowering assigns the role by position: the first object opens the set,
+/// every later object joins it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ZoneChoiceGatherRole {
+    /// The instruction's first object: publish a FRESH tracked set holding this
+    /// pick, even when the pick is empty, so a set an earlier instruction of the
+    /// same resolution published is never gathered.
+    Opens,
+    /// A later object: add this pick to the set the instruction's opener opened.
+    Joins,
 }
 
 /// CR 608.2d: Resolution-time choice cardinality.
@@ -25475,6 +25505,13 @@ pub enum Effect {
         /// zone choices omit this field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reciprocal_role: Option<ReciprocalZoneChoiceRole>,
+        /// CR 608.2c + CR 608.2f: the pick's role in the gathering instruction
+        /// whose single action moves its tracked set. `None` (every ordinary
+        /// zone choice) publishes as the resolver always has; `Some` is honored
+        /// only by a `LibraryTop` pick and a random single-owner `Direct` pick,
+        /// and refused on every other path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gather_role: Option<ZoneChoiceGatherRole>,
         /// CR 107.1c: When true, the chooser may select any number from 0..=count.
         #[serde(default)]
         up_to: bool,
@@ -44619,6 +44656,23 @@ impl ResolvedAbility {
             self.source_id,
             incarnation,
         ))
+    }
+
+    /// CR 113.7a + CR 400.7 + CR 603.7d + CR 603.7e: the source object an effect this ability creates refers to: the object a self-reference binds to while the ability can find it (CR 400.7e/f/j); else the source named by the ability's own trigger provenance (`trigger_source`, the event-time source of a triggered ability and, for a delayed triggered ability, the spell that created it (CR 603.7d) or the source of the ability that created it (CR 603.7e)), which stack placement never restamps; else the incarnation the source had when the ability was put on the stack. A source that has since left its zone is answered by its last known information (CR 608.2h).
+    pub fn effect_source_ref(
+        &self,
+        state: &crate::types::game_state::GameState,
+    ) -> Option<crate::types::identifiers::ObjectIncarnationRef> {
+        self.self_ref_binding(state)
+            .and_then(|id| state.objects.get(&id))
+            .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+            .or_else(|| {
+                self.trigger_source
+                    .as_ref()
+                    .filter(|source| source.identity.reference.object_id == self.source_id)
+                    .map(|source| source.identity.reference)
+            })
+            .or_else(|| self.source_ref(state))
     }
 
     /// CR 400.7: True if the ability's source is still the same object instance it

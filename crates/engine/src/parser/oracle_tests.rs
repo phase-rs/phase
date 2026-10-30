@@ -34582,3 +34582,123 @@ fn nested_exiled_card_returns_keep_the_enclosing_chain_binding() {
         );
     }
 }
+
+/// CR 611.2a + CR 601.2i + CR 400.7j: the "exile this card from your hand: a
+/// land gains a mana ability until this card is cast from exile; you may cast
+/// it for as long as it remains exiled" class (verbatim Oracle text, the
+/// colorless {C}{C} grant and the five three-color grants). Each hand-activated
+/// ability is a continuous grant whose duration is this card's own cast from
+/// exile, followed by a cast permission on the exiled card itself — never a
+/// `CastFromZone`, which would move the targeted land.
+#[test]
+fn self_exile_land_grant_class_parses_until_self_cast_and_self_permission() {
+    use crate::types::ability::{CastingPermission, OriginConstraint};
+
+    const CLASS: [(&str, &str, &[&str]); 6] = [
+        (
+            "Emrakul, the Exigent Doom",
+            "When you cast this spell, untap all lands you control.\nFlying, trample\nWard—Sacrifice three permanents.\n{3}, Exile this card from your hand: Target land gains \"{T}: Add {C}{C}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.",
+            &["Eldrazi"],
+        ),
+        (
+            "Glamorous Outlaw",
+            "When this creature enters, it deals 2 damage to each opponent and you scry 2.\n{2}, Exile this card from your hand: Target land gains \"{T}: Add {U}, {B}, or {R}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.",
+            &["Vampire", "Rogue"],
+        ),
+        (
+            "Masked Bandits",
+            "Vigilance\nMenace (This creature can't be blocked except by two or more creatures.)\n{2}, Exile this card from your hand: Target land gains \"{T}: Add {B}, {R}, or {G}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.",
+            &["Raccoon", "Rogue"],
+        ),
+        (
+            "Rakish Revelers",
+            "When this creature enters, create a 1/1 green and white Citizen creature token.\n{2}, Exile this card from your hand: Target land gains \"{T}: Add {R}, {G}, or {W}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.",
+            &["Elf", "Druid", "Rogue"],
+        ),
+        (
+            "Shattered Seraph",
+            "Flying\nWhen this creature enters, you gain 3 life.\n{2}, Exile this card from your hand: Target land gains \"{T}: Add {W}, {U}, or {B}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.",
+            &["Angel", "Rogue"],
+        ),
+        (
+            "Spara's Adjudicators",
+            "When this creature enters, target creature an opponent controls can't attack or block until your next turn.\n{2}, Exile this card from your hand: Target land gains \"{T}: Add {G}, {W}, or {U}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.",
+            &["Cat", "Citizen"],
+        ),
+    ];
+
+    let deadline = Duration::UntilEvent {
+        event: Box::new(
+            TriggerDefinition::new(TriggerMode::SpellCast)
+                .valid_card(TargetFilter::SelfRef)
+                .spell_cast_origin(OriginConstraint::Equals(Zone::Exile)),
+        ),
+    };
+
+    for (name, oracle, subtypes) in CLASS {
+        let parsed = parse(oracle, name, &[], &["Creature"], subtypes);
+        let ability = parsed
+            .abilities
+            .iter()
+            .find(|ability| ability.activation_zone == Some(Zone::Hand))
+            .unwrap_or_else(|| panic!("{name}: no hand-activated ability"));
+
+        // Reach: the cost is the mana plus exiling this card from hand.
+        let Some(AbilityCost::Composite { costs }) = ability.cost.as_ref() else {
+            panic!("{name}: expected a composite cost, got {:?}", ability.cost);
+        };
+        assert!(
+            costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. })),
+            "{name}: {costs:?}"
+        );
+        assert!(
+            costs.iter().any(|c| matches!(
+                c,
+                AbilityCost::Exile {
+                    zone: Some(Zone::Hand),
+                    ..
+                }
+            )),
+            "{name}: {costs:?}"
+        );
+
+        let Effect::GenericEffect { duration, .. } = ability.effect.as_ref() else {
+            panic!(
+                "{name}: expected a continuous grant, got {:?}",
+                ability.effect
+            );
+        };
+        assert_eq!(duration.as_ref(), Some(&deadline), "{name}");
+
+        let permission = ability
+            .sub_ability
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name}: no cast permission"));
+        assert!(
+            matches!(
+                permission.effect.as_ref(),
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        mode: CardPlayMode::Cast,
+                        duration: Duration::Permanent,
+                        ..
+                    },
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "{name}: {:?}",
+            permission.effect
+        );
+
+        let mut link = Some(ability);
+        while let Some(def) = link {
+            assert!(
+                !matches!(def.effect.as_ref(), Effect::CastFromZone { .. }),
+                "{name}: {:?}",
+                def.effect
+            );
+            link = def.sub_ability.as_deref();
+        }
+    }
+}
