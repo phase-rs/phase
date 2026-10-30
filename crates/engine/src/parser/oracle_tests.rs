@@ -1171,7 +1171,7 @@ mod contextual_hand_publication {
             excess: None,
         })
         .description("~ deals 4 damage to target creature.".into());
-        let token = ability(Effect::Token { name: "Warrior".into(), power: PtValue::Fixed(1), toughness: PtValue::Fixed(1), types: vec!["Warrior".into()], colors: vec![ManaColor::White], keywords: vec![], tapped: false, count: QuantityExpr::Fixed { value: 2 }, owner: TargetFilter::Controller, attach_to: None, enters_attacking: false, attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses, supertypes: vec![], static_abilities: vec![], enter_with_counters: vec![] }).sub_ability(sibling(ability(Effect::GenericEffect { static_abilities: vec![StaticDefinition::continuous().affected(TargetFilter::ParentTarget).modifications(vec![ContinuousModification::AddKeyword { keyword: Keyword::FirstStrike }])], duration: Some(Duration::UntilEndOfTurn), target: Some(TargetFilter::LastCreated), end_cost: None }).duration(Duration::UntilEndOfTurn))).description("Create two 1/1 white Warrior creature tokens. They gain first strike until end of turn.".into());
+        let token = ability(Effect::Token { name: "Warrior".into(), power: PtValue::Fixed(1), toughness: PtValue::Fixed(1), types: vec!["Creature".into(), "Warrior".into()], colors: vec![ManaColor::White], keywords: vec![], tapped: false, count: QuantityExpr::Fixed { value: 2 }, owner: TargetFilter::Controller, attach_to: None, enters_attacking: false, attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses, supertypes: vec![], static_abilities: vec![], enter_with_counters: vec![] }).sub_ability(sibling(ability(Effect::GenericEffect { static_abilities: vec![StaticDefinition::continuous().affected(TargetFilter::LastCreated).modifications(vec![ContinuousModification::AddKeyword { keyword: Keyword::FirstStrike }]).description("gain first strike".into())], duration: Some(Duration::UntilEndOfTurn), target: Some(TargetFilter::LastCreated), end_cost: None }).duration(Duration::UntilEndOfTurn))).description("Create two 1/1 white Warrior creature tokens. They gain first strike until end of turn.".into());
         let modal = ModalChoice { min_choices: 1, max_choices: 1, mode_count: 3, mode_descriptions: vec!["~ deals 4 damage to target creature.".into(), "Create two 1/1 white Warrior creature tokens. They gain first strike until end of turn.".into(), DURESS.into()], ..Default::default() };
         let records = [
             (
@@ -4028,7 +4028,7 @@ fn grant_foreign_roots_keep_complete_documents_and_loader_components() {
         ),
         (
             r###"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"a3635b3f-839c-4fe5-83a5-7c70e8630184"},"keywords":["Menace"],"layout":"normal","manaCost":"{B}","manaValue":1.0,"name":"Moonshadow","power":"7","subtypes":["Elemental"],"supertypes":[],"text":"Menace\nThis creature enters with six -1/-1 counters on it.\nWhenever one or more permanent cards are put into your graveyard from anywhere while this creature has a -1/-1 counter on it, remove a -1/-1 counter from this creature.","toughness":"7","type":"Creature — Elemental","types":["Creature"]}"###,
-            r###"{"triggers":[{"batched":true,"condition":{"condition":{"counters":{"data":"M1M1","type":"OfType"},"minimum":1,"type":"HasCounters"},"type":"EventTime"},"constraint":null,"damage_kind":"Any","description":"Whenever one or more permanent cards are put into your graveyard from anywhere while ~ has a -1/-1 counter on it, remove a -1/-1 counter from ~.","destination":"Graveyard","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":1},"counter_type":"M1M1","target":{"type":"SelfRef"},"type":"RemoveCounter"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":"ChangesZoneAll","optional":false,"origin":null,"phase":null,"secondary":false,"trigger_zones":["Battlefield"],"valid_card":{"controller":"You","properties":[],"type":"Typed","type_filters":["Permanent"]},"valid_source":null,"valid_target":{"controller":"You","properties":[],"type":"Typed","type_filters":[]}}],"replacements":[{"condition":null,"description":"~ enters with six -1/-1 counters on it.","destination_zone":"Battlefield","event":"Moved","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":6},"counter_type":"M1M1","target":{"type":"SelfRef"},"type":"PutCounter"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":{"type":"Mandatory"},"valid_card":{"type":"SelfRef"}}],"keywords":["Menace"]}"###,
+            r###"{"triggers":[{"batched":true,"condition":{"condition":{"counters":{"data":"M1M1","type":"OfType"},"minimum":1,"type":"HasCounters"},"type":"EventTime"},"constraint":null,"damage_kind":"Any","description":"Whenever one or more permanent cards are put into your graveyard from anywhere while ~ has a -1/-1 counter on it, remove a -1/-1 counter from ~.","destination":"Graveyard","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":1},"counter_type":"M1M1","target":{"type":"SelfRef"},"type":"RemoveCounter"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":"ChangesZoneAll","optional":false,"origin":null,"phase":null,"secondary":false,"trigger_zones":["Battlefield"],"valid_card":{"controller":null,"properties":[{"type":"Owned","controller":"You"}],"type":"Typed","type_filters":["Permanent"]},"valid_source":null,"valid_target":{"controller":"You","properties":[],"type":"Typed","type_filters":[]}}],"replacements":[{"condition":null,"description":"~ enters with six -1/-1 counters on it.","destination_zone":"Battlefield","event":"Moved","execute":{"condition":null,"cost":null,"description":null,"duration":null,"effect":{"count":{"type":"Fixed","value":6},"counter_type":"M1M1","target":{"type":"SelfRef"},"type":"PutCounter"},"forward_result":false,"kind":"Spell","optional":false,"optional_targeting":false,"sub_ability":null,"target_prompt":null},"mode":{"type":"Mandatory"},"valid_card":{"type":"SelfRef"}}],"keywords":["Menace"]}"###,
         ),
         (
             r###"{"colorIdentity":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"c429716b-bd3a-4060-b8a3-82e3d6aecd88"},"layout":"normal","manaCost":"{3}{R}","manaValue":4.0,"name":"Sand Strangler","power":"3","subtypes":["Beast"],"supertypes":[],"text":"When this creature enters, if you control a Desert or there is a Desert card in your graveyard, you may have this creature deal 3 damage to target creature.","toughness":"3","type":"Creature — Beast","types":["Creature"]}"###,
@@ -5438,6 +5438,32 @@ const U21_GRIMGRIN: &str = "Grimgrin enters tapped and doesn't untap during your
 const U21_LEVIATHAN: &str = "Trample\nThis creature enters tapped and doesn't untap during your untap step.\nAt the beginning of your upkeep, you may sacrifice two Islands. If you do, untap this creature.\nThis creature can't attack unless you sacrifice two Islands. (This cost is paid as attackers are declared.)";
 const U21_TRAXOS: &str = "Trample\nTraxos enters tapped and doesn't untap during your untap step.\nWhenever you cast a historic spell, untap Traxos. (Artifacts, legendaries, and Sagas are historic.)";
 
+fn u5_keyword_extraction_document(
+    card: &crate::database::mtgjson::AtomicCard,
+) -> crate::parser::oracle_ir::doc::OracleDocIr {
+    let input = crate::database::synthesis::prepare_oracle_parser_input(card, true);
+    parse_oracle_ir(
+        &input.oracle_text,
+        &input.card_name,
+        &input.keyword_names,
+        &input.types,
+        &input.subtypes,
+    )
+}
+
+fn u5_assert_multi_extraction(
+    card: &crate::database::mtgjson::AtomicCard,
+    parsed: &ParsedAbilities,
+) {
+    let multi = crate::database::synthesis::build_oracle_face_multi(card, None);
+    assert_eq!(multi.oracle_text, card.text);
+    assert_eq!(multi.keywords, parsed.extracted_keywords);
+    assert_eq!(multi.abilities, parsed.abilities);
+    assert_eq!(multi.triggers, parsed.triggers);
+    assert_eq!(multi.static_abilities, parsed.statics);
+    assert_eq!(multi.replacements, parsed.replacements);
+}
+
 // SHAPE: complete pinned sources, normal native construction and both loaders.
 #[test]
 fn u5_full_documents_publish_both_halves_at_the_original_source() {
@@ -5475,7 +5501,15 @@ fn u5_full_documents_publish_both_halves_at_the_original_source() {
         } else {
             vec!["trample".to_string()]
         };
-        let mut doc = parse_oracle_ir(text, name, &hints, &types, &subtypes);
+        let extraction_card: crate::database::mtgjson::AtomicCard =
+            serde_json::from_value(serde_json::json!({
+                "name": name, "text": text, "layout": "normal", "identifiers": {},
+                "types": types, "subtypes": subtypes, "keywords": hints,
+                "colors": [], "colorIdentity": [], "manaCost": mana,
+                "power": power.to_string(), "toughness": power.to_string()
+            }))
+            .unwrap();
+        let mut doc = u5_keyword_extraction_document(&extraction_card);
         assert_eq!(doc.source_text, text);
         let normalized = normalize_card_name_refs(text, name);
         let normalized_line = normalized.lines().nth(entry_line).unwrap();
@@ -5644,6 +5678,7 @@ fn u5_full_documents_publish_both_halves_at_the_original_source() {
             }
         }
         let face = complete_publication_native_face(name, text, &types, &subtypes);
+        u5_assert_multi_extraction(&extraction_card, &parsed);
         if name != "Grimgrin, Corpse-Born" {
             assert!(face.keywords.contains(&Keyword::Trample));
         }
@@ -5795,13 +5830,15 @@ fn u5_invalid_singleton_payment_publication_keeps_the_whole_original_body() {
         for connector in ["If", "When"] {
             let body = format!("you may {cost}. {connector} you do, untap ~.");
             let source = format!("Flying\nAt the beginning of your upkeep, {body}");
-            let mut doc = parse_oracle_ir(
-                &source,
-                "Constructed Invalid Payment",
-                &["flying".into()],
-                &["Creature".into()],
-                &[],
-            );
+            let atomic: crate::database::mtgjson::AtomicCard =
+                serde_json::from_value(serde_json::json!({
+                    "name": "Constructed Invalid Payment", "text": source, "layout": "normal",
+                    "colors": [], "colorIdentity": [], "identifiers": {},
+                    "manaCost": "{2}", "manaValue": 2.0, "types": ["Creature"], "subtypes": [],
+                    "power": "2", "toughness": "2", "keywords": ["Flying"]
+                }))
+                .unwrap();
+            let mut doc = u5_keyword_extraction_document(&atomic);
             assert_eq!(doc.source_text, source);
             let flying = doc
                 .items
@@ -5826,14 +5863,7 @@ fn u5_invalid_singleton_payment_publication_keeps_the_whole_original_body() {
                 .unwrap();
             assert_eq!(description.as_deref(), Some(normalized_body));
             assert!(root.sub_ability.is_none());
-            let atomic: crate::database::mtgjson::AtomicCard =
-                serde_json::from_value(serde_json::json!({
-                    "name": "Constructed Invalid Payment", "text": source, "layout": "normal",
-                    "colors": [], "colorIdentity": [], "identifiers": {},
-                    "manaCost": "{2}", "manaValue": 2.0, "types": ["Creature"], "subtypes": [],
-                    "power": "2", "toughness": "2", "keywords": ["Flying"]
-                }))
-                .unwrap();
+            u5_assert_multi_extraction(&atomic, &parsed);
             let face = crate::database::synthesis::build_oracle_face(&atomic, None);
             assert!(face.keywords.contains(&Keyword::Flying));
             assert_eq!(face.triggers, parsed.triggers);
@@ -5872,20 +5902,7 @@ fn u5_printed_ziatora_keeps_its_full_reflexive_source_and_independent_keyword() 
         "subtypes": ["Demon", "Dragon"], "supertypes": ["Legendary"], "type": "Legendary Creature — Demon Dragon",
         "types": ["Creature"], "text": SOURCE
     })).unwrap();
-    let hints = atomic
-        .keywords
-        .as_ref()
-        .unwrap()
-        .iter()
-        .map(|keyword| keyword.to_lowercase())
-        .collect::<Vec<_>>();
-    let mut doc = parse_oracle_ir(
-        SOURCE,
-        &atomic.name,
-        &hints,
-        &atomic.types,
-        &atomic.subtypes,
-    );
+    let mut doc = u5_keyword_extraction_document(&atomic);
     assert_eq!(doc.source_text, SOURCE);
     let flying = doc
         .items
@@ -5906,6 +5923,7 @@ fn u5_printed_ziatora_keeps_its_full_reflexive_source_and_independent_keyword() 
         Some(AbilityCondition::WhenYouDo)
     );
     let face = crate::database::synthesis::build_oracle_face(&atomic, None);
+    u5_assert_multi_extraction(&atomic, &parsed);
     assert!(face.keywords.contains(&Keyword::Flying));
     assert_eq!(face.oracle_text.as_deref(), Some(SOURCE));
     assert_eq!(face.triggers, parsed.triggers);
@@ -6975,7 +6993,29 @@ fn noun_led_perpetual_then_preserves_whole_instruction() {
     let bad = scope_spell(bad_text);
     assert!(bad.abilities.iter().any(has_unimplemented), "{bad:#?}");
     assert!(bad.statics.is_empty());
-    assert!(bad.abilities.iter().flat_map(scope_chain).any(|node| matches!(node.effect.as_ref(), Effect::Unimplemented { description: Some(fragment), .. } if fragment.trim_end_matches('.') == bad_text.trim_end_matches('.'))), "{bad:#?}");
+    assert_eq!(bad.abilities.len(), 1);
+    assert_eq!(bad.abilities[0].description.as_deref(), Some(bad_text));
+    assert!(bad.abilities[0].sub_ability.is_none());
+    assert!(
+        matches!(bad.abilities[0].effect.as_ref(), Effect::Unimplemented { name, description: Some(fragment) }
+        if name == "unparsed_verb_arguments"
+            && fragment == "have no maximum hand size for the rest of the game with an unmodeled rider"),
+        "{bad:#?}"
+    );
+    let doc = parse_oracle_ir(
+        bad_text,
+        "Whole noun-led refusal",
+        &[],
+        &["Sorcery".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, bad_text);
+    assert_eq!(doc.items.len(), 1);
+    assert_eq!(doc.items[0].source.fragment(), Some(bad_text));
+    assert_eq!(
+        doc.items[0].source.span(),
+        &crate::parser::oracle_ir::doc::OracleSourceSpan::exact(0, 0, 0, bad_text.len(), 0)
+    );
     for (name, text, types, abilities) in [
         ("Spellbook", "You have no maximum hand size.", "Artifact", 0),
         (
@@ -43911,7 +43951,11 @@ fn failed_numeric_keyword_parameters_keep_complete_publication_refusals() {
             &[],
         );
         assert_eq!(document.items.len(), 1, "{document:#?}");
-        assert_complete_static_structure_refusal(&document, &source);
+        assert_complete_static_structure_refusal(
+            &document,
+            &source,
+            &format!("Static pattern matched but line failed static parser: {source}"),
+        );
         let parsed = lower_oracle_ir(&mut document);
         let expected = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -43948,6 +43992,7 @@ fn failed_numeric_keyword_parameters_keep_complete_publication_refusals() {
 fn assert_complete_static_structure_refusal(
     doc: &crate::parser::oracle_ir::doc::OracleDocIr,
     line: &str,
+    diagnostic: &str,
 ) {
     use crate::parser::oracle_ir::doc::UnsupportedAbilityCategory;
     let item = doc
@@ -43962,7 +44007,13 @@ fn assert_complete_static_structure_refusal(
     else {
         panic!("{item:#?}")
     };
-    let diagnostic = format!("Static pattern matched but line failed static parser: {line}");
+    assert_eq!(
+        doc.items
+            .iter()
+            .filter(|item| item.source.fragment() == Some(line))
+            .count(),
+        1
+    );
     assert_eq!(
         unsupported.category,
         UnsupportedAbilityCategory::StaticStructure
@@ -43995,7 +44046,7 @@ fn assert_complete_static_structure_refusal(
         crate::parser::oracle::lower_unsupported_node(unsupported, *min_x_value),
         AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::unimplemented("static_structure", &diagnostic)
+            Effect::unimplemented("static_structure", diagnostic)
         )
         .description(line.to_owned())
     );
@@ -44568,7 +44619,14 @@ fn u14_complete_where_x_and_companion_documents() {
         let bad = format!("{}{connector} draw two cards.", line.trim_end_matches('.'));
         let doc = parse_oracle_ir(&bad, "Complete static", &[], &["Enchantment".into()], &[]);
         assert_eq!(doc.source_text, bad);
-        assert_complete_static_structure_refusal(&doc, &bad);
+        // The dynamic-keyword owner declines directly; the attached compound
+        // owner publishes a complete residual converted by apply_source_parity_statics.
+        let diagnostic = if line == "Creatures have mobilize X, where X is its power." {
+            format!("Static pattern matched but line failed static parser: {bad}")
+        } else {
+            bad.clone()
+        };
+        assert_complete_static_structure_refusal(&doc, &bad, &diagnostic);
         assert!(!doc.items.iter().any(|i| matches!(i.node, OracleNodeIr::Static(_))), "no supported partial static: {doc:#?}");
     }
 }
@@ -44633,7 +44691,11 @@ fn u14_base_stat_documents_preserve_each_axis_and_full_maha() {
             let bad_text = text.replace(&line, &failed_line);
             let bad = parse_oracle_ir(&bad_text, name, &[], &["Creature".into()], &[]);
             assert_eq!(bad.source_text, bad_text);
-            assert_complete_static_structure_refusal(&bad, &failed_line);
+            assert_complete_static_structure_refusal(
+                &bad,
+                &failed_line,
+                &format!("Static pattern matched but line failed static parser: {failed_line}"),
+            );
             assert!(!bad.items.iter().any(|i| matches!(&i.node, OracleNodeIr::Static(ir) if ir.definition.modifications.iter().any(|m| matches!(m, ContinuousModification::SetPower { .. } | ContinuousModification::SetToughness { .. })))), "no partial base setter: {bad:#?}");
         }
     }
@@ -44744,7 +44806,11 @@ fn u14_source_bound_mixed_keyword_verb_documents() {
             );
             assert_eq!(bad.source_text, bad_text);
             assert!(bad.items.iter().any(source_parity_chooser));
-            assert_complete_static_structure_refusal(&bad, &failed_line);
+            assert_complete_static_structure_refusal(
+                &bad,
+                &failed_line,
+                &format!("Static pattern matched but line failed static parser: {failed_line}"),
+            );
             assert!(
                 !bad.items
                     .iter()
@@ -44937,7 +45003,11 @@ fn u14_inherited_removal_documents_keep_complete_operations() {
             );
             assert_eq!(bad.source_text, bad_text);
             assert!(bad.items.iter().any(source_parity_chooser));
-            assert_complete_static_structure_refusal(&bad, &failed_line);
+            assert_complete_static_structure_refusal(
+                &bad,
+                &failed_line,
+                &format!("Static pattern matched but line failed static parser: {failed_line}"),
+            );
             let refused = bad
                 .items
                 .iter()
@@ -45063,7 +45133,7 @@ fn u14_inherited_removal_companion_documents() {
             assert_eq!(bad.source_text, bad_text);
             assert!(bad.items.iter().any(source_parity_chooser));
             let normalized_failed_line = failed_line.replace("this Aura", "~");
-            assert_complete_static_structure_refusal(&bad, &normalized_failed_line);
+            assert_complete_static_structure_refusal(&bad, &normalized_failed_line, &format!("Static pattern matched but line failed static parser: {normalized_failed_line}"));
             let refused = bad
                 .items
                 .iter()
@@ -46020,7 +46090,7 @@ fn complete_publication_preserves_full_dedicated_off_zone_identity_and_costs() {
         let retained = bad.statics.iter().filter(|definition| definition.modifications == grant.modifications && definition.affected == grant.affected).collect::<Vec<_>>();
         assert_eq!(retained.len(), 1, "the complete dedicated sibling cannot be swallowed by a bad U3 clause: {card_name}");
         let mut gaps = Vec::new(); let value = serde_json::to_value(&bad).unwrap(); complete_publication_gap_fragments(&value, &mut gaps);
-        assert_complete_static_structure_refusal(&bad_doc, invalid);
+        assert_complete_static_structure_refusal(&bad_doc, invalid, &format!("Static pattern matched but line failed static parser: {invalid}"));
         let grant_line = match face_name {
             "Lier, Disciple of the Drowned" | "Wire Surgeons" | "Sliver Gravemother" | "Aminatou, Veil Piercer" => 1,
             "Green Goblin" => 2,
@@ -47420,13 +47490,13 @@ pub(crate) mod population_relation_publication {
                     TargetFilter::TriggeringPlayer,
                 );
                 let mut attach = spell(json!({"type":"Attach","attachment":{"type":"SelfRef"},
+                    "selection":{"at_resolution":{"count":"one"}},
                     "target":{"type":"And","filters":[{"type":"Opponent"},
                         {"type":"PlayerMatching","player":{"type":"AllExcept","exclude":{"type":"TriggeringPlayer"}}}]}}));
-                attach.target_choice_timing = TargetChoiceTiming::Resolution;
                 attach.target_selection_mode = TargetSelectionMode::Random;
                 let mut cast = trigger(TriggerMode::SpellCast,
                     "Whenever enchanted player casts a noncreature spell, roll a d6. ~ deals damage to that player equal to the result. Then attach ~ to another one of your opponents chosen at random.", chain(vec![die, hit, attach]));
-                cast.valid_card = Some(typed(json!([{"Non":"Creature"}]), json!([])));
+                cast.valid_card = Some(typed(json!(["Card", {"Non":"Creature"}]), json!([])));
                 cast.valid_target = Some(TargetFilter::AttachedTo);
                 out.triggers.push(cast);
             }
@@ -49456,7 +49526,7 @@ pub(crate) mod defining_modifier_publication {
             "Rampaging Yao Guai" => {
                 out.extracted_keywords = vec![Keyword::Vigilance, Keyword::Trample];
                 let x = QuantityExpr::Ref {
-                    qty: QuantityRef::Variable { name: "X".into() },
+                    qty: QuantityRef::CostXPaid,
                 };
                 out.replacements.push(ReplacementDefinition::new(ReplacementEvent::Moved)
                     .valid_card(TargetFilter::SelfRef).destination_zone(Zone::Battlefield)

@@ -21010,9 +21010,10 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                 // shape.
                 let tail = format!("from {after}");
                 let constraint =
-                    parse_origin_constraint_tail(tail.as_str(), parse_cast_origin_zone)
-                        .map(|(_, c)| c)
-                        .unwrap_or(OriginConstraint::Any);
+                    match parse_origin_constraint_tail(tail.as_str(), parse_cast_origin_zone) {
+                        Ok((rest, constraint)) if rest.trim().is_empty() => constraint,
+                        _ => return Some(unknown_trigger_definition(lower)),
+                    };
                 (before, constraint)
             }
             Err(_) => (payload, OriginConstraint::Any),
@@ -21040,7 +21041,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
 
         // First, try the post-spell-modifier-aware decomposition for shapes
         // that include "with {X} in its mana cost" etc.
-        if let Some(filter) = parse_spell_qualifier_payload(payload) {
+        if let Some(filter) = parse_complete_spell_qualifier_payload(payload) {
             let filter = if is_another {
                 add_another_prop(filter)
             } else {
@@ -21057,7 +21058,9 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
 
         // Fall back to the classic type-phrase parser for bare type filters.
-        let (filter, _rest) = parse_type_phrase_folding(payload);
+        let Some(filter) = parse_complete_spell_type_subject(payload) else {
+            return Some(unknown_trigger_definition(lower));
+        };
         let filter = if is_another {
             add_another_prop(filter)
         } else {
@@ -21135,17 +21138,17 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             // the rationale in the "you cast a/an" branch above). Without
             // this, the zone constraint is silently dropped (Ghostly Pilferer
             // class) or mis-routed into `valid_card` via `parse_zone_suffix`.
-            // Only strip the tail when the zone combinator recognises it as
-            // a well-formed cast origin; an unrecognized residual
-            // ("from <some other phrase>") leaves the spell_clause intact
-            // so downstream parsing observes the original shape.
+            // The zone owner must represent the complete tail; unknown or
+            // trailing qualifiers refuse the full trigger condition.
             let (spell_clause, cast_origin) =
                 match nom_primitives::split_once_on(spell_clause, " from ") {
                     Ok((_, (before, after))) => {
                         let tail = format!("from {after}");
                         match parse_origin_constraint_tail(tail.as_str(), parse_cast_origin_zone) {
-                            Ok((_, constraint)) => (before, constraint),
-                            Err(_) => (spell_clause, OriginConstraint::Any),
+                            Ok((rest, constraint)) if rest.trim().is_empty() => {
+                                (before, constraint)
+                            }
+                            _ => return Some(unknown_trigger_definition(lower)),
                         }
                     }
                     Err(_) => (spell_clause, OriginConstraint::Any),
@@ -21181,39 +21184,22 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             {
                 return Some(unknown_trigger_definition(lower));
             }
-            // Handle "multicolored" as a spell property (not a type phrase)
-            if scan_contains(spell_clause, "multicolored") {
-                let filter = with_spell_designation(
-                    TargetFilter::Typed(TypedFilter::default().properties(vec![
-                        FilterProp::ColorCount {
-                            comparator: Comparator::GE,
-                            count: 2,
-                        },
-                    ])),
-                    designation,
-                );
-                let filter = if spell_not_owned_by_caster {
-                    with_owner_scope(filter, ControllerRef::Opponent)
-                } else {
-                    filter
-                };
-                def.valid_card = Some(filter);
+            let Some(filter) = parse_complete_spell_type_subject(spell_clause) else {
+                return Some(unknown_trigger_definition(lower));
+            };
+            let filter = with_spell_designation(filter, designation);
+            let is_meaningful = match &filter {
+                TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
+                TargetFilter::Or { .. } | TargetFilter::And { .. } => true,
+                _ => false,
+            };
+            let filter = if spell_not_owned_by_caster {
+                with_owner_scope(filter, ControllerRef::Opponent)
             } else {
-                let (filter, _rest) = parse_type_phrase_folding(spell_clause);
-                let filter = with_spell_designation(filter, designation);
-                let is_meaningful = match &filter {
-                    TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
-                    TargetFilter::Or { .. } => true,
-                    _ => false,
-                };
-                let filter = if spell_not_owned_by_caster {
-                    with_owner_scope(filter, ControllerRef::Opponent)
-                } else {
-                    filter
-                };
-                if is_meaningful || spell_not_owned_by_caster {
-                    def.valid_card = Some(filter);
-                }
+                filter
+            };
+            if is_meaningful || spell_not_owned_by_caster {
+                def.valid_card = Some(filter);
             }
 
             return Some((TriggerMode::SpellCast, def));
@@ -22149,17 +22135,24 @@ fn split_off_timing_tail(text: &str) -> Option<&str> {
 /// The payload must contain the word "spell" at some position; text before
 /// "spell" is the type phrase, text after "spell" is a post-spell modifier.
 fn parse_spell_qualifier_payload(qualifier: &str) -> Option<TargetFilter> {
-    // Bare "spell" with no pre- or post-modifier means "no filter" (any spell).
-    if qualifier == "spell" {
-        return None;
-    }
+    let (_, type_filter, post_filter) = parse_spell_qualifier_components(qualifier)?;
+    compose_spell_qualifier_filters(type_filter, post_filter)
+}
+
+/// Decompose the incumbent subject once for both admission projections. The
+/// ordinal callers retain their existing optional-filter/fallthrough contract.
+fn parse_spell_qualifier_components(
+    qualifier: &str,
+) -> Option<(&str, Option<TargetFilter>, Option<TargetFilter>)> {
     // The payload is one of three shapes:
     //   (a) "<type-phrase> spell"                 — type only
     //   (b) "spell <post-modifier>"               — post-modifier only
     //   (c) "<type-phrase> spell <post-modifier>" — both
-    // Detect shape (b) by a leading "spell " literal before attempting the
-    // " spell" word-boundary split (which only separates shape (a)/(c)).
-    let (pre_spell, post_spell) = if let Some(rest) = qualifier.strip_prefix("spell ") {
+    // Bare "spell" has neither qualifier. Its whitespace-bounded sibling owns
+    // shape (b) before the same " spell" split used by shapes (a)/(c).
+    let (pre_spell, post_spell) = if let Ok((rest, _)) =
+        preceded(tag::<_, _, OracleError<'_>>("spell"), alt((tag(" "), eof))).parse(qualifier)
+    {
         ("", rest.trim())
     } else {
         // Split on " spell" (word-boundary) to separate type phrase from post-spell modifier.
@@ -22168,7 +22161,7 @@ fn parse_spell_qualifier_payload(qualifier: &str) -> Option<TargetFilter> {
             Ok((_, (pre, post))) => (pre.trim(), post.trim()),
             Err(_) => {
                 // No " spell" split — treat as a type-only qualifier.
-                return type_only_filter(qualifier);
+                (qualifier, "")
             }
         }
     };
@@ -22187,6 +22180,13 @@ fn parse_spell_qualifier_payload(qualifier: &str) -> Option<TargetFilter> {
         Some(parse_post_spell_modifier(post_spell)?)
     };
 
+    Some((pre_spell, type_filter, post_filter))
+}
+
+fn compose_spell_qualifier_filters(
+    type_filter: Option<TargetFilter>,
+    post_filter: Option<TargetFilter>,
+) -> Option<TargetFilter> {
     match (type_filter, post_filter) {
         (None, None) => None,
         (Some(f), None) | (None, Some(f)) => Some(f),
@@ -22194,6 +22194,20 @@ fn parse_spell_qualifier_payload(qualifier: &str) -> Option<TargetFilter> {
             filters: vec![a, b],
         }),
     }
+}
+
+fn parse_complete_spell_qualifier_payload(qualifier: &str) -> Option<TargetFilter> {
+    let (pre_spell, type_filter, post_filter) = parse_spell_qualifier_components(qualifier)?;
+    if !pre_spell.is_empty() && type_filter.is_none() {
+        return None;
+    }
+    compose_spell_qualifier_filters(type_filter, post_filter)
+}
+
+/// Admit only a complete represented spell subject. The incumbent type owner
+/// keeps its canonical filter; post-spell/color qualities reuse their owner.
+fn parse_complete_spell_type_subject(payload: &str) -> Option<TargetFilter> {
+    type_only_filter(payload).or_else(|| parse_complete_spell_qualifier_payload(payload))
 }
 
 /// Parse a bare type phrase (e.g. "noncreature", "creature") as a `TargetFilter`.
@@ -25469,6 +25483,43 @@ mod caster_scoped_spell_designation_tests {
             let plain = creature_cast_trigger(&text);
             assert_eq!(&plain.valid_target, valid_target, "{text}");
             assert_eq!(plain.valid_card, None, "{text}");
+        }
+    }
+
+    #[test]
+    fn generic_cast_subjects_refuse_every_unrepresented_qualifier() {
+        // SHAPE: real bare/type/designation siblings above reach both generic
+        // actor arms; unknown subjects keep the full condition unsupported.
+        for caster in ["you cast", "an opponent casts", "a player casts"] {
+            let plain = creature_cast_trigger(&format!("Whenever {caster} a spell, draw a card."));
+            assert_eq!(plain.mode, TriggerMode::SpellCast);
+            for subject in [
+                "foretold card",
+                "mysterious spell",
+                "creature spell wearing a hat",
+                "multicolored spell wearing a hat",
+                "spell from an unknown place",
+                "spell from exile wearing a hat",
+                "mysterious spell with {x} in its mana cost",
+            ] {
+                let source = format!("Whenever {caster} a {subject}, draw a card.");
+                let parsed = parse_oracle_text(
+                    &source,
+                    "Synthetic cast refusal",
+                    &[],
+                    &["Creature".into()],
+                    &[],
+                );
+                assert_eq!(parsed.triggers.len(), 1, "{source}: {parsed:#?}");
+                assert!(
+                    matches!(parsed.triggers[0].mode, TriggerMode::Unknown(_)),
+                    "{source}: {parsed:#?}"
+                );
+                assert_eq!(
+                    parsed.triggers[0].description.as_deref(),
+                    Some(source.as_str())
+                );
+            }
         }
     }
 }

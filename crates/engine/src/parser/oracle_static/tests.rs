@@ -313,6 +313,272 @@ fn qualified_cost_whole_documents_retain_keyword_activation_and_source() {
 }
 
 #[test]
+fn chosen_player_combat_tax_public_source_choices_and_actual_block_population() {
+    use crate::game::combat::AttackTarget;
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use crate::types::ability::ChoiceType;
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::{CombatTaxContext, WaitingFor};
+    use crate::types::player::PlayerId;
+    const P2: PlayerId = PlayerId(2);
+    // Synthetic building-block text: the public block consumer sees actual attackers.
+    const SOURCE: &str = "As this creature enters, choose a player.\nThis creature can't block unless you pay {1} for each creature the chosen player controls that's attacking you.";
+    // CR 109.5 + CR 607.2d: each source owns its choice; You is its controller.
+    // CR 508.1k + CR 509.1d: attackers exist before block costs are locked.
+    for case in ["two sources", "zero population", "missing choice"] {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.state.active_player = P1;
+        scenario.at_phase(Phase::PreCombatMain);
+        for player in [P0, P1, P2] {
+            scenario.with_library_top(player, &["Island"; 8]);
+        }
+        // Missing authority is deliberately staged, not an unanswered positive producer.
+        let first = if case == "missing choice" {
+            scenario
+                .add_creature(P1, "Missing source choice", 1, 10)
+                .from_oracle_text(SOURCE)
+                .id()
+        } else {
+            scenario
+                .add_creature_to_hand_from_oracle(P1, "First chosen tax", 1, 10, SOURCE)
+                .id()
+        };
+        let second = if case == "two sources" {
+            Some(
+                scenario
+                    .add_creature_to_hand_from_oracle(P1, "Second chosen tax", 1, 10, SOURCE)
+                    .id(),
+            )
+        } else {
+            None
+        };
+        let attacks_you = [
+            scenario
+                .add_creature(P0, "First matching attacker", 1, 10)
+                .id(),
+            scenario
+                .add_creature(P0, "Second matching attacker", 1, 10)
+                .id(),
+        ];
+        let other_defender = scenario
+            .add_creature(P0, "Attacks another defender", 1, 10)
+            .id();
+        let nonattacker = scenario
+            .add_creature(P0, "Nonattacking sibling", 1, 10)
+            .id();
+        for _ in 0..5 {
+            scenario.add_creature(P2, "Unselected nonattacker", 1, 10);
+        }
+        let lands = (0..2)
+            .map(|_| scenario.add_basic_land(P1, ManaColor::White))
+            .collect::<Vec<_>>();
+        let mut runner = scenario.build();
+        let choices = if case == "missing choice" {
+            vec![]
+        } else {
+            let first_choice = if case == "two sources" { P0 } else { P2 };
+            let mut choices = vec![(first, first_choice)];
+            if let Some(second) = second {
+                choices.push((second, P2));
+            }
+            choices
+        };
+        for (source, player_choice) in choices {
+            runner.cast(source).resolve();
+            let WaitingFor::NamedChoice {
+                player,
+                choice_type,
+                options,
+                source: authority,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "required public as-enters player choice: {:?}",
+                    runner.state().waiting_for
+                )
+            };
+            assert_eq!(*player, P1);
+            assert!(matches!(choice_type, ChoiceType::Player { .. }));
+            assert!(authority.is_some());
+            assert_eq!(
+                options,
+                &vec!["0".to_string(), "1".to_string(), "2".to_string()]
+            );
+            runner
+                .act(GameAction::ChooseOption {
+                    choice: player_choice.0.to_string(),
+                })
+                .unwrap();
+            runner.advance_until_stack_empty();
+            assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+            assert_eq!(
+                crate::game::game_object::source_chosen_player(runner.state(), source),
+                Some(player_choice)
+            );
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
+        assert_eq!(
+            crate::game::game_object::source_chosen_player(runner.state(), first),
+            match case {
+                "two sources" => Some(P0),
+                "zero population" => Some(P2),
+                _ => None,
+            }
+        );
+        if let Some(second) = second {
+            assert_eq!(
+                crate::game::game_object::source_chosen_player(runner.state(), second),
+                Some(P2)
+            );
+        }
+        // Ordinary empty combats advance P1, then P2, to P0's attacking turn.
+        for active in [P1, P2] {
+            assert_eq!(runner.state().active_player, active);
+            runner.advance_to_combat();
+            runner.declare_attackers(&[]).unwrap();
+            runner.advance_to_phase(Phase::PreCombatMain);
+        }
+        assert_eq!(runner.state().active_player, P0);
+        runner.advance_to_combat();
+        let proposal = [
+            (attacks_you[0], AttackTarget::Player(P1)),
+            (attacks_you[1], AttackTarget::Player(P1)),
+            (other_defender, AttackTarget::Player(P2)),
+        ];
+        runner.declare_attackers(&proposal).unwrap();
+        runner.advance_to_phase(Phase::DeclareBlockers);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { player: P1, .. }
+        ));
+        let combat = runner.state().combat.as_ref().unwrap();
+        assert_eq!(combat.attackers.len(), 3);
+        for (id, target) in proposal {
+            let actual = combat
+                .attackers
+                .iter()
+                .find(|attacker| attacker.object_id == id)
+                .unwrap();
+            assert_eq!(actual.attack_target, target);
+        }
+        assert!(combat
+            .attackers
+            .iter()
+            .all(|attacker| attacker.object_id != nonattacker));
+        assert!(lands.iter().all(|id| !runner.state().objects[id].tapped));
+        assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+        let mut assignments = vec![(first, attacks_you[0])];
+        if let Some(second) = second {
+            assignments.push((second, attacks_you[1]));
+        }
+        runner.declare_blockers(&assignments).unwrap();
+        if case == "two sources" {
+            let WaitingFor::CombatTaxPayment {
+                player,
+                context,
+                total_cost,
+                per_creature,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "required chosen-player block tax prompt: {:?}",
+                    runner.state().waiting_for
+                )
+            };
+            assert_eq!(*player, P1);
+            assert_eq!(*context, CombatTaxContext::Blocking);
+            assert_eq!(*total_cost, ManaCost::generic(2));
+            // Total2 alone could hide an incorrect1+1 quote across the two sources.
+            assert_eq!(per_creature, &vec![(first, ManaCost::generic(2))]);
+            let combat = runner.state().combat.as_ref().unwrap();
+            assert!(combat.blocker_to_attacker.is_empty());
+            assert!(combat.blocker_assignments.is_empty());
+            let mut declined = GameRunner::from_state(runner.state().clone());
+            runner
+                .act(GameAction::PayCombatTax { accept: true })
+                .unwrap();
+            assert_eq!(
+                lands
+                    .iter()
+                    .filter(|id| runner.state().objects[id].tapped)
+                    .count(),
+                2
+            );
+            assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+            for (blocker, attacker) in &assignments {
+                assert_eq!(
+                    runner.state().combat.as_ref().unwrap().blocker_to_attacker[blocker],
+                    vec![*attacker]
+                );
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::DeclareBlockers { player: P2, .. }
+            ));
+            runner.declare_blockers(&[]).unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+
+            declined
+                .act(GameAction::PayCombatTax { accept: false })
+                .unwrap();
+            assert!(matches!(
+                declined.state().waiting_for,
+                WaitingFor::DeclareBlockers { player: P1, .. }
+            ));
+            assert!(lands.iter().all(|id| !declined.state().objects[id].tapped));
+            assert_eq!(declined.state().players[1].mana_pool.total(), 0);
+            let combat = declined.state().combat.as_ref().unwrap();
+            assert!(combat.blocker_to_attacker.is_empty());
+            assert!(combat.blocker_assignments.is_empty());
+            assert!(!combat.blockers_declared_by.contains(&P1));
+            declined.declare_blockers(&[]).unwrap();
+            assert!(matches!(
+                declined.state().waiting_for,
+                WaitingFor::DeclareBlockers { player: P2, .. }
+            ));
+            declined.declare_blockers(&[]).unwrap();
+            assert!(matches!(
+                declined.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(declined.state().stack.is_empty());
+            assert!(declined.state().resolution_stack.is_empty());
+        } else {
+            // Paired with the positive2 prompt above: no charge still commits a real block.
+            assert_eq!(
+                runner.state().combat.as_ref().unwrap().blocker_to_attacker[&first],
+                vec![attacks_you[0]]
+            );
+            assert!(lands.iter().all(|id| !runner.state().objects[id].tapped));
+            assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::DeclareBlockers { player: P2, .. }
+            ));
+            runner.declare_blockers(&[]).unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+        }
+    }
+}
+
+#[test]
 fn cowed_public_aura_attack_block_payment_and_live_hand() {
     use crate::game::combat::AttackTarget;
     use crate::game::scenario::{GameScenario, P0, P1};
@@ -344,7 +610,7 @@ fn cowed_public_aura_attack_block_payment_and_live_hand() {
                 .add_spell_to_hand(P0, "Cowed by Wisdom", false)
                 .as_enchantment()
                 .with_subtypes(vec!["Aura"])
-                .from_oracle_text(COWED)
+                .from_oracle_text_with_keywords(&["Enchant"], COWED)
                 .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
                 .id();
             let salves = (0..3)
@@ -705,7 +971,7 @@ fn cowed_public_source_host_control_and_independent_aura_sources() {
             .add_spell_to_hand(P0, "Cowed by Wisdom", false)
             .as_enchantment()
             .with_subtypes(vec!["Aura"])
-            .from_oracle_text(COWED)
+            .from_oracle_text_with_keywords(&["Enchant"], COWED)
             .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
             .id();
         let extra = if case == "two_sources" {
@@ -713,7 +979,7 @@ fn cowed_public_source_host_control_and_independent_aura_sources() {
                 .add_spell_to_hand(P1, "Cowed by Wisdom", false)
                 .as_enchantment()
                 .with_subtypes(vec!["Aura"])
-                .from_oracle_text(COWED)
+                .from_oracle_text_with_keywords(&["Enchant"], COWED)
                 .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
                 .id()
         } else {
@@ -736,7 +1002,7 @@ fn cowed_public_source_host_control_and_independent_aura_sources() {
                 .add_spell_to_hand(player, name, false)
                 .as_enchantment()
                 .with_subtypes(vec!["Aura"])
-                .from_oracle_text(oracle)
+                .from_oracle_text_with_keywords(&["Enchant"], oracle)
                 .with_mana_cost(parse_mtgjson_mana_cost(cost))
                 .id()
         };
@@ -982,7 +1248,7 @@ fn combat_tax_complete_atomic_wrapper_and_sentence_publication() {
         let mut doc = parse_oracle_ir(
             &text,
             "Tax source",
-            &[],
+            &["enchant".into()],
             &["Enchantment".into()],
             &["Aura".into()],
         );
@@ -5598,6 +5864,16 @@ fn melira_counter_prohibition_is_not_a_pump() {
 /// mis-split into a plain `CantBeSacrificed` — the terminal guard declines.
 #[test]
 fn cant_be_sacrificed_split_declines_qualified_tail() {
+    let bare = "Enchanted creature gets +1/+1 and can't be sacrificed.";
+    let valid = parse_static_line_multi(bare);
+    assert_eq!(valid.len(), 2);
+    assert_eq!(valid[0].mode, StaticMode::Continuous);
+    assert!(valid[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+    assert_eq!(valid[1].mode, StaticMode::Other("CantBeSacrificed".into()));
+    assert_eq!(valid[0].affected, valid[1].affected);
+    assert_eq!(parse_static_line(bare), Some(valid[0].clone()));
     let defs = parse_static_line_multi(
         "Enchanted creature gets +1/+1 and can't be sacrificed unless you pay 2 life.",
     );
@@ -5608,6 +5884,74 @@ fn cant_be_sacrificed_split_declines_qualified_tail() {
         "qualified \"unless …\" tail must make the split decline, got {:?}",
         defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
     );
+    for tail in [" unless you pay 2 life", " unless", " to cast spells"] {
+        let source = format!("Enchanted creature gets +1/+1 and can't be sacrificed{tail}.");
+        assert!(parse_static_line(&source).is_none(), "{source}");
+        assert!(parse_static_line_multi(&source).is_empty(), "{source}");
+        assert_complete_owned_static_refusal(&source);
+    }
+    let quoted = "Enchanted creature has \"This creature gets +1/+1 and can't be sacrificed.\".";
+    assert!(super::evasion::try_split_and_cant_be_sacrificed(quoted).is_none());
+    let quoted_defs = parse_static_line_multi(quoted);
+    assert_eq!(quoted_defs.len(), 1);
+    assert_eq!(quoted_defs[0].mode, StaticMode::Continuous);
+    assert!(!quoted_defs[0].modifications.is_empty());
+}
+
+// SHAPE: the refused transaction remains one inert, source-addressed gap.
+fn assert_complete_owned_static_refusal(source: &str) {
+    use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir};
+    use crate::parser::oracle_ir::doc::{
+        OracleNodeIr, OracleSourceSpan, UnsupportedAbilityCategory,
+    };
+    let text = format!("{source}\nDraw a card.");
+    let mut doc = parse_oracle_ir(
+        &text,
+        "Synthetic complete refusal",
+        &[],
+        &["Artifact".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, text);
+    assert_eq!(doc.items.len(), 2);
+    assert_eq!(doc.items[0].source.fragment(), Some(source));
+    assert_eq!(
+        doc.items[0].source.span(),
+        &OracleSourceSpan::exact(0, 0, 0, source.len(), 0)
+    );
+    let OracleNodeIr::Unsupported {
+        unsupported,
+        min_x_value,
+    } = &doc.items[0].node
+    else {
+        panic!("complete typed refusal: {doc:#?}")
+    };
+    assert_eq!(
+        unsupported.category,
+        UnsupportedAbilityCategory::StaticStructure
+    );
+    assert_eq!(unsupported.description, source);
+    assert_eq!(
+        unsupported.fragment,
+        format!("Static pattern matched but line failed static parser: {source}")
+    );
+    assert_eq!(*min_x_value, 0);
+    assert_ne!(doc.items[0].id, doc.items[1].id);
+    assert_eq!(doc.items[1].source.fragment(), Some("Draw a card."));
+    let parsed = lower_oracle_ir(&mut doc);
+    assert!(parsed.statics.is_empty());
+    assert_eq!(parsed.abilities.len(), 2);
+    assert_eq!(parsed.abilities[0].description.as_deref(), Some(source));
+    assert!(parsed.abilities[0].sub_ability.is_none());
+    assert_eq!(
+        parsed
+            .abilities
+            .iter()
+            .filter(|ability| crate::parser::oracle::has_unimplemented(ability))
+            .count(),
+        1
+    );
+    assert!(matches!(*parsed.abilities[1].effect, Effect::Draw { .. }));
 }
 
 /// CR 702.5: Consecrate Land — "Enchanted land has indestructible and can't be
@@ -14710,14 +15054,18 @@ fn attached_combat_bare_requirement_shape_preserves_outer_and_quoted_owners() {
                     &[],
                 );
                 assert!(document.statics.is_empty());
+                let diagnostic =
+                    format!("Static pattern matched but line failed static parser: {invalid}");
                 assert_eq!(
                     document
                         .abilities
                         .iter()
                         .filter_map(|ability| ability.effect.unimplemented_description())
                         .collect::<Vec<_>>(),
-                    vec![invalid.as_str()]
+                    vec![diagnostic.as_str()]
                 );
+                assert!(parse_static_line(&invalid).is_none());
+                assert_complete_owned_static_refusal(&invalid);
                 assert!(
                     document
                         .abilities
@@ -40455,7 +40803,13 @@ fn inverted_bare_self_declines_combined_two_mode_form() {
             .effect
             .unimplemented_description()
             .map(|text| text.trim_end_matches('.')),
-        Some(source.trim_end_matches('.'))
+        Some(
+            format!(
+                "Static pattern matched but line failed static parser: {}",
+                source.trim_end_matches('.')
+            )
+            .as_str()
+        )
     );
     assert!(refused.sub_ability.is_none());
 
@@ -40549,7 +40903,13 @@ fn inverted_bare_self_fails_closed_on_untypeable_condition() {
             .effect
             .unimplemented_description()
             .map(|text| text.trim_end_matches('.')),
-        Some(source.trim_end_matches('.'))
+        Some(
+            format!(
+                "Static pattern matched but line failed static parser: {}",
+                source.trim_end_matches('.')
+            )
+            .as_str()
+        )
     );
     assert!(refused.sub_ability.is_none());
 
@@ -45630,6 +45990,7 @@ fn u14_compound_subject_boundary() {
                 assert_eq!(defs[0].condition, defs[1].condition);
                 assert_eq!(defs[0].condition.is_some(), !prefix.is_empty());
                 assert_eq!(parse_static_line_multi(&text).len(), 2);
+                assert_eq!(parse_static_line(&text), Some(defs[0].clone()));
             }
         }
     }
@@ -45657,6 +46018,8 @@ fn u14_compound_subject_boundary() {
                 .all(u14_static_residual),
             "{text}"
         );
+        assert!(parse_static_line(text).is_none(), "{text}");
+        assert_complete_owned_static_refusal(text);
     }
 }
 
@@ -46862,6 +47225,12 @@ fn complete_static_modifier_leaves_preserve_types_costs_and_strict_boundaries() 
                 parse_static_line_multi(&invalid).is_empty(),
                 "failed prefix is not salvageable: {invalid}"
             );
+            assert!(parse_static_line(&invalid).is_none(), "{invalid}");
+            assert_complete_owned_static_refusal(&invalid);
+            let inverted = format!("As long as equipped creature is attacking, it {prefix} and must be blocked by {quality} if able.");
+            assert!(parse_static_line(&inverted).is_none(), "{inverted}");
+            assert!(parse_static_line_multi(&inverted).is_empty(), "{inverted}");
+            assert_complete_owned_static_refusal(&inverted);
         }
     }
     // A lure inside a quote remains in that acquired program, not on its host.

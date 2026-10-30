@@ -3227,7 +3227,90 @@ fn parse_static_line_multi_special_owners(text: &str) -> Option<Vec<StaticDefini
     if let Some(definitions) = try_split_grant_and_dual_gated_combat(&tp, &stripped) {
         return Some(definitions);
     }
-    None
+    parse_complete_static_transaction(text)
+}
+
+/// Bounded complete owners shared by the single and multi APIs. `None` leaves
+/// unrelated grammar alone; `Some(empty)` prevents weaker fallback publication.
+pub(super) fn parse_complete_static_transaction(text: &str) -> Option<Vec<StaticDefinition>> {
+    let stripped = strip_reminder_text(text);
+    // The existing sentence owner dispatches each complete member itself.
+    // A later sentence is not a qualifier on this transaction's final conjunct.
+    if split_static_sentences(&stripped).len() > 1 {
+        return None;
+    }
+    let lower = stripped.to_lowercase();
+    let tp = TextPair::new(&stripped, &lower);
+    if let Some(split) = try_split_inverted_as_long_as(&tp) {
+        let condition_lower = split.condition_text.to_lowercase();
+        if all_consuming(nom_condition::parse_attached_subject_combat_state)
+            .parse(condition_lower.as_str())
+            .is_ok()
+        {
+            let effect_lower = split.effect_text.to_lowercase();
+            let effect = TextPair::new(&split.effect_text, &effect_lower);
+            if let Some(predicate) =
+                nom_tag_tp(&effect, "it ").or_else(|| nom_tag_tp(&effect, "they "))
+            {
+                if super::grammar::split_attached_lure_conjunct(&predicate).is_some()
+                    || split_outer_bare_blocking_requirement(&predicate).is_some()
+                {
+                    return Some(try_parse_inverted_attached_combat_grant(&split, &stripped));
+                }
+            }
+        }
+        let canonical_lower = split.canonical.to_lowercase();
+        if let Some(mut definitions) = super::evasion::parse_compound_subject_keyword_static_owned(
+            &split.canonical,
+            &canonical_lower,
+        ) {
+            let Some(condition) = parse_static_condition(&split.condition_text)
+                .filter(|condition| !condition.contains_unrecognized())
+            else {
+                return Some(Vec::new());
+            };
+            for definition in &mut definitions {
+                if definition.condition.is_none() {
+                    definition.condition = Some(condition.clone());
+                }
+                definition.description = Some(stripped.to_string());
+            }
+            return Some(definitions);
+        }
+    }
+    if let Some(definitions) =
+        super::evasion::parse_compound_subject_keyword_static_owned(&stripped, &lower)
+    {
+        return Some(definitions);
+    }
+    if let Some(definitions) = try_split_and_cant_be_sacrificed(&stripped) {
+        return Some(definitions);
+    }
+    let (affected, predicate) = attached_subject_filter(&tp)?;
+    let predicate_lower = predicate.to_lowercase();
+    let predicate_tp = TextPair::new(predicate, &predicate_lower);
+    if super::grammar::split_attached_lure_conjunct(&predicate_tp).is_some() {
+        return Some(super::grammar::parse_enchanted_equipped_predicate(
+            predicate, affected, &stripped,
+        ));
+    }
+    let (prefix, rule) = split_outer_bare_blocking_requirement(&predicate_tp)?;
+    let mut definitions = Vec::new();
+    if !prefix.trim().is_empty() {
+        let Some(modifications) =
+            super::keyword_grant::parse_complete_continuous_modifications(prefix)
+        else {
+            return Some(Vec::new());
+        };
+        definitions.push(
+            StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(modifications)
+                .description(stripped.to_string()),
+        );
+    }
+    definitions.push(lower_rule_static(rule, None, affected, &stripped));
+    Some(definitions)
 }
 
 fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {

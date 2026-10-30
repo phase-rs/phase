@@ -466,6 +466,16 @@ pub(crate) fn parse_compound_subject_keyword_static(
     text: &str,
     lower: &str,
 ) -> Option<Vec<StaticDefinition>> {
+    parse_compound_subject_keyword_static_owned(text, lower)
+        .filter(|definitions| !definitions.is_empty())
+}
+
+/// Keep recognition separate from semantic success: a mixed population cannot
+/// fall back to an executable grant on only its object or player half.
+pub(crate) fn parse_compound_subject_keyword_static_owned(
+    text: &str,
+    lower: &str,
+) -> Option<Vec<StaticDefinition>> {
     let input = TextPair::new(text, lower);
 
     // Optional leading turn window (Gruul Spellbreaker class).
@@ -491,7 +501,7 @@ pub(crate) fn parse_compound_subject_keyword_static(
     // Locate the continuous predicate verb ("have"/"has"/"gain"/"gains"/…) so
     // the object subject can be any phrase `parse_rule_static_subject_filter`
     // understands — not a hard-coded controller-phrase alt list.
-    let mut object_def = parse_continuous_subject_predicate(&after_you, |subject, predicate| {
+    let object_def = parse_continuous_subject_predicate(&after_you, |subject, predicate| {
         let affected = if multi_object {
             parse_oxford_object_conjuncts(subject)?
         } else {
@@ -502,7 +512,13 @@ pub(crate) fn parse_compound_subject_keyword_static(
             filter
         };
         super::anthem::parse_complete_continuous_predicate(predicate, affected, text)
-    })?;
+    });
+    let Some(mut object_def) = object_def else {
+        // A subject-relative "have" is not the enclosing predicate. Preserve
+        // the incumbent successful scan before recognizing a refused shape.
+        parse_continuous_subject_predicate(&after_you, |_, _| Some(()))?;
+        return Some(Vec::new());
+    };
 
     // Derive the player-half mode from the granted keyword. Only player-
     // applicable keyword modes claim this pattern.
@@ -517,7 +533,10 @@ pub(crate) fn parse_compound_subject_keyword_static(
             keyword: crate::types::keywords::Keyword::Shroud,
         } => Some(StaticMode::Shroud),
         _ => None,
-    })?;
+    });
+    let Some(player_mode) = player_mode else {
+        return Some(Vec::new());
+    };
 
     // Propagate leading turn-window / trailing as-long-as gates onto both halves
     // so the compound grant stays time-locked as one continuous effect (CR 611.3a).
@@ -1662,20 +1681,24 @@ pub(crate) fn try_split_and_cant_be_sacrificed(text: &str) -> Option<Vec<StaticD
     type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
 
-    let (before, _matched, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
-        // Match both the ASCII and typographic U+2019 apostrophe.
-        alt((
-            tag::<_, _, VE>("and can't be sacrificed"),
-            tag::<_, _, VE>("and can\u{2019}t be sacrificed"),
-        ))
-        .parse(i)
-    })?;
+    let tp = TextPair::new(text, &lower);
+    let (before, rest) = tp.scan_around_outside_quotes(
+        |i: &str| {
+            // Match both the ASCII and typographic U+2019 apostrophe.
+            alt((
+                tag::<_, _, VE>("and can't be sacrificed"),
+                tag::<_, _, VE>("and can\u{2019}t be sacrificed"),
+            ))
+            .parse(i)
+        },
+        |before, _, rest| Some((before.original, rest.original)),
+    )?;
 
     // Only the bare, terminal "can't be sacrificed" is a plain prohibition. A
-    // remaining tail ("unless …", "to …") is a qualified restriction owned by
-    // another branch — decline so we don't mis-split it.
+    // remaining tail ("unless …", "to …") refuses this complete transaction;
+    // later generic owners must not salvage the unqualified prohibition.
     if !rest.trim_start().trim_end_matches('.').trim().is_empty() {
-        return None;
+        return Some(Vec::new());
     }
 
     let cut_end = before
@@ -1684,13 +1707,15 @@ pub(crate) fn try_split_and_cant_be_sacrificed(text: &str) -> Option<Vec<StaticD
     let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
     let mut defs = parse_static_line_multi(&line_a);
     if defs.is_empty() {
-        return None;
+        return Some(Vec::new());
     }
     for def in &mut defs {
         def.description = Some(text.to_string());
     }
 
-    let affected = defs[0].affected.clone()?;
+    let Some(affected) = defs[0].affected.clone() else {
+        return Some(Vec::new());
+    };
     defs.push(
         StaticDefinition::new(StaticMode::Other("CantBeSacrificed".to_string()))
             .affected(affected)

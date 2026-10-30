@@ -243,7 +243,12 @@ pub(crate) fn parse_static_line_ir(text: &str) -> Option<StaticIr> {
 
 /// Raw fallback for the multi dispatcher: never retry an ability-word frame here.
 fn parse_static_line_unframed_ir(text: &str) -> Option<StaticIr> {
-    let definition = parse_static_line_inner(text, InvertedAsLongAs::Allow)?;
+    // Share the bounded complete transaction with multi dispatch, including its
+    // owned empty refusal, before a single-result fallback can salvage a prefix.
+    let definition = match shared::parse_complete_static_transaction(text) {
+        Some(definitions) => definitions.into_iter().next()?,
+        None => parse_static_line_inner(text, InvertedAsLongAs::Allow)?,
+    };
     Some(StaticIr::from_definition(text, definition))
 }
 

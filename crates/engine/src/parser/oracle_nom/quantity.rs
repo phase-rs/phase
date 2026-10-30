@@ -3244,6 +3244,62 @@ mod complete_publication_quantity_tests {
     use crate::types::card_type::Supertype;
 
     #[test]
+    fn controlled_combat_population_keeps_controller_defender_and_complete_relative() {
+        // SHAPE: the live population retains the source-relative defender.
+        for (controller_text, controller) in [
+            (
+                "the chosen player controls",
+                ControllerRef::SourceChosenPlayer,
+            ),
+            ("you control", ControllerRef::You),
+        ] {
+            let source = format!("creature {controller_text} that's attacking you");
+            let expected = QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(controller)
+                        .properties(vec![FilterProp::Attacking {
+                            defender: Some(ControllerRef::You),
+                        }]),
+                ),
+            };
+            assert_eq!(
+                parse_qualified_controlled_type(&source).unwrap(),
+                ("", expected.clone())
+            );
+            assert_eq!(
+                parse_for_each_clause_ref_complete_deferred(&format!("for each {source}"))
+                    .unwrap()
+                    .1,
+                expected
+            );
+            for suffix in [
+                "that's attacking a",
+                "that's attacking an unknown defender",
+                "that's",
+                "that dances",
+            ] {
+                let invalid = format!("for each creature {controller_text} {suffix}");
+                assert!(
+                    parse_for_each_clause_ref_complete_deferred(&invalid).is_err(),
+                    "{invalid}"
+                );
+            }
+        }
+        for controller in [
+            "that player controls",
+            "controlled by that player",
+            "you controlled",
+        ] {
+            let invalid = format!("for each creature {controller} that's attacking you");
+            assert!(
+                parse_for_each_clause_ref_complete_deferred(&invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
     fn relative_populations_keep_complete_nouns_zones_and_remainders() {
         // SHAPE: CR 109.2 + CR 109.2a: head and relative union intersect.
         let types = vec![
@@ -3471,12 +3527,21 @@ fn parse_qualified_controlled_type(input: &str) -> OracleResult<'_, QuantityRef>
     let rest = if crate::parser::oracle_target::parse_relative_clause_intro(relative_input)
         .is_some_and(|(_, _, negated)| !negated)
     {
-        let (rest, relative) =
-            cut(crate::parser::oracle_target::parse_relative_card_filter).parse(relative_input)?;
-        filter = TargetFilter::And {
-            filters: vec![filter, relative],
-        };
-        rest
+        if let Some((properties, consumed)) =
+            crate::parser::oracle_target::parse_that_clause_suffix(relative_input, None)
+        {
+            for property in properties {
+                attach_property_to_quantity_filter(&mut filter, property);
+            }
+            &relative_input[consumed..]
+        } else {
+            let (rest, relative) = cut(crate::parser::oracle_target::parse_relative_card_filter)
+                .parse(relative_input)?;
+            filter = TargetFilter::And {
+                filters: vec![filter, relative],
+            };
+            rest
+        }
     } else {
         rest
     };
