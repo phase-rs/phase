@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EMPTY_DRAFT_POOL_GROUPS } from "../draft-adapter";
 import { ServerDraftAdapter } from "../server-draft-adapter";
@@ -1779,5 +1779,386 @@ describe("ServerDraftAdapter game-command correlation", () => {
         seat.dispose();
       }
     });
+  });
+});
+
+describe("draft attachment settlement", () => {
+  const settings = {
+    displayName: "Alice",
+    setCodes: ["MKM"],
+    kind: "Premier" as const,
+    public: true,
+    tournamentFormat: "Swiss" as const,
+    podPolicy: "Competitive" as const,
+    podSize: 8,
+  };
+  const credentials = { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 };
+  const lobbyHello = JSON.stringify({
+    ...JSON.parse(SERVER_HELLO),
+    data: { ...JSON.parse(SERVER_HELLO).data, mode: "LobbyOnly" },
+  });
+  let adapter: ServerDraftAdapter;
+  let established: MockWebSocket;
+
+  function frames(ws: MockWebSocket): string[] {
+    return ws.send.mock.calls.map(([raw]) => {
+      // Outbound frames are authored by the adapter, not external input.
+      const frame: { type: string } = JSON.parse(raw as string);
+      return frame.type;
+    });
+  }
+
+  function start(kind: "create" | "reconnect"): () => Promise<unknown> {
+    return trackRejection(kind === "create" ? adapter.createDraft(settings) : adapter.reconnectDraft());
+  }
+
+  function reply(ws: MockWebSocket, kind: "create" | "reconnect"): void {
+    expect(ws.onmessage).toBeTypeOf("function");
+    if (kind === "create") receive(ws, "DraftCreated", credentials);
+    else receive(ws, "DraftStateUpdate", { view: createMockDraftView() });
+  }
+
+  beforeEach(async () => {
+    adapter = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const created = adapter.createDraft(settings);
+    established = await completeHandshake();
+    receive(established, "DraftCreated", credentials);
+    await created;
+  });
+
+  afterEach(() => {
+    adapter.dispose();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("1 resolves draft-only reconnect after installing its view and phase", async () => {
+    const read = start("reconnect");
+    const ws = await completeHandshake();
+    expect(frames(ws)).toContain("ReconnectDraft");
+    const view = createMockDraftView({ status: "Deckbuilding" });
+    receive(ws, "DraftStateUpdate", { view });
+    expect(await read()).toEqual({ resolvedWith: undefined });
+    expect(adapter.currentDraftView).toEqual(view);
+    expect(adapter.currentPhase).toBe("deckbuilding");
+  });
+
+  it("2 waits through match progress until the reconnect draft update", async () => {
+    const read = start("reconnect");
+    const ws = await completeHandshake();
+    enterAcceptedFullMatch(adapter, ws);
+    expect(await read()).toBe("never settled");
+    receive(ws, "DraftStateUpdate", { view: createMockDraftView({ status: "MatchInProgress" }) });
+    expect(await read()).toEqual({ resolvedWith: undefined });
+    expect(adapter.currentPhase).toBe("match");
+  });
+
+  it("4 rejects once then accepts authoritative state without closing transport", async () => {
+    const events = vi.fn();
+    adapter.onEvent(events);
+    const read = start("reconnect");
+    const ws = await completeHandshake();
+    receive(ws, "DraftActionRejected", { reason: "seat already reattached" });
+    const rejected = await read();
+    expect(rejected).toMatchObject({
+      code: "ACTION_REJECTED", message: "seat already reattached", recoverable: true,
+    });
+    const view = createMockDraftView({ status: "Deckbuilding" });
+    receive(ws, "DraftStateUpdate", { view });
+    expect(await read()).toBe(rejected);
+    expect(adapter.currentDraftView).toEqual(view);
+    expect(adapter.currentPhase).toBe("deckbuilding");
+    expect(events).toHaveBeenCalledWith({ type: "draftViewUpdated", view });
+    expect(ws.close).not.toHaveBeenCalled();
+  });
+
+  it.each(["create", "reconnect"] as const)("%s C2/5 rejects LobbyOnly Error and retains the error event", async (kind) => {
+    const events = vi.fn();
+    adapter.onEvent(events);
+    const read = start(kind);
+    const ws = await completeHandshake(lobbyHello);
+    expect(frames(ws)).toContain(kind === "create" ? "CreateDraftWithSettings" : "ReconnectDraft");
+    receive(ws, "Error", { message: "Drafts unavailable in LobbyOnly mode" });
+    expect(await read()).toMatchObject({
+      code: "WS_ERROR", message: "Drafts unavailable in LobbyOnly mode",
+    });
+    expect(events).toHaveBeenCalledWith({ type: "error", message: "Drafts unavailable in LobbyOnly mode" });
+  });
+
+  it("C1 rejects create on DraftActionRejected", async () => {
+    const read = start("create");
+    const ws = await completeHandshake();
+    receive(ws, "DraftActionRejected", { reason: "invalid pod" });
+    expect(await read()).toMatchObject({ code: "ACTION_REJECTED", message: "invalid pod", recoverable: true });
+  });
+
+  it.each([
+    ["create", "create"], ["create", "reconnect"],
+    ["reconnect", "create"], ["reconnect", "reconnect"],
+  ] as const)("6 supersedes %s with %s without retiring a sent socket", async (firstKind, nextKind) => {
+    const first = start(firstKind);
+    const a = await completeHandshake();
+    const next = start(nextKind);
+    expect(await first()).toMatchObject({ code: "WS_CLOSED", message: expect.stringMatching(/supersed/i), recoverable: true });
+    expect(a.close).not.toHaveBeenCalled();
+    const b = await completeHandshake();
+    receive(b, nextKind === "create" ? "DraftStateUpdate" : "DraftCreated",
+      nextKind === "create" ? { view: createMockDraftView() } : credentials);
+    expect(await next()).toBe("never settled");
+    reply(b, nextKind);
+    expect(await next()).toEqual({ resolvedWith: undefined });
+  });
+
+  it("7a closes a queued successful handshake without late hello or setup", async () => {
+    const events = vi.fn();
+    adapter.onEvent(events);
+    const first = start("reconnect");
+    const a = MockWebSocket.last!;
+    expect(a.onmessage).toBeTypeOf("function");
+    a.dispatchSynthetic("message", SERVER_HELLO);
+    const next = start("create");
+    const b = await completeHandshake();
+    expect(frames(a)).toEqual(["ClientHello"]);
+    expect(a.close).toHaveBeenCalled();
+    expect(events.mock.calls.filter(([event]) => event.type === "serverHello")).toHaveLength(1);
+    expect(await first()).toMatchObject({ message: expect.stringMatching(/supersed/i) });
+    reply(b, "create");
+    expect(await next()).toEqual({ resolvedWith: undefined });
+  });
+
+  it("7b queued handshake failure cannot reject its replacement", async () => {
+    const first = start("reconnect");
+    const a = MockWebSocket.last!;
+    expect(a.onerror).toBeTypeOf("function");
+    a.onerror!();
+    const next = start("create");
+    const b = await completeHandshake();
+    expect(await next()).toBe("never settled");
+    expect(await first()).toMatchObject({ message: expect.stringMatching(/supersed/i) });
+    reply(b, "create");
+    expect(await next()).toEqual({ resolvedWith: undefined });
+  });
+
+  it.each(["DraftStateUpdate", "DraftActionRejected"] as const)(
+    "8a stale %s does not settle the current reconnect",
+    async (type) => {
+      const read = start("reconnect");
+      const b = await completeHandshake();
+      expect(established.onmessage).toBeTypeOf("function");
+      const staleView = createMockDraftView({ pick_number: 9 });
+      receive(established, type, type === "DraftStateUpdate" ? { view: staleView } : { reason: "old failure" });
+      expect(await read()).toBe("never settled");
+      if (type === "DraftStateUpdate") expect(adapter.currentDraftView).toEqual(staleView);
+      reply(b, "reconnect");
+      expect(await read()).toEqual({ resolvedWith: undefined });
+    },
+  );
+
+  it.each(["error", "close"] as const)("8b/8c stale %s preserves current init", async (type) => {
+    const events = vi.fn();
+    adapter.onEvent(events);
+    const read = start("reconnect");
+    const b = await completeHandshake();
+    const callback = type === "error" ? established.onerror : established.onclose;
+    expect(callback).toBeTypeOf("function");
+    callback!();
+    expect(await read()).toBe("never settled");
+    expect(events).not.toHaveBeenCalledWith({ type: "disconnected" });
+    reply(b, "reconnect");
+    expect(await read()).toEqual({ resolvedWith: undefined });
+  });
+
+  it("10 listener exception rejects its owner and closes the incomplete installed socket", async () => {
+    const sentinel = new Error("hello listener sentinel");
+    adapter.onEvent((event) => { if (event.type === "serverHello") throw sentinel; });
+    const read = start("reconnect");
+    const ws = await completeHandshake();
+    expect(await read()).toBe(sentinel);
+    expect(ws.close).toHaveBeenCalled();
+    expect(frames(ws)).toEqual(["ClientHello"]);
+    expect(await trackRejection(adapter.submitPick("after-listener-failure"))()).toMatchObject({ code: "WS_CLOSED" });
+  });
+
+  it("11 reentrant hello replacement closes A without sending its setup", async () => {
+    let next: (() => Promise<unknown>) | undefined;
+    const off = adapter.onEvent((event) => {
+      if (event.type === "serverHello") {
+        off();
+        next = start("create");
+      }
+    });
+    const first = start("reconnect");
+    const a = MockWebSocket.last!;
+    await completeHandshake();
+    expect(frames(a)).toEqual(["ClientHello"]);
+    expect(a.close).toHaveBeenCalled();
+    expect(await first()).toMatchObject({ message: expect.stringMatching(/supersed/i) });
+    expect(next).toBeTypeOf("function");
+    const b = await completeHandshake();
+    reply(b, "create");
+    expect(await next!()).toEqual({ resolvedWith: undefined });
+  });
+
+  it("J1 opening reconnect is superseded by join", async () => {
+    const first = start("reconnect");
+    const a = MockWebSocket.last!;
+    const join = trackRejection(adapter.joinDraft("NEXT12", "Alice"));
+    const b = await completeHandshake();
+    expect(await first()).toMatchObject({ message: expect.stringMatching(/supersed/i) });
+    expect(a.close).toHaveBeenCalled();
+    const view = createMockDraftView();
+    receive(b, "DraftJoined", { ...credentials, view });
+    expect(await join()).toEqual({ resolvedWith: view });
+  });
+
+  it.each(["success", "failure"] as const)("J2 sent join survives replacement reconnect %s", async (outcome) => {
+    const join = trackRejection(adapter.joinDraft("NEXT12", "Alice"));
+    const j = await completeHandshake();
+    expect(frames(j)).toContain("JoinDraftWithPassword");
+    const read = start("reconnect");
+    const b = await completeHandshake();
+    if (outcome === "failure") {
+      receive(b, "Error", { message: "reconnect failed" });
+      expect(await read()).toMatchObject({ code: "WS_ERROR", message: "reconnect failed" });
+      expect(await join()).toBe("never settled");
+    }
+    const view = createMockDraftView({ pick_number: 3 });
+    receive(j, "DraftJoined", { ...credentials, view });
+    expect(await join()).toEqual({ resolvedWith: view });
+    expect(j.close).not.toHaveBeenCalled();
+    if (outcome === "success") {
+      expect(await read()).toBe("never settled");
+      reply(b, "reconnect");
+      expect(await read()).toEqual({ resolvedWith: undefined });
+    }
+  });
+
+  it("J3 opening join is cancelled by reconnect without rejecting the replacement", async () => {
+    const join = trackRejection(adapter.joinDraft("NEXT12", "Alice"));
+    const j = MockWebSocket.last!;
+    const read = start("reconnect");
+    const b = await completeHandshake();
+    expect(await join()).toMatchObject({ message: expect.stringMatching(/supersed/i) });
+    expect(j.close).toHaveBeenCalled();
+    reply(b, "reconnect");
+    expect(await read()).toEqual({ resolvedWith: undefined });
+  });
+
+  it("J4 join stays cancellable during its hello notification", async () => {
+    let created: (() => Promise<unknown>) | undefined;
+    const off = adapter.onEvent((event) => {
+      if (event.type === "serverHello") {
+        off();
+        created = start("create");
+      }
+    });
+    const join = trackRejection(adapter.joinDraft("NEXT12", "Alice"));
+    const j = MockWebSocket.last!;
+    await completeHandshake();
+    expect(await join()).toMatchObject({ message: expect.stringMatching(/supersed/i) });
+    expect(frames(j)).toEqual(["ClientHello"]);
+    expect(j.close).toHaveBeenCalled();
+    expect(created).toBeTypeOf("function");
+    const b = await completeHandshake();
+    reply(b, "create");
+    expect(await created!()).toEqual({ resolvedWith: undefined });
+  });
+
+  it.each(["create", "reconnect", "join"] as const)("L1 dispose fences queued %s continuation", async (kind) => {
+    const read = kind === "join"
+      ? trackRejection(adapter.joinDraft("NEXT12", "Alice"))
+      : start(kind);
+    const a = MockWebSocket.last!;
+    expect(a.onmessage).toBeTypeOf("function");
+    a.dispatchSynthetic("message", SERVER_HELLO);
+    adapter.dispose();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(frames(a)).toEqual(["ClientHello"]);
+    expect(a.close).toHaveBeenCalled();
+    expect(await read()).toMatchObject({ code: "WS_CLOSED", message: expect.stringMatching(/disposed/) });
+  });
+
+  it("H1 preserves reconnect handshake timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      let outcome: unknown = "never settled";
+      void adapter.reconnectDraft().then(
+        (value) => { outcome = { resolvedWith: value }; },
+        (error) => { outcome = error; },
+      );
+      const ws = MockWebSocket.last!;
+      expect(ws.onmessage).toBeTypeOf("function");
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(outcome).toMatchObject({ code: "WS_ERROR", message: expect.stringMatching(/5000ms/), recoverable: true });
+      expect(ws.close).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("H3 preserves reconnect websocket error before hello", async () => {
+    const read = start("reconnect");
+    const ws = MockWebSocket.last!;
+    expect(ws.onerror).toBeTypeOf("function");
+    ws.onerror!();
+    expect(await read()).toMatchObject({ code: "WS_ERROR", message: "WebSocket error during handshake", recoverable: true });
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it.each(["error", "close"] as const)("H4 preserves current installed reconnect %s failure", async (type) => {
+    const read = start("reconnect");
+    const ws = await completeHandshake();
+    expect(frames(ws)).toContain("ReconnectDraft");
+    const callback = type === "error" ? ws.onerror : ws.onclose;
+    expect(callback).toBeTypeOf("function");
+    callback!();
+    expect(await read()).toMatchObject({ code: type === "error" ? "WS_ERROR" : "WS_CLOSED", recoverable: true });
+  });
+
+  it("P1 reconnect handshake failure does not reject a sent pick", async () => {
+    const pick = trackRejection(adapter.submitPick("card-1"));
+    expect(frames(established)).toContain("DraftAction");
+    const read = start("reconnect");
+    const failed = MockWebSocket.last!;
+    expect(failed.onerror).toBeTypeOf("function");
+    failed.onerror!();
+    expect(await read()).toMatchObject({ code: "WS_ERROR" });
+    expect(await pick()).toBe("never settled");
+    const view = createMockDraftView({ pick_number: 4 });
+    receive(established, "DraftStateUpdate", { view });
+    expect(await pick()).toEqual({ resolvedWith: view });
+  });
+
+  it("P2 reconnect setup failure detaches before close and preserves a sent pick", async () => {
+    const pick = trackRejection(adapter.submitPick("card-1"));
+    const read = start("reconnect");
+    const failed = MockWebSocket.last!;
+    let installedHandlers = false;
+    failed.close.mockImplementation(() => failed.dispatchSynthetic("close"));
+    failed.send.mockImplementation((raw: string) => {
+      const frame: { type: string } = JSON.parse(raw);
+      if (frame.type === "ReconnectDraft") {
+        installedHandlers = typeof failed.onclose === "function" && typeof failed.onerror === "function";
+        throw new Error("setup send sentinel");
+      }
+    });
+    await completeHandshake();
+    expect(installedHandlers).toBe(true);
+    expect(await pick()).toBe("never settled");
+    expect(await read()).toMatchObject({ code: "WS_CLOSED", message: "Failed to send setup frame" });
+    expect(failed.close).toHaveBeenCalled();
+    const view = createMockDraftView({ pick_number: 5 });
+    receive(established, "DraftStateUpdate", { view });
+    expect(await pick()).toEqual({ resolvedWith: view });
+  });
+
+  it("P3 reconnect without credentials rejects without opening a socket", async () => {
+    adapter.dispose();
+    const last = MockWebSocket.last;
+    expect(await trackRejection(adapter.reconnectDraft())()).toMatchObject({
+      code: "WS_ERROR", message: "No draft session to reconnect to", recoverable: false,
+    });
+    expect(MockWebSocket.last).toBe(last);
   });
 });
