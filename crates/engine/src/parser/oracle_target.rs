@@ -3359,6 +3359,11 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     // or a Y" clause the condition layer folds one level up (which must stay as
     // `parse_type_phrase_folding` remainder — `parse_type_phrase_leaves_article_led_or_rhs_as_remainder`).
     let mut left_card_suffix = false;
+    // Whether the left leg names its own head noun — a typed qualifier followed by
+    // "spell(s)"/"card(s)" ("artifact spells"), or a bare "spells"/"cards" head
+    // (`TypeFilter::Card`). Such a leg is a complete noun phrase, so its leading
+    // adjectives do not distribute onto a following conjunct.
+    let mut left_head_noun = matches!(card_type, Some(TypeFilter::Card));
     if card_type.is_some() && !matches!(card_type, Some(TypeFilter::Card) | Some(TypeFilter::Any)) {
         let rest_trimmed = lower[pos..].trim_start();
         let ws_len = lower[pos..].len() - rest_trimmed.len();
@@ -3381,6 +3386,7 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
                 pos += ws_len + suffix_len;
                 consumed_suffix = true;
                 left_card_suffix = *is_card;
+                left_head_noun = true;
                 break;
             }
         }
@@ -3395,6 +3401,7 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
                 if rest_trimmed == *suffix {
                     pos += ws_len + suffix.len();
                     left_card_suffix = *is_card;
+                    left_head_noun = true;
                     break;
                 }
             }
@@ -3541,6 +3548,14 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
                 let mut left_extras = std::mem::take(&mut adjective_type_filters);
                 left_extras.append(&mut extra_core_type_filters);
                 left_extras.append(&mut neg_type_filters);
+                // The right leg repeats the left leg's head type ("enchanted
+                // creatures and enchantment creatures" — Inspire Awe; "legendary
+                // creatures and artifact creatures"): the left noun is stated in
+                // both legs, so the left leg is a complete noun phrase too.
+                let right_repeats_left_head = card_type
+                    .as_ref()
+                    .filter(|head| !matches!(head, TypeFilter::Card | TypeFilter::Any))
+                    .is_some_and(|head| leading_leg_type_filters(&other_filter).contains(head));
                 let left = typed(
                     card_type.unwrap_or(TypeFilter::Any),
                     subtype,
@@ -3558,18 +3573,27 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
                 // artifact creature to be red — distributing `HasColor(Red)` would
                 // wrongly reject a colorless artifact creature. A bare disjunct
                 // ("… or creature") shares the left adjectives, unchanged.
+                //
+                // The same holds when each leg states its own head noun: in
+                // "legendary spells and artifact spells" (Gandalf the White) each
+                // leg repeats "spells", and in "enchanted creatures and
+                // enchantment creatures" (Inspire Awe) each repeats "creatures",
+                // so the left adjective qualifies only the left noun. Only an
+                // elided head noun ("legendary creature and planeswalker
+                // spells") lets the adjective distribute across the list.
                 let right_is_article_led = alt((tag::<_, _, OracleError<'_>>("an "), tag("a ")))
                     .parse(after_trimmed)
                     .is_ok();
-                let shared_props: Vec<FilterProp> = if right_is_article_led {
-                    properties
-                        .iter()
-                        .filter(|prop| !is_adjective_prefix_prop(prop))
-                        .cloned()
-                        .collect()
-                } else {
-                    properties.clone()
-                };
+                let shared_props: Vec<FilterProp> =
+                    if right_is_article_led || left_head_noun || right_repeats_left_head {
+                        properties
+                            .iter()
+                            .filter(|prop| !is_adjective_prefix_prop(prop))
+                            .cloned()
+                            .collect()
+                    } else {
+                        properties.clone()
+                    };
                 return (finalize_or_disjunction(combined, &shared_props), final_rest);
             }
         }
@@ -5228,6 +5252,20 @@ pub(super) fn distribute_shared_properties(
                 .collect(),
         },
         other => other,
+    }
+}
+
+/// The type filters of the first leg of a type-union right-hand side: the filter itself when it
+/// is `Typed`, the first disjunct of an `Or`, and none otherwise.
+fn leading_leg_type_filters(filter: &TargetFilter) -> &[TypeFilter] {
+    match filter {
+        TargetFilter::Typed(typed) => &typed.type_filters,
+        // A leg carrying a non-property suffix ("... with the chosen name") lowers to an
+        // `And` whose first member is the typed head.
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.first().map_or(&[], leading_leg_type_filters)
+        }
+        _ => &[],
     }
 }
 

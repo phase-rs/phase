@@ -99,7 +99,7 @@ pub(super) fn dispatch_line_nom(
 mod tests {
     use super::*;
     use crate::types::ability::{Effect, MultiTargetSpec};
-    use crate::types::game_state::DistributionUnit;
+    use crate::types::game_state_kinds::DistributionUnit;
 
     /// Issue #4266 regression: `dispatch_line_nom` was returning `*def.effect`,
     /// discarding `distribute` and `multi_target` from the parsed

@@ -3343,7 +3343,6 @@ impl ZoneRef {
     /// compile here rather than silently reading as "some other zone" at a call
     /// site that pattern-matched only the four it knew about.
     pub fn zone(&self) -> crate::types::zones::Zone {
-        use crate::types::zones::Zone;
         match self {
             ZoneRef::Graveyard => Zone::Graveyard,
             ZoneRef::Exile => Zone::Exile,
@@ -8029,6 +8028,133 @@ impl FilterProp {
     pub fn same_kind(&self, other: &Self) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
     }
+
+    /// True when this property restricts membership to a resolution-chain
+    /// tracked set, at any nesting depth. See
+    /// [`TargetFilter::references_tracked_set`](TargetFilter::references_tracked_set).
+    /// Reference/comparison sub-filters (`DifferentNameFrom`, `DistinctFrom`,
+    /// `SharesQuality`, `Targets`, `TargetsOnly`, `CanEnchant`) are
+    /// deliberately NOT traversed: they compare against their inner filter
+    /// rather than restricting the outer population to it, so recursing into
+    /// them would under-refuse (a "different name from the tracked ones"
+    /// population is, by construction, not the tracked set).
+    pub fn references_tracked_set(&self) -> bool {
+        match self {
+            FilterProp::InTrackedSet { .. } => true,
+            FilterProp::Not { prop } => prop.references_tracked_set(),
+            FilterProp::AnyOf { props } => props.iter().any(FilterProp::references_tracked_set),
+            // Reference/comparison sub-filters: the inner filter is compared
+            // against, not a membership restriction — see the fn docs.
+            FilterProp::DifferentNameFrom { .. }
+            | FilterProp::DistinctFrom { .. }
+            | FilterProp::SharesQuality { .. }
+            | FilterProp::Targets { .. }
+            | FilterProp::TargetsOnly { .. }
+            | FilterProp::CanEnchant { .. } => false,
+            // Player-axis sub-structure: a controller quality
+            // (`ControllerMatches`) or a historical action scoped by a player
+            // recipient (`DealtDamageThisTurn`) is never object-set
+            // membership, even when the inner player predicate counts objects.
+            FilterProp::ControllerMatches { .. } | FilterProp::DealtDamageThisTurn { .. } => false,
+            // Quantity-threshold predicates: a number read from a tracked set
+            // (`Cmc`, `Counters`, `PtComparison`) is a comparison value, not
+            // a membership restriction.
+            FilterProp::Counters { .. }
+            | FilterProp::Cmc { .. }
+            | FilterProp::PtComparison { .. } => false,
+            // Every remaining variant is a leaf over scalars, enums, zones,
+            // costs, names, or counters: none of it can name a tracked set.
+            // Exhaustive by construction — a new variant fails to compile
+            // here rather than silently reading as "some other prop".
+            FilterProp::Token
+            | FilterProp::NonToken
+            | FilterProp::RepresentedByCard
+            | FilterProp::ControllerChoseLabel { .. }
+            | FilterProp::WasPlayed
+            | FilterProp::Attacking { .. }
+            | FilterProp::Blocking
+            | FilterProp::BlockingSource
+            | FilterProp::CombatRelation { .. }
+            | FilterProp::BlockStatus { .. }
+            | FilterProp::AttackingAlone
+            | FilterProp::BlockingAlone
+            | FilterProp::Tapped
+            | FilterProp::Untapped
+            | FilterProp::IsSaddled
+            | FilterProp::SaddledSource
+            | FilterProp::CrewedThisTurn { .. }
+            | FilterProp::ConvokedSource
+            | FilterProp::ProtectorMatches { .. }
+            | FilterProp::HasHasteOrControlledSinceTurnBegan
+            | FilterProp::WithKeyword { .. }
+            | FilterProp::HasKeywordKind { .. }
+            | FilterProp::WithoutKeyword { .. }
+            | FilterProp::WithoutKeywordKind { .. }
+            | FilterProp::ManaValueParity { .. }
+            | FilterProp::ManaCostIn { .. }
+            | FilterProp::InZone { .. }
+            | FilterProp::Owned { .. }
+            | FilterProp::Foretold
+            | FilterProp::HasAdventure
+            | FilterProp::EnchantedBy
+            | FilterProp::EquippedBy
+            | FilterProp::AttachedTo { .. }
+            | FilterProp::HasAttachment { .. }
+            | FilterProp::HasAnyAttachmentOf { .. }
+            | FilterProp::Another
+            | FilterProp::Unpaired
+            | FilterProp::OtherThanTriggerObject
+            | FilterProp::HasColor { .. }
+            | FilterProp::PowerGTSource
+            | FilterProp::ColorCount { .. }
+            | FilterProp::ManaSymbolCount { .. }
+            | FilterProp::HasSupertype { .. }
+            | FilterProp::IsChosenCreatureType
+            | FilterProp::MostPrevalentCreatureTypeIn { .. }
+            | FilterProp::IsChosenColor
+            | FilterProp::IsChosenCardType
+            | FilterProp::MatchesLastChosenCardPredicate
+            | FilterProp::HasSingleTarget
+            | FilterProp::Modal
+            | FilterProp::PrepareSpell
+            | FilterProp::NotColor { .. }
+            | FilterProp::NotSupertype { .. }
+            | FilterProp::Suspected
+            | FilterProp::Renowned
+            | FilterProp::Goaded
+            | FilterProp::Prepared
+            | FilterProp::ToughnessGTPower
+            | FilterProp::PowerExceedsBase
+            | FilterProp::Modified
+            | FilterProp::Historic
+            | FilterProp::NotHistoric
+            | FilterProp::InAnyZone { .. }
+            | FilterProp::WasDealtDamageThisTurn
+            | FilterProp::EnteredThisTurn
+            | FilterProp::ControlledContinuouslySinceTurnBegan
+            | FilterProp::ZoneChangedThisTurn { .. }
+            | FilterProp::AttackedThisTurn { .. }
+            | FilterProp::BlockedThisTurn
+            | FilterProp::AttackedOrBlockedThisTurn
+            | FilterProp::CountersPutOnThisTurn { .. }
+            | FilterProp::FaceDown
+            | FilterProp::Transformed
+            | FilterProp::CouldBeTargetedByTriggeringSpell
+            | FilterProp::HasXInManaCost
+            | FilterProp::HasXInActivationCost
+            | FilterProp::WasKicked
+            | FilterProp::HasManaAbility
+            | FilterProp::HasNoAbilities
+            | FilterProp::Named { .. }
+            | FilterProp::SameName
+            | FilterProp::SameNameAsParentTarget
+            | FilterProp::SameNameAsExiledBySource
+            | FilterProp::NameMatchesAnyPermanent { .. }
+            | FilterProp::IsCommander
+            | FilterProp::SharesCreatureTypeWithCommander
+            | FilterProp::Other { .. } => false,
+        }
+    }
 }
 
 /// Named fields for the `TargetFilter::Typed` variant, extracted for builder ergonomics.
@@ -8454,6 +8580,30 @@ pub enum ThisWayCause {
     /// wider blast radius than adding one new leaf — out of scope for a
     /// single-card bug fix (issue #8159).
     PutIntoGraveyard,
+}
+
+impl ThisWayCause {
+    /// The origin zone the producing transition must have departed, when the
+    /// action determines one. `None` for destination-named actions (Exiled,
+    /// Returned, Bounced, PutIntoGraveyard, OwnerLibraryShuffleSubject),
+    /// which arrive from anywhere. The origin-stamp site requires the
+    /// member's latest zone-change record to agree; a mismatch means the
+    /// record is not the producing transition and no origin is stamped.
+    pub fn expected_origin_zone(self) -> Option<crate::types::zones::Zone> {
+        match self {
+            // CR 701.21a / CR 701.8a: sacrifice and destroy act on permanents.
+            ThisWayCause::Sacrificed | ThisWayCause::Destroyed => Some(Zone::Battlefield),
+            // CR 701.17a: mill moves library cards to the graveyard.
+            ThisWayCause::Milled => Some(Zone::Library),
+            // CR 701.9a: discard moves hand cards to the graveyard.
+            ThisWayCause::Discarded => Some(Zone::Hand),
+            ThisWayCause::Exiled
+            | ThisWayCause::Returned
+            | ThisWayCause::Bounced
+            | ThisWayCause::PutIntoGraveyard
+            | ThisWayCause::OwnerLibraryShuffleSubject => None,
+        }
+    }
 }
 
 /// CR 113.3b / CR 113.3c: Which stack ability kinds a `StackAbility` filter accepts.
@@ -9747,9 +9897,16 @@ fn card_type_set_source_grammar_any(
             // the conservative answer prevents an under-reported consumer.
             contains || !complete
         }
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => false,
+        CardTypeSetSource::TrackedSet { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|inner| filter_grammar_any(inner, visit)),
+        // CR 608.2c + CR 115.1: a targeted-objects population matches exactly
+        // when its canonical slot filter does, via the single
+        // `targeted_objects_filter` authority — never a hardcoded constant.
+        CardTypeSetSource::TargetedObjects { slot } => {
+            filter_grammar_any(&CardTypeSetSource::targeted_objects_filter(slot), visit)
+        }
+        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
     }
 }
 
@@ -10542,7 +10699,7 @@ fn rewrite_quantity_ref_filter_props<C>(
 
 /// Rewrite nested property carriers in a card-type population, recording an
 /// incomplete bounded union walk instead of assuming it was exhaustive.
-fn rewrite_card_type_set_source_filter_props<C>(
+pub(crate) fn rewrite_card_type_set_source_filter_props<C>(
     source: &mut CardTypeSetSource,
     rewrite_node: &mut dyn FnMut(&mut TargetFilter, bool, Option<&C>),
     rewrite: &mut dyn FnMut(&mut FilterProp),
@@ -10591,9 +10748,26 @@ fn rewrite_card_type_set_source_filter_props<C>(
             );
             *complete &= source_complete;
         }
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => {}
+        CardTypeSetSource::TrackedSet { filter, .. } => {
+            filter.as_mut().into_iter().for_each(|inner| {
+                rewrite_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
+            })
+        }
+        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => {}
+        // CR 608.2c + CR 115.1: nothing to rewrite in place — a
+        // targeted-objects population's filter is derived canonically per
+        // read via `targeted_objects_filter`, never stored on the source.
+        // The slot's own filter lives in the ability's target specs and is
+        // rewritten through its own path.
+        CardTypeSetSource::TargetedObjects { .. } => {}
     }
 }
 
@@ -12245,7 +12419,7 @@ pub enum TurnJournalKind {
 /// and colors (CR 105.1). The CHARACTERISTIC axis stays partitioned by CR
 /// section in `QuantityRef`; this axis names only "the set whose members are
 /// read".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
 pub enum CardTypeSetSource {
     /// CR 109.2a + CR 400.1: Cards in a specific zone, scoped by player.
@@ -12259,11 +12433,16 @@ pub enum CardTypeSetSource {
     /// Mirrors `QuantityRef::FilteredTrackedSetSize { caused_by }`: a merged
     /// Draw->Discard set is disambiguated by CAUSE (drawn members are unstamped),
     /// so Some(Discarded) counts only discarded members. None counts all.
+    /// `filter` narrows to members matching a `TargetFilter` (e.g. the agent
+    /// named by an agent-interposed "this way" anaphor); `None` admits every
+    /// member. Mirrors the `filter` on the `TurnJournal` peer.
     TrackedSet {
         #[serde(default, skip_serializing_if = "TrackedAnaphorSource::is_chain_set")]
         set: TrackedAnaphorSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
     },
     /// CR 601.2a + CR 112.1: The members of a per-turn action journal for the
     /// scoped players ("spells you've cast this turn").
@@ -12278,6 +12457,21 @@ pub enum CardTypeSetSource {
         scope: CountScope,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
+    },
+    /// CR 608.2c + CR 115.1: the object targets the RESOLVING ability chose —
+    /// the referent of a later "those cards" / "them" that names an earlier
+    /// target-selection clause in the same ability.
+    ///
+    /// Zone-independent by construction: members are addressed by identity from
+    /// `ResolvedAbility::targets`, read live from `state.objects` with an
+    /// `lki_cache` fallback, exactly as `TrackedSet` reads its members. This is
+    /// why it is NOT `Objects { filter: ParentTarget }` — that variant is a
+    /// zone-derived board census and would miss a graveyard target.
+    TargetedObjects {
+        /// `None` = every object target; `Some(i)` = the i-th slot, mirroring
+        /// `TargetFilter::ParentTargetSlot { index }`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slot: Option<usize>,
     },
     /// CR 109.2: The union of two or more populations — "among \<A\> and \<B\>" /
     /// "among \<A\> and/or \<B\>".
@@ -12296,6 +12490,793 @@ pub enum CardTypeSetSource {
     /// `RwProfile::empty()`, which is FAIL-OPEN for the CR 603.3b ordering gate,
     /// and the resolver would return 0 with no diagnostic.
     AnyOf { sources: UnionSources },
+}
+
+impl CardTypeSetSource {
+    /// CR 608.2c + CR 115.1: the canonical [`TargetFilter`] a
+    /// [`CardTypeSetSource::TargetedObjects`] population denotes — `None` is
+    /// every object target (`ParentTarget`), `Some(i)` is the i-th slot
+    /// (`ParentTargetSlot { index }`), mirroring the target-slot axis exactly.
+    ///
+    /// Single authority for the population ≡ filter equivalence: every
+    /// classifier that answers a filter-routed question about a population
+    /// (binding divergence, cost-paid routing, life-total reads, census
+    /// profiles, zone extraction, predicate matching) calls the SAME
+    /// sub-function it calls for an `Objects { filter }` population, with this
+    /// filter — so the answers cannot drift from the canonical filter's.
+    pub(crate) fn targeted_objects_filter(slot: &Option<usize>) -> TargetFilter {
+        match slot {
+            None => TargetFilter::ParentTarget,
+            Some(index) => TargetFilter::ParentTargetSlot { index: *index },
+        }
+    }
+
+    /// Shared source admission: a member filter on a triggering-batch leaf
+    /// has no agreed-upon reading (the batch is an event population while
+    /// `filter` speaks of members), so no source admits the combination —
+    /// for every head that embeds a source, at any union depth. Likewise a
+    /// member filter that references selected targets through a shape the
+    /// suspension-resume quantity path cannot evaluate (MED1) is refused
+    /// here rather than diverging live-vs-resumed. Decoding routes through
+    /// here; resolution keeps a fail-closed skip behind it for hand-built
+    /// in-memory values only.
+    pub(crate) fn validate_admission(&self) -> Result<(), CardTypeSetSourceError> {
+        let mut invalid_batch_filter = false;
+        let mut dependent_member_filter = false;
+        let complete = self.try_for_each_member(UNION_DEPTH_BUDGET, &mut |leaf| {
+            if matches!(
+                leaf,
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::TriggeringBatch,
+                    filter: Some(_),
+                    ..
+                }
+            ) {
+                invalid_batch_filter = true;
+            }
+            match leaf {
+                CardTypeSetSource::TrackedSet {
+                    filter: Some(filter),
+                    ..
+                } => {
+                    if tracked_member_filter_has_unsupported_ref(filter) {
+                        dependent_member_filter = true;
+                    }
+                }
+                CardTypeSetSource::Objects { filter } => {
+                    if member_filter_has_unsupported_selected_ref(filter) {
+                        dependent_member_filter = true;
+                    }
+                }
+                CardTypeSetSource::TrackedSet { filter: None, .. }
+                | CardTypeSetSource::Zone { .. }
+                | CardTypeSetSource::ExiledBySource
+                | CardTypeSetSource::TargetedObjects { .. }
+                | CardTypeSetSource::AnyOf { .. }
+                // The journal matches spell-cast snapshots without an
+                // ability in scope either way, so its filter cannot
+                // diverge across a suspension.
+                | CardTypeSetSource::TurnJournal { .. } => {}
+            }
+        });
+        if !complete {
+            return Err(CardTypeSetSourceError::SourceDepthExceeded);
+        }
+        if invalid_batch_filter {
+            return Err(CardTypeSetSourceError::FilteredTriggeringBatch);
+        }
+        if dependent_member_filter {
+            return Err(CardTypeSetSourceError::DependentMemberFilter);
+        }
+        Ok(())
+    }
+}
+
+/// MED1: whether a chain-set member filter (or `Objects` whole-filter)
+/// references selected targets through a shape the suspension-resume
+/// quantity path cannot evaluate.
+///
+/// Member filters evaluate per member with the quantity context: live with
+/// the resolving ability in scope, resumed with only the parked slot
+/// channel. Shapes with a parked backstop stay admitted — direct
+/// `ParentTarget` / `ParentTargetSlot` nodes (R1), a direct
+/// `SharesQuality` reference to `ParentTarget` (R2), and the DIRECT
+/// `Typed.controller` target-derived axis (`TargetPlayer` /
+/// `TargetOpponent`, which reads the parked declared-player twin) — while
+/// shapes that read `ability.targets` (or other ability-carried records:
+/// chosen players, declared views, cost stamps) with no parked equivalent
+/// refuse, including the same axis nested in a property or nested scan.
+/// Every match below is exhaustive over its syntax enum (no wildcard) so
+/// a future variant fails compilation here instead of silently admitting.
+pub(crate) fn member_filter_has_unsupported_selected_ref(filter: &TargetFilter) -> bool {
+    target_filter_has_unsupported_selected_ref(filter, false)
+}
+
+/// CR 608.2h: tracked members may read departure snapshots. Their shared-quality
+/// evaluator supports only no reference or the direct selected target; other
+/// reference populations require a live candidate. Keep those forms out of
+/// tracked-source admission while preserving live `Objects` source filters.
+pub(crate) fn tracked_member_filter_has_unsupported_ref(filter: &TargetFilter) -> bool {
+    member_filter_has_unsupported_selected_ref(filter)
+        || filter_contains_filter_prop(filter, &|prop| {
+            matches!(
+                prop,
+                FilterProp::SharesQuality {
+                    reference: Some(reference),
+                    ..
+                } if !matches!(reference.as_ref(), TargetFilter::ParentTarget)
+            )
+        })
+}
+
+/// `nested` selects the evaluation context: `false` is the member-evaluation
+/// context (ability live, parked channel resumed — the R1/R2 backstops
+/// apply); `true` is a nested reference/scan context (the `DistinctFrom`
+/// event route, the `SharesQuality` nested scan, `CanEnchant` hosts,
+/// stack-entry checks, name scans, thresholds, player scopes), where no
+/// parked channel is threaded and every selected node refuses.
+fn target_filter_has_unsupported_selected_ref(filter: &TargetFilter, nested: bool) -> bool {
+    match filter {
+        // R1: direct selected nodes read the parked channel on resume.
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => nested,
+        // Ability-only twins with no parked backstop: the player-axis
+        // resolver reads `ability` concretely, and cost/army stamps live
+        // on the ability.
+        TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::EventTargetController
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy => true,
+        TargetFilter::Typed(typed) => {
+            typed
+                .controller
+                .as_ref()
+                .is_some_and(|controller| controller_ref_is_selected_dependent(controller, !nested))
+                || typed
+                    .properties
+                    .iter()
+                    .any(|prop| filter_prop_has_unsupported_selected_ref(prop, nested))
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|member| target_filter_has_unsupported_selected_ref(member, nested)),
+        TargetFilter::Not { filter } => target_filter_has_unsupported_selected_ref(filter, nested),
+        // Same evaluation context as the member walk (ability and parked
+        // channel both threaded), so the mode carries through.
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            target_filter_has_unsupported_selected_ref(filter, nested)
+        }
+        TargetFilter::ChosenDamageSource { filter } => filter
+            .as_deref()
+            .is_some_and(|member| target_filter_has_unsupported_selected_ref(member, true)),
+        TargetFilter::PlayerMatching { player } => {
+            player_filter_has_unsupported_selected_ref(player)
+        }
+        // Event, ledger, zone, identity, and data leaves evaluate without
+        // an ability in scope either way.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::HasChosenName
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> bool {
+    match prop {
+        // Reference positions evaluated without the parked channel: the
+        // `DistinctFrom` event route, `CanEnchant` hosts, stack-entry
+        // checks, and name scans.
+        FilterProp::DistinctFrom { reference } => {
+            target_filter_has_unsupported_selected_ref(reference, true)
+        }
+        FilterProp::CanEnchant { target } => {
+            target_filter_has_unsupported_selected_ref(target, true)
+        }
+        FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        FilterProp::DifferentNameFrom { filter } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        // R2: a direct `ParentTarget` reference reads the parked channel;
+        // any other selected reference runs the nested scan, which drops
+        // the parked channel.
+        FilterProp::SharesQuality { reference, .. } => match reference.as_deref() {
+            None => false,
+            Some(TargetFilter::ParentTarget) => nested,
+            Some(other) => target_filter_has_unsupported_selected_ref(other, true),
+        },
+        FilterProp::Not { prop } => filter_prop_has_unsupported_selected_ref(prop, nested),
+        FilterProp::AnyOf { props } => props
+            .iter()
+            .any(|member| filter_prop_has_unsupported_selected_ref(member, nested)),
+        FilterProp::ControllerMatches { player } => {
+            player_filter_has_unsupported_selected_ref(player)
+        }
+        FilterProp::DealtDamageThisTurn { recipient, .. } => recipient
+            .as_ref()
+            .is_some_and(player_filter_has_unsupported_selected_ref),
+        // Inherently selected: the resolving ability's first object
+        // target, with no parked equivalent.
+        FilterProp::SameNameAsParentTarget => true,
+        // Both subjects read ability-carried records (selected target,
+        // ability capture) with no parked equivalent.
+        FilterProp::CombatRelation { .. } => true,
+        FilterProp::AttachedTo { to } => match to {
+            AttachmentReferent::DeclaredTarget { .. } => true,
+            AttachmentReferent::Player { player } => {
+                controller_ref_is_selected_dependent(player, false)
+            }
+            AttachmentReferent::Host { filter } => {
+                target_filter_has_unsupported_selected_ref(filter, true)
+            }
+            AttachmentReferent::Source | AttachmentReferent::Recipient => false,
+        },
+        FilterProp::ProtectorMatches { controller }
+        | FilterProp::Owned { controller }
+        | FilterProp::MostPrevalentCreatureTypeIn {
+            scope: controller, ..
+        } => controller_ref_is_selected_dependent(controller, false),
+        FilterProp::Attacking { defender, .. }
+        | FilterProp::AttackedThisTurn { defender, .. }
+        | FilterProp::HasAttachment {
+            controller: defender,
+            ..
+        }
+        | FilterProp::HasAnyAttachmentOf {
+            controller: defender,
+            ..
+        }
+        | FilterProp::NameMatchesAnyPermanent {
+            controller: defender,
+            ..
+        } => defender
+            .as_ref()
+            .is_some_and(|axis| controller_ref_is_selected_dependent(axis, false)),
+        FilterProp::Counters { count, .. } => quantity_expr_has_unsupported_selected_ref(count),
+        FilterProp::Cmc { value, .. } | FilterProp::PtComparison { value, .. } => {
+            quantity_expr_has_unsupported_selected_ref(value)
+        }
+        // Board, zone, name, keyword, counter (fixed), type-line, and
+        // ledger leaves evaluate without an ability in scope either way.
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::Prepared
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => false,
+    }
+}
+
+/// Player filters appear nested under `ControllerMatches`,
+/// `DealtDamageThisTurn`, `PlayerMatching`, and count/possession checks,
+/// whose evaluators thread no ability and no parked channel: every
+/// selected node inside refuses, and nested filters walk nested.
+fn player_filter_has_unsupported_selected_ref(player: &PlayerFilter) -> bool {
+    match player {
+        PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
+        | PlayerFilter::ChosenPlayer { .. } => true,
+        PlayerFilter::OpponentDealtDamage { source, .. } => source
+            .as_deref()
+            .is_some_and(|member| target_filter_has_unsupported_selected_ref(member, true)),
+        PlayerFilter::ControlsCount { filter, count, .. } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+                || quantity_expr_has_unsupported_selected_ref(count)
+        }
+        PlayerFilter::TrackedSetPossessor { filter, .. } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        PlayerFilter::AnyOf { filters } => filters
+            .iter()
+            .any(player_filter_has_unsupported_selected_ref),
+        PlayerFilter::AllExcept { exclude } => player_filter_has_unsupported_selected_ref(exclude),
+        PlayerFilter::PlayerAttribute { attr, value, .. } => {
+            quantity_ref_has_unsupported_selected_ref(attr)
+                || quantity_expr_has_unsupported_selected_ref(value)
+        }
+        // Event, combat, vote, ledger, and controller-context leaves.
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::GrantingObjectCaster => false,
+    }
+}
+
+/// Target-, choice-, and view-derived controller axes read the resolving
+/// ability with no parked equivalent; source, event, combat, and
+/// turn-state axes evaluate identically either way.
+///
+/// `direct_member` is true only for a direct `Typed.controller` in the
+/// member-evaluation context: the single position the parked
+/// declared-player twin serves. Every property, quantity, and nested-scan
+/// position passes false, so a target-derived axis there refuses.
+fn controller_ref_is_selected_dependent(reference: &ControllerRef, direct_member: bool) -> bool {
+    match reference {
+        // MED1 carve-out (direct member-controller position only): the
+        // target-derived axis reads the declared player target, which the
+        // parked quantity path carries through the declared-player twin of
+        // `declared_target_player` — so it is suspension-safe exactly there.
+        // Property contexts (`Owned`, `ProtectorMatches`, defenders) and
+        // nested scans resolve through the live ability only, with no parked
+        // equivalent, and refuse.
+        ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => !direct_member,
+        ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
+        | ControllerRef::ParentTargetOwner
+        | ControllerRef::DeclaredPlayer { .. }
+        | ControllerRef::ChosenPlayer { .. } => true,
+        ControllerRef::You
+        | ControllerRef::Opponent
+        | ControllerRef::ScopedPlayer
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer
+        | ControllerRef::SpecificPlayer { .. } => false,
+    }
+}
+
+/// `Target` and the target-derived controllers read `ability.targets`;
+/// recipient-or-nothing falls back to them when the context binds no
+/// recipient. Aggregates, combat, event, and data scopes are context-only.
+fn player_scope_is_selected_dependent(scope: &PlayerScope) -> bool {
+    match scope {
+        PlayerScope::Target
+        | PlayerScope::RecipientController
+        | PlayerScope::ParentObjectTarget { .. } => true,
+        PlayerScope::Controller
+        | PlayerScope::ScopedPlayer
+        | PlayerScope::Opponent { .. }
+        | PlayerScope::AllPlayers { .. }
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::AnyTurn
+        | PlayerScope::SpecificPlayer { .. } => false,
+    }
+}
+
+/// Object scopes over ability-carried records (targets, recipient-or-target
+/// fallback, cost stamps, anaphoric context, amassed army, carried chains)
+/// diverge once the ability is gone; source, event, batch-context, and
+/// concrete scopes do not.
+fn object_scope_is_selected_dependent(scope: &ObjectScope) -> bool {
+    match scope {
+        ObjectScope::Target
+        | ObjectScope::Recipient
+        | ObjectScope::CostPaidObject
+        | ObjectScope::Anaphoric
+        | ObjectScope::Demonstrative
+        | ObjectScope::AmassedArmy
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
+        | ObjectScope::ChainRootTarget
+        | ObjectScope::GrantingObject => true,
+        ObjectScope::Source
+        | ObjectScope::EventSource
+        | ObjectScope::EventTarget
+        | ObjectScope::BatchSource
+        | ObjectScope::SpecificObject { .. } => false,
+    }
+}
+
+fn cast_mana_object_scope_is_selected_dependent(scope: &CastManaObjectScope) -> bool {
+    match scope {
+        CastManaObjectScope::AbilityTarget => true,
+        CastManaObjectScope::SelfObject | CastManaObjectScope::TriggeringSpell => false,
+    }
+}
+
+fn cast_mana_spent_metric_has_unsupported_selected_ref(metric: &CastManaSpentMetric) -> bool {
+    match metric {
+        CastManaSpentMetric::FromSource { source_filter } => {
+            target_filter_has_unsupported_selected_ref(source_filter, true)
+        }
+        CastManaSpentMetric::Total
+        | CastManaSpentMetric::DistinctColors
+        | CastManaSpentMetric::OfColor { .. } => false,
+    }
+}
+
+/// Threshold quantities evaluate with the bare threshold context (no
+/// ability, no parked channel), so every nested selected reference —
+/// including direct selected nodes — refuses.
+fn quantity_expr_has_unsupported_selected_ref(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => quantity_ref_has_unsupported_selected_ref(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner, .. }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_has_unsupported_selected_ref(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_has_unsupported_selected_ref)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_has_unsupported_selected_ref(left)
+                || quantity_expr_has_unsupported_selected_ref(right)
+        }
+    }
+}
+
+fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
+    match qty {
+        // Chosen X reads `None` here (bare threshold context) but the
+        // announced value live; the event amount and cost-X fallbacks
+        // likewise consult ability-carried records.
+        QuantityRef::Variable { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::CostXPaid => true,
+        QuantityRef::PropertyAggregate(aggregate) => {
+            source_has_unsupported_selected_ref_nested(&aggregate.source)
+        }
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source, .. } => {
+            source_has_unsupported_selected_ref_nested(source)
+        }
+        QuantityRef::FilteredTrackedSetSize { filter, .. } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        QuantityRef::HandSize { player }
+        | QuantityRef::LifeTotal { player }
+        | QuantityRef::GraveyardSize { player }
+        | QuantityRef::StartingLifeTotal { player, .. }
+        | QuantityRef::LifeLostThisTurn { player }
+        | QuantityRef::PartySize { player }
+        | QuantityRef::Speed { player }
+        | QuantityRef::LifeGainedThisTurn { player }
+        | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
+        | QuantityRef::CardsDiscardedThisTurn { player }
+        | QuantityRef::PlayerChosenNumber { player }
+        | QuantityRef::PlayerActionsThisTurn { player, .. }
+        | QuantityRef::LandsPlayedThisTurn { player, .. } => {
+            player_scope_is_selected_dependent(player)
+        }
+        QuantityRef::SacrificedThisTurn { player, filter }
+        | QuantityRef::BattlefieldEntriesThisTurn { player, filter }
+        | QuantityRef::TokensCreatedThisTurn { player, filter } => {
+            player_scope_is_selected_dependent(player)
+                || target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        QuantityRef::TargetObjectManaValue { filter } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::EnteredThisTurn { filter }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::DistinctCounterKindsAmong { filter }
+        | QuantityRef::ControlledByEachPlayer { filter, .. } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            target_filter_has_unsupported_selected_ref(source, true)
+                || target_filter_has_unsupported_selected_ref(target, true)
+        }
+        QuantityRef::ZoneCardCount { filter, .. }
+        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+        | QuantityRef::AttackedThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|member| target_filter_has_unsupported_selected_ref(member, true)),
+        QuantityRef::PlayerCount { filter } | QuantityRef::EventContextPlayerCount { filter } => {
+            player_filter_has_unsupported_selected_ref(filter)
+        }
+        QuantityRef::TargetZoneCardCount { scope, .. }
+        | QuantityRef::BasicLandTypeCount { controller: scope }
+        | QuantityRef::CommanderManaValue { owner: scope } => {
+            controller_ref_is_selected_dependent(scope, false)
+        }
+        QuantityRef::AttachmentsOnLeavingObject { controller, .. } => controller
+            .as_ref()
+            .is_some_and(|axis| controller_ref_is_selected_dependent(axis, false)),
+        QuantityRef::CountersOn { scope, .. }
+        | QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
+        | QuantityRef::Intensity { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. } => {
+            object_scope_is_selected_dependent(scope)
+        }
+        QuantityRef::ManaSpentToCast { scope, metric } => {
+            cast_mana_object_scope_is_selected_dependent(scope)
+                || cast_mana_spent_metric_has_unsupported_selected_ref(metric)
+        }
+        // State, ledger, event, counter, tally, and data leaves evaluate
+        // without an ability in scope either way.
+        QuantityRef::LifeAboveStarting
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::NameStickerLetterCount { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::NotedNumber
+        | QuantityRef::ChosenNumber
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::VoteCount { .. }
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::TurnsTaken
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen => false,
+    }
+}
+
+/// Sources nested under a threshold quantity evaluate with the bare
+/// threshold context, so their member filters walk nested — and
+/// `TargetedObjects` itself reads `ability.targets` there.
+fn source_has_unsupported_selected_ref_nested(source: &CardTypeSetSource) -> bool {
+    match source {
+        CardTypeSetSource::TargetedObjects { .. } => true,
+        CardTypeSetSource::TrackedSet { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|member| target_filter_has_unsupported_selected_ref(member, true)),
+        CardTypeSetSource::Objects { filter } => {
+            target_filter_has_unsupported_selected_ref(filter, true)
+        }
+        CardTypeSetSource::AnyOf { sources } => sources
+            .iter()
+            .any(source_has_unsupported_selected_ref_nested),
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TurnJournal { .. } => false,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum CardTypeSetSourceError {
+    #[error("triggering-batch sources accept no member filter")]
+    FilteredTriggeringBatch,
+    #[error(
+        "member filter references objects the snapshot or suspension-resume path cannot evaluate"
+    )]
+    DependentMemberFilter,
+    #[error("card-type-set source exceeds the supported union depth")]
+    SourceDepthExceeded,
+}
+
+/// Derived decode shape for [`CardTypeSetSource`]: byte-compatible with the
+/// derived form it replaces (same tag, same field defaults, no
+/// deny-unknown-fields), so previously accepted payloads decode identically
+/// and only the admission check below can newly fail.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum CardTypeSetSourceRepr {
+    Zone {
+        zone: ZoneRef,
+        scope: CountScope,
+    },
+    ExiledBySource,
+    Objects {
+        filter: TargetFilter,
+    },
+    TrackedSet {
+        #[serde(default)]
+        set: TrackedAnaphorSource,
+        #[serde(default)]
+        caused_by: Option<ThisWayCause>,
+        #[serde(default)]
+        filter: Option<TargetFilter>,
+    },
+    TurnJournal {
+        journal: TurnJournalKind,
+        scope: CountScope,
+        #[serde(default)]
+        filter: Option<TargetFilter>,
+    },
+    TargetedObjects {
+        #[serde(default)]
+        slot: Option<usize>,
+    },
+    AnyOf {
+        sources: UnionSources,
+    },
+}
+
+impl From<CardTypeSetSourceRepr> for CardTypeSetSource {
+    fn from(repr: CardTypeSetSourceRepr) -> Self {
+        match repr {
+            CardTypeSetSourceRepr::Zone { zone, scope } => CardTypeSetSource::Zone { zone, scope },
+            CardTypeSetSourceRepr::ExiledBySource => CardTypeSetSource::ExiledBySource,
+            CardTypeSetSourceRepr::Objects { filter } => CardTypeSetSource::Objects { filter },
+            CardTypeSetSourceRepr::TrackedSet {
+                set,
+                caused_by,
+                filter,
+            } => CardTypeSetSource::TrackedSet {
+                set,
+                caused_by,
+                filter,
+            },
+            CardTypeSetSourceRepr::TurnJournal {
+                journal,
+                scope,
+                filter,
+            } => CardTypeSetSource::TurnJournal {
+                journal,
+                scope,
+                filter,
+            },
+            CardTypeSetSourceRepr::TargetedObjects { slot } => {
+                CardTypeSetSource::TargetedObjects { slot }
+            }
+            CardTypeSetSourceRepr::AnyOf { sources } => CardTypeSetSource::AnyOf { sources },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CardTypeSetSource {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let source = CardTypeSetSource::from(CardTypeSetSourceRepr::deserialize(deserializer)?);
+        source
+            .validate_admission()
+            .map_err(serde::de::Error::custom)?;
+        Ok(source)
+    }
 }
 
 /// CR 109.2: the members of a [`CardTypeSetSource::AnyOf`], carrying the
@@ -12393,9 +13374,18 @@ impl CardTypeSetSource {
                 CardTypeSetSource::TurnJournal { filter, .. } => filter
                     .as_ref()
                     .is_some_and(TargetFilter::references_cost_paid_object),
+                CardTypeSetSource::TrackedSet { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(TargetFilter::references_cost_paid_object),
+                // CR 608.2c + CR 115.1: a targeted-objects population references
+                // the cost-paid object exactly when its canonical slot filter
+                // does — via the single `targeted_objects_filter` authority,
+                // never a hardcoded constant.
+                CardTypeSetSource::TargetedObjects { slot } => {
+                    CardTypeSetSource::targeted_objects_filter(slot).references_cost_paid_object()
+                }
                 CardTypeSetSource::Zone { .. }
                 | CardTypeSetSource::ExiledBySource
-                | CardTypeSetSource::TrackedSet { .. }
                 | CardTypeSetSource::AnyOf { .. } => false,
             };
         });
@@ -12468,8 +13458,18 @@ impl CardTypeSetSource {
             CardTypeSetSource::ExiledBySource => vec![crate::types::zones::Zone::Exile],
             CardTypeSetSource::Objects { filter } => filter.population_zones(),
             // Not zone reads — see the doc comment on `population_zones`.
+            // A member `filter` on either arm narrows members of an
+            // already-materialized set and declares no zone, so it does not
+            // change this answer; `TurnJournal` has carried one all along.
             CardTypeSetSource::TrackedSet { .. } | CardTypeSetSource::TurnJournal { .. } => {
                 Vec::new()
+            }
+            // CR 608.2c + CR 115.1: the zones a targeted-objects population
+            // reads are exactly the canonical slot filter's — via the single
+            // `targeted_objects_filter` authority, never a hardcoded empty
+            // that could drift from the filter's answer.
+            CardTypeSetSource::TargetedObjects { slot } => {
+                CardTypeSetSource::targeted_objects_filter(slot).population_zones()
             }
             // Unreachable through the walker; empty rather than a panic so a
             // future direct caller degrades instead of crashing a game.
@@ -12653,6 +13653,10 @@ pub struct PropertyAggregate {
 pub enum PropertyAggregateError {
     #[error("turn-journal property aggregates support only ManaValue, not {0:?}")]
     UnsupportedTurnJournalProperty(ObjectProperty),
+    #[error("triggering-batch property aggregates accept no member filter")]
+    UnsupportedTriggeringBatchFilter,
+    #[error("property aggregates accept no member filter with unsupported object references")]
+    UnsupportedDependentMemberFilter,
     #[error("property aggregate source exceeds the supported union depth")]
     SourceDepthExceeded,
 }
@@ -12663,6 +13667,21 @@ impl PropertyAggregate {
         property: ObjectProperty,
         source: CardTypeSetSource,
     ) -> Result<Self, PropertyAggregateError> {
+        // Shared source admission first: the batch-filter verdict lives on
+        // the source so every head inherits it, mapped here to this
+        // constructor's long-standing error values.
+        match source.validate_admission() {
+            Ok(()) => {}
+            Err(CardTypeSetSourceError::FilteredTriggeringBatch) => {
+                return Err(PropertyAggregateError::UnsupportedTriggeringBatchFilter)
+            }
+            Err(CardTypeSetSourceError::DependentMemberFilter) => {
+                return Err(PropertyAggregateError::UnsupportedDependentMemberFilter)
+            }
+            Err(CardTypeSetSourceError::SourceDepthExceeded) => {
+                return Err(PropertyAggregateError::SourceDepthExceeded)
+            }
+        }
         let mut invalid_journal = false;
         let complete = source.try_for_each_member(UNION_DEPTH_BUDGET, &mut |leaf| {
             if matches!(leaf, CardTypeSetSource::TurnJournal { .. })
@@ -12850,6 +13869,7 @@ fn quantity_ref_from_value<E: serde::de::Error>(
                     CardTypeSetSource::TrackedSet {
                         set: source,
                         caused_by: None,
+                        filter: None,
                     },
                 ),
             };
@@ -26331,7 +27351,7 @@ fn default_pt_value_zero() -> PtValue {
     PtValue::Fixed(0)
 }
 
-fn default_mana_production() -> ManaProduction {
+pub fn default_mana_production() -> ManaProduction {
     ManaProduction::Fixed {
         colors: Vec::new(),
         contribution: ManaContribution::Base,
@@ -27096,6 +28116,91 @@ impl TargetFilter {
             TargetFilter::Not { filter } => filter.references_cost_paid_object(),
             TargetFilter::TrackedSetFiltered { filter, .. } => filter.references_cost_paid_object(),
             _ => false,
+        }
+    }
+
+    /// True when this filter restricts membership to a resolution-chain
+    /// tracked set at any structural position: the `TrackedSet` /
+    /// `TrackedSetFiltered` selectors or the `InTrackedSet` property form
+    /// (including nested under `Not` / `AnyOf`, where the destroy-the-rest
+    /// producer wraps it). A target span naming "this way" that yields a
+    /// filter WITHOUT such a restriction has silently dropped the anaphor
+    /// (unit 8e); callers use this to refuse the line honestly instead of
+    /// resolving over-broad.
+    pub fn references_tracked_set(&self) -> bool {
+        match self {
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => true,
+            TargetFilter::Typed(TypedFilter { properties, .. }) => {
+                properties.iter().any(FilterProp::references_tracked_set)
+            }
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(TargetFilter::references_tracked_set)
+            }
+            TargetFilter::Not { filter } => filter.references_tracked_set(),
+            // The narrowing sub-filter constrains which object matches, so a
+            // tracked-set restriction inside it restricts this filter too.
+            TargetFilter::ChosenDamageSource { filter, .. } => filter
+                .as_deref()
+                .is_some_and(TargetFilter::references_tracked_set),
+            // Player-axis population: players satisfying a player predicate —
+            // even one that counts objects — are not tracked members.
+            TargetFilter::PlayerMatching { .. } => false,
+            // Every remaining variant is a leaf: concrete referents, event /
+            // window projections, player roles, zones, names, or stack-object
+            // kinds. None of it can name a resolution-chain tracked set.
+            // Exhaustive by construction — a new variant fails to compile
+            // here rather than silently reading as "some other filter".
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject { .. }
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::EventTarget
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayerOrPlaneswalker
+            | TargetFilter::HasChosenName
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers => false,
         }
     }
 
@@ -28932,7 +30037,7 @@ impl Effect {
     /// returns a constant rather than a field of `self` (`ChooseFromZone`'s targeted-players
     /// iteration, `AdditionalPhase`'s non-targeted recipients) there is no field to address and
     /// this returns `None`. Each arm's rules rationale lives on `target_filter`.
-    /// `tests::target_filter_mut_is_target_filters_twin` pins the two together.
+    /// `types_ability::target_filter_mut_is_target_filters_twin` (integration) pins the two together.
     pub fn target_filter_mut(&mut self) -> Option<&mut TargetFilter> {
         match self {
             Effect::ChooseFromZone {
@@ -42419,6 +43524,22 @@ impl PartialEq for ResolvedAbility {
 /// projected `ObjectId` sequence, which is itself an equivalence relation.
 impl Eq for ResolvedAbility {}
 
+/// CR 400.7 + CR 603.7c: the keyed delayed-referent eligibility predicate
+/// shared by live indexed selection
+/// ([`ResolvedAbility::target_pin_is_current`]) and resumed parked reads —
+/// one policy, evaluated at read time on both paths. An id with no keyed
+/// entry passes (fail-open: not a pinned delayed-trigger referent); a
+/// recorded pin must be current.
+pub fn keyed_target_pin_is_current(
+    pins: &[crate::types::identifiers::ObjectIncarnationRef],
+    id: crate::types::identifiers::ObjectId,
+    state: &crate::types::game_state::GameState,
+) -> bool {
+    pins.iter()
+        .find(|pin| pin.object_id == id)
+        .is_none_or(|pin| pin.is_current(state))
+}
+
 impl ResolvedAbility {
     /// CR 707.10 + CR 400.7: whether a copy of `self` resolves exactly as a copy
     /// of `other`. `PartialEq` compares `cost_paid_objects` by object id only (see
@@ -43366,10 +44487,7 @@ impl ResolvedAbility {
         id: ObjectId,
         state: &crate::types::game_state::GameState,
     ) -> bool {
-        self.target_incarnations
-            .iter()
-            .find(|pin| pin.object_id == id)
-            .is_none_or(|pin| pin.is_current(state))
+        keyed_target_pin_is_current(&self.target_incarnations, id, state)
     }
 
     /// CR 603.7c + CR 400.7: The subset of `targets` this ability may still
@@ -44628,7 +45746,6 @@ mod tests {
     use crate::types::game_state::{DelayedTrigger, GameState, ZoneChangeRecord};
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
-    use syn::__private::ToTokens;
 
     fn goblin_token(attack_destination: TokenAttackDestination) -> Effect {
         Effect::Token {
@@ -44957,6 +46074,45 @@ mod tests {
                 .expect("deserializes");
         assert_eq!(round_tripped, stamped);
         assert!(round_tripped.is_resolution_installed());
+    }
+
+    /// The `CardTypeSetSource::TrackedSet` member `filter` is additive and
+    /// wire-compatible: `None` emits no key (every existing serialized
+    /// `card-data.json` entry stays byte-identical), an old payload carrying
+    /// no key loads as `None`, and a `Some` payload round-trips faithfully.
+    #[test]
+    fn tracked_set_member_filter_is_wire_compatible() {
+        let bare = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: None,
+        };
+        let json = serde_json::to_string(&bare).expect("serializes");
+        assert!(
+            !json.contains("filter"),
+            "an unfiltered tracked set must emit no `filter` key: {json}"
+        );
+
+        // An old payload with no `filter` key loads as `None`.
+        let loaded: CardTypeSetSource = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(loaded, bare);
+
+        // A filtered source round-trips faithfully, key and payload both.
+        let filtered = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(TargetFilter::Typed(
+                TypedFilter::card().controller(ControllerRef::You),
+            )),
+        };
+        let filtered_json = serde_json::to_string(&filtered).expect("serializes");
+        assert!(
+            filtered_json.contains("filter"),
+            "a filtered tracked set must emit its `filter` key: {filtered_json}"
+        );
+        let round_tripped: CardTypeSetSource =
+            serde_json::from_str(&filtered_json).expect("deserializes");
+        assert_eq!(round_tripped, filtered);
     }
 
     #[test]
@@ -45314,6 +46470,7 @@ mod tests {
         let leaf = |n: u32| CardTypeSetSource::TrackedSet {
             set: TrackedAnaphorSource::ChainSet,
             caused_by: (n > 0).then_some(ThisWayCause::Discarded),
+            filter: None,
         };
         let union = CardTypeSetSource::any_of(vec![
             leaf(0),
@@ -45403,6 +46560,7 @@ mod tests {
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::ChainSet,
                 caused_by: None,
+                filter: None,
             },
             CardTypeSetSource::TurnJournal {
                 journal: TurnJournalKind::SpellsCast,
@@ -45636,6 +46794,7 @@ mod tests {
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::ChainSet,
                 caused_by: None,
+                filter: None,
             },
             objects.clone(),
             CardTypeSetSource::any_of(vec![
@@ -45679,6 +46838,7 @@ mod tests {
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::TriggeringBatch,
                     caused_by: None,
+                    filter: None,
                 },
             ),
             (
@@ -45686,6 +46846,7 @@ mod tests {
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
                     caused_by: None,
+                    filter: None,
                 },
             ),
         ] {
@@ -45875,6 +47036,505 @@ mod tests {
         assert!(serde_json::from_str::<QuantityRef>(invalid_json).is_err());
     }
 
+    /// PR-C F6 — VERDICT (reject). No producer emits a member filter on a
+    /// triggering-batch source, and batch snapshots have no member binding
+    /// for one — so the combination is rejected rather than silently ignored
+    /// at resolution. The constructor keeps its long-standing error value;
+    /// decoding refuses at shared source admission (M4r2), which runs before
+    /// the constructor. An unfiltered batch still constructs and decodes.
+    #[test]
+    fn property_aggregate_rejects_filtered_triggering_batch() {
+        let batch = |filter: Option<TargetFilter>| CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::TriggeringBatch,
+            caused_by: None,
+            filter,
+        };
+        let filtered = batch(Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: None,
+            properties: vec![FilterProp::Another],
+        })));
+        assert_eq!(
+            PropertyAggregate::new(AggregateFunction::Sum, ObjectProperty::Power, filtered),
+            Err(PropertyAggregateError::UnsupportedTriggeringBatchFilter),
+            "a member filter on a triggering-batch source must be rejected"
+        );
+        assert!(
+            PropertyAggregate::new(AggregateFunction::Sum, ObjectProperty::Power, batch(None))
+                .is_ok(),
+            "an unfiltered batch still constructs"
+        );
+
+        let wrap = |qty: &str| format!(r#"{{"type":"Ref","qty":{qty}}}"#);
+        let invalid_json = wrap(
+            r#"{"type":"PropertyAggregate","function":"Sum","property":"Power","source":{"type":"TrackedSet","set":"TriggeringBatch","filter":{"type":"Any"}}}"#,
+        );
+        let err = serde_json::from_str::<QuantityExpr>(&invalid_json)
+            .expect_err("decoding a filtered batch must fail");
+        assert!(
+            err.to_string()
+                .contains("triggering-batch sources accept no member filter"),
+            "decoding must fail on the shared admission rejection, not a shape error: {err}"
+        );
+        let valid_json = wrap(
+            r#"{"type":"PropertyAggregate","function":"Sum","property":"Power","source":{"type":"TrackedSet","set":"TriggeringBatch"}}"#,
+        );
+        assert!(
+            serde_json::from_str::<QuantityExpr>(&valid_json).is_ok(),
+            "an unfiltered batch still decodes"
+        );
+    }
+
+    /// M4r2 — VERDICT (reject at shared admission). A member filter on a
+    /// triggering-batch source has no agreed-upon reading, so the SOURCE
+    /// admits no such leaf — for every head that embeds it (all four direct
+    /// heads, not just `PropertyAggregate`) and at any union depth. Decoding
+    /// refuses the payload; unfiltered batches and legitimately filtered
+    /// chain sets still decode.
+    #[test]
+    fn source_admission_rejects_filtered_triggering_batch_for_every_head() {
+        let wrap = |qty: &str| format!(r#"{{"type":"Ref","qty":{qty}}}"#);
+        let batch = |set: &str, filter: &str| {
+            format!(r#"{{"type":"TrackedSet","set":"{set}","filter":{filter}}}"#)
+        };
+        let filtered_batch = batch("TriggeringBatch", r#"{"type":"Any"}"#);
+        // Every direct head refuses the form (PropertyAggregate's own
+        // constructor rejection is pinned by the F6 test above).
+        for (head, payload) in [
+            (
+                "DistinctCardTypes",
+                format!(r#"{{"type":"DistinctCardTypes","source":{filtered_batch}}}"#),
+            ),
+            (
+                "SharedCardTypes",
+                format!(r#"{{"type":"SharedCardTypes","source":{filtered_batch}}}"#),
+            ),
+            (
+                "DistinctSubtypes",
+                format!(r#"{{"type":"DistinctSubtypes","source":{filtered_batch}}}"#),
+            ),
+        ] {
+            let err = serde_json::from_str::<QuantityExpr>(&wrap(&payload))
+                .expect_err(&format!("{head} must refuse a filtered batch at decode"));
+            assert!(
+                err.to_string().contains("triggering-batch"),
+                "{head} must fail on the admission rejection, not a shape error: {err}"
+            );
+        }
+        // DistinctColorsAmong routes its source through the legacy-fallback
+        // untagged reader, which swallows the admission message into its
+        // generic no-match error — but the refusal itself holds: neither
+        // arm admits the form.
+        let colors = format!(r#"{{"type":"DistinctColorsAmong","source":{filtered_batch}}}"#);
+        assert!(
+            serde_json::from_str::<QuantityExpr>(&wrap(&colors)).is_err(),
+            "DistinctColorsAmong must refuse a filtered batch at decode"
+        );
+        // Nested unions refuse too: the poisoned leaf cannot hide behind a
+        // well-formed sibling.
+        let union = format!(
+            r#"{{"type":"DistinctCardTypes","source":{{"type":"AnyOf","sources":[{{"type":"Zone","zone":"Exile","scope":"Controller"}},{filtered_batch}]}}}}"#
+        );
+        assert!(
+            serde_json::from_str::<QuantityExpr>(&wrap(&union)).is_err(),
+            "a filtered batch nested in a union must refuse at decode"
+        );
+        let clean_union = r#"{"type":"DistinctCardTypes","source":{"type":"AnyOf","sources":[{"type":"Zone","zone":"Exile","scope":"Controller"},{"type":"TrackedSet","set":"TriggeringBatch"}]}}"#;
+        assert!(
+            serde_json::from_str::<QuantityExpr>(&wrap(clean_union)).is_ok(),
+            "the union shape itself decodes: the refusal above names the form, not the shape"
+        );
+        // Positive controls: the refusal is scoped to the form.
+        let unfiltered = r#"{"type":"DistinctCardTypes","source":{"type":"TrackedSet","set":"TriggeringBatch"}}"#;
+        assert!(
+            serde_json::from_str::<QuantityExpr>(&wrap(unfiltered)).is_ok(),
+            "an unfiltered batch still decodes"
+        );
+        let chained = format!(
+            r#"{{"type":"DistinctCardTypes","source":{}}}"#,
+            batch("ChainSet", r#"{"type":"Any"}"#)
+        );
+        assert!(
+            serde_json::from_str::<QuantityExpr>(&wrap(&chained)).is_ok(),
+            "a legitimately filtered chain set still decodes"
+        );
+    }
+
+    fn chain_set_with(filter: TargetFilter) -> CardTypeSetSource {
+        chain_set_with_option(Some(filter))
+    }
+
+    fn chain_set_with_option(filter: Option<TargetFilter>) -> CardTypeSetSource {
+        CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter,
+        }
+    }
+
+    #[test]
+    fn tracked_shared_quality_admission_matches_snapshot_reference_support() {
+        let filter = |reference: Option<TargetFilter>, relation| {
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent).properties(vec![
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::CardType,
+                    reference: reference.map(Box::new),
+                    relation,
+                },
+            ]))
+        };
+        for relation in [
+            SharedQualityRelation::Shares,
+            SharedQualityRelation::DoesNotShare,
+        ] {
+            for reference in [None, Some(TargetFilter::ParentTarget)] {
+                let source = chain_set_with(filter(reference, relation));
+                assert_eq!(source.validate_admission(), Ok(()));
+                assert!(PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    source,
+                )
+                .is_ok());
+            }
+            for reference in [
+                TargetFilter::SpecificObject { id: ObjectId(7) },
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            ] {
+                let unsupported = filter(Some(reference), relation);
+                let live = CardTypeSetSource::Objects {
+                    filter: unsupported.clone(),
+                };
+                assert_eq!(live.validate_admission(), Ok(()));
+                let tracked = chain_set_with(unsupported.clone());
+                assert_eq!(
+                    tracked.validate_admission(),
+                    Err(CardTypeSetSourceError::DependentMemberFilter)
+                );
+                assert_eq!(
+                    PropertyAggregate::new(AggregateFunction::Sum, ObjectProperty::Power, tracked,),
+                    Err(PropertyAggregateError::UnsupportedDependentMemberFilter)
+                );
+                let nested = chain_set_with(TargetFilter::Not {
+                    filter: Box::new(TargetFilter::And {
+                        filters: vec![TargetFilter::Any, unsupported],
+                    }),
+                });
+                assert_eq!(
+                    nested.validate_admission(),
+                    Err(CardTypeSetSourceError::DependentMemberFilter)
+                );
+                let encoded = serde_json::to_string(&QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctCardTypes { source: nested },
+                })
+                .expect("typed witness serializes");
+                assert!(serde_json::from_str::<QuantityExpr>(&encoded).is_err());
+            }
+        }
+    }
+
+    /// MED1 — VERDICT (reject at shared admission). A chain-set member
+    /// filter reading selected targets through `DistinctFrom{ParentTarget}`
+    /// evaluates against `ability.targets` live but finds no ability on the
+    /// resumed quantity path, so it excludes nothing there (7 live vs 12
+    /// resumed on the R2-shaped fixture). The SHAPE is refused at the
+    /// shared `CardTypeSetSource` admission both directly and through
+    /// `PropertyAggregate::new`, for `TrackedSet` member filters and for
+    /// `Objects` whole-filters alike — both evaluate per member through
+    /// the suspendable quantity context.
+    #[test]
+    fn med1_admission_rejects_distinct_from_parent_target_member_filter() {
+        let typed = |properties: Vec<FilterProp>| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: None,
+                properties,
+            })
+        };
+        let distinct_from_parent = || {
+            typed(vec![FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::ParentTarget),
+            }])
+        };
+        let chain_set = chain_set_with(distinct_from_parent());
+        assert_eq!(
+            chain_set.validate_admission(),
+            Err(CardTypeSetSourceError::DependentMemberFilter),
+            "MED1 witness: DistinctFrom{{ParentTarget}} must refuse at admission"
+        );
+        assert_eq!(
+            PropertyAggregate::new(
+                AggregateFunction::Sum,
+                ObjectProperty::Power,
+                chain_set_with(distinct_from_parent())
+            ),
+            Err(PropertyAggregateError::UnsupportedDependentMemberFilter),
+            "the aggregate constructor inherits the shared refusal"
+        );
+        let objects = CardTypeSetSource::Objects {
+            filter: distinct_from_parent(),
+        };
+        assert_eq!(
+            objects.validate_admission(),
+            Err(CardTypeSetSourceError::DependentMemberFilter),
+            "Objects whole-filters suspend through the same context"
+        );
+    }
+
+    /// MED1 — the refusal is recursive (combinators, union leaves, nested
+    /// references) and scoped: every review-enumerated unsupported route
+    /// refuses, while the R1/R2-supported shapes and plain filters still
+    /// admit.
+    #[test]
+    fn med1_dependent_member_refusal_is_recursive_and_scoped() {
+        let typed = |properties: Vec<FilterProp>| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: None,
+                properties,
+            })
+        };
+        let parent = || Box::new(TargetFilter::ParentTarget);
+        // Each unsupported route refuses, wherever it nests.
+        for (route, filter) in [
+            (
+                "DistinctFrom nested under a combinator",
+                TargetFilter::Or {
+                    filters: vec![
+                        typed(vec![FilterProp::Token]),
+                        typed(vec![FilterProp::DistinctFrom {
+                            reference: parent(),
+                        }]),
+                    ],
+                },
+            ),
+            (
+                "CanEnchant over a selected reference",
+                typed(vec![FilterProp::CanEnchant { target: parent() }]),
+            ),
+            (
+                "SameNameAsParentTarget",
+                typed(vec![FilterProp::SameNameAsParentTarget]),
+            ),
+            (
+                "selected controller axis",
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![],
+                    controller: Some(ControllerRef::ParentTargetController),
+                    properties: vec![],
+                }),
+            ),
+            (
+                "combat relation against the selected target",
+                typed(vec![FilterProp::CombatRelation {
+                    subject: CombatRelationSubject::ParentTarget,
+                    relation: CombatRelation::BlockingOrBlockedBy,
+                }]),
+            ),
+            (
+                "SharesQuality indexed reference (no parked slot authority in the nested scan)",
+                typed(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::CardType,
+                    reference: Some(Box::new(TargetFilter::ParentTargetSlot { index: 0 })),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+            ),
+            (
+                "threshold over chosen X (bare threshold context reads X as 0)",
+                typed(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                }]),
+            ),
+            (
+                "Owned property over the target player (no parked property authority)",
+                typed(vec![FilterProp::Owned {
+                    controller: ControllerRef::TargetPlayer,
+                }]),
+            ),
+            (
+                "ProtectorMatches over the target opponent (no parked property authority)",
+                typed(vec![FilterProp::ProtectorMatches {
+                    controller: ControllerRef::TargetOpponent,
+                }]),
+            ),
+            (
+                "target-player controller nested in a SharesQuality reference scan",
+                typed(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::CardType,
+                    reference: Some(Box::new(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![],
+                        controller: Some(ControllerRef::TargetPlayer),
+                        properties: vec![],
+                    }))),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+            ),
+        ] {
+            assert_eq!(
+                chain_set_with(filter).validate_admission(),
+                Err(CardTypeSetSourceError::DependentMemberFilter),
+                "{route} must refuse at admission"
+            );
+        }
+        // A poisoned leaf nested in a union refuses too.
+        let union = CardTypeSetSource::any_of(vec![
+            CardTypeSetSource::Zone {
+                zone: ZoneRef::Exile,
+                scope: CountScope::Controller,
+            },
+            chain_set_with(typed(vec![FilterProp::DistinctFrom {
+                reference: parent(),
+            }])),
+        ])
+        .expect("test union constructs");
+        assert_eq!(
+            union.validate_admission(),
+            Err(CardTypeSetSourceError::DependentMemberFilter),
+            "a poisoned member filter nested in a union must refuse"
+        );
+        // Supported and plain shapes still admit.
+        for (shape, filter) in [
+            (
+                "R2 SharesQuality direct reference",
+                typed(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::CardType,
+                    reference: Some(parent()),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+            ),
+            ("R1 direct selected node", TargetFilter::ParentTarget),
+            (
+                "R1 direct indexed node",
+                TargetFilter::ParentTargetSlot { index: 0 },
+            ),
+            (
+                "direct target-player controller axis (parked-supported)",
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![],
+                    controller: Some(ControllerRef::TargetPlayer),
+                    properties: vec![],
+                }),
+            ),
+            (
+                "direct target-opponent controller axis (parked-supported)",
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![],
+                    controller: Some(ControllerRef::TargetOpponent),
+                    properties: vec![],
+                }),
+            ),
+            ("plain token check", typed(vec![FilterProp::Token])),
+            (
+                "plain fixed threshold",
+                typed(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }]),
+            ),
+        ] {
+            assert_eq!(
+                chain_set_with(filter).validate_admission(),
+                Ok(()),
+                "{shape} must still admit"
+            );
+        }
+        assert_eq!(
+            chain_set_with_option(None).validate_admission(),
+            Ok(()),
+            "an unfiltered chain set still admits"
+        );
+    }
+
+    /// MED1 — decoding refuses the dependent shape at shared admission (the
+    /// repr route), while the R2-supported shape still decodes.
+    #[test]
+    fn med1_dependent_member_filter_refuses_at_decode() {
+        let aggregate_json = |source: &CardTypeSetSource| {
+            // Struct literal (not `new`): the decode route must refuse the
+            // value the constructor already rejected.
+            let aggregate = PropertyAggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+                source: source.clone(),
+            };
+            let qty = QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(aggregate),
+            };
+            serde_json::to_string(&qty).expect("test value serializes")
+        };
+        let refused = aggregate_json(&chain_set_with(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: None,
+            properties: vec![FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::ParentTarget),
+            }],
+        })));
+        let err = serde_json::from_str::<QuantityExpr>(&refused)
+            .expect_err("decoding a dependent member filter must fail");
+        assert!(
+            err.to_string().contains("suspension-resume path"),
+            "decoding must fail on the shared admission rejection, not a shape error: {err}"
+        );
+        let admitted = aggregate_json(&chain_set_with(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: None,
+            properties: vec![FilterProp::SharesQuality {
+                quality: SharedQuality::CardType,
+                reference: Some(Box::new(TargetFilter::ParentTarget)),
+                relation: SharedQualityRelation::Shares,
+            }],
+        })));
+        assert!(
+            serde_json::from_str::<QuantityExpr>(&admitted).is_ok(),
+            "the R2-supported shape still decodes"
+        );
+    }
+
+    /// B1b — VERDICT (the target-player carve-out is direct-controller-only).
+    /// Matt's witness: a power sum over `TrackedSet{ChainSet, filter:
+    /// Typed{properties:[Owned{TargetPlayer}]}}` reads 5 live but 0 resumed,
+    /// because the `Owned` property evaluator resolves only through the live
+    /// ability with no parked equivalent. The shape must refuse both at the
+    /// aggregate constructor and at the custom decoder — while the DIRECT
+    /// `Typed.controller` axis keeps admitting (see the scoped test below).
+    #[test]
+    fn med1_owned_target_player_property_refuses_at_construction_and_decode() {
+        let witness = || {
+            chain_set_with(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: None,
+                properties: vec![FilterProp::Owned {
+                    controller: ControllerRef::TargetPlayer,
+                }],
+            }))
+        };
+        assert_eq!(
+            PropertyAggregate::new(AggregateFunction::Sum, ObjectProperty::Power, witness()),
+            Err(PropertyAggregateError::UnsupportedDependentMemberFilter),
+            "B1b witness: Owned{{TargetPlayer}} must refuse at construction"
+        );
+        let aggregate = PropertyAggregate {
+            function: AggregateFunction::Sum,
+            property: ObjectProperty::Power,
+            source: witness(),
+        };
+        let json = serde_json::to_string(&QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(aggregate),
+        })
+        .expect("test value serializes");
+        let err = serde_json::from_str::<QuantityExpr>(&json)
+            .expect_err("decoding the Owned{{TargetPlayer}} witness must fail");
+        assert!(
+            err.to_string().contains("suspension-resume path"),
+            "decoding must fail on the shared admission rejection, not a shape error: {err}"
+        );
+    }
+
     #[test]
     fn first_optional_effect_gate_does_not_latch_a_later_independent_gate() {
         let mut first = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
@@ -46037,6 +47697,159 @@ mod tests {
                 caused_by: Some(ThisWayCause::Exiled),
             })
         );
+    }
+
+    /// Unit 8e refusal gate: `references_tracked_set` descends through
+    /// membership combinators (`And`/`Or`/`Not`, `Typed` properties, the
+    /// `ChosenDamageSource` narrowing) but NOT through reference/comparison
+    /// sub-filters, which compare against their inner filter rather than
+    /// restricting the outer population to it. Recursing into a
+    /// `DifferentNameFrom` would under-refuse: "a different name from the
+    /// tracked ones" is, by construction, not the tracked set.
+    #[test]
+    fn references_tracked_set_covers_narrowing_not_reference_subfilters() {
+        let tracked = || TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0),
+        };
+        // Membership positions: all true.
+        assert!(tracked().references_tracked_set());
+        assert!(
+            TargetFilter::ChosenDamageSource {
+                filter: Some(Box::new(tracked())),
+            }
+            .references_tracked_set(),
+            "the narrowing sub-filter restricts the match, so a tracked-set \
+             restriction inside it counts"
+        );
+        assert!(
+            TargetFilter::Not {
+                filter: Box::new(tracked()),
+            }
+            .references_tracked_set(),
+            "negation of a membership still names the set (the destroy-the-rest shape)"
+        );
+        assert!(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::InTrackedSet {
+                        id: crate::types::identifiers::TrackedSetId(0),
+                    }),
+                }
+            ]),)
+            .references_tracked_set()
+        );
+        // Reference positions: all false.
+        assert!(
+            !TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                FilterProp::DifferentNameFrom {
+                    filter: Box::new(tracked()),
+                },
+            ]),)
+            .references_tracked_set(),
+            "a comparison reference must not read as a membership restriction"
+        );
+        assert!(!TargetFilter::ChosenDamageSource { filter: None }.references_tracked_set());
+        assert!(!TargetFilter::Any.references_tracked_set());
+    }
+
+    /// M7: every remaining reference/comparison sub-filter with a tracked-set
+    /// inner still reads false — the exhaustive classification must preserve
+    /// each of these verdicts, not just `DifferentNameFrom`'s. The player-axis
+    /// pair (`PlayerMatching`, `ControllerMatches`) names player populations
+    /// (or controller qualities), never tracked membership; the stack-target
+    /// pair (`Targets`, `TargetsOnly`) names stack entries; `DistinctFrom`
+    /// and `SharesQuality` compare against the inner; `CanEnchant` names
+    /// Auras. The confusable leaves name resolution-local populations that
+    /// are not tracked sets.
+    #[test]
+    fn references_tracked_set_classifies_every_reference_position_false() {
+        let tracked = || TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0),
+        };
+        let controls_tracked = || PlayerFilter::ControlsCount {
+            relation: PlayerRelation::Opponent,
+            filter: tracked(),
+            comparator: Comparator::GE,
+            count: Box::new(QuantityExpr::Fixed { value: 1 }),
+        };
+        let typed_with = |prop: FilterProp| {
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![prop]))
+        };
+        // FilterProp reference positions: all false.
+        for (name, prop) in [
+            (
+                "DistinctFrom",
+                FilterProp::DistinctFrom {
+                    reference: Box::new(tracked()),
+                },
+            ),
+            (
+                "SharesQuality",
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Color,
+                    reference: Some(Box::new(tracked())),
+                    relation: SharedQualityRelation::Shares,
+                },
+            ),
+            (
+                "Targets",
+                FilterProp::Targets {
+                    filter: Box::new(tracked()),
+                },
+            ),
+            (
+                "TargetsOnly",
+                FilterProp::TargetsOnly {
+                    filter: Box::new(tracked()),
+                },
+            ),
+            (
+                "CanEnchant",
+                FilterProp::CanEnchant {
+                    target: Box::new(tracked()),
+                },
+            ),
+            (
+                "ControllerMatches",
+                FilterProp::ControllerMatches {
+                    player: Box::new(controls_tracked()),
+                },
+            ),
+        ] {
+            assert!(
+                !typed_with(prop).references_tracked_set(),
+                "{name} compares against its inner filter rather than restricting \
+                 membership to it"
+            );
+        }
+        // TargetFilter player-axis position: false (a player population).
+        assert!(
+            !TargetFilter::PlayerMatching {
+                player: Box::new(controls_tracked()),
+            }
+            .references_tracked_set(),
+            "players controlling tracked members are not tracked members"
+        );
+        // Confusable resolution-local leaves: all false (not tracked sets).
+        for (name, filter) in [
+            ("ParentTarget", TargetFilter::ParentTarget),
+            ("ExiledBySource", TargetFilter::ExiledBySource),
+            ("LastZoneChanged", TargetFilter::LastZoneChanged),
+            ("CostPaidObject", TargetFilter::CostPaidObject),
+            ("ChosenCard", TargetFilter::ChosenCard),
+        ] {
+            assert!(
+                !filter.references_tracked_set(),
+                "{name} names a resolution-local population, not a tracked set"
+            );
+        }
+        // The filtered tracked-set selector itself: true.
+        assert!(TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
+            caused_by: None,
+        }
+        .references_tracked_set());
     }
 
     #[test]
@@ -47892,7 +49705,7 @@ mod tests {
             taps_for_mana_produced: None,
             mana_ability_produced: None,
             clash_result: None,
-            room_door: Some(crate::game::game_object::RoomDoor::Left),
+            room_door: Some(crate::types::object_data::RoomDoor::Left),
             granting_object: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
@@ -50702,385 +52515,6 @@ mod tests {
     //
     // The `syn` helpers below mirror `types/statics.rs`'s test helpers of the
     // same names, which are private to that module's tests.
-
-    /// Flatten `Pat::Or` recursively and unwrap `Pat::Paren`, yielding the
-    /// top-level alternatives of one arm pattern.
-    fn arm_alternatives(pat: &syn::Pat, out: &mut Vec<syn::Pat>) {
-        match pat {
-            syn::Pat::Or(or) => or.cases.iter().for_each(|c| arm_alternatives(c, out)),
-            syn::Pat::Paren(p) => arm_alternatives(&p.pat, out),
-            other => out.push(other.clone()),
-        }
-    }
-
-    /// Render a `syn::Pat` for comparison and messages without pulling in `quote`.
-    fn quote_pat(pat: &syn::Pat) -> String {
-        pat.to_token_stream().to_string()
-    }
-
-    /// The single top-level `match` expression of a method body.
-    fn sole_top_level_match(f: &syn::ImplItemFn) -> &syn::ExprMatch {
-        let matches: Vec<&syn::ExprMatch> = f
-            .block
-            .stmts
-            .iter()
-            .filter_map(|stmt| match stmt {
-                syn::Stmt::Expr(syn::Expr::Match(m), _) => Some(m),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            matches.len(),
-            1,
-            "`Effect::{}`'s body must contain exactly one top-level `match`, or this \
-             row reads the wrong one (or none); found {}",
-            f.sig.ident,
-            matches.len()
-        );
-        matches[0]
-    }
-
-    /// Every arm's pattern, rendered, in order.
-    fn arm_patterns(m: &syn::ExprMatch) -> Vec<String> {
-        m.arms.iter().map(|arm| quote_pat(&arm.pat)).collect()
-    }
-
-    /// Whether an arm's body is the literal `None`.
-    fn arm_body_is_none(arm: &syn::Arm) -> bool {
-        matches!(arm.body.as_ref(), syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident("None"))
-    }
-
-    /// Every top-level alternative of every arm.
-    fn match_alternatives(m: &syn::ExprMatch) -> Vec<syn::Pat> {
-        let mut alternatives = Vec::new();
-        m.arms
-            .iter()
-            .for_each(|arm| arm_alternatives(&arm.pat, &mut alternatives));
-        alternatives
-    }
-
-    /// Whether some top-level alternative of `m` names `Effect::<variant>`.
-    fn names_effect_variant(m: &syn::ExprMatch, variant: &str) -> bool {
-        match_alternatives(m).iter().any(|alternative| {
-            let path = match alternative {
-                syn::Pat::Path(p) => &p.path,
-                syn::Pat::TupleStruct(p) => &p.path,
-                syn::Pat::Struct(p) => &p.path,
-                _ => return false,
-            };
-            path.segments.len() == 2
-                && path.segments[0].ident == "Effect"
-                && path.segments[1].ident == variant
-        })
-    }
-
-    /// The patterns of the arms whose bodies are `None` in exactly one of the two
-    /// matches, with the side that returns `None` (`true` = the twin).
-    fn none_class_mismatches(
-        shared: &syn::ExprMatch,
-        twin: &syn::ExprMatch,
-    ) -> Vec<(String, bool)> {
-        shared
-            .arms
-            .iter()
-            .zip(&twin.arms)
-            .filter(|(s, t)| arm_body_is_none(s) != arm_body_is_none(t))
-            .map(|(s, t)| (quote_pat(&s.pat), arm_body_is_none(t)))
-            .collect()
-    }
-
-    fn assert_twin_addresses_the_same_field(mut effect: Effect) {
-        let shared = effect
-            .target_filter()
-            .map(|filter| filter as *const TargetFilter);
-        let twin = effect
-            .target_filter_mut()
-            .map(|filter| &*filter as *const TargetFilter);
-        assert!(
-            shared.is_some(),
-            "sample must surface an operand: {effect:?}"
-        );
-        assert_eq!(
-            shared, twin,
-            "the twin must address the same field: {effect:?}"
-        );
-    }
-
-    fn assert_neither_surfaces_an_operand(mut effect: Effect) {
-        assert!(effect.target_filter().is_none(), "{effect:?}");
-        assert!(effect.target_filter_mut().is_none(), "{effect:?}");
-    }
-
-    /// `target_filter` returns a promoted constant, not a field: the twin has no
-    /// field to address.
-    fn assert_constant_arm(mut effect: Effect, constant: &TargetFilter) {
-        assert_eq!(effect.target_filter(), Some(constant), "{effect:?}");
-        assert!(effect.target_filter_mut().is_none(), "{effect:?}");
-    }
-
-    /// `Effect::target_filter_mut` is `Effect::target_filter`'s mutable twin:
-    /// the same arms in the same order with the same patterns (structural half,
-    /// over this file's source), each addressing the same field (behavioural
-    /// half, by pointer equality). A variant moved between one function's
-    /// `Some` and `None` sides fails the structural half; an arm whose twin
-    /// addresses another field fails the behavioural half on its sample.
-    #[test]
-    fn target_filter_mut_is_target_filters_twin() {
-        // Routed through the repo's single comment-policy authority
-        // (`crate::source_census`), per `no_source_reading_file_carries_a_private_comment_policy`.
-        let stripped = crate::source_census::code_lines(include_str!("ability.rs"));
-        let file = syn::parse_file(&stripped)
-            .expect("this file must parse as Rust for the structural half to mean anything");
-        let effect_methods: Vec<&syn::ImplItemFn> = file
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                syn::Item::Impl(imp)
-                    if imp.trait_.is_none()
-                        && matches!(imp.self_ty.as_ref(), syn::Type::Path(p) if p.path.is_ident("Effect")) =>
-                {
-                    Some(imp)
-                }
-                _ => None,
-            })
-            .flat_map(|imp| imp.items.iter())
-            .filter_map(|item| match item {
-                syn::ImplItem::Fn(f) => Some(f),
-                _ => None,
-            })
-            .collect();
-        let method = |name: &str| {
-            let found: Vec<&&syn::ImplItemFn> = effect_methods
-                .iter()
-                .filter(|f| f.sig.ident == name)
-                .collect();
-            assert_eq!(found.len(), 1, "exactly one `Effect::{name}` must exist");
-            sole_top_level_match(found[0])
-        };
-        let shared = method("target_filter");
-        let twin = method("target_filter_mut");
-
-        // Reach: the row reads the real accessors.
-        for (name, m) in [("target_filter", shared), ("target_filter_mut", twin)] {
-            assert!(
-                m.arms.len() >= 30,
-                "`{name}` must have at least 30 arms; got {}",
-                m.arms.len()
-            );
-            let alternatives = match_alternatives(m).len();
-            assert!(
-                alternatives >= 200,
-                "`{name}`'s arms must have at least 200 top-level alternatives; got {alternatives}"
-            );
-            for variant in ["Goad", "SetTapState"] {
-                assert!(
-                    names_effect_variant(m, variant),
-                    "`{name}` must name `Effect::{variant}` as an alternative"
-                );
-            }
-        }
-
-        // Same arms, pattern for pattern.
-        assert_eq!(arm_patterns(shared), arm_patterns(twin));
-
-        // Same `None` class on every arm except the constant arm with no
-        // field-shaped twin: `ChooseFromZone`'s targeted-players iteration.
-        let mismatches = none_class_mismatches(shared, twin);
-        assert_eq!(
-            mismatches.len(),
-            1,
-            "exactly one arm may be `None` in the twin only; got {mismatches:?}"
-        );
-        let (pattern, twin_is_none) = &mismatches[0];
-        assert!(
-            *twin_is_none
-                && pattern.contains("ChooseFromZone")
-                && pattern.contains("TargetedPlayers"),
-            "the one exception must be `ChooseFromZone`'s targeted-players arm, `None` in the \
-             twin; got {mismatches:?}"
-        );
-
-        // The instrument fires: moving one variant from the `Some` alternation to
-        // the `None` alternation changes the compared pattern lists.
-        let before: syn::ExprMatch = syn::parse_str(
-            "match self { Effect::Goad { target, .. } | Effect::Draw { target, .. } => Some(target), \
-             Effect::Myriad => None }",
-        )
-        .expect("the control match must parse");
-        let after: syn::ExprMatch = syn::parse_str(
-            "match self { Effect::Draw { target, .. } => Some(target), \
-             Effect::Goad { .. } | Effect::Myriad => None }",
-        )
-        .expect("the control match must parse");
-        assert_ne!(arm_patterns(&before), arm_patterns(&after));
-
-        // Behavioural half: one sample per non-plain arm shape.
-        let creature = || TargetFilter::Typed(TypedFilter::creature());
-        let context_ref = || TargetFilter::ParentTarget;
-        let fixed_one = || QuantityExpr::Fixed { value: 1 };
-        let copy_token_of = |source_filter: Option<TargetFilter>| Effect::CopyTokenOf {
-            target: creature(),
-            owner: TargetFilter::Controller,
-            source_filter,
-            enters_attacking: false,
-            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
-            tapped: false,
-            count: fixed_one(),
-            extra_keywords: Vec::new(),
-            additional_modifications: Vec::new(),
-        };
-        let token = |attach_to: Option<TargetFilter>| Effect::Token {
-            name: "Spirit".to_string(),
-            power: PtValue::Fixed(1),
-            toughness: PtValue::Fixed(1),
-            types: vec!["Creature".to_string()],
-            colors: Vec::new(),
-            keywords: Vec::new(),
-            tapped: false,
-            count: fixed_one(),
-            owner: TargetFilter::Controller,
-            attach_to,
-            enters_attacking: false,
-            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
-            supertypes: Vec::new(),
-            static_abilities: Vec::new(),
-            enter_with_counters: Vec::new(),
-        };
-        let apply_perpetual = |target: TargetFilter| Effect::ApplyPerpetual {
-            target,
-            modification: PerpetualModification::ModifyPowerToughness {
-                power: QuantityExpr::Fixed { value: 1 },
-                toughness: QuantityExpr::Fixed { value: 1 },
-                keywords: Vec::new(),
-            },
-        };
-        let reveal_top = |player: TargetFilter| Effect::RevealTop { player, count: 1 };
-        let reveal_until = |player: TargetFilter| Effect::RevealUntil {
-            player,
-            filter: creature(),
-            count: fixed_one(),
-            matched_disposition: Default::default(),
-            kept_destination: Zone::Hand,
-            rest_destination: Zone::Graveyard,
-            rest_order: Default::default(),
-            enter_tapped: Default::default(),
-            enters_attacking: false,
-            kept_optional_to: None,
-            enters_under: None,
-            kept_destination_if: None,
-        };
-        let search_library = |target_player: Option<TargetFilter>| Effect::SearchLibrary {
-            source_zones: vec![Zone::Library],
-            filter: creature(),
-            count: fixed_one(),
-            reveal: false,
-            target_player,
-            selection_constraint: Default::default(),
-            split: None,
-        };
-        let mana = |target: ManaTargetRole| Effect::Mana {
-            produced: default_mana_production(),
-            restrictions: Vec::new(),
-            grants: Vec::new(),
-            expiry: None,
-            target: Some(target),
-        };
-        let additional_phase = |recipient: ExtraPhaseRecipient| Effect::AdditionalPhase {
-            recipient,
-            segment: TurnSegment::Phase(PhaseGroup::Combat),
-            after: ExtraPhaseAnchor::ThisPhase { named: None },
-            followed_by: Vec::new(),
-            count: fixed_one(),
-            attacker_restriction: None,
-        };
-        let set_tap_state = |scope: EffectScope| Effect::SetTapState {
-            target: creature(),
-            scope,
-            state: TapStateChange::Tap,
-        };
-        let generic_effect = |target: Option<TargetFilter>| Effect::GenericEffect {
-            static_abilities: Vec::new(),
-            duration: None,
-            target,
-            end_cost: None,
-        };
-
-        // Conditional arms, both branches each.
-        assert_twin_addresses_the_same_field(copy_token_of(None));
-        assert_twin_addresses_the_same_field(copy_token_of(Some(creature())));
-        assert_twin_addresses_the_same_field(token(Some(creature())));
-        assert_twin_addresses_the_same_field(token(None));
-        assert_twin_addresses_the_same_field(apply_perpetual(creature()));
-        assert_neither_surfaces_an_operand(apply_perpetual(TargetFilter::Any));
-        assert_twin_addresses_the_same_field(reveal_top(TargetFilter::Player));
-        assert_neither_surfaces_an_operand(reveal_top(TargetFilter::Controller));
-        assert_twin_addresses_the_same_field(reveal_until(TargetFilter::Player));
-        assert_neither_surfaces_an_operand(reveal_until(context_ref()));
-        assert_neither_surfaces_an_operand(search_library(Some(TargetFilter::Typed(
-            TypedFilter {
-                controller: Some(ControllerRef::ParentTargetOwner),
-                ..TypedFilter::default()
-            },
-        ))));
-        assert_twin_addresses_the_same_field(search_library(Some(TargetFilter::Player)));
-        assert_neither_surfaces_an_operand(search_library(None));
-
-        // `Mana`: the first declared role, by role shape.
-        assert_twin_addresses_the_same_field(mana(ManaTargetRole::Recipient {
-            recipient: TargetFilter::Player,
-        }));
-        assert_twin_addresses_the_same_field(mana(ManaTargetRole::CountSource {
-            count_source: creature(),
-        }));
-        assert_twin_addresses_the_same_field(mana(ManaTargetRole::Both {
-            recipient: TargetFilter::Player,
-            count_source: creature(),
-        }));
-
-        // `AdditionalPhase`: a field for a targeted player, a constant otherwise.
-        assert_twin_addresses_the_same_field(additional_phase(
-            ExtraPhaseRecipient::TargetedPlayer(TargetFilter::Player),
-        ));
-        assert_constant_arm(
-            additional_phase(ExtraPhaseRecipient::Controller),
-            &TargetFilter::Controller,
-        );
-
-        // Boxed, nested and scope-split fields.
-        assert_twin_addresses_the_same_field(Effect::CombineHost {
-            source: CombineSource::Source,
-            host: Box::new(creature()),
-        });
-        assert_twin_addresses_the_same_field(Effect::EachSourceDealsDamage {
-            sources: creature(),
-            amount: fixed_one(),
-            recipient: EachDamageRecipient::Shared(TargetFilter::Player),
-        });
-        assert_twin_addresses_the_same_field(set_tap_state(EffectScope::Single));
-        assert_neither_surfaces_an_operand(set_tap_state(EffectScope::All));
-        assert_twin_addresses_the_same_field(generic_effect(Some(creature())));
-        assert_neither_surfaces_an_operand(generic_effect(None));
-        assert_twin_addresses_the_same_field(Effect::Goad { target: creature() });
-
-        // `ChooseFromZone`'s targeted-players iteration: a constant.
-        assert_constant_arm(
-            Effect::ChooseFromZone {
-                count: 1,
-                zone: Zone::Hand,
-                additional_zones: Vec::new(),
-                zone_owner: ZoneOwner::Each(PerPlayerScope::TargetedPlayers),
-                filter: None,
-                chooser: Default::default(),
-                candidate_source: Default::default(),
-                reciprocal_role: None,
-                gather_role: None,
-                up_to: false,
-                selection: Default::default(),
-                constraint: None,
-            },
-            &TargetFilter::Player,
-        );
-    }
 }
 
 #[cfg(test)]
@@ -52050,7 +53484,7 @@ mod monarch_subject_axis_tests {
             },
             QuantityRef::PlayerActionsThisTurn {
                 player: player.clone(),
-                action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                action: crate::types::event_kinds::PlayerActionKind::ShuffledLibrary,
             },
         ] {
             assert_eq!(reference.player_scope(), Some(&player));
@@ -52225,7 +53659,7 @@ mod static_condition_traversal_tests {
             },
             StaticCondition::AdditionalCostPaid,
             StaticCondition::CastingAsVariant {
-                variant: crate::types::game_state::CastingVariant::Flashback,
+                variant: crate::types::game_state_kinds::CastingVariant::Flashback,
             },
         ] {
             assert!(

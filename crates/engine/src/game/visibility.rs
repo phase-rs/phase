@@ -4340,8 +4340,9 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
     // CR 615.5 + CR 400.2: the arena keeps every rider for the rest of the game, including
     // riders whose shield ended and riders whose host this projection hid (`hide_card` ran
     // above and cleared the host's definitions). An entry that no `runtime_execute` in the
-    // projected state names, and that names a hidden object as its source or payment
-    // source, becomes an inert `NoOp` with source `ObjectId(0)`, so a single snapshot
+    // projected state names, and that names a hidden object as its source, or whose latched
+    // source context names a hidden mana source or linked-exile member, becomes an inert
+    // `NoOp` with source `ObjectId(0)`, so a single snapshot
     // cannot pair that hidden id with the rider's effect. Its position stays, because live
     // handles resolve by position. A rider some definition still names keeps the payment
     // redaction below unchanged. When no rider names a hidden object, the reference walk
@@ -4924,6 +4925,9 @@ fn redact_hidden_library_identity_carriers(
             }
             for (_, causes) in filtered.tracked_set_member_causes.iter_mut() {
                 causes.retain(|id, _| !hidden.contains(id));
+            }
+            for (_, origins) in filtered.tracked_set_member_origins.iter_mut() {
+                origins.retain(|id, _| !hidden.contains(id));
             }
         }
     }
@@ -14611,6 +14615,65 @@ mod tests {
                 "viewer {viewer:?}"
             );
         }
+    }
+
+    #[test]
+    fn hidden_library_tracked_member_origins_are_redacted_for_every_audience() {
+        let mut state = GameState::new_two_player(42);
+        let hidden = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Hidden Member".to_string(),
+            Zone::Battlefield,
+        );
+        let public = create_object(
+            &mut state,
+            CardId(2),
+            P0,
+            "Public Member".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        for member in [hidden, public] {
+            crate::game::zones::move_to_zone(&mut state, member, Zone::Graveyard, &mut events);
+        }
+        crate::game::effects::publish_tracked_set_with_causes(
+            &mut state,
+            vec![
+                (hidden, Some(crate::types::ability::ThisWayCause::Destroyed)),
+                (public, Some(crate::types::ability::ThisWayCause::Destroyed)),
+            ],
+        );
+        let set = state.chain_tracked_set_id.expect("published set");
+        let origins = state.tracked_set_member_origins[&set].clone();
+        assert_eq!(
+            origins.len(),
+            2,
+            "reach guard: both real departures are stamped"
+        );
+        assert_eq!(origins[&hidden].departed_from, Zone::Battlefield);
+        crate::game::zones::move_to_zone(&mut state, hidden, Zone::Library, &mut events);
+
+        // CR 401.2: no audience may recover a hidden library position from
+        // tracked membership, its cause, or its departure provenance.
+        for projected in [
+            filter_state_for_viewer(&state, P0),
+            filter_state_for_viewer(&state, P1),
+            filter_state_for_unseated_viewer(&state),
+        ] {
+            assert_eq!(projected.tracked_object_sets[&set], vec![public]);
+            assert_eq!(projected.tracked_set_member_causes[&set].len(), 1);
+            assert!(projected.tracked_set_member_causes[&set].contains_key(&public));
+            assert_eq!(projected.tracked_set_member_origins[&set].len(), 1);
+            assert_eq!(
+                projected.tracked_set_member_origins[&set][&public],
+                origins[&public]
+            );
+        }
+        assert_eq!(state.tracked_object_sets[&set], vec![hidden, public]);
+        assert_eq!(state.tracked_set_member_causes[&set].len(), 2);
+        assert_eq!(state.tracked_set_member_origins[&set], origins);
     }
 
     /// CR 400.2 + CR 401.2: an `EffectResolved` subject naming a hidden library

@@ -16409,10 +16409,20 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
         .core_types
         .push(CoreType::Creature);
 
+    // Route through the production action boundary (as the hand-built sibling
+    // does): targeting now stages announcement events, which requires the
+    // boundary's end_action to drain the spell trigger carrier.
     let card_id = state.objects[&spell_id].card_id;
-    let waiting = handle_cast_spell(&mut state, PlayerId(0), spell_id, card_id, &mut Vec::new())
-        .expect("Snuff Out should reach the alternative-cost choice");
-    state.waiting_for = waiting;
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("Snuff Out should reach the alternative-cost choice");
     assert!(
         matches!(
             state.waiting_for,
@@ -62171,6 +62181,30 @@ fn quantity_vs_each_opponent_skips_a_player_who_left_the_game() {
     );
 }
 
+/// PR-C F5 — VISITOR. A `TrackedSet` member filter participates in
+/// chosen-target dependency classification exactly like the `Objects` peer:
+/// a member filter naming a parent target reads the activation's chosen
+/// targets, and an unfiltered set reads none.
+#[test]
+fn tracked_set_member_filter_participates_in_chosen_target_deps() {
+    let source =
+        |filter: Option<TargetFilter>| crate::types::ability::CardTypeSetSource::TrackedSet {
+            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter,
+        };
+    assert!(
+        card_type_set_source_reads_chosen_target(
+            &source(Some(TargetFilter::ParentTarget)),
+            TargetRead::Any
+        ),
+        "a member filter naming a parent target must read chosen targets"
+    );
+    assert!(
+        !card_type_set_source_reads_chosen_target(&source(None), TargetRead::Any),
+        "an unfiltered set reads no chosen target"
+    );
+}
 /// CR 116.2m + CR 605.4a + CR 608.2d: a continuation-carrying special action
 /// (Room unlock) pays through `pay_special_action_mana_cost_with_resume`. Its
 /// affordability probe admits a bonus-dependent cost, and the live payment

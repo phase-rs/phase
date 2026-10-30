@@ -78,6 +78,33 @@
 //! by method syntax from an AST item there, is not seen; and a trait that a glob of a non-state
 //! `types/` module or of the root, or a function-local glob, brings into scope, called by method
 //! syntax, is not seen: method resolution needs types, and Phase 6's split compiles it.
+//!
+//! * **Clause 6.** The test regions of `parser/` files and of non-state `types/` files cross
+//!   no future crate boundary. An `Overlay::Tests` build of clause 5's index also reads the
+//!   test-only items and `mod` files (`#[path]` included) under `parser/` and `types/`, and
+//!   each library `#[test]` fn, into separate overlay maps; `Scope::Tests` resolution reads
+//!   the overlay first and then the library maps, and clause 5 reads only the library maps, so
+//!   its sets are unchanged. A test unit is judged on its own references and a `#[test]` on
+//!   its closure over the overlay helpers it names. The classes: a game-side item, module or
+//!   passage; the crate-level `test_support` or `source_census`; a T item or state-module
+//!   passage; in AST files, the parser; and a source read (`include_str!` / `include_bytes!`
+//!   resolved against the file's directory, or `env!("CARGO_MANIFEST_DIR")` with the literal
+//!   that follows it) of a `crates/engine/` path outside the unit's layer directory, a
+//!   `CARGO_MANIFEST_DIR` with no adjacent literal failing closed. Every overlay `use` entry
+//!   naming such a target, or globbing such a module, is a `<use>` hit. In a mixed `types/`
+//!   file (not a state file, defining a T item) a test whose closure names a T item or passes
+//!   through a state module is state half and exempt, as are a helper every reaching test of
+//!   which is state half and a `use` entry every user of which is. Clause 6's fail-open
+//!   limits: `std::fs` reads with cwd-relative paths, and paths built at runtime rather than
+//!   by a literal, are not seen; a statement-level `use` in a test fn binds nothing, as in
+//!   clause 5; clause 5's resolver limits apply (a re-export chain deeper than
+//!   `RESOLVE_DEPTH`, a struct declared through a macro metavariable, a trait a function-local
+//!   glob brings into scope called by method syntax, and a game-side or state-layer trait a
+//!   mixed `types/` file's library code imports, called by method syntax from an AST-half test
+//!   that reaches it through `use super::*`); an identifier reached only through a
+//!   format-string capture is no reference, so it adds no helper edge and names no item; and
+//!   in a mixed file a `use` entry that a state-half unit names and an AST-half unit consumes
+//!   only by method syntax or by a format capture is exempt.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1325,6 +1352,24 @@ const PATH_KEYWORDS: &[&str] = &[
 /// this resolves to nothing.
 const RESOLVE_DEPTH: usize = 8;
 
+/// Whether an index build also reads the test regions of `parser/` and `types/` (clause 6).
+/// Their definitions, `use` entries and units go to separate overlay maps, so a library-only
+/// build and the library maps of an overlay build are the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Overlay {
+    #[default]
+    None,
+    Tests,
+}
+
+/// Which maps a resolution reads: the library maps only (clauses 1-5), or the overlay maps
+/// first and then the library maps (clause 6's test units).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Scope {
+    Library,
+    Tests,
+}
+
 /// The kinds of definition the index records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum DefKind {
@@ -1536,10 +1581,30 @@ struct LayerIndex {
     impls_of: BTreeMap<ItemKey, Vec<usize>>,
     refs: Vec<UnitRefs>,
     resolved: RefCell<Resolutions>,
+    /// Clause 6's overlay: what an `Overlay::Tests` build reads from the test regions of
+    /// `parser/` and `types/`. Empty for `Overlay::None`.
+    overlay: Overlay,
+    test_names: HashMap<Vec<String>, BTreeMap<String, BTreeSet<ItemKey>>>,
+    /// Module -> its overlay `use` entries, as `(test_use_items index, entry index)`.
+    test_uses: HashMap<Vec<String>, Vec<(usize, usize)>>,
+    test_use_items: Vec<UseItem>,
+    /// Modules declared inside test-only modules.
+    test_modules: HashSet<Vec<String>>,
+    test_units: Vec<TestUnit>,
+    /// Overlay definition -> the test units that define it.
+    test_items: BTreeMap<ItemKey, Vec<usize>>,
 }
 
-/// Memoized resolutions: `(written path, module)` -> what it resolves to.
-type Resolutions = HashMap<(Vec<String>, Vec<String>), Option<Target>>;
+/// A test-region unit of clause 6: a test-only item, or a test-only impl member.
+struct TestUnit {
+    unit: Unit,
+    /// A `#[test]` function, judged on its helper closure; every other unit is judged on its
+    /// own references.
+    is_test: bool,
+}
+
+/// Memoized resolutions: `(written path, module, scope)` -> what it resolves to.
+type Resolutions = HashMap<(Vec<String>, Vec<String>, Scope), Option<Target>>;
 
 fn is_game_side_file(file: &str) -> bool {
     let head = file.split('/').next().unwrap_or(file);
@@ -1910,8 +1975,11 @@ fn passage(full: &[String], state_modules: &HashSet<Vec<String>>) -> Option<Viol
 impl LayerIndex {
     /// Index the crate whose files `read` returns by path relative to `src/`, from `lib.rs`
     /// down every `mod` declaration that is not test-only.
-    fn build(read: &dyn Fn(&str) -> Option<String>) -> Self {
-        let mut index = Self::default();
+    fn build(read: &dyn Fn(&str) -> Option<String>, overlay: Overlay) -> Self {
+        let mut index = Self {
+            overlay,
+            ..Self::default()
+        };
         let mut pending = PendingMacros::default();
         let root = read("lib.rs").expect("the crate root `lib.rs` reads");
         index.walk_file("lib.rs", &root, Vec::new(), read, &mut pending);
@@ -1955,19 +2023,29 @@ impl LayerIndex {
         module: &[String],
         pending: &mut PendingMacros,
     ) {
+        let overlay = self.reads_test_regions(ctx.rel);
         for item in items {
             let test = is_test_only(item_attrs(item));
             let syn::Item::Mod(m) = item else {
                 if !test {
                     self.index_item(item, ctx.rel, module, pending);
+                    if overlay {
+                        self.index_test_members(item, ctx.rel, module);
+                    }
+                } else if overlay {
+                    self.index_test_item(item, ctx.rel, module);
                 }
                 continue;
             };
             let mut path = module.to_vec();
             path.push(m.ident.to_string());
             self.modules.insert(path.clone());
-            // A test-only module holds no library code, so its files are not read.
+            // A test-only module holds no library code, so a library build does not read its
+            // files; an overlay build reads them into the overlay maps.
             if test {
+                if overlay {
+                    self.walk_test_mod(m, ctx, child_dir, inline, path);
+                }
                 continue;
             }
             match &m.content {
@@ -2309,7 +2387,7 @@ impl LayerIndex {
                 match imp
                     .self_path
                     .as_deref()
-                    .and_then(|p| self.resolve(p, &imp.module))
+                    .and_then(|p| self.resolve(p, &imp.module, Scope::Library))
                 {
                     Some(Target::Items(keys)) => keys
                         .into_iter()
@@ -2333,28 +2411,57 @@ impl LayerIndex {
         }
     }
 
-    fn lookup(&self, module: &[String], name: &str, depth: usize) -> Option<Target> {
+    fn lookup(&self, module: &[String], name: &str, depth: usize, scope: Scope) -> Option<Target> {
         if depth > RESOLVE_DEPTH {
             return None;
         }
-        if let Some(keys) = self.names.get(module).and_then(|n| n.get(name)) {
+        if let Some(keys) = self.defined(module, name, scope) {
             return Some(Target::Items(keys.clone()));
         }
         let mut child = module.to_vec();
         child.push(name.to_string());
-        if self.modules.contains(&child) {
+        if self.is_module(&child, scope) {
             return Some(Target::Module(child));
         }
-        let uses = self.uses.get(module).map_or(&[][..], Vec::as_slice);
-        let named = uses
-            .iter()
+        let named = self
+            .entries(module, scope)
             .filter(|e| e.kind == UseKind::Name && e.alias.as_deref() == Some(name))
-            .find_map(|e| self.resolve_at(&e.segs, module, depth + 1));
+            .find_map(|e| self.resolve_at(&e.segs, module, depth + 1, scope));
         if named.is_some() {
             return named;
         }
-        self.glob_bases(module, depth)
-            .find_map(|base| self.lookup(&base, name, depth + 1))
+        self.glob_bases(module, depth, scope)
+            .find_map(|base| self.lookup(&base, name, depth + 1, scope))
+    }
+
+    /// The definitions of `name` in `module`: the overlay's first under `Scope::Tests`.
+    fn defined(&self, module: &[String], name: &str, scope: Scope) -> Option<&BTreeSet<ItemKey>> {
+        let overlay = match scope {
+            Scope::Library => None,
+            Scope::Tests => self.test_names.get(module).and_then(|n| n.get(name)),
+        };
+        overlay.or_else(|| self.names.get(module).and_then(|n| n.get(name)))
+    }
+
+    fn is_module(&self, path: &[String], scope: Scope) -> bool {
+        self.modules.contains(path) || (scope == Scope::Tests && self.test_modules.contains(path))
+    }
+
+    /// `module`'s `use` entries: under `Scope::Tests` the overlay's, then the library's.
+    fn entries<'a>(
+        &'a self,
+        module: &[String],
+        scope: Scope,
+    ) -> impl Iterator<Item = &'a UseEntry> + 'a {
+        let overlay = match scope {
+            Scope::Library => None,
+            Scope::Tests => self.test_uses.get(module),
+        };
+        overlay
+            .into_iter()
+            .flatten()
+            .map(|&(item, entry)| &self.test_use_items[item].entries[entry])
+            .chain(self.uses.get(module).into_iter().flatten())
     }
 
     /// The absolute bases of `module`'s glob `use`s, other than `module` itself.
@@ -2362,21 +2469,25 @@ impl LayerIndex {
         &'a self,
         module: &'a [String],
         depth: usize,
+        scope: Scope,
     ) -> impl Iterator<Item = Vec<String>> + 'a {
-        self.uses
-            .get(module)
-            .into_iter()
-            .flatten()
+        self.entries(module, scope)
             .filter(|e| e.kind == UseKind::Glob)
-            .filter_map(move |e| self.abs_of(&e.segs, module, depth + 1))
+            .filter_map(move |e| self.abs_of(&e.segs, module, depth + 1, scope))
             .filter(move |base| base != module)
     }
 
-    fn abs_of(&self, segs: &[String], module: &[String], depth: usize) -> Option<Vec<String>> {
+    fn abs_of(
+        &self,
+        segs: &[String],
+        module: &[String],
+        depth: usize,
+        scope: Scope,
+    ) -> Option<Vec<String>> {
         if let Some(abs) = absolutize(segs, module) {
             return Some(abs);
         }
-        match self.lookup(module, segs.first()?, depth + 1)? {
+        match self.lookup(module, segs.first()?, depth + 1, scope)? {
             Target::Module(m) => Some(m.into_iter().chain(segs[1..].iter().cloned()).collect()),
             Target::Items(_) => None,
         }
@@ -2384,23 +2495,29 @@ impl LayerIndex {
 
     /// Resolve a written path in `module`. The longest prefix that names an item wins, so an
     /// enum variant or an associated item resolves to its type.
-    fn resolve(&self, segs: &[String], module: &[String]) -> Option<Target> {
-        let key = (segs.to_vec(), module.to_vec());
+    fn resolve(&self, segs: &[String], module: &[String], scope: Scope) -> Option<Target> {
+        let key = (segs.to_vec(), module.to_vec(), scope);
         if let Some(hit) = self.resolved.borrow().get(&key) {
             return hit.clone();
         }
-        let out = self.resolve_at(segs, module, 0);
+        let out = self.resolve_at(segs, module, 0, scope);
         self.resolved.borrow_mut().insert(key, out.clone());
         out
     }
 
-    fn resolve_at(&self, segs: &[String], module: &[String], depth: usize) -> Option<Target> {
+    fn resolve_at(
+        &self,
+        segs: &[String],
+        module: &[String],
+        depth: usize,
+        scope: Scope,
+    ) -> Option<Target> {
         if depth > RESOLVE_DEPTH || segs.is_empty() {
             return None;
         }
         let (base, rest) = match absolutize(segs, module) {
             Some(abs) => (Vec::new(), abs),
-            None => match self.lookup(module, &segs[0], depth + 1)? {
+            None => match self.lookup(module, &segs[0], depth + 1, scope)? {
                 t @ Target::Items(_) => return Some(t),
                 t if segs.len() == 1 => return Some(t),
                 Target::Module(m) => (m, segs[1..].to_vec()),
@@ -2408,7 +2525,7 @@ impl LayerIndex {
         };
         let mut cur = base;
         for s in &rest {
-            match self.lookup(&cur, s, depth + 1) {
+            match self.lookup(&cur, s, depth + 1, scope) {
                 None => break,
                 Some(t @ Target::Items(_)) => return Some(t),
                 Some(Target::Module(m)) => cur = m,
@@ -2418,8 +2535,8 @@ impl LayerIndex {
     }
 
     /// The path the first library `use` in `module` that binds `name` names.
-    fn use_binding(&self, module: &[String], name: &str) -> Option<&[String]> {
-        self.uses.get(module)?.iter().find_map(|e| {
+    fn use_binding(&self, module: &[String], name: &str, scope: Scope) -> Option<&[String]> {
+        self.entries(module, scope).find_map(|e| {
             (e.kind == UseKind::Name && e.alias.as_deref() == Some(name))
                 .then_some(e.segs.as_slice())
         })
@@ -2429,18 +2546,24 @@ impl LayerIndex {
     /// a bare head bound by a `use` replaced by that `use`'s path, a bare head naming a child
     /// module prefixed by the module path, and a bare head a glob imports (and the module does
     /// not define) prefixed by the glob's base. `None` for an extern or local name.
-    fn canonical(&self, segs: &[String], module: &[String], depth: usize) -> Option<Vec<String>> {
+    fn canonical(
+        &self,
+        segs: &[String],
+        module: &[String],
+        depth: usize,
+        scope: Scope,
+    ) -> Option<Vec<String>> {
         if depth > RESOLVE_DEPTH {
             return None;
         }
         if let Some(abs) = absolutize(segs, module) {
             return Some(abs);
         }
-        if let Some(bound) = self.use_binding(module, &segs[0]) {
+        if let Some(bound) = self.use_binding(module, &segs[0], scope) {
             let base = match absolutize(bound, module) {
                 Some(abs) => abs,
                 None if bound.first() != segs.first() => {
-                    self.canonical(bound, module, depth + 1)?
+                    self.canonical(bound, module, depth + 1, scope)?
                 }
                 None => return None,
             };
@@ -2448,28 +2571,24 @@ impl LayerIndex {
         }
         let mut child = module.to_vec();
         child.push(segs[0].clone());
-        if self.modules.contains(&child) {
+        if self.is_module(&child, scope) {
             return Some(module.iter().chain(segs).cloned().collect());
         }
-        if self
-            .names
-            .get(module)
-            .is_some_and(|n| n.contains_key(&segs[0]))
-        {
+        if self.defined(module, &segs[0], scope).is_some() {
             return None;
         }
         let base = self
-            .glob_bases(module, depth)
-            .find(|base| self.resolve(&segs[..1], base).is_some())?;
+            .glob_bases(module, depth, scope)
+            .find(|base| self.resolve(&segs[..1], base, scope).is_some())?;
         Some(base.into_iter().chain(segs.iter().cloned()).collect())
     }
 
-    fn refs_in(&self, toks: &[String], module: &[String]) -> BTreeSet<Ref> {
+    fn refs_in(&self, toks: &[String], module: &[String], scope: Scope) -> BTreeSet<Ref> {
         paths_in(toks)
             .into_iter()
             .filter(|segs| !is_keyword_head(segs))
             .filter_map(|segs| {
-                self.resolve(&segs, module)
+                self.resolve(&segs, module, scope)
                     .or_else(|| self.root_macro(&segs))
             })
             .flat_map(Target::into_refs)
@@ -2495,10 +2614,10 @@ impl LayerIndex {
 
     fn unit_refs(&self, u: usize) -> UnitRefs {
         let unit = &self.units[u];
-        let mut refs = self.refs_in(&unit.tokens, &unit.module);
+        let mut refs = self.refs_in(&unit.tokens, &unit.module, Scope::Library);
         let mut unresolved = Vec::new();
         for (key, value, segs) in serde_paths(&unit.tokens) {
-            match self.resolve(&segs, &unit.module) {
+            match self.resolve(&segs, &unit.module, Scope::Library) {
                 Some(target) => refs.extend(target.into_refs()),
                 None => {
                     let local_fn = segs.len() == 1
@@ -2515,7 +2634,7 @@ impl LayerIndex {
         let sig_refs = unit
             .sig
             .clone()
-            .map(|range| self.refs_in(&unit.tokens[range], &unit.module))
+            .map(|range| self.refs_in(&unit.tokens[range], &unit.module, Scope::Library))
             .unwrap_or_default();
         UnitRefs {
             refs,
@@ -2530,6 +2649,7 @@ impl LayerIndex {
         &self,
         unit: &Unit,
         state_modules: &HashSet<Vec<String>>,
+        scope: Scope,
     ) -> Vec<(ViolationKind, String, String)> {
         let mut seen = BTreeSet::new();
         let serde = serde_paths(&unit.tokens)
@@ -2540,7 +2660,7 @@ impl LayerIndex {
             .chain(serde)
             .filter(|segs| !is_keyword_head(segs))
             .filter_map(|segs| {
-                let full = self.canonical(&segs, &unit.module, 0)?;
+                let full = self.canonical(&segs, &unit.module, 0, scope)?;
                 let kind = passage(&full, state_modules)?;
                 let canonical = format!("crate::{}", full.join("::"));
                 seen.insert(canonical.clone())
@@ -2551,7 +2671,7 @@ impl LayerIndex {
 }
 
 /// Why a `types/` item is in the state layer (T).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum StateWhy {
     /// Its definition names a game-side item or module, or another T item.
     Names(Ref),
@@ -2588,6 +2708,18 @@ enum ViolationKind {
     InherentImpl,
     /// 5c: a trait impl outside `types/` on an AST item whose trait names no game-side item.
     ForeignTraitImpl,
+    /// 6: a test region names a game-side item or module, or passes through a game-side module.
+    TestGameSide,
+    /// 6: a test region names the crate-level card-DB loader, `crate::test_support`.
+    TestSupport,
+    /// 6: a test region names a T item or passes through a state module.
+    TestState,
+    /// 6: an AST test region names the parser or passes through it.
+    TestNamesParser,
+    /// 6: a test region names the crate-level source census, `crate::source_census`.
+    TestSourceCensus,
+    /// 6: a test region reads a `crates/engine/` source outside its own layer directory.
+    TestRead,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -2628,8 +2760,8 @@ struct LayerCensus {
 }
 
 impl LayerCensus {
-    fn run(read: &dyn Fn(&str) -> Option<String>, anchors: &[&str]) -> Self {
-        let index = LayerIndex::build(read);
+    fn run(read: &dyn Fn(&str) -> Option<String>, anchors: &[&str], overlay: Overlay) -> Self {
+        let index = LayerIndex::build(read, overlay);
         let mut census = Self {
             seeds: BTreeMap::new(),
             state: BTreeMap::new(),
@@ -2966,7 +3098,9 @@ impl LayerCensus {
                         witness.clone(),
                     ));
                 }
-                for (kind, written, canonical) in index.passages(unit, &state_modules) {
+                for (kind, written, canonical) in
+                    index.passages(unit, &state_modules, Scope::Library)
+                {
                     out.push(self.violation(
                         kind,
                         unit,
@@ -2995,7 +3129,7 @@ impl LayerCensus {
                 let mut probe = entry.segs.clone();
                 probe.push("_".into());
                 let crossing = index
-                    .canonical(&probe, &use_item.module, 0)
+                    .canonical(&probe, &use_item.module, 0, Scope::Library)
                     .and_then(|full| Some((passage(&full, &state_modules)?, full)));
                 let written = format!("(written `{}`)", entry.segs.join("::"));
                 let (kind, subject, detail) = if parser {
@@ -3008,7 +3142,9 @@ impl LayerCensus {
                 } else {
                     let target = match entry.kind {
                         UseKind::Glob => None,
-                        UseKind::Name => index.resolve(&entry.segs, &use_item.module),
+                        UseKind::Name => {
+                            index.resolve(&entry.segs, &use_item.module, Scope::Library)
+                        }
                     };
                     // A glob can supply any name of its base, so a passage through one is a
                     // hit. In a file that defines no T item, a name for a game-side or T item
@@ -3055,7 +3191,7 @@ impl LayerCensus {
         // 5a: parser library units name no T item and pass through no state module.
         for &u in &index.parser_units {
             let unit = &index.units[u];
-            for (kind, written, canonical) in index.passages(unit, &state_modules) {
+            for (kind, written, canonical) in index.passages(unit, &state_modules, Scope::Library) {
                 if kind == ViolationKind::StatePassage {
                     out.push(self.violation(
                         kind,
@@ -3119,7 +3255,7 @@ impl LayerCensus {
                 None => (ViolationKind::InherentImpl, "inherent".to_string()),
                 Some((name, tokens)) => {
                     if index
-                        .refs_in(tokens, &imp.module)
+                        .refs_in(tokens, &imp.module, Scope::Library)
                         .iter()
                         .any(Ref::is_game_side)
                     {
@@ -3151,6 +3287,7 @@ fn ast_and_parser_library_code_name_no_state_layer_item() {
     let census = LayerCensus::run(
         &|rel: &str| std::fs::read_to_string(src.join(rel)).ok(),
         STATE_MODULE_ANCHORS,
+        Overlay::None,
     );
 
     // Violations report first, so a crossing that also moves a reach-guard anchor (an AST item
@@ -3210,12 +3347,23 @@ fn ast_and_parser_library_code_name_no_state_layer_item() {
     );
 }
 
-/// The planted crate for clause 5's controls: `(path relative to src/, source)`.
+/// The planted crate for clause 5's and clause 6's controls: `(path relative to src/,
+/// source)`. Clause 6's test regions are test-only, so clause 5 sees none of them.
 const PLANTED_CRATE: &[(&str, &str)] = &[
-    ("lib.rs", "pub mod game; pub mod parser; pub mod types;"),
+    (
+        "lib.rs",
+        "pub mod game; pub mod parser; pub mod types;
+         #[cfg(test)] mod test_support;
+         #[cfg(test)] mod source_census;",
+    ),
     (
         "game/mod.rs",
         "pub mod obj;
+         pub struct X;
+         pub mod glob_mod { pub trait GlobExt { fn g(&self); } }
+         // A game-side test region is out of clause 6's scope.
+         #[cfg(test)]
+         mod tests { #[test] fn game_names_parser() { crate::parser::seeds(); } }
          pub use crate::types::ast::Leaf;
          pub trait LocalExt { fn ext(&self); }
          impl LocalExt for crate::types::ast::Clean { fn ext(&self) {} }
@@ -3250,7 +3398,10 @@ const PLANTED_CRATE: &[(&str, &str)] = &[
          use crate::types::state::RuntimeExt;
          use super::deep::Handle;
          pub fn pure_ext(c: &super::ast::Clean) { c.ext(); }
-         pub fn pure_state_ext(c: &super::ast::Clean) { c.obj(); }",
+         pub fn pure_state_ext(c: &super::ast::Clean) { c.obj(); }
+         // An AST test naming the parser.
+         #[cfg(test)]
+         mod tests { #[test] fn names_parser() { crate::parser::seeds(); } }",
     ),
     (
         "types/game_state.rs",
@@ -3331,11 +3482,35 @@ const PLANTED_CRATE: &[(&str, &str)] = &[
             pub struct Runtime;
             pub struct GlobState { pub m: Mode, pub r: Runtime }
         }
+        // A test-only definition shadowing, under `Scope::Tests` only, the name a glob supplies
+        // library code: clause 5 resolves `Handle` to the state-layer one.
+        pub mod shadow {
+            use crate::types::deep::*;
+            #[cfg(test)]
+            pub struct Handle;
+            pub struct UsesHandle { pub h: Handle }
+        }
+        // Clause 6 in a mixed file: a helper and two entries, each with a state-half user and
+        // an AST-half user or none, and an entry only a state-half test uses.
+        #[cfg(test)]
+        mod mixed_tests {
+            use crate::game::X;
+            use crate::game::LocalExt;
+            use crate::game::obj::touch;
+            fn mixed_helper() { let _ = crate::game::obj::Obj; }
+            #[test] fn state_half_helper_user() { mixed_helper(); crate::types::deep::make_handle(); }
+            #[test] fn ast_half_helper_user() { mixed_helper(); }
+            #[test] fn state_half_entry_user() { let _ = X; crate::types::deep::make_handle(); }
+            #[test] fn ast_half_entry_user() { let _ = X; }
+            #[test] fn method_user() { super::GameInherent.ext(); }
+            #[test] fn state_half_alone() { touch(); crate::types::deep::make_handle(); }
+        }
         "#,
     ),
     (
         "parser/mod.rs",
-        "pub fn seeds() {
+        "pub mod ctl; pub mod filemod; pub mod p;
+         pub fn seeds() {
              let _ = (
                  crate::types::ast::direct, crate::types::ast::renamed::renamed,
                  crate::types::ast::grouped::grouped, crate::types::ast::globbed::globbed,
@@ -3360,14 +3535,80 @@ const PLANTED_CRATE: &[(&str, &str)] = &[
          #[cfg(test)]
          fn test_only() -> Option<crate::types::state::Runtime> { None }",
     ),
+    (
+        "parser/ctl.rs",
+        r#"// Library code clause 1 sees, not a test region.
+        #[cfg(any(test, feature = "test-support"))]
+        pub mod th { pub fn library_helper() { crate::game::obj::touch(); } }
+        #[cfg(test)]
+        mod tests {
+            use crate::game::obj::Obj;
+            #[test] fn direct_path() { crate::game::obj::touch(); }
+            #[test] fn use_bound() { let _ = Obj; }
+            fn reaches_game() { crate::game::obj::touch(); }
+            #[test] fn through_helper() { reaches_game(); }
+            #[test] fn names_test_support() { crate::test_support::shared_card_db(); }
+            #[test] fn names_source_census() { crate::source_census::code(); }
+            #[test] fn state_item() { let _: Option<crate::types::state::Runtime> = None; }
+            #[test] fn reads_ast_file() { let _ = include_str!("../types/x.rs"); }
+            #[test]
+            fn reads_manifest_game() {
+                let _ = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/game/x.rs"));
+            }
+            #[test] fn reads_manifest_bare() { let _ = env!("CARGO_MANIFEST_DIR"); }
+            #[test] fn reads_self() { let _ = include_str!("ctl.rs"); }
+            #[test]
+            fn reads_client() {
+                let _ = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../client/x.json"));
+            }
+            mod inner { use super::*; #[test] fn through_glob() { let _ = Obj; } }
+        }
+        // A trait and a glob reached only through a `use` entry, called by method syntax.
+        #[cfg(test)]
+        mod trait_shape { use crate::game::LocalExt; #[test] fn method_call() { 0u8.ext(); } }
+        #[cfg(test)]
+        mod glob_entry { use crate::game::glob_mod::*; #[test] fn glob_method() { 0u8.g(); } }
+        "#,
+    ),
+    ("parser/filemod.rs", "#[cfg(test)] mod tests;"),
+    (
+        "parser/filemod/tests.rs",
+        "#[test] fn in_file() { crate::game::obj::touch(); }",
+    ),
+    (
+        "parser/p.rs",
+        r#"#[cfg(test)]
+        fn p_helper() { crate::game::obj::touch(); }
+        #[cfg(test)]
+        #[path = "p_tests.rs"]
+        mod tests;
+        "#,
+    ),
+    (
+        "parser/p_tests.rs",
+        "use super::*; #[test] fn t() { p_helper(); }",
+    ),
 ];
 
 #[test]
 fn the_layer_census_resolves_every_reference_shape() {
     let files: HashMap<&str, &str> = PLANTED_CRATE.iter().copied().collect();
-    let census = LayerCensus::run(
-        &|rel: &str| files.get(rel).map(|s| s.to_string()),
-        &["types/game_state.rs", "types/state.rs"],
+    let read = |rel: &str| files.get(rel).map(|s| s.to_string());
+    let anchors = ["types/game_state.rs", "types/state.rs"];
+    let census = LayerCensus::run(&read, &anchors, Overlay::None);
+
+    // Non-leak: clause 6's overlay changes none of clause 5's sets. `UsesHandle` is the live
+    // shape: resolved with `Scope::Tests`, its `Handle` is the test-only one.
+    assert!(
+        census.state.keys().any(|k| k.name == "UsesHandle"),
+        "clause 5 resolves `shadow::UsesHandle`'s `Handle` through the glob"
+    );
+    let overlaid = LayerCensus::run(&read, &anchors, Overlay::Tests);
+    assert!(
+        overlaid.state == census.state
+            && overlaid.ast == census.ast
+            && overlaid.violations == census.violations,
+        "an overlay build changes clause 5's state layer, AST closure or violations"
     );
 
     let in_state = |name: &str| census.state.keys().any(|k| k.name == name);
@@ -3634,4 +3875,1047 @@ fn the_layer_census_resolves_every_reference_shape() {
             "the {kind:?} witness for `{item}` reads seed -> item: {found}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Clause 6: test regions of `parser/` and non-state `types/` files cross no future crate
+// boundary.
+// ---------------------------------------------------------------------------------------------
+
+/// Clause-6 exemptions: `(file, unit, kind, subject, reason)`. Each row must match a hit, so a
+/// row that outlives its reference fails the census instead of silently widening it.
+const TEST_REGION_EXEMPTIONS: &[(&str, &str, ViolationKind, &str, &str)] = &[(
+    "types/token_presets.rs",
+    "the_committed_catalog_and_overlay_pass_the_same_check",
+    ViolationKind::TestRead,
+    "data/known-tokens.overlay.toml",
+    "A8: the overlay moves with its lowest consumer, `phase-ast`",
+)];
+
+/// How clause 6 classifies a source read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ReadClass {
+    /// A `crates/engine/` path outside the reading unit's layer directory, or a
+    /// `CARGO_MANIFEST_DIR` with no adjacent literal.
+    Crossing,
+    /// A path inside the reading unit's layer directory (`src/parser/` or `src/types/`).
+    InLayer,
+    /// A path outside `crates/engine/`.
+    OutOfCrate,
+}
+
+/// One reference-level hit of a test unit: its kind, subject and detail.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TestHit {
+    kind: ViolationKind,
+    subject: String,
+    detail: String,
+}
+
+/// Clause 6's verdict over an overlay index.
+struct TestRegionCensus {
+    violations: Vec<Violation>,
+    /// Exemption rows that matched no hit.
+    stale: Vec<String>,
+    parser_tests: usize,
+    ast_tests: usize,
+    /// Mixed-file `#[test]`s exempt as state half.
+    state_half: usize,
+    /// Reads classified as not crossing: `(file, unit, class, path)`.
+    benign_reads: Vec<(String, String, ReadClass, String)>,
+}
+
+/// `rel` against `base`, both `/`-separated, with `.` and `..` folded.
+fn normalize_path(base: &str, rel: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for seg in base.split('/').chain(rel.split('/')) {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    out.join("/")
+}
+
+fn str_literal(token: &str) -> Option<String> {
+    let lit = token.strip_prefix("<lit>")?;
+    syn::parse_str::<syn::LitStr>(lit).ok().map(|s| s.value())
+}
+
+/// The source reads in `toks`, a unit of `file` (relative to `src/`): an `include_str!` /
+/// `include_bytes!` literal, resolved against the file's directory, or an
+/// `env!("CARGO_MANIFEST_DIR")` followed by a literal, resolved against `crates/engine/`.
+/// `None` is a `CARGO_MANIFEST_DIR` with no adjacent literal. Paths are from the repository
+/// root.
+fn reads_in(toks: &[String], file: &str) -> Vec<Option<String>> {
+    let dir = Path::new(file)
+        .parent()
+        .map_or_else(String::new, slash_path);
+    let file_base = format!("crates/engine/src/{dir}");
+    let mut out = Vec::new();
+    for i in 0..toks.len() {
+        let opens = |name: &str| {
+            toks[i] == name
+                && toks.get(i + 1).is_some_and(|t| t == "!")
+                && toks.get(i + 2).is_some_and(|t| t == "<g")
+        };
+        if opens("include_str") || opens("include_bytes") {
+            if let Some(lit) = toks.get(i + 3).and_then(|t| str_literal(t)) {
+                out.push(Some(normalize_path(&file_base, &lit)));
+            }
+        }
+        let manifest = opens("env")
+            && toks.get(i + 3).and_then(|t| str_literal(t)).as_deref()
+                == Some("CARGO_MANIFEST_DIR")
+            && toks.get(i + 4).is_some_and(|t| t == "g>");
+        if manifest {
+            let next = toks[i + 5..].iter().find(|t| *t != ",");
+            out.push(
+                next.and_then(|t| str_literal(t))
+                    .map(|lit| normalize_path("crates/engine", &lit)),
+            );
+        }
+    }
+    out
+}
+
+/// A token run with `#[doc = …]` / `#![doc = …]` attributes removed, so doc text is no
+/// reference.
+fn without_docs(toks: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(toks.len());
+    let mut i = 0;
+    while i < toks.len() {
+        let bang = usize::from(toks.get(i + 1).is_some_and(|t| t == "!"));
+        let is_doc = toks[i] == "#"
+            && toks.get(i + 1 + bang).is_some_and(|t| t == "<g")
+            && toks.get(i + 2 + bang).is_some_and(|t| t == "doc")
+            && toks.get(i + 3 + bang).is_some_and(|t| t == "=")
+            && toks.get(i + 5 + bang).is_some_and(|t| t == "g>");
+        if is_doc {
+            i += 6 + bang;
+        } else {
+            out.push(toks[i].clone());
+            i += 1;
+        }
+    }
+    out
+}
+
+fn is_test_fn(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| a.path().is_ident("test"))
+}
+
+impl LayerIndex {
+    /// An overlay build reads the test regions of `parser/` and `types/` files.
+    fn reads_test_regions(&self, file: &str) -> bool {
+        self.overlay == Overlay::Tests
+            && (file.starts_with("parser/") || file.starts_with("types/"))
+    }
+
+    fn push_test_unit(&mut self, unit: Unit, is_test: bool) -> usize {
+        self.test_units.push(TestUnit { unit, is_test });
+        self.test_units.len() - 1
+    }
+
+    /// The test regions of a library item, each a test unit: a `#[test]` fn with no test-only
+    /// `cfg` (rustc builds it only under `--test`), or a test-only member of an impl.
+    fn index_test_members(&mut self, item: &syn::Item, file: &str, module: &[String]) {
+        let imp = match item {
+            syn::Item::Fn(f) if is_test_fn(&f.attrs) => {
+                let unit = Unit {
+                    file: file.to_string(),
+                    module: module.to_vec(),
+                    item: f.sig.ident.to_string(),
+                    label: "test".into(),
+                    tokens: without_docs(flatten(item)),
+                    sig: None,
+                };
+                self.push_test_unit(unit, true);
+                return;
+            }
+            syn::Item::Impl(imp) => imp,
+            _ => return,
+        };
+        for ii in imp
+            .items
+            .iter()
+            .filter(|ii| is_test_only(impl_item_attrs(ii)))
+        {
+            let Some((name, tokens, _)) = impl_member(ii) else {
+                continue;
+            };
+            let is_test = matches!(ii, syn::ImplItem::Fn(f) if is_test_fn(&f.attrs));
+            let unit = Unit {
+                file: file.to_string(),
+                module: module.to_vec(),
+                item: name,
+                label: "test impl member".into(),
+                tokens,
+                sig: None,
+            };
+            self.push_test_unit(unit, is_test);
+        }
+    }
+
+    /// A test-only item into the overlay: its definition, `use` entries and unit.
+    fn index_test_item(&mut self, item: &syn::Item, file: &str, module: &[String]) {
+        if let syn::Item::Use(u) = item {
+            let mut entries = Vec::new();
+            use_entries(&u.tree, &[], &mut entries);
+            let at = self.test_use_items.len();
+            self.test_uses
+                .entry(module.to_vec())
+                .or_default()
+                .extend((0..entries.len()).map(|e| (at, e)));
+            self.test_use_items.push(UseItem {
+                file: file.to_string(),
+                module: module.to_vec(),
+                entries,
+            });
+            return;
+        }
+        let (name, key, is_test) = match item {
+            syn::Item::Impl(imp) => {
+                let name = type_path(&imp.self_ty)
+                    .and_then(|p| p.last().cloned())
+                    .unwrap_or_default();
+                (format!("impl {name}"), None, false)
+            }
+            syn::Item::Macro(m) => match &m.ident {
+                Some(ident) => (
+                    format!("{ident}!"),
+                    Some((ident.to_string(), DefKind::MacroRules)),
+                    false,
+                ),
+                None => {
+                    let name = m
+                        .mac
+                        .path
+                        .segments
+                        .last()
+                        .map_or_else(String::new, |s| s.ident.to_string());
+                    (format!("{name}!"), None, false)
+                }
+            },
+            other => {
+                let Some((ident, kind)) = def_ident(other) else {
+                    return;
+                };
+                let is_test = matches!(other, syn::Item::Fn(f) if is_test_fn(&f.attrs));
+                (ident.to_string(), Some((ident.to_string(), kind)), is_test)
+            }
+        };
+        let unit = Unit {
+            file: file.to_string(),
+            module: module.to_vec(),
+            item: name,
+            label: if is_test { "test" } else { "test helper" }.into(),
+            tokens: without_docs(flatten(item)),
+            sig: None,
+        };
+        let u = self.push_test_unit(unit, is_test);
+        if let Some((name, kind)) = key.filter(|(n, _)| n != "_") {
+            let key = ItemKey {
+                file: file.to_string(),
+                name: name.clone(),
+                kind,
+            };
+            self.test_names
+                .entry(module.to_vec())
+                .or_default()
+                .entry(name)
+                .or_default()
+                .insert(key.clone());
+            self.test_items.entry(key).or_default().push(u);
+        }
+    }
+
+    /// A test-only module into the overlay, inline or through its file.
+    fn walk_test_mod(
+        &mut self,
+        m: &syn::ItemMod,
+        ctx: &IndexCtx<'_>,
+        child_dir: &Path,
+        inline: bool,
+        path: Vec<String>,
+    ) {
+        match &m.content {
+            Some((_, inner)) => {
+                let dir = child_dir.join(m.ident.to_string());
+                self.walk_test_items(inner, ctx, &dir, true, &path);
+            }
+            None => {
+                let (rel, text) = mod_file_candidates(m, ctx.rel, ctx.dir, child_dir, inline)
+                    .iter()
+                    .find_map(|p| {
+                        let rel = slash_path(p);
+                        (ctx.read)(&rel).map(|text| (rel, text))
+                    })
+                    .unwrap_or_else(|| panic!("`mod {}` in {}: no file", m.ident, ctx.rel));
+                let parsed = syn::parse_file(&text).unwrap_or_else(|e| panic!("parse {rel}: {e}"));
+                let file = Path::new(&rel);
+                let dir = file.parent().unwrap_or(Path::new("")).to_path_buf();
+                let file_child_dir = match file.file_name().and_then(|n| n.to_str()) {
+                    Some("mod.rs" | "lib.rs") => dir.clone(),
+                    _ => dir.join(file.file_stem().expect("file stem")),
+                };
+                let file_ctx = IndexCtx {
+                    rel: &rel,
+                    dir: &dir,
+                    read: ctx.read,
+                };
+                self.walk_test_items(&parsed.items, &file_ctx, &file_child_dir, false, &path);
+            }
+        }
+    }
+
+    fn walk_test_items(
+        &mut self,
+        items: &[syn::Item],
+        ctx: &IndexCtx<'_>,
+        child_dir: &Path,
+        inline: bool,
+        module: &[String],
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Mod(m) => {
+                    let mut path = module.to_vec();
+                    path.push(m.ident.to_string());
+                    self.test_modules.insert(path.clone());
+                    self.walk_test_mod(m, ctx, child_dir, inline, path);
+                }
+                other => self.index_test_item(other, ctx.rel, module),
+            }
+        }
+    }
+
+    /// The overlay `use` entry that binds `name` in `module` under `Scope::Tests`: a named
+    /// entry, or the glob entry whose base supplies it (the innermost overlay binder through a
+    /// chain of globs). `None` when a definition, a child module or a library `use` binds it.
+    fn overlay_binder(
+        &self,
+        module: &[String],
+        name: &str,
+        depth: usize,
+    ) -> Option<(usize, usize)> {
+        if depth > RESOLVE_DEPTH || self.defined(module, name, Scope::Tests).is_some() {
+            return None;
+        }
+        let mut child = module.to_vec();
+        child.push(name.to_string());
+        if self.is_module(&child, Scope::Tests) {
+            return None;
+        }
+        let overlay = self.test_uses.get(module).map_or(&[][..], Vec::as_slice);
+        let entry = |&(item, entry): &(usize, usize)| &self.test_use_items[item].entries[entry];
+        if let Some(&id) = overlay
+            .iter()
+            .find(|id| entry(id).kind == UseKind::Name && entry(id).alias.as_deref() == Some(name))
+        {
+            return Some(id);
+        }
+        let library = self.uses.get(module).map_or(&[][..], Vec::as_slice);
+        if library
+            .iter()
+            .any(|e| e.kind == UseKind::Name && e.alias.as_deref() == Some(name))
+        {
+            return None;
+        }
+        let globs = overlay
+            .iter()
+            .filter(|id| entry(id).kind == UseKind::Glob)
+            .map(|id| (Some(*id), entry(id)))
+            .chain(
+                library
+                    .iter()
+                    .filter(|e| e.kind == UseKind::Glob)
+                    .map(|e| (None, e)),
+            );
+        for (id, e) in globs {
+            let Some(base) = self.abs_of(&e.segs, module, depth + 1, Scope::Tests) else {
+                continue;
+            };
+            if base != module && self.lookup(&base, name, depth + 1, Scope::Tests).is_some() {
+                return self.overlay_binder(&base, name, depth + 1).or(id);
+            }
+        }
+        None
+    }
+}
+
+impl LayerCensus {
+    /// The clause-6 hits of one reference of a unit in `layer` (`parser` or `types`).
+    fn test_ref_hit(&self, r: &Ref, layer: &str) -> Option<TestHit> {
+        let head = match r {
+            Ref::Item(key) => key.file.split(['/', '.']).next().unwrap_or_default(),
+            Ref::Module(path) => path.first().map_or("", String::as_str),
+        };
+        let (kind, detail) = if r.is_game_side() {
+            (ViolationKind::TestGameSide, "is game-side".to_string())
+        } else if head == "test_support" {
+            (
+                ViolationKind::TestSupport,
+                "is the crate-level card-DB loader".into(),
+            )
+        } else if head == "source_census" {
+            (
+                ViolationKind::TestSourceCensus,
+                "is the crate-level source census".into(),
+            )
+        } else if let Some(key) = r.item().filter(|k| self.state.contains_key(*k)) {
+            (
+                ViolationKind::TestState,
+                format!("is a state-layer item ({})", self.state_chain(key)),
+            )
+        } else if layer == "types" && head == "parser" {
+            (ViolationKind::TestNamesParser, "is the parser".into())
+        } else {
+            return None;
+        };
+        Some(TestHit {
+            kind,
+            subject: r.to_string(),
+            detail,
+        })
+    }
+
+    /// The clause-6 kind of a passage a test unit in `layer` makes.
+    fn test_passage_kind(kind: ViolationKind, layer: &str) -> Option<ViolationKind> {
+        match kind {
+            ViolationKind::GamePassage => Some(ViolationKind::TestGameSide),
+            ViolationKind::StatePassage => Some(ViolationKind::TestState),
+            ViolationKind::ParserPassage if layer == "types" => {
+                Some(ViolationKind::TestNamesParser)
+            }
+            _ => None,
+        }
+    }
+
+    /// A test unit's own hits, the overlay units it names (its helper edges), and its reads.
+    fn test_unit_hits(
+        &self,
+        u: usize,
+        state_modules: &HashSet<Vec<String>>,
+        benign: &mut Vec<(String, String, ReadClass, String)>,
+    ) -> (BTreeSet<TestHit>, BTreeSet<usize>) {
+        let index = &self.index;
+        let unit = &index.test_units[u].unit;
+        let layer = unit.file.split('/').next().unwrap_or_default();
+        let mut hits = BTreeSet::new();
+        let mut edges = BTreeSet::new();
+        for r in index.refs_in(&unit.tokens, &unit.module, Scope::Tests) {
+            if let Some(defs) = r.item().and_then(|k| index.test_items.get(k)) {
+                edges.extend(defs.iter().copied().filter(|&d| d != u));
+            }
+            hits.extend(self.test_ref_hit(&r, layer));
+        }
+        for (kind, written, canonical) in index.passages(unit, state_modules, Scope::Tests) {
+            if let Some(kind) = Self::test_passage_kind(kind, layer) {
+                hits.insert(TestHit {
+                    kind,
+                    subject: canonical,
+                    detail: format!("(written `{written}`)"),
+                });
+            }
+        }
+        let layer_dir = format!("crates/engine/src/{layer}/");
+        for read in reads_in(&unit.tokens, &unit.file) {
+            let class = match &read {
+                None => ReadClass::Crossing,
+                Some(p) if !p.starts_with("crates/engine/") => ReadClass::OutOfCrate,
+                Some(p) if p.starts_with(&layer_dir) => ReadClass::InLayer,
+                Some(_) => ReadClass::Crossing,
+            };
+            match (class, read) {
+                (ReadClass::Crossing, Some(p)) => {
+                    hits.insert(TestHit {
+                        kind: ViolationKind::TestRead,
+                        subject: p.trim_start_matches("crates/engine/").to_string(),
+                        detail: format!("reads outside `src/{layer}/`"),
+                    });
+                }
+                (ReadClass::Crossing, None) => {
+                    hits.insert(TestHit {
+                        kind: ViolationKind::TestRead,
+                        subject: "env!(\"CARGO_MANIFEST_DIR\")".into(),
+                        detail: "with no adjacent literal (fail closed)".into(),
+                    });
+                }
+                (class, Some(p)) => benign.push((unit.file.clone(), unit.item.clone(), class, p)),
+                (_, None) => unreachable!("a read with no path is crossing"),
+            }
+        }
+        (hits, edges)
+    }
+
+    /// Clause 6 over an `Overlay::Tests` build, with `exemptions` applied and stale-checked.
+    fn test_regions(
+        &self,
+        exemptions: &[(&str, &str, ViolationKind, &str, &str)],
+    ) -> TestRegionCensus {
+        let index = &self.index;
+        assert_eq!(
+            index.overlay,
+            Overlay::Tests,
+            "clause 6 reads an overlay build"
+        );
+        let state_files = self.state_files(&self.ast);
+        let state_modules: HashSet<Vec<String>> = index
+            .files
+            .iter()
+            .filter(|(file, _)| state_files.contains(file))
+            .map(|(_, module)| module.clone())
+            .collect();
+        let in_scope = |file: &str| {
+            file.starts_with("parser/")
+                || (file.starts_with("types/") && !state_files.contains(file))
+        };
+        let mixed = |file: &str| {
+            file.starts_with("types/")
+                && !state_files.contains(file)
+                && self.state.keys().any(|k| k.file == file)
+        };
+
+        let mut benign = Vec::new();
+        let (own, edges): (Vec<BTreeSet<TestHit>>, Vec<BTreeSet<usize>>) =
+            (0..index.test_units.len())
+                .map(|u| self.test_unit_hits(u, &state_modules, &mut benign))
+                .unzip();
+
+        // Each `#[test]`'s closure over helper edges, each unit with the unit that reached it.
+        let tests: Vec<usize> = (0..index.test_units.len())
+            .filter(|&u| index.test_units[u].is_test && in_scope(&index.test_units[u].unit.file))
+            .collect();
+        let closures: BTreeMap<usize, BTreeMap<usize, Option<usize>>> = tests
+            .iter()
+            .map(|&t| {
+                let mut seen = BTreeMap::new();
+                let mut queue = vec![(t, None)];
+                while let Some((u, parent)) = queue.pop() {
+                    if seen.contains_key(&u) {
+                        continue;
+                    }
+                    seen.insert(u, parent);
+                    queue.extend(edges[u].iter().map(|&v| (v, Some(u))));
+                }
+                (t, seen)
+            })
+            .collect();
+        let chain = |closure: &BTreeMap<usize, Option<usize>>, mut u: usize| {
+            let mut names = vec![index.test_units[u].unit.item.clone()];
+            while let Some(Some(p)) = closure.get(&u) {
+                names.push(index.test_units[*p].unit.item.clone());
+                u = *p;
+            }
+            names.reverse();
+            names.join(" -> ")
+        };
+        let state_half: BTreeSet<usize> = tests
+            .iter()
+            .copied()
+            .filter(|t| {
+                mixed(&index.test_units[*t].unit.file)
+                    && closures[t]
+                        .keys()
+                        .any(|&u| own[u].iter().any(|h| h.kind == ViolationKind::TestState))
+            })
+            .collect();
+        let mut reaching: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (&t, closure) in &closures {
+            for &u in closure.keys().filter(|&&u| u != t) {
+                reaching.entry(u).or_default().push(t);
+            }
+        }
+        // A helper in a mixed file is state half when every test reaching it is.
+        let unit_state_half = |u: usize| {
+            if index.test_units[u].is_test {
+                state_half.contains(&u)
+            } else {
+                reaching
+                    .get(&u)
+                    .is_some_and(|ts| ts.iter().all(|t| state_half.contains(t)))
+            }
+        };
+
+        let mut out = Vec::new();
+        let row = |kind, unit: &Unit, hit: &TestHit, witness: String| Violation {
+            kind,
+            file: unit.file.clone(),
+            item: unit.item.clone(),
+            label: unit.label.clone(),
+            subject: hit.subject.clone(),
+            detail: hit.detail.clone(),
+            witness,
+        };
+        for (u, tu) in index.test_units.iter().enumerate() {
+            if !in_scope(&tu.unit.file) || (mixed(&tu.unit.file) && unit_state_half(u)) {
+                continue;
+            }
+            if tu.is_test {
+                let closure = &closures[&u];
+                for &v in closure.keys() {
+                    for hit in &own[v] {
+                        let witness = format!("{} -> {}", chain(closure, v), hit.subject);
+                        out.push(row(hit.kind, &tu.unit, hit, witness));
+                    }
+                }
+            } else {
+                for hit in &own[u] {
+                    let witness = format!("{} -> {}", tu.unit.item, hit.subject);
+                    out.push(row(hit.kind, &tu.unit, hit, witness));
+                }
+            }
+        }
+
+        // Use entries: who uses each overlay entry in a mixed file, for its exemption.
+        let mut users: BTreeMap<(usize, usize), BTreeSet<usize>> = BTreeMap::new();
+        for (u, tu) in index.test_units.iter().enumerate() {
+            if !mixed(&tu.unit.file) {
+                continue;
+            }
+            for segs in paths_in(&tu.unit.tokens)
+                .iter()
+                .filter(|s| !is_keyword_head(s))
+            {
+                if let Some(id) = index.overlay_binder(&tu.unit.module, &segs[0], 0) {
+                    users.entry(id).or_default().insert(u);
+                }
+            }
+        }
+        for (ui, use_item) in index.test_use_items.iter().enumerate() {
+            if !in_scope(&use_item.file) {
+                continue;
+            }
+            let layer = use_item.file.split('/').next().unwrap_or_default();
+            for (ei, entry) in use_item.entries.iter().enumerate() {
+                if mixed(&use_item.file) {
+                    let used = users.get(&(ui, ei));
+                    if used.is_some_and(|us| us.iter().all(|&u| unit_state_half(u))) {
+                        continue;
+                    }
+                }
+                let mut kinds: BTreeMap<ViolationKind, String> = BTreeMap::new();
+                let module = &use_item.module;
+                let probe = match entry.kind {
+                    UseKind::Name => {
+                        for r in index
+                            .resolve(&entry.segs, module, Scope::Tests)
+                            .into_iter()
+                            .flat_map(Target::into_refs)
+                        {
+                            if let Some(hit) = self.test_ref_hit(&r, layer) {
+                                kinds.entry(hit.kind).or_insert(hit.detail);
+                            }
+                        }
+                        entry.segs.clone()
+                    }
+                    UseKind::Glob => {
+                        if let Some(base) = index.abs_of(&entry.segs, module, 0, Scope::Tests) {
+                            if let Some(hit) = self.test_ref_hit(&Ref::Module(base.clone()), layer)
+                            {
+                                kinds.entry(hit.kind).or_insert(hit.detail);
+                            }
+                            if state_modules.contains(&base) {
+                                kinds
+                                    .entry(ViolationKind::TestState)
+                                    .or_insert_with(|| "globs a state module".into());
+                            }
+                        }
+                        entry
+                            .segs
+                            .iter()
+                            .cloned()
+                            .chain(["_".to_string()])
+                            .collect()
+                    }
+                };
+                if let Some(kind) = index
+                    .canonical(&probe, module, 0, Scope::Tests)
+                    .and_then(|full| passage(&full, &state_modules))
+                    .and_then(|k| Self::test_passage_kind(k, layer))
+                {
+                    kinds
+                        .entry(kind)
+                        .or_insert_with(|| "passes through it".into());
+                }
+                for (kind, detail) in kinds {
+                    out.push(Violation {
+                        kind,
+                        file: use_item.file.clone(),
+                        item: "<use>".into(),
+                        label: "use".into(),
+                        subject: entry.segs.join("::"),
+                        detail,
+                        witness: String::new(),
+                    });
+                }
+            }
+        }
+
+        out.sort();
+        out.dedup();
+        let mut stale = Vec::new();
+        for &(file, unit, kind, subject, reason) in exemptions {
+            let before = out.len();
+            out.retain(|v| {
+                !(v.file == file && v.item == unit && v.kind == kind && v.subject == subject)
+            });
+            if out.len() == before {
+                stale.push(format!("{file} `{unit}` {kind:?} {subject} ({reason})"));
+            }
+        }
+        let count = |layer: &str| {
+            tests
+                .iter()
+                .filter(|&&t| index.test_units[t].unit.file.starts_with(layer))
+                .count()
+        };
+        TestRegionCensus {
+            violations: out,
+            stale,
+            parser_tests: count("parser/"),
+            ast_tests: count("types/"),
+            state_half: state_half.len(),
+            benign_reads: benign,
+        }
+    }
+}
+
+#[test]
+fn parser_and_ast_test_regions_cross_no_future_crate_boundary() {
+    let src = engine_src();
+    let census = LayerCensus::run(
+        &|rel: &str| std::fs::read_to_string(src.join(rel)).ok(),
+        STATE_MODULE_ANCHORS,
+        Overlay::Tests,
+    );
+    let regions = census.test_regions(TEST_REGION_EXEMPTIONS);
+
+    let listed: Vec<String> = regions.violations.iter().map(ToString::to_string).collect();
+    assert!(
+        listed.is_empty(),
+        "parser or AST test code crosses a future crate boundary. Move the test to \
+         `tests/integration/` (or to the game module it exercises), give it the parser or \
+         AST-layer path of what it names, or add a `TEST_REGION_EXEMPTIONS` row with its \
+         reason:\n{}",
+        listed.join("\n")
+    );
+    assert!(
+        regions.stale.is_empty(),
+        "clause-6 exemption rows that match no hit; delete them: {:#?}",
+        regions.stale
+    );
+
+    // Reach guards (floors per addenda/phase-5 §6.7): the overlay reads the test regions, the
+    // mixed-file exemption is live, and the read scanner resolves both benign read classes.
+    assert!(
+        regions.parser_tests >= 11400 && regions.ast_tests >= 575 && regions.state_half >= 120,
+        "reach-guard: parser tests {}, AST tests {}, state-half tests {}",
+        regions.parser_tests,
+        regions.ast_tests,
+        regions.state_half
+    );
+    for (file, unit, class) in [
+        (
+            "parser/oracle_condition.rs",
+            "restriction_only_fallback_dispatches_exactly_the_pinned_families",
+            ReadClass::InLayer,
+        ),
+        (
+            "parser/oracle_keyword.rs",
+            "keyword_payload_wire_golden_matches_the_client_fixture",
+            ReadClass::OutOfCrate,
+        ),
+    ] {
+        assert!(
+            regions
+                .benign_reads
+                .iter()
+                .any(|(f, u, c, _)| f == file && u == unit && *c == class),
+            "reach-guard: `{file}:{unit}` makes a {class:?} read: {:#?}",
+            regions.benign_reads
+        );
+    }
+}
+
+#[test]
+fn the_test_region_census_flags_every_class() {
+    let files: HashMap<&str, &str> = PLANTED_CRATE.iter().copied().collect();
+    let census = LayerCensus::run(
+        &|rel: &str| files.get(rel).map(|s| s.to_string()),
+        &["types/game_state.rs", "types/state.rs"],
+        Overlay::Tests,
+    );
+    let regions = census.test_regions(&[]);
+
+    let touch = "game/obj.rs:touch";
+    let touch_path = "crate::game::obj::touch";
+    let obj = "game/obj.rs:Obj";
+    let obj_path = "crate::game::obj::Obj";
+    let ctl = "parser/ctl.rs";
+    let ast = "types/ast.rs";
+    let mut expected: Vec<(ViolationKind, &str, &str, &str)> = vec![
+        // A direct path, a test-module `use` binding (and the entry), a `super::*` glob, and a
+        // helper closure (the helper's own row beside it).
+        (ViolationKind::TestGameSide, ctl, "direct_path", touch),
+        (ViolationKind::TestGameSide, ctl, "direct_path", touch_path),
+        (ViolationKind::TestGameSide, ctl, "use_bound", obj),
+        (ViolationKind::TestGameSide, ctl, "use_bound", obj_path),
+        (ViolationKind::TestGameSide, ctl, "<use>", obj_path),
+        (ViolationKind::TestGameSide, ctl, "through_glob", obj),
+        (ViolationKind::TestGameSide, ctl, "through_helper", touch),
+        (
+            ViolationKind::TestGameSide,
+            ctl,
+            "through_helper",
+            touch_path,
+        ),
+        (ViolationKind::TestGameSide, ctl, "reaches_game", touch),
+        (ViolationKind::TestGameSide, ctl, "reaches_game", touch_path),
+        // A trait and a glob reached only through a `use` entry.
+        (
+            ViolationKind::TestGameSide,
+            ctl,
+            "<use>",
+            "crate::game::LocalExt",
+        ),
+        (
+            ViolationKind::TestGameSide,
+            ctl,
+            "<use>",
+            "crate::game::glob_mod",
+        ),
+        // A file module behind `#[cfg(test)] mod tests;`.
+        (
+            ViolationKind::TestGameSide,
+            "parser/filemod/tests.rs",
+            "in_file",
+            touch,
+        ),
+        (
+            ViolationKind::TestGameSide,
+            "parser/filemod/tests.rs",
+            "in_file",
+            touch_path,
+        ),
+        // A `#[path]` file whose `use super::*` test reaches a library-level `#[cfg(test)]`
+        // helper of the declaring file.
+        (
+            ViolationKind::TestGameSide,
+            "parser/p.rs",
+            "p_helper",
+            touch,
+        ),
+        (
+            ViolationKind::TestGameSide,
+            "parser/p.rs",
+            "p_helper",
+            touch_path,
+        ),
+        (ViolationKind::TestGameSide, "parser/p_tests.rs", "t", touch),
+        (
+            ViolationKind::TestGameSide,
+            "parser/p_tests.rs",
+            "t",
+            touch_path,
+        ),
+        // Library-level test-only items: an impl member and a parser fn.
+        (ViolationKind::TestGameSide, ast, "t", touch),
+        (ViolationKind::TestGameSide, ast, "t", touch_path),
+        (
+            ViolationKind::TestState,
+            "parser/mod.rs",
+            "test_only",
+            "types/state.rs:Runtime",
+        ),
+        (
+            ViolationKind::TestState,
+            "parser/mod.rs",
+            "test_only",
+            "crate::types::state::Runtime",
+        ),
+        // A T item, the crate-level loader and census, and an AST test naming the parser.
+        (
+            ViolationKind::TestState,
+            ctl,
+            "state_item",
+            "types/state.rs:Runtime",
+        ),
+        (
+            ViolationKind::TestState,
+            ctl,
+            "state_item",
+            "crate::types::state::Runtime",
+        ),
+        (
+            ViolationKind::TestSupport,
+            ctl,
+            "names_test_support",
+            "crate::test_support",
+        ),
+        (
+            ViolationKind::TestSourceCensus,
+            ctl,
+            "names_source_census",
+            "crate::source_census",
+        ),
+        (
+            ViolationKind::TestNamesParser,
+            "types/pure.rs",
+            "names_parser",
+            "parser/mod.rs:seeds",
+        ),
+        (
+            ViolationKind::TestNamesParser,
+            "types/pure.rs",
+            "names_parser",
+            "crate::parser::seeds",
+        ),
+        // Cross-layer reads, one with no adjacent literal (fail closed).
+        (
+            ViolationKind::TestRead,
+            ctl,
+            "reads_ast_file",
+            "src/types/x.rs",
+        ),
+        (
+            ViolationKind::TestRead,
+            ctl,
+            "reads_manifest_game",
+            "src/game/x.rs",
+        ),
+        (
+            ViolationKind::TestRead,
+            ctl,
+            "reads_manifest_bare",
+            "env!(\"CARGO_MANIFEST_DIR\")",
+        ),
+        // The mixed file: the helper and its AST-half user, the AST-half entry user and the
+        // entry, the entry with no user; the test module's state-passage entry has no user.
+        // No state-half test or state-half-only entry has a row.
+        (ViolationKind::TestGameSide, ast, "mixed_helper", obj),
+        (ViolationKind::TestGameSide, ast, "mixed_helper", obj_path),
+        (
+            ViolationKind::TestGameSide,
+            ast,
+            "ast_half_helper_user",
+            obj,
+        ),
+        (
+            ViolationKind::TestGameSide,
+            ast,
+            "ast_half_helper_user",
+            obj_path,
+        ),
+        (
+            ViolationKind::TestGameSide,
+            ast,
+            "ast_half_entry_user",
+            "game/mod.rs:X",
+        ),
+        (
+            ViolationKind::TestGameSide,
+            ast,
+            "ast_half_entry_user",
+            "crate::game::X",
+        ),
+        (ViolationKind::TestGameSide, ast, "<use>", "crate::game::X"),
+        (
+            ViolationKind::TestGameSide,
+            ast,
+            "<use>",
+            "crate::game::LocalExt",
+        ),
+        (
+            ViolationKind::TestState,
+            ast,
+            "<use>",
+            "crate::types::state::Mode",
+        ),
+    ];
+    expected.sort();
+    let mut actual: Vec<(ViolationKind, &str, &str, &str)> = regions
+        .violations
+        .iter()
+        .map(|v| (v.kind, v.file.as_str(), v.item.as_str(), v.subject.as_str()))
+        .collect();
+    actual.sort();
+    actual.dedup();
+    let listed: Vec<String> = regions.violations.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        actual,
+        expected,
+        "planted clause-6 violations:\n{}",
+        listed.join("\n")
+    );
+    assert_eq!(
+        regions.state_half, 3,
+        "the three state-half tests are exempt"
+    );
+
+    for (file, item, chain) in [
+        (
+            ctl,
+            "through_helper",
+            "through_helper -> reaches_game -> game/obj.rs:touch",
+        ),
+        (
+            "parser/p_tests.rs",
+            "t",
+            "t -> p_helper -> game/obj.rs:touch",
+        ),
+        (
+            ast,
+            "ast_half_helper_user",
+            "ast_half_helper_user -> mixed_helper -> game/obj.rs:Obj",
+        ),
+    ] {
+        assert!(
+            regions
+                .violations
+                .iter()
+                .any(|v| v.file == file && v.item == item && v.witness == chain),
+            "the witness for `{item}` reads `{chain}`:\n{}",
+            listed.join("\n")
+        );
+    }
+
+    let mut benign: Vec<(&str, ReadClass)> = regions
+        .benign_reads
+        .iter()
+        .map(|(_, unit, class, _)| (unit.as_str(), *class))
+        .collect();
+    benign.sort();
+    assert_eq!(
+        benign,
+        [
+            ("reads_client", ReadClass::OutOfCrate),
+            ("reads_self", ReadClass::InLayer)
+        ],
+        "a same-directory read and an out-of-crate read are not crossing"
+    );
+
+    // An exemption row removes its hit, and a row matching none is stale.
+    let row = (
+        ctl,
+        "reads_ast_file",
+        ViolationKind::TestRead,
+        "src/types/x.rs",
+        "planted",
+    );
+    let stale = (
+        ctl,
+        "reads_self",
+        ViolationKind::TestRead,
+        "ctl.rs",
+        "planted",
+    );
+    let exempted = census.test_regions(&[row, stale]);
+    assert_eq!(exempted.violations.len(), regions.violations.len() - 1);
+    assert_eq!(exempted.stale.len(), 1, "{:#?}", exempted.stale);
+    assert!(exempted.stale[0].contains("reads_self"));
 }
