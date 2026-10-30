@@ -26293,6 +26293,7 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                printing: Default::default(),
             }
         }
 
@@ -26383,6 +26384,7 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                printing: Default::default(),
             }
         }
 

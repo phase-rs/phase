@@ -21294,6 +21294,7 @@ mod tests {
             was_prepared: false,
             attachments: Vec::new(),
             intensity: 0,
+            printing: Default::default(),
         };
         state
             .lki_by_incarnation

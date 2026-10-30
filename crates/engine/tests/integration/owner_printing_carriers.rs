@@ -12,7 +12,7 @@ use std::fmt::Debug;
 
 use engine::analysis::resource::loop_states_equal_modulo_resources;
 use engine::game::derived_views::{derive_views, DebugLibraryCardView, StackEntryDisplay};
-use engine::game::game_object::{EmblemSource, GameObject};
+use engine::game::game_object::{EmblemSource, GameObject, ObjectIncarnationRefExt};
 use engine::game::zones::create_object;
 use engine::types::ability::{Effect, ResolvedAbility};
 use engine::types::card_printing::CardPrinting;
