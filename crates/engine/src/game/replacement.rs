@@ -17688,13 +17688,15 @@ mod tests {
         let fixed = |value: i32| QuantityExpr::Fixed { value };
         let event = || Box::new(event_amount_expr());
         let overflow = Err(EventQuantityError::Overflow);
-        let rows: Vec<(
-            &str,
+        // (name, expression, event amount, life result, checked result)
+        type Row = (
+            &'static str,
             QuantityExpr,
             u32,
             Option<u32>,
             Result<i32, EventQuantityError>,
-        )> = vec![
+        );
+        let rows: Vec<Row> = vec![
             (
                 "event amount past i32",
                 event_amount_expr(),
