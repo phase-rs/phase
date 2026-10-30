@@ -7341,3 +7341,321 @@ fn choose_then_flip_outcome_reads_the_named_card() {
         }
     }
 }
+
+/// Answers every target prompt in order. Each submission goes through the
+/// production `GameAction::ChooseTarget` path and must be accepted.
+fn answer_prompts(runner: &mut GameRunner, label: &str, answers: &[ObjectId]) {
+    let mut remaining = answers.iter().copied();
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ) {
+        let target = remaining
+            .next()
+            .unwrap_or_else(|| panic!("{label}: more target prompts than expected"));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .unwrap_or_else(|err| {
+                panic!("{label}: target submission {target:?} rejected: {err:?}")
+            });
+    }
+    assert!(
+        remaining.next().is_none(),
+        "{label}: targeting ended before every declaration was answered"
+    );
+}
+
+/// Casts the synthetic spell through the production entry point; the caller
+/// answers the resulting target prompts with `answer_prompts`.
+fn cast_for_prompts(runner: &mut GameRunner, spell: ObjectId) {
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("required announcement");
+}
+
+/// Synthetic fixture (no real card): an exact-one ancestor declaration whose
+/// continuation is a coin whose losing outcome depends on the ancestor's target.
+/// Object ids: ancestor 1, victim 2, distractor 3, spell 4, Krark's Thumb 5.
+fn multi_target_ancestor_runner(
+    thumb: bool,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, MultiTargetSpec, TypedFilter,
+    };
+    let mut definition = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        },
+    )
+    .sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: None,
+            lose_effect: Some(Box::new(shared_type_destroy())),
+            flipper: TargetFilter::Controller,
+        },
+    ));
+    definition.multi_target = Some(MultiTargetSpec::fixed(1, 1));
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ancestor = scenario.add_creature(P0, "Creature antecedent", 2, 2).id();
+    let victim = scenario.add_creature(P1, "Dependent creature", 4, 4).id();
+    let distractor = scenario
+        .add_artifact_from_oracle(P0, "Artifact distractor", "")
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Synthetic multi-target ancestor coin", true)
+        .with_ability_definition(definition)
+        .id();
+    if thumb {
+        scenario.add_artifact_from_oracle(
+            P0,
+            "Krark's Thumb",
+            "If you would flip a coin, instead flip two coins and ignore one.",
+        );
+    }
+    (scenario.build(), ancestor, victim, distractor, spell)
+}
+
+#[test]
+fn multi_target_ancestor_keeps_its_dependent_coin_outcome_target() {
+    use engine::types::resolution::ResolutionStateWire;
+
+    // Synthetic. CR 601.2c: the ancestor's variable-count declaration is fixed
+    // at announcement, and CR 115.1 declares the coin outcome's target in the
+    // same announcement. Assignment must reproduce the announced slot groups,
+    // so the dependent losing outcome keeps its ancestor referent (CR 608.2c).
+    let assert_bound_victim = |runner: &GameRunner, victim: ObjectId, label: &str| {
+        let frame = runner
+            .state()
+            .active_coin_flip_frame()
+            .unwrap_or_else(|| panic!("{label}: coin keep frame"));
+        assert_eq!(
+            frame.lose_effect.as_deref().unwrap().targets,
+            vec![TargetRef::Object(victim)],
+            "{label}: the dependent target was announced and bound"
+        );
+    };
+    for thumb in [false, true] {
+        for won in [false, true] {
+            let label = format!(
+                "{}/{}",
+                if won { "win" } else { "lose" },
+                if thumb { "thumb" } else { "plain" }
+            );
+            let (mut runner, ancestor, victim, distractor, spell) =
+                multi_target_ancestor_runner(thumb);
+            if thumb {
+                pin_outcomes(&mut runner, &[true, false]);
+            } else {
+                pin_outcomes(&mut runner, &[won]);
+            }
+            cast_for_prompts(&mut runner, spell);
+            answer_prompts(&mut runner, &label, &[ancestor, victim]);
+            let mut events = Vec::new();
+            if thumb {
+                pass_to_coin_keep(&mut runner, &mut events);
+                assert!(
+                    flips(&events).is_empty(),
+                    "{label}: ignored flips have not happened"
+                );
+                assert_bound_victim(&runner, victim, &label);
+                // Wire round trip: restore only, no malformed leg.
+                runner.state_mut().capture_rng_word_pos();
+                let wire = serde_json::to_value(ResolutionStateWire::from_game_state(
+                    runner.state().clone(),
+                ))
+                .unwrap();
+                *runner.state_mut() = serde_json::from_value::<ResolutionStateWire>(wire)
+                    .unwrap()
+                    .into_game_state();
+                assert_bound_victim(&runner, victim, &label);
+                events.extend(
+                    runner
+                        .act(GameAction::SelectCoinFlips {
+                            keep_indices: vec![usize::from(!won)],
+                        })
+                        .unwrap()
+                        .events,
+                );
+            }
+            finish(&mut runner, &mut events);
+            assert_eq!(flips(&events), vec![won], "{label}");
+            // CR 705.2 + CR 608.2c: only the losing outcome has an effect, so a
+            // win leaves its announced (unused) target alone.
+            assert_eq!(
+                runner.state().objects[&victim].zone,
+                if won {
+                    Zone::Battlefield
+                } else {
+                    Zone::Graveyard
+                },
+                "{label}: dependent outcome target"
+            );
+            assert_eq!(
+                runner.state().objects[&ancestor].zone,
+                Zone::Battlefield,
+                "{label}: ancestor"
+            );
+            assert_eq!(
+                runner.state().objects[&distractor].zone,
+                Zone::Battlefield,
+                "{label}: distractor"
+            );
+            assert_finished(&runner);
+        }
+    }
+}
+
+#[test]
+fn empty_multi_target_node_between_ancestor_and_dependent_coin_outcome() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, MultiTargetSpec, TypeFilter, TypedFilter,
+    };
+    // Synthetic. The middle "up to one target artifact an opponent controls"
+    // node announces zero slots (CR 601.2c: its count is fixed at announcement)
+    // because the opponent controls no artifact, yet the ancestor above it must
+    // stay visible to the coin outcome below it (CR 608.2c).
+    let mut middle = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent),
+            ),
+        },
+    )
+    .sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: None,
+            lose_effect: Some(Box::new(shared_type_destroy())),
+            flipper: TargetFilter::Controller,
+        },
+    ));
+    middle.multi_target = Some(MultiTargetSpec::fixed(0, 1));
+    let definition = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        },
+    )
+    .sub_ability(middle);
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ancestor = scenario.add_creature(P0, "Creature antecedent", 2, 2).id();
+    let victim = scenario.add_creature(P1, "Dependent creature", 4, 4).id();
+    let distractor = scenario
+        .add_artifact_from_oracle(P0, "Artifact distractor", "")
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Synthetic empty middle declaration", true)
+        .with_ability_definition(definition)
+        .id();
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[false]);
+    cast_for_prompts(&mut runner, spell);
+    // Exactly two prompts: the ancestor and the dependent coin outcome.
+    answer_prompts(&mut runner, "lose", &[ancestor, victim]);
+    let mut events = Vec::new();
+    finish(&mut runner, &mut events);
+    assert_eq!(flips(&events), vec![false]);
+    // CR 705.2 + CR 608.2c: the losing outcome destroys its own selected object.
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&ancestor].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&distractor].zone, Zone::Battlefield);
+    assert_finished(&runner);
+}
+
+#[test]
+fn coin_outcome_multi_target_group_keeps_to_its_own_slots() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, MultiTargetSpec, TypeFilter, TypedFilter,
+    };
+    // Synthetic. Won = "destroy up to two target artifacts" with a single
+    // artifact on the battlefield, so the announcement gives Won one slot and
+    // Lost one slot (CR 601.2c: counts fixed at announcement; CR 115.1: both
+    // outcomes' targets are declared up front). Won's group must end at its own
+    // announced boundary instead of swallowing Lost's slot.
+    for won in [false, true] {
+        let label = if won { "win" } else { "lose" };
+        let mut won_effect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                cant_regenerate: false,
+            },
+        );
+        won_effect.multi_target = Some(MultiTargetSpec::fixed(0, 2));
+        let lost_effect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+        );
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(won_effect)),
+                lose_effect: Some(Box::new(lost_effect)),
+                flipper: TargetFilter::Controller,
+            },
+        );
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let artifact = scenario
+            .add_artifact_from_oracle(P1, "Artifact target", "")
+            .id();
+        let victim = scenario
+            .add_creature(P1, "Losing outcome target", 4, 4)
+            .id();
+        let distractor = scenario.add_creature(P0, "Never selected", 2, 2).id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic coin outcome groups", true)
+            .with_ability_definition(definition)
+            .id();
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[won]);
+        cast_for_prompts(&mut runner, spell);
+        answer_prompts(&mut runner, label, &[artifact, victim]);
+        let mut events = Vec::new();
+        finish(&mut runner, &mut events);
+        assert_eq!(flips(&events), vec![won], "{label}");
+        // CR 705.2 + CR 608.2c: each outcome affects only its own selected object.
+        let (destroyed, kept) = if won {
+            (artifact, victim)
+        } else {
+            (victim, artifact)
+        };
+        assert_eq!(
+            runner.state().objects[&destroyed].zone,
+            Zone::Graveyard,
+            "{label}: the executed outcome's object"
+        );
+        assert_eq!(
+            runner.state().objects[&kept].zone,
+            Zone::Battlefield,
+            "{label}: the other outcome's object"
+        );
+        assert_eq!(
+            runner.state().objects[&distractor].zone,
+            Zone::Battlefield,
+            "{label}: distractor"
+        );
+        assert_finished(&runner);
+    }
+}
