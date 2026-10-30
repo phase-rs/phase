@@ -10596,8 +10596,8 @@ mod tests {
         assert_eq!(valkyrie_after_layers(i32::MIN), (Some(2), Some(4)));
     }
 
-    /// CR 107.2: a `Sum` over opponents' per-player tallies is exact and
-    /// saturates once; two saturated life-lost tallies no longer overflow.
+    /// A `Sum` over opponents' per-player tallies is exact and saturates
+    /// once; two saturated life-lost tallies no longer overflow.
     #[test]
     fn opponent_sum_of_life_lost_this_turn_saturates_at_i32_limits() {
         let opponents = |aggregate| QuantityExpr::Ref {
