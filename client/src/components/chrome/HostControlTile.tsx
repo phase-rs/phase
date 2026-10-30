@@ -119,6 +119,7 @@ function SeatRow({
                     type: "SetKind",
                     data: {
                       seatIndex: slot.playerId,
+                      expectedKind: { type: "WaitingHuman" },
                       kind: {
                         type: "Ai",
                         data: { difficulty: "Medium", deck },
@@ -415,6 +416,7 @@ export function HostControlTile() {
           type: "SetKind",
           data: {
             seatIndex: slot.playerId,
+            expectedKind: { type: "WaitingHuman" },
             kind: { type: "Ai", data: { difficulty: "Medium", deck } },
           },
         });

@@ -323,7 +323,10 @@ describe("HostControlTile", () => {
     it("Add AI seats an empty deck for Dandan with an empty catalog", () => {
       const { seatMutate } = renderSeats("Dandan", waiting);
       fireEvent.click(screen.getByRole("button", { name: "Add AI" }));
-      expect(seatMutate).toHaveBeenCalledWith(setAi(EMPTY));
+      expect(seatMutate).toHaveBeenCalledWith({
+        ...setAi(EMPTY),
+        data: { ...setAi(EMPTY).data, expectedKind: { type: "WaitingHuman" } },
+      });
     });
 
     it("Replace AI seats an empty deck for Dandan with an empty catalog", () => {
@@ -337,7 +340,10 @@ describe("HostControlTile", () => {
       const { seatMutateAsync } = renderSeats("Dandan", waiting);
       fireEvent.click(screen.getByRole("button", { name: "Fill With AI" }));
       await vi.waitFor(() => expect(seatMutateAsync).toHaveBeenCalledWith({ type: "Start" }));
-      expect(seatMutateAsync).toHaveBeenNthCalledWith(1, setAi(EMPTY));
+      expect(seatMutateAsync).toHaveBeenNthCalledWith(1, {
+        ...setAi(EMPTY),
+        data: { ...setAi(EMPTY).data, expectedKind: { type: "WaitingHuman" } },
+      });
     });
 
     it("an AI seat holding Random is promoted to the empty deck for Dandan", () => {
