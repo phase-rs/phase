@@ -353,7 +353,10 @@ mod player_history_foretell {
             for (player, cards, rot) in setup {
                 let outcome = runner.cast(rot).target_player(player).resolve();
                 assert!(
-                    matches!(outcome.final_waiting_for(), WaitingFor::DiscardChoice { player: actor, count: 2, .. } if *actor == player)
+                    matches!(outcome.final_waiting_for(), WaitingFor::DiscardChoice { player: actor, count: 2, .. } if *actor == player),
+                    "Mind Rot must request two discards from {player:?}; actual={:#?}; phase={:?}; active={:?}; pending_cast={:#?}; stack={:#?}; resolution_stack={:#?}; complete spell target/count={:#?}",
+                    outcome.final_waiting_for(), outcome.state().phase, outcome.state().active_player, outcome.state().pending_cast,
+                    outcome.state().stack, outcome.state().resolution_stack, outcome.state().objects[&rot].abilities
                 );
                 runner
                     .act(GameAction::SelectCards {
@@ -46864,7 +46867,8 @@ fn complete_publication_all_mixed_honest_and_native_exceptions_keep_specific_sou
         if supported {
             assert!(!direct_gap && residuals.is_empty() && !parsed_has_unimplemented(&parsed), "independently supported complete source: {name}: {residuals:?}");
         } else {
-        assert!(direct_gap || exact_nested_gap, "specific whole compound/missing member {name}: {raw_printed:?}: {residuals:#?}");
+        assert!(direct_gap || exact_nested_gap, "specific whole compound/missing member {name}: {raw_printed:?}: residuals={residuals:#?}; whole document/source/metadata={doc:#?}; complete lowered={parsed:#?}; independently derived full Spark model={:#?}",
+            (name == "Spark Rupture").then(|| defining_modifier_publication::expected_program("Spark Rupture")));
         if exact_nested_gap {
             let mut unit_doc = parse_oracle_ir(printed, name, &hints, &types, &subtypes);
             let unit = lower_oracle_ir(&mut unit_doc);
@@ -46920,7 +46924,8 @@ fn complete_publication_all_mixed_honest_and_native_exceptions_keep_specific_sou
             })).unwrap();
             crate::database::synthesis::build_oracle_face(&card, None)
         };
-        assert_eq!(crate::game::coverage::card_face_has_unimplemented_parts(&face), !supported, "whole-source support classification, paired with public runtime discriminators: {name}");
+        assert_eq!(crate::game::coverage::card_face_has_unimplemented_parts(&face), !supported, "whole-source support classification, paired with public runtime discriminators: {name}; whole document={doc:#?}; complete lowered={parsed:#?}; synthesized face={face:#?}; independently derived full Spark model={:#?}",
+            (name == "Spark Rupture").then(|| defining_modifier_publication::expected_program("Spark Rupture")));
         if let Some(expected) = complete_publication_expected_full_keywords(name) {
             // allow-raw-authority: card-face-printed-keywords; complete synthesized vector is independently specified.
             assert_eq!(face.keywords, expected, "{name}");

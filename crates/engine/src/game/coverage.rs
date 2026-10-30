@@ -18065,6 +18065,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 .as_ref()
                 .unwrap_or_else(|| panic!("{name} must parse as a Tiered modal"))
                 .mode_count;
+            let modal = face.modal.clone();
+            let parse_warnings = face.parse_warnings.clone();
             let card = coverage_result_for_face(face);
 
             assert!(
@@ -18072,8 +18074,9 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     .gap_details
                     .iter()
                     .any(|gap| gap.handler.starts_with("SilentDrop")),
-                "{name} must not report a SilentDrop: {:?}",
-                card.gap_details
+                "{name} must not report a SilentDrop: gaps={:#?}; modal={modal:#?}; parse_details={:#?}; exact_uncovered={:#?}; warnings={parse_warnings:#?}",
+                card.gap_details, card.parse_details,
+                uncovered_oracle_lines(&effective_oracle_lines(oracle), name, &card.parse_details)
             );
 
             if *fully_supported {
@@ -18093,7 +18096,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     handlers,
                     vec!["Swallow:Duration_UntilEndOfTurn"],
                     "Vincent's only residual gap is the deferred duration-attribution \
-                     swallow seam; update this expectation when that seam is fixed"
+                     swallow seam; update this expectation when that seam is fixed; modal={modal:#?}; parse_details={:#?}; exact_uncovered={:#?}; warnings={parse_warnings:#?}; gaps={:#?}",
+                    card.parse_details, uncovered_oracle_lines(&effective_oracle_lines(oracle), name, &card.parse_details), card.gap_details
                 );
                 assert!(!card.supported, "Vincent must remain unsupported");
             }
@@ -22059,8 +22063,9 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             face_features(&honey).get(&quantity_ref_key("ObjectCount")),
             Some(&FeatureSupport::Handled)
         );
+        let honey_context = format!("{honey:#?}");
         let result = coverage_result_for_face(honey);
-        assert!(result.supported, "{:?}", gap_handlers(&result));
+        assert!(result.supported, "Honey support after the condition walker passed: gaps={:#?}; complete trigger/execute chains (including any refused destroy remainder, regeneration and tie instructions)={honey_context}; parse_details={:#?}; exact_uncovered={:#?}", result.gap_details, result.parse_details, uncovered_oracle_lines(&effective_oracle_lines(DROP_OF_HONEY_ORACLE), "Drop of Honey", &result.parse_details));
     }
 
     /// V9. A delayed trigger's own condition is a trigger condition (CR 603.7):

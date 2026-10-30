@@ -1196,7 +1196,7 @@ fn archangel_public_block_gate_inactive_when_another_creature_attacks() {
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::DeclareBlockers { .. }
-    ));
+    ), "nonattacking Archangel block gate: phase={:?}; active={:?}; waiting={:#?}; combat={:#?}; complete tax definitions={:#?}", runner.state().phase, runner.state().active_player, runner.state().waiting_for, runner.state().combat, runner.state().objects[&archangel].static_definitions);
     runner.declare_blockers(&[(blocker, attacker)]).unwrap();
     assert!(matches!(
         runner.state().waiting_for,
@@ -1757,7 +1757,11 @@ mod retained_spell_context {
         .unwrap();
         assert_eq!(
             bare.affected,
-            Some(TargetFilter::Typed(TypedFilter::card()))
+            // CR 109.5 + CR 118.9: "spells you cast" binds the actual caster
+            // relative to the source of this alternative-cost permission.
+            Some(TargetFilter::Typed(
+                TypedFilter::card().controller(ControllerRef::You)
+            ))
         );
         assert!(matches!(
             bare.mode,
@@ -1781,7 +1785,9 @@ mod retained_spell_context {
             assert_eq!(
                 parsed.affected,
                 Some(TargetFilter::Typed(
-                    TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+                    TypedFilter::card()
+                        .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature)))
+                        .controller(ControllerRef::You)
                 ))
             );
             for source in [format!("You may {payment} rather than pay the mana cost for mysterious spells you cast."), format!("You may {payment} rather than pay the mana cost for noncreature spells you cast nonsense.")] {
@@ -8237,21 +8243,39 @@ fn static_opponent_controlled_compound_subject_shares_continuous_predicate() {
 
 #[test]
 fn static_custom_capitalized_subtype_you_control_preserves_s_suffix() {
-    let affected = parse_continuous_subject_filter("Anubis you control")
-        .expect("subject should produce a filter");
-    let TargetFilter::Typed(typed) = affected else {
-        panic!("expected typed subject filter");
-    };
-
-    assert_eq!(typed.controller, Some(ControllerRef::You));
-    assert!(
-        typed.type_filters.iter().any(|type_filter| matches!(
-            type_filter,
-            TypeFilter::Subtype(subtype) if subtype == "Anubis"
-        )),
-        "expected Anubis subtype, got {:?}",
-        typed.type_filters
-    );
+    // CR 205.3m: capitalization does not create a creature type. Anubis is a
+    // synthetic unknown; Astartes and Aurochs are known s-ending spellings.
+    assert!(parse_continuous_subject_filter("Anubis you control").is_none());
+    let unknown = "Anubis you control get +1/+1.";
+    assert!(parse_static_line(unknown).is_none());
+    assert!(parse_static_line_multi(unknown).is_empty());
+    assert_complete_owned_static_refusal(unknown);
+    for subtype in ["Astartes", "Aurochs"] {
+        assert_eq!(
+            crate::types::text_grammar::parse_subtype(subtype),
+            Some((subtype.to_owned(), subtype.len()))
+        );
+        let subject = format!("{subtype} you control");
+        let expected = TargetFilter::Typed(
+            TypedFilter::creature()
+                .subtype(subtype.to_owned())
+                .controller(ControllerRef::You),
+        );
+        assert_eq!(
+            parse_continuous_subject_filter(&subject),
+            Some(expected.clone())
+        );
+        let def = parse_static_line(&format!("{subject} get +1/+1.")).unwrap();
+        assert_eq!(def.affected, Some(expected));
+        assert_eq!(
+            def.modifications,
+            vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ]
+        );
+        assert!(parse_continuous_subject_filter(&format!("{subject} nonsense")).is_none());
+    }
 }
 
 #[test]
@@ -9794,9 +9818,11 @@ fn colored_only_rider_sets_the_cost_reduction_reach() {
              classified as the rider: {line}"
         );
         let parsed = parse_card(line, "Extended rider", &[], &["Creature"], &[]);
-        assert!(parsed.statics.iter().any(|definition| matches!(definition.mode, StaticMode::ModifyCost { reach: CostReductionReach::SpillsToGeneric, .. })));
+        let mut doc = crate::parser::oracle::parse_oracle_ir(line, "Extended rider", &[], &["Creature".into()], &[]);
+        let lowered = crate::parser::oracle::lower_oracle_ir(&mut doc);
+        assert!(parsed.statics.iter().any(|definition| matches!(definition.mode, StaticMode::ModifyCost { reach: CostReductionReach::SpillsToGeneric, .. })), "synthetic extended rider must retain its exact existing publication contract: source={line:?}; whole IR={doc:#?}; complete public result={parsed:#?}; lowered={lowered:#?}");
         let rider = line.split_once(". ").unwrap().1;
-        assert!(parsed.abilities.iter().any(|ability| ability.effect.unimplemented_description().is_some_and(|text| text.contains(rider))));
+        assert!(parsed.abilities.iter().any(|ability| ability.effect.unimplemented_description().is_some_and(|text| text.contains(rider))), "synthetic extended rider full-source diagnostic: source={line:?}; expected rider={rider:?}; whole IR={doc:#?}; complete public result={parsed:#?}; lowered={lowered:#?}");
     }
 }
 
@@ -16786,8 +16812,18 @@ fn static_creatures_attacking_enchanted_player_have_trample() {
 
 #[test]
 fn static_creatures_attacking_opponents_and_planeswalkers_get_pump() {
+    // CR 611.2a + CR 611.2c: Roar's resolving instruction has a duration and
+    // a resolution-time population; a persistent static cannot represent it.
+    let resolving = "Creatures attacking your opponents and/or planeswalkers they control get +2/+0 until end of turn.";
+    let roar = parse_card("Creature tokens you control have haste.\nWhenever one or more creatures attack, you may pay {1}{R}. If you do, creatures attacking your opponents and/or planeswalkers they control get +2/+0 until end of turn.", "Roar of Resistance", &[], &["Enchantment"], &[]);
+    assert!(parse_static_line(resolving).is_none(), "resolving instruction must not become a persistent static; full Roar execute chains: {roar:#?}");
+    assert!(
+        parse_static_line_multi(resolving).is_empty(),
+        "full Roar execute chains: {roar:#?}"
+    );
+    // Independent, synthetic duration-free positive for the static subject.
     let def = parse_static_line(
-        "Creatures attacking your opponents and/or planeswalkers they control get +2/+0 until end of turn.",
+        "Creatures attacking your opponents and/or planeswalkers they control get +2/+0.",
     )
     .unwrap();
     assert_eq!(def.mode, StaticMode::Continuous);
@@ -27814,10 +27850,14 @@ fn static_other_monocolored_creatures_get_plus() {
 
 #[test]
 fn static_ygra_additive_food_artifact_grants_food_ability() {
-    let def = parse_static_line(
-            "Other creatures are Food artifacts in addition to their other types and have \"{2}, {T}, Sacrifice this permanent: You gain 3 life.\"",
-        )
-        .unwrap();
+    let line = "Other creatures are Food artifacts in addition to their other types and have \"{2}, {T}, Sacrifice this permanent: You gain 3 life.\"";
+    let def = parse_static_line(line).unwrap_or_else(|| panic!(
+        "Ygra complete predicate refused; direct={:?}; multi={:?}; additive owner={:?}; complete predicate={:?}; complete quoted grant={:?}",
+        parse_static_line(line), parse_static_line_multi(line),
+        super::anthem::parse_subject_additive_type_static(line),
+        super::keyword_grant::parse_complete_continuous_modifications("are Food artifacts in addition to their other types and have \"{2}, {T}, Sacrifice this permanent: You gain 3 life.\""),
+        super::grammar::parse_complete_quoted_ability("{2}, {T}, Sacrifice this permanent: You gain 3 life.")
+    ));
     assert_eq!(def.mode, StaticMode::Continuous);
     assert_eq!(
         def.affected,
@@ -43836,24 +43876,59 @@ fn animation_conjunct_emits_both_halves_for_every_grant_verb() {
     }
 }
 
-/// V6 hostile sibling: a NON-grant conjunct verb must not be peeled. "and loses
-/// defender" is an ability-REMOVING clause (still CR 613.1f, Layer 6) already
-/// owned elsewhere; the new boundary combinator matches only the four grant
-/// verbs, so this line must keep its existing shape.
+/// V6 synthetic hostile sibling: CR 613.1f puts removing defender in Layer 6.
+/// A partial animation vector does not prove that the whole conjunct is owned.
 #[test]
 fn animation_conjunct_boundary_ignores_non_grant_verbs() {
-    let def =
-        parse_static_line("it's a 0/0 creature in addition to its other types and loses defender")
-            .expect(
-                "a non-grant conjunct must retain its existing parse path; the previous `if let \
-         Some(def)` let an unintended decline satisfy this test without asserting anything",
-            );
-    assert!(
-        !def.modifications.is_empty(),
-        "a non-grant conjunct must not be turned into an empty-modification static; \
-         mods = {:?}",
-        def.modifications
+    let source = "it's a 0/0 creature in addition to its other types and loses defender";
+    assert!(parse_static_line(source).is_none());
+    assert!(parse_static_line_multi(source).is_empty());
+    let mut doc = crate::parser::oracle::parse_oracle_ir(
+        source,
+        "Synthetic non-grant animation",
+        &[],
+        &["Artifact".into()],
+        &[],
     );
+    assert_eq!(doc.source_text, source);
+    assert_eq!(doc.items.len(), 1, "{doc:#?}");
+    assert_eq!(doc.items[0].source.fragment(), Some(source));
+    let crate::parser::oracle_ir::doc::OracleNodeIr::Unsupported { unsupported, .. } =
+        &doc.items[0].node
+    else {
+        panic!("whole synthetic refusal: {doc:#?}");
+    };
+    assert_eq!(
+        unsupported.category,
+        crate::parser::oracle_ir::doc::UnsupportedAbilityCategory::Unknown
+    );
+    assert_eq!(unsupported.description, source);
+    assert_eq!(unsupported.fragment, source);
+    let parsed = crate::parser::oracle::lower_oracle_ir(&mut doc);
+    assert!(parsed.statics.is_empty());
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert_eq!(
+        parsed.abilities[0].effect.unimplemented_description(),
+        Some(source)
+    );
+    assert_eq!(parsed.abilities[0].description.as_deref(), Some(source));
+    assert!(parsed.abilities[0].sub_ability.is_none());
+    let bare = parse_static_line("it's a 0/0 creature in addition to its other types").unwrap();
+    assert!(bare
+        .modifications
+        .contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature
+        }));
+    assert!(bare
+        .modifications
+        .contains(&ContinuousModification::SetPower { value: 0 }));
+    assert!(bare
+        .modifications
+        .contains(&ContinuousModification::SetToughness { value: 0 }));
+    assert!(parse_static_line(
+        "it's a 0/0 creature in addition to its other types and it has florblewick"
+    )
+    .is_none());
 }
 
 /// V7: an unrecognized conjunct is honest, not swallowed.
@@ -46613,23 +46688,18 @@ fn granted_ability_definitions(line: &str) -> Vec<crate::types::ability::Ability
 /// never the per-ability `OnlyOnceEachTurn` (the per-permanent cap is enforced
 /// by the planeswalker activation gate). Verbatim Oracle lines from the
 /// granted-loyalty class (issue #9936), covering `[+N]`, `[0]` and `[−N]`
-/// costs and a nested quoted ability.
+/// costs. An unsupported nested quoted program is checked separately below.
 #[test]
 fn granted_loyalty_abilities_carry_cr_606_3_timing() {
     use crate::types::ability::{is_loyalty_ability_cost, AbilityCost};
 
-    let cases: [(&str, usize); 4] = [
+    let cases: [(&str, usize); 3] = [
         // Way of the Pyromancer
         ("Planeswalkers you control have \"[+1]: Add {R}.\"", 1),
         // Ichormoon Gauntlet (two grants)
         (
             "Planeswalkers you control have \"[0]: Proliferate\" and \"[−12]: Take an extra turn after this one.\"",
             2,
-        ),
-        // Teferi's Talent
-        (
-            "Enchanted planeswalker has \"[−12]: You get an emblem with 'You may activate loyalty abilities of planeswalkers you control on any player's turn any time you could cast an instant.'\"",
-            1,
         ),
         // Way of the Warlord
         (
@@ -46668,6 +46738,64 @@ fn granted_loyalty_abilities_carry_cr_606_3_timing() {
             );
         }
     }
+
+    // The exact Teferi emblem is an unsupported nested program, so it cannot
+    // serve as a positive timing fixture. Keep the whole card (including its
+    // externally handled enchant line) and its independent draw trigger.
+    let teferi = "Enchant planeswalker\nEnchanted planeswalker has \"[−12]: You get an emblem with 'You may activate loyalty abilities of planeswalkers you control on any player's turn any time you could cast an instant.'\"\nWhenever you draw a card, put a loyalty counter on enchanted planeswalker.";
+    let grant_line = teferi.lines().nth(1).unwrap();
+    assert!(parse_static_line(grant_line).is_none());
+    assert!(parse_static_line_multi(grant_line).is_empty());
+    assert!(granted_ability_definitions(grant_line).is_empty());
+    let mut doc = crate::parser::oracle::parse_oracle_ir(
+        teferi,
+        "Teferi's Talent",
+        &[],
+        &["Enchantment".into()],
+        &["Aura".into()],
+    );
+    assert_eq!(doc.source_text, teferi);
+    assert_eq!(
+        doc.items.len(),
+        2,
+        "Enchant is handled externally: {doc:#?}"
+    );
+    assert_eq!(doc.items[0].source.fragment(), Some(grant_line));
+    assert!(
+        matches!(
+            doc.items[0].node,
+            crate::parser::oracle_ir::doc::OracleNodeIr::Unsupported { .. }
+        ),
+        "the complete nested program must be refused: {doc:#?}"
+    );
+    let parsed = crate::parser::oracle::lower_oracle_ir(&mut doc);
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert_eq!(parsed.abilities[0].description.as_deref(), Some(grant_line));
+    assert_eq!(
+        parsed.abilities[0].effect.unimplemented_description(),
+        Some(
+            format!("Static pattern matched but line failed static parser: {grant_line}").as_str()
+        )
+    );
+    assert!(parsed.abilities[0].sub_ability.is_none());
+    assert_eq!(
+        parsed.triggers.len(),
+        1,
+        "independent draw trigger: {parsed:#?}"
+    );
+    assert!(
+        parsed.statics.is_empty(),
+        "no incomplete granted loyalty program: {parsed:#?}"
+    );
+    let draw = parse_card(
+        teferi.lines().nth(2).unwrap(),
+        "Teferi's Talent",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    assert_eq!(draw.triggers.len(), 1);
+    assert_eq!(parsed.triggers, draw.triggers);
 
     // Negative: a granted non-loyalty mana ability gains no timing restriction
     // and stays a mana ability (CR 605.1a).
@@ -48363,14 +48491,14 @@ fn undercover_skrull_public_live_gate_controller_transfer_and_mana() {
         // CR 106.4: unspent mana empties at the phase boundary.
         assert_eq!(runner.state().players[0].mana_pool.total(), 0);
         runner.declare_attackers(&[]).unwrap();
-        for _ in 0..96 {
+        for step in 0..96 {
             if runner.state().active_player == P1 && runner.state().phase == Phase::PreCombatMain {
                 break;
             }
             assert!(matches!(
                 runner.state().waiting_for,
                 WaitingFor::Priority { .. }
-            ));
+            ), "Skrull phase advance step={step}; own_count={own_count}; phase={:?}; active={:?}; waiting={:#?}; pending_cast={:#?}; stack={:#?}; resolution_stack={:#?}; combat={:#?}", runner.state().phase, runner.state().active_player, runner.state().waiting_for, runner.state().pending_cast, runner.state().stack, runner.state().resolution_stack, runner.state().combat);
             runner.act(GameAction::PassPriority).unwrap();
         }
         assert_eq!(runner.state().active_player, P1);
@@ -48916,13 +49044,12 @@ fn quoted_grants_public_riteknife_hammer_gond_pay_and_keep_source_identity() {
     let mut insufficient = crate::game::scenario::GameRunner::from_state(runner.state().clone());
     insufficient.cast(spend).resolve();
     assert_eq!(insufficient.state().players[0].mana_pool.total(), 2);
-    assert!(insufficient
-        .act(GameAction::ActivateAbility {
-            source_id: host,
-            ability_index: acquired,
-            payment_mode: CastPaymentMode::Auto
-        })
-        .is_err());
+    let activation = insufficient.act(GameAction::ActivateAbility {
+        source_id: host,
+        ability_index: acquired,
+        payment_mode: CastPaymentMode::Auto,
+    });
+    assert!(activation.is_err(), "Hammer activation with insufficient mana must retain the existing Err contract: result={activation:#?}; waiting={:#?}; mana={:#?}; complete acquired definition={:#?}; host={host:?}; granting Hammer={hammer:?}; host object={:#?}; granting object={:#?}; pending_cast={:#?}; stack={:#?}; resolution_stack={:#?}", insufficient.state().waiting_for, insufficient.state().players[0].mana_pool, insufficient.state().objects[&host].abilities[acquired], insufficient.state().objects[&host], insufficient.state().objects[&hammer], insufficient.state().pending_cast, insufficient.state().stack, insufficient.state().resolution_stack);
     runner
         .activate(host, acquired)
         .target_object(victim)
