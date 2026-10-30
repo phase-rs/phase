@@ -79,6 +79,7 @@ vi.mock("../../constants/storage", () => ({
   ACTIVE_DECK_KEY: "active-deck",
   loadActiveDeck: () => ({ main: ["Island"], sideboard: [] }),
   loadActiveDeckBracket: () => null,
+  loadActiveDeckComboDeclaration: () => ({ kind: "none_intended" }),
   touchDeckPlayed: vi.fn(),
 }));
 
@@ -221,7 +222,11 @@ describe("MultiplayerPage host server", () => {
     expect(ensureSubscriptionSocket).not.toHaveBeenCalledWith(URL_A);
     // The same URL reaches the store: the probe target and the dial target are
     // one value, not two reads that could disagree.
-    expect(startHosting).toHaveBeenCalledWith(expect.anything(), expect.anything(), URL_B);
+    expect(startHosting).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ combo_declaration: { kind: "none_intended" } }),
+      URL_B,
+    );
     expect(navigator.sendBeacon).not.toHaveBeenCalled();
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });

@@ -1296,6 +1296,37 @@ describe("multiplayerStore", () => {
       data: { deck: Record<string, unknown> };
     };
     expect(frame.data.deck).not.toHaveProperty("bracket_tier");
+    expect(frame.data.deck).not.toHaveProperty("combo_declaration");
+  });
+
+  it("sends the owner's combo answer on the host deck and each AI seat's deck", async () => {
+    const hostAnswer = { kind: "none_intended" } as const;
+    const seatAnswer = { kind: "intended", window: "early_game" } as const;
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings({
+        aiSeats: [{
+          seatIndex: 1,
+          difficulty: "Medium",
+          deckName: null,
+          deck: {
+            type: "DeckList",
+            data: { main_deck: ["Forest"], sideboard: [], commander: [], combo_declaration: seatAnswer },
+          },
+        }],
+      }),
+      { main_deck: ["Forest"], sideboard: [], commander: [], combo_declaration: hostAnswer },
+      HOST_URL,
+    );
+
+    await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+    const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string) as {
+      data: {
+        deck: { combo_declaration?: unknown };
+        ai_seats: { deck: { data: { combo_declaration?: unknown } } }[];
+      };
+    };
+    expect(frame.data.deck.combo_declaration).toEqual(hostAnswer);
+    expect(frame.data.ai_seats[0].deck.data.combo_declaration).toEqual(seatAnswer);
   });
 
   it("saves server-host metadata with the reconnect token while waiting for players", async () => {

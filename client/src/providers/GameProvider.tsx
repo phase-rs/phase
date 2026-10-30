@@ -31,7 +31,7 @@ import {
 } from "../constants/storage";
 import type { ComboDeclaration, CommanderBracket } from "../types/bracket";
 import { bracketToEngineTier, type CommanderBracketTier } from "../types/bracketEstimate";
-import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
+import { buildLegalAiDeckCatalog, candidateSeatDeck } from "../services/aiDeckCatalog";
 import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
 import { withCatalogSavedNames } from "../services/randomPoolSelection";
 import { cedhSeatProblem, pickAiSeatDecks, resolveRandomDrawPool } from "../services/aiRandomPool";
@@ -452,9 +452,14 @@ async function buildLocalAiDeckList(
   }
 
   const excludeIds = new Set<string>();
-  let playerDeck = deck;
-  let resolvedPlayerBracket = playerBracket;
-  if (!playerDeck) {
+  let player: ExpandedDeckWithTier;
+  if (deck) {
+    player = {
+      ...expandParsedDeck(deck),
+      bracket_tier: bracketToEngineTier(playerBracket),
+      combo_declaration: comboDeclaration,
+    };
+  } else {
     // A deferred human Random pick draws from the shared bracket-then-curation
     // layering, so it lands in the same bracket(s) as the AI seats (falling
     // back the same way when the selection matches nothing).
@@ -474,8 +479,7 @@ async function buildLocalAiDeckList(
           : t("gameProvider.noLegalAiDecks.generic"),
       );
     }
-    playerDeck = playerPick.deck;
-    resolvedPlayerBracket = playerPick.declaredBracket;
+    player = candidateSeatDeck(playerPick);
     excludeIds.add(playerPick.id);
   }
 
@@ -491,16 +495,14 @@ async function buildLocalAiDeckList(
     excludeIds,
   });
 
-  const playerExpanded = expandParsedDeck(playerDeck);
-  const playerTier = bracketToEngineTier(resolvedPlayerBracket);
   // Build ai_difficulties in the same order as the AI seats: opponent first,
   // then any additional ai_decks. Seat 0 maps to the opponent, seats 1+ map
   // to ai_decks. The plan's difficulties are already cEDH-mapped.
   const aiDifficulties = seats.map((seat) => seat.difficulty);
   return {
-    player: { ...playerExpanded, bracket_tier: playerTier, combo_declaration: comboDeclaration },
-    opponent: { ...expandParsedDeck(picks[0].deck), bracket_tier: bracketToEngineTier(picks[0].declaredBracket) },
-    ai_decks: picks.slice(1).map((c) => ({ ...expandParsedDeck(c.deck), bracket_tier: bracketToEngineTier(c.declaredBracket) })),
+    player,
+    opponent: candidateSeatDeck(picks[0]),
+    ai_decks: picks.slice(1).map(candidateSeatDeck),
     ai_difficulties: aiDifficulties,
   };
 }
@@ -1285,6 +1287,7 @@ export function GameProvider({
         ? {
             ...parsedDeckToDeckData(parsedDeck),
             bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
+            combo_declaration: loadActiveDeckComboDeclaration(),
           }
         : emptySeatDeck();
 

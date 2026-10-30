@@ -13,7 +13,8 @@ const catalogMocks = vi.hoisted(() => ({
   candidates: [] as unknown[],
 }));
 
-vi.mock("../../../services/aiDeckCatalog", () => ({
+vi.mock("../../../services/aiDeckCatalog", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../services/aiDeckCatalog")>(),
   useAiDeckCatalog: () => ({
     candidates: catalogMocks.candidates,
     allCandidates: catalogMocks.candidates,
@@ -370,6 +371,18 @@ describe("HostControlTile", () => {
       expect(screen.getAllByRole("combobox")).toHaveLength(2);
       expect(seatMutate).toHaveBeenCalledWith(
         setAi({ type: "DeckList", data: expect.objectContaining({ main_deck: ["Forest"] }) }),
+      );
+    });
+
+    it("promotes a catalog deck with its owner's declarations", () => {
+      const early = { kind: "intended", window: "early_game" } as const;
+      catalogMocks.candidates = [{ ...CATALOG_DECK, declaredBracket: 4, comboDeclaration: early }];
+      const { seatMutate } = renderSeats("Standard", aiWith({ type: "Random" }));
+      expect(seatMutate).toHaveBeenCalledWith(
+        setAi({
+          type: "DeckList",
+          data: expect.objectContaining({ bracket_tier: "optimized", combo_declaration: early }),
+        }),
       );
     });
   });

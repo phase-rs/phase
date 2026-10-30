@@ -8,8 +8,8 @@ use engine::database::{
     ComboProvenance, ComboRelevance, ComboResource, ComboSetup, ComboTable, ComboTableDoc,
 };
 use engine::game::{
-    load_deck_into_state, reconstruct_initial_state, resolve_deck_list, CommanderBracketTier,
-    DeckList, PlayerDeckList,
+    load_deck_into_state, reconstruct_initial_state, resolve_deck_list, ComboDeclaration,
+    ComboWindow, CommanderBracketTier, DeckList, PlayerDeckList,
 };
 use engine::types::format::FormatConfig;
 use engine::types::game_state::GameState;
@@ -76,12 +76,19 @@ fn deck() -> DeckList {
     }
 }
 
-fn resolved_pool(combos: &ComboTable) -> Option<engine::types::game_state::PlayerDeckPool> {
+fn resolved_pools(
+    combos: &ComboTable,
+    list: &DeckList,
+) -> Option<Vec<engine::types::game_state::PlayerDeckPool>> {
     let db = shared_db()?;
-    let payload = resolve_deck_list(db, combos, &deck());
+    let payload = resolve_deck_list(db, combos, list);
     let mut state = GameState::new_two_player(42);
     load_deck_into_state(&mut state, &payload);
-    Some(state.deck_pools[0].clone())
+    Some(state.deck_pools.clone())
+}
+
+fn resolved_pool(combos: &ComboTable) -> Option<engine::types::game_state::PlayerDeckPool> {
+    Some(resolved_pools(combos, &deck())?.swap_remove(0))
 }
 
 #[test]
@@ -106,6 +113,30 @@ fn resolve_deck_list_with_a_default_table_is_unchanged() {
     };
     assert_eq!(
         pool.estimated_bracket_tier,
+        Some(CommanderBracketTier::Core)
+    );
+}
+
+#[test]
+fn resolve_deck_list_floors_each_deck_by_its_own_combo_declaration() {
+    let mut list = deck();
+    list.player.combo_declaration = ComboDeclaration::Intended {
+        window: Some(ComboWindow::EarlyGame),
+    };
+    list.opponent = deck().player;
+    let Some(pools) = resolved_pools(&ComboTable::default(), &list) else {
+        return;
+    };
+    assert_eq!(
+        pools[0].estimated_bracket_tier,
+        Some(CommanderBracketTier::Optimized)
+    );
+    assert_eq!(
+        pools[0].effective_bracket_tier().tier(),
+        CommanderBracketTier::Optimized
+    );
+    assert_eq!(
+        pools[1].estimated_bracket_tier,
         Some(CommanderBracketTier::Core)
     );
 }

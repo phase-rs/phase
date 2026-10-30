@@ -10,8 +10,9 @@ import {
 } from "./deckCatalog";
 import type { DeckArchetype } from "./engineRuntime";
 import { expandParsedDeck, type ParsedDeck } from "./deckParser";
-import type { CommanderBracket } from "../types/bracket";
-import { effectiveBracket, isCommanderFamilyFormat, UNDECLARED_COMBO } from "../types/bracket";
+import type { ComboDeclaration, CommanderBracket } from "../types/bracket";
+import { effectiveBracket, isCommanderFamilyFormat, sameComboDeclaration } from "../types/bracket";
+import { bracketToEngineTier } from "../types/bracketEstimate";
 import {
   DECKS_CHANGED_EVENT,
   FEED_DECK_ORIGINS_KEY,
@@ -39,6 +40,11 @@ export interface AiDeckCandidate {
    * at the engine's own estimate.
    */
   declaredBracket: CommanderBracket | null;
+  /**
+   * The owner's two-card-combo answer. Sent with `declaredBracket` so a seat
+   * plays the same floor the pool filtered on.
+   */
+  comboDeclaration: ComboDeclaration;
 }
 
 export interface AiDeckCatalogOptions {
@@ -106,6 +112,7 @@ export function catalogRequestKey(
 async function resolveBracket(
   deck: ParsedDeck,
   staticBracket: CommanderBracket | null,
+  comboDeclaration: ComboDeclaration,
   format: GameFormat | undefined,
 ): Promise<CommanderBracket | null> {
   if (staticBracket !== null) return staticBracket;
@@ -113,7 +120,7 @@ async function resolveBracket(
   const request = expandParsedDeck(deck);
   if (request.commander.length === 0) return null;
   const outcome = await estimateDeckBracket({
-    deck: { ...request, combo_declaration: UNDECLARED_COMBO },
+    deck: { ...request, combo_declaration: comboDeclaration },
     declared_tier: null,
   });
   switch (outcome.kind) {
@@ -148,10 +155,28 @@ async function legalCandidate(
   if (result.selected_format_compatible !== true) return null;
   return {
     ...candidate,
-    bracket: await resolveBracket(candidate.deck, candidate.declaredBracket, options.selectedFormat ?? undefined),
+    bracket: await resolveBracket(
+      candidate.deck,
+      candidate.declaredBracket,
+      candidate.comboDeclaration,
+      options.selectedFormat ?? undefined,
+    ),
     coveragePct: result.coverage && result.coverage.total_unique > 0
       ? Math.round((result.coverage.supported_unique / result.coverage.total_unique) * 100)
       : candidate.coveragePct,
+  };
+}
+
+/**
+ * What a seat submits for a picked candidate: its list and its owner's
+ * declarations, always taken from the same candidate. Every seat built from the
+ * catalog goes through here, so none can pair a deck with another deck's answers.
+ */
+export function candidateSeatDeck(candidate: AiDeckCandidate) {
+  return {
+    ...expandParsedDeck(candidate.deck),
+    bracket_tier: bracketToEngineTier(candidate.declaredBracket),
+    combo_declaration: candidate.comboDeclaration,
   };
 }
 
@@ -186,6 +211,7 @@ export async function buildLegalAiDeckCatalog(
     archetype: null,
     bracket: candidate.bracket ?? null,
     declaredBracket: candidate.bracket ?? null,
+    comboDeclaration: candidate.comboDeclaration,
     knownFormat: candidate.knownFormat,
   }));
 
@@ -324,6 +350,7 @@ function sameCatalogCandidates(a: readonly AiDeckCandidate[], b: readonly AiDeck
       (candidate, index) =>
         candidate.id === b[index].id
         && candidate.bracket === b[index].bracket
+        && sameComboDeclaration(candidate.comboDeclaration, b[index].comboDeclaration)
         && (candidate.knownFormat ?? null) === (b[index].knownFormat ?? null)
         && (candidate.coveragePct ?? null) === (b[index].coveragePct ?? null)
         && sameCatalogSource(candidate.source, b[index].source),

@@ -26,7 +26,7 @@ import type {
   InteractionPreviewRequest,
   InteractionSubmission,
 } from "./generated/interaction";
-import type { CommanderBracketTier } from "../types/bracketEstimate";
+import type { ComboDeclaration, CommanderBracketTier } from "../types/bracketEstimate";
 
 import {
   AdapterError,
@@ -192,6 +192,7 @@ interface DeckSeatPayload {
   planar_deck?: string[];
   scheme_deck?: string[];
   bracket_tier?: CommanderBracketTier | null;
+  combo_declaration?: ComboDeclaration;
 }
 
 interface DeckListPayload {

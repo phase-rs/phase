@@ -1,5 +1,5 @@
 import type { FormatConfig } from "../adapter/types";
-import type { CommanderBracketTier } from "../types/bracketEstimate";
+import type { ComboDeclaration, CommanderBracketTier } from "../types/bracketEstimate";
 
 export type DeckChoice =
   | { type: "Random" }
@@ -14,6 +14,8 @@ export type DeckChoice =
         scheme_deck?: string[];
         /** Declared Commander bracket tier; omitted or `null` is undeclared and plays at the engine's estimate. */
         bracket_tier?: CommanderBracketTier | null;
+        /** The owner's two-card-combo answer; omitted means unanswered. */
+        combo_declaration?: ComboDeclaration;
       };
     };
 
