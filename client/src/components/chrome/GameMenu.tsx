@@ -30,6 +30,7 @@ export type TakebackAudience = "table" | "solo";
 
 interface GameMenuProps {
   gameId: string;
+  /** Offers the "Show AI Hand" toggle: an AI game whose transport can honor it. */
   isAiMode: boolean;
   isOnlineMode: boolean;
   showAiHand: boolean;

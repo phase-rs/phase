@@ -2,6 +2,7 @@ use crate::game::ability_utils::{resolve_multi_target_bounds, MultiTargetBounds}
 use crate::game::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
     AbilityCondition, AttachCardinality, AttachSelection, AttachmentReferent, Effect, EffectError,
@@ -300,7 +301,7 @@ fn resolve_bound_attachment_operation(
     if ability.optional_targeting
         && ability.attach_host_target().is_none()
         && !host_slot_announced(state, ability, target_filter)
-        && crate::game::ability_utils::attach_host_filter_needs_target_slot(target_filter)
+        && crate::types::ability::attach_host_filter_needs_target_slot(target_filter)
         && target_filter.denotes_battlefield_objects()
     {
         events.push(GameEvent::EffectResolved {
@@ -721,7 +722,7 @@ fn prompt_resolution_attachment_choice(
         if ability.target_choice_timing == TargetChoiceTiming::Resolution
             && ability.attach_host_target().is_none()
             && attachment_filter.is_context_ref()
-            && crate::game::ability_utils::attach_host_filter_needs_target_slot(host_filter)
+            && crate::types::ability::attach_host_filter_needs_target_slot(host_filter)
             && host_filter.denotes_battlefield_objects()
         {
             return prompt_described_host_choice(
@@ -1938,6 +1939,45 @@ pub(crate) fn can_attach_to_player_with_authority(
     }
 }
 
+/// CR 701.3b: [`attach_to`] that reports whether the attachment actually moved
+/// onto `target_id`. Same-host re-attaches (a no-op under CR 701.3b) and
+/// rejected attaches return `false`, so "becomes attached" events (CR 603.2e)
+/// are emitted only for a genuine transition.
+pub(crate) fn attach_to_reporting_change(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_id: ObjectId,
+) -> bool {
+    let host = Some(AttachTarget::Object(target_id));
+    let host_of = |state: &GameState| {
+        state
+            .objects
+            .get(&attachment_id)
+            .and_then(|o| o.attached_to)
+    };
+    let was_attached = host_of(state) == host;
+    attach_to(state, attachment_id, target_id);
+    !was_attached && host_of(state) == host
+}
+
+/// Player-host sibling of [`attach_to_reporting_change`].
+pub(crate) fn attach_to_player_reporting_change(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+) -> bool {
+    let host = Some(AttachTarget::Player(target_player));
+    let host_of = |state: &GameState| {
+        state
+            .objects
+            .get(&attachment_id)
+            .and_then(|o| o.attached_to)
+    };
+    let was_attached = host_of(state) == host;
+    attach_to_player(state, attachment_id, target_player);
+    !was_attached && host_of(state) == host
+}
+
 /// CR 701.3c: Attaching to a different object gives the attachment a new timestamp.
 /// Core attachment logic: attach `attachment_id` to `target_id`.
 /// Handles detaching from a previous target if already attached.
@@ -3125,6 +3165,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],

@@ -52,7 +52,7 @@ fn face_down_morph_board(controller: PlayerId, mana: &[ManaType]) -> (GameRunner
     scenario.at_phase(Phase::PreCombatMain);
     let id = scenario
         .add_creature_to_hand(controller, "Coral Trickster", 2, 1)
-        .with_keyword(Keyword::Morph(morph_cost()))
+        .with_keyword(Keyword::morph(morph_cost()))
         .id();
     if !mana.is_empty() {
         scenario.with_mana_pool(controller, pool(mana));
@@ -281,10 +281,10 @@ fn check_warbreak_morph_x() {
 /// A mana source whose own cost exiles it, plus two exile→graveyard
 /// replacements, forces a CR 616.1 ordering choice while the turn-face-up cost
 /// is being auto-tapped. `casting.rs` deliberately reports such a source as
-/// payable, so the offer above is right to include it — but the compatibility
-/// wrapper `pay_special_action_mana_cost` converts the resulting `Paused` into
-/// an error. That is why #4538 was asked to build a typed resume before the
-/// action could be offered.
+/// payable, so the offer above is right to include it; the action pays through
+/// `pay_special_action_mana_cost_with_resume`, whose typed continuation turns
+/// that pause into a resumable prompt instead of an error. That is the typed
+/// resume #4538 required before the action could be offered.
 ///
 /// The permanent must still be face down while the choice is open, and must flip
 /// exactly once the choice is answered.
@@ -354,10 +354,10 @@ fn a_paused_mana_source_resumes_the_locked_turn_face_up() {
                     &pending.resume,
                     ManaAbilityResume::TurnFaceUp {
                         player,
-                        object_id,
+                        source,
                         announced_x: Some(0),
                         ..
-                    } if *player == P0 && *object_id == id
+                    } if *player == P0 && source.object_id == id
                 )
         ),
         "the typed continuation names the action to finish"

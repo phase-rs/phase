@@ -1,6 +1,7 @@
 use crate::game::ability_utils::build_resolved_from_def;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::GameObject;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::targeting::{TriggeringActivation, TriggeringSpell};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, CopyRetargetPermission,
@@ -2257,6 +2258,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Ref {
                     qty: crate::types::ability::QuantityRef::AdditionalCostPaymentCount,
@@ -2610,6 +2613,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -4486,6 +4491,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
             incarnation: 0,
         });

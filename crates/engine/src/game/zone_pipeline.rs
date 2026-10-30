@@ -6,6 +6,7 @@
 //! layer (CR 614.1 / 614.6 replacement consult, CR 616.1 choices, CR 614.1c
 //! enters-with seeding) plus the CR 303.4f aura-host choice.
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
@@ -1839,6 +1840,7 @@ mod paused_search_audience_tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
         });
 
         // The owner parks on the unanswered event.

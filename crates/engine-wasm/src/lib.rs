@@ -29,6 +29,7 @@ use engine::game::preview::{
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
 // public surface, but this phase must not edit that file.
 use engine::game::deck_validation::{draft_set_concessions_for, evaluate_deck_format_gate};
+use engine::game::visibility::HandDisclosure;
 use engine::game::CardDbRehydrationFinalization;
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
@@ -586,7 +587,7 @@ fn to_js<T: Serialize + ?Sized>(value: &T) -> JsValue {
 
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 use phase_ai::{
-    choose_action_with_session, score_candidates_for_parallel_worker,
+    choose_action_with_issued_contract, score_candidates_for_parallel_worker,
     select_safe_action_from_scores, AiSession, SessionCache,
 };
 thread_local! {
@@ -626,6 +627,16 @@ thread_local! {
     /// They deliberately do not serialize with `GameState`: a restore/new game
     /// starts a new generation even when the state revision happens to match.
     static AI_PROPOSALS: RefCell<AiProposalRegistry> = RefCell::new(AiProposalRegistry::default());
+    /// The local seat's requested hand disclosure for `get_game_state` (the
+    /// "Show AI Hand" toggle). A view preference only: the engine decides
+    /// whether the seat is entitled to it, and it never touches `GameState`.
+    /// Installing a new game (initialize, clear, multiplayer-host resume)
+    /// resets it (`reset_hand_disclosure`), so a request never outlives the
+    /// game it was made in. A restore keeps it: only the client knows whether a
+    /// restore rewinds this game (checkpoint undo, request kept) or replaces it
+    /// (an import starts a new client game session, which withdraws and
+    /// re-sends the request for the new game).
+    static HAND_DISCLOSURE: Cell<HandDisclosure> = const { Cell::new(HandDisclosure::Rules) };
 }
 
 #[derive(Debug, Clone)]
@@ -935,6 +946,7 @@ pub fn clear_game_state() {
     clear_ai_session_cache();
     REPLAY_LOG.with(|cell| cell.set(None));
     invalidate_ai_proposals();
+    reset_hand_disclosure();
 }
 
 /// Verify WASM integration works.
@@ -1971,6 +1983,7 @@ fn initialize_game_impl(
     claim_engine_for(kind);
     clear_ai_session_cache();
     invalidate_ai_proposals();
+    reset_hand_disclosure();
 
     to_js(&result)
 }
@@ -2502,16 +2515,120 @@ fn handle_debug_create_card_inner(
 /// `engine::game::derived_views::ClientGameStateRef`.
 #[wasm_bindgen]
 pub fn get_game_state() -> JsValue {
-    match with_state(|state| {
-        // The local human is always PlayerId(0). `wrap` filters the state for
-        // that seat and scopes web-slinging costs to its hand.
-        to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
-            state,
-            Some(PlayerId(0)),
-        ))
-    }) {
+    match with_state(|state| to_js(&local_seat_client_state(state))) {
         Ok(val) => val,
         Err(_) => JsValue::NULL,
+    }
+}
+
+/// The envelope `get_game_state` exports. The local human is always
+/// PlayerId(0): the projection filters the state for that seat (applying the
+/// requested hand disclosure) and scopes web-slinging costs to its hand.
+fn local_seat_client_state(
+    state: &GameState,
+) -> engine::game::derived_views::ClientGameStateRef<'_> {
+    engine::game::derived_views::ClientGameStateRef::wrap_with_hand_disclosure(
+        state,
+        PlayerId(0),
+        requested_hand_disclosure(),
+    )
+}
+
+/// Request (or stop requesting) the "Show AI Hand" disclosure for the local
+/// seat's `get_game_state` projection. The engine honors it only for a seat
+/// with debug identity access; otherwise hands stay hidden.
+#[wasm_bindgen]
+pub fn set_debug_hand_reveal(enabled: bool) {
+    HAND_DISCLOSURE.with(|cell| {
+        cell.set(if enabled {
+            HandDisclosure::DebugRevealAll
+        } else {
+            HandDisclosure::Rules
+        })
+    });
+}
+
+/// The disclosure `get_game_state` asks the engine for. A multiplayer host's
+/// own view is a seat at a table of humans, never a local debug view, so it is
+/// always the rules projection regardless of any stale local request.
+fn requested_hand_disclosure() -> HandDisclosure {
+    if MULTIPLAYER_MODE.with(Cell::get) {
+        HandDisclosure::Rules
+    } else {
+        HAND_DISCLOSURE.with(Cell::get)
+    }
+}
+
+fn reset_hand_disclosure() {
+    HAND_DISCLOSURE.with(|cell| cell.set(HandDisclosure::Rules));
+}
+
+#[cfg(test)]
+mod hand_disclosure_preference_tests {
+    use super::*;
+
+    #[test]
+    fn toggle_requests_and_withdraws_the_reveal() {
+        set_debug_hand_reveal(true);
+        assert_eq!(requested_hand_disclosure(), HandDisclosure::DebugRevealAll);
+        set_debug_hand_reveal(false);
+        assert_eq!(requested_hand_disclosure(), HandDisclosure::Rules);
+    }
+
+    #[test]
+    fn a_multiplayer_host_view_ignores_a_stale_local_request() {
+        set_debug_hand_reveal(true);
+        set_multiplayer_mode(true);
+        assert_eq!(requested_hand_disclosure(), HandDisclosure::Rules);
+        set_multiplayer_mode(false);
+        reset_hand_disclosure();
+    }
+
+    /// The exported `get_game_state` envelope: a local game's AI hand card
+    /// shows its identity only while the reveal is requested, and never to a
+    /// multiplayer host's own view.
+    #[test]
+    fn exported_state_projects_ai_hand_identity_by_request() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        initialize_debug_permissions(&mut state, false);
+        let card = engine::game::zones::create_object(
+            &mut state,
+            engine::types::identifiers::CardId(1),
+            PlayerId(1),
+            "AI Secret Card".to_string(),
+            engine::types::zones::Zone::Hand,
+        );
+        let exported_card = || {
+            let wire = serde_json::to_value(local_seat_client_state(&state))
+                .expect("client state serializes");
+            let object = &wire["state"]["objects"][card.0.to_string()];
+            (
+                object["name"].as_str().map(str::to_owned),
+                // Omitted on the wire when false; the client reads it as false.
+                object["display_visible_to_viewer"]
+                    .as_bool()
+                    .unwrap_or(false),
+            )
+        };
+        let hidden = (Some("Hidden Card".to_string()), false);
+        let revealed = (Some("AI Secret Card".to_string()), true);
+
+        reset_hand_disclosure();
+        assert_eq!(exported_card(), hidden);
+        set_debug_hand_reveal(true);
+        assert_eq!(exported_card(), revealed);
+        set_multiplayer_mode(true);
+        assert_eq!(exported_card(), hidden);
+        set_multiplayer_mode(false);
+        set_debug_hand_reveal(false);
+        assert_eq!(exported_card(), hidden);
+    }
+
+    #[test]
+    fn clearing_the_game_withdraws_the_reveal() {
+        set_debug_hand_reveal(true);
+        clear_game_state();
+        assert_eq!(requested_hand_disclosure(), HandDisclosure::Rules);
     }
 }
 
@@ -3133,6 +3250,62 @@ fn load_minimal_test_card_database() {
     });
 }
 
+/// Shared native/WASM fixture for a serialized legacy Resolve All Ready state.
+#[cfg(test)]
+fn legacy_ready_state() -> GameState {
+    use engine::types::actions::ResolveAllScope;
+    use engine::types::game_state::{
+        ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, StackEntry,
+        StackEntryKind, StackResolutionBudget,
+    };
+
+    let mut state = GameState::new_two_player(7);
+    const EPOCH: u64 = 70_200;
+    let source = ObjectId(EPOCH);
+    let controller = PlayerId(1);
+    state.waiting_for = WaitingFor::ResolveAllReady { epoch: EPOCH };
+    state.priority_player = PlayerId(0);
+    state.stack.push_back(StackEntry {
+        id: source,
+        source_id: source,
+        controller,
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: source,
+            ability: Box::new(engine::types::ability::ResolvedAbility::new(
+                engine::types::ability::Effect::NoOp,
+                vec![],
+                source,
+                controller,
+            )),
+        },
+    });
+    state.resolve_all_consent_run = Some(ResolveAllConsentRun {
+        epoch: EPOCH,
+        max_resolutions: StackResolutionBudget::default(),
+        scope: ResolveAllScope::Shared,
+        priority_snapshot: ResolveAllPrioritySnapshot {
+            waiting_player: PlayerId(0),
+            priority_player: PlayerId(0),
+            priority_pass_count: 0,
+            priority_passes: Default::default(),
+        },
+        participants: vec![
+            ResolveAllConsentParticipant {
+                representative: PlayerId(0),
+                authorized_submitter: PlayerId(0),
+                granted: true,
+            },
+            ResolveAllConsentParticipant {
+                representative: PlayerId(1),
+                authorized_submitter: PlayerId(1),
+                granted: true,
+            },
+        ],
+        auto_pass_baseline: None,
+    });
+    state
+}
+
 /// Restore the game state from a JSON string.
 /// Uses serde_json which handles string-keyed maps (from localStorage round-trip)
 /// correctly deserializing into HashMap<ObjectId, V>.
@@ -3208,7 +3381,7 @@ fn resume_loaded_stack_automation(
         let mut state = cell.take().ok_or_else(|| NOT_INITIALIZED_ERR.to_string())?;
         let resumed = resume_restored_stack_automation(&mut state);
         cell.set(Some(state));
-        Ok::<_, String>(resumed)
+        resumed.map_err(|error| error.to_string())
     })?;
     let changed = !matches!(
         resumed.presentation.outcome,
@@ -3303,15 +3476,45 @@ fn resume_multiplayer_host_state_inner(
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
     MULTIPLAYER_MODE.with(|cell| cell.set(true));
+    reset_hand_disclosure();
     // The fresh RNG state is installed before the engine evaluates the saved
     // session, and no caller can observe the hosted snapshot until this
     // returns its bounded engine presentation.
-    resume_loaded_stack_automation(true)
+    resume_loaded_stack_automation(true).inspect_err(|_| {
+        clear_game_state();
+        set_multiplayer_mode(false);
+    })
 }
 
 #[cfg(test)]
 mod restored_card_db_requirements_tests {
     use super::*;
+
+    fn legacy_ready_gain_state_json(life_gained_this_turn: u32) -> String {
+        let mut state = legacy_ready_state();
+        state.players[0].life_gained_this_turn = life_gained_this_turn;
+        let entry = state
+            .stack
+            .front_mut()
+            .expect("legacy Ready has a stack entry");
+        let source = entry.source_id;
+        entry.controller = PlayerId(0);
+        entry.kind = engine::types::game_state::StackEntryKind::ActivatedAbility {
+            source_id: source,
+            ability: Box::new(engine::types::ability::ResolvedAbility::new(
+                engine::types::ability::Effect::GainLife {
+                    amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                    player: engine::types::ability::TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )),
+        };
+        state.capture_rng_word_pos();
+        serde_json::to_string(&TrustedGameStateEnvelope::capture(state))
+            .expect("trusted host state serializes")
+    }
 
     #[test]
     fn decoded_restore_requires_a_card_database_before_state_mutation() {
@@ -3425,6 +3628,96 @@ mod restored_card_db_requirements_tests {
         );
         assert!(!game_state_present());
         assert!(!is_multiplayer_mode());
+    }
+
+    #[test]
+    fn multiplayer_host_resume_clears_failed_automation_install_and_allows_retry() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+
+        let cached_state = legacy_ready_state();
+        let cached_before = AI_SESSION_CACHE.with(|cell| {
+            let mut cache = cell.take();
+            let session = cache.get_or_build(&cached_state);
+            cell.set(cache);
+            session
+        });
+        REPLAY_LOG.with(|cell| {
+            cell.set(Some(ReplayLog::new(ReplayHeader {
+                format_config: FormatConfig::standard(),
+                match_config: MatchConfig::default(),
+                player_count: 2,
+                first_player: Some(0),
+                seed: 7,
+                deck_data: None,
+            })));
+        });
+        let token = AI_PROPOSALS.with(|registry| {
+            registry.borrow_mut().insert(AiDecisionContract {
+                semantic_owner: PlayerId(0),
+                authorized_actor: PlayerId(0),
+                state_revision: 0,
+                candidates: Vec::new(),
+            })
+        });
+        let generation_before = AI_PROPOSALS.with(|registry| registry.borrow().generation);
+        assert!(has_replay_recording());
+        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_some()));
+
+        let overflow = legacy_ready_gain_state_json(u32::MAX);
+        let error = resume_multiplayer_host_state_inner(&overflow)
+            .expect_err("host automation must return the life-counter overflow");
+        assert_eq!(
+            error,
+            "Player-resource change is not representable for player PlayerId(0)"
+        );
+        assert!(
+            !game_state_present(),
+            "failed host state install is cleared"
+        );
+        assert!(!is_multiplayer_mode(), "failed host claim is released");
+        assert!(
+            !has_replay_recording(),
+            "the abandoned recording is cleared"
+        );
+        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_none()));
+        assert_eq!(
+            AI_PROPOSALS.with(|registry| registry.borrow().generation),
+            generation_before.wrapping_add(1),
+            "failed host installation invalidates outstanding proposals"
+        );
+        let cached_after = AI_SESSION_CACHE.with(|cell| {
+            let mut cache = cell.take();
+            let session = cache.get_or_build(&cached_state);
+            cell.set(cache);
+            session
+        });
+        assert!(
+            !std::sync::Arc::ptr_eq(&cached_before, &cached_after),
+            "failed host installation clears the cached AI session"
+        );
+
+        // A second fresh-host attempt must work without an intervening clear/reset.
+        let representable = legacy_ready_gain_state_json(u32::MAX - 1);
+        let presentation = resume_multiplayer_host_state_inner(&representable)
+            .expect("the representable saved automation can retry immediately");
+        assert_eq!(
+            presentation.outcome,
+            RestoredStackAutomationOutcome::Progressed
+        );
+        assert!(game_state_present());
+        assert!(is_multiplayer_mode());
+        with_state(|state| {
+            assert_eq!(state.players[0].life_gained_this_turn, u32::MAX);
+            assert_eq!(state.players[0].life, 21);
+            assert!(state.stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        })
+        .expect("successful retry leaves the host game installed");
+
+        clear_game_state();
+        set_multiplayer_mode(false);
     }
 }
 
@@ -4204,7 +4497,7 @@ pub fn get_ai_action_proposal(difficulty: &str, player_id: u8) -> Result<JsValue
         let mut rng = rand::rng();
         let session = ai_session_for(state);
         let Some(action) =
-            choose_action_with_session(state, semantic_owner, &config, &mut rng, &session)
+            choose_action_with_issued_contract(state, &config, &mut rng, &session, &contract)
         else {
             return Ok(JsValue::NULL);
         };
@@ -4239,7 +4532,7 @@ pub fn get_ai_tactical_action_proposal(
         let mut rng = rand::rng();
         let session = ai_session_for(state);
         let Some(action) =
-            choose_action_with_session(state, semantic_owner, &config, &mut rng, &session)
+            choose_action_with_issued_contract(state, &config, &mut rng, &session, &contract)
         else {
             return Ok(JsValue::NULL);
         };
@@ -4269,13 +4562,8 @@ pub fn get_ai_action_proposal_with_diagnostics(
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
         let mut rng = rand::rng();
         let session = ai_session_for(state);
-        let selection = choose_action_with_session_diagnostic(
-            state,
-            semantic_owner,
-            &config,
-            &mut rng,
-            &session,
-        );
+        let selection =
+            choose_action_with_session_diagnostic(state, &config, &mut rng, &session, &contract);
         let Some(action) = selection.action else {
             return Ok(JsValue::NULL);
         };
@@ -4311,13 +4599,8 @@ pub fn get_ai_tactical_action_proposal_with_diagnostics(
         config.search.time_budget_ms = Some(0);
         let mut rng = rand::rng();
         let session = ai_session_for(state);
-        let selection = choose_action_with_session_diagnostic(
-            state,
-            semantic_owner,
-            &config,
-            &mut rng,
-            &session,
-        );
+        let selection =
+            choose_action_with_session_diagnostic(state, &config, &mut rng, &session, &contract);
         let Some(action) = selection.action else {
             return Ok(JsValue::NULL);
         };
@@ -4909,15 +5192,14 @@ mod tests {
         ContinuousModification, Duration, Effect, QuantityExpr, QuantityRef, ResolvedAbility,
         TargetFilter, TargetRef,
     };
-    use engine::types::actions::{ResolveAllConsentDecision, ResolveAllScope};
+    use engine::types::actions::ResolveAllConsentDecision;
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::counter::{CounterMatch, CounterType};
     use engine::types::game_state::{
         MulliganDecisionEntry, MulliganDecisionPhase, NamedChoiceSource, NamedChoiceSourceBinding,
-        OpponentGuessOwner, OpponentGuessSource, PromptSourceBinding, ResolveAllConsentParticipant,
-        ResolveAllConsentRun, ResolveAllPrioritySnapshot, StackEntry, StackEntryKind,
-        StackResolutionBudget, WaitingFor,
+        OpponentGuessOwner, OpponentGuessSource, PromptSourceBinding, StackEntry, StackEntryKind,
+        WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
@@ -6151,54 +6433,9 @@ mod tests {
         load_card_database(&json).unwrap();
     }
 
-    fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
-        let object_id = ObjectId(id);
-        StackEntry {
-            id: object_id,
-            source_id: object_id,
-            controller,
-            kind: StackEntryKind::ActivatedAbility {
-                source_id: object_id,
-                ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
-            },
-        }
-    }
-
     fn legacy_ready_state_json() -> String {
-        let mut state = GameState::new_two_player(7);
+        let state = legacy_ready_state();
         const EPOCH: u64 = 70_200;
-        state.waiting_for = WaitingFor::ResolveAllReady { epoch: EPOCH };
-        state.priority_player = PlayerId(0);
-        state
-            .stack
-            .push_back(no_op_stack_entry(70_200, PlayerId(1)));
-        state.resolve_all_consent_run = Some(ResolveAllConsentRun {
-            epoch: EPOCH,
-            max_resolutions: StackResolutionBudget::default(),
-            // A table-wide run: both seats are participants and both granted.
-            scope: ResolveAllScope::Shared,
-            priority_snapshot: ResolveAllPrioritySnapshot {
-                waiting_player: PlayerId(0),
-                priority_player: PlayerId(0),
-                priority_pass_count: 0,
-                priority_passes: Default::default(),
-            },
-            participants: vec![
-                ResolveAllConsentParticipant {
-                    representative: PlayerId(0),
-                    authorized_submitter: PlayerId(0),
-                    granted: true,
-                },
-                ResolveAllConsentParticipant {
-                    representative: PlayerId(1),
-                    authorized_submitter: PlayerId(1),
-                    granted: true,
-                },
-            ],
-            // `None` and the empty live preference map identify the real
-            // persisted Ready representation, not a contemporary consent run.
-            auto_pass_baseline: None,
-        });
         assert!(matches!(
             state.waiting_for,
             WaitingFor::ResolveAllReady { epoch } if epoch == EPOCH

@@ -1,6 +1,7 @@
 use crate::game::effects::token_copy::{copies_own_source, copy_source, CopySourceReferent};
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::DisplayIdentity;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::layers::{remove_subtype_set, subtype_matches_core_types};
 use crate::game::printed_cards::ensure_keyword_triggers_for_copiable_values;
 use crate::types::ability::{
@@ -1698,6 +1699,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],

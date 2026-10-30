@@ -27,8 +27,9 @@ interface ZoneOpponentChooserModalContentProps {
  * "for each player/opponent, choose …" iteration picks whose selection to make
  * next. Candidates may include the chooser themself, labelled "You".
  *
- * CR 800.4g: with purpose `SubstituteChooser`, the player who would make a
- * pending pick has left the game, and this player elects who makes it.
+ * CR 800.4g: with purpose `SubstituteChooser` or `SubstituteArranger`, the
+ * player who would make a pending pick or arrange a batch of cards has left
+ * the game, and this player elects who does it.
  *
  * Candidates render in the ENGINE-SUPPLIED order: candidate ordering is game
  * ordering and belongs to the engine, so the client must not re-sort it.
@@ -48,7 +49,7 @@ export function ZoneOpponentChooserModalContent({
             "Choose whose selection to make next.",
           ),
         ]
-      : purpose === "SubstituteChooser"
+      : purpose === "SubstituteChooser" || purpose === "SubstituteArranger"
         ? [
             t("zoneOpponentChooser.substituteTitle", "Choose Player"),
             t(

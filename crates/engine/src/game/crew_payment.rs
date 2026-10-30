@@ -7,6 +7,7 @@
 //! never re-read live power, toughness, or statics after preparation.
 
 use crate::game::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::static_abilities::object_crew_power_contribution;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;

@@ -15,7 +15,7 @@ use crate::types::ability::{
     AbilityCost, ActivationRestriction, ControllerRef, Effect, FilterProp, QuantityExpr,
     QuantityRef, TargetChoiceTiming, TargetFilter, TriggerCondition, TypedFilter,
 };
-use crate::types::game_state::DistributionUnit;
+use crate::types::game_state_kinds::DistributionUnit;
 use crate::types::mana::{ManaCost, ManaCostShard};
 
 fn ability_has_unimplemented(def: &crate::types::ability::AbilityDefinition) -> bool {

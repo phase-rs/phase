@@ -178,7 +178,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         // permanents are rare and the dedicated event keeps the consult cost
         // bounded.
         TriggerMode::Evolved => return (keys, true),
-        TriggerMode::ChangesController => push(TriggerEventKey::ChangesController),
+        TriggerMode::ChangesController { .. } => push(TriggerEventKey::ChangesController),
         TriggerMode::LeavesBattlefield => push(TriggerEventKey::LeaveBattlefield(narrow)),
 
         // --- Damage family ---
@@ -753,6 +753,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         }
         GameEvent::PowerToughnessChanged { .. } => {}
         GameEvent::CascadeMissed { .. }
+        | GameEvent::CardNamed { .. }
         | GameEvent::CardPredicateGuessMade { .. }
         | GameEvent::DebugActionUsed { .. }
         | GameEvent::DebugPermissionGranted { .. }

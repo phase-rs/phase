@@ -22,6 +22,7 @@
 
 use std::ops::ControlFlow;
 
+use engine::game::engine::EngineError;
 use engine::game::planeswalker::can_activate_loyalty_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones;
@@ -35,7 +36,7 @@ use engine::types::ability_visit::visit_ability_def;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameRng, RandomDraw, StackEntryKind, WaitingFor};
+use engine::types::game_state::{ActionResult, GameRng, RandomDraw, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
@@ -317,6 +318,15 @@ fn pick_recipient(runner: &mut GameRunner, target: TargetRef) -> Vec<GameEvent> 
         })
         .unwrap_or_else(|error| panic!("the pick must be accepted: {error:?}"))
         .events
+}
+
+/// Answer the single-pick recipient prompt the way the board does: one
+/// `ChooseTarget` click (`None` = choose nothing).
+fn click_recipient(
+    runner: &mut GameRunner,
+    target: Option<TargetRef>,
+) -> Result<ActionResult, EngineError> {
+    runner.act(GameAction::ChooseTarget { target })
 }
 
 /// The graveyard prompt the engine is waiting on: its eligible cards, sorted.
@@ -1121,6 +1131,77 @@ fn faces_four_and_five_deal_damage_equal_to_loyalty_then_remove_two() {
         "paired negative: nobody else was hit"
     );
     assert_eq!(loyalty(&a.runner, a.comet), 3);
+}
+
+/// Faces 4 and 5 answered by one board click: the single-pick recipient prompt
+/// (`min 1`, `max Some(1)`) takes a `ChooseTarget` as the same answer as a
+/// one-item `SelectTargets` (CR 608.2d), so the damage is the loyalty before the
+/// `[−2]` and the ability finishes. The controller may also pick himself.
+#[test]
+fn faces_four_and_five_take_a_single_board_click_for_the_recipient() {
+    for face in [4u8, 5] {
+        let mut a = arena();
+        roll(&mut a.runner, a.comet, face);
+        let (chooser, eligible) = recipient_prompt(&a.runner);
+        assert_eq!(chooser, P0, "reach-guard: the controller chooses");
+        assert!(eligible.contains(&TargetRef::Player(P1)));
+
+        click_recipient(&mut a.runner, Some(TargetRef::Player(P1)))
+            .unwrap_or_else(|error| panic!("the click must be accepted: {error:?}"));
+        assert_eq!(
+            life(&a.runner, P1),
+            15,
+            "damage equal to the loyalty before the removal"
+        );
+        assert_eq!(loyalty(&a.runner, a.comet), 3, "then [−2]");
+        assert!(is_priority(&a.runner));
+        assert!(a.runner.state().stack.is_empty(), "the ability finished");
+    }
+
+    // Sibling: the controller clicks his own seat.
+    let mut a = arena();
+    roll(&mut a.runner, a.comet, 4);
+    let (_, eligible) = recipient_prompt(&a.runner);
+    assert!(eligible.contains(&TargetRef::Player(P0)));
+    click_recipient(&mut a.runner, Some(TargetRef::Player(P0)))
+        .unwrap_or_else(|error| panic!("the click must be accepted: {error:?}"));
+    assert_eq!(life(&a.runner, P0), 15);
+    assert_eq!(life(&a.runner, P1), 20);
+    assert_eq!(loyalty(&a.runner, a.comet), 3);
+    assert!(is_priority(&a.runner));
+    assert!(a.runner.state().stack.is_empty());
+}
+
+/// CR 115.10a: a board click on the recipient prompt is a choice, not a target, so
+/// a hexproof creature is choosable and nothing becomes the target of anything.
+#[test]
+fn a_board_click_hits_a_hexproof_creature_without_targeting_it() {
+    let mut a = arena();
+    roll(&mut a.runner, a.comet, 4);
+    let (_, eligible) = recipient_prompt(&a.runner);
+    assert!(
+        eligible.contains(&TargetRef::Object(a.hexproof_creature)),
+        "reach-guard: the hexproof creature is offered"
+    );
+
+    let events = click_recipient(&mut a.runner, Some(TargetRef::Object(a.hexproof_creature)))
+        .unwrap_or_else(|error| panic!("the click must be accepted: {error:?}"))
+        .events;
+    assert_eq!(
+        marked_damage(&a.runner, a.hexproof_creature),
+        5,
+        "the clicked hexproof creature takes the damage"
+    );
+    assert_eq!(life(&a.runner, P1), 20, "nobody else was hit");
+    assert_eq!(loyalty(&a.runner, a.comet), 3);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::BecomesTarget { .. })),
+        "the click announces no target"
+    );
+    assert!(is_priority(&a.runner));
+    assert!(a.runner.state().stack.is_empty());
 }
 
 /// Face 4 at loyalty 1 (the card's ruling): Comet deals 1 damage, then the `[−2]`

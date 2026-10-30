@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Bind cast-trigger entry riders to the triggering spell incarnation"
+}

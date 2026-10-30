@@ -67,19 +67,9 @@ pub fn resolve(
     // Same source-context propagation as `delayed_trigger::resolve`: matchers
     // read the source snapshot for event attribution, and the boon's source
     // is the creating object.
-    let source_context = ability.trigger_source.clone().or_else(|| {
-        state
-            .objects
-            .get(&ability.source_id)
-            .map(|source| super::super::triggers::trigger_source_context_for_latch(state, source))
-    });
-    if let Some(mut source_context) = source_context {
-        if source_context.identity.reference.object_id == delayed_ability.source_id {
-            if let Some(obj) = state.objects.get(&delayed_ability.source_id) {
-                source_context.identity.expected_zone = obj.zone;
-                source_context.identity.reference.incarnation = obj.incarnation;
-            }
-        }
+    if let Some(source_context) =
+        super::delayed_trigger::delayed_source_context(state, ability, delayed_ability.source_id)
+    {
         delayed_ability.set_trigger_source_recursive(source_context);
     }
     // Digital-only Alchemy (no CR entry): the source-context setter stamps

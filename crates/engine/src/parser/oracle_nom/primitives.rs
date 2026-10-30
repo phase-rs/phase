@@ -3,10 +3,10 @@
 use std::borrow::Cow;
 
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till1, take_until, take_while_m_n};
+use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{char, digit1, multispace0, satisfy, space0};
-use nom::combinator::{all_consuming, eof, map, map_res, not, opt, peek, recognize, value, verify};
-use nom::multi::{many0, many1};
+use nom::combinator::{all_consuming, eof, map, map_res, opt, peek, recognize, value, verify};
+use nom::multi::many1;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
@@ -15,15 +15,13 @@ use crate::types::ability::{AggregateFunction, ObjectProperty, PtValue};
 use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterType, KEYWORD_COUNTERS};
 use crate::types::keywords::KeywordKind;
-use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::player::PlayerCounterKind;
 
-/// Parse a number from Oracle text: digit string OR English words (one through twenty).
-///
-/// Mirrors `oracle_util::parse_number` but as a nom combinator.
-pub fn parse_number(input: &str) -> OracleResult<'_, u32> {
-    alt((parse_digit_number, parse_english_number)).parse(input)
-}
+pub use crate::types::text_grammar::parse_color;
+use crate::types::text_grammar::parse_digit_number;
+pub use crate::types::text_grammar::parse_number;
+pub(crate) use crate::types::text_grammar::parse_your_commanders_color_identity;
 
 /// CR 702.8a: Flash is a static ability that functions in every zone from
 /// which its card could be played.
@@ -46,156 +44,6 @@ pub(crate) fn parse_self_spell_has_flash_prefix(input: &str) -> OracleResult<'_,
         ),
     )
     .parse(input)
-}
-
-/// Parse one or more ASCII digits into a u32, accepting English
-/// thousands-separator commas ("1,000", "1,000,000").
-///
-/// A comma is consumed only when it is followed by exactly three digits
-/// and no further digit after them — i.e. `DDD(,DDD)*` with the extra
-/// constraint that the group after a comma is exactly three digits.
-/// This ensures safe behavior at clause boundaries:
-///
-/// - "1,000" → 1000
-/// - "1,000,000" → 1000000
-/// - "10," (e.g. "deal 10, then ...") → 10, remainder ","
-/// - "1,50" (2-digit group) → 1, remainder ",50"
-/// - "1,0000" (4-digit group) → 1, remainder ",0000"
-///
-/// CR 107.1: Magic numbers are integers; Oracle text conventionally
-/// renders large constants with comma grouping (e.g. A Good Thing,
-/// Jumbo Cactuar, The Millennium Calendar).
-fn parse_digit_number(input: &str) -> OracleResult<'_, u32> {
-    let (rest, matched) = recognize((
-        digit1,
-        many0((
-            tag(","),
-            take_while_m_n(3, 3, |c: char| c.is_ascii_digit()),
-            // Reject a 4th trailing digit — "1,0000" must leave ",0000".
-            peek(not(take_while_m_n(1, 1, |c: char| c.is_ascii_digit()))),
-        )),
-    ))
-    .parse(input)?;
-    // Strip commas before parsing.
-    let digits: String = matched.chars().filter(|c| *c != ',').collect();
-    match digits.parse::<u32>() {
-        Ok(n) => Ok((rest, n)),
-        Err(_) => Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        ))),
-    }
-}
-
-/// Parse an English number word (one through one hundred, plus "a"/"an").
-///
-/// "a"/"an" require a word boundary after the match (whitespace, punctuation, or
-/// end-of-input) to prevent false matches on words like "another" or "anyone".
-///
-/// Supports multiples of ten from thirty through ninety, hyphenated compounds
-/// from twenty-one through ninety-nine, plus "one hundred".
-fn parse_english_number(input: &str) -> OracleResult<'_, u32> {
-    // Longest-match-first ordering within shared prefixes (e.g. "fourteen" before "four").
-    // Split into multiple alt groups to stay within nom's 21-element tuple limit.
-    let (rest, matched) = alt((
-        value(100u32, tag("one hundred")),
-        parse_hyphenated_english_number,
-        parse_english_tens,
-    ))
-    .or(alt((
-        value(19u32, tag("nineteen")),
-        value(18, tag("eighteen")),
-        value(17, tag("seventeen")),
-        value(16, tag("sixteen")),
-        value(15, tag("fifteen")),
-        value(14, tag("fourteen")),
-        value(13, tag("thirteen")),
-        value(12, tag("twelve")),
-        value(11, tag("eleven")),
-        value(10, tag("ten")),
-    )))
-    .or(alt((
-        value(9u32, tag("nine")),
-        value(8, tag("eight")),
-        value(7, tag("seven")),
-        value(6, tag("six")),
-        value(5, tag("five")),
-        value(4, tag("four")),
-        value(3, tag("three")),
-        value(2, tag("two")),
-        value(1, tag("one")),
-        parse_article_number,
-    )))
-    .parse(input)?;
-
-    // Require a word boundary after the number word so a cardinal isn't matched
-    // inside a longer word ("sixth" → "six", "tenfold" → "ten", "nineteenth" →
-    // "nineteen"). This mirrors the boundary guard `parse_article_number` already
-    // applies to "a"/"an"; the multi-character number words previously lacked it
-    // because the `oracle_util::parse_number` wrapper only guards matches of ≤2
-    // characters. A following ASCII alphanumeric means the token continues, so
-    // the match was a spurious substring.
-    match rest.chars().next() {
-        Some(c) if c.is_ascii_alphanumeric() => Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        ))),
-        _ => Ok((rest, matched)),
-    }
-}
-
-fn parse_english_tens(input: &str) -> OracleResult<'_, u32> {
-    alt((
-        value(90u32, tag("ninety")),
-        value(80, tag("eighty")),
-        value(70, tag("seventy")),
-        value(60, tag("sixty")),
-        value(50, tag("fifty")),
-        value(40, tag("forty")),
-        value(30, tag("thirty")),
-        value(20, tag("twenty")),
-    ))
-    .parse(input)
-}
-
-fn parse_english_one_to_nine(input: &str) -> OracleResult<'_, u32> {
-    alt((
-        value(9u32, tag("nine")),
-        value(8, tag("eight")),
-        value(7, tag("seven")),
-        value(6, tag("six")),
-        value(5, tag("five")),
-        value(4, tag("four")),
-        value(3, tag("three")),
-        value(2, tag("two")),
-        value(1, tag("one")),
-    ))
-    .parse(input)
-}
-
-fn parse_hyphenated_english_number(input: &str) -> OracleResult<'_, u32> {
-    map(
-        (parse_english_tens, tag("-"), parse_english_one_to_nine),
-        |(tens, _, ones)| tens + ones,
-    )
-    .parse(input)
-}
-
-/// Parse "a" or "an" as 1, requiring a word boundary after the match.
-///
-/// Prevents false matches where "a" greedily consumes the start of words like
-/// "another", "anyone", "among". The boundary check requires the next character
-/// to be non-alphanumeric (whitespace, punctuation) or end-of-input.
-fn parse_article_number(input: &str) -> OracleResult<'_, u32> {
-    // Try "an" before "a" (longest match first).
-    let (rest, _) = alt((tag("an"), tag("a"))).parse(input)?;
-    match rest.chars().next() {
-        None | Some(' ' | ',' | ';' | '.' | ':' | ')' | '/' | '-' | '\'' | '"') => Ok((rest, 1)),
-        _ => Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        ))),
-    }
 }
 
 /// Parse article "a " or "an " (including trailing space), returning `()`.
@@ -373,38 +221,6 @@ fn parse_phyrexian_hybrid_symbol_inner(input: &str) -> OracleResult<'_, ManaCost
         value(ManaCostShard::PhyrexianGreenWhite, tag("G/W/P")),
         value(ManaCostShard::PhyrexianGreenBlue, tag("G/U/P")),
     ))
-    .parse(input)
-}
-
-/// Parse a color word: "white", "blue", "black", "red", "green".
-pub fn parse_color(input: &str) -> OracleResult<'_, ManaColor> {
-    alt((
-        value(ManaColor::White, tag("white")),
-        value(ManaColor::Blue, tag("blue")),
-        value(ManaColor::Black, tag("black")),
-        value(ManaColor::Red, tag("red")),
-        value(ManaColor::Green, tag("green")),
-    ))
-    .parse(input)
-}
-
-/// CR 903.4: Parse the possessive phrase "your commander's color identity".
-///
-/// The `alt()` covers the singular possessive and both plural apostrophe
-/// placements ("commanders'" and the apostrophe-less "commanders") that
-/// Oracle text and normalized text use for a partnered commander pair
-/// (CR 702.124c). "commanders'" precedes "commanders" so the longer spelling
-/// is tried first. Operates on already-lowercased text and consumes nothing
-/// beyond the phrase itself.
-pub(crate) fn parse_your_commanders_color_identity(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        (
-            tag("your "),
-            alt((tag("commander's"), tag("commanders'"), tag("commanders"))),
-            tag(" color identity"),
-        ),
-    )
     .parse(input)
 }
 
@@ -1578,6 +1394,7 @@ pub(crate) fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::mana::ManaColor;
     use nom::bytes::complete::tag;
 
     /// The total wrapper keeps `parse_period_sentence`'s contract (terminal '.'

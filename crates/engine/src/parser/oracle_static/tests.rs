@@ -3,6 +3,7 @@ use super::keyword_grant::*;
 use super::prelude::*;
 use super::restriction::*;
 use super::support::*;
+use super::test_helpers::P3_SEG;
 use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
@@ -926,28 +927,29 @@ fn compound_subject_keyword_static_splits_four_item_oxford_list() {
     assert_eq!(defs[1].mode, StaticMode::Shroud);
 }
 
-// CR 611.3a + CR 604.3 + CR 613.4a: Angry Mob — a two-clause turn-window CDA. "During
+// CR 604.3a + CR 613.4b: conditional equality is an ordinary layer-7b setter.
+// SHAPE: Angry Mob has two complementary live turn-window statics. "During
 // your turn, ~'s power and toughness are each equal to 2 plus the number of
 // Swamps your opponents control. During turns other than yours, ~'s power and
-// toughness are each 2." Splits into two CDA statics: the on-turn clause is a
+// toughness are each 2." Splits into two conditional statics: the on-turn clause is a
 // dynamic P/T (2 + count) gated on DuringYourTurn; the off-turn clause is a
 // constant 2/2 gated on Not{DuringYourTurn}.
 #[test]
-fn static_angry_mob_two_clause_turn_window_cda() {
+fn static_angry_mob_two_clause_turn_window_setter() {
     let defs = parse_static_line_multi(
         "During your turn, Angry Mob's power and toughness are each equal to 2 plus the number of Swamps your opponents control. During turns other than yours, Angry Mob's power and toughness are each 2.",
     );
     assert_eq!(
         defs.len(),
         2,
-        "expected two turn-window CDA statics, got {defs:?}"
+        "expected two turn-window statics, got {defs:?}"
     );
 
     // On-turn: dynamic P/T (Offset over opponent Swamp count), gated DuringYourTurn.
     let on_turn = &defs[0];
     assert!(
-        on_turn.characteristic_defining,
-        "on-turn clause must be a CDA"
+        !on_turn.characteristic_defining,
+        "on-turn clause must be an ordinary setter"
     );
     assert_eq!(on_turn.condition, Some(StaticCondition::DuringYourTurn));
     // Prove the full quantity, not just that *some* dynamic power exists: both
@@ -969,22 +971,22 @@ fn static_angry_mob_two_clause_turn_window_cda() {
     assert_eq!(
         on_turn.modifications,
         vec![
-            ContinuousModification::SetDynamicPower {
+            ContinuousModification::SetPowerDynamic {
                 value: two_plus_opponent_swamps.clone(),
             },
-            ContinuousModification::SetDynamicToughness {
+            ContinuousModification::SetToughnessDynamic {
                 value: two_plus_opponent_swamps,
             },
         ],
-        "on-turn CDA must set BOTH power and toughness to (2 + opponent Swamp count): {:?}",
+        "on-turn static must set BOTH power and toughness to (2 + opponent Swamp count): {:?}",
         on_turn.modifications
     );
 
     // Off-turn: constant 2/2, gated Not{DuringYourTurn}.
     let off_turn = &defs[1];
     assert!(
-        off_turn.characteristic_defining,
-        "off-turn clause must be a CDA"
+        !off_turn.characteristic_defining,
+        "off-turn clause must be an ordinary setter"
     );
     assert_eq!(
         off_turn.condition,
@@ -5784,7 +5786,7 @@ fn visions_of_ruin_cast_this_way_cost_reduction_binds_commander_mv() {
     assert!(matches!(
         def.condition,
         Some(StaticCondition::CastingAsVariant {
-            variant: crate::types::game_state::CastingVariant::Flashback
+            variant: crate::types::game_state_kinds::CastingVariant::Flashback
         })
     ));
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
@@ -6266,7 +6268,7 @@ fn self_cost_reduction_if_night_uses_day_night_condition() {
     assert_eq!(
         def.condition,
         Some(StaticCondition::DayNightIs {
-            state: crate::types::game_state::DayNight::Night
+            state: crate::types::game_state_kinds::DayNight::Night
         })
     );
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
@@ -10021,7 +10023,7 @@ fn cant_untap_gate_rejects_every_unenforceable_leaf_at_any_depth() {
         // CR 601.2f: decided by the in-flight cast, absent at the untap step.
         StaticCondition::AdditionalCostPaid,
         StaticCondition::CastingAsVariant {
-            variant: crate::types::game_state::CastingVariant::Flashback,
+            variant: crate::types::game_state_kinds::CastingVariant::Flashback,
         },
         // CR 725.1: scoped-player designation with no binding authority here.
         StaticCondition::IsMonarch {
@@ -10207,7 +10209,7 @@ fn payment_gate_acceptance_follows_the_mode_that_owns_the_prompt() {
     // fix: a cast-variant gate stays enforceable everywhere except the untap
     // step (CR 502.3 — a turn-based action, so no cast is ever in flight).
     let cast_variant = StaticCondition::CastingAsVariant {
-        variant: crate::types::game_state::CastingVariant::Flashback,
+        variant: crate::types::game_state_kinds::CastingVariant::Flashback,
     };
     assert_eq!(
         gate_static_condition(&StaticMode::Continuous, cast_variant.clone(), "gap text"),
@@ -14586,6 +14588,135 @@ fn static_cast_as_though_flash_compound_spell_types_scope_each_leg_to_you() {
             })
         )),
         "each disjunct must be scoped to spells you cast, got {filters:?}"
+    );
+}
+
+/// CR 601.3b + CR 205.4a: when each leg of the list repeats its head noun ("legendary spells
+/// and artifact spells" — Gandalf the White; "colorless spells and artifact spells" — Liberator,
+/// Urza's Battlethopter), each leg keeps only its own qualifiers: any artifact spell gets flash,
+/// legendary or not, and colorless or not.
+#[test]
+fn static_cast_as_though_flash_repeated_noun_legs_keep_their_own_qualifiers() {
+    for (text, left_prop) in [
+        (
+            "You may cast legendary spells and artifact spells as though they had flash.",
+            FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            },
+        ),
+        (
+            "You may cast colorless spells and artifact spells as though they had flash.",
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 0,
+            },
+        ),
+    ] {
+        let def = parse_static_line(text).unwrap();
+        let Some(TargetFilter::Or { filters }) = &def.affected else {
+            panic!(
+                "{text}: expected Or affected filter, got {:?}",
+                def.affected
+            );
+        };
+        let [TargetFilter::Typed(left), TargetFilter::Typed(right)] = filters.as_slice() else {
+            panic!("{text}: expected two typed legs, got {filters:?}");
+        };
+        assert_eq!(left.type_filters, vec![TypeFilter::Card], "{text}");
+        assert!(left.properties.contains(&left_prop), "{text}: {left:?}");
+        assert_eq!(right.type_filters, vec![TypeFilter::Artifact], "{text}");
+        assert!(
+            !right.properties.contains(&left_prop),
+            "{text}: the artifact leg must not inherit the left qualifier, got {right:?}"
+        );
+    }
+}
+
+/// The same rule for a repeated "creatures" head: in "enchanted creatures or enchantment
+/// creatures" (Temple Thief, Inspire Awe, Nyx Herald) the enchantment-creature leg need not be
+/// enchanted.
+#[test]
+fn type_list_repeating_its_creature_head_keeps_each_legs_qualifiers() {
+    for phrase in [
+        "enchanted creatures or enchantment creatures",
+        "enchanted creatures and enchantment creatures",
+    ] {
+        let (filter, rest) = crate::parser::oracle_target::parse_type_phrase_folding(phrase);
+        assert_eq!(rest, "", "{phrase}");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("{phrase}: expected Or, got {filter:?}");
+        };
+        let [TargetFilter::Typed(left), TargetFilter::Typed(right)] = filters.as_slice() else {
+            panic!("{phrase}: expected two typed legs, got {filters:?}");
+        };
+        assert!(
+            left.properties.contains(&FilterProp::EnchantedBy),
+            "{phrase}: {left:?}"
+        );
+        assert!(
+            right.type_filters.contains(&TypeFilter::Enchantment)
+                && !right.properties.contains(&FilterProp::EnchantedBy),
+            "{phrase}: the enchantment-creature leg must not need an Aura, got {right:?}"
+        );
+    }
+}
+
+/// The repeated head is found through a leg that lowers to an `And` ("enchantment creatures
+/// with the chosen name"), so "enchanted" still stays on the left leg.
+#[test]
+fn type_list_repeating_its_head_through_an_and_leg_keeps_each_legs_qualifiers() {
+    fn typed_head(filter: &TargetFilter) -> Option<&TypedFilter> {
+        match filter {
+            TargetFilter::Typed(typed) => Some(typed),
+            TargetFilter::And { filters } => filters.first().and_then(typed_head),
+            _ => None,
+        }
+    }
+    let phrase = "enchanted creatures or enchantment creatures with the chosen name";
+    let (filter, rest) = crate::parser::oracle_target::parse_type_phrase_folding(phrase);
+    assert_eq!(rest, "", "{phrase}");
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or, got {filter:?}");
+    };
+    let [left, right] = filters.as_slice() else {
+        panic!("expected two legs, got {filters:?}");
+    };
+    let left = typed_head(left).expect("typed left leg");
+    assert!(
+        left.properties.contains(&FilterProp::EnchantedBy),
+        "{left:?}"
+    );
+    assert!(
+        matches!(right, TargetFilter::And { .. }),
+        "reach guard: the right leg lowers to an And, got {right:?}"
+    );
+    let right = typed_head(right).expect("typed right head");
+    assert!(
+        right.type_filters.contains(&TypeFilter::Enchantment)
+            && !right.properties.contains(&FilterProp::EnchantedBy),
+        "the enchantment-creature leg must not need an Aura, got {right:?}"
+    );
+}
+
+/// An elided head noun ("legendary creature and planeswalker spells") still lets the shared
+/// adjective distribute: a planeswalker spell must be legendary too.
+#[test]
+fn type_list_with_elided_head_noun_distributes_its_adjective() {
+    let (filter, rest) = crate::parser::oracle_target::parse_type_phrase_folding(
+        "legendary creature and planeswalker spells",
+    );
+    assert_eq!(rest, "");
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or, got {filter:?}");
+    };
+    assert!(
+        filters.iter().all(|leg| matches!(
+            leg,
+            TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::HasSupertype {
+                value: Supertype::Legendary
+            })
+        )),
+        "both legs stay legendary, got {filters:?}"
     );
 }
 
@@ -29310,6 +29441,51 @@ fn effect_subject_prefix_word_boundary() {
     assert!(parse_effect_subject_prefix("eachother").is_err());
 }
 
+// SHAPE: the shared inverted normalizer recognizes exactly the possessive P/T
+// subjects, and preserves commas inside the condition before that subject.
+#[test]
+fn static_gaeas_liege_possessive_subject_boundaries() {
+    for effect in [
+        "its power and toughness are each equal to 2",
+        "its power is equal to 2",
+        "its toughness is equal to 2",
+    ] {
+        assert!(parse_effect_subject_prefix(effect).is_ok(), "{effect}");
+        let text = format!("As long as ~ is attacking, {effect}.");
+        let lower = text.to_lowercase();
+        let split = try_split_inverted_as_long_as(&TextPair::new(&text, &lower)).unwrap();
+        assert_eq!(split.condition_text, "~ is attacking");
+        assert_eq!(split.effect_text, effect);
+        assert_eq!(
+            split.canonical,
+            format!("{effect} as long as ~ is attacking")
+        );
+    }
+    for adjacent in [
+        "its controller has a creature",
+        "its mana value is 4",
+        "its powerful friend attacks",
+        "its toughnesses are equal",
+    ] {
+        assert!(parse_effect_subject_prefix(adjacent).is_err(), "{adjacent}");
+    }
+    for existing in ["it gets +1/+1", "~ has flying", "each creature gets +1/+1"] {
+        assert!(parse_effect_subject_prefix(existing).is_ok(), "{existing}");
+    }
+    let text = "As long as ~ is attacking, its controller has a creature, its power is equal to 2.";
+    let lower = text.to_lowercase();
+    let split = try_split_inverted_as_long_as(&TextPair::new(text, &lower)).unwrap();
+    assert_eq!(
+        split.condition_text,
+        "~ is attacking, its controller has a creature"
+    );
+    assert_eq!(split.effect_text, "its power is equal to 2");
+    assert_eq!(
+        split.canonical,
+        "its power is equal to 2 as long as ~ is attacking, its controller has a creature"
+    );
+}
+
 #[test]
 fn inverted_splits_auriok_condition_cleanly() {
     // The primary success criterion: the condition is separated from the effect clause.
@@ -34351,7 +34527,7 @@ fn static_alpine_moon_loses_land_types_and_abilities() {
 /// `PlayerPerformedAction` over [Scry, Surveil, SearchedLibrary].
 #[test]
 fn river_song_full_card_parses_without_unimplemented() {
-    use crate::types::events::PlayerActionKind;
+    use crate::types::event_kinds::PlayerActionKind;
     use crate::types::triggers::TriggerMode;
 
     let oracle = "Meet in Reverse \u{2014} You draw cards from the bottom of your library rather than the top.\n\
@@ -35605,74 +35781,6 @@ fn rayami_exiled_keyword_grant_splits_into_conditional_per_keyword_statics() {
     assert!(
         granted.contains(&Keyword::Deathtouch),
         "grants deathtouch: {granted:?}"
-    );
-}
-
-/// #5257 Rayami runtime discriminator: the keyword grant is CONDITIONAL and
-/// re-evaluated (CR 611.3a). With no matching exiled card, Rayami must NOT have
-/// flying; once an exiled creature card with a blood counter that itself has
-/// flying is present, Rayami gains flying — and only that keyword.
-///
-/// Discriminator: on `main` the condition is `Unrecognized`, so Rayami has
-/// flying (and every other listed keyword) unconditionally and the negative
-/// assertion flips.
-#[test]
-fn rayami_flying_grant_is_conditional_on_matching_exiled_card() {
-    use crate::game::scenario::{GameScenario, P0};
-    use crate::game::zones::create_object;
-    use crate::types::actions::GameAction;
-    use crate::types::card_type::CoreType;
-    use crate::types::counter::CounterType;
-    use crate::types::identifiers::CardId;
-    use crate::types::zones::Zone;
-
-    const RAYAMI: &str = "As long as an exiled creature card with a blood counter on it has flying, Rayami has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, protection, reach, trample, and vigilance.";
-
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let rayami_id = scenario
-        .add_creature_from_oracle(P0, "Rayami, First of the Fallen", 4, 4, RAYAMI)
-        .id();
-    let mut runner = scenario.build();
-    // Force layer evaluation (SBAs run, continuous effects recomputed).
-    runner.act(GameAction::PassPriority).ok();
-
-    assert!(
-        !runner.state().objects[&rayami_id].has_keyword(&Keyword::Flying),
-        "Rayami must not have flying with no matching exiled card present"
-    );
-
-    // Positive reach-guard: an exiled creature card with a blood counter that has
-    // flying. Rayami now gains flying — proving the grant path actually fires, so
-    // the negative above is a genuine conditional rather than flying being
-    // unreachable. (Seed the object directly, then re-run the continuous-effect
-    // engine — a raw state edit bypasses the normal change tracking.)
-    {
-        let state = runner.state_mut();
-        let exiled = create_object(
-            state,
-            CardId(900),
-            P0,
-            "Exiled Bat".to_string(),
-            Zone::Exile,
-        );
-        let obj = state.objects.get_mut(&exiled).expect("exiled card exists");
-        obj.card_types.core_types.push(CoreType::Creature);
-        obj.base_card_types = obj.card_types.clone();
-        obj.keywords.push(Keyword::Flying);
-        *obj.counters
-            .entry(CounterType::Generic("blood".to_string()))
-            .or_insert(0) += 1;
-    }
-    crate::game::layers::evaluate_layers(runner.state_mut());
-
-    assert!(
-        runner.state().objects[&rayami_id].has_keyword(&Keyword::Flying),
-        "Rayami must gain flying while an exiled flying creature card with a blood counter is present"
-    );
-    assert!(
-        !runner.state().objects[&rayami_id].has_keyword(&Keyword::Vigilance),
-        "Rayami must not gain vigilance — no exiled card has vigilance"
     );
 }
 
@@ -38905,10 +39013,6 @@ fn during_your_turn_keyword_grant_unchanged() {
 // differ. Do NOT "correct" these assertions against the artifact.
 // =========================================================================
 
-/// The interposed player class Weathered Sentinels prints, shared by every
-/// static-side row below so the three-production rows cannot drift from the card.
-const P3_SEG: &str = "players who attacked you during their last turn";
-
 /// Weathered Sentinels, printed line 2 — VERBATIM (verified against the base
 /// card-data artifact's `oracle_text`). Note the ASCII `'`: the parser
 /// lowercases and every defender-exception tag uses ASCII `didn't`, so a curly
@@ -39083,98 +39187,6 @@ fn defender_exception_duration_form_is_declined_by_both_static_productions() {
             }),
         }),
         "a duration-plus-class segment must fail closed, not drop the duration"
-    );
-}
-
-/// ROW 5: an unrecognized interposed class is
-/// PERMANENTLY INERT at runtime AND leaves the card RED in coverage.
-///
-/// Two fixtures differing ONLY in the interposed segment. `unenforceable_gate_marker`
-/// yields `Not(Unrecognized{..})`: `layers::evaluate_condition_inner` reads a BARE
-/// `Unrecognized` as TRUE (layers.rs:2120), so the `Not` wrapper is what makes the
-/// gate evaluate FALSE forever — a bare `Unrecognized` here would grant the
-/// PERMISSION against EVERY defender — the fail-OPEN outcome this row forbids —
-/// while `contains_unrecognized` still reports the gap either way.
-///
-/// BASE-SHAPE RECORD: before this change the same line parsed to a
-/// `Continuous`/`AddKeyword(Defender)` grant whose `card_face_gaps` was `[]` —
-/// dishonestly GREEN. This row therefore measures a real supported -> unsupported
-/// FLIP, and its value must not be mistaken for "it was always red".
-#[test]
-fn unrecognized_interposed_class_is_permanently_inert_and_leaves_the_card_red() {
-    let ok = format!("This creature can attack {P3_SEG} as though it didn't have defender.");
-    const BAD: &str =
-        "This creature can attack players who wear a hat as though it didn't have defender.";
-
-    // (i) REACH-GUARD / PAIRED POSITIVE CONTROL: the widened scan consumed THIS
-    // line shape. Without it, BAD's inert marker could be produced for a line the
-    // scan never saw — a shadowed fixture is inert and red for the WRONG reason.
-    assert_eq!(
-        parse_static_line(&ok)
-            .expect("reach-guard: the recognized class must be consumed")
-            .condition,
-        Some(StaticCondition::AnyPlayerAttackedYouLastTurn {
-            scope: AttackedYouScope::AttackedPlayer,
-        })
-    );
-
-    // (ii) the inert marker, POSITIVE shape.
-    let bad = parse_static_line(BAD).expect(
-        "the line shape is still consumed — the production must OWN the line rather \
-         than decline it back to the AddKeyword(Defender) fallback",
-    );
-    assert_eq!(bad.mode, StaticMode::CanAttackWithDefender);
-    assert_eq!(
-        bad.condition,
-        Some(StaticCondition::Not {
-            condition: Box::new(StaticCondition::Unrecognized {
-                text: "players who wear a hat".to_string(),
-            }),
-        })
-    );
-
-    // (iii) INERT AT RUNTIME — the half a parse-shape assertion cannot buy.
-    let state = crate::types::game_state::GameState::new(
-        crate::types::format::FormatConfig::standard(),
-        2,
-        42,
-    );
-    assert!(
-        !crate::game::layers::evaluate_condition_for_test(
-            &state,
-            bad.condition.as_ref().unwrap(),
-            crate::types::player::PlayerId(0),
-            crate::types::identifiers::ObjectId(1),
-        ),
-        "a Not(Unrecognized) gate must evaluate FALSE (a bare Unrecognized is TRUE, layers.rs:2120)"
-    );
-
-    // (iv) RED IN COVERAGE — the half the fallback's NAME does not guarantee:
-    // being permanently inert at runtime does not by itself make the card red.
-    let bad_face = crate::types::card::CardFace {
-        static_abilities: vec![bad.clone()],
-        ..Default::default()
-    };
-    let gaps = crate::game::coverage::card_face_gaps(&bad_face);
-    assert!(
-        gaps.iter()
-            .any(|g| g.contains("Static:Unrecognized(players who wear a hat)")),
-        "the unparsed class must leave the card RED; got {gaps:?}"
-    );
-
-    // SECOND CONTROL, SAME FIXTURE: the recognized class is GREEN, proving the gap
-    // signal comes from the MARKER and not from `CanAttackWithDefender` being
-    // unsupported in the coverage registry.
-    let ok_face = crate::types::card::CardFace {
-        static_abilities: vec![parse_static_line(&ok).unwrap()],
-        ..Default::default()
-    };
-    assert_eq!(
-        crate::game::coverage::card_face_gaps(&ok_face),
-        Vec::<String>::new(),
-        "a RECOGNIZED anchored class must report NO coverage gap — the gap signal \
-         comes from the unenforceable marker, not from `CanAttackWithDefender` \
-         being unsupported in the registry"
     );
 }
 
@@ -41202,7 +41214,7 @@ fn granted_loyalty_abilities_carry_cr_606_3_timing() {
         "{:?}",
         def.activation_restrictions
     );
-    assert!(crate::game::mana_abilities::is_mana_ability(def));
+    assert!(crate::types::ability::is_mana_ability(def));
 }
 
 /// CR 702.16i + CR 903.4: Commander's Plate — "Equipped creature gets +3/+3 and
@@ -41228,5 +41240,140 @@ fn commanders_plate_static_line_parses_to_each_color_protection_set() {
                 )),
             },
         ]
+    );
+}
+
+// SHAPE: the full Oracle line and its canonical trailing forms must preserve
+// both the live Forest census and the complementary combat gates.
+// CR 604.3a + CR 611.3a + CR 613.4b: conditional equality is not a CDA.
+#[test]
+fn static_gaeas_liege_complementary_forest_setters() {
+    // The static parser receives card-name references normalized to `~` by the
+    // Oracle pipeline; full-card dispatch below covers the verbatim Oracle text.
+    let defs = parse_static_line_multi("As long as ~ isn't attacking, its power and toughness are each equal to the number of Forests you control. As long as ~ is attacking, its power and toughness are each equal to the number of Forests defending player controls.");
+    assert_eq!(defs.len(), 2, "{defs:?}");
+    let gates = [
+        StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceIsAttacking),
+        },
+        StaticCondition::SourceIsAttacking,
+    ];
+    for ((def, gate), controller) in defs
+        .iter()
+        .zip(gates)
+        .zip([ControllerRef::You, ControllerRef::DefendingPlayer])
+    {
+        let value = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Subtype("Forest".to_string()))
+                        .controller(controller),
+                ),
+            },
+        };
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(def.condition, Some(gate));
+        assert_eq!(
+            def.modifications,
+            vec![
+                ContinuousModification::SetPowerDynamic {
+                    value: value.clone()
+                },
+                ContinuousModification::SetToughnessDynamic { value }
+            ]
+        );
+        assert!(!def.characteristic_defining);
+    }
+    for (line, expected) in [
+        ("Gaea's Liege's power and toughness are each equal to the number of Forests you control as long as it isn't attacking.", &defs[0]),
+        ("Gaea's Liege's power and toughness are each equal to the number of Forests defending player controls as long as it is attacking.", &defs[1]),
+    ] {
+        let def = parse_static_line(line).expect("canonical equality must parse");
+        assert_eq!(def.condition, expected.condition);
+        assert_eq!(def.modifications, expected.modifications);
+        assert!(!def.characteristic_defining);
+    }
+}
+
+// SHAPE: exercise the shared equality family's axes, preserve unconditional
+// CDAs, and retain unsupported gate text rather than erasing a rules condition.
+// CR 604.3a + CR 613.4a + CR 613.4b: only ungated equality is characteristic defining.
+#[test]
+fn static_gaeas_liege_equality_siblings_and_honest_gaps() {
+    let maro = parse_static_line(
+        "Maro's power and toughness are each equal to the number of cards in your hand.",
+    )
+    .unwrap();
+    assert!(maro.characteristic_defining);
+    assert_eq!(maro.modifications.len(), 2);
+    assert!(matches!(
+        maro.modifications[0],
+        ContinuousModification::SetDynamicPower { .. }
+    ));
+    for (axis, power) in [("power", true), ("toughness", false)] {
+        let line = format!("This creature's {axis} is equal to the number of Forests you control as long as it is attacking.");
+        let def = parse_static_line(&line).unwrap();
+        assert_eq!(def.condition, Some(StaticCondition::SourceIsAttacking));
+        assert_eq!(def.modifications.len(), 1);
+        assert_eq!(
+            matches!(
+                def.modifications[0],
+                ContinuousModification::SetPowerDynamic { .. }
+            ),
+            power
+        );
+        assert!(!def.characteristic_defining);
+    }
+    let unknown = parse_static_line("This creature's power and toughness are each equal to the number of Forests you control as long as the moon is made of cheese.").unwrap();
+    assert_eq!(
+        unknown.modifications.len(),
+        2,
+        "recognized equality body must survive"
+    );
+    assert!(matches!(
+        unknown.condition,
+        Some(StaticCondition::Unrecognized { .. })
+    ));
+    assert!(!unknown.characteristic_defining);
+    assert!(
+        unknown.condition.as_ref().unwrap().contains_unrecognized(),
+        "coverage must retain the unsupported condition gap"
+    );
+    assert!(super::cda::parse_cda_pt_equality(
+        "this creature's power and toughness are each equal to the smell of morning.",
+        "This creature's power and toughness are each equal to the smell of morning."
+    )
+    .is_none());
+    assert!(super::cda::parse_cda_pt_equality("this creature's power and toughness are each equal to the number of forests you control for as long as it is attacking.", "This creature's power and toughness are each equal to the number of Forests you control for as long as it is attacking.").is_none());
+    let combined = parse_static_line("During your turn, this creature's power and toughness are each equal to the number of Forests you control as long as it is attacking.").unwrap();
+    assert_eq!(
+        combined.condition,
+        Some(StaticCondition::And {
+            conditions: vec![
+                StaticCondition::DuringYourTurn,
+                StaticCondition::SourceIsAttacking
+            ]
+        })
+    );
+}
+
+// SHAPE: full card dispatch must reach both statics and its existing activation,
+// without a swallowed clause or an unsupported effect replacing either half.
+#[test]
+fn static_gaeas_liege_full_oracle_dispatch() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "As long as Gaea's Liege isn't attacking, its power and toughness are each equal to the number of Forests you control. As long as Gaea's Liege is attacking, its power and toughness are each equal to the number of Forests defending player controls.\n{T}: Target land becomes a Forest until this creature leaves the battlefield.",
+        "Gaea's Liege", &[], &["Creature".to_string()], &[],
+    );
+    assert_eq!(parsed.statics.len(), 2, "{parsed:?}");
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:?}");
+    assert!(parsed
+        .abilities
+        .iter()
+        .all(|a| a.effect.unimplemented_description().is_none()));
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
     );
 }

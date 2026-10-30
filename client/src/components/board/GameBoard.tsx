@@ -31,7 +31,6 @@ interface GameBoardProps {
   effectiveMultiplayerBoardLayout: MultiplayerBoardLayout;
   oppHud?: React.ReactNode;
   playerHud?: React.ReactNode;
-  showOpponentCards?: boolean;
   onKickPlayer?: (playerId: PlayerId) => void;
   onViewZone?: (
     zone: "graveyard" | "exile" | "library",
@@ -44,7 +43,6 @@ export const GameBoard = memo(function GameBoard({
   effectiveMultiplayerBoardLayout,
   oppHud,
   playerHud,
-  showOpponentCards = false,
   onKickPlayer,
   onViewZone = () => {},
 }: GameBoardProps) {
@@ -175,7 +173,7 @@ export const GameBoard = memo(function GameBoard({
       }
     }
 
-    const boardChoice = getBoardChoiceView(waitingFor, gameState?.objects);
+    const boardChoice = getBoardChoiceView(waitingFor, gameState?.objects, gameState?.allows_cancel_cast);
     if (boardChoice && canActForWaitingState) {
       for (const objectId of boardChoice.objectIds) {
         boardChoiceObjectIds.add(objectId);
@@ -273,7 +271,6 @@ export const GameBoard = memo(function GameBoard({
                       opponentBattlefieldViews.get(opponentId)
                       ?? buildPlayerBattlefieldView(gameState, opponentId)
                     }
-                    showCards={showOpponentCards}
                     onKickPlayer={onKickPlayer}
                     onViewZone={onViewZone}
                   />

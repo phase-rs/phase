@@ -11,7 +11,9 @@ use crate::types::ability::{
     CoinFlipResult, CoinFlipRun, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, ResolutionCoinFlip, WaitingFor};
+use crate::types::game_state::{
+    GameState, ResolutionCoinFlip, ResolvingTriggerContext, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -132,6 +134,11 @@ fn run_flip_branch(
         // binding, so one execution's mutations cannot alter later rewards.
         let mut sub = bound.clone();
         sub.set_chain_root_targets_recursive(chain_root_targets.to_vec());
+        // CR 113.7a + CR 400.7: the outcome acts only for the permanent that
+        // flipped; a source that left and returned is a new object. Source
+        // identity only: the targets, pins, provenance and controller announced
+        // for this outcome are untouched.
+        crate::game::ability_utils::inherit_result_branch_source_identity(state, &mut sub);
         sub.context.forwarded_result_context = branch_context.forwarded_result_context.clone();
         // CR 601.2c + CR 608.2d: only coin entry protects independently
         // declared/unchosen branch slots; ordinary legacy hand-offs keep their
@@ -222,13 +229,25 @@ struct FlipRun<'a> {
     /// CR 608.2c: incoming pinned references and chosen players, retained
     /// across a Krark's Thumb suspension.
     branch_context: &'a FlipBranchContext,
+    trigger_context: &'a Option<ResolvingTriggerContext>,
 }
 
 impl FlipRun<'_> {
     /// CR 614.1a + CR 705.1: the frame a run parks while a doubled flip waits for its keep
     /// choice. `kind` is the position after the paused flip. The branches are cloned only here,
     /// on suspension.
-    fn park(&self, kind: PendingCoinFlipKind) -> PendingCoinFlip {
+    ///
+    /// Fresh coin-keep, pre-roll replacement-ordering, and post-roll die suspensions
+    /// retain their owning scope, including explicit emptiness; legacy missing scope
+    /// is not reconstructed. A die roll started by a coin's continuation drain still
+    /// loses its published per-survivor result at the drain's whole-snapshot restore
+    /// (pre-existing, unchanged).
+    fn park(
+        &self,
+        state: &GameState,
+        kind: PendingCoinFlipKind,
+        start: &FlipRunStart,
+    ) -> PendingCoinFlip {
         PendingCoinFlip {
             source_id: self.source_id,
             controller: self.controller,
@@ -238,6 +257,21 @@ impl FlipRun<'_> {
             kind,
             chain_root_targets: self.chain_root_targets.to_vec(),
             branch_context: self.branch_context.clone(),
+            // CR 608.2c + CR 400.7e: fresh absence is owned emptiness;
+            // resumed absence is legacy authority and must not be recaptured.
+            trigger_context: match start {
+                FlipRunStart::Fresh(_) => {
+                    Some(ResolvingTriggerContext::capture(state).unwrap_or_else(|| {
+                        ResolvingTriggerContext {
+                            event: None,
+                            events: Vec::new(),
+                            match_count: None,
+                            die_result: None,
+                        }
+                    }))
+                }
+                FlipRunStart::Kept { .. } => self.trigger_context.clone(),
+            },
         }
     }
 
@@ -378,9 +412,9 @@ fn drive_flip_run(
     test: RunCompletionTest,
     events: &mut Vec<GameEvent>,
 ) -> Result<FlipRunOutcome, EffectError> {
-    let mut step = match start {
-        FlipRunStart::Fresh(kind) => next_step(kind),
-        FlipRunStart::Kept { kind, won } => settle_flip(state, run, kind, won, events)?,
+    let mut step = match &start {
+        FlipRunStart::Fresh(kind) => next_step(kind.clone()),
+        FlipRunStart::Kept { kind, won } => settle_flip(state, run, kind.clone(), *won, events)?,
     };
     loop {
         match step {
@@ -408,7 +442,7 @@ fn drive_flip_run(
                     CoinFlipOutcome::Suspended => {
                         // CR 614.1a: doubled flip — stash the run position and resume after
                         // the keep choice. The position excludes the paused flip itself.
-                        state.push_coin_flip_frame(run.park(kind_after));
+                        state.push_coin_flip_frame(run.park(state, kind_after, &start));
                         FlipRunStep::Suspended
                     }
                 };
@@ -536,6 +570,7 @@ pub fn resolve(
         win_effect: branches.and_then(|branches| branches.won.as_ref()),
         lose_effect: branches.and_then(|branches| branches.lost.as_ref()),
         branch_context: &branch_context,
+        trigger_context: &None,
     };
     drive_flip_run(state, &run, FlipRunStart::Fresh(kind), test, events)?;
     Ok(())
@@ -572,6 +607,7 @@ pub fn resume_after_keep(
         kind,
         chain_root_targets,
         branch_context,
+        trigger_context,
     } = pending;
 
     // CR 705.1 + CR 614.1a + CR 705.2: the single surviving flip is recorded for
@@ -600,6 +636,7 @@ pub fn resume_after_keep(
         win_effect: win_effect.as_deref(),
         lose_effect: lose_effect.as_deref(),
         branch_context: &branch_context,
+        trigger_context: &trigger_context,
     };
     // CR 608.2c: every resumed path completes once no interactive resolution choice is pending.
     match drive_flip_run(
@@ -864,6 +901,8 @@ mod tests {
                 owner: crate::types::ability::TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -2299,6 +2338,7 @@ mod tests {
             kind: PendingCoinFlipKind::UntilLoss { wins_so_far },
             chain_root_targets: vec![],
             branch_context: FlipBranchContext::default(),
+            trigger_context: None,
         }
     }
 
@@ -2551,6 +2591,12 @@ mod branch_context_tests {
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: ability.context.chain_root_targets.clone(),
             branch_context: FlipBranchContext::from_ability(ability, state),
+            trigger_context: Some(ResolvingTriggerContext {
+                event: None,
+                events: vec![],
+                match_count: None,
+                die_result: None,
+            }),
         }
     }
 

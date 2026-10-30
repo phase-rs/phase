@@ -38,7 +38,8 @@ use super::oracle_nom::prevention::{
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::{
-    controller_phrase_among, parse_type_filter_word, parse_type_phrase, ControllerPhrase,
+    controller_phrase_among, parse_self_reference, parse_type_filter_word, parse_type_phrase,
+    ControllerPhrase,
 };
 use super::oracle_quantity::capitalize_first;
 use super::oracle_target::{
@@ -60,7 +61,8 @@ use crate::types::ability::{
     QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime,
     ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     ReplacementPlayerScope, RoundingMode, SourceExclusion, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    TapStateChange, TargetFilter, TokenAttackDestination, TriggerConstraint, TriggerDefinition,
+    TypeFilter, TypedFilter,
 };
 use crate::types::ability::{CardPlayMode, CastingPermission, PlayerScope};
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
@@ -69,6 +71,7 @@ use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::CastFrequency;
+use crate::types::token_spec::TokenAttackRequest;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -1144,6 +1147,7 @@ fn parse_discard_to_library_top_replacement(
             target: TargetFilter::ParentTarget,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
+            arranger: None,
         },
     );
     Some(
@@ -2507,7 +2511,7 @@ fn parse_as_enters_pay(norm_lower: &str, original_text: &str) -> Option<Replacem
     let AbilityCost::PayLife { amount } = &cost else {
         return None;
     };
-    if !crate::game::effects::pay::is_pay_any_amount(amount) {
+    if !crate::types::ability::is_pay_any_amount(amount) {
         return None;
     }
     let execute = AbilityDefinition::new(
@@ -4623,7 +4627,7 @@ enum EntersWithDecline {
 /// CR 614.1c: the printed part of an "enters with" replacement the parser
 /// cannot carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EntersWithGap {
+pub enum EntersWithGap {
     /// A printed gate is present and cannot be carried (or two gates co-occur
     /// in the single condition slot).
     Gate,
@@ -6475,14 +6479,10 @@ enum CastEntersWithShape<'a> {
     /// graveyard. That <type> enters with …" — a cast trigger whose first
     /// instruction exiles its source and whose second gives the triggering
     /// spell's permanent its counters. The line is owned here so it fails closed
-    /// whole: no part of it is built. The floating rider binds the triggering
-    /// spell only by object id and re-checks the trigger's "you cast" spell
-    /// filter as the permanent enters. A spell that leaves the stack after the
-    /// trigger resolves and is cast again is a new object (CR 400.7) that could
-    /// still pick up the counter, and the original spell would lose it if
-    /// another player gained control of it before it resolved. Until the rider
-    /// carries the exact triggering spell, this form stays unsupported;
-    /// publishing the exile alone would drop the second instruction.
+    /// whole: no part of it is built. Entry riders carry the exact triggering
+    /// spell occurrence independently of continued control; this form still
+    /// needs ordered self-exile plus rider construction. Publishing the exile
+    /// alone would drop the second instruction, so the grammar stays unsupported.
     SelfExilePrelude,
 }
 
@@ -6840,13 +6840,13 @@ fn compose_cast_enters_with_tap(core: AbilityDefinition, tapped: bool) -> Abilit
 /// second qualifying flash creature in response — a bare filter-scoped
 /// one-shot install would let that INTERLOPING spell's battlefield entry
 /// consume the replacement first, leaving the original entrant uncountered.
-/// This is closed by AND-ing the spell filter with
-/// `TargetFilter::SpecificObject { id: TRIGGERING_SPELL_PLACEHOLDER }` — a
-/// parse-time placeholder id that `Effect::AddTargetReplacement`'s resolve
-/// function (`add_target_replacement.rs`) concretizes to the SPECIFIC spell
-/// object named by `state.current_trigger_event` (this trigger's own
-/// originating `SpellCast` event — CR 603.2) at install time, so only that
-/// exact spell's entry can ever satisfy it.
+/// CR 400.7 + CR 109.5: keep cast qualification on the trigger alone. The
+/// rider instead carries `SpecificObject { id: TRIGGERING_SPELL_PLACEHOLDER }`;
+/// installation concretizes that selector and latches the resolving carrier's
+/// spell-incarnation pin from the same authority. Only that occurrence's
+/// pre-move entry can match, regardless of subsequent control changes.
+/// A missing or departed spell installs nothing; a recast cannot inherit an
+/// already-installed rider.
 /// CR 603.1 + CR 603.3: What the dispatcher learned about a
 /// `"Whenever you cast …, that … enters with …"` line.
 ///
@@ -6905,23 +6905,17 @@ pub(crate) fn parse_whenever_you_cast_enters_with_trigger(
     let norm_lower = normalized.to_lowercase();
 
     let (mut replacement, constraint) = parse_whenever_you_cast_enters_with(&norm_lower, &text)?;
-    let spell_filter = replacement.valid_card.clone()?;
+    let spell_filter = replacement.valid_card.take()?;
     // CR 614.1c: one qualifying entry, then gone — this floating install must
     // never persist to affect a second, later cast of the same shape.
     replacement.consume_on_apply = true;
-    // CR 603.2 + CR 117.3b: bind to the SPECIFIC spell that caused this trigger,
-    // not just any spell matching the type/mana-value filter — see the
-    // interleaving-flash-creature note in the doc comment above.
-    // `TRIGGERING_SPELL_PLACEHOLDER` is concretized to the real triggering
-    // spell's id (or `ObjectId(0)`, matching nothing) by
-    // `Effect::AddTargetReplacement`'s resolve function at install time.
-    replacement.valid_card = Some(TargetFilter::And {
-        filters: vec![
-            spell_filter.clone(),
-            TargetFilter::SpecificObject {
-                id: crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER,
-            },
-        ],
+    // CR 603.2 + CR 109.5: "you cast" and the type/mana-value qualification
+    // belong to trigger observation, not a continued-control entry predicate.
+    // CR 400.7 + CR 614.1c: the entry rider names only that spell occurrence.
+    // AddTargetReplacement binds this selector and its pin from the resolving
+    // carrier at installation; departed or missing authority installs nothing.
+    replacement.valid_card = Some(TargetFilter::SpecificObject {
+        id: crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER,
     });
 
     let install = AbilityDefinition::new(
@@ -10509,6 +10503,17 @@ fn parse_attached_host_subject(input: &str) -> OracleResult<'_, TargetFilter> {
 }
 
 pub(crate) fn parse_damage_source_subject_filter(subject: &str) -> Option<TargetFilter> {
+    // CR 608.2c + CR 615.2: source-scoped prevention can name its own source
+    // with a deictic object phrase (Barbed Wire: "by this artifact"). The
+    // vocabulary is the shared `parse_self_reference` authority
+    // (oracle_nom::target), which now also covers "this source"; composing it
+    // here keeps every subject grammar in sync instead of maintaining a second
+    // phrase list. `all_consuming` keeps the contract that the whole subject
+    // must be consumed.
+    if all_consuming(parse_self_reference).parse(subject).is_ok() {
+        return Some(TargetFilter::SelfRef);
+    }
+
     // CR 301.5 + CR 702.6: host-relative subjects ("equipped creature",
     // "enchanted creature") resolve to the attached object before the generic
     // typed-source grammar, which would otherwise treat "creature" as a type.
@@ -12361,6 +12366,7 @@ fn copy_token_of(target: TargetFilter) -> Effect {
         owner: TargetFilter::Controller,
         source_filter: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         tapped: false,
         count: QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -12579,7 +12585,7 @@ enum TokenReplacementShape {
     Half,
     /// "those tokens plus [spec] are created instead" (Chatterfang, Donatello).
     PlusSpec {
-        spec: Box<crate::types::proposed_event::TokenSpec>,
+        spec: Box<crate::types::token_spec::TokenSpec>,
     },
     /// "that many [spec] are created instead" — full token substitution
     /// (Divine Visitation). The substitute characteristics are carried as an
@@ -12658,7 +12664,7 @@ fn scan_token_multiplier_factor(lower: &str) -> Option<u32> {
 /// CR 614.1a + CR 111.1: Extract the "those tokens plus <spec> (is|are) created
 /// instead" appended-token spec (Chatterfang / Donatello). Returns the parsed
 /// `TokenSpec` for the appended token, or `None` if the phrase is absent.
-fn parse_token_plus_spec_shape(lower: &str) -> Option<crate::types::proposed_event::TokenSpec> {
+fn parse_token_plus_spec_shape(lower: &str) -> Option<crate::types::token_spec::TokenSpec> {
     // Extract the spec descriptor between "those tokens plus " and the trailing
     // "are/is created instead" clause using nom combinators.
     let ((descriptor_start, descriptor_len), _rest) = nom_on_lower(lower, lower, |i| {
@@ -12964,7 +12970,7 @@ fn parse_generic_additional_token_replacement(
 /// Tippy-Toe-class replacement effects.
 fn parse_instead_create_those_tokens_plus_spec(
     lower: &str,
-) -> Option<crate::types::proposed_event::TokenSpec> {
+) -> Option<crate::types::token_spec::TokenSpec> {
     let total_len = lower.len();
     let ((descriptor_start, descriptor_len), _) = nom_on_lower(lower, lower, |i| {
         let (i, _) =
@@ -13045,8 +13051,7 @@ fn parse_manufactor_ensure_all_token_replacement(
 
     let condition_subtypes: Vec<String> =
         subtypes.iter().map(|s| canonicalize_subtype(s)).collect();
-    let mut specs: Vec<crate::types::proposed_event::TokenSpec> =
-        Vec::with_capacity(subtypes.len());
+    let mut specs: Vec<crate::types::token_spec::TokenSpec> = Vec::with_capacity(subtypes.len());
     for sub in &subtypes {
         let descriptor = format!("a {sub} token");
         let token = super::oracle_effect::parse_token_description(&descriptor)?;
@@ -13104,10 +13109,10 @@ fn split_subtype_list(s: &str) -> Vec<String> {
 /// spec is not a pattern any known card uses.
 fn token_description_to_spec(
     token: &crate::parser::oracle_ir::ast::TokenDescription,
-) -> Option<crate::types::proposed_event::TokenSpec> {
+) -> Option<crate::types::token_spec::TokenSpec> {
     use crate::types::ability::PtValue;
     use crate::types::card_type::CoreType;
-    use crate::types::proposed_event::TokenSpec;
+    use crate::types::token_spec::TokenSpec;
 
     // Split parsed `types` into core_types vs subtypes by checking CoreType::from_str.
     let mut core_types: Vec<CoreType> = Vec::new();
@@ -13142,7 +13147,7 @@ fn token_description_to_spec(
     }
 
     Some(TokenSpec {
-        characteristics: crate::types::proposed_event::TokenCharacteristics {
+        characteristics: crate::types::token_spec::TokenCharacteristics {
             display_name: token.name.clone(),
             power,
             toughness,
@@ -13160,13 +13165,14 @@ fn token_description_to_spec(
         enter_with_counters: Vec::new(),
         tapped: token.tapped,
         enters_attacking: false,
+        attack_request: TokenAttackRequest::Unspecified,
         sacrifice_at: None,
         // Placeholder: overwritten at apply time with the replacement source's identity.
         source_id: crate::types::identifiers::ObjectId(0),
         controller: crate::types::player::PlayerId(0),
         // Replacement-created tokens ("instead, create a token") are not the
         // "attached to" Aura/Role class; that path flows through `Effect::Token`.
-        attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
+        attach_to: crate::types::token_spec::TokenHostRequest::NotRequested,
     })
 }
 
@@ -14076,7 +14082,7 @@ pub(crate) fn as_long_as_gate_is_unparsed(text: &str, card_name: &str) -> bool {
 /// placement the parser cannot carry. Normalizes exactly as
 /// `parse_replacement_line_inner` does and applies the same reach gate, so the
 /// route and the parser cannot drift.
-pub(crate) fn enters_with_fails_closed(text: &str, card_name: &str) -> Option<EntersWithGap> {
+pub fn enters_with_fails_closed(text: &str, card_name: &str) -> Option<EntersWithGap> {
     let text = strip_reminder_text(text);
     let norm_lower = replace_self_refs(&text, card_name).to_lowercase();
     if !has_enters_with_counter_tokens(&norm_lower) {
@@ -21446,9 +21452,17 @@ mod tests {
             let trigger = parse_whenever_you_cast_enters_with_trigger(text, card)
                 .unwrap_or_else(|| panic!("{card}: elided-count conjunct list must parse"));
             let def = cast_enters_install(trigger.execute.as_deref().expect("execute"));
+            let rider_filter = def.valid_card.as_ref().expect("valid_card set");
             assert!(
-                matches!(&def.valid_card, Some(TargetFilter::And { .. })),
-                "{card}: bound to the triggering spell"
+                crate::types::ability::filter_contains(rider_filter, &|filter| matches!(
+                    filter,
+                    TargetFilter::SpecificObject { id }
+                        if *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER
+                )) && !crate::types::ability::filter_contains(rider_filter, &|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You)
+                )),
+                "{card}: entry rider identifies the triggering spell and carries no continued-control predicate"
             );
             let mut cursor = Some(def.execute.as_deref().expect("execute ability"));
             for (index, counter) in expected.iter().enumerate() {
@@ -29206,10 +29220,10 @@ mod tests {
     /// with mana value 5 or greater, that creature enters with X additional
     /// +1/+1 counters on it, where X is its mana value minus 4.") parses into
     /// a `SpellCast` trigger (not a static replacement scoped to Runadi
-    /// herself — issue #6492 regression), whose resolution installs a
-    /// floating one-shot `ChangeZone` replacement gated on mana value >= 5,
-    /// with a composite offset quantity over the entering creature's own
-    /// mana value.
+    /// herself — issue #6492 regression), whose mana-value-qualified trigger
+    /// installs a floating one-shot `ChangeZone` replacement bound to the
+    /// triggering spell occurrence, with a composite offset quantity over the
+    /// entering creature's own mana value.
     #[test]
     fn parses_runadi_behemoth_caller_trigger() {
         let text = "Whenever you cast a creature spell with mana value 5 or greater, that creature enters with X additional +1/+1 counters on it, where X is its mana value minus 4.";
@@ -29253,27 +29267,23 @@ mod tests {
             "floating install must be one-shot, or it would apply to a later, \
              unrelated qualifying spell too"
         );
-        // valid_card must AND the spell filter with a `SpecificObject` leaf
-        // carrying the trigger-source placeholder — `Effect::AddTargetReplacement`
-        // concretizes this to the SPECIFIC triggering spell's id at install
-        // time, so a different qualifying creature entering during the
-        // post-trigger priority window can't steal the install.
-        let TargetFilter::And { filters } =
-            replacement.valid_card.as_ref().expect("valid_card set")
-        else {
-            panic!(
-                "expected valid_card to be an And{{spell filter, trigger-source \
-                 placeholder}}, got {:?}",
-                replacement.valid_card
-            );
-        };
+        // The trigger above retains cast qualification. The rider identifies
+        // the recipient without imposing continued installer control.
+        let rider_filter = replacement.valid_card.as_ref().expect("valid_card set");
         assert!(
-            filters.iter().any(|f| matches!(
-                f,
+            crate::types::ability::filter_contains(rider_filter, &|filter| matches!(
+                filter,
                 TargetFilter::SpecificObject { id }
                     if *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER
             )),
-            "valid_card must carry the trigger-source placeholder, got {filters:?}"
+            "entry rider must identify the triggering spell: {rider_filter:?}"
+        );
+        assert!(
+            !crate::types::ability::filter_contains(rider_filter, &|filter| matches!(
+                filter,
+                TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You)
+            )),
+            "cast qualification must not become continued control: {rider_filter:?}"
         );
         assert_eq!(replacement.event, ReplacementEvent::ChangeZone);
         assert_eq!(replacement.destination_zone, Some(Zone::Battlefield));
@@ -36355,5 +36365,24 @@ mod damage_source_union {
             vec![TypeFilter::Subtype("Giant".to_string())]
         );
         assert_eq!(typed.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 608.2c + CR 615.2: source deictics bind to the object hosting the
+    /// effect, including Barbed Wire's "this artifact" wording.
+    #[test]
+    fn source_deictics_bind_the_source_object() {
+        for phrase in [
+            "this artifact",
+            "this creature",
+            "this permanent",
+            "this source",
+            "~",
+        ] {
+            assert_eq!(
+                parse_damage_source_subject_filter(phrase),
+                Some(TargetFilter::SelfRef),
+                "{phrase}"
+            );
+        }
     }
 }

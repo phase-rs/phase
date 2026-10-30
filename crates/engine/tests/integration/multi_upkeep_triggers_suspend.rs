@@ -13,7 +13,8 @@
 //!
 //! The trigger is synthesized per-source by
 //! `KeywordTriggerInstaller::triggers_for(&Keyword::Suspend{..})` and the exile
-//! scan in `collect_pending_triggers` iterates every object in `state.exile`,
+//! scan in `collect_pending_triggers` iterates every exiled card with a trigger
+//! that functions from exile (CR 113.6b),
 //! so the per-source firing contract must hold end-to-end: with two suspended
 //! cards in exile, both must decrement by exactly one each upkeep.
 //!
@@ -27,8 +28,8 @@ use std::sync::Arc;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition,
+    AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect, QuantityExpr,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
 };
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::game_state::{GameState, WaitingFor};
@@ -168,4 +169,123 @@ fn multiple_suspended_cards_each_remove_time_counter() {
          additional suspended cards' upkeep triggers do not fire.",
         second_after
     );
+}
+
+/// CR 113.6b + CR 702.62a + CR 702.62b: the exile trigger-source scan lists
+/// only exiled cards with a trigger that functions from exile. A card with
+/// printed Suspend and a card granted Suspend while exiled each lose one time
+/// counter at upkeep beside an exiled card with no triggers, and beside one
+/// whose identical upkeep trigger functions only on the battlefield
+/// (CR 113.6), which keeps its counters.
+#[test]
+fn suspended_cards_tick_beside_exiled_cards_without_exile_triggers() {
+    let mut scenario = GameScenario::new();
+    // Stock library so the Draw step doesn't deck out.
+    scenario.with_library_top(P0, &["Plains", "Plains", "Plains"]);
+    let granter = scenario.add_creature(P0, "Suspend Granter", 1, 1).id();
+
+    let mut runner: GameRunner = scenario.build();
+    let state = runner.state_mut();
+
+    let printed = add_suspended_card(state, P0, "Printed Suspend Card", 4);
+
+    let card_id = CardId(state.next_object_id);
+    let granted = create_object(
+        state,
+        card_id,
+        P0,
+        "Granted Suspend Card".to_string(),
+        Zone::Exile,
+    );
+    state
+        .objects
+        .get_mut(&granted)
+        .unwrap()
+        .counters
+        .insert(CounterType::Time, 4);
+    state
+        .add_transient_continuous_effect(
+            granter,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: granted },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Suspend {
+                    count: 0,
+                    cost: ManaCost::default(),
+                },
+            }],
+            None,
+        )
+        .expect("a permanent grant starts");
+
+    let card_id = CardId(state.next_object_id);
+    let battlefield_only = create_object(
+        state,
+        card_id,
+        P0,
+        "Battlefield-Only Upkeep Card".to_string(),
+        Zone::Exile,
+    );
+    let mut battlefield_upkeep = build_suspend_upkeep_removal_trigger();
+    battlefield_upkeep.trigger_zones.clear();
+    {
+        let obj = state.objects.get_mut(&battlefield_only).unwrap();
+        obj.trigger_definitions.push(battlefield_upkeep.clone());
+        Arc::make_mut(&mut obj.base_trigger_definitions).push(battlefield_upkeep);
+        obj.counters.insert(CounterType::Time, 4);
+    }
+
+    let card_id = CardId(state.next_object_id);
+    let inert = create_object(
+        state,
+        card_id,
+        P0,
+        "Inert Exiled Card".to_string(),
+        Zone::Exile,
+    );
+
+    state.turn_number = 2;
+    state.phase = Phase::Untap;
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+
+    runner.auto_advance_to_main_phase();
+    runner.advance_until_stack_empty();
+
+    let counters_of = |state: &GameState, id: ObjectId| {
+        state
+            .objects
+            .get(&id)
+            .and_then(|o| o.counters.get(&CounterType::Time).copied())
+            .unwrap_or(0)
+    };
+    // CR 702.62a: each suspended card's upkeep trigger removes one time counter.
+    assert_eq!(
+        counters_of(runner.state(), printed),
+        3,
+        "the printed-Suspend card must lose one time counter at upkeep (4 → 3)"
+    );
+    assert_eq!(
+        counters_of(runner.state(), granted),
+        3,
+        "the card granted Suspend in exile must lose one time counter at upkeep (4 → 3)"
+    );
+    assert_eq!(
+        counters_of(runner.state(), battlefield_only),
+        4,
+        "CR 113.6: an upkeep trigger that functions only on the battlefield does not \
+         trigger from exile, so the card keeps its time counters"
+    );
+    assert_eq!(
+        runner.state().objects[&inert].zone,
+        Zone::Exile,
+        "the inert exiled card stays in exile"
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }

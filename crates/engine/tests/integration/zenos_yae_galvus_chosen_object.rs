@@ -431,3 +431,66 @@ fn zenos_does_not_transform_when_it_itself_leaves() {
         "Zenos leaving the battlefield must not transform it"
     );
 }
+
+// ─── V5: the single-pick choice takes one board click ───────────────────────
+
+/// V5 (CR 608.2d + CR 115.10a). The choice is a single pick (`(1, Some(1))`), so
+/// one `ChooseTarget` board click answers it exactly as a one-item
+/// `SelectTargets` does, and the pick is the remembered card. The producer is
+/// object-only, so a player click is refused with the prompt unchanged.
+#[test]
+fn zenos_choice_accepts_a_board_click_and_refuses_a_player() {
+    let mut board = board();
+    let Board {
+        runner,
+        zenos,
+        chosen,
+        other_opponent,
+        ..
+    } = &mut board;
+
+    enter_zenos(runner, *zenos);
+    let WaitingFor::ChooseObjectsSelection {
+        min, max, eligible, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "Zenos's ETB must park on ChooseObjectsSelection, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((min, max), (1, Some(1)), "reach-guard: a single pick");
+    let mut actual = eligible;
+    actual.sort();
+    let mut expected = vec![
+        TargetRef::Object(*chosen),
+        TargetRef::Object(*other_opponent),
+    ];
+    expected.sort();
+    assert_eq!(actual, expected, "reach-guard: the two opponent creatures");
+
+    let before = runner.state().waiting_for.clone();
+    for player in [P1, P0] {
+        let result = runner.act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(player)),
+        });
+        assert!(result.is_err(), "{player:?}: a player is never chosen here");
+        assert_eq!(
+            runner.state().waiting_for,
+            before,
+            "{player:?}: the prompt is unchanged"
+        );
+    }
+
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(*chosen)),
+        })
+        .expect("the board click must be accepted");
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        remembered_cards(runner, *zenos),
+        vec![*chosen],
+        "the clicked creature is the remembered card (CR 608.2c)"
+    );
+}

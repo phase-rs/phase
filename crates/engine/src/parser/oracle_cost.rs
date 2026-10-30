@@ -995,9 +995,17 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                     }
                 }
                 // Flat "Pay N life" — no " for each " tail.
-                return AbilityCost::PayLife {
-                    amount: QuantityExpr::Fixed { value: n as i32 },
-                };
+                // The cost word ends at end-of-text or a sentence boundary; a
+                // trailing qualifier ("... if you control an artifact") is not
+                // consumed, so the cost is declined rather than read as unconditional.
+                if terminated(tag::<_, _, E<'_>>("life"), alt((eof, peek(tag(".")))))
+                    .parse(after_n.trim().trim_end_matches(','))
+                    .is_ok()
+                {
+                    return AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: n as i32 },
+                    };
+                }
             }
         }
         // Pay speed: "pay x speed" / "pay N speed"
@@ -1341,9 +1349,16 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
-    // "Reveal this card from your hand" — reveal self cost
+    // "Reveal this card from your hand" / "Reveal this card in your hand" — reveal self cost
     if nom_on_lower(text, &lower, |i| {
-        value((), tag("reveal this card from your hand")).parse(i)
+        value(
+            (),
+            alt((
+                tag("reveal this card from your hand"),
+                tag("reveal this card in your hand"),
+            )),
+        )
+        .parse(i)
     })
     .is_some()
     {
@@ -1503,7 +1518,13 @@ fn parse_reveal_from_hand_cost_body(body: &str) -> Option<AbilityCost> {
             nom_quantity::parse_quantity_expr_number,
             tag::<_, _, E<'_>>(" "),
         ),
-        terminated(take_until(" from your hand"), tag(" from your hand")),
+        alt((
+            terminated(take_until(" from your hand"), tag(" from your hand")),
+            terminated(
+                take_until(" in your hand"),
+                terminated(tag(" in your hand"), opt(tag("."))),
+            ),
+        )),
     ))
     .parse(body)
     .ok()?;
@@ -2301,13 +2322,35 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
             });
         }
     }
+
     let target_text = format!("target {filter_text}");
     let (filter, rem) = parse_target(&target_text);
     let filter = if rem.trim().is_empty() {
         filter
     } else {
-        let (filter, _) = parse_type_phrase_folding(filter_text);
-        filter
+        let (folded_filter, folded_rem) = parse_type_phrase_folding(filter_text);
+        if folded_rem.trim().is_empty() {
+            folded_filter
+        } else if count == 1
+            // CR 201.5: a by-name reference never starts with an article or count,
+            // so nothing may have been stripped ahead of the object phrase.
+            && rest_lower.trim_start().starts_with(filter_text)
+            && folded_rem.trim() == filter_text.trim()
+            && match &folded_filter {
+                TargetFilter::Any => true,
+                TargetFilter::Typed(tf) => {
+                    tf.type_filters.is_empty()
+                        && tf.properties.is_empty()
+                        && tf.controller.is_none()
+                }
+                _ => false,
+            }
+        {
+            // CR 201.5: By-name self-reference fallback (e.g. "Recurring Nightmare")
+            folded_filter
+        } else {
+            return None;
+        }
     };
     let filter = match filter {
         // CR 201.5: A cost using the source card's own name, such as
@@ -4794,26 +4837,36 @@ mod tests {
         }
     }
 
-    /// The source-name self-reference fallback names ONE object; a counted
-    /// return of an unreadable object phrase must not lower to an unpayable
-    /// `ReturnToHand { count: 2, filter: SelfRef }`.
+    /// The source-name self-reference fallback names ONE object; CR 201.5 by-name
+    /// references never carry an article or count, so an article- or count-led
+    /// unreadable object phrase must not lower to `ReturnToHand { filter: SelfRef }`.
     #[test]
     fn cost_counted_return_of_unreadable_phrase_is_not_self_ref() {
-        // Reach guard: the same object phrase with an article reaches the
-        // fallback and becomes the self-reference.
+        // Reach guard: the bare name reaches the fallback and becomes the self-reference.
         assert_eq!(
-            parse_oracle_cost("Return a Recurring Nightmare to its owner's hand"),
+            parse_oracle_cost("Return Recurring Nightmare to its owner's hand"),
             AbilityCost::ReturnToHand {
                 count: 1,
                 filter: Some(TargetFilter::SelfRef),
                 from_zone: None,
             }
         );
-        let cost = parse_oracle_cost("Return two Recurring Nightmares to their owner's hand");
-        assert!(
-            !matches!(cost, AbilityCost::ReturnToHand { .. }),
-            "counted unreadable phrase must not lower to ReturnToHand, got {cost:?}"
-        );
+        for text in [
+            "Return a Recurring Nightmare to its owner's hand",
+            "Return two Recurring Nightmares to their owner's hand",
+        ] {
+            let cost = parse_oracle_cost(text);
+            assert!(
+                !matches!(
+                    cost,
+                    AbilityCost::ReturnToHand {
+                        filter: Some(TargetFilter::SelfRef),
+                        ..
+                    }
+                ),
+                "{text:?} must not lower to a SelfRef return, got {cost:?}"
+            );
+        }
     }
 
     #[test]
@@ -4899,6 +4952,21 @@ mod tests {
                 filter: Some(TargetFilter::Typed(
                     TypedFilter::default().subtype("Dragon".to_string())
                 )),
+            }
+        );
+    }
+
+    #[test]
+    fn cost_reveal_black_card_from_hand() {
+        assert_eq!(
+            parse_oracle_cost("Reveal a black card in your hand"),
+            AbilityCost::Reveal {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::HasColor {
+                        color: crate::types::mana::ManaColor::Black
+                    }
+                ])))
             }
         );
     }
@@ -5761,5 +5829,141 @@ mod tests {
         let fow = parse_oracle_cost("pay 1 life and exile a blue card from your hand");
         assert!(matches!(&fow, AbilityCost::Composite { costs } if costs.len() == 2));
         assert!(!fow.contains_unimplemented());
+    }
+
+    #[test]
+    fn qualified_reveal_cost_is_rejected_without_dropping_condition() {
+        let cost = parse_oracle_cost("Reveal a black card in your hand if you control an artifact");
+        assert!(!matches!(cost, AbilityCost::Reveal { .. }));
+
+        let valid = parse_oracle_cost("Reveal a blue card in your hand.");
+        assert!(matches!(
+            valid,
+            AbilityCost::Reveal {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn incomplete_return_to_hand_cost_filter_is_rejected() {
+        // Production strips the leading "return " before this helper runs.
+        assert!(try_parse_return_to_hand_cost(
+            "two creatures you control with different names to their owners' hands"
+        )
+        .is_none());
+        // Reach guard: the same counted subject without the unmodeled qualifier parses.
+        assert!(matches!(
+            try_parse_return_to_hand_cost("two creatures you control to their owners' hands"),
+            Some(AbilityCost::ReturnToHand {
+                count: 2,
+                filter: Some(_),
+                ..
+            })
+        ));
+
+        let cost = parse_oracle_cost(
+            "Return two creatures you control with different names to their owners' hands",
+        );
+        assert!(!matches!(cost, AbilityCost::ReturnToHand { .. }));
+    }
+
+    #[test]
+    fn qualified_pay_life_cost_is_rejected() {
+        let cost = parse_oracle_cost("Pay 5 life if you control an artifact");
+        assert!(!matches!(cost, AbilityCost::PayLife { .. }));
+
+        let valid = parse_oracle_cost("Pay 5 life");
+        assert!(matches!(
+            valid,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 5 }
+            }
+        ));
+
+        // A sentence boundary after the cost word is not a qualifier.
+        let sentence = parse_oracle_cost("Pay 3 life. You gain 1 life.");
+        assert!(matches!(
+            sentence,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 3 }
+            }
+        ));
+    }
+
+    /// CR 107.3a: an announced X is chosen and announced, never a fixed 0.
+    /// A standalone X count must decline rather than silently become zero.
+    #[test]
+    fn x_count_cost_is_declined_instead_of_zero() {
+        // CR 107.3a: a reveal count of X stays symbolic (never a fixed 0).
+        assert!(matches!(
+            parse_oracle_cost("Reveal x blue cards in your hand"),
+            AbilityCost::Reveal {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { ref name },
+                },
+                filter: Some(_),
+            } if name == "X"
+        ));
+        // Production strips the leading "return " before this helper runs.
+        assert!(
+            try_parse_return_to_hand_cost("x creatures you control to their owner's hand")
+                .is_none()
+        );
+        // Reach guard: a fixed count in the same production form parses.
+        assert!(matches!(
+            try_parse_return_to_hand_cost("two creatures you control to their owner's hand"),
+            Some(AbilityCost::ReturnToHand {
+                count: 2,
+                filter: Some(_),
+                ..
+            })
+        ));
+
+        let valid = parse_oracle_cost("Reveal a blue card in your hand.");
+        assert!(matches!(
+            valid,
+            AbilityCost::Reveal {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(_)
+            }
+        ));
+    }
+
+    /// CR 201.5: a by-name reference ("Return Recurring Nightmare ...") still
+    /// resolves to the source, but an article-led subject the grammar cannot
+    /// fold must not collapse to SelfRef just because count == 1.
+    #[test]
+    fn by_name_self_ref_requires_complete_subject_text() {
+        let cost = parse_oracle_cost("Return Recurring Nightmare to its owner's hand");
+        assert!(matches!(
+            cost,
+            AbilityCost::ReturnToHand {
+                filter: Some(TargetFilter::SelfRef),
+                ..
+            }
+        ));
+
+        assert!(!matches!(
+            parse_oracle_cost(
+                "Return a nonland card with mana value 3 or less to its owner's hand"
+            ),
+            AbilityCost::ReturnToHand {
+                filter: Some(TargetFilter::SelfRef),
+                ..
+            }
+        ));
+
+        // Reach guard: an article-led subject the grammar can fold still parses
+        // to a typed ReturnToHand filter rather than SelfRef.
+        assert!(matches!(
+            parse_oracle_cost("Return a creature you control to its owner's hand"),
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: Some(TargetFilter::Typed(_)),
+                ..
+            }
+        ));
     }
 }

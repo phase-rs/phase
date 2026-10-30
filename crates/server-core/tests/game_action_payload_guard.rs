@@ -13,7 +13,8 @@ use engine::types::ability::{
     TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef, TypedFilter,
 };
 use engine::types::actions::{
-    DebugAction, DebugTokenRequest, ReplacementAutoChoice, MAX_DEBUG_CREATE_COUNT,
+    DebugAction, DebugTokenRequest, ReplacementAutoChoice, MAX_DEBUG_COUNTER_AMOUNT,
+    MAX_DEBUG_CREATE_COUNT, MAX_DEBUG_LIFE_AMOUNT,
 };
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::game_state::{
@@ -28,7 +29,7 @@ use engine::types::mana::{
 };
 use engine::types::match_config::DeckCardCount;
 use engine::types::phase::Phase;
-use engine::types::player::PlayerId;
+use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::proposed_event::TokenCharacteristics;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
@@ -334,6 +335,65 @@ fn rejects_debug_create_count_above_engine_ceiling() {
 
     let err = guard_game_action_payload(&action).unwrap_err();
     assert!(err.contains("Debug.CreateTokenCopy.count"));
+}
+
+#[test]
+fn rejects_debug_life_change_amount_above_engine_ceiling() {
+    let gain = |amount| {
+        GameAction::Debug(DebugAction::GainLife {
+            player_id: PlayerId(0),
+            amount,
+        })
+    };
+    let lose = |amount| {
+        GameAction::Debug(DebugAction::LoseLife {
+            player_id: PlayerId(1),
+            amount,
+        })
+    };
+
+    guard_game_action_payload(&gain(MAX_DEBUG_LIFE_AMOUNT))
+        .expect("the engine ceiling itself is an accepted life-gain amount");
+    guard_game_action_payload(&lose(MAX_DEBUG_LIFE_AMOUNT))
+        .expect("the engine ceiling itself is an accepted life-loss amount");
+
+    for action in [
+        gain(MAX_DEBUG_LIFE_AMOUNT + 1),
+        lose(MAX_DEBUG_LIFE_AMOUNT + 1),
+    ] {
+        let err = guard_game_action_payload(&action).unwrap_err();
+        assert!(err.contains("Debug.LifeChange.amount"), "{err}");
+    }
+}
+
+#[test]
+fn rejects_debug_counter_gain_count_above_engine_ceiling() {
+    let give_counters = |count| {
+        GameAction::Debug(DebugAction::GivePlayerCounters {
+            player_id: PlayerId(0),
+            counter_kind: PlayerCounterKind::Poison,
+            count,
+        })
+    };
+    let give_energy = |count| {
+        GameAction::Debug(DebugAction::GiveEnergy {
+            player_id: PlayerId(1),
+            count,
+        })
+    };
+
+    guard_game_action_payload(&give_counters(MAX_DEBUG_COUNTER_AMOUNT))
+        .expect("the engine ceiling itself is an accepted player-counter count");
+    guard_game_action_payload(&give_energy(MAX_DEBUG_COUNTER_AMOUNT))
+        .expect("the engine ceiling itself is an accepted energy count");
+
+    for action in [
+        give_counters(MAX_DEBUG_COUNTER_AMOUNT + 1),
+        give_energy(MAX_DEBUG_COUNTER_AMOUNT + 1),
+    ] {
+        let err = guard_game_action_payload(&action).unwrap_err();
+        assert!(err.contains("Debug.CounterGain.count"), "{err}");
+    }
 }
 
 #[test]

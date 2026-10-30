@@ -5479,10 +5479,14 @@ fn history_covers_reading(prior: &GameState, current: &GameState, reads: History
 /// stacks are empty.
 fn last_known_records_grow_unread(prior: &GameState, current: &GameState) -> bool {
     let gone = |id: &ObjectId| !prior.objects.contains_key(id) && !current.objects.contains_key(id);
-    let naming = |frame| {
+    // CR 615.5: each frame's definitions are compared as their by-value views, so two frames
+    // whose shields differ only in which arena position names an `==` rider compare equal.
+    let naming = |frame: &GameState| {
         live_floating_replacement_defs(frame)
             .map(|(_, def)| def)
             .filter(|def| floating_replacement_can_name_object(def, [prior, current]))
+            .map(|def| frame.split_replacement_rider(def))
+            .collect::<Vec<_>>()
     };
     prior
         .lki_cache
@@ -5500,7 +5504,7 @@ fn last_known_records_grow_unread(prior: &GameState, current: &GameState) -> boo
             .lki_copiable_values
             .keys()
             .all(|id| prior.lki_copiable_values.contains_key(id) || gone(id))
-        && naming(prior).eq(naming(current))
+        && naming(prior) == naming(current)
 }
 
 /// Whether a floating replacement holds anything that can name an object by id, and so ask for
@@ -5516,6 +5520,7 @@ fn floating_replacement_can_name_object(
         runtime_execute,
         mode,
         valid_card,
+        triggering_spell,
         condition,
         damage_modification,
         damage_source_filter,
@@ -5532,6 +5537,7 @@ fn floating_replacement_can_name_object(
         destination_zone: _,
         active_zones: _,
         damage_target_filter: _,
+        target_recipient_incarnation: _,
         combat_scope: _,
         draw_scope: _,
         die_ignore_rule: _,
@@ -5557,6 +5563,8 @@ fn floating_replacement_can_name_object(
         || runtime_execute.is_some()
         || !matches!(mode, crate::types::ability::ReplacementMode::Mandatory)
         || valid_card.is_some()
+        // Conservatively retain object-naming authority carried by the pin.
+        || triggering_spell.is_some()
         || condition.is_some()
         || damage_modification.is_some()
         || damage_source_filter.is_some()
@@ -5795,7 +5803,10 @@ fn live_history_reads(state: &GameState) -> HistoryReads {
         }
     }
     for (_source, _idx, def) in loop_window_replacement_defs(state) {
-        reads = reads.or(scan::replacement_definition_history(def));
+        reads = reads.or(scan::replacement_definition_history(
+            def,
+            state.replacement_rider(def),
+        ));
     }
     for effect in &state.transient_continuous_effects {
         reads = reads.or(scan::transient_effect_history(effect));
@@ -6363,10 +6374,9 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
         {
             return true;
         }
-        if def
-            .runtime_execute
-            .as_ref()
-            .is_some_and(|a| scan::ability_reads_sibling_mutable(a))
+        if state
+            .replacement_rider(def)
+            .is_some_and(scan::ability_reads_sibling_mutable)
         {
             return true;
         }
@@ -7162,10 +7172,9 @@ fn fire_time_conditions_read_projected_resource_scoped(
         {
             return true;
         }
-        if def
-            .runtime_execute
-            .as_ref()
-            .is_some_and(|a| crate::game::ability_scan::ability_reads_projected_resource(a))
+        if state
+            .replacement_rider(def)
+            .is_some_and(crate::game::ability_scan::ability_reads_projected_resource)
         {
             return true;
         }
@@ -8438,6 +8447,7 @@ fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usiz
 
 #[cfg(test)]
 mod tests {
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use std::sync::Arc;
 
     /// CR 508.1d + CR 604.1: only a LIVE required-defender class is a growing-class
@@ -8488,6 +8498,11 @@ mod tests {
     use crate::analysis::decision_template::ChoicePoint;
     use crate::game::game_object::GameObject;
     use crate::types::ability::TriggerDefinitionRef;
+    use crate::types::actions::ReplacementAutoChoice;
+    use crate::types::game_state::{
+        ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
+        ReplacementAutoChoiceRecord, ReplacementChoiceKind,
+    };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ExtraPhaseId,
     };
@@ -11164,7 +11179,7 @@ mod tests {
 
         // ── (b) ZERO announcement choices, two ways. `Effect::target_filter()` returns
         // `Some` for both, but the SLOT BUILDER surfaces no stack slot: CR 701.21a
-        // `Sacrifice` is carved out of `triggers::extract_target_filter_from_effect` (the
+        // `Sacrifice` is carved out of `types::ability::extract_target_filter_from_effect` (the
         // accessor the builder actually uses), and a CR 601.2c choice made at resolution
         // (`TargetChoiceTiming::Resolution`) is not announced at all.
         let zero_slot_cases: [(&str, ResolvedAbility); 2] = [
@@ -13718,9 +13733,17 @@ mod tests {
             // (which scans `runtime_execute` only for projected reads) lets the def
             // through — only clause (b) rejects.
             assert!(!crate::game::ability_scan::ability_reads_projected_resource(&runtime_body));
-            let def = ReplacementDefinition::new(ReplacementEvent::GainLife)
-                .runtime_execute(runtime_body);
-            let (prior, current) = with_object_def(def);
+            let handle = crate::types::identifiers::ReplacementContinuationId(0);
+            let def =
+                ReplacementDefinition::new(ReplacementEvent::GainLife).runtime_execute(handle);
+            let (mut prior, mut current) = with_object_def(def);
+            for state in [&mut prior, &mut current] {
+                assert_eq!(
+                    state.install_replacement_continuation(runtime_body.clone()),
+                    handle,
+                    "reach guard: each frame's arena names the body at the def's handle"
+                );
+            }
             assert!(
                 !loop_states_cover_modulo_growth(&prior, &current),
                 "arm4 mandatory GainLife with runtime_execute body"
@@ -23352,6 +23375,8 @@ mod tests {
                         owner: TargetFilter::Controller,
                         attach_to: None,
                         enters_attacking: false,
+                        attack_destination:
+                            crate::types::ability::TokenAttackDestination::ControllerChooses,
                         supertypes: vec![],
                         static_abilities: vec![],
                         enter_with_counters: vec![],
@@ -24210,15 +24235,16 @@ mod tests {
                 // pipeline debug-asserts on one that declares neither.
                 definition.draw_scope = Some(DrawReplacementScope::IndividualDraw);
                 if with_body {
-                    definition.runtime_execute = Some(Box::new(ResolvedAbility::new(
-                        Effect::LoseLife {
-                            amount: QuantityExpr::Fixed { value: 1 },
-                            target: None,
-                        },
-                        vec![],
-                        DEF_SRC,
-                        PlayerId(0),
-                    )));
+                    definition.runtime_execute =
+                        Some(board.install_replacement_continuation(ResolvedAbility::new(
+                            Effect::LoseLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                target: None,
+                            },
+                            vec![],
+                            DEF_SRC,
+                            PlayerId(0),
+                        )));
                 }
                 let mut object = GameObject::new(
                     DEF_SRC,
@@ -26248,6 +26274,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
         s
@@ -28048,5 +28075,137 @@ mod tests {
             certify(&prior, &stray).is_none(),
             "a stray id in the non-holder container refuses"
         );
+    }
+
+    /// CR 615.5: a floating prevention shield naming `rider` through a freshly
+    /// installed arena entry, after `padding` earlier entries.
+    fn floating_rider_frame(padding: usize, rider_amount: i32) -> GameState {
+        let rider = |amount| {
+            crate::types::ability::ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: amount },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let mut state = GameState::new_two_player(42);
+        for _ in 0..padding {
+            state.install_replacement_continuation(rider(rider_amount));
+        }
+        let id = state.install_replacement_continuation(rider(rider_amount));
+        state.pending_damage_replacements.push(
+            ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
+                .runtime_execute(id),
+        );
+        state
+    }
+
+    /// CR 104.4b: two loop samples taken after 3 and 4 iterations, each of which
+    /// installed an `==` rider and re-pointed the pending shield at it, are the same
+    /// game position: the arena is allocation history and is not compared, at loop
+    /// equality or at the CR 732.2a cover gate. Positive control: a remembered CR 616.1
+    /// choice whose rider differs is still compared, and makes the samples unequal.
+    #[test]
+    fn loop_samples_differing_only_in_continuation_allocation_compare_equal() {
+        let a = floating_rider_frame(2, 5);
+        let b = floating_rider_frame(3, 5);
+        assert_ne!(
+            a.pending_damage_replacements[0].runtime_execute,
+            b.pending_damage_replacements[0].runtime_execute,
+            "reach-guard: the samples' shields name different arena positions"
+        );
+        assert_eq!(
+            a.replacement_rider(&a.pending_damage_replacements[0]),
+            b.replacement_rider(&b.pending_damage_replacements[0]),
+            "reach-guard: the named riders are equal"
+        );
+        let (na, nb) = (a.normalize_for_loop(), b.normalize_for_loop());
+        assert!(loop_states_equal(&na, &nb));
+        assert!(eq_except_growable(&na, &nb, &HashSet::new()));
+
+        let remembered = |state: &mut GameState, amount: i32| {
+            let (definition, rider) = {
+                let mut frame = floating_rider_frame(0, amount);
+                let def = frame.pending_damage_replacements.remove(0);
+                frame.split_replacement_rider(&def)
+            };
+            state
+                .replacement_auto_choices
+                .push(ReplacementAutoChoiceRecord {
+                    id: ReplacementAutoChoiceId("r0".to_string()),
+                    key: ReplacementAutoChoiceKey {
+                        player: PlayerId(0),
+                        event: crate::types::replacements::ReplacementEvent::DamageDone,
+                        kind: ReplacementChoiceKind::Order,
+                        candidates: vec![ReplacementAutoChoiceIdentity::Definition {
+                            source: crate::types::identifiers::ObjectIncarnationRef::of(
+                                ObjectId(5),
+                                0,
+                            ),
+                            index: 0,
+                            definition: Box::new(definition),
+                            rider,
+                        }],
+                    },
+                    choice: ReplacementAutoChoice::Order { order: vec![0] },
+                    descriptions: vec![],
+                });
+        };
+        let (mut ra, mut rb) = (a.clone(), b.clone());
+        remembered(&mut ra, 5);
+        remembered(&mut rb, 7);
+        let (ra, rb) = (ra.normalize_for_loop(), rb.normalize_for_loop());
+        assert!(!loop_states_equal(&ra, &rb));
+        assert!(!eq_except_growable(&ra, &rb, &HashSet::new()));
+    }
+
+    /// CR 608.2h + CR 615.5: two frames whose live floating shields differ only in which
+    /// arena position names an `==` rider read the same last-known information, so the
+    /// "records grow unread" verdict is the one for identical frames. Control: frames
+    /// whose riders differ are not the same.
+    #[test]
+    fn floating_shields_differing_only_in_continuation_allocation_grow_unread() {
+        let prior = floating_rider_frame(0, 5);
+        let current = floating_rider_frame(1, 5);
+        assert_ne!(
+            prior.pending_damage_replacements[0].runtime_execute,
+            current.pending_damage_replacements[0].runtime_execute,
+            "reach-guard: the frames' shields name different arena positions"
+        );
+        assert!(last_known_records_grow_unread(&prior, &current));
+        assert!(!last_known_records_grow_unread(
+            &prior,
+            &floating_rider_frame(1, 9)
+        ));
+    }
+
+    /// CR 732.2a + CR 615.5: a live shield's history reads include those of the runtime
+    /// continuation its handle names. The scanner walks the rider it is passed, and
+    /// `live_history_reads` resolves the handle to that rider. Control: the same shield
+    /// naming no continuation reads nothing.
+    #[test]
+    fn replacement_history_reads_the_named_continuation() {
+        let mut state = GameState::new_two_player(42);
+        state
+            .pending_damage_replacements
+            .push(ReplacementDefinition::new(ReplacementEvent::DamageDone));
+        assert!(!live_history_reads(&state).reads(HistoryMember::PlayerTurnsTaken));
+        let id = state.install_replacement_continuation(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::TurnsTaken,
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        ));
+        state.pending_damage_replacements[0] =
+            ReplacementDefinition::new(ReplacementEvent::DamageDone).runtime_execute(id);
+        assert!(live_history_reads(&state).reads(HistoryMember::PlayerTurnsTaken));
     }
 }

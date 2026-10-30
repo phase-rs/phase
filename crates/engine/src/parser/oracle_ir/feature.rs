@@ -113,6 +113,16 @@ pub(crate) enum OracleSemanticFeature {
     /// processed simultaneously — so a parse carrying only one of the two
     /// audiences has silently discarded the other.
     DamageSubjectConjunction,
+    /// CR 509.1g + CR 608.2i: a look-back combat-relation restriction on an object
+    /// set ("creatures it blocked this combat/turn") — a parse that leaves the
+    /// relative clause unrepresented has widened the effect to every object of the
+    /// type.
+    CombatHistoryRelation,
+    /// CR 509.1g + CR 509.1h: a current-block-pairing restriction on an object
+    /// set ("creatures blocking or blocked by it", "creatures blocked by ~") — a
+    /// parse that leaves the relative clause unrepresented has widened the
+    /// effect to every object of the type.
+    CombatPairingRelation,
 }
 
 impl OracleSemanticFeature {
@@ -122,7 +132,7 @@ impl OracleSemanticFeature {
     /// appear in exported `parse_warnings`, so they are byte-for-byte the labels the
     /// previous audit emitted.
     ///
-    /// This IS the single authority: every one of the fourteen `SwallowedClause` emit
+    /// This IS the single authority: every one of the eighteen `SwallowedClause` emit
     /// sites in `swallow_check.rs` constructs its `detector` through this function, and
     /// none constructs a string literal. That is what makes the label test below a pin on
     /// the WIRE FORMAT rather than merely on this table — a claim worth stating precisely,
@@ -146,6 +156,8 @@ impl OracleSemanticFeature {
             Self::Apnap => "APNAP",
             Self::ModalDynamicMaxDropped => "Modal_DynamicMaxDropped",
             Self::DamageSubjectConjunction => "DamageSubjectConjunction",
+            Self::CombatHistoryRelation => "CombatHistoryRelation",
+            Self::CombatPairingRelation => "CombatPairingRelation",
         }
     }
 }
@@ -617,6 +629,8 @@ mod tests {
             (F::Apnap, "APNAP"),
             (F::ModalDynamicMaxDropped, "Modal_DynamicMaxDropped"),
             (F::DamageSubjectConjunction, "DamageSubjectConjunction"),
+            (F::CombatHistoryRelation, "CombatHistoryRelation"),
+            (F::CombatPairingRelation, "CombatPairingRelation"),
         ];
         for (feature, label) in expected {
             assert_eq!(feature.detector_label(), label);

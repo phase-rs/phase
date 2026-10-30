@@ -186,14 +186,14 @@ fn parse_replacement_line\b	crates/engine/src/parser/oracle_replacement.rs
 fn parse_inner_condition\b	crates/engine/src/parser/oracle_nom/condition.rs
 pub fn parse_duration\b	crates/engine/src/parser/oracle_nom/duration.rs
 pub fn parse_quantity_ref\b	crates/engine/src/parser/oracle_nom/quantity.rs
-pub fn parse_number\b	crates/engine/src/parser/oracle_nom/primitives.rs
+pub use crate::types::text_grammar::parse_number\b	crates/engine/src/parser/oracle_nom/primitives.rs
 pub fn parse_number_or_x\b	crates/engine/src/parser/oracle_nom/primitives.rs
-pub fn parse_color\b	crates/engine/src/parser/oracle_nom/primitives.rs
+pub use crate::types::text_grammar::parse_color\b	crates/engine/src/parser/oracle_nom/primitives.rs
 pub fn parse_mana_cost\b	crates/engine/src/parser/oracle_nom/primitives.rs
 pub fn scan_at_word_boundaries\b	crates/engine/src/parser/oracle_nom/primitives.rs
 fn oracle_err\b	crates/engine/src/parser/oracle_nom/error.rs
-pub type OracleError\b	crates/engine/src/parser/oracle_nom/error.rs
-pub type OracleResult\b	crates/engine/src/parser/oracle_nom/error.rs
+pub use crate::types::text_grammar::OracleError\b	crates/engine/src/parser/oracle_nom/error.rs
+pub use crate::types::text_grammar::OracleResult\b	crates/engine/src/parser/oracle_nom/error.rs
 pub fn nom_on_lower\b	crates/engine/src/parser/oracle_nom/bridge.rs
 EOF
 

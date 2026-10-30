@@ -147,11 +147,10 @@ pub fn validated_candidate_actions_with_probe(
 }
 
 /// CR 701.23a + CR 608.2c: A `SelectCards` answering a library search is legal
-/// exactly when it meets the three conditions the submission guard checks —
-/// cardinality, membership in the searched pool, and the printed-text selection
-/// constraint (`engine_resolution_choices.rs`, the `SearchChoice` arm). All
-/// three are decidable from the prompt without mutating the game, so
-/// `SimulationFilter` can skip its clone-and-apply probe. Mirrors
+/// exactly when it meets the submission guard's cardinality, distinct in-pool
+/// membership, and printed-text selection constraint (`engine_resolution_choices.rs`,
+/// the `SearchChoice` arm). These are decidable without mutating the game, so
+/// `SimulationFilter` can skip its clone-and-apply probe for ordinary searches. Mirrors
 /// [`structurally_valid_tap_for_convoke_payment`].
 ///
 /// This is load-bearing for a single-card search, where the enumerator issues
@@ -198,13 +197,7 @@ pub(crate) fn structurally_valid_search_selection(state: &GameState, action: &Ga
         return false;
     }
 
-    // Membership plus distinctness: a repeated id would select one card twice,
-    // which pool membership alone would not catch.
-    let mut seen = std::collections::HashSet::with_capacity(chosen.len());
-    if !chosen
-        .iter()
-        .all(|id| cards.contains(id) && seen.insert(*id))
-    {
+    if !crate::game::effects::search_library::selection_is_distinct_subset(chosen, cards) {
         return false;
     }
 
@@ -755,8 +748,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             // the submission guard / candidate generation lower bound so the
             // validated legal-action path does not drop legal short picks.
             let lower_bounded = *up_to || *allows_partial_find || constraint.permits_partial_find();
-            let exact = if lower_bounded { None } else { Some(*count) };
-            selection_mismatch(chosen, cards, exact) || (lower_bounded && chosen.len() > *count)
+            let invalid_count = if lower_bounded {
+                chosen.len() > *count
+            } else {
+                chosen.len() != *count
+            };
+            invalid_count
+                || !crate::game::effects::search_library::selection_is_distinct_subset(chosen, cards)
         }
         (
             WaitingFor::ChooseFromZoneChoice {
@@ -2031,7 +2029,8 @@ fn beneficial_mana_tap_trigger_hold(
 /// - Only `PassPriority` is available (no spells, abilities, or lands to play)
 /// - Initial upkeep/draw priority without an explicit phase stop (MTGA-style)
 /// - Player's own spell/ability is on top of the stack (MTGA-style: let your
-///   own spells resolve without pausing)
+///   own spells resolve without pausing), unless resolving it can remove a
+///   mana source the player can activate now
 ///
 /// This centralizes the "meaningful action" classification in the engine so
 /// frontends don't need to inspect game objects or card types.
@@ -2091,9 +2090,12 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // so the recommendation and the engine-side pass cannot disagree about the
     // same window. A yield or own object outranks every castability and
     // meaningful-action hold below, including the issue #4388 opponent-turn
-    // mana-window hold (MTGA parity).
+    // mana-window hold (MTGA parity). CR 117.1d + CR 605.3a: an own object
+    // that can move one of the player's activatable mana sources off the
+    // battlefield holds instead — the rungs below never count a mana activation
+    // as meaningful, so falling through would still pass that window.
     match standing_priority_pass(state, player, state.stack.back()) {
-        StandingPriorityPass::Withheld => return false,
+        StandingPriorityPass::Withheld | StandingPriorityPass::Held => return false,
         StandingPriorityPass::Granted => return true,
         StandingPriorityPass::Undecided => {}
     }
@@ -4425,6 +4427,42 @@ mod tests {
     }
 
     #[test]
+    fn search_guards_share_distinct_subset_and_count_boundaries() {
+        let mut state = GameState::new_two_player(42);
+        let choices = vec![ObjectId(1), ObjectId(2), ObjectId(3)];
+        for (up_to, allows_partial_find) in [(false, false), (true, false), (false, true)] {
+            state.waiting_for = WaitingFor::SearchChoice {
+                player: PlayerId(0),
+                library_owner: None,
+                cards: choices.clone(),
+                count: 2,
+                reveal: false,
+                up_to,
+                allows_partial_find,
+                constraint: SearchSelectionConstraint::None,
+                ordering_hint: Default::default(),
+                split: None,
+            };
+            // CR 701.23b + CR 701.23d: quality/up-to permits short finds; quantity does not.
+            for (chosen, valid) in [
+                (vec![choices[1], choices[0]], true),
+                (vec![choices[0], choices[0]], false),
+                (vec![choices[0], ObjectId(99)], false),
+                (choices.clone(), false),
+                (vec![], up_to || allows_partial_find),
+                (vec![choices[0]], up_to || allows_partial_find),
+            ] {
+                let action = GameAction::SelectCards { cards: chosen };
+                assert_eq!(
+                    super::structurally_valid_search_selection(&state, &action),
+                    valid
+                );
+                assert_eq!(cheap_reject_candidate(&state, &action), !valid);
+            }
+        }
+    }
+
+    #[test]
     fn cheap_reject_candidate_accepts_up_to_search_counts() {
         let mut state = GameState::new_two_player(42);
         let choices = vec![ObjectId(1), ObjectId(2), ObjectId(3)];
@@ -6167,6 +6205,8 @@ mod tests {
                     }),
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -7827,7 +7867,7 @@ mod tests {
             );
             let expected = match verdict {
                 StandingPriorityPass::Granted => (true, true),
-                StandingPriorityPass::Withheld => (false, false),
+                StandingPriorityPass::Withheld | StandingPriorityPass::Held => (false, false),
                 StandingPriorityPass::Undecided => (false, true),
             };
             assert_eq!(

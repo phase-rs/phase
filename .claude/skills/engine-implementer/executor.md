@@ -99,22 +99,18 @@ For frontend work, select the test files the change adds, edits, or whose subjec
 
 ### Parser preparatory gate
 
-If any modified or new file is under `crates/engine/src/parser/`, inspect added lines for string dispatch. You never stage, so a new file is untracked and absent from `git diff`; every line of it counts as added:
+If any modified or new file is under `crates/engine/src/parser/`, inspect added lines for string dispatch. You never stage, so a new file is untracked and absent from `git diff`; the helper reads untracked files too, and pools every line, tracked or untracked, against the lines deleted under `crates/engine/src/parser/`, so code moved verbatim within the parser is not reported:
 
 ```bash
-{
-  git -C "$IMPLEMENTATION_WORKTREE" diff --name-only -z "$START_SHA" -- crates/engine/src/parser/ \
-    | while IFS= read -r -d '' f; do
-    git -C "$IMPLEMENTATION_WORKTREE" diff --unified=0 "$START_SHA" -- "$f" | grep '^+' | grep -v '^+++'
-  done
-  git -C "$IMPLEMENTATION_WORKTREE" ls-files --others --exclude-standard -z -- crates/engine/src/parser/ \
-    | while IFS= read -r -d '' f; do sed 's/^/+/' "$IMPLEMENTATION_WORKTREE/$f"; done
-} | grep -vE '^\+\s*//' \
+added=$(cd "$IMPLEMENTATION_WORKTREE" && python3 scripts/lib/added-lines.py --include-untracked "$START_SHA" -- crates/engine/src/parser/) \
+  || echo "PARSER PREPARATORY GATE ERROR: added-lines.py exited $? (no verdict)"
+printf '%s\n' "$added" | cut -f3- | sed 's/^/+/' \
+  | grep -vE '^\+\s*//' \
   | grep -E '\.(contains|starts_with|ends_with|find|rfind|split|splitn|rsplit|split_once)\(' \
   | grep -v '#\[test\]' | grep -v '#\[cfg(test)\]'
 ```
 
-This scan includes untracked executor files as well as the tracked diff; it supplements `scripts/check-parser-combinators.sh`, which checks overlapping string-method dispatch patterns. This scan also includes `.rsplit()` and non-string-literal arguments. Inspect matches using the script's structural-use exemptions and `allow-noncombinator` annotation convention. Parsing dispatch is a failure; test code, comments, justified structural operations, and `TextPair` dual-string operations are not. For phrase scanning, use the shared `oracle_nom::primitives::scan_at_word_boundaries` family instead of copying a `.find(' ')` loop.
+This scan includes untracked executor files as well as the tracked diff, and leaves out lines moved within the parser; it supplements `scripts/check-parser-combinators.sh`, which checks overlapping string-method dispatch patterns. This scan also includes `.rsplit()` and non-string-literal arguments. Inspect matches using the script's structural-use exemptions and `allow-noncombinator` annotation convention. Parsing dispatch is a failure; test code, comments, justified structural operations, and `TextPair` dual-string operations are not. For phrase scanning, use the shared `oracle_nom::primitives::scan_at_word_boundaries` family instead of copying a `.find(' ')` loop.
 
 For parser changes run the non-compiling preparatory gate:
 

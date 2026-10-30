@@ -31,22 +31,27 @@ use super::oracle_ir::feature::{
 };
 use super::oracle_nom::error::OracleError;
 use super::oracle_nom::primitives::{scan_contains, scan_preceded, split_sentence_units};
+use super::oracle_target::{
+    parse_block_pairing_clause, parse_source_blocked_history_clause, BlockPairingForm,
+    CombatRelationSubjectWord,
+};
 use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission,
-    ChooseFromZoneConstraint, CoinFlipRun, Comparator, ContinuousModification,
-    CopyRetargetPermission, DamageModification, DelayedTriggerCondition, Duration, Effect,
-    FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope, ParsedCondition,
-    PerPlayerScope, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, RestrictionExpiry, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, UnlessPayScaling, ZoneOwner,
+    ChooseFromZoneConstraint, CoinFlipRun, CombatHistoryScope, CombatRelation,
+    CombatRelationSubject, Comparator, ContinuousModification, CopyRetargetPermission,
+    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, ManaProduction,
+    ModalSelectionConstraint, OpponentMayScope, ParsedCondition, PerPlayerScope, PlayerFilter,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    RestrictionExpiry, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
+    ZoneOwner,
 };
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
 };
-use crate::types::game_state::RetargetScope;
+use crate::types::game_state_kinds::RetargetScope;
 use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::{ManaCost, ManaExpiry, ManaSpellGrant};
 use crate::types::replacements::ReplacementEvent;
@@ -58,7 +63,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_until, take_while1},
     character::complete::{digit1, multispace0},
-    combinator::{eof, opt, value},
+    combinator::{eof, map, opt, value},
     Parser,
 };
 use std::ops::ControlFlow;
@@ -223,6 +228,8 @@ pub(crate) fn check_swallowed_clauses(
         detect_condition_unless(&cleaned, fragment, &evidence, &mut found);
         detect_condition_as_long_as(&cleaned, fragment, &evidence, &scoped, &mut found);
         detect_duration_this_turn(&cleaned, fragment, &evidence, &mut found);
+        detect_combat_history_relation(&cleaned, fragment, &evidence, &mut found);
+        detect_combat_pairing_relation(&cleaned, fragment, &evidence, &mut found);
         detect_duration_next_turn(&cleaned, fragment, &evidence, &mut found);
         detect_optional_may_have(&cleaned, fragment, &evidence, &mut found);
         detect_apnap(&cleaned, fragment, &scoped, &mut found);
@@ -1519,11 +1526,8 @@ fn def_tree_has_cast_graveyard_redirect_rider(def: &AbilityDefinition) -> bool {
 /// decline link ("If you don't, put it into your hand") is not a rider
 /// (CR 608.2c), so it suppresses nothing.
 fn def_is_graveyard_redirect_to_parent(def: &AbilityDefinition) -> bool {
-    crate::game::effects::cast_from_zone::graveyard_destination_rider(
-        &def.effect,
-        def.condition.as_ref(),
-    )
-    .is_some()
+    crate::types::ability::graveyard_destination_rider(&def.effect, def.condition.as_ref())
+        .is_some()
         || def
             .sub_ability
             .as_deref()
@@ -3599,7 +3603,7 @@ fn co_scoped_parent_target_consumer<'a>(
     pop: &PlayerFilter,
 ) -> Option<&'a AbilityDefinition> {
     if def.player_scope.as_ref() != Some(pop)
-        || !crate::game::effects::effect_introduces_per_iteration_referent(&def.effect)
+        || !crate::types::ability::effect_introduces_per_iteration_referent(&def.effect)
     {
         return None;
     }
@@ -4324,7 +4328,7 @@ fn def_is_delivered_gains_rider_carrier(
             // chain, so a rider stored under an unrelated instruction is not
             // delivered and must not exempt the sentence.
             let transparent = matches!(&*def.effect, Effect::AddPendingETBCounters { .. })
-                || crate::game::effects::cast_from_zone::graveyard_destination_rider(
+                || crate::types::ability::graveyard_destination_rider(
                     &def.effect,
                     def.condition.as_ref(),
                 )
@@ -6269,6 +6273,139 @@ fn detect_damage_subject_conjunction(
     ));
 }
 
+// ── Detector Q: CombatHistoryRelation ───────────────────────────────────
+
+/// CR 509.1g + CR 608.2i: "creatures it blocked this combat" / "all creatures it
+/// blocked this turn" (Cathedral Membrane, Defiant Vanguard) is a look-back
+/// restriction on the affected object set. Every clause the shared recognizer
+/// `parse_source_blocked_history_clause` finds must surface as a
+/// `CombatRelation::BlockedBySubject` filter with the same window; otherwise the
+/// relative clause was dropped and the mass effect silently widened to every
+/// creature (#9179). The duration-ownership guard in `strip_trailing_duration`
+/// keeps the window from reappearing as a spurious effect duration, so without
+/// this detector a declined clause would leave no trace at all.
+fn detect_combat_history_relation(
+    cleaned: &str,
+    original: &str,
+    evidence: &UnitEvidence,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
+    let represented = |scope: CombatHistoryScope| {
+        evidence.any::<FilterProp>(|prop| {
+            matches!(
+                prop,
+                FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockedBySubject { scope: found },
+                    ..
+                } if *found == Some(scope)
+            )
+        })
+    };
+    let mut remaining = cleaned;
+    let mut swallowed = false;
+    while let Some((_, (_, scope), rest)) =
+        scan_preceded(remaining, parse_source_blocked_history_clause)
+    {
+        swallowed |= !represented(scope);
+        remaining = rest;
+    }
+    if swallowed {
+        diagnostics.push(OracleDiagnostic::swallowed_clause(
+            OracleSemanticFeature::CombatHistoryRelation.detector_label(),
+            truncate(original, 140),
+            None,
+        ));
+    }
+}
+
+// ── Detector R: CombatPairingRelation ───────────────────────────────────
+
+/// CR 509.1g + CR 509.1h: "creatures blocking or blocked by it" / "creatures
+/// blocked by ~" (Abu Ja'far, Wall of Nets, Kjeldoran Frostbeast) is a
+/// current-block-pairing restriction on the affected object set. Every clause
+/// the shared recognizer `parse_block_pairing_clause` finds must surface as the
+/// `CombatRelation` its form denotes; otherwise the relative clause was dropped
+/// and the effect silently widened to every creature of the type. Verb phrases
+/// ("becomes blocked by ~", "being blocked by") are consumed whole and skipped:
+/// they are trigger events and conditions, not postnominal restrictions.
+///
+/// Each clause needs its own filter: clauses are matched to filters by form and
+/// subject, and a line with more clauses of one kind than filters of that kind
+/// is reported, so a represented "blocking or blocked by this creature" can't
+/// vouch for an unbound "blocking or blocked by it" on the same line.
+fn detect_combat_pairing_relation(
+    cleaned: &str,
+    original: &str,
+    evidence: &UnitEvidence,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
+    let represented = |form: BlockPairingForm, subject: CombatRelationSubject| {
+        evidence.count::<FilterProp>(|prop| match (form, prop) {
+            (
+                BlockPairingForm::BlockingOrBlockedBy,
+                FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockingOrBlockedBy,
+                    subject: found,
+                },
+            )
+            | (
+                BlockPairingForm::BlockedBy,
+                FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockedBySubject { scope: None },
+                    subject: found,
+                },
+            ) => *found == subject,
+            _ => false,
+        })
+    };
+    let mut clauses: Vec<(BlockPairingForm, CombatRelationSubject)> = Vec::new();
+    let mut remaining = cleaned;
+    while let Some((_, clause, rest)) = scan_preceded(remaining, |input| {
+        alt((
+            value(
+                None,
+                (
+                    alt((tag("becomes "), tag("become "), tag("being "), tag("be "))),
+                    tag("blocked by "),
+                ),
+            ),
+            map(parse_block_pairing_clause, |(form, word)| {
+                Some((form, pairing_subject_of(word)))
+            }),
+        ))
+        .parse(input)
+    }) {
+        clauses.extend(clause);
+        remaining = rest;
+    }
+    let swallowed = clauses.iter().any(|&(form, subject)| {
+        let wanted = clauses
+            .iter()
+            .filter(|&&clause| clause == (form, subject))
+            .count();
+        represented(form, subject) < wanted
+    });
+    if swallowed {
+        diagnostics.push(OracleDiagnostic::swallowed_clause(
+            OracleSemanticFeature::CombatPairingRelation.detector_label(),
+            truncate(original, 140),
+            None,
+        ));
+    }
+}
+
+/// The `CombatRelationSubject` a pairing clause's subject denotes when it is
+/// represented: the source for "it" / "~" / "this creature", the parent
+/// target for "target creature".
+fn pairing_subject_of(word: CombatRelationSubjectWord) -> CombatRelationSubject {
+    match word {
+        CombatRelationSubjectWord::Pronoun | CombatRelationSubjectWord::SelfName => {
+            CombatRelationSubject::Source
+        }
+        CombatRelationSubjectWord::TargetCreature => CombatRelationSubject::ParentTarget,
+    }
+}
+
 // ── Cascade-vs-AST structural diff (option 3) ──────────────────────────
 //
 // Complementary to the oracle-text-scanning detectors above. Where those
@@ -6849,10 +6986,12 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         );
     }
 
-    /// The nine detector labels that pass `None` and are measured present in the phase-base
-    /// corpus. `ActivateLimit` and `ModalDynamicMaxDropped` are deliberately absent: both
-    /// have ZERO corpus warnings at base, so no fixture can reach them. They are bought by
-    /// the compiler instead — the constructor's new parameter makes omission a compile error.
+    /// The ten detector labels that pass `None` and are measured present in the phase-base
+    /// corpus. `ActivateLimit`, `ModalDynamicMaxDropped` and `CombatHistoryRelation` are
+    /// deliberately absent: none has a corpus warning (`CombatHistoryRelation`'s clause is
+    /// printed on exactly two cards, both represented since #9179), so no corpus fixture
+    /// can reach them. They are bought by the compiler instead — the constructor's new
+    /// parameter makes omission a compile error.
     ///
     /// "Non-phrase" here means "no gap axis wired at the push site", NOT "no phrase is
     /// nameable". `Replacement` is in this set and its axis names phrases perfectly well —
@@ -6861,6 +7000,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     const EXPECTED_NON_PHRASE: &[&str] = &[
         "APNAP",
         "ActivateOnlyDuring",
+        "CombatPairingRelation",
         "DamageSubjectConjunction",
         "Duration_NextTurn",
         "Duration_ThisTurn",
@@ -6881,7 +7021,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// A detector with no gap axis wired at its push site passes `None`.
     ///
     /// The reach guard is a SET EQUALITY, not a count and not `!is_empty()`. An
-    /// `assert!(!observed.is_empty())` here would be satisfied by eight of the nine
+    /// `assert!(!observed.is_empty())` here would be satisfied by nine of the ten
     /// ceasing to fire, which is the "guarded assertion satisfied by the guarded paths
     /// ceasing to fire" shape this suite has shipped before. This is red the moment any
     /// one of them stops.
@@ -6894,7 +7034,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         // The `Duration_UntilEndOfTurn` fixture is Savage Punch, not the former Dragon Egg
         // fixture: Dragon Egg's token grant now carries its duration in the AST (CR 602.1a
         // + CR 611.2a), so it no longer fires this detector and cannot reach it. The set
-        // below stays at nine — a detector that stops firing here needs a different corpus
+        // below stays at ten — a detector that stops firing here needs a different corpus
         // card, never a shrunken set.
         let fixtures: &[(&str, &str, &[&str])] = &[
             ("Protection Racket", "At the beginning of your upkeep, repeat the following process for each opponent in turn order. Reveal the top card of your library. That player may pay life equal to that card's mana value. If they do, exile that card. Otherwise, put it into your hand.", &["Enchantment"]),
@@ -6905,6 +7045,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             ("Savage Punch", "Target creature you control fights target creature you don't control.\nFerocious — The creature you control gets +2/+2 until end of turn before it fights if you control a creature with power 4 or greater.", &["Sorcery"]),
             ("The Legend of Yangchen", "(As this Saga enters and after your draw step, add a lore counter.)\nI — Starting with you, each player chooses up to one permanent with mana value 3 or greater from among permanents your opponents control. Exile those permanents.\nII — You may have target opponent draw three cards. If you do, draw three cards.\nIII — Exile this Saga, then return it to the battlefield transformed under your control.", &["Enchantment"]),
             ("Ballot Broker", "While voting, you may vote an additional time. (The votes can be for different choices or for the same choice.)", &["Creature"]),
+            ("Vortex Elemental", "{U}: Put this creature and each creature blocking or blocked by it on top of their owners' libraries, then those players shuffle.\n{3}{U}{U}: Target creature blocks this creature this turn if able.", &["Creature"]),
             ("Mikey & Don, Party Planners", "Ward {2}\nYou may look at the top card of your library any time.\nYou may play lands and cast Mutant, Ninja, or Turtle spells from the top of your library. If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it.", &["Creature"]),
         ];
 
@@ -6934,11 +7075,11 @@ If you sang a song the whole time you were searching and shuffling, you may unta
                 .iter()
                 .map(|d| (*d).to_string())
                 .collect::<BTreeSet<_>>(),
-            "observed non-phrase detector set differs from the corpus-measured nine; \
+            "observed non-phrase detector set differs from the corpus-measured ten; \
              observed = {observed:?}"
         );
 
-        // A blanket `swallowed_clause_gap(...)` applied at all sixteen push sites turns
+        // A blanket `swallowed_clause_gap(...)` applied at all eighteen push sites turns
         // this red.
         assert!(
             gapful.is_empty(),
@@ -14193,10 +14334,14 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         assert!(!any_ability_has_unimplemented(&parsed));
         let etb = parsed.triggers[0].execute.as_deref().expect("Valki ETB");
         assert_eq!(etb.player_scope, Some(PlayerFilter::Opponent));
-        assert!(!crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&etb.effect));
+        assert!(!crate::types::ability::effect_parks_reveal_card_choice(
+            &etb.effect
+        ));
         let choice = etb.sub_ability.as_deref().expect("choice step");
         assert_eq!(choice.player_scope, Some(PlayerFilter::Opponent));
-        assert!(crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&choice.effect));
+        assert!(crate::types::ability::effect_parks_reveal_card_choice(
+            &choice.effect
+        ));
         let sub = choice.sub_ability.as_deref().expect("exile consumer");
         assert_eq!(sub.player_scope, Some(PlayerFilter::Opponent));
         assert_eq!(
@@ -14851,6 +14996,438 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             !has_swallowed_detector(&parsed, "Optional_YouMay"),
             "{:?}",
             parsed.parse_warnings
+        );
+    }
+
+    // ── Detector Q: CombatHistoryRelation ───────────────────────────────
+
+    /// Does the parse carry a `CombatRelation::BlockedBySubject` filter anywhere?
+    fn parse_has_blocked_history_filter(parsed: &crate::parser::oracle::ParsedAbilities) -> bool {
+        use crate::types::ability::CombatRelation;
+        UnitEvidence::of(parsed).any::<FilterProp>(|prop| {
+            matches!(
+                prop,
+                FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockedBySubject { scope: Some(_) },
+                    ..
+                }
+            )
+        })
+    }
+
+    /// Does the parse carry `effect` with an unrestricted creature filter — the
+    /// widened mass effect a declined clause leaves behind?
+    fn parse_has_bare_creature_mass_effect(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+        is_mass_effect: fn(&Effect) -> Option<&TargetFilter>,
+    ) -> bool {
+        let bare = TargetFilter::Typed(TypedFilter::creature());
+        UnitEvidence::of(parsed)
+            .any::<Effect>(|effect| is_mass_effect(effect).is_some_and(|target| *target == bare))
+    }
+
+    fn destroy_all_target(effect: &Effect) -> Option<&TargetFilter> {
+        match effect {
+            Effect::DestroyAll { target, .. } => Some(target),
+            _ => None,
+        }
+    }
+
+    fn damage_all_target(effect: &Effect) -> Option<&TargetFilter> {
+        match effect {
+            Effect::DamageAll { target, .. } => Some(target),
+            _ => None,
+        }
+    }
+
+    /// CR 509.1g + CR 608.2i: every shape whose bare "it" has no `SelfRef`
+    /// antecedent declines the blocked-history clause and must be REPORTED, in
+    /// both windows: a typed trigger subject in an anaphoric compound (a), a
+    /// spell's chosen target (b), a chain-pinned target (c), a typed subject in a
+    /// delayed body (d), and a typed dies-trigger subject (e). Each row pairs the
+    /// negative (no `BlockedBySubject` in the parse) with its reach guard — the
+    /// mass effect parsed with its unrestricted creature filter — and with the
+    /// detector firing, which itself proves the unit was not skipped as
+    /// unimplemented.
+    #[test]
+    fn combat_history_relation_detector_reports_every_declined_clause() {
+        // (a) Typed trigger subject, anaphoric compound: the primary acted on the
+        // triggering creature, so the continuation gets no `SelfRef` pin.
+        let parsed = parse_named(
+            "Whenever a creature you control blocks, destroy it and all creatures it blocked this turn.",
+            "Test Card",
+            &["Enchantment"],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("reach guard: the trigger body parsed");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::Destroy {
+                    target: TargetFilter::TriggeringSource,
+                    ..
+                }
+            ),
+            "reach guard: primary must destroy the triggering creature, got {:?}",
+            execute.effect
+        );
+        assert!(
+            execute
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| destroy_all_target(&sub.effect).is_some()),
+            "reach guard: the DestroyAll continuation must exist"
+        );
+
+        // (b) A spell's chosen target: the continuation's "it" names a target,
+        // which has no sound combat-relation subject.
+        let spell = parse_named(
+            "Destroy target creature and all creatures it blocked this turn.",
+            "Test Card",
+            &["Instant"],
+        );
+        let primary = &spell.abilities[0];
+        assert!(
+            matches!(
+                &*primary.effect,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "reach guard: primary must destroy the chosen target, got {:?}",
+            primary.effect
+        );
+        assert!(
+            primary
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| destroy_all_target(&sub.effect).is_some()),
+            "reach guard: the DestroyAll continuation must exist"
+        );
+
+        for (label, parsed, is_mass_effect) in [
+            ("(a) typed compound", parsed, destroy_all_target as fn(&Effect) -> Option<&TargetFilter>),
+            ("(b) spell target", spell, destroy_all_target),
+            (
+                "(c) chain-pinned target",
+                parse_named(
+                    "Whenever this creature blocks, tap target creature. Destroy all creatures it blocked this turn.",
+                    "Test Card",
+                    &["Creature"],
+                ),
+                destroy_all_target,
+            ),
+            (
+                "(d) typed delayed body",
+                parse_named(
+                    "Whenever a creature you control blocks, at end of combat, destroy all creatures it blocked this turn.",
+                    "Test Card",
+                    &["Enchantment"],
+                ),
+                destroy_all_target,
+            ),
+            (
+                "(e) typed dies subject, this combat",
+                parse_named(
+                    "Whenever a creature you control dies, it deals 2 damage to each creature it blocked this combat.",
+                    "Test Card",
+                    &["Enchantment"],
+                ),
+                damage_all_target,
+            ),
+        ] {
+            assert!(
+                parse_has_bare_creature_mass_effect(&parsed, is_mass_effect),
+                "{label}: reach guard — the mass effect must parse with its bare creature filter"
+            );
+            assert!(
+                !parse_has_blocked_history_filter(&parsed),
+                "{label}: a non-source antecedent must not bind the clause"
+            );
+            assert!(
+                has_swallowed_detector(&parsed, "CombatHistoryRelation"),
+                "{label}: the declined clause must be reported; warnings = {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// The detector is silent when the clause is represented. For the two printed
+    /// cards the silence is paired with a reach guard proving the shared
+    /// recognizer finds the clause in the text and the parse carries the filter,
+    /// so silence is not vacuous. The unary "that blocked this turn" (Hezrou
+    /// style) has no source anchor and is outside the detector's grammar.
+    #[test]
+    fn combat_history_relation_detector_is_silent_when_represented() {
+        // MTGJSON keywords are passed as production does: `parse_named`'s empty list
+        // would leave Membrane's bare "Defender" line `Unimplemented`.
+        for (name, keywords, types, text) in [
+            (
+                "Cathedral Membrane",
+                &["Defender"][..],
+                &["Artifact", "Creature"][..],
+                "({W/P} can be paid with either {W} or 2 life.)\nDefender\nWhen this creature dies during combat, it deals 6 damage to each creature it blocked this combat.",
+            ),
+            (
+                "Defiant Vanguard",
+                &[][..],
+                &["Creature"][..],
+                "When this creature blocks, at end of combat, destroy it and all creatures it blocked this turn.\n{5}, {T}: Search your library for a Rebel permanent card with mana value 4 or less, put it onto the battlefield, then shuffle.",
+            ),
+        ] {
+            let cleaned = text.to_ascii_lowercase();
+            assert!(
+                crate::parser::oracle_nom::primitives::scan_preceded(
+                    &cleaned,
+                    crate::parser::oracle_target::parse_source_blocked_history_clause,
+                )
+                .is_some(),
+                "{name}: reach guard — the recognizer must find the clause"
+            );
+            let parsed = parse_oracle_text(
+                text,
+                name,
+                &keywords.iter().map(|kw| (*kw).to_string()).collect::<Vec<_>>(),
+                &types.iter().map(|ty| (*ty).to_string()).collect::<Vec<_>>(),
+                &[],
+            );
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: reach guard — an unimplemented unit is skipped before the detector runs"
+            );
+            assert!(
+                parse_has_blocked_history_filter(&parsed),
+                "{name}: reach guard — the clause must be represented"
+            );
+            assert!(
+                !has_swallowed_detector(&parsed, "CombatHistoryRelation"),
+                "{name}: {:?}",
+                parsed.parse_warnings
+            );
+        }
+
+        let unary = parse(
+            "At end of combat, destroy each creature that blocked this turn.",
+            &["Enchantment"],
+        );
+        assert!(
+            !any_ability_has_unimplemented(&unary),
+            "unary: reach guard — an unimplemented unit is skipped before the detector runs"
+        );
+        assert!(
+            UnitEvidence::of(&unary).any::<Effect>(|effect| destroy_all_target(effect).is_some()),
+            "unary: reach guard — the DestroyAll must parse"
+        );
+        assert!(
+            !has_swallowed_detector(&unary, "CombatHistoryRelation"),
+            "{:?}",
+            unary.parse_warnings
+        );
+    }
+
+    // ── Detector R: CombatPairingRelation ──────────────────────────────
+
+    /// Does the parse carry a current-block-pairing `CombatRelation` anywhere?
+    fn parse_has_pairing_filter(parsed: &crate::parser::oracle::ParsedAbilities) -> bool {
+        use crate::types::ability::CombatRelation;
+        UnitEvidence::of(parsed).any::<FilterProp>(|prop| {
+            matches!(
+                prop,
+                FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockingOrBlockedBy
+                        | CombatRelation::BlockedBySubject { scope: None },
+                    ..
+                }
+            )
+        })
+    }
+
+    fn parse_card(
+        name: &str,
+        keywords: &[&str],
+        types: &[&str],
+        text: &str,
+    ) -> crate::parser::oracle::ParsedAbilities {
+        parse_oracle_text(
+            text,
+            name,
+            &keywords
+                .iter()
+                .map(|kw| (*kw).to_string())
+                .collect::<Vec<_>>(),
+            &types.iter().map(|ty| (*ty).to_string()).collect::<Vec<_>>(),
+            &[],
+        )
+    }
+
+    /// CR 509.1g + CR 509.1h: a pairing clause whose bare "it" has no `SelfRef`
+    /// antecedent (Vortex Elemental's compound "this creature and each creature
+    /// blocking or blocked by it"; Steadfast Armasaur's activated "target
+    /// creature blocking or blocked by it") is left unconsumed and REPORTED. The
+    /// detector firing proves the unit was not skipped as unimplemented; the
+    /// negative (no pairing filter) is paired with it.
+    #[test]
+    fn combat_pairing_relation_detector_reports_an_unbound_clause() {
+        for (name, keywords, text) in [
+            (
+                "Vortex Elemental",
+                &[][..],
+                "{U}: Put this creature and each creature blocking or blocked by it on top of their owners' libraries, then those players shuffle.\n{3}{U}{U}: Target creature blocks this creature this turn if able.",
+            ),
+            (
+                "Steadfast Armasaur",
+                &["Vigilance"][..],
+                "Vigilance\n{1}{W}, {T}: This creature deals damage equal to its toughness to target creature blocking or blocked by it.",
+            ),
+        ] {
+            let parsed = parse_card(name, keywords, &["Creature"], text);
+            assert!(
+                has_swallowed_detector(&parsed, "CombatPairingRelation"),
+                "{name}: the unbound clause must be reported; warnings = {:?}",
+                parsed.parse_warnings
+            );
+            assert!(
+                !parse_has_pairing_filter(&parsed),
+                "{name}: an unbound pronoun must not produce a pairing filter"
+            );
+        }
+    }
+
+    /// The detector is silent when the clause is represented — the newly parsed
+    /// pronoun (Abu Ja'far) and passive (Wall of Nets, Whip Vine) forms and the
+    /// already-parsed self-name and target forms (Kjeldoran Frostbeast, Trial).
+    /// Each silence is paired with reach guards: the recognizer finds the clause,
+    /// no unit is unimplemented, and the parse carries the pairing filter. A verb
+    /// phrase ("becomes blocked by this creature" — Mirror Shield) is not a
+    /// postnominal clause and is skipped.
+    #[test]
+    fn combat_pairing_relation_detector_is_silent_when_represented() {
+        for (name, keywords, types, text) in [
+            (
+                "Abu Ja'far",
+                &[][..],
+                &["Creature"][..],
+                "When this creature dies, destroy all creatures blocking or blocked by it. They can't be regenerated.",
+            ),
+            (
+                "Wall of Nets",
+                &["Defender"][..],
+                &["Creature"][..],
+                "Defender (This creature can't attack.)\nAt end of combat, exile all creatures blocked by this creature.\nWhen this creature leaves the battlefield, return all cards exiled with it to the battlefield under their owners' control.",
+            ),
+            (
+                "Whip Vine",
+                &["Defender", "Reach"][..],
+                &["Creature"][..],
+                "Defender; reach (This creature can block creatures with flying.)\nYou may choose not to untap this creature during your untap step.\n{T}: Tap target creature with flying blocked by this creature. That creature doesn't untap during its controller's untap step for as long as this creature remains tapped.",
+            ),
+            (
+                "Kjeldoran Frostbeast",
+                &[][..],
+                &["Creature"][..],
+                "At end of combat, destroy all creatures blocking or blocked by this creature.",
+            ),
+            (
+                "Trial",
+                &[][..],
+                &["Instant"][..],
+                "Return all creatures blocking or blocked by target creature to their owner's hand.",
+            ),
+        ] {
+            let cleaned = text.to_ascii_lowercase();
+            assert!(
+                crate::parser::oracle_nom::primitives::scan_preceded(
+                    &cleaned,
+                    crate::parser::oracle_target::parse_block_pairing_clause,
+                )
+                .is_some(),
+                "{name}: reach guard — the recognizer must find the clause"
+            );
+            let parsed = parse_card(name, keywords, types, text);
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: reach guard — an unimplemented unit is skipped before the detector runs"
+            );
+            assert!(
+                parse_has_pairing_filter(&parsed),
+                "{name}: reach guard — the clause must be represented"
+            );
+            assert!(
+                !has_swallowed_detector(&parsed, "CombatPairingRelation"),
+                "{name}: {:?}",
+                parsed.parse_warnings
+            );
+        }
+
+        {
+            let (name, keywords, types, text) = (
+                "Mirror Shield",
+                &["Equip"][..],
+                &["Artifact"][..],
+                "Equipped creature gets +0/+2 and has hexproof and \"Whenever a creature with deathtouch blocks or becomes blocked by this creature, destroy that creature.\"\nEquip {2} ({2}: Attach to target creature you control. Equip only as a sorcery.)",
+            );
+            // Reach guard: the bare recognizer DOES match inside the verb phrase,
+            // so only the verb skip keeps the detector silent. The audit reads the
+            // self-reference-normalized text, where the card name is "~".
+            let cleaned = text.replace(name, "~").to_ascii_lowercase();
+            assert!(
+                crate::parser::oracle_nom::primitives::scan_preceded(
+                    &cleaned,
+                    crate::parser::oracle_target::parse_block_pairing_clause,
+                )
+                .is_some(),
+                "{name}: reach guard — the bare recognizer must match inside the verb phrase"
+            );
+            let parsed = parse_card(name, keywords, types, text);
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: reach guard — an unimplemented unit is skipped before the detector runs"
+            );
+            assert!(
+                !has_swallowed_detector(&parsed, "CombatPairingRelation"),
+                "{name}: a verb phrase is not a pairing clause; {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// Each pairing clause needs its own filter, matched by form and subject: a
+    /// represented "blocking or blocked by this creature" does not vouch for an
+    /// unbound "blocking or blocked by it" on the same line, and a parent-target
+    /// filter does not represent a source clause.
+    #[test]
+    fn combat_pairing_relation_detector_matches_each_clause_to_its_own_filter() {
+        use crate::types::ability::{CombatRelation, CombatRelationSubject};
+        let pairing = |subject| {
+            serde_json::to_string(&FilterProp::CombatRelation {
+                relation: CombatRelation::BlockingOrBlockedBy,
+                subject,
+            })
+            .expect("a FilterProp serializes")
+        };
+        let source = pairing(CombatRelationSubject::Source);
+        let target = pairing(CombatRelationSubject::ParentTarget);
+        let text = "destroy all creatures blocking or blocked by this creature and all creatures blocking or blocked by it.";
+        let reports = |props: &[&str]| {
+            let evidence = UnitEvidence::from_json_for_test(&format!("[{}]", props.join(",")));
+            let mut diagnostics = Vec::new();
+            super::detect_combat_pairing_relation(text, text, &evidence, &mut diagnostics);
+            !diagnostics.is_empty()
+        };
+        assert!(
+            reports(&[&source]),
+            "two source clauses, one filter: the second clause is unrepresented"
+        );
+        assert!(
+            !reports(&[&source, &source]),
+            "one filter per clause: nothing is swallowed"
+        );
+        assert!(
+            reports(&[&source, &target]),
+            "a parent-target filter does not represent a source clause"
         );
     }
 }

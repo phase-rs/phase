@@ -20,26 +20,44 @@
 # Existing offenders are frozen in amber — this check flags only *newly added*
 # offending lines in the diff (same mechanism as check-parser-combinators.sh and
 # check-engine-authorities.sh), so it can land before the back-catalogue is
-# migrated.
+# migrated. A line moved within the gate's view (its scope minus SCOPE_EXCLUDES)
+# is not added; the added-line set comes from scripts/lib/added-lines.py.
 #
 # Exempt: a flagged line (or the line immediately above it) carrying
 #     // allow-full-card-db: <reason>
-# Allowed files (legitimately reference the full-export path): see ALLOWED_FILES.
+# Allowed files (legitimately reference the full-export path): see SCOPE_EXCLUDES.
 #
 # Usage:
 #   scripts/check-test-card-data-load.sh [base-ref]
 #
 # Default base-ref is the merge-base with origin/main. In CI, pass the PR target
 # branch's SHA explicitly.
+#
+# Exit status:
+#   0  no newly added load found.
+#   1  a newly added load found.
+#   1  the added-line helper's own test suite (scripts/lib/added_lines_tests.py)
+#      failed; no verdict.
+#   2  the added-line helper (scripts/lib/added-lines.py) could not read the
+#      diff; no verdict.
 
 set -euo pipefail
+# shellcheck source=scripts/lib/added-lines.sh
+. "$(dirname "$0")/lib/added-lines.sh"
 
 BASE="${1:-$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)}"
 
 # Test code lives both inline (`#[cfg(test)]` in crates/engine/src) and in
-# crates/engine/tests. src/bin/* are CLI tools that load the real export by
-# design and are allow-listed below rather than excluded by scope.
-SCOPE='crates/engine'
+# crates/engine/tests.
+SCOPE=(crates/engine)
+# The canonical loader (support.rs) names the path on purpose; the CLI bins load
+# the real export by design. These files are outside the gate's view, so a line
+# moved out of one into a checked file is checked.
+SCOPE_EXCLUDES=(
+    ':(exclude)**/*.md'
+    ':(exclude)crates/engine/tests/integration/support.rs'
+    ':(exclude)crates/engine/src/bin'
+)
 
 # Pre-commit hook mode: only check staged changes (mirrors the sibling gates)
 # so another agent's unstaged work isn't flagged.
@@ -52,9 +70,6 @@ fi
 # references in doc comments ("verified against client/public/card-data.json")
 # are fine and are filtered out by the comment check below.
 FORBIDDEN='client/public/card-data\.json'
-# The canonical loader (support.rs) names the path on purpose; the CLI bins load
-# the real export by design.
-ALLOWED_FILES='crates/engine/tests/integration/support\.rs|crates/engine/src/bin/'
 
 FAIL=0
 report=""
@@ -65,30 +80,14 @@ strip_comment_lines() {
     grep -Ev '^[[:space:]]*(//|\*|/\*)' || true
 }
 
-# Emit "<new-file-lineno>\t<content>" for each ADDED line in the diff for $file.
-# The line number is parsed from the hunk header (@@ -a,b +c,d @@): with
-# --unified=0 only '+' lines advance the new-file counter, so the running line
-# number is exact. This replaces the old text-match-back-into-file approach,
-# which mis-attributed duplicate lines (always matched the first occurrence).
-added_lines_with_numbers() {
-    local file="$1"
-    git diff $DIFF_MODE --unified=0 "$BASE" -- "$file" | awk '
-        /^@@/        { match($0, /\+[0-9]+/); ln = substr($0, RSTART + 1, RLENGTH - 1) + 0; next }
-        /^\+\+\+/    { next }                       # skip the +++ b/file header
-        /^\+/        { print ln "\t" substr($0, 2); ln++; next }
-    '
-}
-
-files=$(git diff $DIFF_MODE --name-only "$BASE" -- "$SCOPE" ':(exclude)**/*.md' 2>/dev/null || true)
+files=$(git diff $DIFF_MODE --name-only "$BASE" -- "${SCOPE[@]}" "${SCOPE_EXCLUDES[@]}" 2>/dev/null || true)
 if [ -z "$files" ]; then
     exit 0
 fi
+added_lines_load $DIFF_MODE "$BASE" -- "${SCOPE[@]}" "${SCOPE_EXCLUDES[@]}"
 
 while IFS= read -r file; do
     [ -f "$file" ] || continue
-    if echo "$file" | grep -qE "$ALLOWED_FILES"; then
-        continue
-    fi
 
     while IFS=$'\t' read -r ln content; do
         [ -n "$ln" ] || continue
@@ -104,7 +103,7 @@ while IFS= read -r file; do
         report="${report}
   ${file}:${ln}:${content}"
         FAIL=1
-    done <<< "$(added_lines_with_numbers "$file")"
+    done <<< "$(added_lines_for "$file")"
 done <<< "$files"
 
 if [ "$FAIL" -eq 1 ]; then

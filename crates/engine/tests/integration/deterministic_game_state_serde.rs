@@ -5,6 +5,7 @@ use engine::game::combat::{
     CombatRequirement, CombatState, DamageAssignment, DamageTarget,
 };
 use engine::game::dungeon::DungeonProgress;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::game_object::{BackFaceData, GameObject, ProtectionStartSnapshot};
 use engine::game::printed_cards::intrinsic_copiable_values;
 use engine::types::ability::{
@@ -1721,6 +1722,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 source_id: ObjectId(11),
                 controller: PlayerId(0),
                 enters_attacking: false,
+                attack_destination: engine::types::ability::EntryAttackDestination::AnyDefender,
                 attach_to: None,
                 sacrifice_at: None,
                 remaining_count: 1,
@@ -1741,6 +1743,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 source_id: ObjectId(22),
                 controller: PlayerId(1),
                 enters_attacking: false,
+                attack_destination: engine::types::ability::EntryAttackDestination::AnyDefender,
                 attach_to: None,
                 sacrifice_at: None,
                 remaining_count: 2,

@@ -31,10 +31,11 @@
 //! Oracle text is quoted verbatim from Scryfall (`client/public/card-data.json`).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::types::ability::{CastingPermission, TargetRef};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{ExileLink, ExileLinkKind, WaitingFor};
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -47,11 +48,13 @@ const FIGHT_RIGGING: &str = "Hideaway 5 (When this enchantment enters, look at t
 /// `advance_until_stack_empty` (which drains ordinary priority,
 /// `OrderTriggers`, and library-bottom `EffectZoneChoice` prompts) against a
 /// manual `OptionalEffectChoice` answer, since the driver has no generic
-/// "accept every optional offer" policy.
+/// "accept every optional offer" policy. Returns `hidden`'s zone right after
+/// the optional offer was accepted, if it was offered.
 fn resolve_begin_combat_trigger(
     runner: &mut GameRunner,
     counter_target: engine::types::identifiers::ObjectId,
-) {
+    hidden: engine::types::identifiers::ObjectId,
+) -> Option<Zone> {
     if matches!(
         runner.state().waiting_for,
         WaitingFor::TriggerTargetSelection { .. }
@@ -63,6 +66,7 @@ fn resolve_begin_combat_trigger(
             .expect("select the +1/+1 counter's target creature");
     }
 
+    let mut zone_after_accept = None;
     for _ in 0..10 {
         if matches!(
             runner.state().waiting_for,
@@ -71,6 +75,7 @@ fn resolve_begin_combat_trigger(
             runner
                 .act(GameAction::DecideOptionalEffect { accept: true })
                 .expect("accept the optional free play of the hidden card");
+            zone_after_accept = runner.state().objects.get(&hidden).map(|o| o.zone);
             continue;
         }
         if runner.state().stack.is_empty() {
@@ -78,6 +83,7 @@ fn resolve_begin_combat_trigger(
         }
         runner.advance_until_stack_empty();
     }
+    zone_after_accept
 }
 
 fn p1p1_counters(runner: &GameRunner, id: engine::types::identifiers::ObjectId) -> u32 {
@@ -93,12 +99,14 @@ fn p1p1_counters(runner: &GameRunner, id: engine::types::identifiers::ObjectId) 
 }
 
 /// DISCRIMINATOR (condition met): a controlled 7-power creature satisfies
-/// "you control a creature with power 7 or greater", so the granting
-/// sub-ability offers the hidden card. Pre-fix this offer landed on the
-/// TARGETED creature (Squire) instead of the linked hidden card, and Squire
-/// was moved to exile rather than receiving its counter.
+/// "you control a creature with power 7 or greater", so the sub-ability plays
+/// the hidden card. Pre-#6437 this landed on the TARGETED creature (Squire)
+/// instead of the linked hidden card, and Squire was moved to exile rather
+/// than receiving its counter. "You may play the exiled card without paying
+/// its mana cost" states no duration, so the hidden creature card is cast AS
+/// the trigger resolves (CR 701.18b + CR 608.2g) and nothing lingers.
 #[test]
-fn fight_rigging_counters_the_target_and_offers_only_the_hidden_card() {
+fn fight_rigging_counters_the_target_and_casts_only_the_hidden_card() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -113,8 +121,12 @@ fn fight_rigging_counters_the_target_and_offers_only_the_hidden_card() {
     let squire = scenario.add_creature(P0, "Squire", 1, 1).id();
     // Models an earlier turn's already-resolved Hideaway ETB: a card durably
     // linked to Fight Rigging in exile (CR 406.6 + CR 607.2a), independent of
-    // this resolution's chosen targets.
-    let hidden = scenario.add_creature_to_exile(P0, "Hidden Card", 0, 0).id();
+    // this resolution's chosen targets. A 2/2 with a real cost, so its free
+    // cast is observable and it survives on the battlefield.
+    let hidden = scenario
+        .add_creature_to_exile(P0, "Hidden Card", 2, 2)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
 
     let mut runner = scenario.build();
     let incarnation = runner.state().objects[&fight_rigging].incarnation;
@@ -139,7 +151,12 @@ fn fight_rigging_counters_the_target_and_offers_only_the_hidden_card() {
         runner.state().waiting_for
     );
 
-    resolve_begin_combat_trigger(&mut runner, squire);
+    let zone_after_accept = resolve_begin_combat_trigger(&mut runner, squire, hidden);
+    assert_eq!(
+        zone_after_accept,
+        Some(Zone::Stack),
+        "accepting casts the hidden card during the trigger's resolution"
+    );
 
     assert_eq!(
         p1p1_counters(&runner, squire),
@@ -161,20 +178,18 @@ fn fight_rigging_counters_the_target_and_offers_only_the_hidden_card() {
         runner.state().objects[&squire].casting_permissions
     );
 
-    let hidden_has_permission = runner.state().objects[&hidden]
-        .casting_permissions
-        .iter()
-        .any(|p| matches!(p, CastingPermission::ExileWithAltCost { granted_to: Some(p), .. } if *p == P0));
-    assert!(
-        hidden_has_permission,
-        "the HIDDEN card (linked via exile_links) must receive the free-cast \
-         permission, got {:?}",
-        runner.state().objects[&hidden].casting_permissions
-    );
     assert_eq!(
         runner.state().objects.get(&hidden).map(|o| o.zone),
-        Some(Zone::Exile),
-        "the hidden card stays in exile — granting the permission is not a zone move"
+        Some(Zone::Battlefield),
+        "the HIDDEN card (linked via exile_links) was cast and resolved"
+    );
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .all(|obj| obj.casting_permissions.is_empty()),
+        "no permission is left anywhere after the resolution"
     );
     assert_eq!(
         runner.state().objects.get(&big_beater).map(|o| o.zone),
@@ -214,7 +229,8 @@ fn fight_rigging_below_power_threshold_only_places_the_counter() {
     // Squire is the only creature P0 controls, so "target creature you
     // control" auto-binds to it with no `TriggerTargetSelection` pause
     // (unlike the discriminator test above, which has two legal creatures).
-    resolve_begin_combat_trigger(&mut runner, squire);
+    let zone_after_accept = resolve_begin_combat_trigger(&mut runner, squire, hidden);
+    assert_eq!(zone_after_accept, None, "no offer below the threshold");
 
     assert_eq!(
         p1p1_counters(&runner, squire),

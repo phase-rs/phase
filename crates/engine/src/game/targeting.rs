@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     ControllerRef, FilterProp, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
     TypeFilter, TypedFilter,
@@ -679,6 +680,21 @@ pub(crate) enum TriggeringSpell<'a> {
     Gone,
 }
 
+/// CR 601.2i + CR 400.7: the spell occurrence captured when the current cast
+/// trigger went on the stack. Read the resolving carrier, not a possibly fresh
+/// executing branch. Never manufacture a pin from a later same-id object.
+pub(crate) fn triggering_spell_identity(state: &GameState) -> Option<ObjectIncarnationRef> {
+    let GameEvent::SpellCast { object_id, .. } = state.current_trigger_event.as_ref()? else {
+        return None;
+    };
+    state
+        .resolving_stack_entry
+        .as_ref()
+        .and_then(|entry| entry.ability())
+        .and_then(|ability| ability.context.triggering_spell)
+        .filter(|pin| pin.object_id == *object_id)
+}
+
 /// CR 608.2h + CR 400.7 + CR 601.2i: What a spell-cast trigger's "that spell"
 /// / self-cast "this spell" now names. `None` unless
 /// `state.current_trigger_event` is `GameEvent::SpellCast`; every consumer
@@ -691,17 +707,7 @@ pub(crate) fn triggering_spell(state: &GameState) -> Option<TriggeringSpell<'_>>
         return None;
     };
     let object_id = *object_id;
-    // CR 601.2i: the pin bound when this trigger was put on the stack
-    // (`triggers.rs::triggering_spell_pin`), read from the resolving carrier
-    // — a flip branch (Krark) builds a fresh executing ability that does not
-    // itself carry the pin — and used only while it still names this event's
-    // spell.
-    let pin = state
-        .resolving_stack_entry
-        .as_ref()
-        .and_then(|entry| entry.ability())
-        .and_then(|ability| ability.context.triggering_spell)
-        .filter(|pin| pin.object_id == object_id);
+    let pin = triggering_spell_identity(state);
 
     let on_stack = state.objects.get(&object_id).is_some_and(|obj| {
         obj.zone == Zone::Stack && pin.is_none_or(|pin| pin.incarnation == obj.incarnation)
@@ -2172,7 +2178,7 @@ fn target_ref_object(target: &TargetRef) -> Option<ObjectId> {
     }
 }
 
-fn object_targets(targets: &[TargetRef]) -> impl Iterator<Item = ObjectId> + '_ {
+pub(crate) fn object_targets(targets: &[TargetRef]) -> impl Iterator<Item = ObjectId> + '_ {
     targets.iter().filter_map(target_ref_object)
 }
 
@@ -3149,6 +3155,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::PhysicalContestStarted { .. }
         | GameEvent::PhysicalContestResolved { .. }
         | GameEvent::VoteCast { .. }
+        | GameEvent::CardNamed { .. }
         | GameEvent::VoteResolved { .. }
         | GameEvent::PowerToughnessChanged { .. }
         | GameEvent::CascadeMissed { .. }
@@ -9218,5 +9225,61 @@ mod attacked_referent_targeting_tests {
             resolve_event_context_target(&state, &referent, attacker),
             None
         );
+    }
+}
+
+/// Tests relocated from `parser::oracle_effect`'s `exile_graveyard_origin_shape` test module.
+#[cfg(test)]
+mod parser_oracle_effect_tests {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::parser::oracle_effect::test_helpers::compose;
+    use crate::parser::oracle_ir::context::ParseContext;
+    use crate::types::ability::{AbilityKind, EffectScope, TargetFilter, TypedFilter};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::TargetRef;
+
+    #[test]
+    fn shape_positive_zone_stays_outside_negated_class_and_enumerates_real_graveyard() {
+        let mut s = GameScenario::new();
+        let own = s
+            .add_creature_to_graveyard(P0, "Own artifact", 2, 2)
+            .as_artifact()
+            .id();
+        let wrong = s
+            .add_creature_to_graveyard(P1, "Opponent artifact", 2, 2)
+            .as_artifact()
+            .id();
+        let creature = s.add_creature_to_graveyard(P0, "Own creature", 2, 2).id();
+        let battlefield = s
+            .add_creature(P0, "Battlefield artifact", 2, 2)
+            .as_artifact()
+            .id();
+        let class = TargetFilter::Not {
+            filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+        };
+        let (_, target) = compose(
+            class,
+            "target noncreature card from your graveyard",
+            " from your graveyard",
+            EffectScope::Single,
+            &ParseContext::default(),
+        );
+        assert!(
+            matches!(&target, TargetFilter::And { filters } if matches!(filters[0], TargetFilter::Not { .. }))
+        );
+        let r = s.build();
+        let def = parse_effect_chain("Exile target creature.", AbilityKind::Spell);
+        let ability = crate::game::ability_utils::build_resolved_from_def(&def, ObjectId(0), P0);
+        let legal = crate::game::targeting::find_legal_targets_for_ability_with_controller(
+            r.state(),
+            &target,
+            &ability,
+            P0,
+        );
+        assert_eq!(legal, vec![TargetRef::Object(own)]);
+        for id in [wrong, creature, battlefield] {
+            assert!(!legal.contains(&TargetRef::Object(id)));
+        }
     }
 }

@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 
 use crate::ai_support::copy_target_mana_value_ceiling;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     AbilityDefinition, AttachCardinality, AttachSelection, ChosenAttribute, CopyTargetPurpose,
-    Effect, PostReplacementContinuation, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectKind, PostReplacementContinuation, ResolvedAbility, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -11,7 +12,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CounterCostRootSubtree, DeferredLifeCostResume, GameState, PendingCostMoveResume,
-    PendingCounterPostAction, PendingReplacement, TokenEntryEventEmission, WaitingFor,
+    PendingCounterPostAction, PendingReplacement, TokenEntryEventEmission, UnrepresentablePolicy,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -28,8 +30,8 @@ use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext}
 use super::effects::destroy::apply_destroy_after_replacement;
 use super::effects::draw::{apply_draw_after_replacement, settle_draw_instruction};
 use super::effects::life::{
-    apply_life_gain_after_replacement, apply_life_loss_after_replacement,
-    drain_pending_life_total_assignment,
+    drain_pending_life_total_assignment, settle_life_gain_after_choice,
+    settle_life_loss_after_choice, within_ingress_life_window, LifeChangeUnrepresentable,
 };
 use super::effects::mill::apply_mill_after_replacement;
 use super::effects::scry::apply_scry_after_replacement;
@@ -187,7 +189,26 @@ pub(super) fn handle_replacement_choice(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let action_event_start = events.len();
-    let waiting_for = handle_replacement_choice_inner(state, index, events)?;
+    // A record stamped for rejection came from an action-ingress player-resource
+    // change. Resume it inside an ingress window so every life, player-counter
+    // and energy settlement the handler reaches (a substitute's drain,
+    // post-replacement continuations, nested parks) is held to the same rule;
+    // the window closes before the combat lifelink batch resumes.
+    let parked_for_rejection = state.pending_replacement.as_ref().is_some_and(|pending| {
+        pending.unrepresentable_life_change == UnrepresentablePolicy::Reject
+    });
+    let waiting_for = if parked_for_rejection {
+        let (inner, window) = within_ingress_life_window(state, |state| {
+            handle_replacement_choice_inner(state, index, events)
+        });
+        let waiting_for = inner?;
+        if let Some(player) = window.failed_player {
+            return Err(LifeChangeUnrepresentable { player }.into());
+        }
+        waiting_for
+    } else {
+        handle_replacement_choice_inner(state, index, events)?
+    };
     // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
@@ -199,6 +220,75 @@ pub(super) fn handle_replacement_choice(
         super::combat_damage::resume_pending_combat_lifelink(state, action_event_start, events)
             .unwrap_or(waiting_for),
     )
+}
+
+/// What resuming a parked player-scope sacrifice batch produced.
+pub(crate) struct PausedPlayerScopeSacrificeResume {
+    /// The wait the caller must adopt, when the resume left a prompt open.
+    pub(crate) next_wait: Option<WaitingFor>,
+    /// CR 603.2 + CR 603.10a: the completed batch's own event span in the
+    /// buffer the helper was handed. Its observers belong to whichever
+    /// collector scans that buffer: the replacement action's post-action
+    /// pipeline, or the departure settlement.
+    pub(crate) completed_batch: Option<std::ops::Range<usize>>,
+}
+
+/// CR 101.4 + CR 616.1: resume a simultaneous player-scope sacrifice batch
+/// parked on a CR 616.1 choice. Collects no triggers: it reports the wait the
+/// caller must adopt and the completed batch's own event span, and the caller's
+/// collector observes that span (CR 603.2).
+pub(crate) fn resume_paused_player_scope_sacrifice(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<PausedPlayerScopeSacrificeResume, EngineError> {
+    let Some(sacrifice_source_id) = state
+        .pending_player_scope_sacrifice_choice
+        .as_ref()
+        .map(|pending| pending.ability.source_id)
+    else {
+        return Ok(PausedPlayerScopeSacrificeResume {
+            next_wait: None,
+            completed_batch: None,
+        });
+    };
+    match effects::drain_pending_player_scope_sacrifice_after_replacement(state, events)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+    {
+        effects::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice => {
+            Ok(PausedPlayerScopeSacrificeResume {
+                next_wait: None,
+                completed_batch: None,
+            })
+        }
+        // The paused members' events stay in the carrier's deferred span, so
+        // nothing of the batch is observable yet.
+        effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
+            Ok(PausedPlayerScopeSacrificeResume {
+                next_wait: Some(state.waiting_for.clone()),
+                completed_batch: None,
+            })
+        }
+        effects::PendingPlayerScopeSacrificeOutcome::Completed {
+            events_before_sacrifice,
+            events_after_sacrifice,
+            sacrificed_count,
+        } => {
+            effects::stamp_active_player_action_completion(
+                state,
+                sacrifice_source_id,
+                crate::types::ability::EffectResolutionResult {
+                    cause: crate::types::ability::ThisWayCause::Sacrificed,
+                    count: sacrificed_count,
+                },
+            );
+            effects::drain_pending_continuation(state, events);
+            Ok(PausedPlayerScopeSacrificeResume {
+                next_wait: (!matches!(state.waiting_for, WaitingFor::Priority { .. }))
+                    .then(|| state.waiting_for.clone()),
+                completed_batch: Some(events_before_sacrifice..events_after_sacrifice),
+            })
+        }
+    }
 }
 
 fn handle_replacement_choice_inner(
@@ -297,6 +387,14 @@ fn handle_replacement_choice_inner(
         .as_ref()
         .map(|pending| pending.lifelink_bonus)
         .unwrap_or(0);
+    // The player-resource policy the parked record was stamped with, captured
+    // with the file's other `parked_*` reads before `continue_replacement`
+    // consumes it.
+    let parked_life_policy = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| pending.unrepresentable_life_change)
+        .unwrap_or_default();
     // CR 701.21a + CR 614.1: An inner graveyard move can have parked after a
     // sacrifice was accepted. The resumed payload is only a ZoneChange, so
     // capture the enclosing sacrifice before `continue_replacement` consumes
@@ -536,6 +634,10 @@ fn handle_replacement_choice_inner(
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
                 // Corpsejack Menace doubler on a prompted counter-placement).
+                // CR 122.1 + CR 616.1: a player or energy placement settles under
+                // the policy the parked record was stamped with: `Reject` fails
+                // the answer (the boundary restores the record and prompt),
+                // `IgnoreImpossible` records into the open window.
                 ProposedEvent::AddCounter {
                     placement, count, ..
                 } => match placement {
@@ -560,10 +662,17 @@ fn handle_replacement_choice_inner(
                         player_id,
                         counter_kind,
                         count,
+                        parked_life_policy,
                         events,
-                    ),
+                    )?,
                     CounterPlacement::Energy { player_id, .. } => {
-                        effects::energy::apply_energy_addition(state, player_id, count, events)
+                        effects::energy::apply_energy_addition(
+                            state,
+                            player_id,
+                            count,
+                            parked_life_policy,
+                            events,
+                        )?
                     }
                 },
                 // CR 122.1: Counter removal accepted after replacement choice.
@@ -774,17 +883,21 @@ fn handle_replacement_choice_inner(
                         return Ok(state.waiting_for.clone());
                     }
                 }
-                // CR 119.1: Life gain accepted after replacement choice.
+                // CR 119.3: Life gain accepted after replacement choice. The
+                // parked record's policy decides an unrepresentable final edit:
+                // `Reject` fails the answer (the boundary restores the record and
+                // its prompt), `IgnoreImpossible` skips the change and resumes.
                 gain @ ProposedEvent::LifeGain { .. } => {
-                    apply_life_gain_after_replacement(state, gain, events);
+                    settle_life_gain_after_choice(state, gain, parked_life_policy, events)?;
                 }
-                // CR 120.3: Life loss accepted after replacement choice.
+                // CR 119.3: Life loss accepted after replacement choice.
                 loss @ ProposedEvent::LifeLoss { player_id, .. } => {
                     // An empty-pool loss that deferred here never returns to
                     // the phase-transition drain, so this is the only place
                     // its cause can still be named (a mana burn would
                     // otherwise land as an unexplained life change).
-                    let actual = apply_life_loss_after_replacement(state, loss, events);
+                    let actual =
+                        settle_life_loss_after_choice(state, loss, parked_life_policy, events)?;
                     crate::game::turns::note_empty_pool_life_loss_resolved(
                         state, player_id, actual, events,
                     );
@@ -928,25 +1041,10 @@ fn handle_replacement_choice_inner(
                 // — the `spec` field carries the full self-describing token
                 // characteristics. Delegate to the shared helper.
                 create @ ProposedEvent::CreateToken { .. } => {
-                    let is_copy =
-                        matches!(create, ProposedEvent::CreateToken { copy: Some(_), .. });
+                    // CR 614.1a + CR 608.2c: the delivery authority publishes this
+                    // event's whole referent, and hands it to a resident CopyToken
+                    // frame, whose drain below assigns the ledger.
                     let completed = apply_create_token_after_replacement(state, create, events);
-                    // CR 614.1a + CR 608.2c: the created referent includes any
-                    // batch a replacement appended to this event; the window
-                    // spans the chosen replacement's application and the apply.
-                    //
-                    // Known residual: a copy event is left as is. A replacement-appended
-                    // batch is never in the CopyToken frame's created ids. On a
-                    // liminal-immediate copy the apply drains the frame and resolves the
-                    // effect's riders inside the apply, so publishing here would rewrite
-                    // the ledger after the riders read it; otherwise the frame's later
-                    // drain overwrites the ledger with the frame's ids.
-                    if !is_copy {
-                        effects::token::publish_replacement_appended_tokens(
-                            state,
-                            &events[replacement_action_event_start..],
-                        );
-                    }
                     if !completed {
                         return Ok(state.waiting_for.clone());
                     }
@@ -1252,35 +1350,10 @@ fn handle_replacement_choice_inner(
                 // CR 101.4: a simultaneous each-player sacrifice paused by a
                 // CR 616.1 replacement choice resumes the already-announced
                 // remaining sacrifices before any parked continuation can run.
-                let sacrifice_source_id = state
-                    .pending_player_scope_sacrifice_choice
-                    .as_ref()
-                    .map(|pending| pending.ability.source_id)
-                    .expect("active sacrifice choice owns its source identity");
-                match effects::drain_pending_player_scope_sacrifice_after_replacement(state, events)
-                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-                {
-                    effects::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice => {}
-                    effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
-                        waiting_for = state.waiting_for.clone();
-                    }
-                    effects::PendingPlayerScopeSacrificeOutcome::Completed {
-                        sacrificed_count,
-                        ..
-                    } => {
-                        effects::stamp_active_player_action_completion(
-                            state,
-                            sacrifice_source_id,
-                            crate::types::ability::EffectResolutionResult {
-                                cause: crate::types::ability::ThisWayCause::Sacrificed,
-                                count: sacrificed_count,
-                            },
-                        );
-                        effects::drain_pending_continuation(state, events);
-                        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                            waiting_for = state.waiting_for.clone();
-                        }
-                    }
+                // CR 603.2: the completed batch lies inside this action's buffer,
+                // which the post-action pipeline scans; it is not collected here.
+                if let Some(next) = resume_paused_player_scope_sacrifice(state, events)?.next_wait {
+                    waiting_for = next;
                 }
             }
 
@@ -2708,6 +2781,13 @@ pub(super) fn handle_copy_target_choice(
         // only the liminal entry's PRESENCE matters here: it is what says this commit will park
         // an entry that later needs realizing.
         let has_liminal_entry = state.liminal_entries.contains_key(&source_id);
+        // CR 508.4: how many tokens of the batch exist once this entry is
+        // realized; the continuation parked behind a pause counts its own
+        // tokens from zero, so its request has to start past them.
+        let entrants_through_this_entry = state
+            .liminal_entries
+            .get(&source_id)
+            .map_or(0, |entry| entry.created_ids.len() + 1);
         let copy_continuation = state.liminal_entries.get(&source_id).and_then(|entry| {
             entry.copy_resume.as_ref().and_then(|copy| {
                 (entry.remaining_count > 0).then(|| {
@@ -2805,9 +2885,12 @@ pub(super) fn handle_copy_target_choice(
                 },
             );
         }
-        if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
+        if let Some((owner, mut copy, enter_tapped, enter_with_counters, remaining_count)) =
             copy_continuation.clone()
         {
+            copy.attack_request = copy
+                .attack_request
+                .after_entrants(entrants_through_this_entry);
             counter_pause_post_actions.push(PendingCounterPostAction::ContinueCopyTokenCreation {
                 owner,
                 copy,
@@ -2851,13 +2934,9 @@ pub(super) fn handle_copy_target_choice(
                 }
             }
         }
-        let created_ids = state.last_created_token_ids.clone();
-        if let Some(pending) = state.active_copy_token_mut() {
-            pending.created_ids = created_ids;
-        }
-        if state.active_copy_token().is_some() {
-            super::effects::token_copy::drain_pending_copy_token_resolution(state, events);
-        }
+        // CR 614.1a + CR 608.2c: the batch is done; hand over to the rest of a
+        // compound token event parked over it, then to the CopyToken owner.
+        super::effects::token::finish_liminal_copy_token_batch(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             return Ok(state.waiting_for.clone());
         }
@@ -4039,6 +4118,13 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
             event,
             GameEvent::LandPlayed { object_id, .. }
                 if *object_id == source_id
+        ) || matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Attach,
+                source_id: attach_source_id,
+                ..
+            } if *attach_source_id == source_id
         ) {
             state.deferred_entry_events.push(event.clone());
         }
@@ -4113,16 +4199,34 @@ pub(crate) fn apply_pending_spell_resolution(
         .unwrap_or(false);
     if is_aura {
         if let Some(target) = ctx.spell_targets.first() {
-            match target {
+            // CR 608.3c / CR 603.2e: an Aura spell becoming attached on this
+            // resume path is an effect resolution, so emit `EffectResolved
+            // { Attach }` (Bramble Elemental) -- but only when the attachment
+            // actually moved: a same-host re-attach is a CR 701.3b no-op and
+            // must not re-trigger "becomes attached".
+            let attached = match target {
                 crate::types::ability::TargetRef::Object(target_id)
                     if state.battlefield.contains(target_id) =>
                 {
-                    effects::attach::attach_to(state, ctx.object_id, *target_id);
+                    effects::attach::attach_to_reporting_change(state, ctx.object_id, *target_id)
                 }
-                crate::types::ability::TargetRef::Object(_) => {}
+                crate::types::ability::TargetRef::Object(_) => false,
                 crate::types::ability::TargetRef::Player(player_id) => {
-                    effects::attach::attach_to_player(state, ctx.object_id, *player_id);
+                    effects::attach::attach_to_player_reporting_change(
+                        state,
+                        ctx.object_id,
+                        *player_id,
+                    )
                 }
+            };
+            if attached {
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::Attach,
+                    source_id: ctx.object_id,
+                    subject: state
+                        .capture_event_object_snapshot(ctx.object_id)
+                        .map(Box::new),
+                });
             }
         }
     }
@@ -4537,6 +4641,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
 
@@ -5214,6 +5319,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
         state.priority_player = PlayerId(0);
@@ -5797,6 +5903,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(1),
             controller: PlayerId(0),
@@ -5812,6 +5919,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: std::collections::HashSet::new(),
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -5882,6 +5990,8 @@ mod tests {
                     owner: crate::types::ability::TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -5924,6 +6034,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: replacement_source,
             controller: PlayerId(0),
@@ -5938,6 +6049,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: std::collections::HashSet::new(),
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -6026,6 +6138,8 @@ mod tests {
                     owner: crate::types::ability::TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -6085,6 +6199,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: replacement_source,
             controller: PlayerId(0),
@@ -6099,6 +6214,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: std::collections::HashSet::new(),
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -6204,6 +6320,8 @@ mod tests {
                     owner: crate::types::ability::TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -6262,6 +6380,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: replacement_source,
             controller: PlayerId(0),
@@ -6276,6 +6395,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: std::collections::HashSet::new(),
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -6417,6 +6537,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: jinnie_source,
             controller: PlayerId(0),
@@ -6432,6 +6553,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied,
         };
         assert!(
@@ -6492,6 +6614,8 @@ mod tests {
                     owner: crate::types::ability::TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -6557,6 +6681,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: jinnie_source,
             controller: PlayerId(0),
@@ -6572,6 +6697,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: std::collections::HashSet::new(),
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -8608,6 +8734,7 @@ mod tests {
                 additional_modifications: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: entering_aura,
                 controller: PlayerId(0),
@@ -9270,6 +9397,7 @@ mod tests {
                 source_id: ObjectId(999),
                 controller: PlayerId(0),
                 enters_attacking: false,
+                attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                 attach_to: None,
                 sacrifice_at: None,
                 remaining_count: 0,

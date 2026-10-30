@@ -3,6 +3,7 @@
 
 use engine::ai_support::legal_actions;
 use engine::game::casting::can_activate_ability_now;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{CoinFlipRun, Effect, EffectKind, TargetFilter, TargetRef};
@@ -489,7 +490,7 @@ fn two_branch_win_destroys_only_the_announced_opponents_creature() {
 
 #[test]
 fn coin_branch_stack_persistence_is_strict_and_current_bindings_execute() {
-    use engine::types::resolution::ResolutionStateWire;
+    use engine::types::resolution::{ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION};
     let (mut runner, source, own, opposing) = two_branch_fixture(true, true);
     runner
         .act(GameAction::ActivateAbility {
@@ -522,7 +523,7 @@ fn coin_branch_stack_persistence_is_strict_and_current_bindings_execute() {
     let current =
         serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone())).unwrap();
     let before = runner.state().clone();
-    for version in 1..=10 {
+    for version in 1..=RESOLUTION_STATE_WIRE_VERSION {
         let mut malformed = current.clone();
         malformed["stack"][0]["kind"]["data"]["ability"]
             .as_object_mut()
@@ -539,7 +540,10 @@ fn coin_branch_stack_persistence_is_strict_and_current_bindings_execute() {
         let error = serde_json::from_value::<ResolutionStateWire>(malformed)
             .expect_err("missing stack binding is never reconstructed")
             .to_string();
-        let expected = if version <= 9 {
+        // CR 601.2c + CR 608.2b: every pre-current wire version (<= 10) cannot
+        // prove the outcome bindings announced at cast, so a carrier-less coin
+        // ability is refused as incompatible; the current version is malformed.
+        let expected = if version < RESOLUTION_STATE_WIRE_VERSION {
             "RESTORE_INCOMPATIBLE_COIN_BRANCH_BINDINGS:"
         } else {
             "INVALID_COIN_BRANCH_BINDINGS:"
@@ -717,9 +721,12 @@ fn installed_coin_replacements_round_trip_and_execute_the_selected_bound_branch(
                 1,
                 "reach: installed shield"
             );
-            let runtime = runner.state().pending_damage_replacements[0]
-                .runtime_execute
-                .as_ref()
+            // CR 615.5 + CR 614.6: the shield's rider lives in the state's
+            // continuation arena behind a handle; read it through the single
+            // read authority.
+            let runtime = runner
+                .state()
+                .replacement_rider(&runner.state().pending_damage_replacements[0])
                 .unwrap();
             assert_eq!(
                 runtime.coin_branches.is_some(),
@@ -7072,4 +7079,265 @@ fn modal_coin_static_scope_matches_the_combined_mode_chain() {
     assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&antecedent].zone, Zone::Battlefield);
     assert_finished(&runner);
+}
+
+// Synthetic composition, not a printed card: "When this creature enters, choose
+// <a creature type or a card name>. Flip a coin. If you win the flip or lose the
+// flip, you gain 1 life for each creature you control that reads the choice."
+// Both bound outcomes read the answer published by the earlier instruction.
+struct ChooseThenFlip {
+    choice_type: engine::types::ability::ChoiceType,
+    persist: bool,
+    counted: TargetFilter,
+    /// Creatures P0 controls besides the host, as (name, subtypes).
+    board: Vec<(&'static str, Vec<&'static str>)>,
+    answer: &'static str,
+    /// Life gained when the outcome reads the answer: the number of `board`
+    /// creatures that match it.
+    expected_gain: i32,
+}
+
+/// Drives the host's enters trigger through the production cast and priority
+/// path, answers the `NamedChoice` through `GameAction::ChooseOption`, then runs
+/// the flip inline (`thumb == false`) or after Krark's Thumb with a persisted
+/// round trip at the keep prompt (`thumb == true`).
+fn choose_then_flip(case: &ChooseThenFlip, thumb: bool, won: bool) {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, QuantityExpr, QuantityRef, TargetSelectionMode,
+        TriggerDefinition,
+    };
+    use engine::types::game_state::PersistedGameState;
+    use engine::types::triggers::TriggerMode;
+
+    let label = format!("thumb={thumb} won={won}");
+    let branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: case.counted.clone(),
+                },
+            },
+            player: TargetFilter::Controller,
+        },
+    );
+    let body = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Choose {
+            choice_type: case.choice_type.clone(),
+            persist: case.persist,
+            selection: TargetSelectionMode::Chosen,
+        },
+    )
+    .sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: Some(Box::new(branch.clone())),
+            lose_effect: Some(Box::new(branch)),
+            flipper: TargetFilter::Controller,
+        },
+    ));
+    // CR 603.6a: an enters-the-battlefield ability triggers when the host enters.
+    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .valid_card(TargetFilter::SelfRef)
+        .destination(Zone::Battlefield)
+        .execute(body);
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    if thumb {
+        scenario.add_artifact_from_oracle(
+            P0,
+            "Krark's Thumb",
+            "If you would flip a coin, instead flip two coins and ignore one.",
+        );
+    }
+    for (name, subtypes) in &case.board {
+        scenario
+            .add_creature(P0, name, 1, 1)
+            .with_subtypes(subtypes.clone());
+    }
+    // The host starts in hand so that its enters trigger comes from the real
+    // cast, resolution and zone-change pipeline.
+    let host = scenario
+        .add_creature_to_hand(P0, "Synthetic choose-then-flip host", 1, 1)
+        .with_mana_cost(ManaCost::zero())
+        .with_trigger_definition(trigger)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().all_card_names = case
+        .board
+        .iter()
+        .map(|(name, _)| (*name).to_string())
+        .collect::<Vec<_>>()
+        .into();
+    pin_outcomes(
+        &mut runner,
+        &if thumb { vec![won, !won] } else { vec![won] },
+    );
+    let life_before = runner.life(P0);
+
+    drop(runner.cast(host).commit());
+    let mut events = Vec::new();
+    for _ in 0..8 {
+        if matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }) {
+            break;
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "{label}: unexpected prompt {:?}",
+            runner.state().waiting_for
+        );
+        assert!(
+            !runner.state().stack.is_empty(),
+            "{label}: the host spell or its enters trigger reaches the choice"
+        );
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    // Required prompt: the choice comes first, before any coin is flipped.
+    let WaitingFor::NamedChoice {
+        player,
+        choice_type,
+        options,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "{label}: the enters trigger must pause on its choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0, "{label}");
+    assert_eq!(
+        std::mem::discriminant(choice_type),
+        std::mem::discriminant(&case.choice_type),
+        "{label}"
+    );
+    assert!(
+        options.is_empty() || options.iter().any(|option| option == case.answer),
+        "{label}: {options:?}"
+    );
+    assert!(
+        flips(&events).is_empty(),
+        "{label}: no flip before the choice"
+    );
+    assert_eq!(runner.life(P0), life_before, "{label}");
+
+    events.extend(
+        runner
+            .act(GameAction::ChooseOption {
+                choice: case.answer.to_string(),
+            })
+            .unwrap()
+            .events,
+    );
+    if thumb {
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::CoinFlipKeepChoice { player: P0, .. }
+            ),
+            "{label}: required keep prompt, got {:?}",
+            runner.state().waiting_for
+        );
+        assert!(flips(&events).is_empty(), "{label}: ignored flips pending");
+        // CR 614.1a + CR 705.1: the parked frame holds the bound outcomes that
+        // already carry the published answer; restore it before resuming.
+        runner.state_mut().capture_rng_word_pos();
+        let wire =
+            serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+        *runner.state_mut() = serde_json::from_value::<PersistedGameState>(wire)
+            .unwrap()
+            .into_game_state()
+            .unwrap();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::CoinFlipKeepChoice { player: P0, .. }
+            ),
+            "{label}: the restored state is still at the keep prompt"
+        );
+        events.extend(
+            runner
+                .act(GameAction::SelectCoinFlips {
+                    keep_indices: vec![0],
+                })
+                .unwrap()
+                .events,
+        );
+    }
+    finish(&mut runner, &mut events);
+    assert_eq!(
+        flips(&events),
+        vec![won],
+        "{label}: reach: selected outcome ran"
+    );
+    // CR 608.2c + CR 608.2d: the outcome applies the answer announced by the
+    // earlier instruction of this resolution. An outcome that lost it counts
+    // zero matching creatures and gains nothing.
+    assert_eq!(
+        runner.life(P0) - life_before,
+        case.expected_gain,
+        "{label}: the outcome reads the published choice"
+    );
+    assert_finished(&runner);
+}
+
+#[test]
+fn choose_then_flip_outcome_reads_the_published_choice() {
+    use engine::types::ability::{ChoiceType, ControllerRef, FilterProp, TypedFilter};
+    // Synthetic: a non-card-name choice (CR 608.2c) published before the flip.
+    let case = ChooseThenFlip {
+        choice_type: ChoiceType::CreatureType {
+            options: vec!["Dog".into(), "Wolf".into()],
+        },
+        persist: true,
+        counted: TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::IsChosenCreatureType]),
+        ),
+        board: vec![
+            ("Chosen type A", vec!["Wolf"]),
+            ("Chosen type B", vec!["Wolf"]),
+            ("Distractor", vec!["Dog"]),
+        ],
+        answer: "Wolf",
+        expected_gain: 2,
+    };
+    for thumb in [false, true] {
+        for won in [true, false] {
+            choose_then_flip(&case, thumb, won);
+        }
+    }
+}
+
+#[test]
+fn choose_then_flip_outcome_reads_the_named_card() {
+    use engine::types::ability::{ChoiceType, ControllerRef, TypedFilter};
+    // Synthetic: a card name answered through the interactive continuation
+    // (CR 608.2d) reaches the bound coin outcome that reads it (CR 608.2c).
+    let case = ChooseThenFlip {
+        choice_type: ChoiceType::CardName,
+        persist: false,
+        counted: TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                TargetFilter::HasChosenName,
+            ],
+        },
+        board: vec![
+            ("Named Wolf", vec![]),
+            ("Named Wolf", vec![]),
+            ("Other Wolf", vec![]),
+        ],
+        answer: "Named Wolf",
+        expected_gain: 2,
+    };
+    for thumb in [false, true] {
+        for won in [true, false] {
+            choose_then_flip(&case, thumb, won);
+        }
+    }
 }

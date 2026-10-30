@@ -10,7 +10,9 @@ use crate::types::events::{BoundActivationCost, ExertOrigin, GameEvent, PlayerAc
 use crate::types::game_state::{GameState, TriggerSourceContext};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::triggers::{AbilityLifecyclePoint, PlaneswalkRole, TriggerMode};
+use crate::types::triggers::{
+    AbilityLifecyclePoint, ControlChangeSide, PlaneswalkRole, TriggerMode,
+};
 use crate::types::zones::Zone;
 
 use super::triggers::TriggerMatcher;
@@ -103,7 +105,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Shuffled => match_shuffled,
         TriggerMode::Revealed => match_revealed,
         TriggerMode::TapsForMana => match_taps_for_mana,
-        TriggerMode::ChangesController => match_changes_controller,
+        TriggerMode::ChangesController { .. } => match_changes_controller,
         TriggerMode::Transformed => match_transformed,
         TriggerMode::Fight | TriggerMode::FightOnce => match_fight,
         TriggerMode::Immediate | TriggerMode::Always => match_always,
@@ -344,7 +346,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::Shuffled, match_shuffled);
     r.insert(TriggerMode::Revealed, match_revealed);
     r.insert(TriggerMode::TapsForMana, match_taps_for_mana);
-    r.insert(TriggerMode::ChangesController, match_changes_controller);
     r.insert(TriggerMode::Transformed, match_transformed);
     r.insert(TriggerMode::Fight, match_fight);
     r.insert(TriggerMode::FightOnce, match_fight);
@@ -411,6 +412,15 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         PlaneswalkRole::Any,
     ] {
         r.insert(TriggerMode::Planeswalked { role }, match_planeswalked);
+    }
+    // CR 603.2 + CR 603.10 / CR 603.10d: one matcher for both control-change
+    // sides; it reads the side off the trigger's mode. Each side is a distinct
+    // registry key (side participates in `TriggerMode`'s Hash/Eq).
+    for side in [ControlChangeSide::Loses, ControlChangeSide::Gains] {
+        r.insert(
+            TriggerMode::ChangesController { side },
+            match_changes_controller,
+        );
     }
     // CR 714.2e: one matcher for each lifecycle point; it reads the axis off the
     // trigger's mode. Each point is a distinct registry key (it participates in
@@ -1163,6 +1173,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::PhysicalContestStarted { .. }
         | GameEvent::PhysicalContestResolved { .. }
         | GameEvent::VoteCast { .. }
+        | GameEvent::CardNamed { .. }
         | GameEvent::VoteResolved { .. }
         | GameEvent::PowerToughnessChanged { .. }
         | GameEvent::CascadeMissed { .. }
@@ -1206,6 +1217,20 @@ fn named_origin_zone(origin: &OriginConstraint, from: Option<Zone>) -> Option<Zo
     }
 }
 
+/// CR 603.6c: whether a zone-change clause requires the object to have gone to a
+/// particular zone. "Leaves the battlefield without dying" (`NotEquals`) names
+/// only where it didn't go.
+fn clause_names_destination(
+    destination: Option<&Zone>,
+    destination_constraint: &DestinationConstraint,
+) -> bool {
+    destination.is_some()
+        || matches!(
+            destination_constraint,
+            DestinationConstraint::Equals(_) | DestinationConstraint::OneOf(_)
+        )
+}
+
 fn destination_matches_constraint(zone: Zone, constraint: &DestinationConstraint) -> bool {
     match constraint {
         DestinationConstraint::Any => true,
@@ -1245,13 +1270,29 @@ fn zone_change_clause_matches(
     if !origin_ok {
         return false;
     }
-    if let Some(dest) = destination {
-        if dest != to {
+    if record.departure.left_game() {
+        // CR 800.4a + CR 603.6c + CR 702.26k: an object that left the game with
+        // its owner went to no zone, so only a leaves-the-battlefield clause sees
+        // it: one naming the battlefield as origin and no destination it went to.
+        if named_origin_zone(origin, *from) != Some(Zone::Battlefield)
+            || !record
+                .departure
+                .observed_leaving_battlefield(clause_names_destination(
+                    destination,
+                    destination_constraint,
+                ))
+        {
             return false;
         }
-    }
-    if !destination_matches_constraint(*to, destination_constraint) {
-        return false;
+    } else {
+        if let Some(dest) = destination {
+            if dest != to {
+                return false;
+            }
+        }
+        if !destination_matches_constraint(*to, destination_constraint) {
+            return false;
+        }
     }
     if let Some(filter) = valid_card {
         let ctx = super::filter::FilterContext::from_trigger_source(source_context);
@@ -3114,7 +3155,20 @@ pub(super) fn match_becomes_target(
     match target {
         TargetRef::Object(object_id) => {
             // Check if the targeted object matches the trigger's valid_card filter.
-            if trigger.valid_card.is_some() {
+            if let Some(filter) = &trigger.valid_card {
+                // CR 109.2: a zone-less subject such as "a creature" (Horobi,
+                // Death's Wail) means a creature permanent on the battlefield.
+                // A creature card targeted in a graveyard (Nezumi Graverobber's
+                // flip side) or exile is not "a creature", so it does not fire
+                // the trigger even though the card has the creature type.
+                if super::filter::filter_denotes_battlefield_permanent(filter)
+                    && state
+                        .objects
+                        .get(object_id)
+                        .is_none_or(|obj| obj.zone != Zone::Battlefield)
+                {
+                    return false;
+                }
                 valid_card_matches(trigger, state, *object_id, source_context)
             } else {
                 *object_id == source_id
@@ -3367,8 +3421,15 @@ pub(super) fn match_exiled(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::ZoneChanged { object_id, to, .. } = event {
-        if *to != Zone::Exile {
+    if let GameEvent::ZoneChanged {
+        object_id,
+        to,
+        record,
+        ..
+    } = event
+    {
+        // CR 800.4a: an object that left the game with its owner was not exiled.
+        if *to != Zone::Exile || record.departure.left_game() {
             return false;
         }
         if !valid_card_matches(trigger, state, *object_id, source_context) {
@@ -3654,39 +3715,53 @@ pub(super) fn match_taps_for_mana(
 }
 
 /// CR 603.2 + CR 613.1b: ChangesController — fires on the `ControllerChanged`
-/// event a Layer-2 control change (or its end) emits. Every control-change path
-/// now emits this event (targeted `GainControl`, `GainControlAll`, `GiveControl`,
-/// `apply_permanent_control_change`, `exchange_control::resolve` — CR 701.12a,
-/// on its success path only — and the until-EOT control reversion in
-/// `turns::execute_cleanup`), so the redundant `EffectResolved { GainControl }`
-/// arm was dropped — matching both would have double-fired now that the gain
-/// also emits `ControllerChanged`.
+/// event published by these control-changing instruction handlers: targeted
+/// `GainControl`, `GainControlAll`, `GiveControl`,
+/// `apply_permanent_control_change`, `exchange_control::resolve` (CR 701.12a, on
+/// its success path only) and the until-EOT control reversion in
+/// `turns::execute_cleanup`. The redundant `EffectResolved { GainControl }` arm
+/// was dropped for that reason — matching both would have double-fired now that
+/// the gain also emits `ControllerChanged`.
+///
+/// Control the layer pass assigns or retires publishes nothing: a static
+/// ability's layer-2 effect (Confiscate, Control Magic) is applied as
+/// `ContinuousModification::ChangeController`, a lapsed `ForAsLongAs` duration
+/// (Callous Oppressor) is retired by `layers::retire_ended_effects`, and
+/// `layers::finish_layer_evaluation` only diffs the settled controllers
+/// (phase-rs/phase#9903). Coverage keeps the `Gains` side unsupported for that
+/// reason (`coverage::trigger_mode_has_unpublished_event_source`).
 ///
 /// (The until-EOT emitter is `turns::execute_cleanup`, NOT
 /// `layers::prune_end_of_turn_effects`: the latter only retains over
 /// `transient_continuous_effects` and pushes no events.)
 ///
-/// The only producers of this mode are "When you lose control of ~"
-/// abilities (Khârn the Betrayer, Duplicity, Gustha's Scepter, and the S25
-/// Stolen Uniform reflexive). Two guards keep it from over-firing:
+/// The producers of this mode are "When you lose control of ~" abilities
+/// (`side: Loses`: Khârn the Betrayer, Duplicity, Gustha's Scepter, and the S25
+/// Stolen Uniform reflexive) and "When you gain control of ~ [from another
+/// player]" (`side: Gains`: Risky Move). Two guards keep it from over-firing:
 ///   * `valid_card` scopes the event to the tracked object (SelfRef for "~";
 ///     the bound Equipment for Stolen Uniform's `ParentTarget`). Without this
 ///     the trigger fired on *any* object's control change (the Portent trap).
-///   * "lose control" is directional: it fires only for the player *losing*
-///     control. Which side that is depends on whether the trigger source is the
-///     changing object itself:
+///   * The trigger's `side` is directional: it fires only for the player on that
+///     endpoint of the change (`ControlChangeSide::participant`). "From another
+///     player" adds no predicate: the event exists only when `old != new` (checked
+///     above) and every permanent has a controller (CR 110.2), so a gain always
+///     comes from another player (a teammate included, CR 102.3). Which endpoint
+///     is "you" depends on whether the trigger source is the changing object itself:
 ///     - Self-ref ("~", `source_id == object_id`): the source's live
 ///       `controller` is unusable as the direction test. `collect_pending_triggers`
 ///       calls `flush_layers` at its very top (before any trigger scan), so the
 ///       object's controller has already flushed to `new_controller` by match
-///       time. Instead we rely on CR 603.10d look-back: a "loses control" ability
-///       is intrinsically the pre-change controller's, and `old != new` (checked
-///       above) already guarantees exactly one loser — fire for it.
+///       time. Instead the event's own endpoint is "you": CR 603.10d look-back for
+///       `Loses` (the pre-change controller) and CR 603.10 + CR 603.3a for `Gains`
+///       (the controller immediately after the event). `old != new` already
+///       guarantees exactly one of each, so the trigger matches and
+///       `collect_matching_triggers_inner` attributes it to that player.
 ///     - Delayed/`SpecificObject` (Stolen Uniform): the source is the graveyard
-///       spell whose controller stays constant (the temp holder), so the
-///       `old_controller == source.controller` test correctly fires on the loss
+///       spell whose controller stays constant (the temp holder), so for `Loses`
+///       the `old_controller == source.controller` test correctly fires on the loss
 ///       (old == caster == source.controller) and NOT on the initial gain
-///       (old == owner != caster).
+///       (old == owner != caster). `Gains` mirrors it against `new_controller`.
 pub(super) fn match_changes_controller(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -3694,10 +3769,14 @@ pub(super) fn match_changes_controller(
     state: &GameState,
 ) -> bool {
     let source_id = source_event_subject_id(source_context);
+    let TriggerMode::ChangesController { side } = &trigger.mode else {
+        return false;
+    };
     let GameEvent::ControllerChanged {
         object_id,
         old_controller,
         new_controller,
+        ..
     } = event
     else {
         return false;
@@ -3709,20 +3788,18 @@ pub(super) fn match_changes_controller(
         return false;
     }
     if source_id == *object_id {
-        // CR 603.10d: "when you lose control of ~" looks back in time — the
-        // ability is intrinsically the pre-change controller's, i.e. the loser.
-        // The source IS the changing object, whose live `controller` already
-        // flushed to `new_controller` (flush_layers runs at the top of
-        // collect_pending_triggers, before this scan), so it can't gate the
-        // direction. `old != new` above already guarantees exactly one loser;
-        // fire for it.
+        // CR 603.10d (Loses, pre-change controller) / CR 603.10 + CR 603.3a
+        // (Gains, controller immediately after this event): the source IS the
+        // changing object, so the event's endpoint is "you". Its post-flush live
+        // controller cannot gate either side (one flush precedes collection).
+        // `collect_matching_triggers_inner` attributes the trigger to that player.
         return true;
     }
-    // CR 603.2: delayed/`SpecificObject` case (Stolen Uniform). The source is the
-    // graveyard spell whose controller is the player who temporarily held the
-    // object; firing only when `old_controller == source.controller` fires on the
-    // loss and not on the initial gain.
-    source_context.source_read(state).controller() == *old_controller
+    // CR 603.7d + CR 603.2: non-self source (Stolen Uniform's delayed trigger).
+    // "You" is the source's controller; firing only when it is the participant on
+    // the trigger's side fires on the loss and not on the initial gain.
+    source_context.source_read(state).controller()
+        == side.participant(*old_controller, *new_controller)
 }
 
 /// CR 712.14: Transformed trigger — fires when an object transforms.
@@ -5813,6 +5890,7 @@ pub(crate) fn test_trigger_source_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::game_object::{AttachTarget, RoomDoor};
     use crate::game::zones::create_object;
     use crate::parser::oracle_trigger::parse_trigger_line;
@@ -5990,6 +6068,120 @@ mod tests {
         // stop firing if the insert is dropped during a refactor.
         let registry = build_trigger_registry();
         assert!(registry.contains_key(&TriggerMode::LoyaltyAbilityActivated));
+    }
+
+    /// CR 603.2 + CR 603.10 / CR 603.10d: both control-change sides are registry
+    /// keys. `HashMap` insert is not compile-enforced, so a dropped `Gains` insert
+    /// would silently stop "When you gain control of ~" (Risky Move) from firing.
+    #[test]
+    fn trigger_registry_includes_both_changes_controller_sides() {
+        let registry = build_trigger_registry();
+        for side in [ControlChangeSide::Loses, ControlChangeSide::Gains] {
+            assert!(
+                registry.contains_key(&TriggerMode::ChangesController { side }),
+                "registry must key ChangesController {{ side: {side:?} }}"
+            );
+        }
+    }
+
+    fn controller_changed(object: ObjectId, old: u8, new: u8) -> GameEvent {
+        GameEvent::ControllerChanged {
+            object_id: object,
+            old_controller: PlayerId(old),
+            new_controller: PlayerId(new),
+        }
+    }
+
+    /// CR 603.2 + CR 603.7d: a non-self source (Stolen Uniform's delayed trigger
+    /// shape — a `SpecificObject` subject, source controller constant) matches a
+    /// `Gains` trigger iff the source's controller is the gaining player, a
+    /// `Loses` trigger iff it is the losing player, and an unchanged controller
+    /// never matches.
+    ///
+    /// Revert-failing: flipping the `participant` call in `match_changes_controller`
+    /// swaps the two sides' assertions.
+    #[test]
+    fn changes_controller_non_self_source_matches_its_controllers_side() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Delayed Source".to_string(),
+            Zone::Graveyard,
+        );
+        let subject = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Subject".to_string(),
+            Zone::Battlefield,
+        );
+        let context = test_trigger_source_context(&state, source_id);
+        let trigger_for = |side| {
+            let mut trigger = make_trigger(TriggerMode::ChangesController { side });
+            trigger.valid_card = Some(TargetFilter::SpecificObject { id: subject });
+            trigger
+        };
+        let gains = trigger_for(ControlChangeSide::Gains);
+        let loses = trigger_for(ControlChangeSide::Loses);
+
+        // Source controller P1 gains the subject from P0.
+        let gained = controller_changed(subject, 0, 1);
+        assert!(match_changes_controller(&gained, &gains, &context, &state));
+        assert!(!match_changes_controller(&gained, &loses, &context, &state));
+
+        // Source controller P1 loses the subject to P0.
+        let lost = controller_changed(subject, 1, 0);
+        assert!(match_changes_controller(&lost, &loses, &context, &state));
+        assert!(!match_changes_controller(&lost, &gains, &context, &state));
+
+        // An unchanged controller is not a control change on either side.
+        let unchanged = controller_changed(subject, 1, 1);
+        assert!(!match_changes_controller(
+            &unchanged, &gains, &context, &state
+        ));
+        assert!(!match_changes_controller(
+            &unchanged, &loses, &context, &state
+        ));
+    }
+
+    /// CR 102.3: "from another player" includes a teammate. A self-ref `Gains`
+    /// source matches a teammate-to-teammate control change in Two-Headed Giant.
+    ///
+    /// Documentation pin, not a revert-failing claim: it locks the "another
+    /// player includes a teammate" reading against a future opponent-only filter.
+    #[test]
+    fn changes_controller_gains_includes_a_teammate_in_two_headed_giant() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Risky Move".to_string(),
+            Zone::Battlefield,
+        );
+        let context = test_trigger_source_context(&state, source_id);
+        let mut trigger = make_trigger(TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains,
+        });
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        // P0 and P1 are teammates in Two-Headed Giant (seats 0/1 vs 2/3).
+        assert_eq!(
+            crate::game::players::teammates(&state, PlayerId(0)),
+            vec![PlayerId(1)],
+            "reach guard: P0 and P1 must be teammates"
+        );
+        assert!(match_changes_controller(
+            &controller_changed(source_id, 0, 1),
+            &trigger,
+            &context,
+            &state
+        ));
     }
 
     /// Helper to create a minimal TriggerDefinition with typed fields.
@@ -16145,7 +16337,9 @@ mod tests {
             Zone::Graveyard,
         );
         let context = test_trigger_source_context(&state, source_id);
-        let mut specific = TriggerDefinition::new(TriggerMode::ChangesController);
+        let mut specific = TriggerDefinition::new(TriggerMode::ChangesController {
+            side: ControlChangeSide::Loses,
+        });
         specific.valid_target = Some(TargetFilter::SpecificPlayer { id: PlayerId(1) });
         assert!(
             valid_player_matches(&specific, &state, PlayerId(1), &context),
@@ -16155,7 +16349,9 @@ mod tests {
             !valid_player_matches(&specific, &state, PlayerId(0), &context),
             "a bound player slot matches no other player"
         );
-        let mut dead = TriggerDefinition::new(TriggerMode::ChangesController);
+        let mut dead = TriggerDefinition::new(TriggerMode::ChangesController {
+            side: ControlChangeSide::Loses,
+        });
         dead.valid_target = Some(TargetFilter::None);
         assert!(
             !valid_player_matches(&dead, &state, PlayerId(0), &context)
@@ -16185,7 +16381,9 @@ mod tests {
         );
         let context = test_trigger_source_context(&state, source_id);
         let matches = |filter: TargetFilter, player: PlayerId| {
-            let mut trigger = TriggerDefinition::new(TriggerMode::ChangesController);
+            let mut trigger = TriggerDefinition::new(TriggerMode::ChangesController {
+                side: ControlChangeSide::Loses,
+            });
             trigger.valid_target = Some(filter);
             valid_player_matches(&trigger, &state, player, &context)
         };
