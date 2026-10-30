@@ -1,9 +1,11 @@
+use crate::game::deck_loading;
 use crate::game::effects::change_zone::{self, ZoneMoveResult};
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
 use crate::types::ability::TargetFilter;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::card_printing::DeckSection;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, OutsideGameCardUse, OutsideGameChoiceEntry, OutsideGameChoiceSource, WaitingFor,
@@ -212,13 +214,13 @@ pub(crate) fn put_sideboard_entry_into_game(
     sideboard_index: usize,
     destination: Zone,
 ) -> Result<crate::types::identifiers::ObjectId, EffectError> {
-    let card_face = {
-        let entry = state
+    let (card_face, printing) = {
+        let pool = state
             .deck_pools
             .iter()
             .find(|pool| pool.player == player)
             .ok_or(EffectError::PlayerNotFound)?;
-        let Some(entry) = entry.current_sideboard.get(sideboard_index) else {
+        let Some(entry) = pool.current_sideboard.get(sideboard_index) else {
             return Err(EffectError::InvalidParam(
                 "sideboard index out of range".to_string(),
             ));
@@ -228,7 +230,16 @@ pub(crate) fn put_sideboard_entry_into_game(
                 "sideboard card already brought into game".to_string(),
             ));
         }
-        entry.card.clone()
+        // CR 400.11b + CR 203.1 + CR 206.1: the brought-in card keeps its owner's printing
+        // (display-only). Read before the bookkeeping below, so the copy being brought in
+        // counts as not yet taken.
+        let printing = deck_loading::outside_game_copy_printing(
+            pool,
+            &state.outside_game_cards_brought_in,
+            DeckSection::Sideboard,
+            &entry.card,
+        );
+        (entry.card.clone(), printing)
     };
 
     // CR 407.3: refuse BEFORE the bookkeeping below, not at materialization —
@@ -261,12 +272,15 @@ pub(crate) fn put_sideboard_entry_into_game(
     // The CR 407.3 gate above already cleared this face, so the authority's own
     // check cannot refuse here; map it rather than unwrap so a future divergence
     // between the two surfaces as an error instead of a panic.
-    put_outside_game_face_into(state, player, &card_face, destination).ok_or_else(|| {
-        EffectError::InvalidParam(format!(
-            "{} can't be brought into the game from outside the game (CR 407.3)",
-            card_face.name
-        ))
-    })
+    let object_id =
+        put_outside_game_face_into(state, player, &card_face, destination).ok_or_else(|| {
+            EffectError::InvalidParam(format!(
+                "{} can't be brought into the game from outside the game (CR 407.3)",
+                card_face.name
+            ))
+        })?;
+    deck_loading::stamp_created_card(state, object_id, printing.as_ref());
+    Ok(object_id)
 }
 
 /// CR 400.11b: Bring one card from OUTSIDE the game into `destination` as a new

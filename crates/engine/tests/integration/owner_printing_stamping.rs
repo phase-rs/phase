@@ -291,7 +291,77 @@ fn normalization_is_lenient_section_bound_ordered_and_capped() {
             .count(),
         5
     );
-    assert_eq!(state.deck_pools[0].current_companion.len(), 0);
+    // The freeform load drops the dedicated companion slot, but the pool still retains the
+    // payload's rows (CR 203.1 + CR 206.1), the Companion row included.
+    assert!(state.deck_pools[0].current_companion.is_empty());
+    let record = state.deck_pools[0]
+        .printings
+        .get()
+        .as_deref()
+        .expect("the pool retains the payload's printing record");
+    assert_eq!(record.rows(), payload.player.printings.as_slice());
+    assert!(record
+        .rows()
+        .iter()
+        .any(|row| row.section == DeckSection::Companion));
+
+    // The lookup agrees with load stamping: copy k of the face carries the k-th row's
+    // printing in stream order (b1), and the lookup's multiset is the loaded objects' (b2).
+    let forest = &payload
+        .player
+        .main_deck
+        .iter()
+        .find(|entry| entry.card.name == "Forest")
+        .expect("P0 main deck holds Forest")
+        .card;
+    let sequence: Vec<Option<String>> = (0..6)
+        .map(|copy| {
+            record
+                .printing_of(DeckSection::MainDeck, forest, copy)
+                .map(|printing| printing.set_code.clone())
+        })
+        .collect();
+    let expected_sequence: Vec<Option<String>> = [
+        "first",
+        "first",
+        "uncatalogued",
+        "uncatalogued",
+        "uncatalogued",
+    ]
+    .into_iter()
+    .map(|tag| Some(tag.to_string()))
+    .chain([None])
+    .collect();
+    assert_eq!(sequence, expected_sequence);
+    let mut looked_up: Vec<String> = sequence.into_iter().flatten().collect();
+    looked_up.sort();
+    let mut loaded: Vec<String> = state
+        .objects
+        .values()
+        .filter(|o| o.owner == PlayerId(0) && o.name == "Forest")
+        .filter_map(|o| o.printing.get().as_ref().map(|p| p.set_code.clone()))
+        .collect();
+    loaded.sort();
+    assert_eq!(looked_up, loaded);
+
+    // Database-free loading retains an equal record. `DisplayOnly` equality is always true,
+    // so compare through `get`.
+    let mut database_free = GameState::new(FormatConfig::freeform(), 2, 4910);
+    load_and_hydrate_decks(&mut database_free, &payload, None);
+    assert_eq!(
+        database_free.deck_pools[0].printings.get(),
+        state.deck_pools[0].printings.get()
+    );
+
+    // A seat without rows serializes without the key; the annotated seat has it (reach).
+    assert!(serde_json::to_value(&state.deck_pools[0])
+        .unwrap()
+        .get("printings")
+        .is_some());
+    assert!(serde_json::to_value(&state.deck_pools[1])
+        .unwrap()
+        .get("printings")
+        .is_none());
     start(&mut state);
 }
 
@@ -1386,5 +1456,798 @@ fn loaded_typed_shared_piles_hide_printings_until_their_reveal_transition() {
             assert_eq!(object.base_printing.get().as_ref(), Some(printing));
         }
         assert_exposure(&state, Some(revealed));
+    }
+}
+
+/// CR 203.1 + CR 206.1: objects created from a deck-pool entry AFTER load (a companion put
+/// into hand, a sideboard card brought in from outside the game) carry the owner's printing.
+mod post_load_creators {
+    use super::*;
+    use engine::database::mtgjson::{AtomicCard, AtomicIdentifiers, SetRelatedCards};
+    use engine::game::deck_loading::{
+        normalize_deck_printings, round_trip_name, DeckEntry, DeckPayload, PlayerDeckPayload,
+    };
+    use engine::game::engine::start_game_with_starting_player;
+    use engine::game::scenario::{GameRunner, P0, P1};
+    use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
+    use engine::types::ability::{Effect, OutsideGameSourcePool};
+    use engine::types::ability_visit::visit_ability_def;
+    use engine::types::actions::{GameAction, MulliganChoice, OutsideGameSelection};
+    use engine::types::card::CardFace;
+    use engine::types::display_only::{rules_projection, DisplayOnly};
+    use engine::types::events::GameEvent;
+    use engine::types::game_state::{
+        CastPaymentMode, CompanionChoiceSource, CompanionDeclaration, CompanionRevealChoice,
+        OutsideGameChoiceSource, PersistedGameState, WaitingFor,
+    };
+    use engine::types::identifiers::ObjectId;
+    use engine::types::mana::{ManaType, ManaUnit};
+    use engine::types::match_config::MatchType;
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+    use std::ops::ControlFlow;
+
+    const LURRUS: &str = "Lurrus of the Dream-Den";
+    const LURRUS_ORACLE_ID: &str = "3bc757c1-3adb-4321-8832-8e1cc9e687f7";
+    const WERNOG: &str = "Wernog, Rider's Chaplain";
+    /// Living Wish's verbatim Oracle text (Scryfall).
+    const LIVING_WISH_ORACLE: &str = "You may reveal a creature or land card you own from outside the game and put it into your hand. Exile Living Wish.";
+
+    /// Living Wish, built through the production card-data face builder so the fetch
+    /// vehicle's parse is the parser's, not a hand-written effect.
+    fn living_wish_face() -> CardFace {
+        let card = AtomicCard {
+            name: "Living Wish".to_string(),
+            mana_cost: Some("{1}{G}".to_string()),
+            colors: vec!["G".to_string()],
+            color_identity: vec!["G".to_string()],
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            text: Some(LIVING_WISH_ORACLE.to_string()),
+            layout: "normal".to_string(),
+            type_line: Some("Sorcery".to_string()),
+            types: vec!["Sorcery".to_string()],
+            subtypes: Vec::new(),
+            supertypes: Vec::new(),
+            keywords: None,
+            side: None,
+            face_name: None,
+            mana_value: 2.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some("living-wish-oracle".to_string()),
+                scryfall_id: Some("living-wish-face".to_string()),
+            },
+            foreign_data: Vec::new(),
+            related_cards: SetRelatedCards::default(),
+        };
+        // The second argument is what `build_oracle_face` stores as the face's oracle id.
+        let face = engine::database::synthesis::build_oracle_face(
+            &card,
+            Some("living-wish-oracle".to_string()),
+        );
+        // Reach guards: the vehicle parses cleanly to the revealing sideboard fetch.
+        assert!(
+            !engine::game::coverage::card_face_has_unimplemented_parts(&face),
+            "Living Wish must parse without Unimplemented"
+        );
+        let mut fetch = None;
+        for ability in &face.abilities {
+            let _ = visit_ability_def(ability, &mut |effect| {
+                if matches!(effect, Effect::SearchOutsideGame { .. }) {
+                    fetch = Some(effect.clone());
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            });
+        }
+        assert!(
+            matches!(
+                fetch,
+                Some(Effect::SearchOutsideGame {
+                    reveal: true,
+                    destination: Zone::Hand,
+                    source_pool: OutsideGameSourcePool::Sideboard,
+                    ..
+                })
+            ),
+            "Living Wish must lower to a revealing sideboard fetch into hand, got {fetch:?}"
+        );
+        face
+    }
+
+    fn qualified_key() -> String {
+        format!("{} [{LURRUS_ORACLE_ID}]", LURRUS.to_lowercase())
+    }
+
+    /// The committed Lurrus under its qualified key, a homonym (same printed name, another
+    /// oracle id) under the bare key, plus the named fixture faces (and Living Wish).
+    fn lurrus_homonym_database(extra: &[&str]) -> (CardDatabase, String) {
+        let fixture =
+            crate::support::shared_card_db().expect("committed integration database is required");
+        let lurrus = fixture
+            .get_face_by_name(LURRUS)
+            .expect("fixture holds Lurrus");
+        assert_eq!(lurrus.scryfall_oracle_id.as_deref(), Some(LURRUS_ORACLE_ID));
+        let mut homonym = lurrus.clone();
+        homonym.scryfall_oracle_id = Some("lurrus-homonym".to_string());
+        let key = qualified_key();
+        let mut entries = serde_json::Map::new();
+        entries.insert(key.clone(), serde_json::to_value(lurrus).unwrap());
+        entries.insert(
+            LURRUS.to_lowercase(),
+            serde_json::to_value(&homonym).unwrap(),
+        );
+        for name in extra {
+            let face = if *name == "Living Wish" {
+                living_wish_face()
+            } else {
+                fixture
+                    .get_face_by_name(name)
+                    .unwrap_or_else(|| panic!("fixture holds {name}"))
+                    .clone()
+            };
+            entries.insert(name.to_lowercase(), serde_json::to_value(&face).unwrap());
+        }
+        let db = CardDatabase::from_json_str(&serde_json::Value::Object(entries).to_string())
+            .expect("homonym fixture database");
+        // Reach guards: the qualified face round-trips under its qualified key, and the
+        // homonym owns the bare name.
+        let qualified = db
+            .get_face_by_name(&key)
+            .expect("qualified Lurrus resolves");
+        assert_eq!(
+            qualified.scryfall_oracle_id.as_deref(),
+            Some(LURRUS_ORACLE_ID)
+        );
+        assert_eq!(round_trip_name(&db, qualified), key);
+        let bare = db.get_face_by_name(LURRUS).expect("bare Lurrus resolves");
+        assert_eq!(bare.scryfall_oracle_id.as_deref(), Some("lurrus-homonym"));
+        assert_eq!(round_trip_name(&db, bare), LURRUS);
+        (db, key)
+    }
+
+    fn tag(printing: &Option<engine::types::card_printing::CardPrinting>) -> Option<&str> {
+        printing.as_ref().map(|printing| printing.set_code.as_str())
+    }
+
+    fn companion_printing(runner: &GameRunner, seat: PlayerId) -> Option<&str> {
+        tag(runner.state().players[seat.0 as usize]
+            .companion
+            .as_ref()
+            .expect("the seat revealed a companion")
+            .printing
+            .get())
+    }
+
+    fn hand(runner: &GameRunner, seat: PlayerId) -> Vec<ObjectId> {
+        runner.state().players[seat.0 as usize]
+            .hand
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    /// The single object `after` holds beyond `before`.
+    fn only_new(before: &[ObjectId], after: &[ObjectId]) -> ObjectId {
+        let new: Vec<ObjectId> = after
+            .iter()
+            .copied()
+            .filter(|id| !before.contains(id))
+            .collect();
+        assert_eq!(new.len(), 1, "exactly one new hand object, got {new:?}");
+        new[0]
+    }
+
+    fn assert_fresh_printing(runner: &GameRunner, id: ObjectId, expected: Option<&str>) {
+        let object = &runner.state().objects[&id];
+        assert_eq!(tag(object.printing.get()), expected, "{id:?} printing");
+        assert_eq!(
+            tag(object.base_printing.get()),
+            expected,
+            "{id:?} base printing"
+        );
+    }
+
+    fn offer(name: &str, source: CompanionChoiceSource) -> CompanionRevealChoice {
+        CompanionRevealChoice {
+            name: name.to_string(),
+            source,
+        }
+    }
+
+    fn reveal(runner: &mut GameRunner, choice: CompanionRevealChoice) {
+        runner
+            .act(GameAction::DeclareCompanion {
+                choice: CompanionDeclaration::Reveal(choice),
+            })
+            .expect("the offered companion is revealed");
+    }
+
+    fn assert_offer(runner: &GameRunner, seat: PlayerId, expected: &[CompanionRevealChoice]) {
+        let WaitingFor::CompanionReveal {
+            player,
+            eligible_companions,
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "expected a companion reveal offer, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, seat);
+        let mut offered = eligible_companions.clone();
+        offered.sort();
+        let mut expected = expected.to_vec();
+        expected.sort();
+        assert_eq!(offered, expected);
+    }
+
+    /// Starts the game; the first prompt is the companion reveal.
+    fn start_to_reveal(mut state: GameState) -> GameRunner {
+        let result = start_game_with_starting_player(&mut state, P0);
+        assert!(
+            matches!(result.waiting_for, WaitingFor::CompanionReveal { .. }),
+            "{:?}",
+            result.waiting_for
+        );
+        GameRunner::from_state(state)
+    }
+
+    fn play_to_main(runner: &mut GameRunner) {
+        for _ in 0..4 {
+            if !matches!(
+                runner.state().waiting_for,
+                WaitingFor::MulliganDecision { .. }
+            ) {
+                break;
+            }
+            runner
+                .act(GameAction::MulliganDecision {
+                    choice: MulliganChoice::Keep,
+                })
+                .expect("keep the opening hand");
+        }
+        runner.advance_to_phase(Phase::PreCombatMain);
+        assert_eq!(runner.state().phase, Phase::PreCombatMain);
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+            "{:?}",
+            runner.state().waiting_for
+        );
+    }
+
+    /// Fixture setup only: floating mana for P0, as `GameScenario::with_mana_pool` adds it.
+    fn add_pool_mana(runner: &mut GameRunner, types: &[ManaType]) {
+        for mana_type in types {
+            let _ = runner
+                .state_mut()
+                .add_mana_to_pool(P0, ManaUnit::new(*mana_type, ObjectId(0), false, vec![]));
+        }
+    }
+
+    fn companion_to_hand(runner: &mut GameRunner) -> ObjectId {
+        add_pool_mana(runner, &[ManaType::Colorless; 3]);
+        let before = hand(runner, P0);
+        runner
+            .act(GameAction::CompanionToHand)
+            .expect("the companion special action is paid from the pool");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ));
+        only_new(&before, &hand(runner, P0))
+    }
+
+    #[test]
+    fn dedicated_companion_carries_its_own_qualified_printing_into_hand() {
+        let (db, key) = lurrus_homonym_database(&["Plains", "Swamp", WERNOG]);
+        let decoy = choice(DeckSection::Sideboard, LURRUS, 1, "homonym-sideboard");
+        let companion_row = choice(DeckSection::Companion, &key, 1, "qualified-companion");
+        let list = DeckList {
+            player: PlayerDeckList {
+                main_deck: names(&[("Plains", 10), ("Swamp", 10)]),
+                commander: names(&[(WERNOG, 1)]),
+                companion: vec![key.clone()],
+                // Dropped from the pool by `SideboardPolicy::Forbidden` (CR 903.5e), but its
+                // row is normalized against the payload and retained.
+                sideboard: vec![LURRUS.to_string()],
+                printings: vec![decoy.clone(), companion_row.clone()],
+                ..Default::default()
+            },
+            opponent: PlayerDeckList {
+                main_deck: names(&[("Plains", 20)]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let payload = resolve_deck_list(&db, &list);
+        assert_eq!(payload.player.printings, [decoy, companion_row]);
+
+        let mut state = GameState::new(FormatConfig::commander(), 2, 4910);
+        load_and_hydrate_decks(&mut state, &payload, Some(&db));
+        let qualified = &payload.player.companion[0].card;
+        assert_eq!(
+            qualified.scryfall_oracle_id.as_deref(),
+            Some(LURRUS_ORACLE_ID)
+        );
+        let record = state.deck_pools[0]
+            .printings
+            .get()
+            .as_deref()
+            .expect("P0 retains a printing record");
+        assert_eq!(record.rows(), payload.player.printings.as_slice());
+        assert_eq!(
+            record.lookup_name(DeckSection::Companion, qualified),
+            Some(key.as_str())
+        );
+
+        let mut runner = start_to_reveal(state);
+        assert_offer(
+            &runner,
+            P0,
+            &[offer(LURRUS, CompanionChoiceSource::Dedicated)],
+        );
+        reveal(&mut runner, offer(LURRUS, CompanionChoiceSource::Dedicated));
+        assert_eq!(companion_printing(&runner, P0), Some("qualified-companion"));
+
+        play_to_main(&mut runner);
+        let companion = companion_to_hand(&mut runner);
+        let object = &runner.state().objects[&companion];
+        assert_eq!(object.name, LURRUS);
+        assert_eq!(
+            object.printed_ref.as_ref().expect("printed ref").oracle_id,
+            LURRUS_ORACLE_ID
+        );
+        assert_fresh_printing(&runner, companion, Some("qualified-companion"));
+    }
+
+    /// The state after: a sideboard companion revealed (copy 0 of the entry), a Living Wish
+    /// fetch from the same entry (copy 1), and the companion put into hand.
+    struct CompanionAndFetch {
+        runner: GameRunner,
+        fetched: ObjectId,
+        companion_object: ObjectId,
+    }
+
+    fn companion_and_fetch() -> CompanionAndFetch {
+        let (db, key) =
+            lurrus_homonym_database(&["Living Wish", "Plains", "Jegantha, the Wellspring"]);
+        let companion_slot = choice(DeckSection::Companion, &key, 1, "companion-slot");
+        let first = choice(DeckSection::Sideboard, &key, 1, "q-first");
+        let second = choice(DeckSection::Sideboard, &key, 1, "q-second");
+        let list = DeckList {
+            player: PlayerDeckList {
+                main_deck: names(&[("Living Wish", 20)]),
+                sideboard: vec![key.clone(); 2],
+                // Dropped from the pool in Standard; its row is retained, first.
+                companion: vec![key.clone()],
+                printings: vec![companion_slot, first, second],
+                ..Default::default()
+            },
+            opponent: PlayerDeckList {
+                main_deck: names(&[("Plains", 20)]),
+                sideboard: vec!["Jegantha, the Wellspring".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let payload = resolve_deck_list(&db, &list);
+        let mut state = GameState::new(FormatConfig::standard(), 2, 4910);
+        state.match_config.match_type = MatchType::Bo3;
+        load_and_hydrate_decks(&mut state, &payload, Some(&db));
+
+        let mut runner = start_to_reveal(state);
+        assert_offer(
+            &runner,
+            P0,
+            &[offer(LURRUS, CompanionChoiceSource::Sideboard { index: 0 })],
+        );
+        reveal(
+            &mut runner,
+            offer(LURRUS, CompanionChoiceSource::Sideboard { index: 0 }),
+        );
+        assert_eq!(companion_printing(&runner, P0), Some("q-first"));
+        // Reach: the removal the ordinal rule reads.
+        assert_eq!(runner.state().deck_pools[0].current_sideboard[0].count, 1);
+
+        let jegantha = "Jegantha, the Wellspring";
+        assert_offer(
+            &runner,
+            P1,
+            &[offer(
+                jegantha,
+                CompanionChoiceSource::Sideboard { index: 0 },
+            )],
+        );
+        reveal(
+            &mut runner,
+            offer(jegantha, CompanionChoiceSource::Sideboard { index: 0 }),
+        );
+        let wire = serde_json::to_value(runner.state()).unwrap();
+        assert!(companion_printing_is_none(&runner, P1));
+        assert!(wire["players"][1]["companion"].get("printing").is_none());
+        assert!(wire["players"][0]["companion"].get("printing").is_some());
+
+        // Persisted round trip: both carriers survive, and creation works after the restore.
+        let record_rows = runner.state().deck_pools[0]
+            .printings
+            .get()
+            .as_deref()
+            .expect("P0 record")
+            .rows()
+            .to_vec();
+        let persisted =
+            serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("the persisted wire decodes")
+            .into_game_state()
+            .expect("the restore contract holds");
+        // Read through `get`, never `==`: the wrapper is always equal.
+        let restored_record = restored.deck_pools[0]
+            .printings
+            .get()
+            .as_deref()
+            .expect("the restored pool keeps its record");
+        assert_eq!(restored_record.rows(), record_rows.as_slice());
+        let qualified_face = restored.deck_pools[0].registered_sideboard[0].card.clone();
+        assert_eq!(
+            restored_record.lookup_name(DeckSection::Sideboard, &qualified_face),
+            Some(key.as_str())
+        );
+        assert_eq!(
+            tag(restored.players[0]
+                .companion
+                .as_ref()
+                .expect("restored companion")
+                .printing
+                .get()),
+            Some("q-first")
+        );
+        let mut runner = GameRunner::from_state(restored);
+
+        play_to_main(&mut runner);
+        add_pool_mana(&mut runner, &[ManaType::Green, ManaType::Colorless]);
+        let before = hand(&runner, P0);
+        let wish = before
+            .iter()
+            .copied()
+            .find(|id| runner.state().objects[id].name == "Living Wish")
+            .expect("the opening hand holds Living Wish");
+        let card_id = runner.state().objects[&wish].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: wish,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("Living Wish is castable");
+        for _ in 0..8 {
+            if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority to resolve Living Wish");
+            } else {
+                break;
+            }
+        }
+        let WaitingFor::OutsideGameChoice {
+            player,
+            choices,
+            reveal,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "expected the outside-game choice, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert!(*reveal);
+        assert!(
+            matches!(
+                choices.as_slice(),
+                [entry] if entry.count == 1
+                    && matches!(
+                        &entry.source,
+                        OutsideGameChoiceSource::Sideboard { sideboard_index: 0, .. }
+                    )
+            ),
+            "{choices:?}"
+        );
+        let result = runner
+            .act(GameAction::ChooseOutsideGameCards {
+                selections: vec![OutsideGameSelection::Sideboard { sideboard_index: 0 }],
+            })
+            .expect("the sideboard copy is brought in");
+        let after_fetch = hand(&runner, P0);
+        let hand_before_cast: Vec<ObjectId> = before.clone();
+        let fetched = only_new(&hand_before_cast, &after_fetch);
+        let object = &runner.state().objects[&fetched];
+        assert_eq!(object.name, LURRUS);
+        assert_eq!(
+            object.printed_ref.as_ref().expect("printed ref").oracle_id,
+            LURRUS_ORACLE_ID
+        );
+        assert_fresh_printing(&runner, fetched, Some("q-second"));
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ));
+        assert!(runner.state().stack.is_empty());
+        assert_eq!(runner.state().objects[&wish].zone, Zone::Exile);
+        // Positive reveal control for the hidden-information test: the fetch revealed it.
+        assert!(runner.state().revealed_cards.contains(&fetched));
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::CardsRevealed { card_ids, .. } if card_ids.contains(&fetched)
+        )));
+        // Both copies of the entry are now taken: registered 2 - current 1 + brought in 1.
+        let record = runner.state().deck_pools[0]
+            .printings
+            .get()
+            .as_deref()
+            .expect("P0 record");
+        assert!(record
+            .printing_of(DeckSection::Sideboard, &qualified_face, 2)
+            .is_none());
+
+        let companion_object = companion_to_hand(&mut runner);
+        assert_fresh_printing(&runner, companion_object, Some("q-first"));
+        assert_fresh_printing(&runner, fetched, Some("q-second"));
+        CompanionAndFetch {
+            runner,
+            fetched,
+            companion_object,
+        }
+    }
+
+    fn companion_printing_is_none(runner: &GameRunner, seat: PlayerId) -> bool {
+        runner.state().players[seat.0 as usize]
+            .companion
+            .as_ref()
+            .expect("the seat revealed a companion")
+            .printing
+            .get()
+            .is_none()
+    }
+
+    #[test]
+    fn sideboard_companion_and_fetch_take_distinct_printings_of_one_entry() {
+        let CompanionAndFetch { runner, .. } = companion_and_fetch();
+        let state = runner.state();
+
+        // Display-only isolation: equality, the rules projection and the legal actions
+        // ignore both new carriers.
+        let mut stripped = state.clone();
+        for pool in &mut stripped.deck_pools {
+            pool.printings = DisplayOnly::new(None);
+        }
+        for player in &mut stripped.players {
+            if let Some(companion) = player.companion.as_mut() {
+                companion.printing = DisplayOnly::new(None);
+            }
+        }
+        assert!(*state == stripped);
+        assert_eq!(
+            rules_projection(state).unwrap(),
+            rules_projection(&stripped).unwrap()
+        );
+        assert_eq!(
+            engine::ai_support::legal_actions(state),
+            engine::ai_support::legal_actions(&stripped)
+        );
+        // Positive control: the wire does carry them.
+        assert_ne!(
+            serde_json::to_value(state).unwrap(),
+            serde_json::to_value(&stripped).unwrap()
+        );
+    }
+
+    #[test]
+    fn same_section_homonym_sideboard_companion_keeps_its_own_row() {
+        let (db, key) = lurrus_homonym_database(&["Plains"]);
+        let plains = db.get_face_by_name("Plains").expect("Plains");
+        let homonym = db.get_face_by_name(LURRUS).expect("homonym");
+        let qualified = db.get_face_by_name(&key).expect("qualified");
+        // The composition `server_core::deck_resolve::resolve_deck` performs: one entry per
+        // submitted key (so homonyms stay distinct in one section), then normalization.
+        let mut seat = PlayerDeckPayload {
+            main_deck: vec![DeckEntry::from_resolved_face(&db, plains, 20)],
+            sideboard: vec![
+                DeckEntry::from_resolved_face(&db, homonym, 1),
+                DeckEntry::from_resolved_face(&db, qualified, 1),
+            ],
+            printings: vec![
+                choice(DeckSection::Sideboard, LURRUS, 1, "homonym-art"),
+                choice(DeckSection::Sideboard, &key, 1, "qualified-art"),
+            ],
+            ..Default::default()
+        };
+        normalize_deck_printings(&db, &mut seat);
+        assert_eq!(seat.printings.len(), 2, "both rows survive normalization");
+        let bindings: Vec<(usize, &str)> = seat
+            .printing_entry_names
+            .iter()
+            .map(|binding| (binding.entry_index, binding.name.as_str()))
+            .collect();
+        assert_eq!(bindings, [(0, LURRUS), (1, key.as_str())]);
+
+        let payload = DeckPayload {
+            player: seat,
+            opponent: PlayerDeckPayload {
+                main_deck: vec![DeckEntry::from_resolved_face(&db, plains, 20)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut state = GameState::new(FormatConfig::standard(), 2, 4910);
+        load_and_hydrate_decks(&mut state, &payload, Some(&db));
+        let mut runner = start_to_reveal(state);
+        assert_offer(
+            &runner,
+            P0,
+            &[
+                offer(LURRUS, CompanionChoiceSource::Sideboard { index: 0 }),
+                offer(LURRUS, CompanionChoiceSource::Sideboard { index: 1 }),
+            ],
+        );
+        reveal(
+            &mut runner,
+            offer(LURRUS, CompanionChoiceSource::Sideboard { index: 1 }),
+        );
+        assert_eq!(companion_printing(&runner, P0), Some("qualified-art"));
+
+        play_to_main(&mut runner);
+        let companion = companion_to_hand(&mut runner);
+        assert_eq!(
+            runner.state().objects[&companion]
+                .printed_ref
+                .as_ref()
+                .expect("printed ref")
+                .oracle_id,
+            LURRUS_ORACLE_ID
+        );
+        assert_fresh_printing(&runner, companion, Some("qualified-art"));
+    }
+
+    #[test]
+    fn printing_record_is_redacted_with_the_pool_lists_it_annotates() {
+        let CompanionAndFetch {
+            mut runner,
+            fetched,
+            companion_object,
+            ..
+        } = companion_and_fetch();
+        let state = runner.state();
+
+        // The transient reveal ended: `CompanionToHand` was the next action after the fetch,
+        // and an action from `Priority` clears `revealed_cards`. (The positive control, that
+        // it WAS revealed, is in `companion_and_fetch`.) The public reveal is durable until
+        // the card changes zone (CR 701.20a; `CardsRevealed` publishes it), so the fetched
+        // card stays publicly identified, and its printing leaves with its identity
+        // (`redact_printed_identity`). Reach guard for the paired assertions below.
+        assert!(!state.revealed_cards.contains(&fetched));
+        assert!(state.public_revealed_cards.contains(&fetched));
+        assert!(!state.public_revealed_cards.contains(&companion_object));
+
+        // Positives first: the unfiltered pool carries the record, and the owner's view
+        // shows both objects' printings.
+        let record_rows = state.deck_pools[0]
+            .printings
+            .get()
+            .as_deref()
+            .expect("the unfiltered pool carries the record")
+            .rows()
+            .to_vec();
+        assert!(
+            serde_json::to_value(&state.deck_pools[0]).unwrap()["printings"]
+                .get("rows")
+                .is_some()
+        );
+        let own = filter_state_for_viewer(state, P0);
+        for (id, expected) in [(fetched, "q-second"), (companion_object, "q-first")] {
+            let object = own.objects.get(&id).expect("the owner sees their hand");
+            assert_eq!(tag(object.printing.get()), Some(expected));
+            assert_eq!(tag(object.base_printing.get()), Some(expected));
+        }
+        let own_text = serde_json::to_string(&own).unwrap();
+        assert!(own_text.contains("q-second"), "paired positive");
+
+        // Negatives: no viewer outside the sideboarding prompt carries any seat's record.
+        let opponent = filter_state_for_viewer(state, P1);
+        let unseated = filter_state_for_unseated_viewer(state);
+        for view in [&own, &opponent, &unseated] {
+            for pool in &view.deck_pools {
+                assert!(serde_json::to_value(pool)
+                    .unwrap()
+                    .get("printings")
+                    .is_none());
+            }
+        }
+        // A printing is visible to a viewer exactly when the object's identity is: the
+        // publicly revealed fetched copy shows both (name and `q-second`), and the
+        // never-revealed companion hand object shows neither, to the opponent and to an
+        // unseated observer alike.
+        let identity_visible = |view: &GameState, id: ObjectId| {
+            view.objects
+                .get(&id)
+                .is_some_and(|object| object.name == LURRUS)
+        };
+        let printing_visible = |view: &GameState, id: ObjectId| {
+            view.objects.get(&id).is_some_and(|object| {
+                object.printing.get().is_some() || object.base_printing.get().is_some()
+            })
+        };
+        for (view_name, view) in [("opponent", &opponent), ("unseated", &unseated)] {
+            for id in [fetched, companion_object] {
+                assert_eq!(
+                    identity_visible(view, id),
+                    printing_visible(view, id),
+                    "{view_name}: {id:?} printing is visible exactly when its identity is"
+                );
+            }
+            assert!(identity_visible(view, fetched), "{view_name}: revealed");
+            assert_eq!(
+                tag(view.objects[&fetched].printing.get()),
+                Some("q-second"),
+                "{view_name}: the revealed copy's printing"
+            );
+            assert_eq!(
+                tag(view.objects[&fetched].base_printing.get()),
+                Some("q-second")
+            );
+            // Strict negatives: the never-revealed hand object leaks neither.
+            assert!(!identity_visible(view, companion_object), "{view_name}");
+            assert!(!printing_visible(view, companion_object), "{view_name}");
+        }
+        // The revealed companion's printing is public (CR 702.139a).
+        assert_eq!(
+            tag(opponent.players[0]
+                .companion
+                .as_ref()
+                .expect("public companion")
+                .printing
+                .get()),
+            Some("q-first")
+        );
+
+        // During the owner's own sideboarding prompt the owner's view keeps the record.
+        runner
+            .act(GameAction::Concede { player_id: P1 })
+            .expect("conceding game one");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::BetweenGamesSideboard { player, .. } if player == P0
+            ),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        let state = runner.state();
+        let own = filter_state_for_viewer(state, P0);
+        assert_eq!(
+            own.deck_pools[0]
+                .printings
+                .get()
+                .as_deref()
+                .expect("the sideboarding owner keeps their record")
+                .rows(),
+            record_rows.as_slice()
+        );
+        let opponent = filter_state_for_viewer(state, P1);
+        assert!(serde_json::to_value(&opponent.deck_pools[0])
+            .unwrap()
+            .get("printings")
+            .is_none());
     }
 }

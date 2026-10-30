@@ -36,7 +36,7 @@ use super::ability::{
 use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
-use super::card_printing::CardPrinting;
+use super::card_printing::{CardPrinting, DeckPrintingRecord};
 use super::card_type::{CoreType, Supertype};
 use super::counter::{counter_map_serde, CounterMatch, CounterType};
 use super::display_only::{
@@ -11344,6 +11344,11 @@ pub struct PlayerDeckPool {
     /// compatibility with saved states and test fixtures that omit the field.
     #[serde(default)]
     pub bracket_tier: CommanderBracketTier,
+    /// CR 203.1 + CR 206.1: the owner's printing record for this seat (display-only),
+    /// filled at load and never written after it. Redacted with the lists it annotates
+    /// (`visibility.rs`, CR 400.2 + CR 100.4).
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printings: DisplayOnly<Option<Arc<DeckPrintingRecord>>>,
 }
 
 impl PlayerDeckPool {
@@ -11368,6 +11373,7 @@ impl PlayerDeckPool {
             registered_scheme_deck,
             current_scheme_deck,
             bracket_tier,
+            printings,
         } = self;
         // Named rather than written inline: `clippy::type_complexity` rejects the
         // inline array-of-pairs type, and the alias is the lint's own suggested remedy.
@@ -11390,8 +11396,15 @@ impl PlayerDeckPool {
             (registered_scheme_deck, &other.registered_scheme_deck),
             (current_scheme_deck, &other.current_scheme_deck),
         ];
+        // Identity of the retained printing record: the same allocation, or none on both sides.
+        let printings_shared = match (printings.get(), other.printings.get()) {
+            (Some(mine), Some(theirs)) => Arc::ptr_eq(mine, theirs),
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        };
         *player == other.player
             && *bracket_tier == other.bracket_tier
+            && printings_shared
             && lists
                 .into_iter()
                 .all(|(mine, theirs)| Arc::ptr_eq(mine, theirs))
@@ -37511,6 +37524,34 @@ mod tests {
             ..pool.clone()
         };
         assert!(!other_seat.shares_storage_with(&pool));
+    }
+
+    /// The retained printing record is part of storage identity: a clone shares it, an
+    /// equal fresh allocation does not (the display-only wrapper keeps the pools equal),
+    /// and a record against none never shares.
+    #[test]
+    fn deck_pool_storage_identity_covers_the_printing_record() {
+        use crate::types::card_printing::DeckPrintingRecord;
+        let record = || Arc::new(DeckPrintingRecord::new(Vec::new(), Vec::new()));
+        let pool = PlayerDeckPool {
+            player: PlayerId(1),
+            printings: DisplayOnly::new(Some(record())),
+            ..Default::default()
+        };
+        let mut copy = pool.clone();
+        assert!(copy.shares_storage_with(&pool));
+
+        copy.printings = DisplayOnly::new(Some(record()));
+        assert_eq!(copy, pool);
+        assert!(!copy.shares_storage_with(&pool));
+        assert!(!pool.shares_storage_with(&copy));
+
+        let without = PlayerDeckPool {
+            printings: DisplayOnly::new(None),
+            ..pool.clone()
+        };
+        assert!(!without.shares_storage_with(&pool));
+        assert!(!pool.shares_storage_with(&without));
     }
 
     /// CR 602.1a + CR 602.2b: the record's bound activation cost survives

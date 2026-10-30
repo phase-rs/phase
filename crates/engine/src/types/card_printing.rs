@@ -10,6 +10,8 @@ use serde::de::{DeserializeOwned, DeserializeSeed, IgnoredAny, MapAccess, SeqAcc
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Number, Value};
 
+use crate::types::card::CardFace;
+
 /// One printing of a card: its set code and collector number.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardPrinting {
@@ -327,6 +329,106 @@ impl<'de> Visitor<'de> for AnyElement {
             }
         }
         Ok(Value::Object(entries))
+    }
+}
+
+/// The identity `round_trip_name` resolves a face by: its printed name plus its Scryfall
+/// oracle id when one is recorded. The single face-identity authority for the retained
+/// printing record and for counting copies of a face in a pool list.
+pub fn deck_face_identity(face: &CardFace) -> (&str, Option<&str>) {
+    (face.name.as_str(), face.scryfall_oracle_id.as_deref())
+}
+
+/// Index-free form of `DeckEntryLookupName`: which round-trip lookup name `section`'s rows
+/// use for a face. The entry index a binding carries is invalidated by command-zone
+/// netting, zero-count pruning and companion removal; the face identity is not. The two
+/// types also live at different times: the index form in a payload, this one for a game.
+/// So this is a separate type rather than a parameter of the payload binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeckFaceLookupName {
+    pub section: DeckSection,
+    pub face_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_id: Option<String>,
+    /// The normalized (round-trip) name the section's rows carry for this face.
+    pub name: String,
+}
+
+impl DeckFaceLookupName {
+    pub fn of(section: DeckSection, face: &CardFace, name: String) -> Self {
+        let (face_name, oracle_id) = deck_face_identity(face);
+        Self {
+            section,
+            face_name: face_name.to_string(),
+            oracle_id: oracle_id.map(str::to_string),
+            name,
+        }
+    }
+
+    /// True when this entry names `face` in `section` (identity, never a raw name compare).
+    pub fn names(&self, section: DeckSection, face: &CardFace) -> bool {
+        self.section == section
+            && deck_face_identity(face) == (self.face_name.as_str(), self.oracle_id.as_deref())
+    }
+}
+
+/// CR 203.1 + CR 206.1: a seat's owner-chosen printings, retained beside its deck pool so
+/// an object created from a pool entry after load (a companion put into hand, a sideboard
+/// card brought in from outside the game) can carry the owner's printing. Display-only:
+/// no rules or AI path reads it. Never written after load: fields are private, the pool
+/// holds it behind an `Arc`, and only visibility redaction replaces it (in filtered copies).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeckPrintingRecord {
+    /// The loaded payload's normalized rows, unchanged (round-trip names, original order).
+    rows: Vec<DeckPrinting>,
+    /// One entry per (section, face identity) the payload bound.
+    lookup_names: Vec<DeckFaceLookupName>,
+}
+
+impl DeckPrintingRecord {
+    pub(crate) fn new(rows: Vec<DeckPrinting>, lookup_names: Vec<DeckFaceLookupName>) -> Self {
+        Self { rows, lookup_names }
+    }
+
+    pub fn rows(&self) -> &[DeckPrinting] {
+        &self.rows
+    }
+
+    pub fn lookup_names(&self) -> &[DeckFaceLookupName] {
+        &self.lookup_names
+    }
+
+    /// The round-trip name `section`'s rows use for `face`.
+    pub fn lookup_name(&self, section: DeckSection, face: &CardFace) -> Option<&str> {
+        self.lookup_names
+            .iter()
+            .find(|entry| entry.names(section, face))
+            .map(|entry| entry.name.as_str())
+    }
+
+    /// The printing of copy `ordinal` (0-based) of `face` in `section`, counting that face's
+    /// rows in stream order (the order `entry_copies` consumes them at load). Stateless.
+    pub fn printing_of(
+        &self,
+        section: DeckSection,
+        face: &CardFace,
+        ordinal: u32,
+    ) -> Option<&CardPrinting> {
+        let name = self.lookup_name(section, face)?;
+        let mut skip = ordinal;
+        // Both names are normalized round-trip names (the row's by `normalize_deck_printings`,
+        // the binding's by `round_trip_name`), never a raw face-name compare.
+        self.rows
+            .iter()
+            .filter(|row| row.section == section && row.name == name)
+            .find_map(|row| {
+                if skip < row.count {
+                    Some(&row.printing)
+                } else {
+                    skip -= row.count;
+                    None
+                }
+            })
     }
 }
 

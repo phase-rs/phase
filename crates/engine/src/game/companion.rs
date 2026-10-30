@@ -1,8 +1,10 @@
 use std::collections::HashSet;
 
-use crate::game::deck_loading::DeckEntry;
+use crate::game::deck_loading::{self, DeckEntry};
 use crate::types::card::CardFace;
+use crate::types::card_printing::DeckSection;
 use crate::types::card_type::CoreType;
+use crate::types::display_only::DisplayOnly;
 use crate::types::events::GameEvent;
 use crate::types::format::{GameFormat, SideboardPolicy};
 use crate::types::game_state::{
@@ -370,7 +372,7 @@ pub fn handle_declare_companion(
             &pool.current_commander,
             state.format_config.uses_commander,
         );
-        let selected = match choice.source {
+        let (selected, printing) = match choice.source {
             CompanionChoiceSource::Sideboard { index } => {
                 let entry = pool
                     .current_sideboard
@@ -386,13 +388,20 @@ pub fn handle_declare_companion(
                 ) {
                     return Err("Companion is no longer eligible".to_string());
                 }
+                // Read before the removal below: the ordinal counts copies already taken.
+                let printing = deck_loading::outside_game_copy_printing(
+                    pool,
+                    &state.outside_game_cards_brought_in,
+                    DeckSection::Sideboard,
+                    &entry.card,
+                );
                 let sideboard = std::sync::Arc::make_mut(&mut pool.current_sideboard);
                 if sideboard[index].count > 1 {
                     sideboard[index].count -= 1;
                 } else {
                     sideboard.remove(index);
                 }
-                entry
+                (entry, printing)
             }
             CompanionChoiceSource::Dedicated => {
                 let entry = pool
@@ -411,8 +420,14 @@ pub fn handle_declare_companion(
                 {
                     return Err("Companion is no longer eligible".to_string());
                 }
+                let printing = deck_loading::outside_game_copy_printing(
+                    pool,
+                    &state.outside_game_cards_brought_in,
+                    DeckSection::Companion,
+                    &entry.card,
+                );
                 std::sync::Arc::make_mut(&mut pool.current_companion).clear();
-                entry
+                (entry, printing)
             }
         };
 
@@ -421,12 +436,14 @@ pub fn handle_declare_companion(
             .iter_mut()
             .find(|entry| entry.id == player)
             .ok_or_else(|| "Player does not exist".to_string())?;
+        // CR 702.139a: the revealed card's printing comes from the source it was revealed from.
         player_data.companion = Some(CompanionInfo {
             card: DeckEntry {
                 card: selected.card,
                 count: 1,
             },
             used: false,
+            printing: DisplayOnly::new(printing),
         });
 
         events.push(GameEvent::CompanionRevealed {
@@ -560,18 +577,19 @@ fn pay_companion_to_hand_cost(
 /// CR 116.2g + CR 702.139a: Commit the once-per-game companion action only
 /// after its full payment succeeds. This is also the sole point that clears the
 /// player's undoable mana-tap record for this non-mana action.
+/// CR 203.1 + CR 206.1: the created object carries the printing captured at the reveal;
+/// the stamp is display-only.
 pub(crate) fn finish_paid_companion_to_hand(
     state: &mut GameState,
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    let card_face = state.players[player.0 as usize]
+    let companion = state.players[player.0 as usize]
         .companion
         .as_ref()
-        .expect("a paid companion continuation retains its declared companion")
-        .card
-        .card
-        .clone();
+        .expect("a paid companion continuation retains its declared companion");
+    let card_face = companion.card.card.clone();
+    let printing = companion.printing.get().clone();
     let card_name = card_face.name.clone();
     state.players[player.0 as usize]
         .companion
@@ -584,6 +602,7 @@ pub(crate) fn finish_paid_companion_to_hand(
     if let Some(obj) = state.objects.get_mut(&obj_id) {
         super::printed_cards::apply_card_face_to_object(obj, &card_face);
     }
+    deck_loading::stamp_created_card(state, obj_id, printing.as_ref());
 
     events.push(GameEvent::CompanionMovedToHand { player, card_name });
     state.lands_tapped_for_mana.remove(&player);

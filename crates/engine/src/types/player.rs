@@ -3,6 +3,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use super::card_printing::CardPrinting;
+use super::display_only::DisplayOnly;
 use super::event_kinds::BendingType;
 use super::identifiers::ObjectId;
 use super::mana::{ManaColor, ManaPool};
@@ -78,6 +80,10 @@ pub struct CompanionInfo {
     pub card: DeckEntry,
     /// CR 702.139c: Whether the companion has been put into hand this game (once per game).
     pub used: bool,
+    /// CR 702.139a + CR 203.1 + CR 206.1: the owner's printing of the revealed companion,
+    /// captured at the reveal from the source it was revealed from (display-only).
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<CardPrinting>>,
 }
 
 #[derive(

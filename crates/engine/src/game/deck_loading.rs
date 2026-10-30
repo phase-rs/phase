@@ -9,9 +9,13 @@ use crate::database::CardDatabase;
 use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::starter_decks::DeckData;
 use crate::types::card::CardFace;
-use crate::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
+use crate::types::card_printing::{
+    deck_face_identity, CardPrinting, DeckFaceLookupName, DeckPrinting, DeckPrintingRecord,
+    DeckSection,
+};
 use crate::types::card_type::CoreType;
-use crate::types::game_state::GameState;
+use crate::types::display_only::DisplayOnly;
+use crate::types::game_state::{GameState, OutsideGameCardUse, PlayerDeckPool};
 use crate::types::identifiers::CardId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -1204,6 +1208,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             registered_scheme_deck: std::sync::Arc::clone(&p0_scheme),
             current_scheme_deck: p0_scheme,
             bracket_tier: payload.player.bracket_tier,
+            printings: retained_printing_record(&payload.player),
         });
     let p1_main = std::sync::Arc::new(main_deck_for(&payload.opponent));
     let p1_side = std::sync::Arc::new(sideboard_for(&payload.opponent.sideboard));
@@ -1229,6 +1234,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             registered_scheme_deck: std::sync::Arc::clone(&p1_scheme),
             current_scheme_deck: p1_scheme,
             bracket_tier: payload.opponent.bracket_tier,
+            printings: retained_printing_record(&payload.opponent),
         });
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
@@ -1256,6 +1262,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 registered_scheme_deck: std::sync::Arc::clone(&scheme),
                 current_scheme_deck: scheme,
                 bracket_tier: ai_deck.bracket_tier,
+                printings: retained_printing_record(ai_deck),
             });
     }
 
@@ -1500,6 +1507,100 @@ struct DeckCardCopy<'a> {
     printing: Option<&'a CardPrinting>,
 }
 
+/// CR 203.1 + CR 206.1: the display-only record a seat's pool retains: the payload's
+/// normalized rows unchanged, plus the index-free form of its bindings. Needs no card
+/// database, so database-free loading retains the same record.
+///
+/// Two entries with one face identity in one section always share a round-trip name
+/// (`round_trip_name` reads only the face and the database), so the first binding of a
+/// face identity names it.
+fn retained_printing_record(
+    deck: &PlayerDeckPayload,
+) -> DisplayOnly<Option<Arc<DeckPrintingRecord>>> {
+    if deck.printings.is_empty() {
+        return DisplayOnly::new(None);
+    }
+    let mut lookup_names: Vec<DeckFaceLookupName> = Vec::new();
+    for binding in &deck.printing_entry_names {
+        let face = &section_entries(deck, binding.section)
+            .get(binding.entry_index)
+            .expect("printing binding index must name an original resolved entry")
+            .card;
+        if !lookup_names
+            .iter()
+            .any(|known| known.names(binding.section, face))
+        {
+            lookup_names.push(DeckFaceLookupName::of(
+                binding.section,
+                face,
+                binding.name.clone(),
+            ));
+        }
+    }
+    DisplayOnly::new(Some(Arc::new(DeckPrintingRecord::new(
+        deck.printings.clone(),
+        lookup_names,
+    ))))
+}
+
+/// CR 400.11a + CR 400.11b + CR 702.139a: the owner's printing for the copy of `face`
+/// that is about to leave `section` (outside the game) as a new object. Copies leave
+/// in row order; the ordinal is how many copies of this face were already taken from the
+/// section this game: those a companion reveal removed from the current list (registered
+/// minus current), plus those an outside-the-game effect brought in
+/// (`outside_game_cards_brought_in`). Stateless: the record is never written after load.
+/// CR 203.1 + CR 206.1: display-only; no rules path reads the result.
+///
+/// `section` reuses `DeckSection` rather than a new two-variant source enum, because the
+/// record's rows are keyed by `DeckSection`. The non-outside-game arms return `None`
+/// exhaustively, so a section added later is a build error here.
+pub(crate) fn outside_game_copy_printing(
+    pool: &PlayerDeckPool,
+    brought_in: &[OutsideGameCardUse],
+    section: DeckSection,
+    face: &CardFace,
+) -> Option<CardPrinting> {
+    let record = pool.printings.get().as_deref()?;
+    let (registered, current) = match section {
+        DeckSection::Sideboard => (&pool.registered_sideboard, &pool.current_sideboard),
+        DeckSection::Companion => (&pool.registered_companion, &pool.current_companion),
+        // No outside-the-game creator takes from these; their copies are stamped at load
+        // by `entry_copies`.
+        DeckSection::MainDeck
+        | DeckSection::Commander
+        | DeckSection::AttractionDeck
+        | DeckSection::PlanarDeck
+        | DeckSection::SchemeDeck
+        | DeckSection::ContraptionDeck
+        | DeckSection::SignatureSpell
+        | DeckSection::Unknown => return None,
+    };
+    let identity = deck_face_identity(face);
+    let copies = |list: &[DeckEntry]| -> u32 {
+        list.iter()
+            .filter(|entry| deck_face_identity(&entry.card) == identity)
+            .map(|entry| entry.count)
+            .sum()
+    };
+    // A multi-pick outside-game choice calls the sideboard route once per selection, and
+    // each call adds 1 to `count`, so copies are counted, not uses.
+    let brought: u32 = match section {
+        DeckSection::Sideboard => brought_in
+            .iter()
+            .filter(|used| used.player == pool.player)
+            .filter(|used| {
+                current
+                    .get(used.sideboard_index)
+                    .is_some_and(|entry| deck_face_identity(&entry.card) == identity)
+            })
+            .map(|used| used.count)
+            .sum(),
+        _ => 0,
+    };
+    let taken = copies(registered).saturating_sub(copies(current)) + brought;
+    record.printing_of(section, face, taken).cloned()
+}
+
 /// Validate correspondence before any object, pool or RNG mutation.
 fn validate_printing_bindings(payload: &PlayerDeckPayload) {
     let mut bindings = HashMap::new();
@@ -1598,8 +1699,10 @@ fn entry_copies<'a>(
     copies
 }
 
-/// Creation-only display metadata; never called by hydration or gameplay transitions.
-fn stamp_created_card(
+/// Creation-only display metadata: called where an object is created from a deck-pool entry
+/// (load, companion to hand, sideboard fetch); never by hydration or by a transition of an
+/// existing object.
+pub(crate) fn stamp_created_card(
     state: &mut GameState,
     id: crate::types::identifiers::ObjectId,
     printing: Option<&CardPrinting>,

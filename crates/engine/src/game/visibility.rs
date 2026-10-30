@@ -3146,6 +3146,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             pool.registered_planar_deck = Arc::new(Vec::new());
             pool.registered_scheme_deck = Arc::new(Vec::new());
             pool.current_scheme_deck = Arc::new(Vec::new());
+            // CR 400.2 + CR 100.4: the record names this seat's library and sideboard
+            // cards, so it leaves with the lists it annotates.
+            pool.printings = DisplayOnly::new(None);
         }
     }
 
