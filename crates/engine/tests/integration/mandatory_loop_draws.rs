@@ -1658,7 +1658,7 @@ fn a_drain_with_an_out_outside_the_loop_is_offered_not_won() {
             },
             &leg,
         );
-        assert_eq!(battlefield_entries(&accepted), 3 * cycle, "{leg}");
+        assert_eq!(repetitions(&accepted), 3, "{leg}");
         assert_eq!(
             state.players[0].life - accepted_state.players[0].life,
             3 * lost,
@@ -3032,6 +3032,18 @@ fn battlefield_entries(events: &[GameEvent]) -> usize {
         .count()
 }
 
+/// The repetitions a take performed: the record elides the middle ones but keeps the last marker.
+fn repetitions(events: &[GameEvent]) -> u32 {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ShortcutRepetition { repetition, .. } => Some(*repetition),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 const NO_WINNER: &str = "naming no winner";
 
 /// Asserts each player's view of the offer at `offered` carries the engine's counted take.
@@ -3108,6 +3120,7 @@ fn assert_counted_take_performs(offered: &GameState, leg: &str) {
         assert!(responds(window, P1), "{leg}: {:?}", window.waiting_for);
         let (at_two, events) = admitted(window, P1, shorten_at(2), leg);
         assert_eq!(battlefield_entries(&events), 2 * cycle, "{leg}");
+        assert_eq!(repetitions(&events), 2, "{leg}");
         assert!(priority_to(&at_two, P1), "{leg}: {:?}", at_two.waiting_for);
     }
     let (_, accepted) = admitted(
@@ -3118,7 +3131,7 @@ fn assert_counted_take_performs(offered: &GameState, leg: &str) {
         },
         leg,
     );
-    assert_eq!(battlefield_entries(&accepted), 3 * cycle, "{leg}");
+    assert_eq!(repetitions(&accepted), 3, "{leg}");
 }
 
 /// CR 732.2b + CR 732.2c: on the Lightning Bolt board, beside P0's Soul Warden with its trigger
