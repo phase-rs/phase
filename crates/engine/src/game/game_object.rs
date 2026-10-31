@@ -1190,14 +1190,17 @@ pub struct GameObject {
 
     /// CR 730.3c: When a merged permanent leaves the battlefield it "becomes"
     /// multiple new objects (CR 730.3 / CR 400.7). Each absorbed component records
-    /// the surviving object's id here, so that an effect which finds the object
-    /// the merged permanent became — a flicker/blink referencing "it" — returns
-    /// ALL of the components, not just the survivor (see
+    /// the incarnation the surviving object holds after its leave move (CR 400.7)
+    /// here, so that an effect which finds the object the merged permanent
+    /// became — a flicker/blink referencing "it" — returns ALL of the
+    /// components, not just the survivor (see
     /// `merge::expand_returned_merge_components`). Set when the component is split
     /// out on battlefield exit; cleared on any battlefield (re-)entry. `None` for
-    /// objects that were never split out of a merged permanent this way.
+    /// objects that were never split out of a merged permanent this way. A
+    /// survivor that changes zones again no longer matches, so the component is
+    /// not collected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub split_from_merge_survivor: Option<ObjectId>,
+    pub split_from_merge_survivor: Option<ObjectIncarnationRef>,
 
     /// CR 702.148a-b + CR 612: `Some(_)` while this object's cleave
     /// text-changing effect is live (the spell was cast for its cleave cost).

@@ -283,6 +283,8 @@ pub struct PlayTraceCounters {
     pub legality_read_copies: u64,
     pub confirm_asks: u64,
     pub confirm_drives: u64,
+    /// Replays `mandatory_period_holds` ran.
+    pub mandatory_replays: u64,
     /// Entries appended to carried spans.
     pub carry_appends: u64,
     /// Old-window nodes looked up in the carrying index at a step's end.
@@ -314,6 +316,7 @@ impl PlayTraceCounters {
             legality_read_copies: self.legality_read_copies - earlier.legality_read_copies,
             confirm_asks: self.confirm_asks - earlier.confirm_asks,
             confirm_drives: self.confirm_drives - earlier.confirm_drives,
+            mandatory_replays: self.mandatory_replays - earlier.mandatory_replays,
             carry_appends: self.carry_appends - earlier.carry_appends,
             step_end_lookups: self.step_end_lookups - earlier.step_end_lookups,
             engine_b_rebuilds: self.engine_b_rebuilds - earlier.engine_b_rebuilds,
@@ -562,6 +565,7 @@ thread_local! {
             legality_read_copies: 0,
             confirm_asks: 0,
             confirm_drives: 0,
+            mandatory_replays: 0,
             carry_appends: 0,
             step_end_lookups: 0,
             engine_b_rebuilds: 0,

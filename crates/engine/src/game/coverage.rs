@@ -8158,7 +8158,7 @@ fn check_trigger(
         );
     }
     // CR 603.8: StateCondition triggers are handled by the priority pipeline
-    // (check_state_triggers), not the event-based trigger registry. They are supported.
+    // (collect_state_triggers), not the event-based trigger registry. They are supported.
     if !trigger_mode_is_supported(&trigger.mode, trigger_registry) {
         let label = format!("Trigger:{}", trigger.mode);
         if !missing.contains(&label) {
@@ -8169,7 +8169,7 @@ fn check_trigger(
 
 /// Whether a printed (battlefield) trigger mode can fire: recognised, and either
 /// in the event-trigger registry or a CR 603.8 state trigger (handled by the
-/// priority pipeline's `check_state_triggers`). Delayed triggers use the
+/// priority pipeline's `collect_state_triggers`). Delayed triggers use the
 /// stricter `delayed_trigger_mode_is_supported`.
 fn trigger_mode_is_supported(
     mode: &TriggerMode,

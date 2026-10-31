@@ -3850,6 +3850,7 @@ pub fn candidate_actions_broad_with_probe(
         // (Scored by `phase_ai::policies::loop_shortcut::LoopShortcutPolicy`.)
         WaitingFor::LoopShortcut {
             proposer,
+            predicted_winner,
             schema,
             declaration,
             period,
@@ -3870,10 +3871,22 @@ pub fn candidate_actions_broad_with_probe(
             // `template: None` declaration; where neither applies, `DeclineShortcut` really is
             // the only legal answer at the node, and representing that honestly is the point.
             let mut v = Vec::new();
-            if !schema.is_bounded() {
+            // CR 732.2a: an offer to repeat without end is declared as one.
+            let unbounded = match schema.iteration_count {
+                crate::analysis::decision_template::IterationCount::WithoutEnd => {
+                    Some(crate::analysis::decision_template::IterationCount::WithoutEnd)
+                }
+                // CR 732.2a: until lethal ends only where the offer's named winner wins.
+                crate::analysis::decision_template::IterationCount::Fixed(_)
+                | crate::analysis::decision_template::IterationCount::UntilLethal => {
+                    (!schema.is_bounded() && predicted_winner.is_some())
+                        .then_some(crate::analysis::decision_template::IterationCount::UntilLethal)
+                }
+            };
+            if let Some(count) = unbounded {
                 v.push(candidate(
                     GameAction::DeclareShortcut {
-                        count: crate::analysis::decision_template::IterationCount::UntilLethal,
+                        count,
                         template: None,
                     },
                     TacticalClass::Utility,
@@ -3913,7 +3926,8 @@ pub fn candidate_actions_broad_with_probe(
             // suggestion here has no count to name and emits nothing rather than guessing one.
             let suggested = match schema.iteration_count {
                 crate::analysis::decision_template::IterationCount::Fixed(n) => Some(n),
-                crate::analysis::decision_template::IterationCount::UntilLethal => None,
+                crate::analysis::decision_template::IterationCount::UntilLethal
+                | crate::analysis::decision_template::IterationCount::WithoutEnd => None,
             };
             if let Some(n) = suggested.filter(|_| {
                 schema.is_bounded()
@@ -7219,6 +7233,7 @@ mod tests {
             schema: crate::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
             road: crate::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
 
@@ -10198,6 +10213,7 @@ mod tests {
             },
             declaration,
             road: crate::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
         state

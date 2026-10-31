@@ -70,6 +70,12 @@ const COMPLEATED_LOYALTY_INDEX: usize = usize::MAX - 3;
 /// `source` `ObjectId`). It is armed by `GameState::combat_phase_skip_next_turn`
 /// being `Active` for the active player on a combat phase.
 const TURN_SCOPED_COMBAT_SKIP_INDEX: usize = usize::MAX - 4;
+/// CR 614.1b + CR 614.10a: Pending one-shot "skips their next combat phase"
+/// (Revenant Patriarch, Moment of Silence). The skip leaves no battlefield object,
+/// so it is a virtual BeginPhase replacement keyed on its position in
+/// `GameState::pending_combat_phase_skips` (encoded into the sentinel `source`
+/// `ObjectId`), which applying it uses up.
+const PENDING_COMBAT_PHASE_SKIP_INDEX: usize = usize::MAX - 10;
 /// CR 122.1h: Finality-counter redirect — a virtual `ZoneChange{BF→GY}`
 /// replacement keyed on the dying permanent. Intrinsic to the counter (persists
 /// past cleanup, like shield counters), so a reserved candidate id lets the
@@ -215,6 +221,24 @@ fn turn_scoped_combat_skip_replacement_id(player: PlayerId) -> ReplacementId {
 
 fn is_turn_scoped_combat_skip_replacement(rid: ReplacementId) -> bool {
     rid.index == TURN_SCOPED_COMBAT_SKIP_INDEX
+}
+
+/// CR 614.1b + CR 614.10a: virtual replacement id for the pending skip at
+/// `position` in `GameState::pending_combat_phase_skips`.
+fn pending_combat_phase_skip_replacement_id(position: usize) -> ReplacementId {
+    ReplacementId {
+        source: ObjectId(position as u64),
+        index: PENDING_COMBAT_PHASE_SKIP_INDEX,
+    }
+}
+
+fn is_pending_combat_phase_skip_replacement(rid: ReplacementId) -> bool {
+    rid.index == PENDING_COMBAT_PHASE_SKIP_INDEX
+}
+
+/// The position of the pending skip `rid` names.
+fn pending_combat_phase_skip_position(rid: ReplacementId) -> usize {
+    rid.source.0 as usize
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1657,6 +1681,12 @@ fn replacement_choice_definition(
 /// `source_object: None`, and falls back to `rid.source` — reproducing today's
 /// behavior (empty name) exactly, rather than naming some unrelated object.
 fn replacement_choice_display_source(state: &GameState, rid: ReplacementId) -> ObjectId {
+    // CR 614.10: a combat skip has no host, and its `rid.source` encodes a player
+    // or a list position, which must not name whichever object has that id.
+    if is_turn_scoped_combat_skip_replacement(rid) || is_pending_combat_phase_skip_replacement(rid)
+    {
+        return ObjectId(0);
+    }
     replacement_choice_definition(state, rid)
         .map(|def| replacement_source_host(rid, def))
         .unwrap_or(rid.source)
@@ -1679,9 +1709,21 @@ fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> St
     if is_finality_counter_replacement(rid) {
         return "Exile it instead".to_string();
     }
+    // CR 616.1: these name what each skip is, because which one is used up is the
+    // affected player's choice.
     if is_turn_scoped_combat_skip_replacement(rid) {
-        // CR 614.10: mandatory skip — static label, never offered as a choice.
-        return "Skip combat phase".to_string();
+        return "Skip all combat phases this turn".to_string();
+    }
+    if is_pending_combat_phase_skip_replacement(rid) {
+        let limited = state
+            .pending_combat_phase_skips
+            .get(pending_combat_phase_skip_position(rid))
+            .is_some_and(|skip| skip.duration.is_some());
+        return if limited {
+            "Skip your next combat phase this turn".to_string()
+        } else {
+            "Skip your next combat phase".to_string()
+        };
     }
     if is_umbra_armor_replacement(rid) {
         return state
@@ -8992,6 +9034,28 @@ pub fn find_applicable_replacements(
                 candidates.push(rid);
             }
         }
+
+        // CR 614.10 + CR 614.10a: each pending "skips their next combat phase" of
+        // the active player's team (CR 805.8) applies to a combat phase that would
+        // begin. Decided only at its first step, so a combat in progress can't be
+        // skipped. Skips with the same duration are interchangeable, so one of them
+        // stands for all and CR 616.1 has no choice to offer between them. CR 800.4j:
+        // a turn without an active player has no one to choose among these, and it
+        // runs out through `turns::skip_eliminated_active_turn`.
+        if *phase == crate::types::phase::Phase::BeginCombat
+            && super::players::is_alive(state, *player_id)
+        {
+            let team = super::topology::normalize_shared_turn_recipient(state, *player_id);
+            let mut durations = Vec::new();
+            for (position, skip) in state.pending_combat_phase_skips.iter().enumerate() {
+                if super::topology::normalize_shared_turn_recipient(state, skip.player) == team
+                    && !durations.contains(&&skip.duration)
+                {
+                    durations.push(&skip.duration);
+                    candidates.push(pending_combat_phase_skip_replacement_id(position));
+                }
+            }
+        }
     }
 
     candidates.extend(object_replacement_candidates(state, event, registry));
@@ -10164,6 +10228,15 @@ fn apply_single_replacement(
     // phase that turn (including extra combat phases) is prevented; it is cleared
     // at the start of the player's following turn in `start_next_turn`.
     if is_turn_scoped_combat_skip_replacement(rid) {
+        return Err(ApplyResult::Prevented);
+    }
+
+    // CR 614.10a: a one-shot skip is satisfied by the combat phase it replaces;
+    // only the chosen skip is used up, and any other stays for a later occurrence.
+    if is_pending_combat_phase_skip_replacement(rid) {
+        state
+            .pending_combat_phase_skips
+            .remove(pending_combat_phase_skip_position(rid));
         return Err(ApplyResult::Prevented);
     }
 
@@ -11479,9 +11552,11 @@ fn candidate_materiality(
         return CandidateMateriality::Unconditional;
     }
 
-    // CR 614.10: the turn-scoped combat skip fully prevents the BeginPhase event,
-    // so it is unconditional like the umbra-armor / shield-counter destroy.
-    if is_turn_scoped_combat_skip_replacement(rid) {
+    // CR 614.10: a combat skip fully prevents the BeginPhase event, so it is
+    // unconditional like the umbra-armor / shield-counter destroy. Which one
+    // applies decides which is left, so competing skips are the CR 616.1e choice.
+    if is_turn_scoped_combat_skip_replacement(rid) || is_pending_combat_phase_skip_replacement(rid)
+    {
         return CandidateMateriality::Unconditional;
     }
 
@@ -12882,13 +12957,13 @@ fn replay_pending_replacement(
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
-    // CR 616.1: choosing an optional effect's turn is separate from its may
-    // decision. Discard ordering automation before looking up that saved decision.
-    if state
+    let optional = state
         .pending_replacement
         .as_ref()
-        .is_some_and(|pending| pending.is_optional)
-    {
+        .is_some_and(|pending| pending.is_optional);
+    // CR 616.1: choosing an optional effect's turn is separate from its may
+    // decision. Discard ordering automation before looking up that saved decision.
+    if optional {
         state.replacement_auto_choice_tail = None;
     }
     let had_tail = state.replacement_auto_choice_tail.is_some();
@@ -12960,6 +13035,13 @@ fn replay_pending_replacement(
         }
         return ReplacementResult::NeedsChoice(player);
     };
+    // CR 616.1e + CR 616.1: a replayed answer is still the affected player's choice —
+    // whether to apply an optional effect, or which effect applies next.
+    state.record_loop_decision(if optional {
+        crate::game::play_trace::AnswerOptionality::Optional
+    } else {
+        crate::game::play_trace::AnswerOptionality::Mandatory
+    });
     let result = continue_replacement_impl(state, index, events);
     if !matches!(result, ReplacementResult::Execute(_)) {
         state.replacement_auto_choice_tail = None;

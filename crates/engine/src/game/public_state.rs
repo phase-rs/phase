@@ -519,6 +519,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::GameOver { .. }
             // CR 732.2: a halted-resolution notification dirties no display state.
             | GameEvent::ResolutionHalted { .. }
+            | GameEvent::ShortcutRepetition { .. }
             | GameEvent::SpellCountered { .. }
             | GameEvent::EffectResolved { .. }
             | GameEvent::Unattached { .. }

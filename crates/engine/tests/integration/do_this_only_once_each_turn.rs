@@ -791,12 +791,6 @@ fn creature_back_face(name: &str, power: i32, toughness: i32) -> BackFaceData {
 /// Corruption of Towashi (no ETB) beside two P0 double-faced creatures: Thraben
 /// Gargoyle transforms (Corruption's "transforms" half) and Jill returns
 /// transformed (its "enters transformed" half).
-///
-/// The engine also reports a transformed entry as a transform (`zone_pipeline`
-/// applies CR 712.14a through `transform_permanent`, which emits
-/// `GameEvent::Transformed`), so Jill's entry can put both halves on the stack. The
-/// assertions below hold either way: they name the half each event must reach and
-/// count draws, never the number of stacked instances.
 struct CorruptionBoard {
     runner: GameRunner,
     corruption: ObjectId,

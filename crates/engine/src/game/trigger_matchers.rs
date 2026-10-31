@@ -18,164 +18,248 @@ use crate::types::zones::Zone;
 use super::triggers::TriggerMatcher;
 
 pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
+    trigger_route(&mode).map(|route| route.matcher)
+}
+
+/// What a mode's matcher does with the event of the trigger's own object leaving the battlefield.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OnDeparture {
+    /// The matcher reads no event a departure produces.
+    Silent,
+    /// The zone-change matcher, or one delegating to it: silent only in the entry shape.
+    SilentAsEntry,
+    /// The matcher can match the object's own departure.
+    Fires,
+}
+
+/// A mode's matcher, with its departure class decided on the same arm.
+struct TriggerRoute {
+    matcher: TriggerMatcher,
+    on_departure: OnDeparture,
+}
+
+fn silent(matcher: TriggerMatcher) -> TriggerRoute {
+    TriggerRoute {
+        matcher,
+        on_departure: OnDeparture::Silent,
+    }
+}
+
+fn silent_as_entry(matcher: TriggerMatcher) -> TriggerRoute {
+    TriggerRoute {
+        matcher,
+        on_departure: OnDeparture::SilentAsEntry,
+    }
+}
+
+fn fires(matcher: TriggerMatcher) -> TriggerRoute {
+    TriggerRoute {
+        matcher,
+        on_departure: OnDeparture::Fires,
+    }
+}
+
+/// CR 603.6a: a zone-change trigger in this shape observes only a move onto the battlefield.
+pub(crate) fn trigger_is_an_entry(def: &TriggerDefinition) -> bool {
+    def.destination == Some(Zone::Battlefield)
+        && def.zone_change_clauses.is_empty()
+        && def.origin_zones.is_empty()
+}
+
+/// CR 603.2 + CR 603.6a + CR 603.6c + CR 603.10a: whether `def` can trigger on its own object
+/// leaving the battlefield. A mode with no route — a state trigger (CR 603.8) or an unknown
+/// mode — is assumed to.
+pub(crate) fn trigger_can_fire_as_its_object_leaves(def: &TriggerDefinition) -> bool {
+    trigger_route(&def.mode).is_none_or(|route| match route.on_departure {
+        OnDeparture::Silent => false,
+        OnDeparture::SilentAsEntry => !trigger_is_an_entry(def),
+        OnDeparture::Fires => true,
+    })
+}
+
+fn trigger_route(mode: &TriggerMode) -> Option<TriggerRoute> {
     Some(match mode {
         // CR 702.100a: Evolve — fires when a creature the trigger controller
         // controls enters the battlefield. build_evolve_trigger sets
         // .destination(Battlefield); valid_card filtering and the power/toughness
         // intervening-if (CR 603.4) are handled downstream by
         // zone_change_clause_matches / check_trigger_condition respectively.
-        TriggerMode::ChangesZone | TriggerMode::Evolve => match_changes_zone,
-        TriggerMode::Evolved => match_evolved,
-        TriggerMode::ChangesZoneAll => match_changes_zone_all,
+        TriggerMode::ChangesZone | TriggerMode::Evolve => silent_as_entry(match_changes_zone),
+        TriggerMode::Evolved => silent(match_evolved),
+        TriggerMode::ChangesZoneAll => silent_as_entry(match_changes_zone_all),
         // CR 702.55c: Haunt payoff — fires from exile when the haunted creature
         // dies; resolved through the `ExileLinkKind::Haunt` link.
-        TriggerMode::HauntedCreatureDies => crate::game::haunt::match_haunted_creature_dies,
+        TriggerMode::HauntedCreatureDies => fires(crate::game::haunt::match_haunted_creature_dies),
         TriggerMode::DamageDone
         | TriggerMode::DamageDoneOnce
         | TriggerMode::DamageAll
-        | TriggerMode::DamageDealtOnce => match_damage_done,
-        TriggerMode::DamageDoneOnceByController => match_damage_done_once_by_controller,
+        | TriggerMode::DamageDealtOnce => silent(match_damage_done),
+        TriggerMode::DamageDoneOnceByController => silent(match_damage_done_once_by_controller),
         TriggerMode::SpellCast | TriggerMode::SpellCastOrCopy | TriggerMode::SpellCopy => {
-            match_spell_cast
+            silent(match_spell_cast)
         }
-        TriggerMode::Attacks => match_attacks,
+        TriggerMode::Attacks => silent(match_attacks),
         // CR 701.43d: linked "when you do" trigger fires when the source creature
         // is exerted as it attacks.
-        TriggerMode::Exerted => match_exerted,
+        TriggerMode::Exerted => silent(match_exerted),
         // CR 607.2h + CR 702.154b: linked Enlist trigger fires when the
         // source creature enlisted another creature as it attacked.
-        TriggerMode::Enlisted => match_enlisted,
-        TriggerMode::Discover => match_discover,
-        TriggerMode::Adapt => match_adapt,
-        TriggerMode::Connives => match_connives,
-        TriggerMode::Foretell => match_foretell,
-        TriggerMode::DamagePreventedOnce => match_unimplemented,
+        TriggerMode::Enlisted => silent(match_enlisted),
+        TriggerMode::Discover => silent(match_discover),
+        TriggerMode::Adapt => silent(match_adapt),
+        TriggerMode::Connives => silent(match_connives),
+        TriggerMode::Foretell => silent(match_foretell),
+        TriggerMode::DamagePreventedOnce => silent(match_unimplemented),
         TriggerMode::AttackersDeclared | TriggerMode::AttackersDeclaredOneTarget => {
-            match_attackers_declared
+            silent(match_attackers_declared)
         }
-        TriggerMode::Blocks => match_blocks,
-        TriggerMode::BlockersDeclared => match_blockers_declared,
-        TriggerMode::Countered => match_countered,
+        TriggerMode::Blocks => silent(match_blocks),
+        TriggerMode::BlockersDeclared => silent(match_blockers_declared),
+        // CR 603.10e: countering reads a spell, never a permanent's departure.
+        TriggerMode::Countered => silent(match_countered),
         TriggerMode::CounterAdded
         | TriggerMode::CounterAddedOnce
-        | TriggerMode::CounterAddedAll => match_counter_added,
-        TriggerMode::CounterRemoved | TriggerMode::CounterRemovedOnce => match_counter_removed,
-        TriggerMode::Taps | TriggerMode::TapAll => match_taps,
-        TriggerMode::Untaps | TriggerMode::UntapAll => match_untaps,
-        TriggerMode::LifeGained => match_life_gained,
-        TriggerMode::LifeLost | TriggerMode::LifeLostAll => match_life_lost,
-        TriggerMode::LifeChanged => match_life_changed,
-        TriggerMode::Drawn => match_drawn,
-        TriggerMode::Discarded | TriggerMode::DiscardedAll => match_discarded,
-        TriggerMode::Sacrificed | TriggerMode::SacrificedOnce => match_sacrificed,
-        TriggerMode::Destroyed => match_destroyed,
-        TriggerMode::TokenCreated | TriggerMode::TokenCreatedOnce => match_token_created,
-        TriggerMode::TurnBegin => match_turn_begin,
-        TriggerMode::Phase | TriggerMode::PayEcho | TriggerMode::PayCumulativeUpkeep => match_phase,
-        TriggerMode::BecomesTarget | TriggerMode::BecomesTargetOnce => match_becomes_target,
-        TriggerMode::LandPlayed => match_land_played,
-        TriggerMode::PlayCard => match_play_card,
-        TriggerMode::ManaAdded => match_mana_added,
-        TriggerMode::ManaAbilityProduced => match_mana_ability_produced,
+        | TriggerMode::CounterAddedAll => silent(match_counter_added),
+        // CR 122.2: counters on a departing object cease to exist without being removed.
+        TriggerMode::CounterRemoved | TriggerMode::CounterRemovedOnce => {
+            silent(match_counter_removed)
+        }
+        TriggerMode::Taps | TriggerMode::TapAll => silent(match_taps),
+        TriggerMode::Untaps | TriggerMode::UntapAll => silent(match_untaps),
+        TriggerMode::LifeGained => silent(match_life_gained),
+        TriggerMode::LifeLost | TriggerMode::LifeLostAll => silent(match_life_lost),
+        TriggerMode::LifeChanged => silent(match_life_changed),
+        TriggerMode::Drawn => silent(match_drawn),
+        TriggerMode::Discarded | TriggerMode::DiscardedAll => silent(match_discarded),
+        // CR 701.21a + CR 603.10a: a sacrifice moves the permanent off the battlefield.
+        TriggerMode::Sacrificed | TriggerMode::SacrificedOnce => fires(match_sacrificed),
+        // CR 701.8a: destroying moves the permanent off the battlefield.
+        TriggerMode::Destroyed => fires(match_destroyed),
+        TriggerMode::TokenCreated | TriggerMode::TokenCreatedOnce => silent(match_token_created),
+        TriggerMode::TurnBegin => silent(match_turn_begin),
+        TriggerMode::Phase | TriggerMode::PayEcho | TriggerMode::PayCumulativeUpkeep => {
+            silent(match_phase)
+        }
+        TriggerMode::BecomesTarget | TriggerMode::BecomesTargetOnce => silent(match_becomes_target),
+        TriggerMode::LandPlayed => silent(match_land_played),
+        TriggerMode::PlayCard => silent(match_play_card),
+        TriggerMode::ManaAdded => silent(match_mana_added),
+        TriggerMode::ManaAbilityProduced => silent(match_mana_ability_produced),
         TriggerMode::SearchedLibrary
         | TriggerMode::Scry
         | TriggerMode::Surveil
         | TriggerMode::CollectEvidence
-        | TriggerMode::Investigated
-        | TriggerMode::PlayerPerformedAction => match_player_action,
-        TriggerMode::LeavesBattlefield => match_leaves_battlefield,
-        TriggerMode::BecomesBlocked => match_becomes_blocked,
-        TriggerMode::YouAttack => match_you_attack,
-        TriggerMode::YouAttackUnblocked => match_you_attack_unblocked,
-        TriggerMode::DamageReceived => match_damage_received,
-        TriggerMode::ExcessDamage => match_excess_damage,
-        TriggerMode::ExcessDamageAll => match_excess_damage_all,
+        | TriggerMode::Investigated => silent(match_player_action),
+        // CR 701.61a: the joined action list includes forage, which can sacrifice a Food.
+        TriggerMode::PlayerPerformedAction => fires(match_player_action),
+        // CR 603.6c: a leaves-the-battlefield trigger.
+        TriggerMode::LeavesBattlefield => fires(match_leaves_battlefield),
+        TriggerMode::BecomesBlocked => silent(match_becomes_blocked),
+        TriggerMode::YouAttack => silent(match_you_attack),
+        TriggerMode::YouAttackUnblocked => silent(match_you_attack_unblocked),
+        TriggerMode::DamageReceived => silent(match_damage_received),
+        TriggerMode::ExcessDamage => silent(match_excess_damage),
+        TriggerMode::ExcessDamageAll => silent(match_excess_damage_all),
         TriggerMode::AttackerBlocked
         | TriggerMode::AttackerBlockedOnce
-        | TriggerMode::AttackerBlockedByCreature => match_attacker_blocked,
+        | TriggerMode::AttackerBlockedByCreature => silent(match_attacker_blocked),
         TriggerMode::AttackerUnblocked | TriggerMode::AttackerUnblockedOnce => {
-            match_attacker_unblocked
+            silent(match_attacker_unblocked)
         }
-        TriggerMode::Milled | TriggerMode::MilledOnce | TriggerMode::MilledAll => match_milled,
-        TriggerMode::Exiled => match_exiled,
-        TriggerMode::Attached => match_attached,
-        TriggerMode::Unattach => match_unattach,
-        TriggerMode::Cycled => match_cycled,
-        TriggerMode::CycledOrDiscarded => match_cycled_or_discarded,
-        TriggerMode::Shuffled => match_shuffled,
-        TriggerMode::Revealed => match_revealed,
-        TriggerMode::TapsForMana => match_taps_for_mana,
-        TriggerMode::ChangesController { .. } => match_changes_controller,
-        TriggerMode::Transformed => match_transformed,
-        TriggerMode::Fight | TriggerMode::FightOnce => match_fight,
-        TriggerMode::Immediate | TriggerMode::Always => match_always,
-        TriggerMode::Explored => match_explored,
-        TriggerMode::TurnFaceUp => match_turn_face_up,
-        TriggerMode::ManifestDread => match_manifest_dread,
-        TriggerMode::DayTimeChanges => match_day_time_changes,
-        TriggerMode::CommitCrime => match_commit_crime,
-        TriggerMode::CaseSolved => match_case_solved,
-        TriggerMode::ClassLevelGained => match_class_level_gained,
-        TriggerMode::BecomeMonarch => match_become_monarch,
-        TriggerMode::RolledDie | TriggerMode::RolledDieOnce => match_rolled_die,
-        TriggerMode::FlippedCoin => match_flipped_coin,
-        TriggerMode::Clashed => match_clash,
-        TriggerMode::Vote => match_vote_resolved,
-        TriggerMode::RingTemptsYou => match_ring_tempts_you,
-        TriggerMode::DungeonCompleted => match_dungeon_completed,
+        TriggerMode::Milled | TriggerMode::MilledOnce | TriggerMode::MilledAll => {
+            silent(match_milled)
+        }
+        // CR 701.13a + CR 603.6c: exiling a permanent moves it off the battlefield.
+        TriggerMode::Exiled => fires(match_exiled),
+        TriggerMode::Attached => silent(match_attached),
+        // CR 701.3d + CR 603.10c: an attachment leaving the battlefield becomes unattached.
+        TriggerMode::Unattach => fires(match_unattach),
+        TriggerMode::Cycled => silent(match_cycled),
+        TriggerMode::CycledOrDiscarded => silent(match_cycled_or_discarded),
+        TriggerMode::Shuffled => silent(match_shuffled),
+        TriggerMode::Revealed => silent(match_revealed),
+        TriggerMode::TapsForMana => silent(match_taps_for_mana),
+        // CR 603.10d: a control-loss trigger looks back in time, so the mode (both sides) is
+        // classed with departures.
+        TriggerMode::ChangesController { .. } => fires(match_changes_controller),
+        TriggerMode::Transformed => silent(match_transformed),
+        TriggerMode::Fight | TriggerMode::FightOnce => silent(match_fight),
+        // Matches every event, a departure's included.
+        TriggerMode::Immediate | TriggerMode::Always => fires(match_always),
+        TriggerMode::Explored => silent(match_explored),
+        TriggerMode::TurnFaceUp => silent(match_turn_face_up),
+        TriggerMode::ManifestDread => silent(match_manifest_dread),
+        TriggerMode::DayTimeChanges => silent(match_day_time_changes),
+        TriggerMode::CommitCrime => silent(match_commit_crime),
+        TriggerMode::CaseSolved => silent(match_case_solved),
+        TriggerMode::ClassLevelGained => silent(match_class_level_gained),
+        TriggerMode::BecomeMonarch => silent(match_become_monarch),
+        TriggerMode::RolledDie | TriggerMode::RolledDieOnce => silent(match_rolled_die),
+        TriggerMode::FlippedCoin => silent(match_flipped_coin),
+        TriggerMode::Clashed => silent(match_clash),
+        TriggerMode::Vote => silent(match_vote_resolved),
+        TriggerMode::RingTemptsYou => silent(match_ring_tempts_you),
+        TriggerMode::DungeonCompleted => silent(match_dungeon_completed),
         // CR 311.7 / CR 901.9b: "Whenever chaos ensues" fires for the active plane.
-        TriggerMode::ChaosEnsues => match_chaos_ensues,
+        TriggerMode::ChaosEnsues => silent(match_chaos_ensues),
         // CR 701.31 / CR 701.31d / CR 901.11: all planeswalk triggers route to one
         // matcher that reads the `PlaneswalkRole` off the trigger's mode — `From`
         // and `To` bind the source to that endpoint, `Any` is source-independent.
-        TriggerMode::Planeswalked { .. } => match_planeswalked,
+        TriggerMode::Planeswalked { .. } => silent(match_planeswalked),
         // CR 714.2e: "whenever the final chapter ability of a Saga you control
         // triggers/resolves" — one matcher reads the lifecycle axis off the
         // mode.
-        TriggerMode::FinalSagaChapterAbility { .. } => match_saga_chapter_ability,
+        TriggerMode::FinalSagaChapterAbility { .. } => silent(match_saga_chapter_ability),
         // CR 904.9 / CR 701.32b: "When you set this scheme in motion" fires for
         // the scheme set in motion.
-        TriggerMode::SetInMotion => match_set_in_motion,
+        TriggerMode::SetInMotion => silent(match_set_in_motion),
         // CR 701.33b: "When you abandon this scheme" fires for the abandoned scheme.
-        TriggerMode::Abandoned => match_abandoned,
-        TriggerMode::RoomEntered => match_room_entered,
-        TriggerMode::UnlockDoor => match_unlock_door,
-        TriggerMode::FullyUnlock => match_fully_unlock,
-        TriggerMode::TakesInitiative => match_takes_initiative,
-        TriggerMode::Exploited => match_exploited,
-        TriggerMode::BecomeRenowned => match_become_renowned,
-        TriggerMode::BecomeMonstrous => match_become_monstrous,
-        TriggerMode::ManaExpend => match_mana_expend,
-        TriggerMode::EntersOrAttacks => match_enters_or_attacks,
-        TriggerMode::AttacksOrBlocks => match_attacks_or_blocks,
-        TriggerMode::BlocksOrBecomesBlocked => match_blocks_or_becomes_blocked,
+        TriggerMode::Abandoned => silent(match_abandoned),
+        TriggerMode::RoomEntered => silent(match_room_entered),
+        TriggerMode::UnlockDoor => silent(match_unlock_door),
+        TriggerMode::FullyUnlock => silent(match_fully_unlock),
+        TriggerMode::TakesInitiative => silent(match_takes_initiative),
+        // CR 702.110a + CR 702.110b: the exploiting creature may sacrifice itself.
+        TriggerMode::Exploited => fires(match_exploited),
+        TriggerMode::BecomeRenowned => silent(match_become_renowned),
+        TriggerMode::BecomeMonstrous => silent(match_become_monstrous),
+        TriggerMode::ManaExpend => silent(match_mana_expend),
+        TriggerMode::EntersOrAttacks => silent_as_entry(match_enters_or_attacks),
+        TriggerMode::AttacksOrBlocks => silent(match_attacks_or_blocks),
+        TriggerMode::BlocksOrBecomesBlocked => silent(match_blocks_or_becomes_blocked),
         // CR 702.55c: ETB half only on the battlefield; haunted-dies half is synthesized
         // into exile as `HauntedCreatureDies`.
-        TriggerMode::EntersOrHauntedCreatureDies => match_changes_zone,
-        TriggerMode::Crewed | TriggerMode::BecomesCrewed => match_vehicle_crewed,
-        TriggerMode::Stationed => match_stationed,
-        TriggerMode::Saddled | TriggerMode::BecomesSaddled => match_saddled,
-        TriggerMode::Crews => match_crews,
-        TriggerMode::Saddles => match_saddles,
-        TriggerMode::SaddlesOrCrews => match_saddles_or_crews,
-        TriggerMode::NinjutsuActivated => match_ninjutsu_activated,
-        TriggerMode::KeywordAbilityActivated(_) => match_keyword_ability_activated,
-        TriggerMode::AbilityActivated => match_ability_activated,
-        TriggerMode::LoyaltyAbilityActivated => match_loyalty_ability_activated,
-        TriggerMode::Firebend => match_firebend,
-        TriggerMode::Airbend => match_airbend,
-        TriggerMode::Earthbend => match_earthbend,
-        TriggerMode::Waterbend => match_waterbend,
-        TriggerMode::ElementalBend => match_elemental_bend,
-        TriggerMode::BecomesPlotted => match_becomes_plotted,
+        TriggerMode::EntersOrHauntedCreatureDies => silent_as_entry(match_changes_zone),
+        TriggerMode::Crewed | TriggerMode::BecomesCrewed => silent(match_vehicle_crewed),
+        TriggerMode::Stationed => silent(match_stationed),
+        TriggerMode::Saddled | TriggerMode::BecomesSaddled => silent(match_saddled),
+        TriggerMode::Crews => silent(match_crews),
+        TriggerMode::Saddles => silent(match_saddles),
+        TriggerMode::SaddlesOrCrews => silent(match_saddles_or_crews),
+        TriggerMode::NinjutsuActivated => silent(match_ninjutsu_activated),
+        TriggerMode::KeywordAbilityActivated(_) => silent(match_keyword_ability_activated),
+        TriggerMode::AbilityActivated => silent(match_ability_activated),
+        TriggerMode::LoyaltyAbilityActivated => silent(match_loyalty_ability_activated),
+        TriggerMode::Firebend => silent(match_firebend),
+        // CR 701.65b: airbending exiles.
+        TriggerMode::Airbend => fires(match_airbend),
+        TriggerMode::Earthbend => silent(match_earthbend),
+        TriggerMode::Waterbend => silent(match_waterbend),
+        // CR 701.65b: reads the `Airbend` event, and airbending exiles.
+        TriggerMode::ElementalBend => fires(match_elemental_bend),
+        TriggerMode::BecomesPlotted => silent(match_becomes_plotted),
         // CR 104.3a: "Whenever a player loses the game" — dedicated matcher.
-        TriggerMode::LosesGame => match_loses_game,
+        // CR 800.4a + CR 603.6c: a player leaving the game takes their permanents with them.
+        TriggerMode::LosesGame => fires(match_loses_game),
         // CR 702.26c: Phasing triggers fire when a permanent phases in.
-        TriggerMode::PhaseIn => match_phase_in,
+        TriggerMode::PhaseIn => silent(match_phase_in),
         // CR 702.26b: Phasing triggers fire when a permanent phases out.
-        TriggerMode::PhaseOut => match_phase_out,
+        // CR 702.26d: phasing out is not a zone change.
+        TriggerMode::PhaseOut => silent(match_phase_out),
         // CR 107.14: "Whenever you get one or more {E}" — batched player-counter trigger.
-        TriggerMode::CounterPlayerAddedAll => match_counter_player_added_all,
+        TriggerMode::CounterPlayerAddedAll => silent(match_counter_player_added_all),
+        // The matcher reads only `AttractionVisited`; routing one of these modes elsewhere
+        // rewrites its arm, and with it its class.
         TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
         | TriggerMode::AbilityTriggered
@@ -197,11 +281,11 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::Proliferate
         | TriggerMode::SeekAll
         | TriggerMode::Trains
-        | TriggerMode::VisitAttraction => match_visit_attraction,
-        TriggerMode::CrankContraption => match_crank_contraption,
-        TriggerMode::Specializes => match_specializes,
+        | TriggerMode::VisitAttraction => silent(match_visit_attraction),
+        TriggerMode::CrankContraption => silent(match_crank_contraption),
+        TriggerMode::Specializes => silent(match_specializes),
         // CR 702.140c-d: "Whenever this creature mutates" fires on `Mutated`.
-        TriggerMode::Mutates => match_mutates,
+        TriggerMode::Mutates => silent(match_mutates),
         // CR 603.8: State triggers are not event-based — they are checked separately
         // in the priority pipeline, not through the event-matching trigger system.
         TriggerMode::StateCondition => return None,
@@ -1110,6 +1194,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::GameOver { .. }
         // CR 732.2: a halted-resolution notification carries no trigger subject.
         | GameEvent::ResolutionHalted { .. }
+        | GameEvent::ShortcutRepetition { .. }
         | GameEvent::DamagePrevented { .. }
         | GameEvent::SpellCountered { .. }
         | GameEvent::ObjectIntensified { .. }
@@ -3337,7 +3422,7 @@ pub(super) fn match_mana_added(
     matches!(event, GameEvent::ManaAdded { .. })
 }
 
-/// CR 605.1b: Matches one aggregate production event from an activated mana
+/// CR 605.1b: Matches one aggregate production event from a mana
 /// ability. This deliberately does not consume `ManaAdded`, whose per-unit
 /// accounting would fire a multi-mana ability's trigger more than once.
 pub(super) fn match_mana_ability_produced(
