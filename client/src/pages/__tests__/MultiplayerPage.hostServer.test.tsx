@@ -933,7 +933,7 @@ describe("MultiplayerPage host server", () => {
   describe("owner submission handovers (V6)", () => {
     const expected = [{ section: "main_deck", name: "Island", count: 2, printing: { set_code: "aaa", collector_number: "001" } }];
 
-    it("preserves the route's existing section loss and freezes the deck across a later broker probe", async () => {
+    it("carries every deck section and freezes the deck across a later broker probe", async () => {
       harness.deckText = "Deck\n2 Island (AAA) 001\nSideboard\n1 Forest";
       harness.deckExtras = {
         commander: ["Commander"], planar_deck: ["Plane"], scheme_deck: ["Scheme"],
@@ -952,9 +952,12 @@ describe("MultiplayerPage host server", () => {
       await act(async () => { release({ serverInfo: { mode: "Full" } }); await pending; });
       await waitFor(() => expect(transport.send).toHaveBeenCalledOnce());
       const frame = JSON.parse(transport.send.mock.calls[0][0]);
+      // Hosting hands off every deck list (upstream #10446), so the sections this route once
+      // lost now ride beside the printings, which stay frozen to the deck captured at submit.
       expect(frame.data.deck).toEqual({
         main_deck: ["Island", "Island"], sideboard: ["Forest"], commander: ["Commander"],
         planar_deck: ["Plane"], scheme_deck: ["Scheme"], bracket_tier: "core", printings: expected,
+        companion: ["Companion"], signature_spell: ["Spell"], sticker_sheets: ["Stickers"],
       });
     });
 
@@ -998,7 +1001,7 @@ describe("MultiplayerPage host server", () => {
         await waitFor(() => expect(P2PHostAdapter).toHaveBeenCalledOnce());
         expect(vi.mocked(P2PHostAdapter).mock.calls[0][0]).toMatchObject({ player: { printings: expected } });
         expect(transport.apply).toHaveBeenCalledWith({
-          type: "SetKind", data: { seatIndex: 1, kind: { type: "Ai", data: { difficulty: "Hard", deck: { type: "DeckList", data: ai } } } },
+          type: "SetKind", data: { seatIndex: 1, expectedKind: { type: "WaitingHuman" }, kind: { type: "Ai", data: { difficulty: "Hard", deck: { type: "DeckList", data: ai } } } },
         });
         expect(transport.register).toHaveBeenCalledTimes(route === "offline" ? 0 : 1);
       }
