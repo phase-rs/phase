@@ -650,6 +650,18 @@ impl Default for ProspectiveBudget {
 }
 
 impl ProspectiveBudget {
+    /// Spend one payment application, or `None` once the allowance is gone.
+    /// The payment walk recurses from inside its own candidate loop, so the
+    /// entry check cannot protect a sibling iteration that runs after a child
+    /// branch drained the allowance: a bare `-= 1` there wrapped to
+    /// `usize::MAX` in release builds and the walk became unbounded (an AI
+    /// proposal that never returned — Izzet Murktide with Mishra's Bauble and
+    /// a fetchland, MagicFinder AI x AI games, v0.110.0).
+    fn charge_payment_application(&mut self) -> Option<()> {
+        self.payment_applications_remaining = self.payment_applications_remaining.checked_sub(1)?;
+        Some(())
+    }
+
     fn issue_forced_progress(
         &mut self,
         continuation: FrozenCandidate,
@@ -1209,7 +1221,7 @@ fn finish_payment_terminal(
     for candidate in mana {
         let frozen = FrozenCandidate::capture(state, &candidate)?;
         let mut next = state.clone();
-        budget.payment_applications_remaining -= 1;
+        budget.charge_payment_application()?;
         let Ok(events) = frozen.apply(&mut next) else {
             continue;
         };
@@ -1328,6 +1340,17 @@ mod tests {
             assert!(decision.terminal_branch_budget().is_some());
         }
         assert!(decision.terminal_branch_budget().is_none());
+    }
+
+    #[test]
+    fn payment_applications_stop_at_zero_instead_of_wrapping() {
+        let mut budget = ProspectiveBudget::default();
+        budget.payment_applications_remaining = 1;
+        assert_eq!(budget.charge_payment_application(), Some(()));
+        assert_eq!(budget.payment_applications_remaining, 0);
+        // A sibling iteration after a child branch drained the allowance.
+        assert_eq!(budget.charge_payment_application(), None);
+        assert_eq!(budget.payment_applications_remaining, 0);
     }
 
     #[test]
