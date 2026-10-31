@@ -179,6 +179,7 @@
       "exportedTo": "Exporté vers {{path}}.",
       "exportRequested": "Export demandé — {{filename}}.",
       "exportFailed": "Impossible d'exporter l'état de la partie.",
+      "exportFailedDetail": "Impossible d'exporter l'état de la partie. {{detail}}",
       "replayExported": "Replay enregistré sous {{filename}}.",
       "replayExportUnavailable": "Aucun enregistrement de replay n'est disponible pour cette partie.",
       "replayExportFailed": "Impossible d'exporter le replay."

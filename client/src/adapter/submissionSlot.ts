@@ -26,7 +26,7 @@ export interface UnmatchedCompletion {
  * The slot owns the resolve/reject pair and the stamped command id as one
  * value, so they cannot drift, and it is the only place that decides whether a
  * completion frame (`StateUpdate`, `ActionRejected`, `ActionFailed`,
- * `ActionNoOp`) answers the pending command:
+ * `ActionNoOp`, `StateWithheld`) answers the pending command:
  *
  * - a stamped submission settles only on a frame echoing its `command_id`;
  * - an unstamped submission (server without `CommandIdV1`) settles on the

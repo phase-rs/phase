@@ -875,9 +875,8 @@ fn server_action_result(
 /// encode of `socket_io::encode_application`: build the seat's `StateUpdate`,
 /// wrap it in the writer's `Envelope`, serialize, then gzip-envelope it.
 fn measure_publication(result: &ActionResult, revision: u64, totals: &mut [SeatMeasurements]) {
-    let source = StateUpdateSource::from_result(result, revision);
-    source
-        .guard()
+    let source = StateUpdateSource::from_result(result, revision)
+        .guarded("BUDGET")
         .expect("the snapshot guard admits the scripted board");
     let full_key = FullSessionKey {
         game_code: "BUDGET".into(),
@@ -1053,8 +1052,9 @@ fn completion_envelope_removes_command_id_through_delta() {
     let applied = game.runner.act(action).expect("scripted action succeeds");
     let result = server_action_result(game.runner.state(), applied);
     let revision = 1;
-    let source = StateUpdateSource::from_result(&result, revision);
-    source.guard().expect("scripted snapshot is admitted");
+    let source = StateUpdateSource::from_result(&result, revision)
+        .guarded("COMPLETION")
+        .expect("scripted snapshot is admitted");
     let full_key = FullSessionKey {
         game_code: "COMPLETION".into(),
         generation: 1,
