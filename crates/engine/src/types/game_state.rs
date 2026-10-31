@@ -34227,6 +34227,7 @@ impl GameState {
                 | GameEvent::DamageCleared { .. }
                 | GameEvent::GameOver { .. }
                 | GameEvent::ResolutionHalted { .. }
+                | GameEvent::ShortcutRepetition { .. }
                 | GameEvent::DamageDealt { .. }
                 | GameEvent::DamagePrevented { .. }
                 | GameEvent::SpellCountered { .. }

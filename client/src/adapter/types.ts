@@ -3608,6 +3608,8 @@ export type GameEvent =
   | { type: "EnduringStoryGained"; data: { player_id: PlayerId } }
   | { type: "DamageCleared"; data: { object_id: ObjectId } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
+  | { type: "ResolutionHalted"; data: { involved: ObjectId[] } }
+  | { type: "ShortcutRepetition"; data: { controller: PlayerId; repetition: number } }
   | { type: "DamageDealt"; data: { source_id: ObjectId; target: TargetRef; amount: number; is_combat: boolean; excess?: number } }
   | { type: "DamagePrevented"; data: { source_id: ObjectId; target: TargetRef; amount: number } }
   | { type: "SpellCountered"; data: { object_id: ObjectId; countered_by: ObjectId } }
@@ -4962,7 +4964,20 @@ export const AdapterErrorCode = {
   /** The Action frame was definitely not handed to the WebSocket. */
   ACTION_NOT_SENT: "ACTION_NOT_SENT",
   STALE_ACTION: "STALE_ACTION",
+  /** The server refused one request; the connection stays open. */
+  REQUEST_FAILED: "REQUEST_FAILED",
 } as const;
+
+/** Which frame a `StateWithheld` replaced; a withheld `GameStarted` carries the recipient's seat. */
+export type WithheldFrame =
+  | { type: "GameStarted"; data: { your_player: PlayerId } }
+  | { type: "StateUpdate" };
+
+/** The server applied a state it could not send (`StateWithheld`). */
+export interface StateWithheldNotice {
+  revision: number;
+  reason: string;
+}
 
 /**
  * Detect the Rust-side sentinel used by `with_state`/`with_state_mut` in

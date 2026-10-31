@@ -1,0 +1,6 @@
+{
+  "surfaces": [
+    "full"
+  ],
+  "reason": "ServerMessage gains StateWithheld, sent in place of a GameStarted or StateUpdate over the frame bound; an older client cannot parse the tag"
+}
