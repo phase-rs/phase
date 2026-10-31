@@ -11563,21 +11563,33 @@ fn reduce_zone_quals(entries: &[(ZoneQual, Zone)]) -> Option<ZoneQual> {
 /// `filter::bind_declaring_owner_authority` binds unconditionally, with no
 /// dependence on the zone set.
 ///
-/// KNOWN OVER-RESTRICTION. One `Owned` over the whole `InAnyZone` applies the
-/// possessor to the SHARED leg too, which CR 400.1 does not license: the
-/// unpossessed "in exile" half of "cards in exile and in your graveyard" names
-/// every player's exiled cards, not only the controller's. Expressing that needs
-/// a `TargetFilter::Or` of a possessed per-player leg and a bare shared leg,
-/// which this function cannot return — the zone suffix's contract is a flat
-/// `Vec<FilterProp>` read by ~10 call sites. It is unreachable on the printed
-/// set: every card in the class states its ownership separately ("… cards YOU
-/// OWN in exile and in your graveyard" — Huskburster Swarm, Sailors' Bane,
+/// KNOWN OVER-RESTRICTION, AND IT IS NOT LOCAL TO THIS FUNCTION. One `Owned`
+/// over the whole `InAnyZone` applies the possessor to the SHARED leg too, which
+/// CR 400.1 does not license: the unpossessed "in exile" half of "cards in exile
+/// and in your graveyard" names every player's exiled cards, not only the
+/// controller's. Expressing that needs a `TargetFilter::Or` of a possessed
+/// per-player leg and a bare shared leg, which this function cannot return — the
+/// zone suffix's contract is a flat `Vec<FilterProp>` read by ~10 call sites, so
+/// widening that contract to an `Or` is the fix.
+///
+/// The `Opponent` / `TargetPlayer` / `Their` arms of the caller's multi-zone
+/// match have the same `Owned + InAnyZone` shape and the same over-restriction,
+/// and `reduce_zone_quals`' absorption of a shared zone's `Plain` is what newly
+/// makes them reachable — so a fix belongs at that match, not only here. No
+/// printed card reaches any of the four arms with a mixed list: 0 cards spell a
+/// mixed-zone list with an opponent/target-player/third-person possessor at all,
+/// and every card in the `your` class states its ownership separately ("… cards
+/// YOU OWN in exile and in your graveyard" — Huskburster Swarm, Sailors' Bane,
 /// Beacon Bolt, Crackling Drake, Ral, Izzet Viceroy, Serpentine Curve, Slime
 /// Against Humanity, Candlekeep Inspiration; "all commanders you own from the
 /// command zone and from your graveyard" — Campfire), which is why
-/// `extend_zone_properties` has to dedupe the resulting identical props. A card
-/// that spells the mixed list WITHOUT a separate ownership phrase would be
-/// counted too narrowly, and widening the contract to an `Or` is the fix.
+/// `extend_zone_properties` has to dedupe the resulting identical props.
+///
+/// For the `you own` class the over-restriction is not merely unreachable, it is
+/// VACUOUS: CR 400.3 sends a card to its OWNER's graveyard, so a card you own
+/// cannot sit in another player's graveyard, and `Owned { You } ∧ (Exile ∨
+/// Graveyard)` is exactly the printed population. The defect only bites a card
+/// that spells the mixed list with no separate ownership phrase.
 fn possessive_zone_list_props(
     controller: ControllerRef,
     zones: Vec<Zone>,
@@ -11632,17 +11644,25 @@ fn parse_zone_suffix_nom(
     //   the whole suffix, which is exactly what this grammar did before the list
     //   became a `many0` — so "from your hand or graveyard" (34 printed cards
     //   whose second zone omits its preposition) keeps declining HERE instead of
-    //   half-reading the hand alone. Those cards are not unsupported: the
-    //   prepositionless form is owned by `oracle_effect::mod`'s
-    //   `put_hand_graveyard_origin_zones`, a verbatim-phrase table. Generalizing
-    //   the continuation's preposition to `opt` would retire that table and
-    //   cover the whole sub-class; that is a separate change with its own
-    //   34-card measurement, deliberately not folded in here.
+    //   half-reading the hand alone. Only part of that sub-class is covered
+    //   elsewhere: `oracle_effect::mod`'s `put_hand_graveyard_origin_zones` is a
+    //   verbatim-phrase table reaching just the hand/graveyard spellings, 17 of
+    //   the 34 are outside it, and 11 of the 34 are `supported: false` — e.g.
+    //   Soulless Jailer ("Players can't cast noncreature spells from graveyards
+    //   or exile"), whose single coverage gap IS that line. Generalizing the
+    //   continuation's preposition to `opt` would retire that table and cover
+    //   the whole sub-class; that is a separate change with its own 34-card
+    //   measurement, deliberately not folded in here. Declining is still the
+    //   right behavior for THIS grammar — an honest gap beats half a zone list.
     // * "and" does not commit. After a zone phrase it far more often joins the
     //   next instruction ("exile target card from a graveyard and put an oil
-    //   counter on this creature" — 149 printed cards) than another zone phrase,
-    //   so a continuation that is not a zone phrase ends the list and leaves the
-    //   "and" unconsumed for the caller.
+    //   counter on this creature") than another zone phrase. Measured over every
+    //   printed face, matching this grammar's own zone words (plurals included)
+    //   and qualifiers: of the 159 cards that write " and " immediately after a
+    //   zone phrase, 149 continue with something that is not a zone phrase and
+    //   10 continue the list — a disjoint partition. So a continuation that is
+    //   not a zone phrase ends the list and leaves the "and" unconsumed for the
+    //   caller.
     let (i, tail) = many0(alt((
         preceded(tag(" or "), cut(parse_zone_phrase_entry)),
         preceded(tag(" and "), parse_zone_phrase_entry),
@@ -25765,10 +25785,25 @@ mod zone_list_grammar {
                 Some(ControllerRef::You),
             ),
             (
+                // The only printed card with this exact phrase is un-set:
+                // Mzed is `isFunny`, UNK-only, zero format legalities. Kept
+                // because the grammar still has to read it, and flagged so it
+                // is never mistaken for a black-bordered authority. The
+                // black-bordered near-shape — same two zones, no possessor —
+                // is Stinging Study / Imposing Grandeur, pinned in its own row
+                // below.
                 "on the battlefield or in your command zone",
-                "Mzed, Mercenary Leader",
+                "Mzed, Mercenary Leader (UNK, un-set)",
                 vec![Zone::Battlefield, Zone::Command],
                 Some(ControllerRef::You),
+            ),
+            (
+                // Black-bordered, and the printed order Edgar Markov's row
+                // reverses: both zones shared, both qualifiers plain.
+                "on the battlefield or in the command zone",
+                "Stinging Study / Imposing Grandeur / Cloudkill",
+                vec![Zone::Battlefield, Zone::Command],
+                None,
             ),
             (
                 "in your library or in the command zone",
@@ -25946,11 +25981,14 @@ mod zone_list_grammar {
         );
     }
 
-    /// CR 613.1: "the chosen player's" is the other possessor that rides
-    /// `TypedFilter.controller` on an all-per-player list, so it takes the same
-    /// `FilterProp::Owned` switch as `your ` once a shared zone joins the list.
-    /// Pinned because the two share one helper and only `your ` appears in the
-    /// printed two-zone corpus.
+    /// CR 607.2d: "the chosen player's" is linked to an earlier "choose a
+    /// player" on the same object ("those abilities are linked. The second
+    /// ability refers only to a choice made as a result of the first ability"),
+    /// which is what makes it a possessor at all. It is the other possessor that
+    /// rides `TypedFilter.controller` on an all-per-player list, so it takes the
+    /// same `FilterProp::Owned` switch as `your ` once a shared zone joins the
+    /// list. Pinned because the two share one helper and only `your ` appears in
+    /// the printed two-zone corpus.
     ///
     /// No printed card spells a mixed-zone list with this possessor; the nearest
     /// printed instance of the qualifier itself is Haunting Apparition's "green
@@ -25979,6 +26017,36 @@ mod zone_list_grammar {
             vec![FilterProp::InAnyZone {
                 zones: vec![Zone::Graveyard, Zone::Hand]
             }]
+        );
+    }
+
+    /// THE COMMA IS NOT A ZONE-LIST SEPARATOR, AND MUST NOT BECOME ONE while
+    /// this grammar is blind to its caller's position.
+    ///
+    /// Hedron Alignment: "you win the game if you own a card named Hedron
+    /// Alignment in exile, in your hand, in your graveyard, and on the
+    /// battlefield" — FOUR distinct cards, one per zone, because an object is in
+    /// one zone (CR 400.7). Adding `", "` to the separator `alt` in
+    /// `parse_zone_suffix_nom` would fold that into a single
+    /// `InAnyZone { [Exile, Hand, Graveyard, Battlefield] }`, turning a
+    /// four-copies-in-four-zones win condition into one-copy-anywhere — and
+    /// every other test in this suite would stay green, which is why the hazard
+    /// is a gate here and not only a comment there.
+    ///
+    /// The assertion is the whole return value, so a change to any part of it
+    /// fails: the head consumes exactly "in exile" (8 bytes) and the comma ends
+    /// the list, leaving a scalar `InZone`.
+    #[test]
+    fn comma_is_not_a_zone_list_separator() {
+        assert_eq!(
+            parse_zone_suffix("in exile, in your hand"),
+            Some((vec![FilterProp::InZone { zone: Zone::Exile }], None, 8)),
+        );
+        // The full Hedron Alignment tail, read from the same position its
+        // enclosing condition would hand over.
+        assert_eq!(
+            parse_zone_suffix("in exile, in your hand, in your graveyard, and on the battlefield"),
+            Some((vec![FilterProp::InZone { zone: Zone::Exile }], None, 8)),
         );
     }
 
