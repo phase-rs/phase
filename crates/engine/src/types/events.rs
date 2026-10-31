@@ -1173,7 +1173,8 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "ManaTapState::is_not_from_tap")]
         tap_state: ManaTapState,
     },
-    /// CR 605.1b: An activated mana ability resolved and produced mana. Unlike
+    /// CR 605.1b: A mana ability resolved and produced mana; a triggered mana
+    /// ability's production is emitted only while loop detection samples. Unlike
     /// `ManaAdded`, this is one aggregate event per ability resolution; unlike
     /// `TappedForMana`, it also covers mana abilities without a tap cost.
     ManaAbilityProduced {

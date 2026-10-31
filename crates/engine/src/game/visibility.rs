@@ -2214,6 +2214,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         ref schema,
         ref declaration,
         road,
+        counted_take,
         period: _,
     } = state.waiting_for
     {
@@ -2328,6 +2329,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             certificate: certificate.clone(),
             declaration,
             road,
+            counted_take,
             period: Default::default(),
             schema,
         };
@@ -13521,6 +13523,7 @@ mod tests {
                 key: DecisionGroupKey::from_sources(&[slot.source], DecisionKind::LoopChoice),
             }),
             road: crate::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
         state
@@ -13929,6 +13932,7 @@ mod tests {
                 published_declaration: Some(declaration),
                 leading_aims: Vec::new(),
                 road: crate::analysis::loop_check::OfferRoad::Ring,
+                counted_take: Default::default(),
                 period: Default::default(),
             },
         };

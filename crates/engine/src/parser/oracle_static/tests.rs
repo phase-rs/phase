@@ -26114,6 +26114,86 @@ fn static_chosen_type_pump() {
     }
 }
 
+/// SHAPE — Engineered Plague (MTGJSON):
+/// "All creatures of the chosen type get -1/-1."
+/// CR 611.3a + CR 205.3m + CR 607.2d: the affected creatures must have
+/// the creature type chosen for this Engineered Plague.
+#[test]
+fn all_creatures_engineered_plague_preserves_chosen_type_shape() {
+    let def = parse_static_line("All creatures of the chosen type get -1/-1.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::AddPower { value: -1 },
+            ContinuousModification::AddToughness { value: -1 },
+        ]
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::IsChosenCreatureType])
+        ))
+    );
+}
+
+/// SHAPE — Shiv (MTGJSON):
+/// "All creatures have \"{R}: This creature gets +1/+0 until end of turn.\""
+/// Humility (MTGJSON):
+/// "All creatures lose all abilities and have base power and toughness 1/1."
+/// CR 611.3a: both subjects include every creature without a qualifier.
+/// Shiv's quoted inner "gets" must not replace the leading "have" boundary.
+#[test]
+fn all_creatures_shiv_and_humility_keep_bare_subject_shape() {
+    let bare = Some(TargetFilter::Typed(TypedFilter::creature()));
+    for text in [
+        "All creatures have \"{R}: This creature gets +1/+0 until end of turn.\"",
+        "All creatures lose all abilities and have base power and toughness 1/1.",
+    ] {
+        let def = parse_static_line(text).unwrap_or_else(|| panic!("{text:?} must parse"));
+        assert_eq!(def.mode, StaticMode::Continuous, "{text:?}");
+        assert_eq!(def.affected, bare, "{text:?}");
+    }
+}
+
+/// SHAPE — synthetic rejection case, not a supported-card claim.
+/// No printed static ability in the pinned MTGJSON corpus begins
+/// "All creatures with art by". The nearest printed static is Drawn Together:
+/// "As this enchantment enters, choose an artist.
+/// Creatures with art by the chosen artist get +2/+2."
+/// Its subject lacks "All", so it does not reach this dispatch arm.
+/// The nearest printed "All creatures with art by" line is the instant
+/// Graphic Violence:
+/// "All creatures with art by the artist of your choice get +2/+2 and gain
+/// trample until end of turn."
+/// CR 611.2a + CR 611.2c govern Graphic Violence's resolving continuous
+/// effect. This test does not claim to implement either card.
+/// Retain this synthetic static input to guard the changed arm against
+/// discarding a subject it cannot recognize and substituting all creatures.
+/// The printed positive control is Engineered Plague:
+/// "All creatures of the chosen type get -1/-1."
+/// CR 611.3a + CR 607.2d: its static applies only to its chosen creature type.
+#[test]
+fn all_creatures_synthetic_artist_qualifier_does_not_widen_shape() {
+    let bare = Some(TargetFilter::Typed(TypedFilter::creature()));
+    if let Some(def) =
+        parse_static_line("All creatures with art by the artist of your choice get +2/+2.")
+    {
+        assert_ne!(def.affected, bare, "qualifier was dropped: {def:?}");
+    }
+
+    // Printed positive control: Engineered Plague reaches the same dispatch arm
+    // and preserves its recognized subject. The separate production-revert run
+    // establishes that the synthetic negative also reaches the widening defect.
+    let recognized = parse_static_line("All creatures of the chosen type get -1/-1.").unwrap();
+    assert_eq!(
+        recognized.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::IsChosenCreatureType])
+        ))
+    );
+}
+
 #[test]
 fn parser_shape_arcane_adaptation_chosen_type_applies_to_creatures_you_control() {
     let def = parse_static_line(

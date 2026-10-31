@@ -7824,7 +7824,10 @@ impl IllegalTargetsDisposition {
     }
 }
 
-/// CR 701.9a: How cards are selected from a zone during an effect or cost.
+/// How cards are selected from a zone during an effect or cost. Modeled on
+/// CR 701.9b (a discard is by default chosen by the affected player, but some
+/// effects require a random discard); other consumers of this enum are only
+/// analogous to that rule.
 ///
 /// Analogous to `TargetSelectionMode` but for cards from a player's hand (or
 /// other non-target zones) rather than spell/ability targets.
@@ -7833,7 +7836,8 @@ pub enum CardSelectionMode {
     /// CR 608.2d: The affected player or controller chooses the card(s).
     #[default]
     Chosen,
-    /// CR 701.9a: The game selects card(s) uniformly at random.
+    /// CR 701.9b: The game selects card(s) uniformly at random (random discard;
+    /// analogous for the other consumers of this enum).
     Random,
 }
 
@@ -20750,27 +20754,6 @@ pub enum StepSkipTarget {
     CombatPhase,
 }
 
-impl StepSkipTarget {
-    pub fn constituent_steps(self) -> &'static [Phase] {
-        match self {
-            Self::Step(Phase::Untap) => &[Phase::Untap],
-            Self::Step(Phase::Upkeep) => &[Phase::Upkeep],
-            Self::Step(Phase::Draw) => &[Phase::Draw],
-            Self::Step(Phase::PreCombatMain) => &[Phase::PreCombatMain],
-            Self::Step(Phase::BeginCombat) => &[Phase::BeginCombat],
-            Self::Step(Phase::DeclareAttackers) => &[Phase::DeclareAttackers],
-            Self::Step(Phase::DeclareBlockers) => &[Phase::DeclareBlockers],
-            Self::Step(Phase::CombatDamage) => &[Phase::CombatDamage],
-            Self::Step(Phase::EndCombat) => &[Phase::EndCombat],
-            Self::Step(Phase::PostCombatMain) => &[Phase::PostCombatMain],
-            Self::Step(Phase::End) => &[Phase::End],
-            Self::Step(Phase::Cleanup) => &[Phase::Cleanup],
-            // CR 506.1: the combat phase's five steps.
-            Self::CombatPhase => PhaseGroup::Combat.steps(),
-        }
-    }
-}
-
 /// CR 500.8 + CR 500.9 + CR 500.10: where an added phase or step is inserted.
 /// `ThisStep` and `ThisPhase` are resolved when the effect resolves:
 /// `ThisStep` against the step it resolves in, `ThisPhase` against the phase in
@@ -22855,15 +22838,15 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         additional_modifications: Vec<ContinuousModification>,
     },
-    /// CR 707.2 + CR 111.1 + CR 701.9a (analogous): Create a token that's a copy
+    /// CR 707.2 + CR 111.1 + CR 701.9b (analogous): Create a token that's a copy
     /// of a creature card chosen from a format-defined pool whose mana value
     /// satisfies `mv <comparator> mv_bound`. The canonical card is the Momir
     /// Basic emblem ("Create a token that's a copy of a creature card with mana
     /// value X chosen at random"). The pool is the engine's creature corpus,
     /// drawn from `GameState::card_db` at resolution time. `selection` chooses how a
     /// candidate is picked from the matching set: `Random` (CR 701.9a is the
-    /// discard keyword action; the random *selection* here is analogous to the
-    /// random-choice idiom) or `Chosen`. Built as a reusable primitive so the
+    /// discard keyword action and CR 701.9b its random-discard rule; the random
+    /// *selection* here is only analogous to the latter) or `Chosen`. Built as a reusable primitive so the
     /// `mv` comparator also expresses "copy a creature card with mana value N or
     /// less" (Oko-style) via `Comparator::LE`.
     CreateTokenCopyFromPool {
@@ -22881,7 +22864,7 @@ pub enum Effect {
         /// CR 202.3: the mana-value bound. For Momir this is `Variable { "X" }`
         /// (the chosen X paid for the ability).
         mv_bound: QuantityExpr,
-        /// CR 701.9a (analogous) / CR 608.2d: how a candidate is selected from
+        /// CR 701.9b (analogous) / CR 608.2d: how a candidate is selected from
         /// the matching set — `Random` (Momir) or `Chosen`.
         selection: CardSelectionMode,
         /// CR 707.10: number of tokens to create. Defaults to one.
@@ -23352,7 +23335,7 @@ pub enum Effect {
         count: QuantityExpr,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
-        /// CR 701.9a: Random discard (e.g., "discard a card at random").
+        /// CR 701.9b: Random discard (e.g., "discard a card at random").
         #[serde(
             default,
             with = "card_selection_bool_compat",
@@ -25538,7 +25521,7 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         player_b: TargetFilter,
     },
-    /// CR 730.1: Set the game's day/night designation.
+    /// CR 731.1: Set the game's day/night designation.
     /// Triggers daybound/nightbound transformations on all relevant permanents.
     SetDayNight {
         to: crate::types::game_state_kinds::DayNight,
@@ -37185,7 +37168,7 @@ pub enum AbilityCondition {
     /// `AdditionalCostNotPaid` and `SourceDidNotEnterThisTurn`. Used by
     /// "if you don't" / "unless you" / "if it isn't" sub-clause gates.
     Not { condition: Box<AbilityCondition> },
-    /// CR 730.2a: True when it's neither day nor night (day_night is None).
+    /// CR 731.1: True when it's neither day nor night (day_night is None).
     /// Used by Daybound/Nightbound ETB initialization: "If it's neither day nor night,
     /// it becomes day as this creature enters."
     DayNightIsNeither,
@@ -39669,6 +39652,40 @@ pub struct TriggerDefinitionRef {
 }
 
 impl TriggerDefinitionRef {
+    /// Yields every object incarnation this reference names, an expanded grant's provider
+    /// included (CR 400.7).
+    pub fn for_each_incarnation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
+        f(self.source.object_id, &mut self.source.incarnation);
+        if let TriggerDefinitionOccurrenceRef::ExpandedGrant { provider, .. } = &mut self.occurrence
+        {
+            provider.for_each_incarnation_mut(f);
+        }
+    }
+
+    /// Yields every layer-6 grant generation this reference names, an expanded grant's provider
+    /// included, keyed by the object whose allocator minted it.
+    pub fn for_each_grant_generation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
+        let minted_by = self.source.object_id;
+        match &mut self.occurrence {
+            TriggerDefinitionOccurrenceRef::KeywordCompanion { grant_instance, .. }
+            | TriggerDefinitionOccurrenceRef::CopyRetained { grant_instance, .. }
+            | TriggerDefinitionOccurrenceRef::Granted { grant_instance } => {
+                f(minted_by, &mut grant_instance.0);
+            }
+            TriggerDefinitionOccurrenceRef::ExpandedGrant {
+                grant_instance,
+                provider,
+                provider_output_index: _,
+            } => {
+                f(minted_by, &mut grant_instance.0);
+                provider.for_each_grant_generation_mut(f);
+            }
+            TriggerDefinitionOccurrenceRef::Printed { .. }
+            | TriggerDefinitionOccurrenceRef::CopiedValue { .. }
+            | TriggerDefinitionOccurrenceRef::Unmaterialized => {}
+        }
+    }
+
     /// CR 113.2c + CR 603.2 + CR 603.2h: the key under which `def`'s per-definition
     /// limit ledgers (once each turn, once, the first N times each turn, and the
     /// indicated action) are read and written. Every lowered half of one printed
@@ -39977,6 +39994,12 @@ impl TriggerOccurrenceState {
         self.active_grants
             .iter()
             .map(|active| (&active.producer, active.instance))
+    }
+
+    pub fn for_each_active_grant_generation_mut(&mut self, mut f: impl FnMut(&mut u64)) {
+        for active in &mut self.active_grants {
+            f(&mut active.instance.0);
+        }
     }
 }
 

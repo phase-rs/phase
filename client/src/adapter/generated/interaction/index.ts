@@ -81,7 +81,7 @@ export type InteractionRelationSourceConstraint = "atMostOne" | "engineValidated
 
 export type InteractionDamageAssignmentMode = "normal" | "asThoughUnblocked";
 
-export type InteractionShortcutCountSpec = { "type": "fixed", "data": { min: number, max: number, suggested: number, } } | { "type": "untilLethal" };
+export type InteractionShortcutCountSpec = { "type": "fixed", "data": { min: number, max: number, suggested: number, } } | { "type": "untilLethal" } | { "type": "withoutEnd" };
 
 export type InteractionShortcutPreviewFamily = "mana" | "life" | "damage" | "mill" | "counters" | "tokens" | "cards" | "casts" | "combats" | "turns" | "triggers";
 

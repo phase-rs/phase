@@ -7537,7 +7537,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
         }
     }
 
-    // CR 730.2a: "it's neither day nor night" — Daybound/Nightbound ETB initialization.
+    // CR 702.145d + CR 731.1: "it's neither day nor night" — Daybound/Nightbound ETB initialization.
     if tag::<_, _, OracleError<'_>>("it's neither day nor night")
         .parse(lower.as_str())
         .is_ok()

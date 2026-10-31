@@ -552,8 +552,8 @@ pub enum TriggerMode {
     FlippedCoin,
     Clashed,
 
-    // Day/night — CR 730 (Day and Night)
-    /// CR 730: Triggers when it becomes day or night.
+    // Day/night — CR 731 (Day and Night)
+    /// CR 731.1 + CR 731.1a: Triggers when it becomes day or night.
     DayTimeChanges,
 
     // Class

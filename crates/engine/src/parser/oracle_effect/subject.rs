@@ -6199,7 +6199,7 @@ fn build_become_clause(
         return Some(clause);
     }
 
-    // CR 730.1: "it becomes night" / "it becomes day" — set game day/night designation.
+    // CR 731.1: "it becomes night" / "it becomes day" — set game day/night designation.
     // Must intercept before parse_animation_spec which produces AddSubtype("Night"/"Day").
     if let Some(clause) = try_parse_set_day_night(become_text) {
         return Some(clause);
@@ -6869,7 +6869,7 @@ fn try_parse_set_life_total(
     })
 }
 
-/// CR 730.1: Parse "night" / "day" after "becomes" into SetDayNight effect.
+/// CR 731.1: Parse "night" / "day" after "becomes" into SetDayNight effect.
 /// Accepts a trailing "as ~ enters" timing qualifier and ignores it.
 fn try_parse_set_day_night(become_text: &str) -> Option<ParsedEffectClause> {
     let lower = become_text.to_lowercase();

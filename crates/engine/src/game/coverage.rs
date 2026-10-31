@@ -8158,7 +8158,7 @@ fn check_trigger(
         );
     }
     // CR 603.8: StateCondition triggers are handled by the priority pipeline
-    // (check_state_triggers), not the event-based trigger registry. They are supported.
+    // (collect_state_triggers), not the event-based trigger registry. They are supported.
     if !trigger_mode_is_supported(&trigger.mode, trigger_registry) {
         let label = format!("Trigger:{}", trigger.mode);
         if !missing.contains(&label) {
@@ -8169,7 +8169,7 @@ fn check_trigger(
 
 /// Whether a printed (battlefield) trigger mode can fire: recognised, and either
 /// in the event-trigger registry or a CR 603.8 state trigger (handled by the
-/// priority pipeline's `check_state_triggers`). Delayed triggers use the
+/// priority pipeline's `collect_state_triggers`). Delayed triggers use the
 /// stricter `delayed_trigger_mode_is_supported`.
 fn trigger_mode_is_supported(
     mode: &TriggerMode,
@@ -10864,7 +10864,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::Or { .. } => ("Or", Handled),
         // CR 608.2c: Logical negation — handled by evaluate_condition (effects/mod.rs).
         AbilityCondition::Not { .. } => ("Not", Handled),
-        // CR 730.2a: Daybound/Nightbound ETB initialization — handled by evaluate_condition.
+        // CR 702.145d + CR 731.1: Daybound/Nightbound ETB initialization — handled by evaluate_condition.
         AbilityCondition::DayNightIsNeither => ("DayNightIsNeither", Handled),
         // CR 731.1: Day/night designation check — handled by evaluate_condition.
         AbilityCondition::DayNightIs { .. } => ("DayNightIs", Handled),
