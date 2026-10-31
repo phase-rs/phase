@@ -15,6 +15,7 @@ import { VolumeControl } from "./VolumeControl.tsx";
 import { clearGame } from "../../stores/gameStore.ts";
 import { useDraftStore } from "../../stores/draftStore.ts";
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore.ts";
+import { displayedBuildHash } from "../../services/buildInfo.ts";
 import { useCardDataMeta } from "../../hooks/useCardDataMeta.ts";
 import { useConcedeHandler } from "../../hooks/useConcedeHandler.ts";
 import type { ResolvedMultiplayerBoardLayout } from "../../stores/preferencesStore.ts";
@@ -101,6 +102,7 @@ export function GameMenu({
   const ownedMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const resolvedMenuTriggerRef = menuTriggerRef ?? ownedMenuTriggerRef;
   const cardDataMeta = useCardDataMeta();
+  const buildHash = displayedBuildHash();
   const isDraft = searchParams.get("source") === "draft" && !!searchParams.get("draftId");
   const isDraftPodMatch = searchParams.get("mode") === "draft-match";
   const boardLayoutToggleLabel = multiplayerBoardLayout === "split"
@@ -365,12 +367,12 @@ export function GameMenu({
           <div className="my-1 border-t border-gray-700" />
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 px-3 py-1.5 text-[10px] text-slate-500">
             <a
-              href={`${__GIT_REPO_URL__}/commit/${__BUILD_HASH__}`}
+              href={buildHash ? `${__GIT_REPO_URL__}/commit/${buildHash}` : __GIT_REPO_URL__}
               target="_blank"
               rel="noopener noreferrer"
               className="transition-colors hover:text-white"
             >
-              v{__APP_VERSION__} {__BUILD_HASH__}
+              v{__APP_VERSION__}{buildHash && ` ${buildHash}`}
             </a>
             {cardDataMeta && (
               <>

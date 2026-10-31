@@ -11,6 +11,7 @@ import {
   useUpdateError,
   getUpdateDebugReport,
 } from "../../pwa/updateStatus";
+import { displayedBuildHash } from "../../services/buildInfo";
 import { isBundledTauriOrigin, isDesktopTauri, isTauri } from "../../services/platform";
 
 const UPDATED_LABEL_MS = 4500;
@@ -79,7 +80,9 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
     window.alert(report);
   };
 
-  const commitUrl = `${__GIT_REPO_URL__}/commit/${__BUILD_HASH__}`;
+  const buildHash = displayedBuildHash();
+  // Link to the exact commit only when its hash is shown; otherwise the commit URL would expose the hash.
+  const versionUrl = buildHash ? `${__GIT_REPO_URL__}/commit/${buildHash}` : __GIT_REPO_URL__;
   const cardDataAge = cardDataMeta ? formatRelativeDate(cardDataMeta.generated_at) : null;
   const cardDataCommitUrl = cardDataMeta
     ? `${__GIT_REPO_URL__}/commit/${cardDataMeta.commit}`
@@ -90,7 +93,7 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
   // in its hover tooltip (the same meta the wide mobile pill shows inline).
   if (compact) {
     const tooltip = [
-      `v${__APP_VERSION__} · ${__BUILD_HASH__}`,
+      buildHash ? `v${__APP_VERSION__} · ${buildHash}` : `v${__APP_VERSION__}`,
       shellVersion && t("buildBadge.desktopAppVersion", { version: shellVersion }),
       cardDataMeta &&
         t("buildBadge.cardDataTitle", {
@@ -109,16 +112,20 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
             onClick={handleCheckUpdate}
             aria-label={t("buildBadge.checkForUpdates")}
             title={tooltip}
-            className="inline-flex items-center gap-1 font-mono text-[10.5px] leading-none text-slate-400 transition-colors hover:text-white"
+            className="inline-flex flex-col items-center gap-0.5 font-mono text-[10.5px] leading-none text-slate-400 transition-colors hover:text-white"
           >
-            <span>v{__APP_VERSION__}</span>
-            <span className={`text-[11px] text-slate-500 ${isActive ? "animate-spin" : ""}`} aria-hidden>
-              ↻
+            <span className="inline-flex items-center gap-1">
+              <span>v{__APP_VERSION__}</span>
+              <span className={`text-[11px] text-slate-500 ${isActive ? "animate-spin" : ""}`} aria-hidden>
+                ↻
+              </span>
             </span>
+            {buildHash && <span className="text-[9px] text-slate-500">{buildHash}</span>}
           </button>
         ) : (
-          <span title={tooltip} className="font-mono text-[10.5px] leading-none text-slate-400">
-            v{__APP_VERSION__}
+          <span title={tooltip} className="inline-flex flex-col items-center gap-0.5 font-mono text-[10.5px] leading-none text-slate-400">
+            <span>v{__APP_VERSION__}</span>
+            {buildHash && <span className="text-[9px] text-slate-500">{buildHash}</span>}
           </span>
         )}
         {canCheckForUpdates && statusLabel && (
@@ -147,13 +154,13 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
     >
       <div className="relative flex items-center gap-1 rounded-full border border-white/10 bg-black/18 px-2.5 py-1.5 text-[10px] text-slate-400 shadow-lg shadow-black/30 backdrop-blur-md overflow-hidden">
         <a
-          href={commitUrl}
+          href={versionUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="flex items-center gap-1 transition-colors hover:text-white"
         >
           <span>v{__APP_VERSION__}</span>
-          <span className="text-slate-600">{__BUILD_HASH__}</span>
+          {buildHash && <span className="text-slate-600">{buildHash}</span>}
         </a>
 
         {shellVersion && (

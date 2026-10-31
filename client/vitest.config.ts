@@ -98,6 +98,7 @@ export default defineConfig({
     __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
     __RELEASE_SITE_URL__: JSON.stringify("https://phase-rs.dev"),
     __IS_RELEASE_BUILD__: JSON.stringify(false),
+    __IS_PREVIEW_BUILD__: "globalThis.__IS_PREVIEW_BUILD__",
     // Empty ⇒ telemetry is build-disabled in tests (no network egress).
     __TELEMETRY_URL__: JSON.stringify(""),
   },
