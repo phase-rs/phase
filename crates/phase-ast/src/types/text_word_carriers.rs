@@ -124,7 +124,7 @@ pub fn carrier_class(tag: Option<&str>, key: &str, domain: TextWordDomain) -> Op
 
 /// Visits every string leaf of a serialized value with its nearest enclosing
 /// `type` tag and the key (list elements carry a `[]` suffix) that holds it.
-pub(crate) fn walk_strings(
+pub fn walk_strings(
     value: &mut Value,
     tag: Option<&str>,
     key: &str,

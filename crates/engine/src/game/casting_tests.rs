@@ -57017,6 +57017,243 @@ fn resolution_cast_auto_selects_its_only_legal_spell_face() {
     assert!(state.objects[&spell].modal_back_face);
 }
 
+/// A free resolution request for the spell//land fixture under `play_mode`,
+/// with an optional frozen cast-time constraint on the policy.
+fn resolution_test_play_request(
+    play_mode: CardPlayMode,
+    constraint: Option<CastPermissionConstraint>,
+) -> ResolutionCastRequest {
+    let mut request = resolution_test_request(TargetFilter::Any);
+    request.face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        TargetFilter::Any,
+        ObjectId(83_021),
+        PlayerId(0),
+        constraint,
+    )
+    .with_play_mode(play_mode);
+    request.cleanup.face_policy = request.face_policy.clone();
+    request
+}
+
+/// A spell (sorcery) // land modal double-faced card in exile.
+fn resolution_test_spell_land(state: &mut GameState) -> ObjectId {
+    resolution_test_two_spell_faces(state, CoreType::Sorcery, CoreType::Land)
+}
+
+/// "Mana value 0 or less": with a generic(3) front face, the spell face is
+/// illegal under this constraint while the land face is unaffected.
+fn resolution_test_mv_zero_constraint() -> Option<CastPermissionConstraint> {
+    Some(CastPermissionConstraint::ManaValue {
+        comparator: Comparator::LE,
+        value: QuantityExpr::Fixed { value: 0 },
+    })
+}
+
+/// Read every legal face of `spell` under `request` through the exact
+/// temporary permission, installed on a clone.
+fn resolution_test_face_legality(
+    state: &GameState,
+    spell: ObjectId,
+    request: &ResolutionCastRequest,
+) -> ResolutionFaceLegality {
+    let mut projected = state.clone();
+    let permission =
+        install_resolution_cast_permission(&mut projected, PlayerId(0), spell, request)
+            .expect("the fixture request installs");
+    resolution_face_legality_for_current_permission(
+        &projected,
+        PlayerId(0),
+        spell,
+        &request.face_policy,
+        permission.index,
+    )
+}
+
+/// CR 701.18b + CR 712.12 + CR 305.2b + CR 305.3: only a Play policy admits
+/// the land face of a spell//land modal card, and only while that land play
+/// is legal now. The spell face is judged independently (CR 712.11c).
+#[test]
+fn resolution_face_legality_admits_the_land_face_only_under_a_play_policy() {
+    use ResolutionFaceAction::{Cast, PlayLand};
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_spell_land(&mut state);
+
+    let cast = resolution_test_play_request(CardPlayMode::Cast, None);
+    assert_eq!(
+        resolution_test_face_legality(&state, spell, &cast),
+        ResolutionFaceLegality {
+            front: Some(Cast),
+            back: None,
+        },
+        "a Cast policy never admits a land face"
+    );
+
+    let play = resolution_test_play_request(CardPlayMode::Play, None);
+    assert_eq!(
+        resolution_test_face_legality(&state, spell, &play),
+        ResolutionFaceLegality {
+            front: Some(Cast),
+            back: Some(PlayLand),
+        },
+        "a Play policy admits both the spell face and the land face"
+    );
+
+    let mut at_allowance = state.clone();
+    at_allowance.lands_played_this_turn = 1;
+    at_allowance.players[0].lands_played_this_turn = 1;
+    assert_eq!(
+        resolution_test_face_legality(&at_allowance, spell, &play).back,
+        None,
+        "CR 305.2b: the land face is unavailable at the allowance"
+    );
+
+    let mut opponents_turn = state.clone();
+    opponents_turn.active_player = PlayerId(1);
+    assert_eq!(
+        resolution_test_face_legality(&opponents_turn, spell, &play).back,
+        None,
+        "CR 305.3: the land face is unavailable on another player's turn"
+    );
+
+    let mut constrained = state.clone();
+    constrained.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::generic(3);
+    let play_constrained =
+        resolution_test_play_request(CardPlayMode::Play, resolution_test_mv_zero_constraint());
+    assert_eq!(
+        resolution_test_face_legality(&constrained, spell, &play_constrained),
+        ResolutionFaceLegality {
+            front: None,
+            back: Some(PlayLand),
+        },
+        "an illegal spell face does not suppress the legal land face"
+    );
+}
+
+/// CR 712.12 + CR 305.2a: when the land face is a Play election's only legal
+/// face, it is returned for the caller to play and no temporary permission
+/// remains. The same card under a Cast policy is rejected outright: a Cast
+/// instruction never elects a land face (CR 601.2).
+#[test]
+fn resolution_play_election_plays_the_only_legal_land_face_and_leaves_no_permission() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_spell_land(&mut state);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::generic(3);
+
+    let mut play_state = state.clone();
+    let initiation = initiate_resolution_election(
+        &mut play_state,
+        PlayerId(0),
+        spell,
+        resolution_test_play_request(CardPlayMode::Play, resolution_test_mv_zero_constraint()),
+        &mut Vec::new(),
+    )
+    .expect("the Play election initiates");
+    assert!(
+        matches!(initiation, ResolutionElectionInitiation::PlayLandFace(_)),
+        "the only legal face is the land face"
+    );
+    assert!(play_state.objects[&spell].casting_permissions.is_empty());
+
+    let mut cast_state = state.clone();
+    let initiation = initiate_resolution_election(
+        &mut cast_state,
+        PlayerId(0),
+        spell,
+        resolution_test_play_request(CardPlayMode::Cast, resolution_test_mv_zero_constraint()),
+        &mut Vec::new(),
+    )
+    .expect("the Cast election initiates");
+    assert!(
+        matches!(
+            initiation,
+            ResolutionElectionInitiation::Cast(ResolutionCastInitiation::Rejected(_))
+        ),
+        "a Cast policy with an illegal spell face rejects; it never elects the land face"
+    );
+    assert!(cast_state.objects[&spell].casting_permissions.is_empty());
+}
+
+/// CR 712.12 + CR 305.2a: with both faces legal, a Play election offers both
+/// plus `CancelCast`; electing the land face plays it during resolution by its
+/// back face, consumes the allowance, and leaves no permission.
+#[test]
+fn resolution_play_election_with_two_legal_faces_plays_the_elected_land_face() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_spell_land(&mut state);
+
+    let initiation = initiate_resolution_election(
+        &mut state,
+        PlayerId(0),
+        spell,
+        resolution_test_play_request(CardPlayMode::Play, None),
+        &mut Vec::new(),
+    )
+    .expect("the Play election initiates");
+    let ResolutionElectionInitiation::Cast(ResolutionCastInitiation::WaitingFor(waiting_for)) =
+        initiation
+    else {
+        panic!("two legal faces must open a prompt");
+    };
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ModalFaceChoice { .. }
+    ));
+    state.waiting_for = *waiting_for;
+    let actions = crate::ai_support::legal_actions(&state);
+    assert!(actions.contains(&GameAction::ChooseModalFace { back_face: false }));
+    assert!(actions.contains(&GameAction::ChooseModalFace { back_face: true }));
+    assert!(actions.contains(&GameAction::CancelCast));
+
+    apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: true })
+        .expect("the elected land face is played");
+
+    let object = &state.objects[&spell];
+    assert_eq!(object.zone, Zone::Battlefield);
+    assert_eq!(object.name, "Resolution Back");
+    assert!(object.modal_back_face);
+    assert!(object.casting_permissions.is_empty());
+    assert_eq!(state.lands_played_this_turn, 1);
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
+/// CR 608.2d + CR 305.2b: once the allowance is reached, the land face is no
+/// longer offered, and a forged land-face choice is refused with no mutation.
+#[test]
+fn forged_land_face_choice_after_the_allowance_is_rejected_without_mutation() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_spell_land(&mut state);
+    let initiation = initiate_resolution_election(
+        &mut state,
+        PlayerId(0),
+        spell,
+        resolution_test_play_request(CardPlayMode::Play, None),
+        &mut Vec::new(),
+    )
+    .expect("the Play election initiates");
+    let ResolutionElectionInitiation::Cast(ResolutionCastInitiation::WaitingFor(waiting_for)) =
+        initiation
+    else {
+        panic!("two legal faces must open a prompt");
+    };
+    state.waiting_for = *waiting_for;
+    state.lands_played_this_turn = 1;
+    state.players[0].lands_played_this_turn = 1;
+
+    let actions = crate::ai_support::legal_actions(&state);
+    assert!(
+        actions.contains(&GameAction::ChooseModalFace { back_face: false }),
+        "reach-guard: the prompt is live and its spell face is still offered"
+    );
+    assert!(!actions.contains(&GameAction::ChooseModalFace { back_face: true }));
+
+    let before = state.clone();
+    assert!(
+        apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: true }).is_err(),
+        "a land face past the allowance is refused"
+    );
+    assert_eq!(state, before, "a refused land-face choice mutates nothing");
+}
+
 /// A paid resolution offer evaluates both independently castable faces. Once a
 /// player elects the back face, it must charge that face's printed cost and
 /// retain the grant's additional cost across the modal prompt.

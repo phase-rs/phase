@@ -754,6 +754,7 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::ScopedPlayerMatches { .. } => false,
     }
 }
@@ -833,6 +834,7 @@ fn rebind_source_counter_condition(condition: &mut AbilityCondition, to: ObjectS
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::ScopedPlayerMatches { .. } => {}
     }
 }
@@ -1714,7 +1716,9 @@ fn player_filter_reads_player_chosen_number(filter: &PlayerFilter) -> bool {
         PlayerFilter::ControlsCount { count, .. } => {
             quantity_expr_reads_player_chosen_number(count)
         }
-        PlayerFilter::AllExcept { exclude } => player_filter_reads_player_chosen_number(exclude),
+        PlayerFilter::AllExcept { exclude, .. } => {
+            player_filter_reads_player_chosen_number(exclude)
+        }
         PlayerFilter::AnyOf { filters } => {
             filters.iter().any(player_filter_reads_player_chosen_number)
         }
@@ -1817,6 +1821,7 @@ fn finalize_committed_guess_choice_types(
             _ => unreachable!("matched above"),
         };
         *ability.effect = Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::opponent(),
             persist: false,
             selection: TargetSelectionMode::Chosen,
@@ -2421,6 +2426,7 @@ fn condition_reads_the_event_subject(condition: &AbilityCondition) -> bool {
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::ScopedPlayerMatches { .. } => false,
     }
 }
@@ -8724,6 +8730,14 @@ fn parse_event_context_ref_with_ctx<'a>(
         (TargetFilter::TriggeringPlayer, Some(ControllerRef::ParentTargetController)) => {
             TargetFilter::ParentTargetController
         }
+        // CR 608.2c + CR 109.4 + CR 115.1: "that player" after a targeted
+        // `Choose` ("target opponent chooses self or others") or a
+        // player-typed `TargetOnly` names the ANNOUNCED target — the most
+        // recent player mention — not the trigger event's player. Fires only
+        // when no explicit `relative_player_scope` pin won above.
+        (TargetFilter::TriggeringPlayer, None) if ctx.chain_prior_targeted_player => {
+            TargetFilter::ParentTarget
+        }
         _ => target,
     };
     Some((target, rest))
@@ -9536,7 +9550,10 @@ fn parse_effect_clause_with_damage_context(
             // modifier is extracted before the main shell pass below, so consult
             // the same shell here to bind an anaphoric "they" to a prepositional
             // scope such as "for each opponent, you … unless they …".
-            let (player_scope, _) = super::clause_shell::peel_player_scope_subject(&clause_text);
+            let (player_scope, _) = super::clause_shell::peel_player_scope_subject(
+                &clause_text,
+                ctx.chain_prior_targeted_player,
+            );
             let (stripped, unless_pay) =
                 extract_resolution_unless_pay_modifier(&clause_text, player_scope.as_ref());
             if unless_pay.is_some() {
@@ -9588,7 +9605,8 @@ fn parse_effect_clause_with_damage_context(
             }
         }
     }
-    let (peeled_text, peel_ctx) = super::clause_shell::peel_clause(text);
+    let (peeled_text, peel_ctx) =
+        super::clause_shell::peel_clause_with_anchor(text, ctx.chain_prior_targeted_player);
     // CR 608.2c + CR 109.5: a peeled player subject ("target opponent may",
     // "that creature's controller may", "each opponent …") names who acts, and
     // this clause has no slot to carry it — the chunk loop is where those
@@ -10772,6 +10790,7 @@ fn try_parse_choose_player_to_verb(
     ctx.relative_player_scope = Some(chosen_scope.clone());
 
     let mut clause = parsed_clause(Effect::Choose {
+        chooser: crate::types::ability::ControllerRef::You,
         choice_type: choice_type.clone(),
         persist: false,
         selection,
@@ -10845,6 +10864,7 @@ fn try_parse_an_opponent_to_verb(
     }
 
     let mut clause = parsed_clause(Effect::Choose {
+        chooser: crate::types::ability::ControllerRef::You,
         choice_type: ChoiceType::opponent(),
         persist: false,
         selection: TargetSelectionMode::Chosen,
@@ -10877,6 +10897,7 @@ fn try_parse_opponent_guesses_chosen_library_kind(
     let mut guess = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::CardPredicateGuess {
                 options: ChoiceType::land_or_nonland_card_predicate_options(),
             },
@@ -10891,6 +10912,7 @@ fn try_parse_opponent_guesses_chosen_library_kind(
     });
 
     let mut choose_opponent = parsed_clause(Effect::Choose {
+        chooser: crate::types::ability::ControllerRef::You,
         choice_type: ChoiceType::opponent(),
         persist: false,
         selection: TargetSelectionMode::Chosen,
@@ -11292,6 +11314,8 @@ fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: C
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // No `ControllerRef` payload — nothing to rebind.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => {}
     }
 }
@@ -15663,6 +15687,8 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::BattlefieldEntriesThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
@@ -15711,7 +15737,7 @@ fn player_filter_reads_chain_local_result(filter: &PlayerFilter) -> bool {
         | PlayerFilter::PerformedActionThisWay { .. }
         | PlayerFilter::TrackedSetPossessor { .. }
         | PlayerFilter::VotedFor { .. } => true,
-        PlayerFilter::AllExcept { exclude } => player_filter_reads_chain_local_result(exclude),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_reads_chain_local_result(exclude),
         PlayerFilter::AnyOf { filters } => {
             filters.iter().any(player_filter_reads_chain_local_result)
         }
@@ -18568,6 +18594,21 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
     .parse(rest)?;
 
     let (rest, filter) = nom_target::parse_type_phrase(rest)?;
+
+    // CR 607.2d boundary: the type phrase admits "the chosen player controls"
+    // (scheme statics), but a keeper head's domain is each nominating seat's
+    // own permanents — never the scheme's persisted choice. Decline it here
+    // so the suffix stays unconsumed for callers that own it, and this
+    // production keeps its they / that-player / you controller set.
+    if matches!(
+        &filter,
+        TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::SourceChosenPlayer)
+    ) {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
 
     // Recognized for its POSITION, not for a payload — which is why this reads
     // the controller-phrase grammar (`nom_target::parse_controller_phrase`)
@@ -24043,6 +24084,8 @@ fn parent_population_amount_is_plain(amount: &QuantityExpr) -> bool {
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::LifeGainedThisTurn { .. }
             | QuantityRef::CardsDrawnThisTurn { .. }
+            | QuantityRef::CardsDrawnLastTurn { .. }
+            | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
             | QuantityRef::BattlefieldEntriesThisTurn { .. }
             | QuantityRef::LandsPlayedThisTurn { .. }
             | QuantityRef::TurnsTaken
@@ -24750,7 +24793,9 @@ fn parse_bare_damage_continuation<'a>(
     {
         // "each player" / "each opponent" / "each foe" → per-player damage,
         // which may vary per recipient (`DamageEachPlayer`, CR 120.3a).
-        if let Some(player_filter) = lower::parse_damage_each_player_scope(after_to) {
+        if let Some(player_filter) =
+            lower::parse_damage_each_player_scope(after_to, ctx.chain_prior_targeted_player)
+        {
             return Some((
                 Effect::DamageEachPlayer {
                     amount,
@@ -24769,10 +24814,13 @@ fn parse_bare_damage_continuation<'a>(
         let rem = trim_dangling_target_word(rem);
         let trimmed_rem = rem.trim_start_matches([',', ' ']);
         let trimmed_rem_lower = trimmed_rem.to_lowercase();
+        let target_anchor_in_scope = ctx.chain_prior_targeted_player;
         let player_filter = tag::<_, _, OracleError<'_>>("and ")
             .parse(trimmed_rem_lower.as_str())
             .ok()
-            .and_then(|(after_and, _)| lower::parse_damage_each_player_scope(after_and));
+            .and_then(|(after_and, _)| {
+                lower::parse_damage_each_player_scope(after_and, target_anchor_in_scope)
+            });
         let rem_out = if player_filter.is_some() { "" } else { rem };
         return Some((
             Effect::DamageAll {
@@ -27943,6 +27991,97 @@ fn chain_prior_chosen_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
     None
 }
 
+/// CR 115.1 + CR 608.2c: a prior `TargetOnly` naming an object controlled
+/// by an announced opponent proves the announced player for a later anaphor
+/// exactly as a player-typed `TargetOnly` does. Teferi, Temporal Pilgrim's
+/// −12 ("Target opponent chooses a permanent …") lowers the choice to a
+/// `TargetOnly` permanent carrying a `TargetOpponent` controller, so the
+/// later "they shuffle …" names that announced opponent. Restricted to
+/// `TargetOpponent`: a `TargetPlayer` controller-ref can also name an
+/// event-bound player with no announced target (Gornog's "target creature
+/// that player controls"), which must not prove. No `Not` descent (fail
+/// closed); no uniqueness gate (mirrors the sibling player-typed arm).
+fn target_filter_announces_opponent(target: &TargetFilter) -> bool {
+    match target {
+        TargetFilter::Typed(tf) => {
+            matches!(tf.controller, Some(ControllerRef::TargetOpponent))
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_announces_opponent)
+        }
+        _ => false,
+    }
+}
+
+/// CR 608.2c + CR 109.4 + CR 115.1: whether the nearest player-referent
+/// clause earlier in this same chain names a TARGETED player — a `Choose`
+/// with a targeted chooser ("target opponent chooses self or others") or a
+/// player-typed `TargetOnly`. When true, a later "that player" / "the player"
+/// anaphor names that announced target (`ParentTarget`), not the trigger
+/// event's player (`TriggeringPlayer`).
+///
+/// Sibling of `chain_prior_chosen_target` (which answers the OBJECT question
+/// for Emry-style grants): same walk skeleton, player-oriented decision, kept
+/// separate so grant routing never observes choice clauses. Opaque through
+/// conditions (mirrors the sibling); transparent through `ParentTarget`
+/// carriers (they continue the referent). Stops false at:
+/// - a `Choose` naming a mid-resolution CHOSEN player (`Player`/`Opponent`
+///   choice types — Gluntch/Tempt class, bound by `ChosenPlayer` machinery),
+/// - a newer non-targeted `Choose` (the controller's own choice shadows),
+/// - an object-typed `TargetOnly` or any other typed referent ("that player"
+///   cannot name a chosen object — falls back to the event).
+fn chain_prior_targeted_player(clauses: &[ClauseIr]) -> bool {
+    for prev in clauses.iter().rev() {
+        if let Some(cond) = &prev.condition {
+            // CR 607.2d + CR 608.2c: a label-gated branch (a self-or-others
+            // sibling) introduces no player referent — it shares its choice
+            // head's announced target. See through it to the head rather than
+            // blocking: blocking would orphan the sibling branch's "other"
+            // anaphor ("each of your other opponents" in the Others branch
+            // names the head's target, not nobody). Every other condition
+            // still blocks (provenance: a nearer conditional clause may scope
+            // a different referent).
+            if matches!(cond, AbilityCondition::ChosenLabelIs { .. }) {
+                continue;
+            }
+            return false;
+        }
+        if let Effect::Choose {
+            chooser,
+            choice_type,
+            ..
+        } = &prev.parsed.effect
+        {
+            if matches!(
+                choice_type,
+                ChoiceType::Player { .. } | ChoiceType::Opponent { .. }
+            ) {
+                return false;
+            }
+            return matches!(
+                chooser,
+                ControllerRef::TargetPlayer | ControllerRef::TargetOpponent
+            );
+        }
+        if let Effect::TargetOnly { target } = &prev.parsed.effect {
+            return (target_filter_can_target_player(target)
+                || target_filter_announces_opponent(target))
+                && !target.is_context_ref();
+        }
+        if has_typed_target_widened(&prev.parsed.effect) {
+            return false;
+        }
+        if matches!(
+            prev.parsed.effect.target_filter(),
+            Some(TargetFilter::ParentTarget)
+        ) {
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
 /// CR 601.2c + CR 608.2c: Returns the nearest earlier same-chain clause's
 /// declared OBJECT target filter — the antecedent a later clause's demonstrative
 /// anaphor ("that token", "that artifact") can name (Hazel of the Rootbloom's
@@ -29565,17 +29704,81 @@ fn target_announcer_from_subject(
     }
 }
 
-/// CR 608.2c: Lower a subject-predicate clause with the subject seeded as the
-/// antecedent of the predicate's "that player" / "they". The seed only fills an
-/// empty relative scope: a scope an enclosing trigger, mode or for-each already
-/// pinned is the nearer antecedent and is kept.
+/// CR 608.2c + CR 608.2k: Lower a subject-predicate clause with the subject
+/// seeded as the antecedent of the predicate's anaphors — its OBJECT antecedent
+/// here, its PLAYER antecedent in
+/// [`lower_subject_predicate_ast_player_seeded`], which this calls.
+///
+/// The two seeds take OPPOSITE precedence, deliberately:
+///
+/// * The object pin WINS over an enclosing one. A possessive subject's
+///   possessor is printed in this very clause, so it is nearer than anything a
+///   trigger condition or an earlier chunk established, and the whole point of
+///   the pin is to beat `resolve_it_pronoun`'s source default.
+/// * The player seed YIELDS to an enclosing one (`relative_player_scope`
+///   already set). There the enclosing scope is the nearer antecedent — a
+///   trigger, mode or for-each frame the clause sits inside.
+///
+/// Both are restored before returning, so neither leaks past this clause.
+fn lower_subject_predicate_ast(
+    subject: SubjectPhraseAst,
+    predicate: PredicateAst,
+    ctx: &mut ParseContext,
+    original_clause: &str,
+    damage_context: DamageTargetContext,
+) -> ParsedEffectClause {
+    // CR 608.2c + CR 608.2k: a possessive-player subject ("that creature's
+    // controller", "its controller may") names its player only by way of the
+    // object that player controls or owns, so that POSSESSOR stays in scope as
+    // the nearest antecedent of a bare object pronoun in this clause's own
+    // predicate — "that creature's controller sacrifices IT at end of combat"
+    // (Basalt Golem). Pinning it here is what keeps `resolve_it_pronoun`'s
+    // `SelfRef` default (correct for a self-ETB "sacrifice it") from claiming a
+    // pronoun whose printed antecedent is the possessor. See
+    // `subject::subject_possessive_object_antecedent` for the grammar, the
+    // required discriminant and the exclusions; it returns `None` for every
+    // other subject shape, which leaves the enclosing antecedent untouched.
+    //
+    // CR 509.3c + CR 608.2k: `condition_object_antecedent` is the companion
+    // field that says what an AMBIGUOUS `object_pronoun_ref` names, and it
+    // describes the pin it travelled with — so a nearer pin must not inherit
+    // the outer pin's label. Cleared alongside, by the same save/restore, which
+    // is why this seeds through one helper rather than writing the field.
+    match subject::subject_possessive_object_antecedent(&subject) {
+        Some(antecedent) => ctx.with_object_pronoun_ref(antecedent, |ctx| {
+            lower_subject_predicate_ast_player_seeded(
+                subject,
+                predicate,
+                ctx,
+                original_clause,
+                damage_context,
+            )
+        }),
+        None => lower_subject_predicate_ast_player_seeded(
+            subject,
+            predicate,
+            ctx,
+            original_clause,
+            damage_context,
+        ),
+    }
+}
+
+/// [`lower_subject_predicate_ast`] after the object antecedent is pinned: seeds
+/// the subject's PLAYER antecedent (CR 115.1 + CR 109.4) for the same predicate
+/// and lowers it.
+///
+/// The seed only fills an EMPTY relative scope: a scope an enclosing trigger,
+/// mode or for-each already pinned is the nearer antecedent and is kept. (The
+/// object pin in the caller takes the opposite precedence, for the reason
+/// stated there.)
 ///
 /// A declared player subject (`TargetPlayer` / `TargetOpponent`) is carried in
 /// the binder's declared rungs (`declared_player_scope` +
 /// `prior_player_declaration`); every other seed (an object subject's
 /// controller) is carried in `relative_player_scope`. Both are restored before
 /// returning, so the seed never leaks past this clause.
-fn lower_subject_predicate_ast(
+fn lower_subject_predicate_ast_player_seeded(
     subject: SubjectPhraseAst,
     predicate: PredicateAst,
     ctx: &mut ParseContext,
@@ -31001,6 +31204,21 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
         // surfaces a player target slot and `resolve_sacrifice_scope` reads the
         // chosen player at resolution — identical to the "target opponent" path.
         TargetFilter::Player => Some(ControllerRef::TargetPlayer),
+        // CR 115.1 + CR 701.21a + CR 608.2c: NO unit-`ParentTarget` arm.
+        // A bare anaphor subject proves nothing by itself: "the player" after
+        // an announced target (Feed the Machine), "they" after an object
+        // target (Isildur's Fateful Strike), and "they" with no antecedent at
+        // all (My Forces Are Innumerable) all lower to the same unit filter.
+        // Promoting it unconditionally minted invented player targets (My
+        // Forces) and silently empty continuations (Isildur). `TargetPlayer`
+        // is therefore minted only for a proven player antecedent, carried as
+        // `inherits_parent` on the subject (the announced-target "that
+        // player" arm in `subject.rs`, the `Declared` player carry, and the
+        // proven "they" site — all the Din of the Fireherd shape); see
+        // `proven_subject_player_ref` below. An unproven anaphor falls
+        // through to `None` here, and the Sacrifice/ChangeZone injection
+        // arms fail it closed to an explicit `UNBOUND_SUBJECT_GAP` rather
+        // than a fail-open controller scope.
         // CR 508.5 + CR 701.21a: A bare "defending player" subject on an
         // attack-trigger edict ("Whenever ~ attacks, defending player
         // sacrifices an artifact of their choice" — Kibo, Uktabi Prince). Like
@@ -31014,6 +31232,27 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
         TargetFilter::DefendingPlayer => Some(ControllerRef::DefendingPlayer),
         _ => None,
     }
+}
+
+/// CR 115.1 + CR 608.2c (R1/R2 proof channel): the Sacrifice/ChangeZone
+/// injection arms read the subject through this gate rather than through
+/// `player_filter_as_controller_ref` directly. A unit-`ParentTarget`
+/// subject mints `TargetPlayer` ONLY with the `inherits_parent` proof —
+/// the Din of the Fireherd `Declared`-carry shape, also emitted by the
+/// announced-target "that player" arm and the proven "they" site in
+/// `subject.rs`. Every other filter maps exactly as before. Soundness
+/// note: on a Sacrifice/ChangeZone clause the subject is grammatically a
+/// player, so an inherited unit anaphor always inherits a player
+/// referent; the same shape from an object anaphor ("the other creature")
+/// cannot grammatically head these verbs.
+fn proven_subject_player_ref(
+    subject_filter: &TargetFilter,
+    inherits_parent: bool,
+) -> Option<ControllerRef> {
+    player_filter_as_controller_ref(subject_filter).or_else(|| {
+        (subject_filter == &TargetFilter::ParentTarget && inherits_parent)
+            .then_some(ControllerRef::TargetPlayer)
+    })
 }
 
 /// CR 115.1a/c/d: Preserve whether a targeted sacrifice subject is
@@ -31427,6 +31666,39 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
         TargetFilter::Not { filter } => target_filter_can_target_player(filter),
         _ => false,
     }
+}
+
+/// CR 109.4 + CR 115.1: map a targeted player subject to the announced-target
+/// chooser it names. Opponent-ness is read from either subject leg (the bare
+/// opponent filter "target opponent" lowers its `affected` to, or an
+/// opponent-typed `target`); anything else player-denoting is `TargetPlayer`.
+/// Returns `None` when the subject is untargeted or names no player —
+/// non-player targeted subjects keep the controller default (choosing is not
+/// targeting).
+fn targeted_chooser_for_subject(subject: &SubjectPhraseAst) -> Option<ControllerRef> {
+    subject.target.as_ref()?;
+    let player_denoting = [subject.target.as_ref(), subject.affected.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(target_filter_can_target_player);
+    if !player_denoting {
+        return None;
+    }
+    let is_opponent = [subject.target.as_ref(), subject.affected.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|f| {
+            matches!(f, TargetFilter::Opponent)
+                || matches!(f, TargetFilter::Typed(tf)
+                if tf.controller == Some(ControllerRef::Opponent)
+                    && tf.type_filters.is_empty()
+                    && tf.properties.is_empty())
+        });
+    Some(if is_opponent {
+        ControllerRef::TargetOpponent
+    } else {
+        ControllerRef::TargetPlayer
+    })
 }
 
 /// How long a carried player reference stays armed.
@@ -32034,6 +32306,33 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
     let Some(subject_filter) = subject.target.clone().or_else(|| subject.affected.clone()) else {
         return;
     };
+    // CR 115.1 + CR 701.21a (R1 honest gap): a Sacrifice/ChangeZone whose
+    // subject is a bare, unproven `ParentTarget` anaphor (no
+    // `inherits_parent` proof — My Forces Are Innumerable's collective
+    // "they", which names no announced target, or Last-Minute Chopping's
+    // "they", whose announcer is itself unparsed) names no player the engine
+    // can scope to. Fail closed to an explicit gap rather than the old
+    // fail-open controller default (the archenemy sacrificing its own
+    // creatures) or an invented `TargetPlayer` slot. Proven anaphors carry
+    // the inherited `Declared`-carry shape and never reach this arm, and an
+    // effect whose target already names its object explicitly ("they put
+    // it onto the battlefield" — Chaos Warp, Audacious Swap) keeps its
+    // pre-change shape: the subject scope is not load-bearing there.
+    let bare_anaphor_subject = subject_filter == TargetFilter::ParentTarget
+        && subject.target.is_none()
+        && !subject.inherits_parent;
+    if bare_anaphor_subject {
+        let gap_effect = matches!(effect, Effect::Sacrifice { .. } | Effect::ChangeZone { .. });
+        let explicitly_anchored = matches!(
+            effect,
+            Effect::Sacrifice { target, .. } | Effect::ChangeZone { target, .. }
+            if subject::is_single_object_ref(target)
+        );
+        if gap_effect && !explicitly_anchored {
+            *effect = Effect::unimplemented(subject::UNBOUND_SUBJECT_GAP, original_clause);
+            return;
+        }
+    }
     // The carried player is a player by construction, though `ParentTarget` can
     // also name an object and so fails the shared predicate.
     let subject_names_player = target_filter_can_target_player(&subject_filter)
@@ -32110,6 +32409,21 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
         Effect::FlipCoins { flipper, .. } if *flipper == TargetFilter::Controller =>
         {
             *flipper = subject_filter;
+        }
+        // CR 608.2d + CR 109.4 + CR 115.1: "target opponent chooses …" /
+        // "target player chooses …" — bind the named chooser so the choice
+        // belongs to the announced target, not the source's controller (the
+        // self-or-others scheme class; mirrors the FlipCoin `flipper` arm).
+        // The bare lowering leaves `chooser = You`; only a genuine TARGETED
+        // player subject overrides it. Untargeted choosers ("an opponent
+        // chooses", "that player chooses") keep the default — separate
+        // pre-existing gaps, deliberately out of scope here.
+        Effect::Choose { chooser, .. }
+            if *chooser == ControllerRef::You && subject.target.is_some() =>
+        {
+            if let Some(mapped) = targeted_chooser_for_subject(subject) {
+                *chooser = mapped;
+            }
         }
         // CR 122.1: "target player gets a poison counter" — inject subject target
         Effect::GivePlayerCounter { target, .. } if *target == TargetFilter::Controller => {
@@ -32292,9 +32606,11 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
         // Also rewrite "they control" refs inside the count expression so
         // the dynamic count resolves against the targeted player's board.
         Effect::Sacrifice { target, count, .. }
-            if player_filter_as_controller_ref(&subject_filter).is_some() =>
+            if proven_subject_player_ref(&subject_filter, subject.inherits_parent).is_some() =>
         {
-            if let Some(ctrl) = player_filter_as_controller_ref(&subject_filter) {
+            if let Some(ctrl) =
+                proven_subject_player_ref(&subject_filter, subject.inherits_parent)
+            {
                 let effective_ctrl =
                     sacrifice_subject_controller(ctrl, subject.target.is_some());
                 force_controller(target, effective_ctrl.clone());
@@ -32325,9 +32641,11 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
         // this inject. This rebind is a no-op when `effective_ctrl` is itself
         // `ScopedPlayer` (the untargeted "each player"/Braids case).
         Effect::ChangeZone { target, .. }
-            if player_filter_as_controller_ref(&subject_filter).is_some() =>
+            if proven_subject_player_ref(&subject_filter, subject.inherits_parent).is_some() =>
         {
-            if let Some(ctrl) = player_filter_as_controller_ref(&subject_filter) {
+            if let Some(ctrl) =
+                proven_subject_player_ref(&subject_filter, subject.inherits_parent)
+            {
                 let effective_ctrl = if subject.target.is_some() {
                     ControllerRef::TargetPlayer
                 } else {
@@ -34683,8 +35001,10 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // land//land modal card, bound anywhere but the graveyard, keeps the
         // lingering grant at runtime (`ResolutionPlayRoute::LingeringFaceElection`)
         // — that covers Hideaway exile and Djinn-class library cards, which the
-        // grant delivers to exile; a spell//land MDFC is cast by its front face
-        // (CR 712.8a). An `alt_ability_cost` or an explicit
+        // grant delivers to exile; a spell//land MDFC takes the resolution-owned
+        // face election at runtime (`ResolutionPlayRoute::ElectFace`: cast the
+        // spell face or play the land face, CR 712.11b + CR 712.12), so this
+        // classification is unchanged for it. An `alt_ability_cost` or an explicit
         // `duration` likewise keeps the lingering grant (Cruelclaw's discard
         // alt cost; Rebound-style durational recasts). A `constraint` (a
         // conditional free-cast such as Beseech the Mirror's "you may cast the
@@ -37043,6 +37363,7 @@ fn opponent_guess_clause(guesser: ControllerRef, subject: GuessSubject) -> Parse
     // so the chosen player is threaded to the dependent guess as a
     // same-resolution `ChosenPlayer`.
     let mut clause = parsed_clause(Effect::Choose {
+        chooser: crate::types::ability::ControllerRef::You,
         choice_type: ChoiceType::opponent(),
         persist: false,
         selection: TargetSelectionMode::Chosen,
@@ -40822,6 +41143,7 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
@@ -41428,6 +41750,7 @@ fn wrap_in_color_choice(def: &mut AbilityDefinition) {
     let displaced_effect = std::mem::replace(
         &mut def.effect,
         Box::new(Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::color(),
             // CR 607.2d + CR 613.1: `persist: true` so the choice resolver
             // carries exact source authority into `WaitingFor::NamedChoice`;
@@ -44817,9 +45140,13 @@ fn parse_effect_chain_ir_body(
     // `chunk_ctx` is rebuilt per chunk, so the group counter threads through this local.
     let mut chain_declared_groups = ctx.next_declared_player_group;
     // CR 608.2c + CR 109.4: Chain-spanning "its controller" antecedent. Armed
-    // when a chunk's leading subject is "its/their controller may <act>"
-    // (SubjectApplication { affected: ParentTargetController, is_optional: true });
-    // a later sentence's "that player" anaphor (Star Athlete) binds to it.
+    // when a chunk's leading subject resolves to `ParentTargetController` and
+    // either offers its own choice ("its/their controller may <act>" — Star
+    // Athlete) or printed the possessive anaphor outright
+    // (`PlayerAnaphor::ItsController`: "its controller", "<noun>'s controller"
+    // — Basalt Golem); see the arming site at the end of the chunk loop for
+    // both rungs and for what each one excludes. A later sentence's "that
+    // player" / "they" anaphor binds to it.
     // Unlike the Sentence-reset siblings, this MUST survive the sentence
     // boundary between "...sacrifice it." and "If they don't, ...", so it is
     // single-shot consumption-cleared (cleared once a downstream chunk binds a
@@ -46259,6 +46586,34 @@ fn parse_effect_chain_ir_body(
             }
             None => strip_additional_cost_conditional(normalized_text),
         };
+        // CR 608.2c + CR 614.6: a cost-paid "instead" body with its own guard
+        // cannot share the single condition slot with the selector, so it goes
+        // beneath the override carrier rather than losing the guard.
+        if let Some(selector) = condition
+            .as_ref()
+            .filter(|c| c.is_instead_override() && !builder.is_empty())
+        {
+            let body = parse_child_ability_with_parent_target(
+                &text,
+                kind,
+                instead_parent_target_available,
+            );
+            if body.condition.is_some() {
+                builder
+                    .clause(
+                        normalized_text,
+                        placeholder_parsed_clause("instead_clause_placeholder"),
+                        chunk.boundary_after,
+                        ClauseDisposition::ReplaceMeaning {
+                            kind: ReplaceMeaningKind::Instead(Box::new(
+                                instead_override_definition(body, selector.clone()),
+                            )),
+                        },
+                    )
+                    .push();
+                continue;
+            }
+        }
         // CR 205.3m + CR 607.2d + CR 608.2h: target-declaring leading-if that
         // gates the ability's target on the source's chosen creature type
         // ("If target attacking creature token is the chosen type, <body>",
@@ -47000,7 +47355,10 @@ fn parse_effect_chain_ir_body(
                         value((), tag("each ")).parse(i)
                     })
                     .is_some();
-                    let (scope, stripped) = super::clause_shell::peel_player_scope_subject(&text);
+                    let (scope, stripped) = super::clause_shell::peel_player_scope_subject(
+                        &text,
+                        chain_prior_targeted_player(builder.clauses()),
+                    );
                     let subject_worded_exile = subject_worded && scope.is_some();
                     (scope, stripped, subject_worded_exile)
                 }
@@ -47367,6 +47725,11 @@ fn parse_effect_chain_ir_body(
         let chain_prior_chosen_target_filter =
             chain_prior_chosen_target(builder.clauses()).cloned();
         let parent_target_is_chosen = chain_prior_chosen_target_filter.is_some();
+        // CR 608.2c + CR 109.4 + CR 115.1: the player-oriented sibling scan —
+        // whether a "that player" / "the player" anaphor in THIS chunk names an
+        // announced target (a prior targeted `Choose` or player-typed
+        // `TargetOnly`) rather than the trigger event's player.
+        let chain_prior_targeted_player = chain_prior_targeted_player(builder.clauses());
         // CR 608.2c (issue #1670): Consumption signal for the body "its
         // controller may" antecedent. True only when the rung ladder below
         // falls through to `chain_parent_target_controller_scope` for THIS
@@ -47647,6 +48010,7 @@ fn parse_effect_chain_ir_body(
             // zone) so `try_parse_cast_effect`'s anaphor branch can scope the
             // "you may cast that card" driver to a graveyard-chosen target.
             chain_prior_chosen_target: chain_prior_chosen_target_filter,
+            chain_prior_targeted_player,
             // CR 608.2c + CR 400.7: seed the zone published by an earlier
             // "choose card(s) in <zone>" producer so this chunk's "put those
             // cards onto the battlefield" anaphor binds its `TrackedSet` move to
@@ -49975,10 +50339,55 @@ fn parse_effect_chain_ir_body(
         // only ARMS. The arming chunk (leading subject "its controller may
         // <act>") has `seeded == false` (the local was None at its start), so the
         // hoisted clear was a no-op for it and this arm fires unimpeded.
-        if matches!(
-            leading_subject_application.as_ref(),
-            Some(app) if app.is_optional && app.affected == TargetFilter::ParentTargetController
-        ) {
+        //
+        // CR 608.2c: the antecedent is a property of the printed SUBJECT, not of
+        // its modality, so a MANDATORY possessive-controller subject arms it too
+        // — Basalt Golem's "that creature's controller sacrifices it at end of
+        // combat. If the player does, they create a 0/2 … Wall …" must bind "the
+        // player" / "they" to that creature's controller, which is the player
+        // CR 701.21a made the sacrificer, not to the ability's own controller.
+        //
+        // Two rungs, and the distinction between them is load-bearing: arming
+        // must fire for a subject that INTRODUCES this antecedent, never for one
+        // that merely CONSUMED it. `PlayerAnaphor::ItsController` is the printed
+        // possessive anaphor that introduces it ("its controller", "<noun>'s
+        // controller"); `is_optional` is the pre-existing rung, retained
+        // verbatim so no shape that armed before stops arming (a "that player
+        // may …" subject that resolved to `ParentTargetController` keeps it).
+        //
+        // A bare MANDATORY "they" subject carries neither rung, and that is what
+        // keeps the single-shot clear single-shot: in "its controller may pay 1
+        // life. If they do, they draw a card. That player discards a card."
+        // (issue #3659's leak guard) the middle sentence's "they" resolves
+        // THROUGH the armed scope, so re-arming on it would carry the creature's
+        // controller into the final independent "that player", which names the
+        // damaged opponent. A "they MAY …" subject still arms through the
+        // retained `is_optional` rung, exactly as it did at base — that rung is
+        // not narrowed here.
+        //
+        // The `ItsController` rung is the SAME RUNG the clause-local pin
+        // (`subject::subject_possessive_object_antecedent`) requires — not the
+        // same predicate: this one also admits any `is_optional` subject and
+        // never admits `ParentTargetOwner` (both stated below). Sharing the rung
+        // is deliberate: on the shapes both seams see they must answer "did this
+        // subject PRINT a possessor" the same way, or one binds an anaphor on
+        // evidence the other rejects. Two routes reach `ParentTargetController`
+        // while stamping no discriminant and so arm nothing here — an
+        // attached-host subject ("enchanted permanent's controller") and the
+        // "<noun>'s controller or that player" disjunct (Acorn Catapult) — and
+        // no printed card pairs either with a gated "If the player does,
+        // they …" rider. A `ParentTargetOwner` possessive never arms this rung
+        // either; the owner scope below is its own, unconditional, single-shot
+        // local. This rung keeps the extra `is_optional` leg the pin does not
+        // need, purely so no shape that armed at base stops arming.
+        if leading_subject_application.as_ref().is_some_and(|app| {
+            app.affected == TargetFilter::ParentTargetController
+                && (app.is_optional
+                    || matches!(
+                        app.player_anaphor,
+                        Some(nom_target::PlayerAnaphor::ItsController)
+                    ))
+        }) {
             chain_parent_target_controller_scope = Some(ControllerRef::ParentTargetController);
         }
         if matches!(
@@ -49988,6 +50397,7 @@ fn parse_effect_chain_ir_body(
         {
             chain_parent_target_owner_scope = Some(PlayerFilter::AllExcept {
                 exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+                relation: PlayerRelation::All,
             });
         }
 

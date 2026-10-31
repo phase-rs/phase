@@ -62,7 +62,7 @@ pub fn parse_number(input: &str) -> OracleResult<'_, u32> {
 /// CR 107.1: Magic numbers are integers; Oracle text conventionally
 /// renders large constants with comma grouping (e.g. A Good Thing,
 /// Jumbo Cactuar, The Millennium Calendar).
-pub(crate) fn parse_digit_number(input: &str) -> OracleResult<'_, u32> {
+pub fn parse_digit_number(input: &str) -> OracleResult<'_, u32> {
     let (rest, matched) = recognize((
         digit1,
         many0((
@@ -215,7 +215,7 @@ pub fn parse_color(input: &str) -> OracleResult<'_, ManaColor> {
 /// (CR 702.124c). "commanders'" precedes "commanders" so the longer spelling
 /// is tried first. Operates on already-lowercased text and consumes nothing
 /// beyond the phrase itself.
-pub(crate) fn parse_your_commanders_color_identity(input: &str) -> OracleResult<'_, ()> {
+pub fn parse_your_commanders_color_identity(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         (
@@ -272,7 +272,7 @@ static ORACLE_SUBTYPES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::
     crate::types::card_type::build_parser_subtype_vocabulary(&creature)
 });
 
-pub(crate) fn oracle_subtypes() -> &'static [String] {
+pub fn oracle_subtypes() -> &'static [String] {
     &ORACLE_SUBTYPES
 }
 
@@ -321,7 +321,7 @@ pub fn parse_subtype(text: &str) -> Option<(String, usize)> {
     None
 }
 
-pub(crate) fn parse_subtype_entry(text: &str, subtype: &str) -> Option<(String, usize)> {
+pub fn parse_subtype_entry(text: &str, subtype: &str) -> Option<(String, usize)> {
     if starts_with_word_ci(text, subtype) {
         return Some((subtype.to_string(), subtype.len()));
     }
@@ -429,7 +429,7 @@ fn takes_es_plural(word: &str) -> bool {
 // --- from parser/oracle_nom/target.rs ---
 
 /// Parse a "non" prefix: "non" or "non-" followed by implicit word boundary.
-pub(crate) fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
+pub fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
     alt((tag("non-"), tag("non"))).parse(input)
 }
 
@@ -681,7 +681,7 @@ pub fn parse_color_property(input: &str) -> OracleResult<'_, FilterProp> {
 
 /// Guard: does text start with something `parse_type_phrase_folding` would recognize?
 /// Used to prevent comma/and/or recursion on non-type text.
-pub(crate) fn starts_with_type_word(text: &str) -> bool {
+pub fn starts_with_type_word(text: &str) -> bool {
     // Core type: "creature", "artifact", "permanent", etc.
     if parse_core_type(text).0.is_some() {
         return true;
@@ -762,7 +762,7 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
     false
 }
 
-pub(crate) fn starts_with_type_phrase_lead(text: &str) -> bool {
+pub fn starts_with_type_phrase_lead(text: &str) -> bool {
     let text = text.trim_start();
     starts_with_type_word(text)
         || parse_supertype_prefix(text).is_ok()
@@ -774,7 +774,7 @@ pub(crate) fn starts_with_type_phrase_lead(text: &str) -> bool {
         || parse_leading_pt_designation(text).is_some()
 }
 
-pub(crate) fn parse_core_type(text: &str) -> (Option<TypeFilter>, Option<String>, usize) {
+pub fn parse_core_type(text: &str) -> (Option<TypeFilter>, Option<String>, usize) {
     // Delegate to the shared nom combinator table which handles both singular
     // and plural forms in longest-match-first order.
     if let Ok((rest, tf)) = parse_type_filter_word(text) {
@@ -785,7 +785,7 @@ pub(crate) fn parse_core_type(text: &str) -> (Option<TypeFilter>, Option<String>
     (None, None, 0)
 }
 
-pub(crate) fn parse_token_suffix(text: &str) -> Option<usize> {
+pub fn parse_token_suffix(text: &str) -> Option<usize> {
     let trimmed = text.trim_start();
 
     // Try "tokens" before "token" (longest match first), with word boundary.
@@ -806,7 +806,7 @@ pub(crate) fn parse_token_suffix(text: &str) -> Option<usize> {
 ///
 /// Delegates to `parse_color` for color word recognition,
 /// then verifies a trailing space exists (color as adjective, not standalone).
-pub(crate) fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
+pub fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
     let (rest, color) = parse_color(text).ok()?;
     // CR 105.1: A color word is an adjective prefix only when a separator
     // follows, so a bare color word ("whiteness") never matches. Two separators
@@ -833,7 +833,7 @@ pub(crate) fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
 /// Parse color-quality adjective prefixes: "colorless creature",
 /// "monocolored permanent", "multicolored card", etc.
 /// Returns the filter property and bytes consumed including trailing space.
-pub(crate) fn parse_color_quality_prefix(text: &str) -> Option<(FilterProp, usize)> {
+pub fn parse_color_quality_prefix(text: &str) -> Option<(FilterProp, usize)> {
     let (rest, prop) = alt((
         value(
             FilterProp::ColorCount {
@@ -867,7 +867,7 @@ pub(crate) fn parse_color_quality_prefix(text: &str) -> Option<(FilterProp, usiz
 /// bytes consumed (including the trailing space). Only matches when a type word
 /// follows, so a bare "1/1" elsewhere is not hijacked. Fixed integers only;
 /// dynamic "*/*" / "X/X" designations are left to the existing P/T paths.
-pub(crate) fn parse_leading_pt_designation(input: &str) -> Option<(i32, i32, usize)> {
+pub fn parse_leading_pt_designation(input: &str) -> Option<(i32, i32, usize)> {
     let (after_power, power) = parse_number(input).ok()?;
     let (after_slash, _) = tag::<_, _, OracleError<'_>>("/").parse(after_power).ok()?;
     let (after_toughness, toughness) = parse_number(after_slash).ok()?;
@@ -891,7 +891,7 @@ pub(crate) fn parse_leading_pt_designation(input: &str) -> Option<(i32, i32, usi
 ///
 /// Delegates to `parse_property_filter` for the common property keywords,
 /// then handles "face-down " (hyphenated variant not in the nom combinator).
-pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usize)> {
+pub fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usize)> {
     // Try the shared nom property filter combinator for combat/tap status keywords.
     // Filter to only the status properties relevant as type phrase prefixes.
     if let Ok((rest, prop)) = parse_property_filter(text) {
@@ -936,7 +936,7 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
 /// flying and each planeswalker", "target creature with flying and all Equipment
 /// attached to that creature") — belongs to the enclosing list and stays
 /// unconsumed.
-pub(crate) fn separator_continues_enclosing_list(after_separator: &str) -> bool {
+pub fn separator_continues_enclosing_list(after_separator: &str) -> bool {
     parse_leading_keyword_match(after_separator).is_none()
         && (starts_with_type_word(after_separator)
             || alt((
@@ -952,7 +952,7 @@ pub(crate) fn separator_continues_enclosing_list(after_separator: &str) -> bool 
 /// Parse "without [keyword]" suffix — negated keyword filter.
 /// Handles "without flying", "without first strike", etc.
 /// Parallels `parse_keyword_suffix` but emits `WithoutKeyword`.
-pub(crate) fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
+pub fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
     let (after_without, _) = tag::<_, _, OracleError<'_>>("without ")
@@ -999,12 +999,12 @@ pub(crate) fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp
     }
 }
 
-pub(crate) enum KeywordMatch {
+pub enum KeywordMatch {
     Concrete(Keyword),
     Kind(KeywordKind),
 }
 
-pub(crate) fn parse_leading_keyword_match(text: &str) -> Option<(KeywordMatch, usize)> {
+pub fn parse_leading_keyword_match(text: &str) -> Option<(KeywordMatch, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
     let mut candidate_ends = vec![trimmed.len()];
@@ -1139,7 +1139,7 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
 /// (KHM) and Harold and Bob, First Numens (FIN-precon). The longest-first
 /// ordering inside each cluster keeps "creature" from short-matching against
 /// future hypothetical subtype legs.
-pub(crate) fn parse_enchant_type_leg(input: &str) -> OracleResult<'_, TypeFilter> {
+pub fn parse_enchant_type_leg(input: &str) -> OracleResult<'_, TypeFilter> {
     alt((
         value(TypeFilter::Creature, tag("creature")),
         value(TypeFilter::Artifact, tag("artifact")),
@@ -1191,7 +1191,7 @@ fn parse_artifact_subtype_enchant_leg(input: &str) -> OracleResult<'_, TypeFilte
 /// such as "snow land", "basic land", or "legendary creature". Reuse the
 /// shared target-phrase supertype recognizer so Aura legality gets the same
 /// `HasSupertype` property as ordinary target phrases.
-pub(crate) fn parse_enchant_qualified_type_leg(input: &str) -> OracleResult<'_, TypedFilter> {
+pub fn parse_enchant_qualified_type_leg(input: &str) -> OracleResult<'_, TypedFilter> {
     let (input, supertype) = opt(parse_supertype_prefix).parse(input)?;
     let (input, excluded_subtype) = opt(parse_enchant_negated_subtype_prefix).parse(input)?;
     let (input, type_filter) = parse_enchant_type_leg(input)?;
@@ -1222,7 +1222,7 @@ fn parse_enchant_negated_subtype_prefix(input: &str) -> OracleResult<'_, TypeFil
 
 /// Optional trailing controller clause. Ordered longest-first so
 /// "an opponent controls" isn't shadowed by "opponent controls".
-pub(crate) fn parse_enchant_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
+pub fn parse_enchant_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
     alt((
         value(ControllerRef::You, tag(" you control")),
         value(ControllerRef::Opponent, tag(" an opponent controls")),
@@ -1239,7 +1239,7 @@ pub(crate) fn parse_enchant_controller_suffix(input: &str) -> OracleResult<'_, C
 /// source-exclusion axis on the `HasAttachment` filter prop. The leading space
 /// ensures the qualifier only matches after a preceding type leg (never as a
 /// standalone clause).
-pub(crate) fn parse_enchant_attachment_qualifier(input: &str) -> OracleResult<'_, FilterProp> {
+pub fn parse_enchant_attachment_qualifier(input: &str) -> OracleResult<'_, FilterProp> {
     let (input, _) = tag(" with ").parse(input)?;
     let (input, exclude_source) = alt((
         value(true, tag("another ")),
@@ -1299,7 +1299,7 @@ pub fn craft_materials_filter(types: &[TypeFilter]) -> TargetFilter {
     })
 }
 
-pub(crate) fn craft_materials_from_typed_filter(filter: TypedFilter) -> TargetFilter {
+pub fn craft_materials_from_typed_filter(filter: TypedFilter) -> TargetFilter {
     let with_types = |base: TypedFilter| -> TypedFilter {
         filter
             .type_filters

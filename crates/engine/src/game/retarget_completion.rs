@@ -115,7 +115,11 @@ pub(crate) fn retarget_dependencies(filter: &TargetFilter) -> RetargetDeps {
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
-        | TargetFilter::ParentTargetOwner => RetargetDeps::AllPositions,
+        | TargetFilter::ParentTargetOwner
+        // CR 108.3: the per-member owner anchor reads owners of the objects
+        // this ability affected — a target-derived member set shifts when
+        // another target position is re-picked, so fail closed.
+        | TargetFilter::AffectedObjectOwner => RetargetDeps::AllPositions,
         // Read the source, the event, a resolution-time binding or nothing:
         // never another target position.
         TargetFilter::None

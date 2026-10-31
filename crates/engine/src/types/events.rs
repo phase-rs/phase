@@ -667,6 +667,9 @@ impl EventObjectSnapshot {
             | TargetFilter::EventTargetController
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
+            // CR 108.3 + CR 508.1d: per-member owner anchor — denotes players,
+            // never the conniving permanent itself.
+            | TargetFilter::AffectedObjectOwner
             | TargetFilter::PostReplacementSourceController
             | TargetFilter::PostReplacementDamageTargetOwner => PermanentDomainFalse,
 

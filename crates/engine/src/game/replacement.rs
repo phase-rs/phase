@@ -11979,6 +11979,7 @@ pub(crate) fn as_enters_choice_type(def: &ReplacementDefinition) -> Option<&Choi
     }
     match &*execute.effect {
         Effect::Choose {
+            chooser: _,
             choice_type,
             persist: true,
             selection,
@@ -14469,6 +14470,7 @@ mod tests {
         let choose = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: crate::types::ability::ChoiceType::creature_type(),
                 persist: true,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -16722,6 +16724,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type: crate::types::ability::ChoiceType::color_excluding(vec![
                         crate::types::mana::ManaColor::Green,
                     ]),

@@ -2183,7 +2183,8 @@ fn payment_outcome_condition(condition: &AbilityCondition) -> bool {
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. }
-        | AbilityCondition::ScopedPlayerMatches { .. } => false,
+        | AbilityCondition::ScopedPlayerMatches { .. }
+        | AbilityCondition::ChosenLabelIs { .. } => false,
     }
 }
 

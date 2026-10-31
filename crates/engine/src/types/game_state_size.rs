@@ -67,6 +67,16 @@
 //! are already boxed, so nothing large went inline; the ceiling moved to
 //! 14,352.next_multiple_of(256) + 256 = 14,848.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc at 14,864 B when the
+//! scheme-support branch merged main's tracked-set member origins
+//! (`tracked_set_member_origins`, an `im::HashMap`, 24 B inline) alongside
+//! the branch's own named-label scratch (`named_label_this_resolution`,
+//! `Option<String>`, 24 B inline): each side was green alone under 14,848,
+//! and the union crossed it by 16 B. Neither field is a large
+//! rarely-populated one — both are ordinary 24 B fields, and the origins
+//! map is already heap-shared — so the ceiling moves to
+//! 14,864.next_multiple_of(256) + 256 = 15,360.
+//!
 //! Base `GameState` on x86_64-pc-windows-msvc measured 14,336 B at
 //! `nightly-2026-04-19`, exactly at the ceiling of that time. The attacked-player referent
 //! work adds `attack_target: Option<AttackTarget>` to `ZoneChangeCombatStatus`

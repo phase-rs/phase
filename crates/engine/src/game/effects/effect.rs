@@ -1019,6 +1019,7 @@ fn binds_as_player(filter: &TargetFilter) -> bool {
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::AttackedPlayerOrPlaneswalker

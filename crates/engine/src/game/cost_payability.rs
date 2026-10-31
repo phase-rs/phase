@@ -100,6 +100,9 @@ pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — carries no
+        // pitch-bound X.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
@@ -132,7 +135,9 @@ pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -
 /// where the enclosing walker stops — neither descends into `QuantityExpr`.
 fn player_filter_has_x_mana_value_constraint(player: &PlayerFilter) -> bool {
     match player {
-        PlayerFilter::AllExcept { exclude } => player_filter_has_x_mana_value_constraint(exclude),
+        PlayerFilter::AllExcept { exclude, .. } => {
+            player_filter_has_x_mana_value_constraint(exclude)
+        }
         PlayerFilter::AnyOf { filters } => filters
             .iter()
             .any(player_filter_has_x_mana_value_constraint),
@@ -177,8 +182,9 @@ fn player_filter_has_x_mana_value_constraint(player: &PlayerFilter) -> bool {
 /// stripped, leaving every other axis untouched.
 fn relax_x_mana_value_constraint_player(player: &PlayerFilter) -> PlayerFilter {
     match player {
-        PlayerFilter::AllExcept { exclude } => PlayerFilter::AllExcept {
+        PlayerFilter::AllExcept { exclude, relation } => PlayerFilter::AllExcept {
             exclude: Box::new(relax_x_mana_value_constraint_player(exclude)),
+            relation: *relation,
         },
         PlayerFilter::AnyOf { filters } => PlayerFilter::AnyOf {
             filters: filters
@@ -295,6 +301,9 @@ pub(crate) fn relax_x_mana_value_constraint(filter: &TargetFilter) -> TargetFilt
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — no X constraint to
+        // relax, identity like the neighboring anchors.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
@@ -1981,6 +1990,9 @@ fn has_enough_tap_creatures(
             stat: TapCreaturesAggregateStat::TotalPower,
             comparator,
             value,
+            // Activation pays singular; `collective` is a resolution-only
+            // flag the parser never stamps on activatable costs.
+            ..
         } => {
             let total_positive_power: i32 = eligible
                 .filter_map(|id| state.objects.get(&id))
@@ -2447,6 +2459,7 @@ mod tests {
                 relation: PlayerRelation::All,
                 comparator: Comparator::GE,
             }),
+            relation: PlayerRelation::All,
         });
         // Nor may an `AnyOf` union hide one behind a constraint-free member.
         let nested_any_of = wrap(PlayerFilter::AnyOf {

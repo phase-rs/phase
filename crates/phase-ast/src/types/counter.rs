@@ -73,7 +73,7 @@ pub enum CounterType {
 /// with their canonical Oracle-text name. Single source of truth for the
 /// string↔`KeywordKind` mapping at the parser/serialization boundary —
 /// runtime dispatch works on the typed `CounterType::Keyword(kind)` directly.
-pub(crate) const KEYWORD_COUNTERS: &[(&str, KeywordKind)] = &[
+pub const KEYWORD_COUNTERS: &[(&str, KeywordKind)] = &[
     ("indestructible", KeywordKind::Indestructible),
     ("double strike", KeywordKind::DoubleStrike),
     ("first strike", KeywordKind::FirstStrike),
@@ -209,13 +209,13 @@ impl<'de> serde::Deserialize<'de> for CounterType {
     }
 }
 
-pub(crate) mod counter_map_serde {
+pub mod counter_map_serde {
     use super::*;
     use serde::de::{self, MapAccess, Visitor};
     use serde::{Deserializer, Serializer};
     use std::fmt;
 
-    pub(crate) fn serialize<S, H>(
+    pub fn serialize<S, H>(
         map: &HashMap<CounterType, u32, H>,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
@@ -229,9 +229,7 @@ pub(crate) mod counter_map_serde {
         )
     }
 
-    pub(crate) fn deserialize<'de, D>(
-        deserializer: D,
-    ) -> Result<HashMap<CounterType, u32>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<CounterType, u32>, D::Error>
     where
         D: Deserializer<'de>,
     {

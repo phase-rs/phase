@@ -59,6 +59,11 @@ pub(crate) fn has_trigger_prefix(lower: &str) -> bool {
         value((), tag::<_, _, OracleError<'_>>("when ")),
         value((), tag("whenever ")),
         value((), tag("at ")),
+        // CR 904.9: "As you set this scheme in motion, ..." is trigger-shaped
+        // (event + body) on the single card that prints it (Bow to My
+        // Command); the trigger parser lowers it onto `SetInMotion` beside
+        // the "When ..." sibling.
+        value((), tag("as you set this scheme in motion")),
         super::oracle_trigger::parse_as_transforms_into_keyword,
     ))
     .parse(lower)
