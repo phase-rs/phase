@@ -26,7 +26,6 @@ use engine::game::functioning_abilities::active_static_definitions;
 use engine::game::keywords::{object_has_effective_keyword_kind, source_matches_protection_target};
 use engine::game::targeting::find_legal_targets;
 use engine::types::ability::TargetRef;
-use engine::types::card_type::CoreType;
 use engine::types::keywords::{HexproofFilter, KeywordKind, ProtectionTarget};
 
 use crate::ability_chain::collect_chain_effects;
@@ -36,7 +35,10 @@ use crate::features::mana_ramp::target_filter_references_land;
 use crate::policies::effect_classify::{
     effect_polarity, extract_target_filter, lethal_to_creature, EffectPolarity,
 };
-use crate::policies::stack_awareness::{damage_kills, node_damage, nodes_acting_on};
+use crate::policies::stack_awareness::{
+    damage_kills, is_creature_permanent_controlled_by, is_damage, is_harmful, judged_reaches,
+    node_damage, nodes_acting_on,
+};
 
 /// Threat-level threshold above which protection casts/activations are unblocked.
 pub(crate) const THREAT_FLOOR: f64 = 0.45;
@@ -395,12 +397,18 @@ fn any_stack_harmful_answerable_by_grants(
         if entry.controller == ai_player {
             return false;
         }
+        // Only a harmful node is answered (`harmful_effect_answerable_by_grants`),
+        // so only the harmful nodes are read: an entry without one is skipped
+        // before its reach is built.
+        let harmful = judged_reaches(state, entry, is_harmful);
+        if harmful.is_empty() {
+            return false;
+        }
         let declared_targets = entry
             .ability()
             .map(declared_targets_in_chain)
             .unwrap_or_default();
-        let reaches = engine::game::effects::stack_reach::stack_entry_node_reach(state, entry);
-        reaches.iter().any(|reach| {
+        harmful.iter().any(|reach| {
             reach.acted_on.iter().any(|t| {
                 let TargetRef::Object(obj_id) = t else {
                     return false;
@@ -408,16 +416,16 @@ fn any_stack_harmful_answerable_by_grants(
                 let Some(obj) = state.objects.get(obj_id) else {
                     return false;
                 };
-                if obj.controller != ai_player
-                    || !obj.card_types.core_types.contains(&CoreType::Creature)
-                {
+                // CR 109.2 + CR 400.7 + CR 702.26b: a grant reaches only a
+                // creature permanent the AI controls, not the card of one that
+                // left the battlefield or one that is phased out.
+                if !is_creature_permanent_controlled_by(obj, ai_player) {
                     return false;
                 }
                 // Whether the stack's damage kills the creature: `None` when a
                 // damage node's amount is not fixed.
-                let lethal = nodes_acting_on(state, *obj_id)
+                let lethal = nodes_acting_on(state, *obj_id, is_damage)
                     .iter()
-                    .filter(|other| matches!(other.node.effect, Effect::DealDamage { .. }))
                     .map(|other| node_damage(state, other.node, obj))
                     .collect::<Option<Vec<_>>>()
                     .map(|dealt| damage_kills(obj, &dealt, 0));
@@ -439,6 +447,9 @@ fn any_stack_harmful_answerable_by_grants(
 /// `effect`. A prevention grant answers damage unless `lethal` says the damage
 /// does not kill `protected`. `declared_targets` are the targets of the stack
 /// entry `effect` belongs to.
+/// Its caller passes only harmful nodes
+/// ([`judged_reaches`](crate::policies::stack_awareness::judged_reaches)); its
+/// own `is_harmful` check keeps that contract without relying on the caller.
 fn harmful_effect_answerable_by_grants(
     state: &GameState,
     effect: &Effect,
@@ -448,7 +459,7 @@ fn harmful_effect_answerable_by_grants(
     lethal: Option<bool>,
     declared_targets: &[TargetRef],
 ) -> bool {
-    if !matches!(effect_polarity(effect), EffectPolarity::Harmful) {
+    if !is_harmful(effect) {
         return false;
     }
     grants
@@ -1250,6 +1261,7 @@ fn ability_grants_combat_step_protection(ability: &AbilityDefinition) -> bool {
 mod tests {
     use super::*;
     use engine::types::ability::{AbilityKind, ControllerRef, TypedFilter};
+    use engine::types::card_type::CoreType;
     use engine::types::keywords::ProtectionTarget;
 
     fn grant_effect(
@@ -2221,38 +2233,45 @@ mod tests {
         assert!(answerable(&runner));
     }
 
-    #[test]
-    fn prevention_is_judged_against_the_damage_of_every_stack_entry() {
-        use engine::game::effects::stack_reach::stack_entry_node_reach;
+    /// P1 casts two Shocks at P0's creature with toughness `toughness`, each
+    /// its own stack entry.
+    fn two_shocks_at_ai_creature(toughness: i32) -> (engine::game::scenario::GameRunner, ObjectId) {
         use engine::game::scenario::{GameScenario, P0, P1};
         use engine::types::game_state::WaitingFor;
         use engine::types::mana::{ManaColor, ManaCost};
-        // P1 casts two Shocks at P0's creature, each its own stack entry.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let ai_creature = scenario.add_creature(P0, "Ai", 3, toughness).id();
+        let shocks: Vec<ObjectId> = (0..2)
+            .map(|_| {
+                scenario
+                    .add_spell_to_hand_from_oracle(P1, "Shock", true, SHOCK)
+                    .with_mana_cost(ManaCost::generic(1))
+                    .id()
+            })
+            .collect();
+        for _ in 0..2 {
+            scenario.add_basic_land(P1, ManaColor::Red);
+        }
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P1;
+            state.waiting_for = WaitingFor::Priority { player: P1 };
+        }
+        for shock in shocks {
+            runner.cast(shock).target_object(ai_creature).commit();
+        }
+        (runner, ai_creature)
+    }
+
+    #[test]
+    fn prevention_is_judged_against_the_damage_of_every_stack_entry() {
+        use engine::game::effects::stack_reach::stack_entry_node_reach;
+        use engine::game::scenario::P0;
         for toughness in [3, 5] {
-            let mut scenario = GameScenario::new();
-            scenario.at_phase(Phase::PreCombatMain);
-            let ai_creature = scenario.add_creature(P0, "Ai", 3, toughness).id();
-            let shocks: Vec<ObjectId> = (0..2)
-                .map(|_| {
-                    scenario
-                        .add_spell_to_hand_from_oracle(P1, "Shock", true, SHOCK)
-                        .with_mana_cost(ManaCost::generic(1))
-                        .id()
-                })
-                .collect();
-            for _ in 0..2 {
-                scenario.add_basic_land(P1, ManaColor::Red);
-            }
-            let mut runner = scenario.build();
-            {
-                let state = runner.state_mut();
-                state.active_player = P1;
-                state.priority_player = P1;
-                state.waiting_for = WaitingFor::Priority { player: P1 };
-            }
-            for shock in shocks {
-                runner.cast(shock).target_object(ai_creature).commit();
-            }
+            let (runner, ai_creature) = two_shocks_at_ai_creature(toughness);
             let state = runner.state();
             assert!(
                 state.stack.len() == 2
@@ -2267,6 +2286,33 @@ mod tests {
                 any_stack_harmful_answerable_by_grants(state, P0, &[DefensiveGrant::PreventDamage]),
                 toughness == 3,
                 "4 damage kills a 3-toughness creature and not a 5-toughness one"
+            );
+        }
+    }
+
+    #[test]
+    fn prevention_is_judged_among_landfall_triggers_without_reading_their_reach() {
+        use crate::test_support::{reading_with_reach_count, with_landfall_triggers};
+        use engine::game::scenario::{P0, P1};
+        let answerable = |state: &GameState| {
+            any_stack_harmful_answerable_by_grants(state, P0, &[DefensiveGrant::PreventDamage])
+        };
+        for toughness in [3, 5] {
+            let (runner, _) = two_shocks_at_ai_creature(toughness);
+            let plain = runner.state();
+            // P1's landfall triggers below, between and above the two Shocks.
+            let landfall = with_landfall_triggers(plain, P1);
+            let (answer, builds) = reading_with_reach_count(|| answerable(plain));
+            assert_eq!(
+                answer,
+                toughness == 3,
+                "4 damage kills a 3-toughness creature and not a 5-toughness one"
+            );
+            assert!(builds > 0, "reach guard: the Shocks' reach is read");
+            assert_eq!(
+                reading_with_reach_count(|| answerable(&landfall)),
+                (answer, builds),
+                "the same answer, without reading the triggers' reach"
             );
         }
     }
@@ -2548,6 +2594,46 @@ mod tests {
             Zone::Battlefield,
             "engine: protection from red prevents it"
         );
+    }
+
+    #[test]
+    fn a_grant_does_not_answer_damage_to_a_phased_out_ai_creature() {
+        use engine::game::effects::stack_reach::stack_entry_node_reach;
+        use engine::game::game_object::PhaseOutCause;
+        use engine::game::phasing::phase_out_object;
+        use engine::game::scenario::P0;
+        use engine::types::mana::ManaColor;
+        let (mut runner, ai_creature) = ghyrson_starn_trigger_at_the_ai_creature();
+        let red = [DefensiveGrant::Protection(ProtectionTarget::Color(
+            ManaColor::Red,
+        ))];
+        assert!(
+            any_stack_harmful_answerable_by_grants(runner.state(), P0, &red),
+            "control: protection from red answers the trigger's damage to the phased-in creature"
+        );
+        // The creature phases out with the trigger waiting, as an effect
+        // that phases it out does.
+        assert_eq!(
+            phase_out_object(
+                runner.state_mut(),
+                ai_creature,
+                PhaseOutCause::Directly,
+                &mut Vec::new()
+            ),
+            vec![ai_creature],
+            "reach guard: the creature phased out"
+        );
+        let state = runner.state();
+        let entry = state.stack.back().expect("Ghyrson Starn's trigger");
+        assert!(
+            stack_entry_node_reach(state, entry)
+                .iter()
+                .any(|reach| reach.acted_on == vec![TargetRef::Object(ai_creature)]),
+            "reach guard: the trigger still acts on the phased-out creature"
+        );
+        // CR 702.26b: a phased-out creature is treated as though it does not
+        // exist, so no grant reaches it.
+        assert!(!any_stack_harmful_answerable_by_grants(state, P0, &red));
     }
 
     #[test]
