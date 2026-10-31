@@ -10368,7 +10368,7 @@ mod tests {
         }
     }
 
-    // Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). a
+    // Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). A
     // stack ability 'draw two, then flip a coin (win/lose: draw one)' round-trips; decode refuses
     // missing coin_branches/won/lost, branches on a non-coin root, and misaligned branch pins. The
     // coin ability it persists is made up (an Effect literal). Nearest printed cards: Goblin
@@ -10700,7 +10700,7 @@ mod tests {
         }
     }
 
-    // Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). a
+    // Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). A
     // spell with two nested target-then-coin layers paused at Krark's Thumb's inner keep prompt
     // (optionally after an exile response) restores and finishes; saves stripped of announcement
     // provenance are refused. Krark's Thumb ("If you would flip a coin, instead flip two coins and
@@ -10824,7 +10824,7 @@ mod tests {
     }
 
     // Real cards: wire/persistence test (it asserts how saved state restores, not card behavior).
-    // the same nested-binding spell parked at Krark's Thumb's prompt decodes as an unversioned
+    // The same nested-binding spell parked at Krark's Thumb's prompt decodes as an unversioned
     // GameState transport and a viewer-filtered state without legacy refusal, then finishes.
     // Krark's Thumb ("If you would flip a coin, instead flip two coins and ignore one.") is the
     // printed card in play; the coin ability it persists is made up (an Effect literal: the nested

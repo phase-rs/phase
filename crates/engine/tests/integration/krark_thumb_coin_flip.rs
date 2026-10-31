@@ -1161,7 +1161,7 @@ fn assert_resting_at_priority(runner: &GameRunner) {
     assert!(runner.state().active_coin_flip_frame().is_none());
 }
 
-// Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). a
+// Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). A
 // 'flip a coin, if you win gain 2 life' spell paused at Krark's Thumb's first keep prompt refuses a
 // v7 Single-frame save; the current save completes paying once. Krark's Thumb ("If you would flip a
 // coin, instead flip two coins and ignore one.") is the printed card in play; the coin ability it
@@ -1231,7 +1231,7 @@ fn legacy_v7_single_flip_save_is_refused_current_completes() {
     assert_legacy_coin_refused(legacy);
 }
 
-// Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). a
+// Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). A
 // 'flip three coins' spell with no branches paused at Krark's Thumb's first keep prompt refuses a
 // v7 FlipN save; the current save completes three kept flips. Krark's Thumb ("If you would flip a
 // coin, instead flip two coins and ignore one.") is the printed card in play; the coin ability it
@@ -1280,7 +1280,7 @@ fn legacy_v7_flip_n_save_is_refused_current_completes() {
     }
 }
 
-// Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). a
+// Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). A
 // 'flip until you lose, gain 1 life per win' spell paused at Krark's Thumb's first prompt (no wins
 // yet) refuses a v7 UntilLose save; the current save completes. Krark's Thumb ("If you would flip a
 // coin, instead flip two coins and ignore one.") is the printed card in play; the coin ability it
@@ -1327,7 +1327,7 @@ fn legacy_v7_until_lose_frame_without_wins_is_refused() {
     }
 }
 
-// Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). the
+// Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). The
 // until-lose life spell paused under Krark's Thumb after one kept win (reward owed) refuses a v7
 // save; the current save pays the owed and later rewards after the final loss. Krark's Thumb ("If
 // you would flip a coin, instead flip two coins and ignore one.") is the printed card in play; the
