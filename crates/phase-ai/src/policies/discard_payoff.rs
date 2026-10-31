@@ -254,6 +254,7 @@ fn candidate_discards_controller(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::PayUnlessCost { .. }
         | GameAction::ChooseUnlessCostBranch { .. }
         | GameAction::ChooseActivationCostBranch { .. }
+        | GameAction::ChooseAdditionalCostBranch { .. }
         | GameAction::PayCombatTax { .. }
         | GameAction::ChooseRingBearer { .. }
         | GameAction::ChoosePair { .. }

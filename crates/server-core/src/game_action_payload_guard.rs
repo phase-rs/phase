@@ -757,6 +757,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::PayUnlessCost { .. }
         | GameAction::ChooseUnlessCostBranch { .. }
         | GameAction::ChooseActivationCostBranch { .. }
+        | GameAction::ChooseAdditionalCostBranch { .. }
         | GameAction::PayCombatTax { .. }
         | GameAction::ChooseRingBearer { .. }
         | GameAction::ChoosePair { .. }

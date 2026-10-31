@@ -456,6 +456,49 @@ describe("additionalCostChoices — repeatable additional cost", () => {
   });
 });
 
+describe("additionalCostChoices — N-way choice of additional costs (issue #10442)", () => {
+  // CR 118.8 + CR 601.2b: Dusk Mangler lists three alternative additional
+  // costs. Each listed cost gets its own button carrying its index, because
+  // `DecideOptionalCost { pay }` can only name the first and the last.
+  const threeWayChoice: AdditionalCost = {
+    type: "Choice",
+    data: [
+      { type: "Sacrifice", count: 1 },
+      { type: "Discard", count: { type: "Fixed", value: 1 } },
+      { type: "PayLife", amount: { type: "Fixed", value: 4 } },
+    ],
+  };
+
+  it("offers one indexed option per listed cost, in printed order", () => {
+    const { options } = additionalCostChoices(threeWayChoice);
+
+    expect(options.map((option) => option.id)).toEqual([
+      "option:0",
+      "option:1",
+      "option:2",
+    ]);
+  });
+
+  it("offers no decline leg — a Choice is part of the total cost (CR 601.2f)", () => {
+    const { options } = additionalCostChoices(threeWayChoice);
+
+    expect(options.some((option) => option.id === "decline")).toBe(false);
+    expect(options.some((option) => option.id === "pay")).toBe(false);
+  });
+
+  it("still renders a two-option choice as two indexed buttons", () => {
+    const { options } = additionalCostChoices({
+      type: "Choice",
+      data: [
+        { type: "Discard", count: { type: "Fixed", value: 1 } },
+        { type: "PayLife", amount: { type: "Fixed", value: 3 } },
+      ],
+    });
+
+    expect(options.map((option) => option.id)).toEqual(["option:0", "option:1"]);
+  });
+});
+
 describe("formatAbilityCost", () => {
   // CR 101.4: `QuantityRef::PlayerChosenNumber` renders the cross-player fold the
   // engine supplies — "the highest number" for `Max`, "the lowest number" for

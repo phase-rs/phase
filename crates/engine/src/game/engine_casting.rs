@@ -4,7 +4,8 @@ use serde::ser::{Impossible, SerializeMap, SerializeStruct};
 use serde::{Serialize, Serializer};
 
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, BeholdCostAction, TapCreaturesSelectionMode, TargetFilter,
+    AbilityCost, AdditionalCost, AdditionalCostAnswer, BeholdCostAction, TapCreaturesSelectionMode,
+    TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -1250,10 +1251,10 @@ pub(super) fn handle_optional_cost_choice(
     player: PlayerId,
     pending_cast: PendingCast,
     cost: &AdditionalCost,
-    pay: bool,
+    answer: AdditionalCostAnswer,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    casting_costs::handle_decide_additional_cost(state, player, pending_cast, cost, pay, events)
+    casting_costs::handle_decide_additional_cost(state, player, pending_cast, cost, answer, events)
 }
 
 #[allow(clippy::too_many_arguments)]

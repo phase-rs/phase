@@ -553,6 +553,7 @@ pub enum InteractionActionCode {
     ChooseDamageSource,
     SelectModes,
     DecideOptionalCost,
+    ChooseAdditionalCostBranch,
     ChooseAdventureFace,
     ChooseModalFace,
     ChooseAlternativeCast,

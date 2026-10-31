@@ -721,8 +721,8 @@ fn whispersteel_concession_prices_an_additional_cost_choice() {
     )
     .expect("Bayou Groff's additional cost");
     assert!(matches!(
-        &groff_cost,
-        AdditionalCost::Choice(AbilityCost::Sacrifice(_), AbilityCost::Mana { .. })
+        groff_cost.choice_options(),
+        Some([AbilityCost::Sacrifice(_), AbilityCost::Mana { .. }])
     ));
     let groff_mana = ManaCost::Cost {
         shards: vec![ManaCostShard::Green],

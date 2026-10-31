@@ -3,9 +3,9 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{all_consuming, map, opt, value};
-use nom::multi::separated_list1;
+use nom::multi::{many1, separated_list1};
 use nom::sequence::{preceded, terminated};
-use nom::Parser;
+use nom::{Offset, Parser};
 
 use super::oracle_classifier::lower_starts_with;
 use super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
@@ -71,8 +71,9 @@ pub(crate) fn split_additional_cost_trailing_spell_reduction<'a>(
 ///
 /// Recognized patterns:
 /// - "you may blight N" → `Optional(Blight { count: N })`
-/// - "blight N or pay {M}" → `Choice(Blight { count: N }, Mana { cost: M })`
-/// - General "X or Y" → `Choice(X, Y)` using `parse_single_cost` for each fragment
+/// - "blight N or pay {M}" → `Choice([Blight { count: N }, Mana { cost: M }])`
+/// - "X, Y, or Z" → `Choice([X, Y, Z])` via `alternative_cost_list_options`
+/// - General "X or Y" → `Choice([X, Y])` using `parse_single_cost` for each fragment
 /// - Anything no arm can read → an honest `Unimplemented` cost (`Optional` for a
 ///   "you may" body, otherwise `Required`), NOT `None`. CR 601.2f + CR 601.2h:
 ///   the cost is part of the total cost and cannot be silently dropped. Only a
@@ -135,6 +136,15 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
         }
     }
 
+    // CR 118.8 + CR 601.2b: "[cost A], [cost B], or [cost C]" — a comma list of
+    // alternative additional costs the caster chooses ONE of. Tried before the
+    // two " or " arms below, which read only the last " or " boundary and hand
+    // `parse_single_cost` a fragment holding several costs; it reads the first
+    // and silently drops the rest (Dusk Mangler lost ", discard a card").
+    if let Some(options) = alternative_cost_list_options(&tp) {
+        return Some(AdditionalCost::Choice(options));
+    }
+
     // "X or pay {M}" → Choice between cost X and mana payment.
     // Uses the raw text for mana symbols (case-sensitive).
     if let Some((left_lower, right_lower)) = body_lower.split_once(" or pay ") {
@@ -142,10 +152,10 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
         if let Some((mana_cost, _)) = parse_mana_symbols(right_raw.trim()) {
             let cost_a = super::oracle_cost::parse_single_cost(left_lower.trim());
             if !matches!(cost_a, AbilityCost::Unimplemented { .. }) {
-                return Some(AdditionalCost::Choice(
+                return Some(AdditionalCost::Choice(vec![
                     cost_a,
                     AbilityCost::Mana { cost: mana_cost },
-                ));
+                ]));
             }
         }
     }
@@ -159,7 +169,7 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
         if !matches!(cost_a, AbilityCost::Unimplemented { .. })
             && !matches!(cost_b, AbilityCost::Unimplemented { .. })
         {
-            return Some(AdditionalCost::Choice(cost_a, cost_b));
+            return Some(AdditionalCost::Choice(vec![cost_a, cost_b]));
         }
     }
 
@@ -207,6 +217,69 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
     }
 
     None
+}
+
+/// CR 118.8 + CR 601.2b: Read a comma list of alternative additional costs —
+/// "[cost A], [cost B], or [cost C]" — into one cost per listed option, in
+/// printed order. `None` when the body is not such a list.
+///
+/// Dusk Mangler's "sacrifice a creature, discard a card, or pay 4 life" is the
+/// shape. The commas are the grammar: each comma-separated head and the final
+/// "or " option must parse to a cost on its own, which is what separates a list
+/// of alternative COSTS from a single cost whose FILTER happens to be a comma
+/// list of types ("sacrifice an artifact, enchantment, or token" — Bargain,
+/// CR 702.166a — whose middle option is the bare word "enchantment").
+/// Containment is tested with [`AbilityCost::contains_unimplemented`], the
+/// single authority over the cost tree, so a fragment that only reaches an
+/// `EffectCost` wrapping an unimplemented effect is rejected too. That same
+/// per-fragment check is what keeps a reminder text's own comma list out of the
+/// grammar (`oracle.rs` strips reminder text before this line is routed, and a
+/// fragment carrying a leftover parenthetical is not a cost).
+///
+/// Two consequences of that discriminator are deliberate, not oversights:
+///
+/// 1. **All-or-nothing.** A list whose grammar matches but one of whose options
+///    the cost parser cannot read declines here and falls through to the older
+///    `" or "` arm, which can still drop options. Returning an `Unimplemented`
+///    option instead would be more honest for that case but WRONG for the
+///    filter-list case above, which is indistinguishable at this layer: both are
+///    "a comma list where some fragment is not a cost". The filter list is the
+///    shape that exists on real cards (Bargain, 20 printings), so it wins; the
+///    unreadable-option list has no printed instance.
+/// 2. **Mandatory only.** `AdditionalCost::Optional` carries ONE cost, so an
+///    optional N-way list ("you may A, B, or C") has no representation yet — it
+///    would need `Optional { cost: AbilityCost::OneOf { .. } }`, and the
+///    cast-time payment authority has no `OneOf` procedure. The `"you may "` arm
+///    above therefore keeps such a line, and no printed card has the shape.
+fn alternative_cost_list_options(body: &TextPair<'_>) -> Option<Vec<AbilityCost>> {
+    /// Every head option with its ", " separator, then the Oxford "or " that
+    /// introduces the final option, whose text is the remainder.
+    ///
+    /// The heads stop one option short because `tag(", ")` also matches the
+    /// opening of ", or ": the head parser consumes that comma and then fails
+    /// on "or …", which has no further ", " to take until.
+    fn parse(i: &str) -> OracleResult<'_, Vec<&str>> {
+        let (i, heads) = many1(terminated(take_until(", "), tag(", "))).parse(i)?;
+        let (last, _) = tag("or ").parse(i)?;
+        Ok(("", heads.into_iter().chain(std::iter::once(last)).collect()))
+    }
+
+    let (_, fragments_lower) = parse(body.lower).ok()?;
+    fragments_lower
+        .into_iter()
+        .map(|fragment_lower| {
+            // Realign the lowercase fragment onto the original-case body so
+            // mana symbols survive (`{B}` lowercased is not black mana).
+            // `nom::Offset` locates the fragment inside the body the parse ran
+            // on, and `str::get` is the CHECKED slice: a length-changing Unicode
+            // lowercasing (U+0130) puts the boundary mid-character, and the arm
+            // then declines instead of panicking on a non-char boundary.
+            let start = body.lower.offset(fragment_lower);
+            let fragment = body.original.get(start..start + fragment_lower.len())?;
+            let cost = super::oracle_cost::parse_single_cost(fragment);
+            (!cost.contains_unimplemented()).then_some(cost)
+        })
+        .collect()
 }
 
 /// CR 701.4a: Detect the *opening* of a spelled-out choose-behold cost —
@@ -1535,20 +1608,21 @@ Trample";
             "As an additional cost to cast this spell, behold an Elf or pay {2}. (To behold an Elf, choose an Elf you control or reveal an Elf card from your hand.)";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(
-                AbilityCost::Behold {
+            Some(AdditionalCost::Choice(options)) => {
+                let [AbilityCost::Behold {
                     count: 1,
                     filter: TargetFilter::Typed(filter),
                     action: BeholdCostAction::ChooseOrReveal,
                     ..
-                },
-                AbilityCost::Mana { cost },
-            )) => {
+                }, AbilityCost::Mana { cost }] = &options[..]
+                else {
+                    panic!("Expected [Behold Elf, Mana {{2}}], got {options:?}");
+                };
                 assert!(filter
                     .type_filters
                     .iter()
                     .any(|tf| matches!(tf, TypeFilter::Subtype(name) if name == "Elf")));
-                assert_eq!(cost, ManaCost::generic(2));
+                assert_eq!(*cost, ManaCost::generic(2));
             }
             other => panic!("Expected Choice(Behold Elf, Mana {{2}}), got {other:?}"),
         }
@@ -1667,7 +1741,7 @@ Trample";
             let result = parse_additional_cost_line(&lower, &raw);
             assert_eq!(
                 result,
-                Some(AdditionalCost::Choice(
+                Some(AdditionalCost::Choice(vec![
                     AbilityCost::Blight { count: blight },
                     AbilityCost::Mana {
                         cost: ManaCost::Cost {
@@ -1675,7 +1749,7 @@ Trample";
                             shards: vec![]
                         }
                     }
-                )),
+                ])),
                 "blight {blight} or pay {{{generic}}}"
             );
         }
@@ -1692,22 +1766,183 @@ Trample";
         );
     }
 
+    /// CR 118.8 + CR 601.2b: a comma list of alternative additional costs
+    /// keeps EVERY option. The old " or " arm split at the last " or " and let
+    /// `parse_single_cost` swallow "sacrifice a creature, discard a card" as a
+    /// bare sacrifice, so the discard option vanished (issue #10442).
+    #[test]
+    fn parse_additional_cost_three_way_comma_list_keeps_every_option() {
+        let lower =
+            "as an additional cost to cast this spell, sacrifice a creature, discard a card, or pay 4 life.";
+        let raw =
+            "As an additional cost to cast this spell, sacrifice a creature, discard a card, or pay 4 life.";
+        let Some(AdditionalCost::Choice(options)) = parse_additional_cost_line(lower, raw) else {
+            panic!(
+                "expected a three-way Choice, got {:?}",
+                parse_additional_cost_line(lower, raw)
+            );
+        };
+        assert!(
+            matches!(
+                options.as_slice(),
+                [
+                    AbilityCost::Sacrifice(_),
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        selection: CardSelectionMode::Chosen,
+                        ..
+                    },
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 4 },
+                    },
+                ]
+            ),
+            "expected [Sacrifice, Discard 1, PayLife 4] in printed order, got {options:?}"
+        );
+    }
+
+    /// The comma-list arm must stay off the ONE cost whose FILTER happens to be
+    /// a comma list of types — Bargain's "sacrifice an artifact, enchantment, or
+    /// token" (CR 702.166a) is a single sacrifice. The mandatory wording is used
+    /// deliberately: it reaches the comma-list arm, so the discriminator under
+    /// test is the per-fragment cost check (the middle fragment is the bare word
+    /// "enchantment", which is not a cost), not an earlier arm.
+    #[test]
+    fn parse_additional_cost_comma_type_list_is_one_cost_not_a_choice() {
+        let lower =
+            "as an additional cost to cast this spell, sacrifice an artifact, enchantment, or token.";
+        let raw =
+            "As an additional cost to cast this spell, sacrifice an artifact, enchantment, or token.";
+        // Reach-guard: the arm's grammar DOES match this line — the same comma
+        // list with cost-shaped fragments yields a three-way choice (the test
+        // above) — so the arm ran and its fragment check is what declined.
+        assert_eq!(
+            alternative_cost_list_options(&TextPair::new(
+                "sacrifice an artifact, enchantment, or token",
+                "sacrifice an artifact, enchantment, or token",
+            )),
+            None,
+            "the per-fragment cost check must decline a comma list of TYPES"
+        );
+        let result = parse_additional_cost_line(lower, raw);
+        assert!(
+            !matches!(result, Some(AdditionalCost::Choice(_))),
+            "a multi-type sacrifice filter must not fragment into a cost choice, got {result:?}"
+        );
+        // Positive reach-guard: the line is still read as one sacrifice cost, so
+        // the negative above is not passing because the parse failed upstream.
+        assert!(
+            matches!(
+                result,
+                Some(AdditionalCost::Required(AbilityCost::Sacrifice(_)))
+            ),
+            "expected one required sacrifice cost, got {result:?}"
+        );
+    }
+
+    /// Bargain's printed, optional wording takes the "you may" arm before the
+    /// comma-list arm is reached, and stays one optional sacrifice.
+    #[test]
+    fn parse_additional_cost_optional_comma_type_list_stays_one_optional_cost() {
+        let lower =
+            "as an additional cost to cast this spell, you may sacrifice an artifact, enchantment, or token.";
+        let raw =
+            "As an additional cost to cast this spell, you may sacrifice an artifact, enchantment, or token.";
+        let result = parse_additional_cost_line(lower, raw);
+        assert!(
+            matches!(
+                result,
+                Some(AdditionalCost::Optional {
+                    cost: AbilityCost::Sacrifice(_),
+                    ..
+                })
+            ),
+            "expected one optional sacrifice cost, got {result:?}"
+        );
+    }
+
+    /// The option fragments are read in ORIGINAL case, so a mana symbol in any
+    /// position survives — `{B}` lowercased to `{b}` would not parse as black
+    /// mana. Guards the `TextPair` realignment, not one card's text.
+    #[test]
+    fn parse_additional_cost_comma_list_keeps_option_case_for_mana() {
+        let lower =
+            "as an additional cost to cast this spell, sacrifice a creature, discard a card, or pay {2}{b}.";
+        let raw =
+            "As an additional cost to cast this spell, sacrifice a creature, discard a card, or pay {2}{B}.";
+        let Some(AdditionalCost::Choice(options)) = parse_additional_cost_line(lower, raw) else {
+            panic!(
+                "expected a three-way Choice, got {:?}",
+                parse_additional_cost_line(lower, raw)
+            );
+        };
+        assert_eq!(
+            options.last(),
+            Some(&AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![crate::types::mana::ManaCostShard::Black],
+                },
+            }),
+            "the last option must keep its original-case mana symbols, got {options:?}"
+        );
+    }
+
+    /// A conjunction is not a disjunction: "A, B, and C" lists costs that would
+    /// ALL be paid (CR 601.2f), so the comma-list arm must decline it instead of
+    /// turning it into a choice of one.
+    ///
+    /// The two halves differ by one word, which is the reach-guard: the "or"
+    /// form reaches the arm and yields three options, so the "and" form reaches
+    /// it too and is declined by its conjunction, not by anything upstream. The
+    /// "and" result is deliberately not pinned — a conjunctive additional cost
+    /// belongs in `AbilityCost::Composite` and no printed card has that shape,
+    /// so this test only fixes that the arm keeps its hands off it.
+    #[test]
+    fn parse_additional_cost_comma_list_requires_a_disjunction() {
+        let disjunctive_lower =
+            "as an additional cost to cast this spell, sacrifice a creature, discard a card, or pay 4 life.";
+        let disjunctive_raw =
+            "As an additional cost to cast this spell, sacrifice a creature, discard a card, or pay 4 life.";
+        assert!(
+            matches!(
+                parse_additional_cost_line(disjunctive_lower, disjunctive_raw),
+                Some(AdditionalCost::Choice(options)) if options.len() == 3
+            ),
+            "reach-guard: the disjunctive form of this list must reach the arm"
+        );
+
+        let conjunctive_lower =
+            "as an additional cost to cast this spell, sacrifice a creature, discard a card, and pay 4 life.";
+        let conjunctive_raw =
+            "As an additional cost to cast this spell, sacrifice a creature, discard a card, and pay 4 life.";
+        let result = parse_additional_cost_line(conjunctive_lower, conjunctive_raw);
+        assert!(
+            !matches!(result, Some(AdditionalCost::Choice(_))),
+            "an \"and\" list must not parse as a choice of costs, got {result:?}"
+        );
+    }
+
     #[test]
     fn parse_additional_cost_discard_or_pay_life() {
         let lower = "as an additional cost to cast this spell, discard a card or pay 3 life.";
         let raw = "As an additional cost to cast this spell, discard a card or pay 3 life.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(
-                AbilityCost::Discard {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    selection: CardSelectionMode::Chosen,
-                    ..
-                },
-                AbilityCost::PayLife {
-                    amount: QuantityExpr::Fixed { value: 3 },
-                },
-            )) => {}
+            Some(AdditionalCost::Choice(options))
+                if matches!(
+                    options.as_slice(),
+                    [
+                        AbilityCost::Discard {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            selection: CardSelectionMode::Chosen,
+                            ..
+                        },
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 3 },
+                        },
+                    ]
+                ) => {}
             other => panic!("Expected Choice(Discard, PayLife), got {:?}", other),
         }
     }
@@ -1718,7 +1953,11 @@ Trample";
         let raw = "As an additional cost to cast this spell, sacrifice a creature or pay {2}.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(AbilityCost::Sacrifice(_), AbilityCost::Mana { .. })) => {}
+            Some(AdditionalCost::Choice(options))
+                if matches!(
+                    options.as_slice(),
+                    [AbilityCost::Sacrifice(_), AbilityCost::Mana { .. }]
+                ) => {}
             other => panic!("Expected Choice(Sacrifice, Mana), got {:?}", other),
         }
     }
@@ -2076,14 +2315,18 @@ Trample";
             "As an additional cost to cast this spell, reveal a Dragon card from your hand or pay {1}.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(
-                AbilityCost::Reveal {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    filter: Some(_),
-                    shared_quality: _,
-                },
-                AbilityCost::Mana { .. },
-            )) => {}
+            Some(AdditionalCost::Choice(options))
+                if matches!(
+                    options.as_slice(),
+                    [
+                        AbilityCost::Reveal {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            filter: Some(_),
+                            shared_quality: _,
+                        },
+                        AbilityCost::Mana { .. },
+                    ]
+                ) => {}
             other => panic!("Expected Choice(Reveal, Mana), got {:?}", other),
         }
     }

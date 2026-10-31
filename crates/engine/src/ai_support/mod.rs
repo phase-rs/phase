@@ -556,6 +556,18 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         ) => costs.get(*index).is_none_or(|cost| {
             !casting::activation_one_of_branch_payable(state, *player, pending_cast, cost)
         }),
+        // CR 601.2b: the index must name one of the options the prompt offered.
+        // No second payability check: for a card's own choice the announcement
+        // authority already dropped the unpayable options (CR 601.2h), and for
+        // the engine-synthesized CR 118.9 election the printed-cost leg is the
+        // cost the caster would pay anyway — rejecting it would leave the
+        // election unanswerable.
+        (
+            WaitingFor::OptionalCostChoice { cost, .. },
+            GameAction::ChooseAdditionalCostBranch { index },
+        ) => cost
+            .choice_options()
+            .is_none_or(|options| options.get(*index).is_none()),
         (
             WaitingFor::DamageSourceChoice { options, .. },
             GameAction::ChooseDamageSource { source },
@@ -1482,6 +1494,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::PayUnlessCost { .. }
         | GameAction::ChooseUnlessCostBranch { .. }
         | GameAction::ChooseActivationCostBranch { .. }
+        | GameAction::ChooseAdditionalCostBranch { .. }
         | GameAction::PayCombatTax { .. }
         | GameAction::ChooseRingBearer { .. }
         | GameAction::ChoosePair { .. }

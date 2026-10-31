@@ -1049,6 +1049,22 @@ pub enum GameAction {
         epoch: u64,
         representative: PlayerId,
     },
+    /// CR 118.8 + CR 601.2b: Announce WHICH listed cost of an
+    /// `AdditionalCost::Choice` is paid, by its position in the prompt's option
+    /// list. The cast-time sibling of [`Self::ChooseActivationCostBranch`]
+    /// (CR 118.12a), which does the same for a disjunctive activation cost.
+    ///
+    /// `DecideOptionalCost { pay }` still answers every two-outcome prompt, the
+    /// CR 118.9 alternative-versus-printed election among them. It cannot name a
+    /// third option, which a card listing three or more alternative additional
+    /// costs needs (Dusk Mangler: "sacrifice a creature, discard a card, or pay
+    /// 4 life"), so an N-way announcement carries the index instead.
+    ///
+    /// Kept after the existing action variants so their derived
+    /// `GameActionKind` ordering remains stable for deterministic replay.
+    ChooseAdditionalCostBranch {
+        index: usize,
+    },
 }
 
 /// One representative's explicit Resolve All decision.
@@ -2163,6 +2179,7 @@ impl GameAction {
             | Self::SubmitLifeRedistribution { .. }
             | Self::SelectModes { .. }
             | Self::DecideOptionalCost { .. }
+            | Self::ChooseAdditionalCostBranch { .. }
             | Self::ChooseAdventureFace { .. }
             | Self::ChooseModalFace { .. }
             | Self::ChooseAlternativeCast { .. }
@@ -2588,7 +2605,8 @@ impl GameAction {
             // Pattern A). The Licid that installed the effect is not addressed
             // by this action.
             | GameAction::EndContinuousEffect { .. }
-            | GameAction::ChooseActivationCostBranch { .. } => None,
+            | GameAction::ChooseActivationCostBranch { .. }
+            | GameAction::ChooseAdditionalCostBranch { .. } => None,
         }
     }
 }

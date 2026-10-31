@@ -10,7 +10,8 @@ use engine::types::ability::{AbilityCost, AdditionalCost, TargetRef};
 use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    CastPaymentMode, CastingVariant, StackEntry, StackEntryKind, WaitingFor,
+    CastPaymentMode, CastingVariant, SpellAlternativeCostElection, StackEntry, StackEntryKind,
+    WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -241,17 +242,90 @@ fn foil_with_affordable_mana_offers_both_costs() {
     // The cast surfaces the optional-cost choice between the two-discard
     // alternative cost and the printed mana cost (CR 118.9b).
     let WaitingFor::OptionalCostChoice {
-        cost: AdditionalCost::Choice(alternative, printed),
+        cost: AdditionalCost::Choice(options),
         ..
     } = &waiting
     else {
         panic!("expected the alternative/printed cost choice, got {waiting:?}");
+    };
+    let [alternative, printed] = &options[..] else {
+        panic!("expected exactly the alternative and the printed cost, got {options:?}");
     };
     assert!(matches!(
         alternative,
         AbilityCost::Composite { costs } if costs.len() == 2
     ));
     assert!(matches!(printed, AbilityCost::Mana { .. }));
+}
+
+/// CR 118.9: declining the alternative-cost election records a DECLINED
+/// election, whichever action carries the answer.
+///
+/// The client sends `ChooseAdditionalCostBranch` for every `Choice` prompt
+/// (issue #10442), and "this answer pays something" is true for every indexed
+/// answer — so the election has to be read from the SELECTED POSITION, not from
+/// that projection. Reading it from the projection recorded `Accepted` on a
+/// decline, and `alternative_cost_election` rides in the serialized
+/// `PendingCast`. Driven with `CastPaymentMode::Manual` so the pending is still
+/// in flight and the recorded election is observable.
+#[test]
+fn declining_the_election_by_index_records_a_declined_election() {
+    for (answer, expected) in [
+        (
+            GameAction::ChooseAdditionalCostBranch { index: 1 },
+            SpellAlternativeCostElection::Declined,
+        ),
+        (
+            GameAction::ChooseAdditionalCostBranch { index: 0 },
+            SpellAlternativeCostElection::Accepted,
+        ),
+        (
+            GameAction::DecideOptionalCost { pay: false },
+            SpellAlternativeCostElection::Declined,
+        ),
+    ] {
+        let mut b = board(&[Card::Island, Card::Forest], true);
+        let card_id = b.runner.state().objects[&b.foil].card_id;
+        let waiting = b
+            .runner
+            .act(GameAction::CastSpell {
+                object_id: b.foil,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .expect("cast")
+            .waiting_for;
+        // Reach-guard: the election really is the prompt being answered.
+        assert!(
+            matches!(
+                waiting,
+                WaitingFor::OptionalCostChoice {
+                    cost: AdditionalCost::Choice(_),
+                    ..
+                }
+            ),
+            "expected the alternative/printed election, got {waiting:?}"
+        );
+
+        b.runner
+            .act(answer.clone())
+            .unwrap_or_else(|error| panic!("answering {answer:?} must be accepted: {error}"));
+
+        // The pending lives on whichever carrier the answer led to: the
+        // alternative's own discard payment prompt, or `state.pending_cast`
+        // once the remaining cost is manual mana.
+        let state = b.runner.state();
+        let pending = state
+            .waiting_for
+            .pending_cast_ref()
+            .or(state.pending_cast.as_deref())
+            .unwrap_or_else(|| panic!("the cast is still pending after {answer:?}"));
+        assert_eq!(
+            pending.alternative_cost_election, expected,
+            "answering {answer:?} must record {expected:?}"
+        );
+    }
 }
 
 /// B1 guard: an ACTIVATED cost with two chosen hand-discard legs goes through the

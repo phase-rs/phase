@@ -549,6 +549,12 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             cmp_val(a0, b0)
         }
+        GameAction::ChooseAdditionalCostBranch { index: a0 } => {
+            let GameAction::ChooseAdditionalCostBranch { index: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
         GameAction::ChooseAdventureFace { creature: a0 } => {
             let GameAction::ChooseAdventureFace { creature: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");

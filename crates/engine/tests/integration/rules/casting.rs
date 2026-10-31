@@ -1665,8 +1665,9 @@ fn required_blight_with_no_creatures_rejects_cast() {
     assert!(matches!(result.waiting_for, WaitingFor::Priority { player } if player == P0));
 }
 
-/// CR 601.2b: When an `AdditionalCost::Choice(A, B)` has an unpayable
-/// preferred cost A, the fallback B is applied automatically with no prompt.
+/// CR 601.2b + CR 601.2h: When an `AdditionalCost::Choice` is narrowed to a
+/// single payable option, that option is applied automatically with no prompt —
+/// there is nothing left to announce.
 #[test]
 fn choice_cost_falls_through_when_preferred_unpayable() {
     let mut scenario = GameScenario::new();
@@ -1683,12 +1684,12 @@ fn choice_cost_falls_through_when_preferred_unpayable() {
             damage_source: None,
             excess: None,
         })
-        .with_additional_cost(AdditionalCost::Choice(
+        .with_additional_cost(AdditionalCost::Choice(vec![
             AbilityCost::Blight { count: 1 },
             AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 2 },
             },
-        ))
+        ]))
         .id();
 
     let mut runner = scenario.build();
@@ -2736,7 +2737,10 @@ fn rooftop_storm_grants_alternative_zero_cost_to_zombie_spells() {
 
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice { cost, .. } => match cost {
-            AdditionalCost::Choice(alt, printed) => {
+            AdditionalCost::Choice(options) => {
+                let [alt, printed] = &options[..] else {
+                    panic!("expected the alternative and the printed cost, got {options:?}");
+                };
                 assert_eq!(
                     *alt,
                     AbilityCost::Mana {
@@ -2755,7 +2759,9 @@ fn rooftop_storm_grants_alternative_zero_cost_to_zombie_spells() {
                     "printed fallback must be the Zombie's {{6}} mana cost"
                 );
             }
-            other => panic!("expected AdditionalCost::Choice(alt, printed), got {other:?}"),
+            other => {
+                panic!("expected an alternative/printed AdditionalCost::Choice, got {other:?}")
+            }
         },
         other => panic!("expected OptionalCostChoice for the grant, got {other:?}"),
     }
@@ -2855,7 +2861,10 @@ fn as_foretold_dynamic_alt_cost_offered_and_consumed() {
 
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice { cost, .. } => match cost {
-            AdditionalCost::Choice(alt, printed) => {
+            AdditionalCost::Choice(options) => {
+                let [alt, printed] = &options[..] else {
+                    panic!("expected the alternative and the printed cost, got {options:?}");
+                };
                 assert_eq!(
                     *alt,
                     AbilityCost::Mana {
@@ -2874,7 +2883,9 @@ fn as_foretold_dynamic_alt_cost_offered_and_consumed() {
                     "printed fallback must be the spell's {{2}} mana cost"
                 );
             }
-            other => panic!("expected AdditionalCost::Choice(alt, printed), got {other:?}"),
+            other => {
+                panic!("expected an alternative/printed AdditionalCost::Choice, got {other:?}")
+            }
         },
         other => panic!("expected OptionalCostChoice for the As Foretold grant, got {other:?}"),
     }

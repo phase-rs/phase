@@ -398,6 +398,7 @@ mod dreadhorde_arcanist_ceiling_4943;
 mod dream_salvage_target_opponent_discards;
 mod dredgers_insight_mill_from_among;
 mod druid_of_purification_destroy_chosen_4780;
+mod dusk_mangler_three_way_additional_cost;
 mod duskmantle_seer_each_player_reveal;
 mod dyadrine_counter_selection;
 mod eagles_delayed_result_phase3;

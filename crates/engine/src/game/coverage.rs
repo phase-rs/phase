@@ -6392,9 +6392,10 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
                     build_cost_item(cost, items);
                 }
             }
-            AdditionalCost::Choice(first, second) => {
-                build_cost_item(first, items);
-                build_cost_item(second, items);
+            AdditionalCost::Choice(options) => {
+                for option in options {
+                    build_cost_item(option, items);
+                }
             }
         }
         return;
@@ -6417,7 +6418,7 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
             }
         }
         AdditionalCost::Required(_) => "AdditionalCost:Required",
-        AdditionalCost::Choice(_, _) => "AdditionalCost:Choice",
+        AdditionalCost::Choice(_) => "AdditionalCost:Choice",
     };
     items.push(ParsedItem {
         category: ParseCategory::Cost,
@@ -6445,9 +6446,7 @@ fn additional_cost_has_unimplemented(additional_cost: &AdditionalCost) -> bool {
         AdditionalCost::Kicker { costs, .. } => {
             costs.iter().any(AbilityCost::contains_unimplemented)
         }
-        AdditionalCost::Choice(first, second) => {
-            first.contains_unimplemented() || second.contains_unimplemented()
-        }
+        AdditionalCost::Choice(options) => options.iter().any(AbilityCost::contains_unimplemented),
     }
 }
 
@@ -8941,9 +8940,10 @@ fn collect_additional_cost_missing_parts(
                 collect_ability_cost_missing_parts(cost, missing);
             }
         }
-        AdditionalCost::Choice(first, second) => {
-            collect_ability_cost_missing_parts(first, missing);
-            collect_ability_cost_missing_parts(second, missing);
+        AdditionalCost::Choice(options) => {
+            for option in options {
+                collect_ability_cost_missing_parts(option, missing);
+            }
         }
     }
 }

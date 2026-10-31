@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use thiserror::Error;
 
 use crate::types::ability::{
-    DigSource, DurationEvent, Effect, EffectKind, KeywordAction, ResolvedAbility, TargetRef,
+    AdditionalCostAnswer, DigSource, DurationEvent, Effect, EffectKind, KeywordAction,
+    ResolvedAbility, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -13361,7 +13362,31 @@ fn apply_non_priority_pass_action(
             *player,
             *pending_cast.clone(),
             cost,
-            pay,
+            if pay {
+                AdditionalCostAnswer::Pay
+            } else {
+                AdditionalCostAnswer::Decline
+            },
+            &mut events,
+        )?,
+        // CR 601.2b: a choice of additional costs is announced by naming the
+        // option, which `DecideOptionalCost { pay }` cannot do past the second
+        // one. Guarded on the prompt actually offering options, so this action
+        // is never an alias for "pay" on a Kicker / Optional / Required prompt.
+        (
+            WaitingFor::OptionalCostChoice {
+                player,
+                cost,
+                pending_cast,
+                ..
+            },
+            GameAction::ChooseAdditionalCostBranch { index },
+        ) if cost.choice_options().is_some() => engine_casting::handle_optional_cost_choice(
+            state,
+            *player,
+            *pending_cast.clone(),
+            cost,
+            AdditionalCostAnswer::Listed { index },
             &mut events,
         )?,
         (

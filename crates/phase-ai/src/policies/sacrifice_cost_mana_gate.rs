@@ -207,7 +207,7 @@ fn required_sacrifice_leg(additional_cost: &AdditionalCost) -> Option<SacrificeC
         // CR 702.33a: kicker is an optional additional cost.
         AdditionalCost::Kicker { .. } => None,
         // CR 601.2b: the payer picks a leg, same reasoning as `OneOf`.
-        AdditionalCost::Choice(_, _) => None,
+        AdditionalCost::Choice(_) => None,
     }
 }
 

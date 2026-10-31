@@ -980,6 +980,7 @@ fn classify(action: &GameAction, prompt: &WaitingFor) -> Choice {
         | GameAction::PayUnlessCost { .. }
         | GameAction::ChooseUnlessCostBranch { .. }
         | GameAction::ChooseActivationCostBranch { .. }
+        | GameAction::ChooseAdditionalCostBranch { .. }
         | GameAction::PayCombatTax { .. }
         | GameAction::ChooseRingBearer { .. }
         | GameAction::ChoosePair { .. }

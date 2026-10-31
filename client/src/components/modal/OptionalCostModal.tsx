@@ -75,10 +75,24 @@ export function OptionalCostModalContent({
     <ChoiceModal
       title={title}
       options={options}
-      onChoose={(id) =>
-        dispatch({ type: "DecideOptionalCost", data: { pay: id === "pay" } })
-      }
+      onChoose={(id) => dispatch(additionalCostAction(id))}
       onClose={isMandatoryChoice ? undefined : () => dispatch({ type: "CancelCast" })}
     />
   );
+}
+
+/**
+ * CR 601.2b: map an `AdditionalCostOption` id to the action that answers it.
+ *
+ * An `option:<index>` id comes from a `Choice` of additional costs and carries
+ * the selected position, which the two-outcome `DecideOptionalCost { pay }`
+ * answer cannot express once a third option exists.
+ */
+function additionalCostAction(id: string): GameAction {
+  const selected = id.startsWith("option:")
+    ? Number.parseInt(id.slice("option:".length), 10)
+    : Number.NaN;
+  return Number.isInteger(selected)
+    ? { type: "ChooseAdditionalCostBranch", data: { index: selected } }
+    : { type: "DecideOptionalCost", data: { pay: id === "pay" } };
 }

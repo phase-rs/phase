@@ -6093,7 +6093,8 @@ fn project_action_payload(
         GameAction::ChooseReplacement { index }
         | GameAction::ChooseBranch { index }
         | GameAction::ChooseCastingVariant { index }
-        | GameAction::ChooseActivationCostBranch { index } => {
+        | GameAction::ChooseActivationCostBranch { index }
+        | GameAction::ChooseAdditionalCostBranch { index } => {
             push_value_surface(surfaces, InteractionRoleCode::OptionIndex, index)
         }
         GameAction::OrderTriggers { order } => {
@@ -6815,6 +6816,9 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::ChooseDamageSource { .. } => InteractionActionCode::ChooseDamageSource,
         GameAction::SelectModes { .. } => InteractionActionCode::SelectModes,
         GameAction::DecideOptionalCost { .. } => InteractionActionCode::DecideOptionalCost,
+        GameAction::ChooseAdditionalCostBranch { .. } => {
+            InteractionActionCode::ChooseAdditionalCostBranch
+        }
         GameAction::ChooseAdventureFace { .. } => InteractionActionCode::ChooseAdventureFace,
         GameAction::ChooseModalFace { .. } => InteractionActionCode::ChooseModalFace,
         GameAction::ChooseAlternativeCast { .. } => InteractionActionCode::ChooseAlternativeCast,

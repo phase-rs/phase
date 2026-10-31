@@ -4978,6 +4978,16 @@ pub(crate) fn deterministic_choice(
             total_untapped > combined_cmc
         };
 
+        // CR 601.2b: a choice of additional costs is announced by NAMING the
+        // option, which is the whole candidate set `ai_support` advertises for
+        // that prompt, so the quick answer names the first offered option
+        // instead of returning a pay/decline bool the prompt does not take.
+        // Option 0 is a card's first payable option, or the CR 118.9
+        // alternative; the search re-scores the rest through the candidate path.
+        if additional_cost.choice_options().is_some() {
+            return Some(GameAction::ChooseAdditionalCostBranch { index: 0 });
+        }
+
         let pay = match additional_cost {
             engine::types::ability::AdditionalCost::Optional {
                 cost: engine::types::ability::AbilityCost::Mana { cost: extra_mana },
@@ -5024,8 +5034,10 @@ pub(crate) fn deterministic_choice(
             }
             engine::types::ability::AdditionalCost::Optional { .. } => true,
             engine::types::ability::AdditionalCost::Kicker { .. } => true,
-            engine::types::ability::AdditionalCost::Choice(_, _) => true,
             engine::types::ability::AdditionalCost::Required(_) => true,
+            engine::types::ability::AdditionalCost::Choice(_) => {
+                unreachable!("a choice of additional costs returned above")
+            }
         };
         return Some(GameAction::DecideOptionalCost { pay });
     }

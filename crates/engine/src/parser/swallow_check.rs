@@ -2267,7 +2267,7 @@ fn any_ability_is_optional(parsed: &ParsedAbilities) -> bool {
             parsed.additional_cost,
             Some(crate::types::ability::AdditionalCost::Optional { .. }
                 | crate::types::ability::AdditionalCost::Kicker { .. }
-                | crate::types::ability::AdditionalCost::Choice(_, _))
+                | crate::types::ability::AdditionalCost::Choice(_))
         )
         // CR 117.6 + 117.9 + 702.8 + 715.3a: Every variant of
         // `SpellCastingOption` is an opt-in player choice — alternative

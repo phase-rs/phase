@@ -18,7 +18,7 @@
 use engine::game::casting::can_cast_object_now;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{AbilityCost, AdditionalCost};
+use engine::types::ability::AbilityCost;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::mana::ManaCost;
@@ -79,21 +79,23 @@ fn once_upon_a_time_free_as_first_spell_of_game() {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting the first spell of the game should begin");
+    let WaitingFor::OptionalCostChoice { cost, .. } = &result.waiting_for else {
+        panic!(
+            "expected a free-vs-printed cost choice, got {:?}",
+            result.waiting_for
+        );
+    };
     assert!(
         matches!(
-            result.waiting_for,
-            WaitingFor::OptionalCostChoice {
-                cost: AdditionalCost::Choice(
-                    AbilityCost::Mana {
-                        cost: ManaCost::NoCost
-                    },
-                    _
-                ),
-                ..
-            }
+            cost.choice_options(),
+            Some([
+                AbilityCost::Mana {
+                    cost: ManaCost::NoCost
+                },
+                _,
+            ])
         ),
-        "expected a free-vs-printed cost choice, got {:?}",
-        result.waiting_for
+        "expected the free alternative listed first, got {cost:?}"
     );
 
     runner

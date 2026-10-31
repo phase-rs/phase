@@ -21484,11 +21484,141 @@ pub enum AdditionalCost {
         )]
         repeatability: AdditionalCostRepeatability,
     },
-    /// "[cost A] or [cost B]" — player must pay exactly one.
-    /// Choosing the first cost sets `additional_cost_paid = true`.
-    Choice(AbilityCost, AbilityCost),
+    /// CR 118.8 + CR 601.2b: "[cost A], [cost B], or [cost C]" — the controller
+    /// announces which ONE of the listed costs they intend to pay. A list, not a
+    /// pair: Dusk Mangler's "sacrifice a creature, discard a card, or pay 4 life"
+    /// offers three, and the count is whatever the printed text lists. The
+    /// "exactly one" comes from the card's own wording; CR 118.8 says what kind
+    /// of cost this is and CR 601.2b says when it is announced. (CR 118.8a is
+    /// about several SEPARATE additional costs applied to one spell, which is a
+    /// different shape, so it is not cited as the count authority here.)
+    ///
+    /// CR 601.2f: whichever listed option is announced, an additional cost was
+    /// paid, so every option sets `additional_cost_paid = true` — including the
+    /// sole payable option the declaration authority pays without an
+    /// announcement. The flag must not depend on which options happened to be
+    /// affordable, because the prompt lists only the payable ones.
+    ///
+    /// Known gap, unchanged by the widening: a paid `Choice` does not re-derive
+    /// the total cost the way a paid `Optional` does, so a hypothetical
+    /// `ReduceCost { condition: AdditionalCostPaid }` on a card with a `Choice`
+    /// cost would lock in the unreduced total (CR 601.2f). The two-option form
+    /// already behaved that way at index 0, and no printed card pairs a `Choice`
+    /// cost with such a rider.
+    ///
+    /// Invariant: at least two options. A one-option disjunction is a
+    /// `Required` cost and is represented as one.
+    ///
+    /// The two-element form is also the engine-synthesized CR 118.9 election
+    /// (`[alternative cost, printed mana cost]`, in that order), which
+    /// `PendingCast::alternative_cost_election` distinguishes from a card's own
+    /// CR 118.8 choice. `Vec` (not a fixed pair) mirrors the sibling
+    /// `Kicker { costs }` and keeps the `{"type":"Choice","data":[a,b]}`
+    /// serialization of the former two-field tuple variant byte-for-byte.
+    Choice(#[serde(deserialize_with = "deserialize_choice_options")] Vec<AbilityCost>),
     /// Mandatory additional cost (e.g., "As an additional cost, waterbend {5}").
     Required(AbilityCost),
+}
+
+/// CR 601.2b: Read a `Choice`'s option list, refusing a degenerate one.
+///
+/// The variant's at-least-two invariant holds by construction at every producer
+/// — the parser's comma-list grammar yields two or more, and the announcement
+/// authority errors at zero options and pays the sole option without a prompt —
+/// but the variant travels in card data and in serialized `GameState`, so a
+/// shorter list has to fail on READ. Accepting one would publish a mandatory
+/// prompt with nothing to announce and no advertised answer.
+fn deserialize_choice_options<'de, D>(deserializer: D) -> Result<Vec<AbilityCost>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let options = Vec::<AbilityCost>::deserialize(deserializer)?;
+    if options.len() < 2 {
+        return Err(serde::de::Error::invalid_length(
+            options.len(),
+            &"at least two additional-cost options",
+        ));
+    }
+    Ok(options)
+}
+
+/// CR 118.8 + CR 601.2b: the controller's answer to a cast-time additional-cost
+/// announcement prompt.
+///
+/// `Pay` / `Decline` are the two-outcome answer (`GameAction::DecideOptionalCost
+/// { pay }`) that every `Optional`, `Kicker`, `Required` and two-option `Choice`
+/// prompt takes; `Listed { index }` is the N-way answer
+/// (`GameAction::ChooseAdditionalCostBranch { index }`) a `Choice` of three or
+/// more options needs, where no single bool can name the selection. Typed rather
+/// than a `bool` + `Option<usize>` pair so a prompt can be answered exactly one
+/// way.
+///
+/// Sibling rationale (CLAUDE.md "Parameterize, don't proliferate"): the
+/// disjunctive-cost answers `UnlessCostBranch` and
+/// `ResolutionOptionalPaymentChoice` are the same `Decline | Pay { index }`
+/// shape, but both belong to CR 118.12's unless-costs rather than CR 118.8's
+/// additional costs, and both are serialized action payloads. This type is
+/// neither: it is the engine-internal normalization of the TWO actions that
+/// answer one additional-cost prompt, which is why `Pay` (pay the single cost a
+/// two-outcome prompt offered) stays distinct from `Listed { index }` (name one
+/// of several listed costs) instead of folding into `Pay { index: 0 }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdditionalCostAnswer {
+    /// Pay the optional cost / take the first listed `Choice` option (the
+    /// CR 118.9 alternative cost, when the prompt is that election).
+    Pay,
+    /// Decline the optional cost / take the last listed `Choice` option (the
+    /// printed mana cost, when the prompt is the CR 118.9 election).
+    Decline,
+    /// CR 601.2b: take the `Choice` option listed at this position.
+    Listed { index: usize },
+}
+
+impl AdditionalCostAnswer {
+    /// Whether this answer pays the cost a two-outcome prompt offered.
+    ///
+    /// A `Listed` answer is a selection among costs any of which is paid once
+    /// chosen (a `Choice` has no decline leg, CR 601.2f), so it reads as paying.
+    #[must_use]
+    pub fn pays(self) -> bool {
+        !matches!(self, AdditionalCostAnswer::Decline)
+    }
+
+    /// The `Choice` option this answer selects, given how many were offered.
+    ///
+    /// `None` when the answer names no offered option — an illegal answer the
+    /// caller refuses rather than reinterpreting.
+    #[must_use]
+    pub fn choice_index(self, offered: usize) -> Option<usize> {
+        let index = match self {
+            // CR 118.9: the engine lists an alternative cost first, so the
+            // two-outcome "pay" takes the first option.
+            AdditionalCostAnswer::Pay => 0,
+            // CR 118.9: "decline" means "pay the printed cost instead", which
+            // is the second option of the two-option election.
+            AdditionalCostAnswer::Decline if offered == 2 => 1,
+            // CR 601.2f: a longer list is part of the total cost and has no
+            // decline leg, so a two-outcome decline names nothing. Answering it
+            // as "the last option" would pay a cost the caster never named.
+            AdditionalCostAnswer::Decline => return None,
+            AdditionalCostAnswer::Listed { index } => index,
+        };
+        (index < offered).then_some(index)
+    }
+}
+
+impl AdditionalCost {
+    /// CR 118.8 + CR 601.2b: the options of a `Choice`, or `None` for an
+    /// announcement shape that offers no choice of costs.
+    #[must_use]
+    pub fn choice_options(&self) -> Option<&[AbilityCost]> {
+        match self {
+            AdditionalCost::Choice(options) => Some(options),
+            AdditionalCost::Optional { .. }
+            | AdditionalCost::Kicker { .. }
+            | AdditionalCost::Required(_) => None,
+        }
+    }
 }
 
 /// CR 113.2c + CR 601.2b/f: Linked identity for one independently functioning
@@ -57632,5 +57762,137 @@ mod created_referent_classification_tests {
             kind: ChooseOneOfKind::Ordinary,
         };
         assert!(ordinary_branch.publishes_created_referent());
+    }
+}
+
+#[cfg(test)]
+mod additional_cost_choice_serde_tests {
+    //! CR 601.2b: the `Choice` option LIST and its wire shape.
+    //!
+    //! Widening the former two-field tuple variant to a `Vec` must not move the
+    //! two-option encoding, because `card-data.json` and every persisted
+    //! `GameState` already carry it — the protocol record for this change rests
+    //! on that, and the migration cost of the list is confined to the lists a
+    //! previous peer has never seen.
+    use super::*;
+    use crate::types::mana::ManaCost;
+
+    fn pay_life(amount: i32) -> AbilityCost {
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: amount },
+        }
+    }
+
+    fn mana(generic: u32) -> AbilityCost {
+        AbilityCost::Mana {
+            cost: ManaCost::generic(generic),
+        }
+    }
+
+    /// The two-option form serializes exactly as the two-field tuple variant
+    /// did: a `data` array of the two costs.
+    #[test]
+    fn two_option_choice_keeps_the_legacy_wire_shape() {
+        let cost = AdditionalCost::Choice(vec![pay_life(3), mana(2)]);
+        let encoded = serde_json::to_value(&cost).expect("a Choice serializes");
+
+        let data = encoded
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .expect("`data` is the option array");
+        assert_eq!(encoded.get("type").and_then(|t| t.as_str()), Some("Choice"));
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0], serde_json::to_value(pay_life(3)).unwrap());
+        assert_eq!(data[1], serde_json::to_value(mana(2)).unwrap());
+        assert_eq!(
+            serde_json::from_value::<AdditionalCost>(encoded).expect("round-trips"),
+            cost
+        );
+    }
+
+    /// An exported two-option value written before the widening still loads.
+    #[test]
+    fn stored_two_option_choice_still_deserializes() {
+        let stored = r#"{"type":"Choice","data":[{"type":"PayLife","amount":{"type":"Fixed","value":3}},{"type":"Mana","cost":{"type":"Cost","shards":[],"generic":2}}]}"#;
+        let decoded: AdditionalCost =
+            serde_json::from_str(stored).expect("a stored two-option Choice loads");
+
+        assert_eq!(
+            decoded.choice_options(),
+            Some([pay_life(3), mana(2)].as_slice())
+        );
+    }
+
+    /// The three-option form is the shape no previous peer can decode, which is
+    /// what the protocol bump records.
+    #[test]
+    fn three_option_choice_serializes_every_option() {
+        let cost = AdditionalCost::Choice(vec![pay_life(4), mana(1), pay_life(2)]);
+        let encoded = serde_json::to_value(&cost).expect("a Choice serializes");
+
+        assert_eq!(
+            encoded["data"].as_array().map(Vec::len),
+            Some(3),
+            "all three options must reach the wire: {encoded}"
+        );
+        assert_eq!(
+            serde_json::from_value::<AdditionalCost>(encoded).expect("round-trips"),
+            cost
+        );
+    }
+
+    /// CR 601.2b: a `Choice` must offer at least two options — one option is a
+    /// `Required` cost and none is no cost — so a shorter list is refused on
+    /// READ. Without this the degenerate list reaches the prompt and publishes a
+    /// mandatory announcement with nothing to announce and no legal answer.
+    #[test]
+    fn a_degenerate_option_list_is_refused_on_read() {
+        for stored in [
+            r#"{"type":"Choice","data":[]}"#,
+            r#"{"type":"Choice","data":[{"type":"PayLife","amount":{"type":"Fixed","value":3}}]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<AdditionalCost>(stored).is_err(),
+                "a Choice with fewer than two options must not load: {stored}"
+            );
+        }
+        // Reach-guard: the same shape with two options does load, so the
+        // refusals above are about the LENGTH and not about the encoding.
+        assert!(serde_json::from_str::<AdditionalCost>(
+            r#"{"type":"Choice","data":[{"type":"PayLife","amount":{"type":"Fixed","value":3}},{"type":"Mana","cost":{"type":"Cost","shards":[],"generic":2}}]}"#
+        )
+        .is_ok());
+    }
+
+    /// CR 118.9: the two-outcome answer is the two-option election — `Pay` takes
+    /// the alternative the engine listed first, `Decline` the printed cost
+    /// listed second. CR 601.2f: a longer list has no decline leg, so a
+    /// two-outcome `Decline` names no option there and is refused rather than
+    /// silently paying the last cost. An index names any offered option.
+    #[test]
+    fn answer_maps_onto_the_offered_options() {
+        assert_eq!(AdditionalCostAnswer::Pay.choice_index(2), Some(0));
+        assert_eq!(AdditionalCostAnswer::Decline.choice_index(2), Some(1));
+        assert_eq!(AdditionalCostAnswer::Pay.choice_index(3), Some(0));
+        assert_eq!(
+            AdditionalCostAnswer::Decline.choice_index(3),
+            None,
+            "a two-outcome decline must not be read as 'pay the last option'"
+        );
+        assert_eq!(AdditionalCostAnswer::Decline.choice_index(0), None);
+        assert_eq!(AdditionalCostAnswer::Decline.choice_index(1), None);
+        for index in 0..3 {
+            assert_eq!(
+                AdditionalCostAnswer::Listed { index }.choice_index(3),
+                Some(index)
+            );
+        }
+        assert_eq!(
+            AdditionalCostAnswer::Listed { index: 3 }.choice_index(3),
+            None
+        );
+        assert!(AdditionalCostAnswer::Pay.pays());
+        assert!(AdditionalCostAnswer::Listed { index: 2 }.pays());
+        assert!(!AdditionalCostAnswer::Decline.pays());
     }
 }

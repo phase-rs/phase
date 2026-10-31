@@ -6895,7 +6895,7 @@ fn additional_cost_references_growing_class(a: &crate::types::ability::Additiona
     match a {
         AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => reads(cost),
         AdditionalCost::Kicker { costs, .. } => costs.iter().any(reads),
-        AdditionalCost::Choice(a, b) => reads(a) || reads(b),
+        AdditionalCost::Choice(options) => options.iter().any(reads),
     }
 }
 

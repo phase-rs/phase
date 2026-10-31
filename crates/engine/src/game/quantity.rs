@@ -1489,9 +1489,8 @@ pub fn additional_cost_is_cast_stable_for_pre_cast(
         crate::types::ability::AdditionalCost::Kicker { costs, .. } => {
             costs.iter().all(ability_cost_is_cast_stable_for_pre_cast)
         }
-        crate::types::ability::AdditionalCost::Choice(first, second) => {
-            ability_cost_is_cast_stable_for_pre_cast(first)
-                && ability_cost_is_cast_stable_for_pre_cast(second)
+        crate::types::ability::AdditionalCost::Choice(options) => {
+            options.iter().all(ability_cost_is_cast_stable_for_pre_cast)
         }
     }
 }

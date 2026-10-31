@@ -3153,12 +3153,15 @@ fn transient_granted_spell_keywords_for(
 ///
 /// CR 118.9a: only one alternative cost is ultimately applied to a spell, and
 /// the spell's controller chooses which. The casting pipeline currently surfaces
-/// a single alternative-vs-printed choice (`AdditionalCost::Choice`), so when
-/// multiple grants match (e.g. Rooftop Storm and Fist of Suns both active) this
-/// returns the first in deterministic battlefield-scan order rather than
-/// prompting the controller to choose among them. Offering a choice across
-/// multiple simultaneous grants needs a multi-alternative choice surface and is
-/// a known limitation tracked for follow-up, not implemented here.
+/// a single alternative-vs-printed choice, so when multiple grants match (e.g.
+/// Rooftop Storm and Fist of Suns both active) this returns the first in
+/// deterministic battlefield-scan order rather than prompting the controller to
+/// choose among them (CR 118.9a). `AdditionalCost::Choice` now holds a LIST, so
+/// the prompt could carry more than two legs — but the election is still built
+/// as exactly `[alternative, printed mana cost]` at its two construction sites,
+/// and `SpellAlternativeCostElection` is accepted-or-declined, which a list of
+/// several alternatives has no answer for. Enumerating the matching grants onto
+/// that surface remains a known limitation tracked for follow-up.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct GrantedSpellAlternativeCost {
     pub(super) cost: AbilityCost,
@@ -21594,7 +21597,7 @@ fn can_cast_prepared_now_with_probe(
     // mana cost. Reuse the declaration-time authority so discard/life,
     // sacrifice/mana, and other choice shapes cannot reach target selection
     // and then fail during payment after the cast has been announced.
-    if let Some(AdditionalCost::Choice(preferred, fallback)) = state
+    if let Some(AdditionalCost::Choice(options)) = state
         .objects
         .get(&prepared.object_id)
         .and_then(|o| o.additional_cost.as_ref())
@@ -21623,7 +21626,7 @@ fn can_cast_prepared_now_with_probe(
             )
             .unwrap_or(false)
         };
-        if !branch_is_offerable(preferred) && !branch_is_offerable(fallback) {
+        if !options.iter().any(branch_is_offerable) {
             return false;
         }
     }

@@ -2411,7 +2411,16 @@ export type AdditionalCost =
   | { type: "Optional"; data: { cost: SerializedAbilityCost; repeatable?: boolean } }
   | { type: "Kicker"; data: { costs: SerializedAbilityCost[]; repeatable?: boolean } }
   | { type: "Required"; data: SerializedAbilityCost }
-  | { type: "Choice"; data: [SerializedAbilityCost, SerializedAbilityCost] };
+  /**
+   * CR 118.8 + CR 601.2b: the caster announces which ONE of the listed costs
+   * they pay. A list, not a pair — Dusk Mangler offers three ("sacrifice a
+   * creature, discard a card, or pay 4 life"). For a card's OWN choice the
+   * engine lists only options it proved payable (CR 601.2h); the two-element
+   * form the engine synthesizes for the CR 118.9 alternative-versus-printed
+   * election is not filtered that way, and its printed-cost leg may still be
+   * unaffordable.
+   */
+  | { type: "Choice"; data: SerializedAbilityCost[] };
 
 /** Mirrors Rust AbilityCost serialization (serde tag = "type"). */
 export type SerializedAbilityCost = { type: string; [key: string]: unknown };
@@ -3382,6 +3391,13 @@ export type GameAction =
   | { type: "ChooseDamageSource"; data: { source: ObjectId } }
   | { type: "SelectModes"; data: { indices: number[] } }
   | { type: "DecideOptionalCost"; data: { pay: boolean } }
+  /**
+   * CR 601.2b: answer an `OptionalCostChoice` whose cost is a `Choice` by
+   * selecting the option at `index`. The two-option `pay` answer cannot name a
+   * third option, so an N-way choice of additional costs uses this instead —
+   * the cast-time sibling of `ChooseActivationCostBranch`.
+   */
+  | { type: "ChooseAdditionalCostBranch"; data: { index: number } }
   | { type: "RespondToSpliceOffer"; data: { card: ObjectId | null } }
   | { type: "ChooseAdventureFace"; data: { creature: boolean } }
   | { type: "ChooseModalFace"; data: { back_face: boolean } }
