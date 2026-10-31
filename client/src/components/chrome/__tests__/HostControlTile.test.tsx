@@ -622,7 +622,8 @@ describe("HostControlTile", () => {
 
     it("retries a rejected AI promotion of the unchanged publication once and sends the concrete deck", async () => {
       useMultiplayerStore.setState({ toasts: new Map(), showToast: realShowToast }); // earlier tests leave toasts and a mock behind
-      vi.spyOn(Math, "random").mockReturnValue(0); // pick A → printings printedA
+      // The first pick draws A; the retry must draw fresh, so it draws B.
+      vi.spyOn(Math, "random").mockReturnValueOnce(0).mockReturnValue(0.99);
       const held = heldMetadata();
       art.face.mockImplementationOnce(async () => { await held.promise; return { scryfall_oracle_id: "Forest" }; });
       const { dispatch } = mount([host, aiRandom]);
@@ -634,10 +635,11 @@ describe("HostControlTile", () => {
       await waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2));
       await waitFor(() => expect(screen.getByRole("button", { name: "Start Game" })).toBeEnabled());
       expect(Array.from(useMultiplayerStore.getState().toasts.values(), ({ message }) => message)).toContain("promotion rejected");
-      for (const [mutation] of dispatch.mock.calls) {
-        expect(mutation).toMatchObject({ type: "SetKind", data: { seatIndex: 1, kind: { type: "Ai", data: {
-          difficulty: "Medium", deck: { type: "DeckList", data: { printings: printedA } } } } } });
-      }
+      const assignments = dispatch.mock.calls.map(([mutation]) => mutation);
+      expect(assignments[0]).toMatchObject({ type: "SetKind", data: { seatIndex: 1, kind: { type: "Ai", data: {
+        difficulty: "Medium", deck: { type: "DeckList", data: { printings: printedA } } } } } });
+      expect(assignments[1]).toMatchObject({ type: "SetKind", data: { seatIndex: 1, kind: { type: "Ai", data: {
+        difficulty: "Medium", deck: { type: "DeckList", data: { printings: printedB } } } } } });
       await act(async () => {}); // flush pending effects
       expect(art.face).toHaveBeenCalledTimes(2); // the retry ran a fresh preparation; no third
       expect(dispatch).toHaveBeenCalledTimes(2); // the successful retry is not resubmitted (no echo)
@@ -668,6 +670,21 @@ describe("HostControlTile", () => {
       expect(art.face).toHaveBeenCalledTimes(3);
       expect(dispatch).toHaveBeenCalledTimes(3); // the republished promotion succeeded once and is not resubmitted
       expect(dispatch.mock.calls[2][0]).toMatchObject({ type: "SetKind", data: { seatIndex: 1 } });
+    });
+
+    it("retries a promotion whose rejection lands before the busy latch commits", async () => {
+      useMultiplayerStore.setState({ toasts: new Map() });
+      vi.spyOn(Math, "random").mockReturnValue(0);
+      // No held metadata: preparation and the rejection settle on microtasks.
+      // Guards "a rejection always wakes the retry"; under act() the latch alone
+      // would also wake it, so this does not reproduce the batching itself.
+      const { dispatch } = mount([host, aiRandom]);
+      dispatch.mockRejectedValueOnce(new Error("promotion rejected"));
+      await waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Start Game" })).toBeEnabled());
+      await act(async () => {}); // flush pending effects
+      expect(dispatch).toHaveBeenCalledTimes(2); // exactly one send and one retry, no third and no transport echo
+      expect(art.face).toHaveBeenCalledTimes(2); // one preparation per send
     });
 
     it("keeps local keys invariant only under printing changes", () => {

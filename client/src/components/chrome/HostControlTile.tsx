@@ -277,6 +277,10 @@ const MAX_PROMOTION_ATTEMPTS = 2;
 export function HostControlTile() {
   const [collapsed, setCollapsed] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Rejection completion is its own reactive signal: `setBusy(false)` can batch
+  // with the send's `setBusy(true)` into no committed change, so the promotion
+  // effect must not depend on the latch alone to see a rejected send.
+  const [rejections, setRejections] = useState(0);
   const busyRef = useRef(false);
   const mounted = useRef(false);
   useEffect(() => {
@@ -452,12 +456,15 @@ export function HostControlTile() {
       room: hostSession, code: hostGameCode, slots: playerSlots, attempts: attempts + 1, outcome: "pending",
     };
     promotedPublication.current = record;
-    assignAi(assignments, false, () => { record.outcome = "rejected"; });
+    assignAi(assignments, false, () => {
+      record.outcome = "rejected";
+      if (mounted.current) setRejections((count) => count + 1);
+    });
     // `pickRandomAiDeck` is intentionally omitted from deps — it closes over
     // `deckChoices` which is already a dep (via `haveAnyDeck`), and including
     // the function would cause an effect storm on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, canEditSeats, haveAnyDeck, hostGameCode, hostSession, playerSlots, seatMutate]);
+  }, [busy, rejections, canEditSeats, haveAnyDeck, hostGameCode, hostSession, playerSlots, seatMutate]);
 
   if (hostingStatus === "idle") {
     return null;
