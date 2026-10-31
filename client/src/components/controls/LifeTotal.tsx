@@ -10,6 +10,7 @@ import {
   useDisplayedLife,
 } from "../../hooks/useDisplayedLife.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { damageCauseState } from "../animation/cardVfx/cardVfxSpecs.ts";
 
@@ -23,6 +24,14 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
   const { t } = useTranslation("game");
   const readout = useDisplayedLife(playerId);
   const life = formatLifeReadout(readout);
+  // Engine-derived: this seat has no life total (the Horde). Never inferred from
+  // format/archenemy on the client — the engine publishes the fact.
+  const hasNoLifeTotal = useGameStore(
+    (s) => s.gameState?.players[playerId]?.has_no_life_total ?? false,
+  );
+  const libraryCount = useGameStore(
+    (s) => s.gameState?.players[playerId]?.library?.length ?? 0,
+  );
   const activeStep = useAnimationStore((s) => s.activeStep);
   const [flashColor, setFlashColor] = useState<"red" | "green" | null>(null);
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -83,6 +92,41 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
     : size === "sm"
       ? "text-sm lg:text-base"
       : "text-base lg:text-lg";
+
+  // A seat with no life total (the Horde) has no life worth showing: damage and
+  // life loss are redirected into milling, and it is defeated when its library
+  // runs out. Render that library count — its real clock — so the player gets
+  // feedback that their attacks are landing, instead of a life total frozen at
+  // its starting value. Placed after every hook so the rules of hooks hold.
+  if (hasNoLifeTotal) {
+    // Shrinking library = closer to defeat, so the scale runs the same direction
+    // as life: healthy while deep, alarming when nearly decked.
+    const libraryColor =
+      libraryCount >= 60
+        ? "text-green-400"
+        : libraryCount >= 25
+          ? "text-yellow-400"
+          : "text-red-400";
+    return (
+      <div
+        className={`flex items-baseline ${size === "sm" ? "gap-1" : "gap-2"}`}
+        title={t("lifeTotal.libraryTooltip")}
+      >
+        {!hideLabel && (
+          <span className="text-xs text-slate-400">{t("lifeTotal.libraryLabel")}</span>
+        )}
+        <motion.span
+          key={libraryCount}
+          initial={{ scale: 1.3 }}
+          animate={{ scale: 1 }}
+          transition={{ duration: 0.2 }}
+          className={`rounded-md px-1 py-0.5 font-bold tabular-nums transition-colors duration-400 ${size === "sm" ? "" : "lg:px-1.5"} ${sizeClass} ${libraryColor}`}
+        >
+          {libraryCount}
+        </motion.span>
+      </div>
+    );
+  }
 
   return (
     <div className={`flex items-baseline ${size === "sm" ? "gap-1" : "gap-2"}`}>

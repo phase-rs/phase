@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::ability::is_false;
 use super::event_kinds::BendingType;
 use super::identifiers::ObjectId;
 use super::mana::{ManaColor, ManaPool};
@@ -70,6 +71,21 @@ pub struct CompanionInfo {
 pub struct Player {
     pub id: PlayerId,
     pub life: i32,
+    /// This seat has NO life total, so `life` is meaningless for it and must not
+    /// be presented as a resource. Damage and life loss it would take are
+    /// redirected into milling its library, and it is exempt from the CR 704.5a
+    /// "0 or less life" state-based action.
+    ///
+    /// True only for the Horde seat in a `GameFormat::Horde` game (a casual
+    /// variant, hence no CR number — see `horde::player_has_no_life_total`). Set
+    /// once at deck load, since the Horde seat is fixed for the whole game.
+    ///
+    /// Engine-derived and serialized so clients can render the seat truthfully
+    /// (showing its library — the Horde's real clock, as it loses by decking out)
+    /// instead of a frozen life total, WITHOUT re-deriving "which seat is the
+    /// Horde" on the frontend.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_no_life_total: bool,
     pub mana_pool: ManaPool,
 
     // Per-player zones
@@ -218,6 +234,7 @@ impl Default for Player {
         Player {
             id: PlayerId(0),
             life: 20,
+            has_no_life_total: false,
             mana_pool: ManaPool::default(),
             library: im::Vector::new(),
             hand: im::Vector::new(),

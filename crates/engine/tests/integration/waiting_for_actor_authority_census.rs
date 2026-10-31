@@ -827,9 +827,12 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // `PhysicalContest`. It is ACTORLESS — nobody submits a `GameAction` while it
     // runs — and is declared in `ACTORLESS` with `NoActor::HostContestDriver`,
     // advanced by `game::contest::advance_contest`.
-    if declared.len() != 144 {
+    // 144 -> 145 is adjudicated: Turtle Team-Up added `HeroEventChoice`. It HAS
+    // an acting player — the prompted hero answers with `SelectCards` — and is
+    // classified `ActingAuthority::One(player)` alongside `DiscardChoice`.
+    if declared.len() != 145 {
         failures.push(format!(
-            "PIN declared.len()={} != 144.\n\
+            "PIN declared.len()={} != 145.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\

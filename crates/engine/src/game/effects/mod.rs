@@ -137,6 +137,7 @@ pub mod endure;
 pub mod energy;
 pub mod epic;
 pub mod exile_resolving_spell;
+pub mod horde_play_card;
 pub mod physical_contest;
 pub mod put_chosen_counter;
 // Tests for `epic` live in a sibling file (declared here, not in `epic.rs`, so
@@ -5459,7 +5460,10 @@ fn effect_enters_battlefield(effect: &Effect) -> bool {
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::Unimplemented { .. } => false,
+        | Effect::Unimplemented { .. }
+        // Turtle Team-Up: plays cards off the boss library; the played cards'
+        // own instructions enter, not this one — not a ContinuationStep member.
+        | Effect::HordePlayCard { .. } => false,
     }
 }
 
@@ -5572,7 +5576,8 @@ fn batch_completion_may_apply_with_entry(
         | BatchCompletion::MeldExile { .. }
         | BatchCompletion::MeldEntry { .. }
         | BatchCompletion::MeldRedirect { .. }
-        | BatchCompletion::MilledDeliveryComplete { .. } => false,
+        | BatchCompletion::MilledDeliveryComplete { .. }
+        | BatchCompletion::HordeMillFromLossDeliveryComplete { .. } => false,
     }
 }
 
@@ -8124,6 +8129,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        | Effect::HordePlayCard { .. } => (None, ParentTargetHandling::NotAudited),
         | Effect::Unimplemented { .. } => (None, ParentTargetHandling::NotAudited),
     };
     let mut quantities_fixed = true;
@@ -9382,6 +9388,9 @@ fn effect_fields_read_filter_population(
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::Unimplemented { .. }
+        // Turtle Team-Up: `count` is a bare u32 — no filter, target, or
+        // quantity field can read a filter population.
+        | Effect::HordePlayCard { .. }
         | Effect::AbandonScheme => false,
     }
 }
@@ -13227,6 +13236,7 @@ fn resolve_legacy_effect(
         Effect::Amass { .. } => amass::resolve(state, ability, events),
         Effect::EmpowerJace { .. } => empower_jace::resolve(state, ability, events),
         Effect::Monstrosity { .. } => monstrosity::resolve(state, ability, events),
+        Effect::HordePlayCard { .. } => horde_play_card::resolve(state, ability, events),
         Effect::Specialize => specialize::resolve(state, ability, events),
         Effect::Renown { .. } => renown::resolve(state, ability, events),
         Effect::Adapt { .. } => adapt::resolve(state, ability, events),

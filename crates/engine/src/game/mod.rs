@@ -46,6 +46,7 @@ mod dash_tests;
 pub mod day_night;
 pub mod deck_loading;
 pub mod deck_validation;
+pub mod decks;
 pub mod derived;
 pub mod derived_views;
 pub mod devotion;
@@ -112,7 +113,9 @@ mod omnath_tests;
 // Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
 // so `merge.rs` stays implementation-only).
 pub mod archenemy;
+pub mod boss;
 pub mod conspiracy;
+pub mod horde;
 // Tests for `conspiracy` live in a sibling file (declared here, not in
 // `conspiracy.rs`, so `conspiracy.rs` stays implementation-only).
 #[cfg(test)]

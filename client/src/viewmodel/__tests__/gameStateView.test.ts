@@ -1312,6 +1312,7 @@ const PARTITION_FIXTURES: Record<
   AssistPayment: NO_TARGET_REF_LEGAL_SET,
   ConniveDiscard: NO_TARGET_REF_LEGAL_SET,
   DiscardChoice: NO_TARGET_REF_LEGAL_SET,
+  HeroEventChoice: NO_TARGET_REF_LEGAL_SET,
   ManifestDreadChoice: NO_TARGET_REF_LEGAL_SET,
   LearnChoice: NO_TARGET_REF_LEGAL_SET,
   ClashChooseOpponent: NO_TARGET_REF_LEGAL_SET,

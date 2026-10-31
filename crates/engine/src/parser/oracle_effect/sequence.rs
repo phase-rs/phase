@@ -8395,6 +8395,10 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // resolving effects, not Dig-lookback-transparent.
         | Effect::ChooseCounterKind { .. }
         | Effect::PutChosenCounter { .. }
+        // Turtle Team-Up (no CR section — casual product): "the bosses play a
+        // card" consumes the library top, so a `DigFromAmong` continuation must
+        // NOT skip past it looking for an antecedent.
+        | Effect::HordePlayCard { .. } => false,
         | Effect::Unimplemented { .. } => false,
     }
 }

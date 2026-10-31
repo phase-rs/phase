@@ -11359,6 +11359,7 @@ mod tests {
                     prevention_tally: Vec::new(),
                     lives_before: vec![20, 20],
                     sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                    phase_c_remnant: None,
                 }));
             assert!(
                 !priority_checkpoint_is_settled(&state),

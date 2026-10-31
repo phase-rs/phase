@@ -1176,6 +1176,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::CopyTokenOf { .. }
         | Effect::CreateTokenCopyFromPool { .. }
         | Effect::Investigate
+        | Effect::HordePlayCard { .. } => return Projection::Unmodeled,
         | Effect::Unimplemented { .. } => return Projection::Unmodeled,
     }
     b.finish()

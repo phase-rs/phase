@@ -799,8 +799,28 @@ pub(crate) fn apply_damage_after_replacement(
                 if super::life::apply_damage_life_loss(state, *player_id, actual_amount, events)
                     .is_err()
                 {
-                    // CR 616.1: two or more co-applicable life-loss replacements — the
-                    // affected player must choose which applies first.
+                    // CR 616.1: the loss paused — co-applicable life-loss
+                    // replacements, or the Horde damage→mill redirect parking a
+                    // mill/batch choice. The loss, the damage event, and any
+                    // lifelink for this target are deferred until the resume.
+                    // Both combat and non-combat legs stash their post-loss work
+                    // (combat-flagged for the batch remnant, which the combat
+                    // resume consumes; the shared drain skips combat stashes).
+                    // Counter-addition pauses (infect/toxic) return NeedsChoice
+                    // WITHOUT stashing, so the stash's presence after this call
+                    // identifies a loss pause.
+                    state.pending_damage_post_loss =
+                        Some(Box::new(crate::types::game_state::PendingDamagePostLoss {
+                            source_id: ctx.source_id,
+                            source_incarnation: ctx.source_incarnation,
+                            controller: ctx.controller,
+                            target: *player_id,
+                            actual_amount,
+                            has_lifelink: ctx.has_lifelink,
+                            lifelink_bonus: ctx.lifelink_bonus,
+                            stage: crate::types::game_state::DamagePostLossStage::EmitAndRecord,
+                            is_combat,
+                        }));
                     return DamageResult::NeedsChoice;
                 }
             }
@@ -919,113 +939,18 @@ pub(crate) fn apply_damage_after_replacement(
         }
     }
 
-    events.push(GameEvent::DamageDealt {
-        source_id: ctx.source_id,
-        target: t.clone(),
-        amount: primary_amount,
+    emit_damage_dealt_and_record(
+        state,
+        ctx.source_id,
+        ctx.source_incarnation,
+        ctx.controller,
+        t,
+        actual_amount,
+        primary_amount,
+        primary_excess,
         is_combat,
-        excess: primary_excess,
-        // CR 400.7: the incarnation captured with the damage context, as the
-        // damage record below uses.
-        source_incarnation: ctx.source_incarnation,
-    });
-
-    // CR 120.1: Record damage for "was dealt damage by" condition queries.
-    if actual_amount > 0 {
-        let target_controller = match t {
-            TargetRef::Player(player_id) => *player_id,
-            TargetRef::Object(object_id) => state
-                .objects
-                .get(object_id)
-                .map(|object| object.controller)
-                .unwrap_or(ctx.controller),
-        };
-        // CR 400.7: Snapshot the target's incarnation at damage time so
-        // subsequent zone-change look-backs do not match a new incarnation.
-        let target_incarnation = match t {
-            TargetRef::Object(object_id) => state
-                .objects
-                .get(object_id)
-                .map(|object| object.incarnation),
-            TargetRef::Player(_) => None,
-        };
-        // CR 608.2i + CR 608.2h: Snapshot the damage source's characteristics at
-        // damage time so look-back source-filter queries ("opponents who were
-        // dealt combat damage by ~ or a Dragon this turn") evaluate against the
-        // source as it was when the damage was dealt — the source may later
-        // change type, leave the battlefield (CR 113.7a LKI), or be removed.
-        let src = state.objects.get(&ctx.source_id);
-        // CR 400.7: Use the incarnation captured with the damage context, not
-        // a post-application live lookup. The latter can name a later object
-        // after a replacement pause or zone change.
-        let source_incarnation = ctx.source_incarnation;
-        let mut record = DamageRecord {
-            source_id: ctx.source_id,
-            source_controller: ctx.controller,
-            target: t.clone(),
-            target_controller,
-            target_incarnation,
-            source_incarnation,
-            // CR 120.4a: the permanent was dealt only the lethal portion; the
-            // excess is recorded against the controller by the redirect below.
-            amount: primary_amount,
-            is_combat,
-            // CR 120.10: Record excess so "was dealt excess damage this turn"
-            // intervening-if conditions can query without re-computing lethal.
-            // Redirected excess is recorded against the controller by the redirect
-            // leg below, so the creature's record reports `primary_excess` (zero
-            // when the rider redirected it).
-            excess: primary_excess,
-            // CR 608.2i + CR 608.2h: the obj-derived source snapshot below
-            // overwrites these when the source still exists; the empty/default
-            // tail (Default::default()) covers the source-already-gone case.
-            source_controller_snapshot: ctx.controller,
-            source_owner: ctx.controller,
-            ..Default::default()
-        };
-        if let Some(obj) = src {
-            record.source_name = obj.name.clone();
-            record.source_core_types = obj.card_types.core_types.clone();
-            record.source_subtypes = obj.card_types.subtypes.clone();
-            record.source_supertypes = obj.card_types.supertypes.clone();
-            record.source_keywords = obj.keywords.clone();
-            record.source_power = obj.power;
-            record.source_toughness = obj.toughness;
-            // CR 202.3d + CR 702.102b: snapshot the source's colors / mana value
-            // through the split-aware authority so a FUSED split spell freezes its
-            // COMBINED colors and mana value for damage-history source filters. For
-            // permanents and non-fused spells these are byte-identical to the prior
-            // `obj.color` / `mana_value_with_x(zone, cost_x_paid)` reads (CR 202.3e:
-            // the non-fused mana-value arm includes the chosen X).
-            record.source_colors = obj.spell_colors();
-            record.source_mana_value = obj.spell_mana_value();
-            record.source_controller_snapshot = obj.controller;
-            record.source_owner = obj.owner;
-            // CR 608.2i: snapshot the source's zone (Stack for a spell,
-            // Battlefield for a permanent) so a zone-discriminating look-back
-            // source filter evaluates against the zone as it was at damage time.
-            record.source_zone = obj.zone;
-        }
-        state.damage_dealt_this_turn.push_back(record);
-        // CR 120.3 + CR 120.6 + CR 702.11b + CR 613.1f: Mark the source as having
-        // actually dealt damage (this branch is gated on `actual_amount > 0`, i.e.
-        // a nonzero amount actually dealt per CR 120.3/120.6, not the would-be
-        // amount of CR 120.1a). Only battlefield-resident sources carry this
-        // sticky flag, since the reset in `apply_zone_exit_cleanup` is gated on a
-        // battlefield exit. When the id is NEWLY inserted, mark layers fully dirty
-        // so `flush_layers` recomputes the materialized keyword set that
-        // `has_hexproof` reads — otherwise the conditional hexproof grant for
-        // "has hexproof if it hasn't dealt damage yet" would never drop at the
-        // targeting check (a Clean `layers_dirty` no-ops `flush_layers`).
-        if state
-            .objects
-            .get(&ctx.source_id)
-            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
-            && state.objects_that_dealt_damage.insert(ctx.source_id)
-        {
-            state.layers_dirty.mark_full();
-        }
-    }
+        events,
+    );
 
     // CR 120.4a treats the redirect as ONE modified damage event. The excess is
     // dealt to the controller by a redirect leg that carries `lifelink_bonus` (this
@@ -1098,10 +1023,13 @@ pub(crate) fn apply_damage_after_replacement(
     // gain.
     if !redirected {
         let lifelink_amount = primary_amount + ctx.lifelink_bonus;
-        if ctx.has_lifelink
-            && lifelink_amount > 0
-            && super::life::apply_life_gain(state, ctx.controller, lifelink_amount, events).is_err()
-        {
+        if gain_lifelink_for_damage_leg(
+            state,
+            ctx.has_lifelink,
+            lifelink_amount,
+            ctx.controller,
+            events,
+        ) {
             // CR 616.1: two or more co-applicable life-gain replacements — the gaining
             // player must choose which applies first. All damage has
             // already been dealt; only this final lifelink gain is deferred.
@@ -1110,6 +1038,212 @@ pub(crate) fn apply_damage_after_replacement(
     }
 
     DamageResult::Applied(actual_amount)
+}
+
+/// CR 120.1: push the `DamageDealt` event and record the damage for "was
+/// dealt damage by" condition queries. `dealt_amount` gates recording (a
+/// nonzero amount actually dealt per CR 120.3/120.6); `record_amount` /
+/// `record_excess` are the lethal-split figures the record carries. Shared by
+/// the synchronous path, the post-loss resume drain, and the combat batch
+/// remnant resume so a paused-then-resumed leg emits and records exactly what
+/// the never-paused leg would.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_damage_dealt_and_record(
+    state: &mut GameState,
+    source_id: ObjectId,
+    source_incarnation: Option<u64>,
+    controller: PlayerId,
+    target: &TargetRef,
+    dealt_amount: u32,
+    record_amount: u32,
+    record_excess: u32,
+    is_combat: bool,
+    events: &mut Vec<GameEvent>,
+) {
+    events.push(GameEvent::DamageDealt {
+        source_id,
+        target: target.clone(),
+        amount: record_amount,
+        is_combat,
+        excess: record_excess,
+        // CR 400.7: the incarnation captured with the damage context, as the
+        // damage record below uses.
+        source_incarnation,
+    });
+
+    // CR 120.1: Record damage for "was dealt damage by" condition queries.
+    if dealt_amount > 0 {
+        let target_controller = match target {
+            TargetRef::Player(player_id) => *player_id,
+            TargetRef::Object(object_id) => state
+                .objects
+                .get(object_id)
+                .map(|object| object.controller)
+                .unwrap_or(controller),
+        };
+        // CR 400.7: Snapshot the target's incarnation at damage time so
+        // subsequent zone-change look-backs do not match a new incarnation.
+        let target_incarnation = match target {
+            TargetRef::Object(object_id) => state
+                .objects
+                .get(object_id)
+                .map(|object| object.incarnation),
+            TargetRef::Player(_) => None,
+        };
+        // CR 608.2i + CR 608.2h: Snapshot the damage source's characteristics at
+        // damage time so look-back source-filter queries ("opponents who were
+        // dealt combat damage by ~ or a Dragon this turn") evaluate against the
+        // source as it was when the damage was dealt — the source may later
+        // change type, leave the battlefield (CR 113.7a LKI), or be removed.
+        let src = state.objects.get(&source_id);
+        // CR 400.7: Use the incarnation captured with the damage context, not
+        // a post-application live lookup. The latter can name a later object
+        // after a replacement pause or zone change.
+        let mut record = DamageRecord {
+            source_id,
+            source_controller: controller,
+            target: target.clone(),
+            target_controller,
+            target_incarnation,
+            source_incarnation,
+            // CR 120.4a: the permanent was dealt only the lethal portion; the
+            // excess is recorded against the controller by the redirect below.
+            amount: record_amount,
+            is_combat,
+            // CR 120.10: Record excess so "was dealt excess damage this turn"
+            // intervening-if conditions can query without re-computing lethal.
+            // Redirected excess is recorded against the controller by the redirect
+            // leg below, so the creature's record reports `primary_excess` (zero
+            // when the rider redirected it).
+            excess: record_excess,
+            // CR 608.2i + CR 608.2h: the obj-derived source snapshot below
+            // overwrites these when the source still exists; the empty/default
+            // tail (Default::default()) covers the source-already-gone case.
+            source_controller_snapshot: controller,
+            source_owner: controller,
+            ..Default::default()
+        };
+        if let Some(obj) = src {
+            record.source_name = obj.name.clone();
+            record.source_core_types = obj.card_types.core_types.clone();
+            record.source_subtypes = obj.card_types.subtypes.clone();
+            record.source_supertypes = obj.card_types.supertypes.clone();
+            record.source_keywords = obj.keywords.clone();
+            record.source_power = obj.power;
+            record.source_toughness = obj.toughness;
+            // CR 202.3d + CR 702.102b: snapshot the source's colors / mana value
+            // through the split-aware authority so a FUSED split spell freezes its
+            // COMBINED colors and mana value for damage-history source filters. For
+            // permanents and non-fused spells these are byte-identical to the prior
+            // `obj.color` / `mana_value_with_x(zone, cost_x_paid)` reads (CR 202.3e:
+            // the non-fused mana-value arm includes the chosen X).
+            record.source_colors = obj.spell_colors();
+            record.source_mana_value = obj.spell_mana_value();
+            record.source_controller_snapshot = obj.controller;
+            record.source_owner = obj.owner;
+            // CR 608.2i: snapshot the source's zone (Stack for a spell,
+            // Battlefield for a permanent) so a zone-discriminating look-back
+            // source filter evaluates against the zone as it was at damage time.
+            record.source_zone = obj.zone;
+        }
+        state.damage_dealt_this_turn.push_back(record);
+        // CR 120.3 + CR 120.6 + CR 702.11b + CR 613.1f: Mark the source as having
+        // actually dealt damage (this branch is gated on `dealt_amount > 0`, i.e.
+        // a nonzero amount actually dealt per CR 120.3/120.6, not the would-be
+        // amount of CR 120.1a). Only battlefield-resident sources carry this
+        // sticky flag, since the reset in `apply_zone_exit_cleanup` is gated on a
+        // battlefield exit. When the id is NEWLY inserted, mark layers fully dirty
+        // so `flush_layers` recomputes the materialized keyword set that
+        // `has_hexproof` reads — otherwise the conditional hexproof grant for
+        // "has hexproof if it hasn't dealt damage yet" would never drop at the
+        // targeting check (a Clean `layers_dirty` no-ops `flush_layers`).
+        if state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
+            && state.objects_that_dealt_damage.insert(source_id)
+        {
+            state.layers_dirty.mark_full();
+        }
+    }
+}
+
+/// CR 702.15b / CR 120.3f: gain the lifelink life for one damage leg. Returns
+/// whether the gain parked on co-applicable life-gain replacements (the prompt
+/// is already in `waiting_for`; the LifeGain arm resumes it). Shared by the
+/// synchronous path and the post-loss resume drain.
+fn gain_lifelink_for_damage_leg(
+    state: &mut GameState,
+    has_lifelink: bool,
+    lifelink_amount: u32,
+    controller: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    has_lifelink
+        && lifelink_amount > 0
+        && super::life::apply_life_gain(state, controller, lifelink_amount, events).is_err()
+}
+
+/// Outcome of [`drain_pending_damage_post_loss`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DamagePostLossDrainOutcome {
+    /// The stashed work fully settled (or nothing was stashed).
+    Settled,
+    /// The lifelink gain parked on a life-gain replacement choice. Nothing is
+    /// re-stashed: the gain is owned by `state.pending_replacement` and the
+    /// LifeGain arm settles it — re-stashing would re-propose a second gain on
+    /// the next answer.
+    PausedForReplacement,
+}
+
+/// CR 120.3f + CR 120.1 + CR 616.1: run a non-combat player-damage leg's
+/// stashed post-loss work (the `DamageDealt` event, the CR 120.1 record, the
+/// lifelink gain) once its life loss fully settles. Called from the
+/// post-replacement funnel after the batch drain retires with no re-park.
+/// `EmitAndRecord` is infallible; a lifelink gain that parks hands ownership
+/// to the pending replacement (matching `PendingCombatLifelink`, whose paused
+/// source is deliberately absent from `remaining`) instead of re-stashing, so
+/// the answering drain never proposes the gain twice.
+pub(crate) fn drain_pending_damage_post_loss(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> DamagePostLossDrainOutcome {
+    use crate::types::game_state::DamagePostLossStage;
+    let Some(stashed) = state.pending_damage_post_loss.take() else {
+        return DamagePostLossDrainOutcome::Settled;
+    };
+    if matches!(stashed.stage, DamagePostLossStage::EmitAndRecord) {
+        // Players have no excess and the excess-redirect rider is
+        // creature-only, so the dealt, recorded, and excess figures are the
+        // post-replacement amount, that same amount, and zero.
+        emit_damage_dealt_and_record(
+            state,
+            stashed.source_id,
+            stashed.source_incarnation,
+            stashed.controller,
+            &TargetRef::Player(stashed.target),
+            stashed.actual_amount,
+            stashed.actual_amount,
+            0,
+            false,
+            events,
+        );
+    }
+    if gain_lifelink_for_damage_leg(
+        state,
+        stashed.has_lifelink,
+        stashed.actual_amount + stashed.lifelink_bonus,
+        stashed.controller,
+        events,
+    ) {
+        // CR 616.1: the gaining player must choose which replacement applies
+        // first. Nothing was applied for this leg. `state.pending_replacement`
+        // is left populated ON PURPOSE — it is the resume's authority, and
+        // this leg is deliberately NOT re-stashed (that would gain the life
+        // twice) — mirroring `drain_combat_lifelink`'s handoff.
+        return DamagePostLossDrainOutcome::PausedForReplacement;
+    }
+    DamagePostLossDrainOutcome::Settled
 }
 
 /// CR 120.3 + CR 616.1e: Build a one-shot, single-target non-combat `DealDamage`

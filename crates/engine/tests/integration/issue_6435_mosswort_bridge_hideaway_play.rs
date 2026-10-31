@@ -544,7 +544,9 @@ struct BlinkedBridge {
 }
 
 /// Pass priority until `done` holds, hiding the first card each hideaway
-/// offers and accepting every optional play.
+/// offers and accepting every optional play. An accepted free play casts
+/// during the resolution (CR 608.2g), so the hidden Shock's target choice
+/// is answered at P1.
 fn resolve_until(runner: &mut GameRunner, done: impl Fn(&GameState) -> bool) {
     for _ in 0..64 {
         if done(runner.state()) {
@@ -557,6 +559,11 @@ fn resolve_until(runner: &mut GameRunner, done: impl Fn(&GameState) -> bool) {
             },
             WaitingFor::OptionalEffectChoice { .. } => {
                 GameAction::DecideOptionalEffect { accept: true }
+            }
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(P1)),
+                }
             }
             other => panic!("unexpected prompt {other:?}"),
         };
@@ -645,22 +652,11 @@ fn blink_bridge_under_its_activation(rehide: bool) -> Option<BlinkedBridge> {
     })
 }
 
-fn has_free_play(state: &GameState, card: ObjectId) -> bool {
-    state.objects[&card]
-        .casting_permissions
-        .iter()
-        .any(|permission| {
-            matches!(
-                permission,
-                CastingPermission::ExileWithAltCost { cost, .. } if cost.is_without_paying_mana()
-            )
-        })
-}
-
 /// CR 113.7a + CR 607.2a + CR 400.7: Bridge's activation waits while Bridge is
 /// blinked, and the returned Bridge's hideaway hides a new card. The activation
 /// is the activating Bridge's, so "the exiled card" is the card that Bridge
-/// hid: it plays that card free and not the new one.
+/// hid: it casts that card free during the resolution (CR 608.2g) and not
+/// the new one.
 #[test]
 fn old_bridge_activation_plays_its_own_card_not_the_new_one() {
     let Some(mut blink) = blink_bridge_under_its_activation(true) else {
@@ -688,16 +684,26 @@ fn old_bridge_activation_plays_its_own_card_not_the_new_one() {
         "the new card is the returned Bridge's look link"
     );
 
+    let life_before = blink.runner.state().players[1].life;
     resolve_until(&mut blink.runner, priority_with_stack(0));
     let state = blink.runner.state();
-    assert!(
-        has_free_play(state, blink.hidden),
-        "the activation plays the card the activating Bridge hid"
+    assert_eq!(
+        state.players[1].life,
+        life_before - 2,
+        "the activation casts the Shock its Bridge hid (P1 takes 2)"
     );
-    assert!(
-        !has_free_play(state, rehidden),
-        "the returned Bridge's card is not the activating Bridge's exiled card"
+    assert_eq!(
+        state.objects[&blink.hidden].zone,
+        Zone::Graveyard,
+        "the cast Shock resolved into its owner's graveyard"
     );
+    assert_eq!(
+        state.objects[&rehidden].zone,
+        Zone::Exile,
+        "the returned Bridge's card is never cast"
+    );
+    assert_no_permissions(&blink.runner, blink.hidden);
+    assert_no_permissions(&blink.runner, rehidden);
 }
 
 /// CR 113.7a + CR 607.2a: as above, but the returned Bridge's hideaway finds
@@ -723,9 +729,18 @@ fn old_bridge_activation_after_an_empty_rehide_still_plays_its_card() {
         "the returned Bridge hid nothing; only the old look link remains"
     );
 
+    let life_before = blink.runner.state().players[1].life;
     resolve_until(&mut blink.runner, priority_with_stack(0));
-    assert!(
-        has_free_play(blink.runner.state(), blink.hidden),
-        "the activation plays the card the activating Bridge hid"
+    let state = blink.runner.state();
+    assert_eq!(
+        state.players[1].life,
+        life_before - 2,
+        "the activation casts the Shock its Bridge hid (P1 takes 2)"
     );
+    assert_eq!(
+        state.objects[&blink.hidden].zone,
+        Zone::Graveyard,
+        "the cast Shock resolved into its owner's graveyard"
+    );
+    assert_no_permissions(&blink.runner, blink.hidden);
 }

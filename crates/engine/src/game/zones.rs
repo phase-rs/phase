@@ -54,6 +54,18 @@ pub(super) fn token_is_outside_battlefield_and_stack(state: &GameState, obj: &Ga
     obj.is_token && obj.zone != Zone::Battlefield && !object_has_stack_residency(state, obj)
 }
 
+/// CR 111.8 movement freeze, Horde-aware: a token outside the battlefield and
+/// stack cannot change zones — EXCEPT a Horde-deck token (`is_horde_deck_token`),
+/// which moves by design in boss-deck games (Events library↔graveyard,
+/// Shredder's Challenge returns, stage-clear exiles). Classic decks never move
+/// their flagged placeholders, so the carve-out is inert there. Single authority
+/// for the three movement guards (`move_to_zone`, `move_to_library_at_index`,
+/// the zone-pipeline primitive); the CR 704.5d sweep (`sba.rs`) pairs the same
+/// flag with the raw outside-battlefield predicate plus the copy rule.
+pub(super) fn token_cannot_change_zones(state: &GameState, obj: &GameObject) -> bool {
+    token_is_outside_battlefield_and_stack(state, obj) && !obj.is_horde_deck_token
+}
+
 /// CR 704.5e + CR 707.10a: A copy of a card in any zone other than the stack or
 /// the battlefield ceases to exist as a state-based action. Distinct from the
 /// token rule (CR 704.5d): a copy of a card is legal on the battlefield
@@ -1577,10 +1589,12 @@ pub(crate) fn move_to_zone_with_entry_flags(
     // flicker ("exile target permanent, then return it") on a token would return
     // it before the cease-to-exist SBA runs. The Stack carve-out matches the
     // CR 111.7 SBA so a copy of a spell still resolves off the stack normally.
+    // (Horde-deck tokens are exempt via `token_cannot_change_zones` — boss-deck
+    // loops move them by design.)
     if state
         .objects
         .get(&object_id)
-        .is_some_and(|obj| token_is_outside_battlefield_and_stack(state, obj))
+        .is_some_and(|obj| token_cannot_change_zones(state, obj))
     {
         return;
     }
@@ -1715,6 +1729,18 @@ pub(crate) fn move_to_zone_with_entry_flags(
         // CR 717.6: Astrotorium-backed cards that would move to any zone other
         // than battlefield, exile, or command move to command instead.
         to = Zone::Command;
+    }
+    // Basic Horde rule (hordemagic.com): "If a permanent is returned to the
+    // Horde's 'hand' and is owned by the Horde, it goes on top of the library."
+    // The Horde has no hand — it plays off the top of its library — so redirect
+    // ANY move that would put a Horde-owned card into a hand to the TOP of that
+    // Horde's library instead (generalizing "permanent" to any card, since the
+    // Horde can never hold a card in hand). Owner-scoped so a survivor's bounced
+    // card is unaffected; `is_horde_seat` is a no-op outside Horde games. The
+    // top-of-library placement is applied after the move completes below.
+    let horde_hand_to_top = to == Zone::Hand && super::horde::is_horde_seat(state, owner);
+    if horde_hand_to_top {
+        to = Zone::Library;
     }
     // CR 400.7 + CR 611.3a: a static may depend on an object's membership in
     // either the leaving or destination zone through its recipient filter,
@@ -1868,6 +1894,15 @@ pub(crate) fn move_to_zone_with_entry_flags(
         &zone_change_record.linked_exile_snapshot,
         &cast_cost_pile,
     );
+
+    // Horde hand→library redirect (above): `add_to_zone` appended to the BOTTOM of
+    // the library, but the rule puts the card on TOP, so move it to the front.
+    if horde_hand_to_top {
+        if let Some(player) = state.players.iter_mut().find(|p| p.id == owner) {
+            player.library.retain(|&id| id != object_id);
+            player.library.push_front(object_id);
+        }
+    }
 
     // CR 603.6c: Drop the leaving permanent from the TriggerIndex. The
     // leaves-battlefield last-known-information scan in
@@ -2726,11 +2761,12 @@ pub fn move_to_library_at_index(
     index: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) {
-    // CR 111.8: A token that has left the battlefield can't move to another zone.
+    // CR 111.8: A token that has left the battlefield can't move to another zone
+    // (Horde-deck tokens exempt — boss-deck loops move them by design).
     if state
         .objects
         .get(&object_id)
-        .is_some_and(|obj| token_is_outside_battlefield_and_stack(state, obj))
+        .is_some_and(|obj| token_cannot_change_zones(state, obj))
     {
         return;
     }

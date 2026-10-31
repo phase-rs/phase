@@ -260,6 +260,7 @@ const FORMAT_SHAPES: Record<BuiltInGameFormat, DeckShape> = {
   Freeform: "constructed",
   FreeformCommander: "commander",
   Dandan: "mainOnly",
+  Horde: "constructed",
 };
 
 describe("fetchDeckFromUrl — format coverage", () => {

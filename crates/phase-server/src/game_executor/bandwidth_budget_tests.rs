@@ -701,7 +701,10 @@ impl ScriptedGame {
             | WaitingFor::PayAmountChoice { .. }
             | WaitingFor::RetargetChoice { .. }
             | WaitingFor::CombatTaxPayment { .. }
-            | WaitingFor::PhyrexianPayment { .. } => panic!(
+            | WaitingFor::PhyrexianPayment { .. }
+            // Turtle Team-Up hero-choice prompt: unreachable in this scripted
+            // non-Horde game; fails loudly with the other unscripted prompts.
+            | WaitingFor::HeroEventChoice { .. } => panic!(
                 "unscripted prompt WaitingFor::{} on turn {}; extend the script deliberately",
                 self.runner.waiting_for_kind(),
                 state.turn_number

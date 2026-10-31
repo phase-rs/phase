@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
 use crate::game::bracket_estimate::CommanderBracketTier;
-use crate::types::card::CardFace;
+use crate::types::card::{CardFace, Rarity, TokenImageRef};
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
@@ -645,6 +645,464 @@ pub fn momir_emblem_ability() -> crate::types::ability::AbilityDefinition {
     ability
 }
 
+/// Horde Magic display name for the game-start Horde emblem chip.
+const HORDE_EMBLEM_SOURCE_NAME: &str = "The Horde";
+
+/// The Horde's game-start command-zone emblem static: a single continuous
+/// ability that grants every creature the Horde controls haste and (when the
+/// ruleset forces it) "attacks each combat if able".
+///
+/// Both grants are Layer 6 ability-adding continuous effects (CR 613.1f /
+/// CR 613.3): `AddKeyword(Haste)` (CR 702.10b) and, gated on
+/// `horde_creatures_forced_attackers`, a grafted `StaticMode::MustAttack`
+/// (CR 508.1d) via `GrantStaticAbility`. The outer static is controlled by the
+/// Horde, so its `ControllerRef::You` affected-filter resolves to "creatures the
+/// Horde controls" — a live read, so a creature that changes controller stops
+/// receiving both grants. Mirrors `create_emblem::ninja_pump_static`'s
+/// command-zone anthem pattern.
+fn horde_emblem_static(forced_attackers: bool) -> crate::types::ability::StaticDefinition {
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::statics::StaticMode;
+
+    let mut modifications = vec![
+        // CR 702.10b: haste — the Horde's creatures can attack the turn they
+        // enter and ignore summoning sickness for tap abilities.
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste,
+        },
+    ];
+    if forced_attackers {
+        // CR 508.1d: graft "attacks each combat if able" onto each affected
+        // creature as a static ability of its own (self-scoped), so the
+        // declare-attackers validation forces it to attack. SelfRef-scoped:
+        // `affected: None` is game-wide under the matcher's authority
+        // (`static_ability_match_applies` skips the filter when absent), so a
+        // bare `StaticDefinition::new` graft would force EVERY creature to
+        // attack, including the survivors' board.
+        modifications.push(ContinuousModification::GrantStaticAbility {
+            definition: Box::new(
+                StaticDefinition::new(StaticMode::MustAttack).affected(TargetFilter::SelfRef),
+            ),
+        });
+    }
+
+    StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))
+        .modifications(modifications)
+        .description(
+            "Creatures the Horde controls have haste and attack each combat if able.".to_string(),
+        )
+}
+
+/// The Horde combat rule "only Horde creatures with Defender can block": a Layer 6
+/// `GrantStaticAbility` that gives every NON-Defender creature the Horde controls a
+/// `CantBlock` static (CR 509.1b). The Horde is an attacking force — its creatures
+/// must attack and don't hold the line — so this pairs with the forced-attackers
+/// grant as one aggressive-Horde combat package, gated on the same ruleset axis
+/// (`horde_creatures_forced_attackers`). A Defender creature (which can't attack,
+/// CR 702.3b) is excluded by the `WithoutKeyword(Defender)` affected-filter, so it
+/// remains the Horde's only legal blocker. `ControllerRef::You` resolves against the
+/// emblem's controller (the Horde), so this is a live "creatures the Horde controls"
+/// read, mirroring [`horde_emblem_static`].
+fn horde_no_block_static() -> crate::types::ability::StaticDefinition {
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, FilterProp, StaticDefinition, TargetFilter,
+        TypedFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::statics::StaticMode;
+
+    StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::WithoutKeyword {
+                    value: Keyword::Defender,
+                }]),
+        ))
+        // SelfRef-scoped (see `horde_emblem_static`): a bare `new` graft is
+        // game-wide under the matcher's authority and would stop EVERY
+        // creature from blocking, including the survivors'.
+        .modifications(vec![ContinuousModification::GrantStaticAbility {
+            definition: Box::new(
+                StaticDefinition::new(StaticMode::CantBlock).affected(TargetFilter::SelfRef),
+            ),
+        }])
+        .description(
+            "Non-Defender creatures the Horde controls can't block (only Defenders block)."
+                .to_string(),
+        )
+}
+
+/// Grant the Horde seat its game-start setup: the command-zone emblem (haste on
+/// its creatures always, plus — under `forced_attackers` — the aggressive-combat
+/// package of "attacks each combat if able" and "only Defenders can block") and,
+/// under the advanced `HordePostCombatActivation::OncePerPermanent` rule, infinite
+/// mana (so its post-combat activation costs are payable). Single authority for
+/// Horde game-start setup, mirroring the Momir emblem grant; `forced_attackers`
+/// comes from the ruleset, and the infinite-mana grant reads the ruleset directly.
+pub fn grant_horde_emblem(state: &mut GameState, horde_seat: PlayerId, forced_attackers: bool) {
+    // The aggressive-Horde combat package: haste + forced attackers (in
+    // `horde_emblem_static`) and, under the same forced-attackers axis, the
+    // "only Defenders block" restriction ([`horde_no_block_static`]).
+    let mut statics = vec![horde_emblem_static(forced_attackers)];
+    if forced_attackers {
+        statics.push(horde_no_block_static());
+    }
+    let emblem_id = crate::game::effects::create_emblem::grant_emblem(
+        state,
+        horde_seat,
+        statics,
+        Vec::new(),
+        Vec::new(),
+    );
+    // CR 114.5: give the emblem chip a display-only name (it has no art of its
+    // own); `grant_emblem` leaves `emblem_source` unset.
+    if let Some(obj) = state.objects.get_mut(&emblem_id) {
+        obj.emblem_source = Some(crate::game::game_object::EmblemSource {
+            name: HORDE_EMBLEM_SOURCE_NAME.to_string(),
+            printed_ref: None,
+        });
+    }
+
+    // Hordemagic advanced rule: "Horde has infinite mana (for … activation
+    // costs)." Only the decks that actually activate abilities post-combat need
+    // it, so gate on the ruleset axis. Reuses the standard unbounded-mana
+    // machinery — mark the axes, then `mana_payment::refill_infinite_mana` (run
+    // after every action) keeps the pool topped so activation mana costs are
+    // payable. The mark is PERSISTENT: the step-end drain exempts seats under
+    // `horde::has_horde_infinite_mana` from both the pool-empty and the axis
+    // de-realization, so the mana survives to the post-combat queue. Real
+    // non-mana costs (tap/sacrifice) are still paid normally.
+    if state.format_config.horde_ruleset.as_ref().is_some_and(|r| {
+        r.post_combat_activation
+            == crate::types::format::HordePostCombatActivation::OncePerPermanent
+    }) {
+        state.mark_unbounded_loop(
+            horde_seat,
+            &crate::game::mana_payment::INFINITE_MANA_AXES,
+            &crate::game::mana_payment::INFINITE_MANA_AXES,
+        );
+        crate::game::mana_payment::refill_infinite_mana(state);
+    }
+}
+
+/// Create a non-token Horde library card face up in the Horde seat's library.
+///
+/// Mirrors `create_scheme_deck_card`, but the Horde's engine-supplied deck IS
+/// its library (not the command-zone scheme deck): the card sits face up in the
+/// owner's `Player::library` with no scheme flag, exactly like any ordinary
+/// library card, so `horde::maybe_reveal_next` can reveal and free-cast it. This
+/// is the single Horde authority for library-card creation; it reuses
+/// `create_object_from_card_face` (the shared library-object building block)
+/// rather than duplicating the create + `apply_card_face_to_object` steps.
+pub fn create_horde_library_card(
+    state: &mut GameState,
+    card_face: &CardFace,
+    rarity_override: Option<Rarity>,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    let obj_id = create_object_from_card_face(state, card_face, owner);
+    // Record the card's rarity so a rarity-based wave
+    // (`WaveTermination::UntilRarityAtLeast`, the D&D Horde) can tell when a
+    // reveal-and-resolve wave ends. Prefer the deck's PINNED rarity: the runtime
+    // `card-data.json` export does not carry rarity (`CardFace::rarities` is
+    // always empty), so without a pin the wave would never find an uncommon-or-
+    // better card and would reveal the whole library. Fall back to the card
+    // face's lowest printing rarity if a deck ever relies on DB-supplied rarity.
+    if let Some(obj) = state.objects.get_mut(&obj_id) {
+        obj.horde_library_rarity =
+            rarity_override.or_else(|| card_face.rarities.iter().min().copied());
+    }
+    obj_id
+}
+
+/// Create a predefined token in the Horde seat's library from a token body.
+///
+/// CR 111: a token can never be cast, so Cyberman/Dalek tokens wait in the
+/// Horde's library and enter the battlefield when revealed
+/// (`horde::reveal_library_token`). The object is stamped `is_token` and
+/// `is_horde_deck_token` (the CR 704.5d cease-to-exist exemption plus the
+/// CR 111.8 movement-freeze carve-out — boss-deck loops move these tokens)
+/// and carries the body's full
+/// characteristics — P/T, card types, colors, keywords — on both the live and
+/// `base_*` fields so `reveal_library_token`'s `GameObject → TokenCharacteristics`
+/// projection round-trips the body faithfully. `TokenCharacteristics` has no
+/// channel for non-keyword abilities, so keyword-only / vanilla bodies (Cyberman
+/// 2/2 vanilla; Dalek 3/3 with Menace) round-trip fully.
+/// The predefined-token identity to stamp on an id-pinned Horde library token,
+/// so its catalog `rules_text` abilities can be recovered on reveal. Prefer the
+/// preset's own `token_image_ref` (correct art + preset id, matching how ordinary
+/// token creation resolves identity); if the catalog entry has none, synthesize a
+/// minimal ref keyed on the preset id — the only field the reveal-time injection
+/// needs to find the preset again.
+pub(crate) fn horde_token_image_ref(
+    preset: &crate::game::token_presets::TokenPreset,
+) -> TokenImageRef {
+    preset
+        .token_image_ref
+        .clone()
+        .unwrap_or_else(|| TokenImageRef {
+            scryfall_id: preset.id.clone(),
+            scryfall_oracle_id: None,
+            face_name: None,
+            preset_id: preset.id.clone(),
+        })
+}
+
+/// A token whose printed rules carry a non-keyword (triggered/activated) ability
+/// is stamped with its preset identity via `token_image_ref` (`None` for bodies
+/// without one); on reveal the apply path re-materializes the preset's catalog
+/// abilities from that identity (see `horde::reveal_library_token`).
+pub fn create_horde_library_token(
+    state: &mut GameState,
+    body: &crate::types::proposed_event::TokenCharacteristics,
+    token_image_ref: Option<TokenImageRef>,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    let obj_id = create_object(
+        state,
+        CardId(0),
+        owner,
+        body.display_name.clone(),
+        Zone::Library,
+    );
+    let obj = state.objects.get_mut(&obj_id).expect("just created");
+    // CR 111.1: mark as a token; CR 704.5d exemption while library-resident.
+    obj.is_token = true;
+    obj.is_horde_deck_token = true;
+    // CR 111.4: the token's predefined identity, so `reveal_library_token` can
+    // recover its catalog `rules_text` abilities on the apply path.
+    obj.token_image_ref = token_image_ref.clone();
+    // CR 111.10: link the placeholder to its exact preset. The reveal drives a
+    // `CreateToken` with this object as `source_id`, and without the link the
+    // create path resolves identity by body alone — ambiguous for same-name
+    // families ("Ooze" has six bodies; same-body reprints share Oracle text, so
+    // the body match installs from a sibling printing and the reveal's pinned
+    // re-inject double-installs the trigger). With the sole-link fast path the
+    // create path resolves the pinned preset (or nothing, if the body
+    // round-tripped lossy) and the revealed token carries exactly one install.
+    obj.source_related_token_ids = token_image_ref
+        .map(|image_ref| vec![image_ref.preset_id])
+        .unwrap_or_default();
+    obj.power = body.power;
+    obj.toughness = body.toughness;
+    obj.base_power = body.power;
+    obj.base_toughness = body.toughness;
+    obj.card_types = crate::types::card_type::CardType {
+        supertypes: body.supertypes.clone(),
+        core_types: body.core_types.clone(),
+        subtypes: body.subtypes.clone(),
+    };
+    obj.base_card_types = obj.card_types.clone();
+    obj.base_name = body.display_name.clone();
+    obj.color = body.colors.clone();
+    obj.base_color = body.colors.clone();
+    obj.keywords = body.keywords.clone();
+    obj.base_keywords = body.keywords.clone();
+    obj_id
+}
+
+/// Build the Horde seat's engine-supplied library for a challenge deck and
+/// shuffle it deterministically from the game seed.
+///
+/// Seat-scoped like the Archenemy scheme deck (`load_shared_scheme_deck`), NOT
+/// all-seat like Momir: only the Horde's library is replaced; survivors keep the
+/// decks they submitted. Non-token names are resolved from the card DB (any name
+/// that fails to resolve panics — the decklist is a fixed engine resource and a
+/// silent miss would ship a short library); token names are resolved from the
+/// predefined-token catalog. CR 103.3: the assembled library is then shuffled
+/// with `state.rng` so reveals are random but reproducible from the game seed.
+pub fn load_horde_library(
+    state: &mut GameState,
+    db: &CardDatabase,
+    horde_seat: PlayerId,
+    deck: crate::types::format::ChallengeDeck,
+) {
+    use crate::types::format::ChallengeDeck;
+
+    // Only rarity-wave decks pin per-card rarity (the D&D Horde); every other
+    // deck terminates its wave on a different axis (fixed count / nontoken count)
+    // and never consults rarity, so it resolves to `None`.
+    fn no_pinned_rarity(_name: &str) -> Option<Rarity> {
+        None
+    }
+
+    let (nontokens, tokens, card_rarity): (_, _, fn(&str) -> Option<Rarity>) = match deck {
+        ChallengeDeck::CybermanHorde => (
+            crate::game::decks::cyberman_horde::CYBERMAN_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::cyberman_horde::CYBERMAN_HORDE_TOKENS,
+            no_pinned_rarity,
+        ),
+        ChallengeDeck::DndHorde => (
+            crate::game::decks::dnd_horde::DND_OOZE_NONTOKEN_CARDS,
+            crate::game::decks::dnd_horde::DND_OOZE_TOKENS,
+            crate::game::decks::dnd_horde::card_rarity,
+        ),
+        ChallengeDeck::ZombiesHorde => (
+            crate::game::decks::zombies_horde::ZOMBIES_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::zombies_horde::ZOMBIES_HORDE_TOKENS,
+            no_pinned_rarity,
+        ),
+        ChallengeDeck::SliversHorde => (
+            crate::game::decks::slivers_horde::SLIVERS_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::slivers_horde::SLIVERS_HORDE_TOKENS,
+            no_pinned_rarity,
+        ),
+        ChallengeDeck::HumansGodzillaHorde => (
+            crate::game::decks::humans_godzilla_horde::HUMANS_GODZILLA_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::humans_godzilla_horde::HUMANS_GODZILLA_HORDE_TOKENS,
+            no_pinned_rarity,
+        ),
+        // LOTR "Two Towers" — Sauron. Rarity is pinned per card for the uncommon+
+        // wave (the runtime DB carries no rarity); revealed Orc Army tokens amass
+        // (see `horde::maybe_reveal_next`).
+        ChallengeDeck::SauronHorde => (
+            crate::game::decks::sauron_horde::SAURON_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::sauron_horde::SAURON_HORDE_TOKENS,
+            crate::game::decks::sauron_horde::card_rarity,
+        ),
+        // LOTR "Two Towers" — Saruman. Rarity pinned per card for the uncommon+
+        // wave; revealed Orc Army tokens amass (see `horde::maybe_reveal_next`).
+        ChallengeDeck::SarumanHorde => (
+            crate::game::decks::saruman_horde::SARUMAN_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::saruman_horde::SARUMAN_HORDE_TOKENS,
+            crate::game::decks::saruman_horde::card_rarity,
+        ),
+        // The Two Towers picker identity: seat 0's library IS Sauron's (Saruman is
+        // the co-horde loaded into seat 1 via `horde_decks()`).
+        ChallengeDeck::LotrTwoTowersHorde => (
+            crate::game::decks::sauron_horde::SAURON_HORDE_NONTOKEN_CARDS,
+            crate::game::decks::sauron_horde::SAURON_HORDE_TOKENS,
+            crate::game::decks::sauron_horde::card_rarity,
+        ),
+        // Turtle Team-Up: the 27-card event deck IS the Boss library (all
+        // tokens — the enemy deck has no card-DB cards). The 11-card Boss
+        // deck loads separately as the face-down Boss pile (see
+        // `boss::load_boss_deck`), not into the library.
+        ChallengeDeck::TurtleTeamUpHorde => (
+            crate::game::decks::turtle_teamup_horde::TURTLE_TEAMUP_NONTOKEN_CARDS,
+            crate::game::decks::turtle_teamup_horde::TURTLE_TEAMUP_EVENT_DECK_TOKENS,
+            no_pinned_rarity,
+        ),
+    };
+
+    // REPLACE, don't append: the Horde seat is an engine-supplied seat, but in a
+    // real game it is an AI seat that was auto-assigned a deck, which
+    // `load_deck_into_state` already loaded into this library. Clear it (and drop
+    // the now-orphaned objects) so the Horde's library ends up EXACTLY the
+    // challenge deck — matching this function's contract.
+    let stale_library: Vec<crate::types::identifiers::ObjectId> = state
+        .players
+        .iter()
+        .find(|p| p.id == horde_seat)
+        .map(|p| p.library.iter().copied().collect())
+        .unwrap_or_default();
+    for id in &stale_library {
+        state.objects.remove(id);
+    }
+    if let Some(player) = state.players.iter_mut().find(|p| p.id == horde_seat) {
+        // allow-raw-zone: pregame setup swaps the stale library for the fixed challenge deck; begins from outside the game, not a zone move (CR 400.11).
+        player.library.clear();
+    }
+
+    // CR 400.2 + CR 103.3: expand BOTH groups into one combined entry list
+    // and shuffle it BEFORE object allocation (a Placement draw, like
+    // `shuffled_entry_faces` for hidden-order decks). Sequential `ObjectId`s
+    // plus the viewer-visible pile order would otherwise let an observer sort
+    // by ID and recover the pre-shuffle assembly order.
+    enum HordeLibraryEntry {
+        Card {
+            // Boxed: `CardFace` dwarfs the token variant (`clippy::large_enum_variant`).
+            face: Box<CardFace>,
+            pinned: Option<Rarity>,
+        },
+        Token {
+            body: &'static crate::types::proposed_event::TokenCharacteristics,
+            image_ref: Option<TokenImageRef>,
+        },
+    }
+    let mut assembled: Vec<HordeLibraryEntry> = Vec::new();
+    for (count, name) in nontokens {
+        let face = db
+            .get_face_by_name(name)
+            .unwrap_or_else(|| {
+                panic!("Horde deck {deck:?} non-token card '{name}' must resolve in the card DB")
+            })
+            .clone();
+        let pinned = card_rarity(name);
+        for _ in 0..*count {
+            assembled.push(HordeLibraryEntry::Card {
+                face: Box::new(face.clone()),
+                pinned,
+            });
+        }
+    }
+
+    for (count, selector) in tokens {
+        // Resolve a token selector by display name first (the Cyberman deck's
+        // uniquely-named "Cyberman"/"Dalek"), then fall back to a preset id. The
+        // id path is required for generic subtype tokens whose display name maps
+        // to multiple distinct bodies (the D&D Horde's "Ooze" — six same-name
+        // bodies in the catalog make name lookup ambiguous, so it pins the id).
+        // Prefer a preset id (the path generic subtype tokens must use — the D&D
+        // Horde's "Ooze" maps to six same-name bodies, so a name lookup is
+        // ambiguous), then a unique display name (Cyberman/Dalek). An id-pinned
+        // token also carries its preset IDENTITY onto the library object, so the
+        // reveal can materialize the preset's catalog abilities (the
+        // self-replicating Ooze's dies trigger). Name-resolved tokens are uniquely
+        // named vanilla/keyword bodies with no catalog abilities and pass `None`.
+        let (body, token_image_ref): (
+            &'static crate::types::proposed_event::TokenCharacteristics,
+            Option<TokenImageRef>,
+        ) = if let Some(preset) = crate::game::token_presets::known_token_preset_by_id(selector) {
+            (&preset.body, Some(horde_token_image_ref(preset)))
+        } else if let Some(body) = crate::game::token_presets::known_token_body_by_name(selector) {
+            (body, None)
+        } else {
+            panic!(
+                "Horde deck {deck:?} token selector '{selector}' must resolve to a unique body \
+                 (by display name or preset id)"
+            )
+        };
+        for _ in 0..*count {
+            assembled.push(HordeLibraryEntry::Token {
+                body,
+                image_ref: token_image_ref.clone(),
+            });
+        }
+    }
+
+    assembled.shuffle(
+        state
+            .rng
+            .draw(crate::types::game_state::RandomDraw::Placement),
+    );
+    for entry in assembled {
+        match entry {
+            HordeLibraryEntry::Card { face, pinned } => {
+                create_horde_library_card(state, &face, pinned, horde_seat);
+            }
+            HordeLibraryEntry::Token { body, image_ref } => {
+                create_horde_library_token(state, body, image_ref, horde_seat);
+            }
+        }
+    }
+
+    // CR 103.3: shuffle the assembled Horde library. Uses `state.rng` (seeded
+    // from the game seed) so the reveal order is random yet reproducible.
+    let GameState { players, rng, .. } = state;
+    if let Some(player) = players.iter_mut().find(|p| p.id == horde_seat) {
+        let placement = rng.draw(crate::types::game_state::RandomDraw::Placement);
+        crate::util::im_ext::shuffle_vector(&mut player.library, placement);
+    }
+}
+
 /// Create a commander GameObject from a CardFace, placing it in the command zone.
 pub fn create_commander_from_card_face(
     state: &mut GameState,
@@ -1103,7 +1561,16 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             )
             .collect()
     };
+    // Horde Magic: a Horde seat's submitted deck is wholly replaced by its
+    // engine-supplied challenge deck (`load_horde_library` below), so its
+    // payload `commander` slot is an inert placeholder — placing it would seat
+    // a phantom commander the Horde never owns. Skip the same seats whose
+    // libraries are replaced.
+    let horde_seats = crate::game::horde::horde_seats(state);
     for (owner, entries) in commander_decks {
+        if horde_seats.contains(&owner) {
+            continue;
+        }
         for entry in entries {
             for _ in 0..entry.count {
                 create_commander_from_card_face(state, &entry.card, owner);
@@ -1201,6 +1668,37 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                     printed_ref: None,
                 });
             }
+        }
+    }
+
+    // Horde Magic: grant the Horde seat its game-start command-zone emblem
+    // (haste + forced attackers on the Horde's creatures). Mirrors the Momir
+    // emblem grant above; scoped to the single Horde seat, unlike Momir's
+    // all-seat loop, because only the Horde controls Horde creatures.
+    if state.format_config.format == crate::types::format::GameFormat::Horde {
+        let forced_attackers = state
+            .format_config
+            .horde_ruleset
+            .as_ref()
+            .is_some_and(|r| r.horde_creatures_forced_attackers);
+        // Every Horde seat gets the emblem — a two-Horde deck (LOTR Two Towers) has
+        // two commanders, each controlling its own creatures.
+        for horde_seat in crate::game::horde::horde_seats(state) {
+            grant_horde_emblem(state, horde_seat, forced_attackers);
+        }
+    }
+
+    // Turtle Team-Up: load the shuffled Boss pile and deploy stage 1. Beside
+    // the emblem grant because it is the same kind of game-start setup; gated
+    // on the ruleset's `boss_stages` axis so every classic deck skips it. Deck
+    // loading is event-free by design (no consumer exists yet at setup), so
+    // stage-1 deploy events (Boss zone moves, Leatherhead's potential
+    // enter-gain) go to a throwaway vec — the STATE (pile, deployed Bosses,
+    // grafted abilities, life) is what setup must produce.
+    if crate::game::horde::has_boss_stages(state) {
+        if let Some(&horde_seat) = crate::game::horde::horde_seats(state).first() {
+            let mut setup_events = Vec::new();
+            crate::game::boss::setup_boss_game(state, horde_seat, &mut setup_events);
         }
     }
 
@@ -1398,7 +1896,35 @@ pub fn load_and_hydrate_decks(
     };
     load_deck_into_state(state, payload);
     match db {
-        Some(db) => hydrate_loaded_game_from_card_db(state, db),
+        Some(db) => {
+            // Horde Magic: inject the Horde seat's engine-supplied library
+            // (~300 cards) BEFORE rehydration so the freshly-created non-token
+            // cards get their DFC `back_face`/layout hydrated alongside every
+            // other object. Seat-scoped (like the Archenemy scheme deck),
+            // unlike Momir's all-seat overwrite: survivors keep their submitted
+            // decks. Library-resident tokens carry no `printed_ref`, so
+            // rehydration skips them and their materialized bodies are
+            // preserved. `load_horde_library` shuffles the Horde library itself
+            // (CR 103.3) — `load_deck_into_state`'s per-player shuffle already
+            // ran, before these cards existed.
+            if state.format_config.format == crate::types::format::GameFormat::Horde {
+                // Load each Horde seat's own library: seat i gets `horde_decks()[i]`
+                // (the primary `challenge_deck` for the archenemy seat, then each
+                // co-horde for a two-Horde deck like LOTR Two Towers). `horde_seats`
+                // and `horde_decks` are both in seat order, so they zip 1:1.
+                let horde_seats = crate::game::horde::horde_seats(state);
+                let horde_decks: Vec<crate::types::format::ChallengeDeck> = state
+                    .format_config
+                    .horde_ruleset
+                    .as_ref()
+                    .map(|r| r.horde_decks())
+                    .unwrap_or_default();
+                for (horde_seat, deck) in horde_seats.into_iter().zip(horde_decks) {
+                    load_horde_library(state, db, horde_seat, deck);
+                }
+            }
+            hydrate_loaded_game_from_card_db(state, db);
+        }
         None => {
             // Latch the warning so a long-running desktop session that
             // starts many games doesn't spam the log on each match.

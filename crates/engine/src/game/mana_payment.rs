@@ -110,8 +110,12 @@ fn static_source_reads_unspent_mana(state: &GameState) -> bool {
 /// `player.mana_pool`, so a flagged player can pay any cost without divergence
 /// between "shows castable" and "actually pays".
 ///
-/// NOT a rules-legal effect — a developer convenience gated behind the same
-/// debug-action permission as every other `DebugAction`.
+/// Two legitimate producers flag players for this top-up (see
+/// [`GameState::mark_unbounded_loop`]): the developer-convenience
+/// `DebugAction::SetInfiniteMana` toggle, and the production Horde advanced rule
+/// (`deck_loading::grant_horde_emblem` under `HordePostCombatActivation::OncePerPermanent`,
+/// "the Horde has infinite mana"). It is not a rules-legal effect a normal player
+/// can invoke; it is driven either by that debug action or by the Horde ruleset.
 pub fn refill_infinite_mana(state: &mut GameState) {
     // Flagged = players whose unbounded-resource set names at least one Mana axis,
     // paired with the exact mana type(s) that set records.

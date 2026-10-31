@@ -1161,6 +1161,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
+            | WaitingFor::HeroEventChoice { .. }
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::NamedChoice { .. }
@@ -6424,6 +6425,130 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
         (
+            WaitingFor::HeroEventChoice {
+                player,
+                event: kind,
+                event_id,
+                cards,
+                count,
+                up_to,
+                min,
+                remaining_heroes,
+                answers,
+                copies_pending,
+                fired_baxters,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            // Turtle Team-Up hero-choice answer: count + distinctness + offer
+            // membership, mirroring DiscardChoice. No zone-freshness check —
+            // answers don't apply until the queue drains, so nothing moves
+            // between the prompt and the answer; membership in the frozen
+            // offer suffices.
+            if up_to && chosen.len() > count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose at most {} card(s), got {}",
+                    count,
+                    chosen.len()
+                )));
+            }
+            if up_to && chosen.len() < min {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose at least {} card(s), got {}",
+                    min,
+                    chosen.len()
+                )));
+            }
+            if !up_to && chosen.len() != count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose exactly {} card(s), got {}",
+                    count,
+                    chosen.len()
+                )));
+            }
+            let unique_chosen: HashSet<ObjectId> = chosen.iter().copied().collect();
+            if unique_chosen.len() != chosen.len() {
+                return Err(EngineError::InvalidAction(
+                    "Selected cards must be distinct".to_string(),
+                ));
+            }
+            for card_id in &chosen {
+                if !cards.contains(card_id) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected card not in eligible set".to_string(),
+                    ));
+                }
+            }
+
+            // The Boss seat owns the resolving Event (Events are never owned
+            // by a hero), so ownership re-derives the seat for application.
+            let Some(horde) = state.objects.get(&event_id).map(|o| o.owner) else {
+                return Err(EngineError::InvalidAction(
+                    "Hero-event source left the game".to_string(),
+                ));
+            };
+
+            let events_before_effect = events.len();
+            let progress = super::boss::answer_hero_event_choice(
+                state,
+                horde,
+                event_id,
+                kind,
+                player,
+                chosen,
+                remaining_heroes,
+                answers,
+                fired_baxters,
+                copies_pending,
+                events,
+            );
+            if matches!(progress, super::boss::HeroEventProgress::Prompted) {
+                // The queue advanced (or a nested replacement prompt took
+                // over mid-batch): defer this answer's observer triggers
+                // across the pause, exactly like the discard pause path.
+                defer_observer_triggers_for_paused_choice(state, events, events_before_effect);
+                return Ok(action_result_outcome(events, state.waiting_for.clone()));
+            }
+            let events_after_move = events.len();
+
+            // The Event was the Horde's action, so priority returns to the
+            // active player (not the answering hero) — the post-spell shape —
+            // and any parked chain behind the prompt (Savanti's trigger rest)
+            // resumes through the continuation drain.
+            let active = state.active_player;
+            let waiting_for = finish_with_continuation(state, active, events);
+
+            // Batch this resolution's observer triggers (dies, discards, life)
+            // across the choice pause, like the DiscardChoice completion: the
+            // move slice plus the continuation slice drain together.
+            for (start, end) in [
+                (events_before_effect, events_after_move),
+                (events_after_move, events.len()),
+            ] {
+                if end <= start {
+                    continue;
+                }
+                let trigger_events: Vec<GameEvent> = events[start..end]
+                    .iter()
+                    .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                    .cloned()
+                    .collect();
+                if !trigger_events.is_empty() {
+                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                }
+            }
+
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+                }
+                return Ok(ResolutionChoiceOutcome::WaitingForWithInlineTriggers(
+                    waiting_for,
+                ));
+            }
+            ResolutionChoiceOutcome::WaitingFor(waiting_for)
+        }
+        (
             WaitingFor::EffectZoneChoice {
                 player,
                 cards,
@@ -10088,6 +10213,17 @@ pub(crate) fn run_batch_completion(
         BatchCompletion::MilledDeliveryComplete { player_id, cards } => {
             effects::mill::complete_mill_delivery(state, player_id, cards, events)
         }
+        BatchCompletion::HordeMillFromLossDeliveryComplete {
+            player_id,
+            milled,
+            legendary_cohort,
+        } => crate::game::horde::complete_advanced_mill_from_loss(
+            state,
+            player_id,
+            milled,
+            legendary_cohort,
+            events,
+        ),
         BatchCompletion::ReturnAsAuraNoTargetComplete { source_id } => {
             effects::return_as_aura::complete_no_target_delivery(source_id, events)
         }

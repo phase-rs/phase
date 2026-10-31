@@ -803,8 +803,10 @@ pub(crate) fn zone_move_is_primitive_noop(
     object: &GameObject,
     to: Zone,
 ) -> bool {
-    // CR 111.8: a token outside the battlefield (and not stack-resident) stays put.
-    zones::token_is_outside_battlefield_and_stack(state, object)
+    // CR 111.8: a token outside the battlefield (and not stack-resident) stays
+    // put — except a Horde-deck token, which moves by design in boss-deck
+    // games (see `zones::token_cannot_change_zones`).
+    zones::token_cannot_change_zones(state, object)
         // CR 400.6 + CR 603.6d: Battlefield -> Battlefield is no entry event.
         || (object.zone == Zone::Battlefield && to == Zone::Battlefield)
 }

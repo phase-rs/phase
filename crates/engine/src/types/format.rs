@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::database::legality::LegalityFormat;
+use crate::types::card::Rarity;
 use crate::types::custom_format::{
     custom_format_registry, passes_legacy_axis_gate, CommandZoneMode, CustomFormatId,
     CustomFormatRules, FormatConfigError,
@@ -152,6 +153,16 @@ pub enum GameFormat {
     /// Create a token that's a copy of a creature card with mana value X chosen
     /// at random."
     Momir,
+    /// Horde Magic: a cooperative variant where a team of survivors faces a
+    /// single self-piloting "Horde" deck. Casual community format (not
+    /// DCI/CR-sanctioned); it reuses CR mechanisms the engine already models —
+    /// shared team turns (CR 805) for the survivor team and the one-vs-many
+    /// topology used by Archenemy (CR 904). The Horde has no life total, takes
+    /// scripted "reveal and resolve" turns, and loses by decking out. Which
+    /// concrete deck is played and how each Horde turn reveals cards are carried
+    /// by `FormatConfig::horde_ruleset` (`HordeRuleset`), never by sibling
+    /// `GameFormat` variants.
+    Horde,
     /// CR 903.13: Commander Draft — a draft (CR 903.13b) followed by a
     /// multiplayer Commander game (CR 903.13a). Deck construction follows
     /// CR 903.5 with CR 903.13f's exceptions: at least 60 cards with no
@@ -239,6 +250,7 @@ impl std::str::FromStr for GameFormat {
             "Planechase" => Ok(GameFormat::Planechase),
             "PlanechaseCommander" => Ok(GameFormat::PlanechaseCommander),
             "Momir" => Ok(GameFormat::Momir),
+            "Horde" => Ok(GameFormat::Horde),
             "CommanderDraft" => Ok(GameFormat::CommanderDraft),
             "Freeform" => Ok(GameFormat::Freeform),
             "FreeformCommander" => Ok(GameFormat::FreeformCommander),
@@ -279,6 +291,7 @@ impl std::fmt::Display for GameFormat {
             GameFormat::Planechase => write!(f, "Planechase"),
             GameFormat::PlanechaseCommander => write!(f, "PlanechaseCommander"),
             GameFormat::Momir => write!(f, "Momir"),
+            GameFormat::Horde => write!(f, "Horde"),
             GameFormat::CommanderDraft => write!(f, "CommanderDraft"),
             GameFormat::Freeform => write!(f, "Freeform"),
             GameFormat::FreeformCommander => write!(f, "FreeformCommander"),
@@ -545,6 +558,899 @@ pub enum FormatTopology {
     },
 }
 
+/// Which concrete self-piloting Horde deck a `GameFormat::Horde` game uses.
+///
+/// This is the deck-identity axis of the Horde ruleset. Per-deck rule
+/// differences (wave size, whether the Horde's creatures attack, life totals)
+/// live on `HordeRuleset`, not here — this enum only names the deck so
+/// `deck_loading` can inject the right fixed library. New decks are pure
+/// additions: the community/Knudson variants and the three Theros challenge
+/// decks (Battle the Horde, Face the Hydra, Defeat a God) each add one variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChallengeDeck {
+    /// Doctor Who "Cyberman Horde" — ~100 real Universes Beyond cards plus ~200
+    /// predefined Cyberman/Dalek tokens. The first deck the spine is validated
+    /// against.
+    CybermanHorde,
+    /// D&D Horde (community format, hordemagic.com). An escalating challenge of
+    /// three tiered libraries (Ooze → Goblin/Skeleton → Giant/Dragon), all built
+    /// from real, already-implemented cards, using the rarity-based wave rule
+    /// (`WaveTermination::UntilRarityAtLeast`). This spine slice loads the Level 1
+    /// **Ooze** library; multi-tier progression is a follow-up.
+    DndHorde,
+    /// Zombies Horde (community format, hordemagic.com). 100 nontoken cards plus
+    /// 200 Zombie / Zombie Giant tokens. Its signature rule is a *snaking* wave
+    /// count — the Horde reveals until one nontoken resolves, then two, then
+    /// three, then back down — so pressure ramps up and eases off in a cycle.
+    ZombiesHorde,
+    /// Slivers Horde (community format, hordemagic.com). 135 nontoken cards plus
+    /// 170 Metallic Sliver tokens. Every Sliver lord buffs every other Sliver, so
+    /// the board compounds fast — the swarm gets stronger rather than just wider.
+    SliversHorde,
+    /// Humans and Godzilla Horde (community format, hordemagic.com). 100 nontoken
+    /// cards plus 200 Human Soldier tokens: a wide, cheap human army punctuated
+    /// by a handful of enormous Godzilla-series titans.
+    HumansGodzillaHorde,
+    /// The Lord of the Rings "Two Towers" — Sauron, the Dark Lord (community
+    /// format, hordemagic.com). A near-all-creature swarm of Orcs, Nazgûl, and
+    /// siege beasts, with revealed Orc Army tokens amassing one growing army. Uses
+    /// the advanced LOTR rules: the uncommon+ rarity wave and the "milled legendary
+    /// enters then phases out" rule. Half of the two-Horde "Two Towers" experience
+    /// (Saruman is the other half); playable on its own as a single Horde.
+    SauronHorde,
+    /// The Lord of the Rings "Two Towers" — Saruman, the White Hand (community
+    /// format, hordemagic.com). Uruk-hai and Orcs backed by removal and
+    /// enchantments that grow the White Hand's Orc Army; same advanced LOTR rules
+    /// as Sauron. The other half of the two-Horde "Two Towers" experience;
+    /// playable on its own as a single Horde.
+    SarumanHorde,
+    /// The Lord of the Rings "Two Towers" — the full TWO-Horde experience: Sauron
+    /// and Saruman as two commanders, each with its own library, battlefield, and
+    /// graveyard, alternating turns (Reading B). The picker identity that pairs the
+    /// two half-decks — its `default_ruleset` has `challenge_deck` = this (seat 0's
+    /// library is Sauron's cards) and `co_horde_decks = [SarumanHorde]` (seat 1).
+    LotrTwoTowersHorde,
+    /// Teenage Mutant Ninja Turtles "Turtle Team-Up" — the co-op boss-deck
+    /// game: four 60-card Turtle hero decks face 11 Bosses deployed in three
+    /// stages (1 → 2 → 3) sharing one life total per stage, backed by a
+    /// 27-card event deck of Ninja creatures and villain Events. The first
+    /// boss-deck challenge: the Horde seat keeps a real (per-stage) life
+    /// total instead of the classic mill race (see `HordeRuleset::boss_stages`).
+    TurtleTeamUpHorde,
+}
+
+/// Authoritative display metadata for one selectable Horde challenge deck.
+///
+/// Produced by [`ChallengeDeck::registry`] and consumed by the frontend's Horde
+/// deck picker. The engine is the single source of truth for which decks exist;
+/// the client keeps only a synchronous render mirror of this registry
+/// (`client/src/data/challengeDeckRegistry.ts`, for pre-WASM picker render)
+/// plus a drift test against the `getChallengeDeckRegistry` WASM export — that
+/// mirror entry is the only client-side follow-up when adding a deck, never an
+/// independent list. Mirrors [`FormatMetadata`] for `GameFormat`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChallengeDeckMetadata {
+    pub deck: ChallengeDeck,
+    /// Full display label, e.g. "Cyberman Horde".
+    pub label: &'static str,
+    /// Short code for compact badges, e.g. "CYB".
+    pub short_label: &'static str,
+    /// One-line human description suitable for a card or tooltip.
+    pub description: &'static str,
+    /// The deck's canonical ruleset, so a client can build the complete
+    /// `FormatConfig` for a selected deck without a second call.
+    pub default_ruleset: HordeRuleset,
+    /// The fully engine-resolved `FormatConfig` for this deck (built by
+    /// `FormatConfig::horde`): survivor deck-shape axes (`deck_size`,
+    /// `singleton`, commander fields) already derived from the ruleset's
+    /// `survivor_deck_format`. The deck picker applies this — never a
+    /// ruleset-only patch — so switching decks cannot leave the previous
+    /// deck's EDH/constructed shape attached.
+    pub resolved_config: FormatConfig,
+    /// Human-readable, engine-authored breakdown of how this deck plays — one
+    /// labeled line per rules axis (waves, survivor life, setup, Horde combat).
+    /// Rendered by [`HordeRuleset::summary`] from the structured ruleset, so the
+    /// frontend displays these verbatim and never derives rules prose from the
+    /// typed axes itself (that would put game-rule interpretation in the display
+    /// layer). Lets the deck picker and any in-game info panel show HOW each deck
+    /// plays and how it DIFFERS without a second source of truth.
+    pub rules: Vec<RuleSummaryLine>,
+}
+
+/// One labeled line of a Horde deck's human-readable rules summary.
+///
+/// The `label` is a short, stable category name the frontend can style (bold,
+/// column header, etc.); the `detail` is the deck-specific behavior for that
+/// category, already rendered into prose by the engine. Both are display text —
+/// the source of truth for the actual rules is the structured [`HordeRuleset`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleSummaryLine {
+    /// Short category label, e.g. "Waves", "Survivor life", "Setup".
+    pub label: &'static str,
+    /// This deck's behavior for that category, human-readable.
+    pub detail: String,
+}
+
+/// How many NON-token cards a [`WaveTermination::UntilNonToken`] wave must
+/// resolve before it ends.
+///
+/// A plain number would cover the classic rule ("until the first nontoken"), but
+/// the count genuinely varies *per Horde turn* in published decks — the Zombies
+/// Horde ramps difficulty by snaking the count up and back down. Modelling it as
+/// a typed schedule keeps that inside the ruleset instead of leaking a
+/// special-case counter into the turn engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum WaveCount {
+    /// The same number of nontokens every Horde turn. `Fixed(1)` is the classic
+    /// "reveal until the first nontoken card" rule.
+    Fixed(u32),
+    /// Ramp the count up from `min` to `max`, then back down, repeating — a
+    /// triangle wave over the Horde's turns. The Zombies Horde is
+    /// `Snaking { min: 1, max: 3 }`: "Wave 1, then Wave 2, and so on for Wave 3.
+    /// On its next turn, it will descend back down to Wave 2, snaking back and
+    /// forth" — i.e. 1, 2, 3, 2, 1, 2, 3, …
+    Snaking { min: u32, max: u32 },
+}
+
+impl WaveCount {
+    /// How many nontokens end the wave on the Horde's `turn_index`-th turn
+    /// (0-based).
+    ///
+    /// `Snaking` is a triangle wave of period `2 * (max - min)`: the phase walks
+    /// up to `max` and back down toward `min` without repeating the endpoints,
+    /// which is what "snaking back and forth" means. A degenerate range
+    /// (`max <= min`) collapses to `min`, so a malformed ruleset still yields a
+    /// terminating wave rather than a divide-by-zero.
+    pub fn nontokens_for_turn(self, turn_index: u32) -> u32 {
+        match self {
+            WaveCount::Fixed(n) => n,
+            WaveCount::Snaking { min, max } => {
+                if max <= min {
+                    return min;
+                }
+                let span = max - min;
+                let period = span * 2;
+                let phase = turn_index % period;
+                min + if phase <= span { phase } else { period - phase }
+            }
+        }
+    }
+}
+
+/// How a single Horde turn decides how many cards to reveal-and-resolve.
+///
+/// This is a *policy*, not a scalar count, because the rule genuinely varies by
+/// ruleset: the Theros challenge decks reveal a fixed number, the original
+/// Knudson rules reveal until a non-token card, and the community format ends a
+/// "wave" when a card of at least a given rarity resolves. Modelling it as a
+/// typed enum lets every current and future ruleset slot in as a pure addition
+/// rather than overloading a number with special-case meanings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum WaveTermination {
+    /// Reveal-and-resolve a fixed base number of cards each Horde turn. Runtime
+    /// bonuses that depend on live game state (one extra per Horde artifact in
+    /// play, one extra per additional survivor) are layered on in the turn
+    /// engine, not stored here — this is only the base count (e.g. 2 for Battle
+    /// the Horde, 1 for Face the Hydra).
+    FixedCount(u32),
+    /// Reveal-and-resolve cards until `count` NON-token cards have been cast,
+    /// which ends the wave. Every token revealed along the way enters the
+    /// battlefield; each nontoken is cast (for free), and once the required
+    /// number have resolved the wave stops — the next revealed card stays in the
+    /// library for the following Horde turn.
+    ///
+    /// The authentic behavior for token-heavy decks (the original Knudson rules,
+    /// and the Doctor Who Cyberman Horde, which is ~2/3 tokens): a small
+    /// `FixedCount` would usually reveal only tokens and barely advance the real
+    /// threats, so "reveal until N nontokens" keeps the wave pressuring.
+    ///
+    /// `count` is a [`WaveCount`] rather than a bare number because the count is
+    /// not always constant: the Zombies Horde escalates it 1 → 2 → 3 → 2 → 1 …
+    /// as a difficulty ramp. `WaveCount::Fixed(1)` is the classic
+    /// "until the first nontoken" rule.
+    UntilNonToken { count: WaveCount },
+    /// Reveal-and-resolve cards until (and including) the first card whose rarity
+    /// is at least the given threshold, which ends the wave. Tokens (no rarity)
+    /// and nontoken cards *below* the threshold are deployed/cast and the wave
+    /// CONTINUES; the first card at or above the threshold is cast and then stops
+    /// the wave, leaving the rest of the library for the next Horde turn.
+    ///
+    /// This is the community "waves" rule used by the D&D Horde: "a wave ends when
+    /// an Uncommon, Rare, or Mythic card enters" — i.e. `UntilRarityAtLeast(
+    /// Rarity::Uncommon)`. Commons and tokens are the filler that builds the board
+    /// up; the first uncommon-or-better is the payoff that caps the wave. Rarity
+    /// is a card-data property (`Rarity` derives `Ord`: Common < Uncommon < Rare
+    /// < Mythic), not a CR concept — Horde Magic is a casual community format.
+    UntilRarityAtLeast(Rarity),
+}
+
+/// How a Horde deck treats its own legendary permanent cards when they would be
+/// put into the Horde's graveyard from its library (the Horde is damage-milled,
+/// see [`crate::game::horde::mill_from_loss`]).
+///
+/// A typed axis rather than a `bool` because legendary handling has more than two
+/// plausible community variants — ordinary graveyard, the "boss recurs"
+/// phase-out rule below, or a future "shuffle back into the library" — and a
+/// boolean could name at most one of them. Casual community format
+/// (hordemagic.com advanced rules); no CR governs the axis itself, though
+/// [`EtbThenPhaseOut`](Self::EtbThenPhaseOut) resolves through CR 603.6 (enters-
+/// the-battlefield triggers) and CR 702.26 (phasing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum HordeLegendaryDeath {
+    /// Basic rules: a milled legendary is put into the graveyard like any other
+    /// card. The default, and what every currently-shipped deck uses.
+    #[default]
+    Normal,
+    /// Advanced rules (Walking Dead, Stranger Things, …): "any Legendary card
+    /// that goes to the Graveyard [when the Horde is damage-milled] instead
+    /// enters the battlefield, ETB triggers fire, then immediately Phases Out."
+    /// Milling one of the Horde's legendaries therefore DEPLOYS it (its ETB
+    /// resolves) rather than removing it, and it phases back in on the Horde's
+    /// next untap (CR 702.26c) — a recurring boss instead of a wasted mill.
+    EtbThenPhaseOut,
+}
+
+/// Whether — and how — the engine-scripted Horde activates its permanents'
+/// activated abilities during its post-combat main phase.
+///
+/// A typed axis rather than a `bool` because the activation cadence has more than
+/// two plausible shapes (none / once per permanent / a single best-ability per
+/// turn), and a boolean could name only one. Casual community format
+/// (hordemagic.com): "Card-activated abilities … occur during the post-combat
+/// main phase, and only once per turn"; "Horde has infinite mana (for … activation
+/// costs)." The activation itself runs through the normal CR 602 activation path
+/// ([`crate::game::casting::handle_activate_ability`]); this axis only gates the
+/// scripted beat that drives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum HordePostCombatActivation {
+    /// Basic rules: the Horde never activates abilities. The default, and what
+    /// every currently-shipped deck uses.
+    #[default]
+    None,
+    /// Advanced rules (Walking Dead, Stranger Things, …): during its post-combat
+    /// main phase the Horde activates each of its permanents' non-mana activated
+    /// abilities once — once per permanent per turn — paying with its infinite
+    /// mana (real non-mana costs such as tap/sacrifice are still paid). Per the
+    /// rule "Card-activated abilities have summoning sickness", a creature's
+    /// `{T}`/`{Q}` ability stays summoning-sick the turn it enters even though the
+    /// emblem's Haste lets it attack (CR 302.6) — see
+    /// [`crate::game::horde`]'s `tap_ability_summoning_sick_for_horde`.
+    OncePerPermanent,
+}
+
+/// The deck-construction format each SURVIVOR brings to a Horde game — a per-deck
+/// axis, because different Horde decks were designed against different survivor
+/// pools. The hordemagic community decks are built around EDH/Commander survivor
+/// decks ("Each player chooses an EDH deck"); the Theros challenge decks (Face the
+/// Hydra, Battle the Horde, Defeat a God) were built for 60-card Theros-block
+/// constructed decks. [`FormatConfig::horde`] derives the survivor deck
+/// constraints (size, singleton, commander) from this.
+///
+/// `Constructed` is the default (and the behavior for the basic community
+/// decks). Promoting a community deck to `Commander` is more than a deck-size
+/// change — it turns on the commander subsystem for survivors (command-zone
+/// commanders via [`FormatConfig::command_zone_holds_decklist_commander`], tax,
+/// damage), so that remains a deliberate, per-deck follow-up; this axis is the
+/// declaration point for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SurvivorDeckFormat {
+    /// 60-card (minimum) constructed: non-singleton, no commander. Theros-block
+    /// challenge decks, and the current default for every shipped deck.
+    #[default]
+    Constructed,
+    /// EDH / Commander: 100-card singleton with a commander (command zone) and
+    /// the 21-point commander-damage threshold.
+    Commander,
+}
+
+/// Staged boss-deck configuration (Turtle Team-Up class): the Boss team fights
+/// in stages of deployed Bosses sharing one life total per stage, instead of
+/// the classic Horde's life-total-less mill race.
+///
+/// `Some` on [`HordeRuleset::boss_stages`] switches the Horde seat to a real
+/// (per-stage) life total: damage and life loss apply normally, and the Boss
+/// life hitting zero clears the stage (deployed Bosses leave, life resets, the
+/// next stage deploys) until the final stage falls. Turtle Team-Up's life
+/// table (per the product booklet): 20 Boss life with 2–3 heroes, 30 with 4.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BossStages {
+    /// Bosses deployed per stage in order — `[1, 2, 3]` for Turtle Team-Up.
+    pub stage_sizes: Vec<u8>,
+    /// Boss life at the start of each stage with fewer than four survivors.
+    pub life_base: i32,
+    /// Boss life at the start of each stage with four or more survivors.
+    pub life_at_four_survivors: i32,
+}
+
+impl BossStages {
+    /// Boss life for a stage given the survivor count.
+    pub fn life_for_survivor_count(&self, survivors: usize) -> i32 {
+        if survivors >= 4 {
+            self.life_at_four_survivors
+        } else {
+            self.life_base
+        }
+    }
+}
+
+/// The parameters that distinguish one Horde deck's rules from another, carried
+/// on `FormatConfig` so a single `GameFormat::Horde` variant covers the whole
+/// family without sibling format variants. All fields are typed axes, not
+/// booleans-as-config where a richer type exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HordeRuleset {
+    /// Which fixed library the Horde seat plays.
+    pub challenge_deck: ChallengeDeck,
+    /// How each Horde turn sizes its reveal-and-resolve wave.
+    pub wave: WaveTermination,
+    /// How many turns the survivors take before the Horde's first turn, letting
+    /// them establish a board (3 in the published rules).
+    pub survivor_setup_turns: u8,
+    /// The survivors' shared combined life total with a SINGLE survivor — the
+    /// base the per-survivor delta below adjusts from. The hordemagic community
+    /// rules set this at 100 ("Player life totals are combined, shared and start
+    /// at 100 life"); the Theros challenge decks use a flat shared 20.
+    ///
+    /// Carried here rather than read from `FormatConfig::starting_life` because
+    /// base life is a per-deck-family property (community 100 vs Theros 20), and
+    /// it belongs next to `per_extra_survivor_life_delta` — the two halves of the
+    /// same combined-total formula. `GameState::new` computes the combined total
+    /// as `combined_base_life + per_extra_survivor_life_delta * (survivors - 1)`
+    /// and distributes it across the survivor seats (CR 810.9a shared team life).
+    pub combined_base_life: i32,
+    /// Life added to the survivors' shared combined total for each survivor
+    /// beyond the first. `0` for a flat combined total (Theros: shared 20); the
+    /// hordemagic community rules use −15 ("Each player reduces {15} life to the
+    /// total life beyond the 1st player") — so 1/2/3 survivors → 100/85/70.
+    pub per_extra_survivor_life_delta: i32,
+    /// Whether the Horde's creatures are forced to attack each combat if able
+    /// (true for every published Horde ruleset; a typed axis so a future ruleset
+    /// can opt out — e.g. Defeat a God's revelers that only attack when told).
+    pub horde_creatures_forced_attackers: bool,
+    /// How the Horde's own legendary cards are treated when milled to its
+    /// graveyard by damage. `Normal` for the basic community decks; the advanced
+    /// decks (Walking Dead, Stranger Things, …) use
+    /// [`HordeLegendaryDeath::EtbThenPhaseOut`]. `#[serde(default)]` so Horde
+    /// configs serialized before this axis existed still deserialize — they
+    /// predate any advanced deck, so the `Normal` back-fill is correct.
+    #[serde(default)]
+    pub legendary_death: HordeLegendaryDeath,
+    /// Whether the Horde activates its permanents' abilities post-combat. `None`
+    /// for the basic community decks; the advanced decks use
+    /// [`HordePostCombatActivation::OncePerPermanent`], which also grants the
+    /// Horde infinite mana (its activation costs are otherwise unpayable).
+    /// `#[serde(default)]` so pre-axis serialized Horde configs still deserialize.
+    #[serde(default)]
+    pub post_combat_activation: HordePostCombatActivation,
+    /// The deck-construction format survivors bring (per-deck; see
+    /// [`SurvivorDeckFormat`]). `#[serde(default)]` back-fills `Constructed` for
+    /// Horde configs serialized before this axis — matching the pre-axis behavior
+    /// where `FormatConfig::horde` hardcoded a 60-card non-singleton survivor deck.
+    #[serde(default)]
+    pub survivor_deck_format: SurvivorDeckFormat,
+    /// Additional Horde libraries beyond [`challenge_deck`](Self::challenge_deck),
+    /// one per extra Horde seat — the LOTR "Two Towers" two-Horde experience pairs
+    /// Sauron (`challenge_deck`) with Saruman here. Empty for every single-Horde
+    /// deck. The full per-seat deck list is [`horde_decks`](Self::horde_decks):
+    /// `challenge_deck` (seat 0) then each of these in order. `#[serde(default,
+    /// skip_serializing_if)]` so single-Horde configs serialize byte-identically
+    /// to before this axis existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub co_horde_decks: Vec<ChallengeDeck>,
+    /// Staged boss-deck configuration (Turtle Team-Up class) — `None` for the
+    /// classic mill-race Hordes. `#[serde(default, skip_serializing_if)]` so
+    /// classic configs serialize byte-identically to before this axis existed
+    /// and pre-axis payloads back-fill `None` (correct: they predate any boss
+    /// deck).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boss_stages: Option<BossStages>,
+}
+
+impl HordeRuleset {
+    /// The per-seat Horde libraries in seat order: the primary
+    /// [`challenge_deck`](Self::challenge_deck) followed by each
+    /// [`co_horde_decks`](Self::co_horde_decks) entry. A single-Horde deck yields
+    /// one; the LOTR two-Horde deck yields `[Sauron, Saruman]`. The length is the
+    /// number of Horde seats the game designates.
+    pub fn horde_decks(&self) -> Vec<ChallengeDeck> {
+        std::iter::once(self.challenge_deck)
+            .chain(self.co_horde_decks.iter().copied())
+            .collect()
+    }
+    /// Render this ruleset's typed axes into human-readable, labeled lines for
+    /// the Horde deck picker and any in-game info panel.
+    ///
+    /// This is the single authority for turning the structured Horde rules into
+    /// prose. The frontend renders these lines verbatim; it must never interpret
+    /// [`WaveTermination`], the life deltas, or the setup count into its own
+    /// wording, because that is game-rule interpretation and belongs in the
+    /// engine. Because the summary is produced by matching over the struct's own
+    /// fields, every deck's summary is complete by construction — a new
+    /// advanced-rules axis added to `HordeRuleset` adds one line here and every
+    /// deck picks it up, rather than requiring a hand-authored per-deck string.
+    pub fn summary(&self) -> Vec<RuleSummaryLine> {
+        // Small pluralizer so counts read naturally without a formatting crate.
+        fn plural(n: u32) -> &'static str {
+            if n == 1 {
+                ""
+            } else {
+                "s"
+            }
+        }
+
+        // The wave line is the deck's signature difference, so it leads.
+        let waves = match self.wave {
+            WaveTermination::FixedCount(n) => {
+                format!("Reveals {n} card{} each Horde turn", plural(n))
+            }
+            WaveTermination::UntilNonToken {
+                count: WaveCount::Fixed(1),
+            } => "Reveals until the first nontoken card is cast".to_string(),
+            WaveTermination::UntilNonToken {
+                count: WaveCount::Fixed(n),
+            } => format!("Reveals until {n} nontoken cards are cast"),
+            WaveTermination::UntilNonToken {
+                count: WaveCount::Snaking { min, max },
+            } => format!(
+                "Reveals until N nontokens are cast — N snakes {min} \u{2192} {max} \u{2192} {min} \
+                 each turn"
+            ),
+            WaveTermination::UntilRarityAtLeast(rarity) => {
+                format!(
+                    "A wave ends at the first {} or better card",
+                    rarity_word(rarity)
+                )
+            }
+        };
+
+        // Survivor life: the combined base plus the per-extra-survivor scaling.
+        let life = if self.per_extra_survivor_life_delta == 0 {
+            format!("{} life, shared by all survivors", self.combined_base_life)
+        } else {
+            format!(
+                "{} life shared, {:+} per extra survivor",
+                self.combined_base_life, self.per_extra_survivor_life_delta
+            )
+        };
+
+        let setup = format!(
+            "Survivors take {} turn{} to set up before the Horde's first turn",
+            self.survivor_setup_turns,
+            plural(u32::from(self.survivor_setup_turns)),
+        );
+
+        let combat = if self.horde_creatures_forced_attackers {
+            "The Horde's creatures attack every combat if able, and only its Defenders can block"
+                .to_string()
+        } else {
+            "The Horde's creatures attack only when instructed".to_string()
+        };
+
+        // What survivor decks to bring — a per-deck property (community decks are
+        // built for EDH; Theros-block decks for 60-card constructed).
+        let survivor_decks = match self.survivor_deck_format {
+            SurvivorDeckFormat::Constructed => "Survivors bring 60-card constructed decks",
+            SurvivorDeckFormat::Commander => {
+                "Survivors bring 100-card singleton Commander (EDH) decks"
+            }
+        }
+        .to_string();
+
+        let mut lines = vec![
+            RuleSummaryLine {
+                label: "Waves",
+                detail: waves,
+            },
+            RuleSummaryLine {
+                label: "Survivor life",
+                detail: life,
+            },
+            RuleSummaryLine {
+                label: "Survivor decks",
+                detail: survivor_decks,
+            },
+            RuleSummaryLine {
+                label: "Setup",
+                detail: setup,
+            },
+            RuleSummaryLine {
+                label: "Horde combat",
+                detail: combat,
+            },
+        ];
+
+        // The legendary line is an *advanced-rules* axis: only the decks that opt
+        // into the "boss recurs" rule surface it, so a basic deck's summary stays
+        // exactly the five base lines above. This is a distinguishing rule, not the
+        // vanilla default, so showing "legendaries die normally" for every basic
+        // deck would be noise.
+        match self.legendary_death {
+            HordeLegendaryDeath::Normal => {}
+            HordeLegendaryDeath::EtbThenPhaseOut => lines.push(RuleSummaryLine {
+                label: "Legendary deaths",
+                detail: "A milled legendary enters, triggers its ETB, then phases out — \
+                         it returns on the Horde's next untap instead of being removed"
+                    .to_string(),
+            }),
+        }
+
+        // Post-combat activation is likewise an advanced-only axis — surfaced only
+        // for the decks that opt in, so basic decks keep their prior line set.
+        match self.post_combat_activation {
+            HordePostCombatActivation::None => {}
+            HordePostCombatActivation::OncePerPermanent => lines.push(RuleSummaryLine {
+                label: "Post-combat",
+                detail: "After combat the Horde activates each of its permanents' abilities \
+                         once, with infinite mana"
+                    .to_string(),
+            }),
+        }
+
+        // Boss stages are likewise surfaced only for the decks that stage
+        // Bosses — classic mill-race decks keep their prior line set.
+        if let Some(boss) = &self.boss_stages {
+            let stages = boss
+                .stage_sizes
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(" \u{2192} ");
+            lines.push(RuleSummaryLine {
+                label: "Bosses",
+                detail: format!(
+                    "Bosses deploy in {} stage{} ({}) sharing {} life per stage ({} with 4+ heroes)",
+                    boss.stage_sizes.len(),
+                    plural(boss.stage_sizes.len() as u32),
+                    stages,
+                    boss.life_base,
+                    boss.life_at_four_survivors
+                ),
+            });
+        }
+
+        lines
+    }
+}
+
+/// Lowercase English word for a rarity, for the Horde wave-rule summary
+/// ("uncommon or better"). Horde Magic's community wave rule is keyed on rarity
+/// order (`Rarity` derives `Ord`); this is display text, not a CR concept.
+fn rarity_word(rarity: Rarity) -> &'static str {
+    match rarity {
+        Rarity::Common => "common",
+        Rarity::Uncommon => "uncommon",
+        Rarity::Rare => "rare",
+        Rarity::Mythic => "mythic",
+        Rarity::Special => "special",
+        Rarity::Bonus => "bonus",
+    }
+}
+
+impl ChallengeDeck {
+    /// Every selectable challenge deck, in display order.
+    ///
+    /// New decks must be appended here as well as given a [`Self::metadata`] arm
+    /// (that match is exhaustive, so the compiler catches a missing arm; the
+    /// `registry_covers_every_challenge_deck` test catches a missing entry here).
+    pub const ALL: &'static [ChallengeDeck] = &[
+        ChallengeDeck::CybermanHorde,
+        ChallengeDeck::DndHorde,
+        ChallengeDeck::ZombiesHorde,
+        ChallengeDeck::SliversHorde,
+        ChallengeDeck::HumansGodzillaHorde,
+        ChallengeDeck::SauronHorde,
+        ChallengeDeck::SarumanHorde,
+        ChallengeDeck::LotrTwoTowersHorde,
+        ChallengeDeck::TurtleTeamUpHorde,
+    ];
+
+    /// Display metadata for a single deck. Exhaustive match: adding a
+    /// `ChallengeDeck` variant fails to compile until it is described here.
+    ///
+    /// The flavor `label`/`short_label`/`description` are per-deck display text;
+    /// the structured `default_ruleset` and its rendered `rules` summary are the
+    /// single source of truth for the actual rules, so they are attached once
+    /// from [`Self::default_ruleset`] rather than restated per arm.
+    pub fn metadata(self) -> ChallengeDeckMetadata {
+        let (label, short_label, description) = match self {
+            ChallengeDeck::CybermanHorde => (
+                "Cyberman Horde",
+                "CYB",
+                "Doctor Who — Cybermen and Daleks swarm in waves that \
+                 run until a nontoken card is cast",
+            ),
+            ChallengeDeck::DndHorde => (
+                "D&D Horde — Oozes",
+                "DND",
+                "Dungeons & Dragons — a self-replicating Ooze swarm; \
+                 each wave ends when an uncommon or better is revealed",
+            ),
+            ChallengeDeck::ZombiesHorde => (
+                "Zombies Horde",
+                "ZOM",
+                "An undead swarm whose waves ramp 1 → 2 → 3 nontokens \
+                 and back down, snaking between pressure and respite",
+            ),
+            ChallengeDeck::SliversHorde => (
+                "Slivers Horde",
+                "SLV",
+                "Every Sliver buffs every other Sliver — the swarm \
+                 compounds, growing stronger as it grows wider",
+            ),
+            ChallengeDeck::HumansGodzillaHorde => (
+                "Humans & Godzilla Horde",
+                "HGZ",
+                "A wide, cheap human army punctuated by a handful of \
+                 enormous Godzilla-series titans",
+            ),
+            ChallengeDeck::SauronHorde => (
+                "Sauron, the Dark Lord Horde",
+                "SAU",
+                "The Lord of the Rings \u{201c}Two Towers\u{201d} — Sauron's \
+                 near-all-creature swarm of Orcs, Nazg\u{fb}l, and siege beasts; \
+                 revealed Orc Armies amass one growing army, and milled legendaries \
+                 recur by phasing out",
+            ),
+            ChallengeDeck::SarumanHorde => (
+                "Saruman, the White Hand Horde",
+                "SAR",
+                "The Lord of the Rings \u{201c}Two Towers\u{201d} — Saruman's \
+                 Uruk-hai and Orcs backed by removal and enchantments that grow the \
+                 White Hand's Orc Army; uncommon+ waves and legendaries that recur \
+                 by phasing out",
+            ),
+            ChallengeDeck::LotrTwoTowersHorde => (
+                "LOTR: The Two Towers Horde",
+                "2TW",
+                "The Lord of the Rings \u{201c}Two Towers\u{201d} — the full \
+                 two-Horde experience: Sauron and Saruman as two commanders, each \
+                 with its own deck, battlefield, and graveyard, ALTERNATING turns \
+                 against the survivor team",
+            ),
+            ChallengeDeck::TurtleTeamUpHorde => (
+                "Turtle Team-Up Horde",
+                "TMT",
+                "Teenage Mutant Ninja Turtles — staged Bosses sharing one life \
+                 total per stage, backed by an event deck of Ninjas and villain \
+                 Events",
+            ),
+        };
+        let default_ruleset = self.default_ruleset();
+        let rules = default_ruleset.summary();
+        let resolved_config = FormatConfig::horde(default_ruleset.clone());
+        ChallengeDeckMetadata {
+            deck: self,
+            label,
+            short_label,
+            description,
+            default_ruleset,
+            resolved_config,
+            rules,
+        }
+    }
+
+    /// The full catalog of selectable Horde decks with display metadata. It is
+    /// the single source of truth for which decks exist and how they are
+    /// labeled; the frontend's Horde deck picker renders the synchronous TS
+    /// mirror of this registry pre-WASM, and the drift test pins the two
+    /// together.
+    pub fn registry() -> Vec<ChallengeDeckMetadata> {
+        Self::ALL.iter().copied().map(Self::metadata).collect()
+    }
+
+    /// The canonical ruleset for each Horde deck. Centralizes deck-identity →
+    /// rules so the registry, `FormatConfig::for_format`, and callers that only
+    /// have the deck enum agree on one source of truth.
+    pub fn default_ruleset(self) -> HordeRuleset {
+        match self {
+            ChallengeDeck::CybermanHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::CybermanHorde,
+                // The Cyberman deck is ~2/3 tokens, so a small `FixedCount`
+                // would usually reveal only tokens and barely advance the real
+                // threats. "Reveal until a non-token card" is the authentic
+                // token-heavy behavior for this deck — the classic single-
+                // nontoken rule, i.e. `Fixed(1)`.
+                wave: WaveTermination::UntilNonToken {
+                    count: WaveCount::Fixed(1),
+                },
+                survivor_setup_turns: 3,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
+                horde_creatures_forced_attackers: true,
+                // All shipped community decks are basic decks — the advanced
+                // legendary and post-combat rules arrive with Walking Dead /
+                // Stranger Things.
+                legendary_death: HordeLegendaryDeath::Normal,
+                post_combat_activation: HordePostCombatActivation::None,
+                // Every shipped deck is a community deck; survivor decks currently
+                // load as 60-card constructed. Promoting these to `Commander`
+                // (per the basic EDH rule) remains a deliberate per-deck follow-up —
+                // the commander seating itself is wired, only the promotion is pending.
+                survivor_deck_format: SurvivorDeckFormat::Constructed,
+                co_horde_decks: Vec::new(),
+                boss_stages: None,
+            },
+            ChallengeDeck::DndHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::DndHorde,
+                // The D&D Horde's defining rule: a wave ends when an Uncommon,
+                // Rare, or Mythic card enters (commons and tokens keep it going).
+                wave: WaveTermination::UntilRarityAtLeast(Rarity::Uncommon),
+                // No published D&D-specific setup/life values; follow the generic
+                // hordemagic rules, mirroring the Cyberman defaults (tunable axes).
+                survivor_setup_turns: 3,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
+                horde_creatures_forced_attackers: true,
+                // All shipped community decks are basic decks — the advanced
+                // legendary and post-combat rules arrive with Walking Dead /
+                // Stranger Things.
+                legendary_death: HordeLegendaryDeath::Normal,
+                post_combat_activation: HordePostCombatActivation::None,
+                // Every shipped deck is a community deck; survivor decks currently
+                // load as 60-card constructed. Promoting these to `Commander`
+                // (per the basic EDH rule) remains a deliberate per-deck follow-up —
+                // the commander seating itself is wired, only the promotion is pending.
+                survivor_deck_format: SurvivorDeckFormat::Constructed,
+                co_horde_decks: Vec::new(),
+                boss_stages: None,
+            },
+            ChallengeDeck::ZombiesHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::ZombiesHorde,
+                // The deck's defining rule: "it will Wave 1, putting out Tokens
+                // until it flips its first nontoken card. Then ... Wave 2 ... and
+                // so on for Wave 3. On its next turn, it will descend back down
+                // to Wave 2, snaking back and forth."
+                wave: WaveTermination::UntilNonToken {
+                    count: WaveCount::Snaking { min: 1, max: 3 },
+                },
+                // No published Zombies-specific setup/life values; follow the
+                // generic hordemagic rules, as the other community decks do.
+                survivor_setup_turns: 3,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
+                horde_creatures_forced_attackers: true,
+                // All shipped community decks are basic decks — the advanced
+                // legendary and post-combat rules arrive with Walking Dead /
+                // Stranger Things.
+                legendary_death: HordeLegendaryDeath::Normal,
+                post_combat_activation: HordePostCombatActivation::None,
+                // Every shipped deck is a community deck; survivor decks currently
+                // load as 60-card constructed. Promoting these to `Commander`
+                // (per the basic EDH rule) remains a deliberate per-deck follow-up —
+                // the commander seating itself is wired, only the promotion is pending.
+                survivor_deck_format: SurvivorDeckFormat::Constructed,
+                co_horde_decks: Vec::new(),
+                boss_stages: None,
+            },
+            ChallengeDeck::SliversHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::SliversHorde,
+                // States no deck-specific rules; takes the hordemagic BASIC rule
+                // verbatim: "Waves end when an UNCOMMON, RARE or MYTHIC card is
+                // cast."
+                wave: WaveTermination::UntilRarityAtLeast(Rarity::Uncommon),
+                // Basic rules: "Each player takes {3} consecutive turns to set up
+                // their board."
+                survivor_setup_turns: 3,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
+                horde_creatures_forced_attackers: true,
+                // All shipped community decks are basic decks — the advanced
+                // legendary and post-combat rules arrive with Walking Dead /
+                // Stranger Things.
+                legendary_death: HordeLegendaryDeath::Normal,
+                post_combat_activation: HordePostCombatActivation::None,
+                // Every shipped deck is a community deck; survivor decks currently
+                // load as 60-card constructed. Promoting these to `Commander`
+                // (per the basic EDH rule) remains a deliberate per-deck follow-up —
+                // the commander seating itself is wired, only the promotion is pending.
+                survivor_deck_format: SurvivorDeckFormat::Constructed,
+                co_horde_decks: Vec::new(),
+                boss_stages: None,
+            },
+            ChallengeDeck::HumansGodzillaHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::HumansGodzillaHorde,
+                // As above — no deck-specific rules stated, so the basic
+                // community wave rule applies.
+                wave: WaveTermination::UntilRarityAtLeast(Rarity::Uncommon),
+                survivor_setup_turns: 3,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
+                horde_creatures_forced_attackers: true,
+                // All shipped community decks are basic decks — the advanced
+                // legendary and post-combat rules arrive with Walking Dead /
+                // Stranger Things.
+                legendary_death: HordeLegendaryDeath::Normal,
+                post_combat_activation: HordePostCombatActivation::None,
+                // Every shipped deck is a community deck; survivor decks currently
+                // load as 60-card constructed. Promoting these to `Commander`
+                // (per the basic EDH rule) remains a deliberate per-deck follow-up —
+                // the commander seating itself is wired, only the promotion is pending.
+                survivor_deck_format: SurvivorDeckFormat::Constructed,
+                co_horde_decks: Vec::new(),
+                boss_stages: None,
+            },
+            ChallengeDeck::SauronHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::SauronHorde,
+                // LOTR "Two Towers": "Waves end when an Uncommon, Rare, or Mythic
+                // ETB." Per-card rarity is pinned by `sauron_horde::card_rarity`.
+                wave: WaveTermination::UntilRarityAtLeast(Rarity::Uncommon),
+                survivor_setup_turns: 3,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
+                horde_creatures_forced_attackers: true,
+                // LOTR advanced rule: a legendary that would be milled to the
+                // graveyard by damage instead enters the battlefield and phases out.
+                legendary_death: HordeLegendaryDeath::EtbThenPhaseOut,
+                post_combat_activation: HordePostCombatActivation::None,
+                // The published deck is played against upgraded Commander (EDH)
+                // survivor decks (Aragorn, the Uniter) — the first Commander deck.
+                survivor_deck_format: SurvivorDeckFormat::Commander,
+                co_horde_decks: Vec::new(),
+                boss_stages: None,
+            },
+            ChallengeDeck::SarumanHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::SarumanHorde,
+                // LOTR "Two Towers": same advanced rules as Sauron. Per-card rarity
+                // is pinned by `saruman_horde::card_rarity`.
+                wave: WaveTermination::UntilRarityAtLeast(Rarity::Uncommon),
+                survivor_setup_turns: 3,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
+                horde_creatures_forced_attackers: true,
+                legendary_death: HordeLegendaryDeath::EtbThenPhaseOut,
+                post_combat_activation: HordePostCombatActivation::None,
+                survivor_deck_format: SurvivorDeckFormat::Commander,
+                co_horde_decks: Vec::new(),
+                boss_stages: None,
+            },
+            ChallengeDeck::LotrTwoTowersHorde => HordeRuleset {
+                // Seat 0's library is Sauron's (its `load_horde_library` arm loads
+                // the Sauron cards); Saruman is the co-horde in seat 1. The registry
+                // requires `challenge_deck == deck`, so it is this variant itself.
+                challenge_deck: ChallengeDeck::LotrTwoTowersHorde,
+                co_horde_decks: vec![ChallengeDeck::SarumanHorde],
+                wave: WaveTermination::UntilRarityAtLeast(Rarity::Uncommon),
+                survivor_setup_turns: 3,
+                combined_base_life: 100,
+                per_extra_survivor_life_delta: -15,
+                horde_creatures_forced_attackers: true,
+                legendary_death: HordeLegendaryDeath::EtbThenPhaseOut,
+                post_combat_activation: HordePostCombatActivation::None,
+                survivor_deck_format: SurvivorDeckFormat::Commander,
+                boss_stages: None,
+            },
+            ChallengeDeck::TurtleTeamUpHorde => HordeRuleset {
+                challenge_deck: ChallengeDeck::TurtleTeamUpHorde,
+                // The Boss Action phase plays 2 event cards — 3 with three or
+                // four heroes, plus one more while Krang is deployed (those
+                // live-state bonuses layer on in `horde::wave_seed`).
+                wave: WaveTermination::FixedCount(2),
+                // No setup turns: the heroes share the first turn immediately.
+                survivor_setup_turns: 0,
+                // Shared hero life 20/30/40 for 2/3/4 heroes: base 10 for the
+                // first, +10 per extra survivor.
+                combined_base_life: 10,
+                per_extra_survivor_life_delta: 10,
+                horde_creatures_forced_attackers: true,
+                legendary_death: HordeLegendaryDeath::Normal,
+                post_combat_activation: HordePostCombatActivation::None,
+                // The four 60-card Turtle hero decks.
+                survivor_deck_format: SurvivorDeckFormat::Constructed,
+                co_horde_decks: Vec::new(),
+                // Three stages (1 → 2 → 3 Bosses) sharing 20 life per stage
+                // (30 with four heroes), per the product's life table.
+                boss_stages: Some(BossStages {
+                    stage_sizes: vec![1, 2, 3],
+                    life_base: 20,
+                    life_at_four_survivors: 30,
+                }),
+            },
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum RangeOfInfluenceConfigWire {
@@ -660,6 +1566,12 @@ pub struct FormatConfig {
     /// Immutable for the life of the session.
     #[serde(default)]
     pub allow_debug_actions: bool,
+    /// Present only for `GameFormat::Horde`: the per-deck Horde rules (which
+    /// challenge deck, wave sizing, setup turns, life scaling, forced attackers).
+    /// `None` for every other format. Mirrors the optional `archenemy_player`
+    /// pattern so existing serialized configs deserialize unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horde_ruleset: Option<HordeRuleset>,
     /// Present only when `format == GameFormat::Custom(id)` (and then `id`
     /// must equal `custom_rules.id` — see
     /// `custom_format::validate_custom_rules_consistency`). `None` for every
@@ -1147,6 +2059,25 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
     // custom_rules == None; the biconditional is established upstream by
     // validate_custom_rules_consistency.
 
+    // horde_ruleset: ShapeLocked(one-directional) on the Option
+    // discriminant — a built-in outside the Horde family may not invent
+    // one — plus HostChoice on the ruleset itself. Which challenge deck
+    // (Cyberman, Zombie, Sliver, ...) drives the Horde is the table's
+    // choice, resolved into the config alongside the seat's deck; the
+    // registry value for Horde is only one of several legitimate
+    // variants, so value-equality is NOT required here.
+    //
+    // The one thing still worth rejecting: a built-in format outside the
+    // Horde family (whose registry value is always `None`) declaring a
+    // ruleset at all, since only Horde-family formats use this field.
+    if rules.horde_ruleset.is_none() && config.horde_ruleset.is_some() {
+        return Err(format!(
+            "FormatConfig.horde_ruleset is {:?}, but {} does not use a Horde ruleset \
+             at all — only Horde-family formats may declare this field",
+            config.horde_ruleset, config.format,
+        ));
+    }
+
     Ok(())
 }
 
@@ -1428,6 +2359,11 @@ impl GameFormat {
             // Dandân's deck is the engine-supplied pile, so no legality table
             // applies to a submitted list.
             GameFormat::Dandan => CardPool::NoEngineAuthority,
+            // The Horde's own deck is engine-supplied and fixed; survivor
+            // decks are validated structurally (Commander shape for EDH
+            // hordes, unrestricted otherwise), never against a legality
+            // table — the old `legality_format() == None` answer, preserved.
+            GameFormat::Horde => CardPool::NoEngineAuthority,
             // A custom format's legality is entirely governed by its own
             // `LegalityRules` (legal_sets/legal_cards/banned/restricted), never by the
             // built-in `LegalityFormat` table.
@@ -1520,6 +2456,12 @@ impl GameFormat {
             | GameFormat::Archenemy
             | GameFormat::Planechase
             | GameFormat::Momir
+            // The Horde deck itself designates no commander. Commander-format
+            // hordes (Sauron, Saruman) whose SURVIVORS run commanders are
+            // validated by the Horde path in deck_validation, which branches
+            // on the challenge deck's survivor-deck format before this
+            // format-level pairing is consulted.
+            | GameFormat::Horde
             | GameFormat::Dandan
             | GameFormat::Freeform
             | GameFormat::Custom(_) => CommanderPairing::NoCommander,
@@ -1577,6 +2519,8 @@ impl GameFormat {
             | GameFormat::Brawl
             // Momir has no sideboard — the deck is exactly 60 snow basic lands.
             | GameFormat::Momir
+            // Horde decks are engine-supplied and fixed — no sideboard.
+            | GameFormat::Horde
             | GameFormat::Dandan
             // CR 903.13f routes deck construction through CR 903.5, and the
             // Commander family has no sideboard.
@@ -1677,6 +2621,11 @@ impl GameFormat {
             // limit still binds underneath this default (MEASURED: 2 copies
             // of a card with a printed singleton limit are refused).
             GameFormat::FreeformCommander => DeckCopyLimit::Unlimited,
+            // Constructed-block hordes leave survivor decks unrestricted; the
+            // `horde()` constructor tightens this to `UpTo(1)` for
+            // Commander-format hordes (a tighter field than the method is
+            // allowed — only a looser one is rejected at deserialization).
+            GameFormat::Horde => DeckCopyLimit::Unlimited,
             // Phase 1a: disclosed, temporary, bare-GameFormat-context
             // fallback — not this custom format's real declared limit.
             // UpTo(1) (the same value already used for command-zone
@@ -1736,6 +2685,7 @@ impl GameFormat {
             | GameFormat::Dandan
             | GameFormat::CommanderDraft
             | GameFormat::Freeform
+            | GameFormat::Horde
             | GameFormat::FreeformCommander => DeckSizeAuthority::RulesFixed,
             // R6 (review round 3): exhaustive, no wildcard. Unreachable by
             // construction from the admission gate: `for_format` returns Err
@@ -1790,6 +2740,10 @@ impl GameFormat {
             | GameFormat::Momir
             | GameFormat::Dandan
             | GameFormat::Freeform
+            // Default (constructed) survivor decks count the main deck only;
+            // Commander-format hordes validate survivors against a Commander
+            // config, which answers `MainDeckAndCommanders` instead.
+            | GameFormat::Horde
             | GameFormat::Custom(_) => DeckSizeSubject::MainDeck,
         }
     }
@@ -1850,7 +2804,11 @@ impl GameFormat {
             // Commander-style or Brawl variant, so it gets neither
             // CR 103.5c's Brawl clause nor the Commander Rules Committee's
             // supplementary rule.
-            | GameFormat::Freeform => false,
+            | GameFormat::Freeform
+            // Like Archenemy: 3+ seat games grant the free mulligan by seat
+            // count (`mulligan.rs` ORs that in), so this arm only governs the
+            // 1-survivor edge, which mulligans normally.
+            | GameFormat::Horde => false,
             // Exhaustive rather than `matches!`, matching `deck_supply`'s
             // and `has_unrepresentable_auxiliary_deck_component`'s style: a
             // future built-in must force a deliberate `true`/`false` choice
@@ -1946,6 +2904,9 @@ impl GameFormat {
             | GameFormat::Planechase
             | GameFormat::Momir
             | GameFormat::Dandan
+            // Default (constructed) hordes run no commanders; Commander-format
+            // hordes set `uses_commander: true` on the resolved config instead.
+            | GameFormat::Horde
             | GameFormat::Freeform => Ok(false),
             GameFormat::Custom(id) => Err(FormatConfigError(format!(
                 "uses_commander cannot resolve ad-hoc Custom format {} — read \
@@ -2040,6 +3001,10 @@ impl GameFormat {
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
             | GameFormat::Planechase
+            // Horde is per-config (Commander-format survivors seat a decklist
+            // commander; see the `FormatConfig`-level override), so the
+            // format-level axis reports the emblem-only default.
+            | GameFormat::Horde
             | GameFormat::Freeform => Ok(false),
             GameFormat::Custom(id) => Err(FormatConfigError(format!(
                 "command_zone_holds_decklist_commander cannot resolve ad-hoc Custom format {} — \
@@ -2055,6 +3020,10 @@ impl GameFormat {
     /// `FormatConfig::supplies_fixed_deck` field to bypass deck-selection gates,
     /// and must never re-list such formats client-side.
     pub fn supplies_fixed_deck(self) -> bool {
+        // Horde answers false via `deck_supply` (PlayerBuilt): only the Horde
+        // *seat* plays an engine-supplied library (injected like Archenemy's
+        // shared scheme deck), while the survivors — the human players —
+        // still build and select their own decks.
         self.deck_supply() != DeckSupply::PlayerBuilt
     }
 
@@ -2093,6 +3062,9 @@ impl GameFormat {
             // CR 903.13e: the drafted cards become the player's card pool and
             // they build a deck from it, so the engine supplies nothing.
             | GameFormat::CommanderDraft
+            // Survivors build and select their own decks; only the Horde
+            // seat's library is engine-injected (like Archenemy's scheme deck).
+            | GameFormat::Horde
             | GameFormat::Planechase
             | GameFormat::PlanechaseCommander => DeckSupply::PlayerBuilt,
             // No custom-format use case for an engine-supplied deck exists
@@ -2139,6 +3111,9 @@ impl GameFormat {
             // unrepresentable for Custom for the same reason.
             | GameFormat::PlanechaseCommander
             | GameFormat::Momir
+            // The Horde's fixed library and game-start emblem are injected by
+            // deck_loading keyed on the literal `GameFormat::Horde`.
+            | GameFormat::Horde
             | GameFormat::Dandan => true,
             GameFormat::Standard
             | GameFormat::Limited
@@ -2205,6 +3180,7 @@ impl GameFormat {
             | GameFormat::CommanderDraft
             | GameFormat::Freeform
             | GameFormat::FreeformCommander
+            | GameFormat::Horde
             | GameFormat::Custom(_) => SharedZones::NONE,
         }
     }
@@ -2242,6 +3218,7 @@ impl GameFormat {
             | GameFormat::CommanderDraft
             | GameFormat::Freeform
             | GameFormat::FreeformCommander
+            | GameFormat::Horde
             | GameFormat::Custom(_) => DealOrder::PlayerByPlayer,
         }
     }
@@ -2282,6 +3259,7 @@ impl GameFormat {
             | GameFormat::CommanderDraft
             | GameFormat::Freeform
             | GameFormat::FreeformCommander
+            | GameFormat::Horde
             | GameFormat::Custom(_) => FreeRevealMulligan::Unavailable,
         }
     }
@@ -2319,6 +3297,7 @@ impl GameFormat {
             | GameFormat::CommanderDraft
             | GameFormat::Freeform
             | GameFormat::FreeformCommander
+            | GameFormat::Horde
             | GameFormat::Custom(_) => EntryOwnership::OwnerKept,
         }
     }
@@ -2356,6 +3335,7 @@ impl GameFormat {
             | GameFormat::CommanderDraft
             | GameFormat::Freeform
             | GameFormat::FreeformCommander
+            | GameFormat::Horde
             | GameFormat::Custom(_) => OpeningHandEquivalence::Distinguishable,
         }
     }
@@ -2366,6 +3346,8 @@ impl GameFormat {
     pub fn best_of_three_ceiling(self) -> MatchType {
         match self {
             GameFormat::Dandan => MatchType::Bo1,
+            // Single games with no sideboard and no multi-game match shape.
+            GameFormat::Horde => MatchType::Bo1,
             GameFormat::Standard
             | GameFormat::Limited
             | GameFormat::Commander
@@ -2433,6 +3415,7 @@ impl GameFormat {
             GameFormat::Planechase => Cow::Borrowed("Planechase"),
             GameFormat::PlanechaseCommander => Cow::Borrowed("Planechase Commander"),
             GameFormat::Momir => Cow::Borrowed("Momir's Madness"),
+            GameFormat::Horde => Cow::Borrowed("Horde"),
             GameFormat::CommanderDraft => Cow::Borrowed("Commander Draft"),
             GameFormat::Freeform => Cow::Borrowed("Freeform"),
             GameFormat::FreeformCommander => Cow::Borrowed("Freeform Commander"),
@@ -2705,6 +3688,15 @@ impl GameFormat {
                 default_config: FormatConfig::momir(),
             },
             FormatMetadata {
+                format: GameFormat::Horde,
+                label: "Horde",
+                short_label: "HRD",
+                description: "Co-op team vs a self-piloting Horde deck",
+                group: FormatGroup::Multiplayer,
+                legality_key: GameFormat::Horde.legality_key(),
+                default_config: FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
+            },
+            FormatMetadata {
                 format: GameFormat::Dandan,
                 label: "Dand\u{e2}n",
                 short_label: "DAN",
@@ -2765,6 +3757,14 @@ impl FormatConfig {
                 archenemy: self.archenemy_player.unwrap_or(PlayerId(0)),
                 turn_structure: TurnStructure::SharedTeamTurns,
             },
+            // Horde reuses the one-vs-many topology with the Horde as the
+            // "archenemy" seat and the survivors as a shared-turn team. The
+            // survivors-first turn order and no-life-total handling are applied
+            // in `starting_player`/`starting_life_for_player`, not here.
+            GameFormat::Horde => FormatTopology::OneVsMany {
+                archenemy: self.archenemy_player.unwrap_or(PlayerId(0)),
+                turn_structure: TurnStructure::SharedTeamTurns,
+            },
             _ if self.team_based => FormatTopology::FixedTeams {
                 team_size: 2,
                 team_count: 2,
@@ -2799,10 +3799,25 @@ impl FormatConfig {
             FormatTopology::FixedTeams { team_size, .. } => {
                 self.starting_life / i32::from(team_size)
             }
-            // CR 904.5: The archenemy starts at 40 life; each other player
-            // starts at 20. This is not a shared life total.
+            // Horde and Archenemy both map to OneVsMany, so the format must be
+            // distinguished here.
             FormatTopology::OneVsMany { archenemy, .. } => {
-                if self.format == GameFormat::ArchenemyCommander {
+                if self.format == GameFormat::Horde {
+                    // The Horde has no life total (it loses by decking out, not
+                    // by life), so its own seat's life value is never consulted.
+                    // Every seat is seeded here with the survivors' single-
+                    // survivor combined base life, and that combined total is
+                    // distributed across the survivor seats in `GameState::new`
+                    // once the seat count is known (CR 810.9a reads each seat
+                    // through the shared team total). The base lives on the
+                    // ruleset (per-deck: community 100, Theros 20); fall back to
+                    // the format-wide `starting_life` only if a Horde config was
+                    // somehow built without a ruleset. The Horde is NOT given the
+                    // archenemy's 40 life.
+                    self.horde_ruleset
+                        .as_ref()
+                        .map_or(self.starting_life, |r| r.combined_base_life)
+                } else if self.format == GameFormat::ArchenemyCommander {
                     // CR 904.13b: the archenemy starts at 60; the heroes
                     // split their shared 60 evenly across seats. 60 divides
                     // evenly by every legal hero count (1-5), so the split
@@ -2814,6 +3829,8 @@ impl FormatConfig {
                         60 / heroes
                     }
                 } else if player == archenemy {
+                    // CR 904.5: The archenemy starts at 40 life; each other
+                    // player starts at 20. This is not a shared life total.
                     40
                 } else {
                     20
@@ -2849,6 +3866,30 @@ impl FormatConfig {
             FormatTopology::OneVsMany { archenemy, .. } => Some(archenemy),
             FormatTopology::IndividualSeats | FormatTopology::FixedTeams { .. } => None,
         }
+    }
+
+    /// The Horde seats a game designates under this config: the primary
+    /// (`archenemy_player`) plus one seat per co-Horde deck at consecutive
+    /// offsets. UNFILTERED — seats past the table edge are included, so
+    /// callers must validate every seat exists (see
+    /// `validate_for_player_count`); `GameState::new` filters defensively.
+    /// Empty for non-Horde formats or a missing primary, matching the
+    /// designation rule in `GameState::new`. Single authority for the
+    /// primary+offsets rule so validation and allocation cannot drift.
+    pub fn horde_designated_seats(&self) -> Vec<PlayerId> {
+        if self.format != GameFormat::Horde {
+            return Vec::new();
+        }
+        let Some(primary) = self.archenemy_player() else {
+            return Vec::new();
+        };
+        let deck_count = self
+            .horde_ruleset
+            .as_ref()
+            .map_or(1, |r| r.horde_decks().len());
+        (0..deck_count)
+            .map(|offset| PlayerId(primary.0.saturating_add(offset as u8)))
+            .collect()
     }
 
     /// Bounds a runtime seat count against this format's registry range. Owns
@@ -2964,14 +4005,44 @@ impl FormatConfig {
             ));
         }
         // One-vs-many seat check, phrased on the topology rather than the
-        // format enum: default Archenemy is the only such format today, but
-        // Archenemy Commander (CR 904.13) will share the OneVsMany shape and
-        // must inherit this bound without a second edit.
+        // format enum so every OneVsMany format — default Archenemy,
+        // Archenemy Commander (CR 904.13), Horde — inherits this bound
+        // without a second edit. The designated special seat (archenemy /
+        // Horde) must be a valid seat index.
         if matches!(self.topology(), FormatTopology::OneVsMany { .. }) {
             let archenemy = self.archenemy_player().unwrap_or(PlayerId(0));
             if archenemy.0 >= player_count {
+                let seat = if self.format == GameFormat::Horde {
+                    "horde"
+                } else {
+                    "archenemy"
+                };
                 return Err(format!(
-                    "archenemy_player must be less than player_count ({player_count})"
+                    "{seat}_player must be less than player_count ({player_count})"
+                ));
+            }
+        }
+        // Horde designates the primary plus one seat per co-Horde deck
+        // (`horde_designated_seats`); every designated seat must exist, and at
+        // least one seat must remain for the survivors. Without this, a
+        // two-player Two Towers game silently drops Saruman (seat 2 is past
+        // the table edge) and deals a single incoherent Horde, and a
+        // primary-0 two-player game leaves no survivors at all. Reject here —
+        // `GameState::new` filters defensively but must never silently drop
+        // in a validated session.
+        if self.format == GameFormat::Horde {
+            let designated = self.horde_designated_seats();
+            if let Some(&missing) = designated.iter().find(|seat| seat.0 >= player_count) {
+                return Err(format!(
+                    "horde seat {} (of {} designated) is past the table edge for {player_count} players",
+                    missing.0,
+                    designated.len(),
+                ));
+            }
+            if designated.len() >= player_count as usize {
+                return Err(format!(
+                    "horde designates {} of {player_count} seats, leaving no survivors",
+                    designated.len(),
                 ));
             }
         }
@@ -3012,6 +4083,20 @@ impl FormatConfig {
     }
 
     pub fn starting_player(&self) -> PlayerId {
+        // Horde: the survivors set up their board first (the published rules
+        // give them several turns before the Horde's first turn), so the first
+        // turn goes to a survivor, NOT the Horde: the lowest seat index
+        // outside the COMPLETE Horde roster (primary plus every co-Horde —
+        // a primary-only check would start a two-Horde game on the secondary
+        // commander). `validate_for_player_count` guarantees a survivor seat
+        // exists in every admitted session.
+        if self.format == GameFormat::Horde {
+            let roster = self.horde_designated_seats();
+            return (0..=u8::MAX)
+                .map(PlayerId)
+                .find(|seat| !roster.contains(seat))
+                .unwrap_or(PlayerId(0));
+        }
         // CR 904.6: The archenemy takes the first turn instead of a randomly
         // determined player. Non-Archenemy formats keep the legacy default.
         self.archenemy_player().unwrap_or(PlayerId(0))
@@ -3073,6 +4158,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Standard.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3095,6 +4181,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Commander.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3134,6 +4221,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::CommanderDraft.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3228,6 +4316,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::TinyLeaders.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3254,6 +4343,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Oathbreaker.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3315,6 +4405,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::FreeformCommander.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3339,6 +4430,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Brawl.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3372,6 +4464,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::FreeForAll.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3396,6 +4489,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Limited.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3423,6 +4517,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Momir.default_deck_copy_limit(),
             supplies_fixed_deck: true,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3448,6 +4543,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Dandan.default_deck_copy_limit(),
             supplies_fixed_deck: true,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3470,6 +4566,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::TwoHeadedGiant.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3503,6 +4600,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::TwoHeadedGiantCommander.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3528,6 +4626,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Planechase.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3555,6 +4654,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::PlanechaseCommander.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3586,6 +4686,7 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::ArchenemyCommander.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: None,
         }
     }
@@ -3610,6 +4711,76 @@ impl FormatConfig {
             default_deck_copy_limit: GameFormat::Archenemy.default_deck_copy_limit(),
             supplies_fixed_deck: false,
             allow_debug_actions: false,
+            horde_ruleset: None,
+            custom_rules: None,
+        }
+    }
+
+    /// Horde Magic (casual community variant, not CR-sanctioned). A team of
+    /// survivors shares a life total and faces the self-piloting Horde seat,
+    /// which occupies the `archenemy_player` seat and reuses the one-vs-many
+    /// shared-turn topology. `command_zone: true` so the game-start Horde emblem
+    /// (forced attackers + haste on Horde creatures) has a home, mirroring how
+    /// Archenemy/Momir install their game-start command-zone objects.
+    ///
+    /// `starting_life` is the survivors' *combined* starting total (distributed
+    /// across survivor seats at game start); the Horde itself has no life total.
+    /// `supplies_fixed_deck` is `false` — only the Horde seat's library is
+    /// engine-supplied (injected like the Archenemy scheme deck); survivors
+    /// build and select their own decks.
+    pub fn horde(ruleset: HordeRuleset) -> Self {
+        // Survivor deck constraints are a per-deck axis (community decks want EDH,
+        // Theros-block decks want 60-card constructed). `command_zone` stays true
+        // regardless — the Horde's own game-start emblem lives in the command zone,
+        // independent of whether survivors run commanders.
+        let (
+            deck_size,
+            singleton,
+            uses_commander,
+            commander_damage_threshold,
+            default_deck_copy_limit,
+        ) = match ruleset.survivor_deck_format {
+            SurvivorDeckFormat::Constructed => (
+                DeckSizeRule::Minimum(60),
+                false,
+                false,
+                None,
+                DeckCopyLimit::Unlimited,
+            ),
+            SurvivorDeckFormat::Commander => (
+                DeckSizeRule::Exactly(100),
+                true,
+                true,
+                Some(21),
+                DeckCopyLimit::UpTo(1),
+            ),
+        };
+        FormatConfig {
+            format: GameFormat::Horde,
+            // Fallback only. The authoritative survivors' combined base life is
+            // `HordeRuleset::combined_base_life` (per-deck: community 100, Theros
+            // 20); `starting_life_for_player` and `GameState::new` read the
+            // ruleset and only fall back to this if a Horde config were built
+            // without one. Kept at the community base so that fallback is sane.
+            starting_life: 100,
+            // 1 survivor + the Horde seat, up to 4 survivors + the Horde.
+            min_players: 2,
+            max_players: 5,
+            deck_size,
+            singleton,
+            command_zone: true,
+            commander_damage_threshold,
+            range_of_influence: None,
+            team_based: false,
+            // The Horde occupies seat 0; survivors take the remaining seats and
+            // act first (see `starting_player`).
+            archenemy_player: Some(PlayerId(0)),
+            uses_commander,
+            sideboard_policy: GameFormat::Horde.sideboard_policy(),
+            default_deck_copy_limit,
+            supplies_fixed_deck: false,
+            allow_debug_actions: false,
+            horde_ruleset: Some(ruleset),
             custom_rules: None,
         }
     }
@@ -3636,6 +4807,13 @@ impl FormatConfig {
     /// a decklist commander; `Disabled` never does.
     pub fn command_zone_holds_decklist_commander(&self) -> bool {
         match self.format {
+            // Horde is per-config, not per-format: Commander-format survivors
+            // seat a decklist commander (netted from the library and placed
+            // at load); Constructed survivors don't. The enum-level axis
+            // below stays `false` — it cannot see the ruleset.
+            GameFormat::Horde => self.horde_ruleset.as_ref().is_some_and(|ruleset| {
+                ruleset.survivor_deck_format == SurvivorDeckFormat::Commander
+            }),
             GameFormat::Custom(_) => match self.custom_rules.as_deref() {
                 Some(rules) => matches!(
                     rules.structural.command_zone_mode,
@@ -3703,6 +4881,7 @@ impl FormatConfig {
             GameFormat::Planechase => Self::planechase(),
             GameFormat::PlanechaseCommander => Self::planechase_commander(),
             GameFormat::Momir => Self::momir(),
+            GameFormat::Horde => Self::horde(ChallengeDeck::CybermanHorde.default_ruleset()),
             GameFormat::CommanderDraft => Self::commander_draft(),
             GameFormat::Freeform => Self::freeform(),
             GameFormat::FreeformCommander => Self::freeform_commander(),
@@ -3780,6 +4959,7 @@ impl FormatConfig {
             sideboard_policy: structural.sideboard_policy,
             default_deck_copy_limit: structural.default_deck_copy_limit,
             allow_debug_actions: false,
+            horde_ruleset: None,
             custom_rules: Some(Box::new(rules.clone())),
         }
     }
@@ -3876,6 +5056,7 @@ mod tests {
             sideboard_policy: _,
             default_deck_copy_limit: _,
             allow_debug_actions: _,
+            horde_ruleset: _,
             custom_rules: _,
         } = config;
     }
@@ -4372,6 +5553,82 @@ mod tests {
         assert!(config.validate_for_player_count(4).is_ok());
         assert!(config.validate_for_player_count(2).is_err());
         assert!(config.validate_for_player_count(5).is_err());
+    }
+
+    /// A two-Horde deck whose co-commander seat is past the table edge must be
+    /// rejected, not silently truncated: Two Towers anchored at seat 1 (the
+    /// transport remap) with only 2 seats would otherwise drop Saruman (seat
+    /// 2) and deal a single incoherent Horde.
+    #[test]
+    fn validate_for_player_count_rejects_truncated_horde_roster() {
+        let mut config = FormatConfig::horde(ChallengeDeck::LotrTwoTowersHorde.default_ruleset());
+        config.archenemy_player = Some(PlayerId(1));
+        let err = config
+            .validate_for_player_count(2)
+            .expect_err("seat 2 is past a 2-player table edge");
+        assert!(
+            err.contains("past the table edge"),
+            "unexpected rejection: {err}"
+        );
+    }
+
+    /// A Horde game with no survivors is incoherent: Two Towers anchored at
+    /// seat 0 with 2 seats designates both seats as Horde and must be
+    /// rejected rather than starting survivor-less.
+    #[test]
+    fn validate_for_player_count_rejects_horde_roster_without_survivors() {
+        let config = FormatConfig::horde(ChallengeDeck::LotrTwoTowersHorde.default_ruleset());
+        assert_eq!(config.archenemy_player, Some(PlayerId(0)));
+        let err = config
+            .validate_for_player_count(2)
+            .expect_err("both seats are Horde, leaving no survivors");
+        assert!(err.contains("no survivors"), "unexpected rejection: {err}");
+    }
+
+    /// The same Two Towers config is admitted once the table fits the roster:
+    /// 3 seats with the seat-1 anchor hold both commanders plus a survivor,
+    /// and a single-Horde deck keeps its existing 2-seat admission.
+    #[test]
+    fn validate_for_player_count_admits_complete_horde_rosters() {
+        let mut two_towers =
+            FormatConfig::horde(ChallengeDeck::LotrTwoTowersHorde.default_ruleset());
+        two_towers.archenemy_player = Some(PlayerId(1));
+        assert!(two_towers.validate_for_player_count(3).is_ok());
+
+        let mut cyberman = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
+        cyberman.archenemy_player = Some(PlayerId(1));
+        assert!(cyberman.validate_for_player_count(2).is_ok());
+        cyberman.archenemy_player = Some(PlayerId(0));
+        assert!(cyberman.validate_for_player_count(2).is_ok());
+    }
+
+    /// Horde survivors act first: for EVERY challenge deck, under both the
+    /// engine-default anchor (seat 0) and the transport remap (seat 1), the
+    /// starting seat is the lowest seat outside the COMPLETE Horde roster —
+    /// never a commander. A primary-only check starts Two Towers on Saruman.
+    #[test]
+    fn horde_starting_player_is_first_seat_outside_full_roster() {
+        for deck in ChallengeDeck::ALL {
+            for anchor in [PlayerId(0), PlayerId(1)] {
+                let mut config = FormatConfig::horde(deck.default_ruleset());
+                config.archenemy_player = Some(anchor);
+                let roster = config.horde_designated_seats();
+                let start = config.starting_player();
+                assert!(
+                    !roster.contains(&start),
+                    "{deck:?} anchored at {anchor:?} must not start on a Horde seat \
+                     (roster {roster:?}, start {start:?})"
+                );
+                let expected = (0..=u8::MAX)
+                    .map(PlayerId)
+                    .find(|seat| !roster.contains(seat))
+                    .unwrap();
+                assert_eq!(
+                    start, expected,
+                    "{deck:?} anchored at {anchor:?} must start on the lowest survivor seat"
+                );
+            }
+        }
     }
 
     /// The admission gate and the runtime seat-count validator are
@@ -5209,6 +6466,82 @@ mod tests {
     }
 
     #[test]
+    fn format_config_horde() {
+        let config = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
+        assert_eq!(config.format, GameFormat::Horde);
+        // `starting_life` is now only the fallback base; the authoritative
+        // survivor combined base lives on the ruleset (community rules: 100).
+        assert_eq!(config.starting_life, 100);
+        assert_eq!(
+            config.horde_ruleset.as_ref().unwrap().combined_base_life,
+            100
+        );
+        assert_eq!(config.min_players, 2);
+        assert_eq!(config.max_players, 5);
+        assert!(config.command_zone);
+        assert!(!config.team_based);
+        assert!(!config.uses_commander);
+        // Survivors build their own decks; only the Horde seat is engine-supplied.
+        assert!(!config.supplies_fixed_deck);
+        assert_eq!(config.archenemy_player(), Some(PlayerId(0)));
+        let ruleset = config
+            .horde_ruleset
+            .as_ref()
+            .expect("horde config has ruleset");
+        assert_eq!(ruleset.challenge_deck, ChallengeDeck::CybermanHorde);
+        assert_eq!(ruleset.survivor_setup_turns, 3);
+        assert!(ruleset.horde_creatures_forced_attackers);
+        // Every shipped deck loads survivors as 60-card constructed today.
+        assert_eq!(
+            ruleset.survivor_deck_format,
+            SurvivorDeckFormat::Constructed
+        );
+    }
+
+    /// The per-deck survivor-deck-format axis drives `FormatConfig::horde`'s
+    /// survivor deck constraints: `Constructed` is 60-card non-singleton with no
+    /// commander; `Commander` is 100-card singleton EDH. `command_zone` is present
+    /// either way — the Horde's own emblem lives there.
+    #[test]
+    fn horde_survivor_deck_format_axis_drives_deck_constraints() {
+        let mut ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
+
+        ruleset.survivor_deck_format = SurvivorDeckFormat::Constructed;
+        let cfg = FormatConfig::horde(ruleset.clone());
+        assert_eq!(cfg.deck_size, DeckSizeRule::Minimum(60));
+        assert!(!cfg.singleton);
+        assert!(!cfg.uses_commander);
+        assert_eq!(cfg.commander_damage_threshold, None);
+        assert!(cfg.command_zone);
+
+        ruleset.survivor_deck_format = SurvivorDeckFormat::Commander;
+        let cfg = FormatConfig::horde(ruleset);
+        assert_eq!(cfg.deck_size, DeckSizeRule::Exactly(100));
+        assert!(cfg.singleton);
+        assert!(cfg.uses_commander);
+        assert_eq!(cfg.commander_damage_threshold, Some(21));
+        assert!(cfg.command_zone);
+    }
+
+    /// `horde_decks()` is the per-seat library list: the primary `challenge_deck`
+    /// then each `co_horde_decks` entry in order. Single-Horde decks list one; the
+    /// LOTR two-Horde pairing lists [Sauron, Saruman] (two Horde seats).
+    #[test]
+    fn horde_decks_lists_primary_then_co_hordes() {
+        let single = ChallengeDeck::SauronHorde.default_ruleset();
+        assert!(single.co_horde_decks.is_empty());
+        assert_eq!(single.horde_decks(), vec![ChallengeDeck::SauronHorde]);
+
+        let mut two = ChallengeDeck::SauronHorde.default_ruleset();
+        two.co_horde_decks = vec![ChallengeDeck::SarumanHorde];
+        assert_eq!(
+            two.horde_decks(),
+            vec![ChallengeDeck::SauronHorde, ChallengeDeck::SarumanHorde],
+            "primary then co-hordes, in seat order"
+        );
+    }
+
+    #[test]
     fn two_headed_giant_commander_registry_entry_composes_both_parents() {
         let registry = GameFormat::registry();
         let entry = registry
@@ -5249,6 +6582,83 @@ mod tests {
             FormatConfig::for_format(format).unwrap(),
             FormatConfig::two_headed_giant_commander()
         );
+    }
+
+    #[test]
+    fn horde_uses_one_vs_many_shared_turn_topology() {
+        let config = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
+        assert_eq!(
+            config.topology(),
+            FormatTopology::OneVsMany {
+                archenemy: PlayerId(0),
+                turn_structure: TurnStructure::SharedTeamTurns,
+            }
+        );
+    }
+
+    #[test]
+    fn horde_survivors_take_the_first_turn_not_the_horde() {
+        // Regression guard for the review's B1 blocker: because Horde reuses the
+        // Archenemy OneVsMany topology, the naive path would hand the Horde
+        // (the archenemy seat) the first turn. Survivors must go first.
+        let config = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
+        let horde_seat = config.archenemy_player().expect("horde seat");
+        let first = config.starting_player();
+        assert_ne!(first, horde_seat, "the Horde must not take the first turn");
+        assert_eq!(first, PlayerId(1));
+    }
+
+    #[test]
+    fn horde_seat_is_not_given_archenemy_forty_life() {
+        // B1 blocker guard: the Archenemy OneVsMany arm grants 40 life to the
+        // special seat. The Horde has no life total and must not inherit 40.
+        let ruleset = ChallengeDeck::CybermanHorde.default_ruleset();
+        let base = ruleset.combined_base_life;
+        let config = FormatConfig::horde(ruleset);
+        let horde_seat = config.archenemy_player().expect("horde seat");
+        // Load-bearing: NOT the archenemy's 40. Every seat is pre-seeded with the
+        // combined base (redistributed across survivors in `GameState::new`);
+        // derive it from the ruleset rather than hardcoding, so this stays valid
+        // as deck balance changes.
+        assert_ne!(config.starting_life_for_player(horde_seat, 4), 40);
+        assert_eq!(config.starting_life_for_player(horde_seat, 4), base);
+        assert_eq!(config.starting_life_for_player(PlayerId(1), 4), base);
+    }
+
+    #[test]
+    fn horde_registry_entry_uses_default_config() {
+        let registry = GameFormat::registry();
+        let entry = registry
+            .iter()
+            .find(|m| m.format == GameFormat::Horde)
+            .expect("Horde must be in registry");
+        assert_eq!(entry.group, FormatGroup::Multiplayer);
+        assert_eq!(entry.short_label, "HRD");
+        assert_eq!(
+            entry.default_config,
+            FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset())
+        );
+    }
+
+    #[test]
+    fn horde_ruleset_survives_config_serde_round_trip() {
+        let config = FormatConfig::horde(ChallengeDeck::CybermanHorde.default_ruleset());
+        let json = serde_json::to_string(&config).expect("serialize");
+        let restored: FormatConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(config, restored);
+    }
+
+    #[test]
+    fn non_horde_configs_have_no_horde_ruleset() {
+        for meta in GameFormat::registry() {
+            let has_ruleset = meta.default_config.horde_ruleset.is_some();
+            assert_eq!(
+                has_ruleset,
+                meta.format == GameFormat::Horde,
+                "{:?}: horde_ruleset presence must match the Horde format",
+                meta.format
+            );
+        }
     }
 
     #[test]
@@ -5576,6 +6986,9 @@ mod tests {
             GameFormat::Limited,
             GameFormat::Freeform,
             GameFormat::Dandan,
+            // Format-level axis only (per-config Commander survivors are the
+            // `FormatConfig`-level override's business).
+            GameFormat::Horde,
         ];
 
         for count in 0usize..=3 {
@@ -5793,8 +7206,394 @@ mod tests {
 
         let (deviating, stock_count) =
             splits(&all, GameFormat::best_of_three_ceiling, MatchType::Bo3);
-        assert_eq!(deviating, only_dandan);
+        // Horde joins Dandan off the Bo3 stock: a fixed challenge deck with a
+        // Forbidden sideboard has nothing to sideboard between games.
+        assert_eq!(deviating, vec![GameFormat::Horde, GameFormat::Dandan]);
         assert!(stock_count > 0);
         assert_eq!(GameFormat::Dandan.best_of_three_ceiling(), MatchType::Bo1);
+        assert_eq!(GameFormat::Horde.best_of_three_ceiling(), MatchType::Bo1);
+    }
+
+    /// The Horde deck picker renders `ChallengeDeck::registry()` directly, so a
+    /// deck missing from `ALL` would be silently unselectable. `metadata` is an
+    /// exhaustive match (the compiler catches a missing arm); this catches a
+    /// variant that was described but never added to `ALL`.
+    #[test]
+    fn registry_covers_every_challenge_deck() {
+        let registry = ChallengeDeck::registry();
+        assert_eq!(registry.len(), ChallengeDeck::ALL.len());
+
+        for deck in ChallengeDeck::ALL {
+            // Exhaustive match: adding a variant fails to compile here until it
+            // is also appended to `ALL`.
+            match deck {
+                ChallengeDeck::CybermanHorde
+                | ChallengeDeck::DndHorde
+                | ChallengeDeck::ZombiesHorde
+                | ChallengeDeck::SliversHorde
+                | ChallengeDeck::HumansGodzillaHorde
+                | ChallengeDeck::SauronHorde
+                | ChallengeDeck::SarumanHorde
+                | ChallengeDeck::LotrTwoTowersHorde
+                | ChallengeDeck::TurtleTeamUpHorde => {}
+            }
+            assert!(
+                registry.iter().any(|meta| meta.deck == *deck),
+                "{deck:?} is missing from the challenge-deck registry"
+            );
+        }
+    }
+
+    /// Every entry must be renderable (non-empty labels) and internally
+    /// consistent — the bundled ruleset must describe the deck it is attached to,
+    /// so a client can build a `FormatConfig` straight from a picked entry.
+    #[test]
+    fn registry_entries_are_renderable_and_self_consistent() {
+        for meta in ChallengeDeck::registry() {
+            assert!(!meta.label.is_empty(), "{:?} has no label", meta.deck);
+            assert!(
+                !meta.short_label.is_empty(),
+                "{:?} has no short label",
+                meta.deck
+            );
+            assert!(
+                !meta.description.is_empty(),
+                "{:?} has no description",
+                meta.deck
+            );
+            assert_eq!(
+                meta.default_ruleset.challenge_deck, meta.deck,
+                "{:?} bundles a ruleset for a different deck",
+                meta.deck
+            );
+            // Every entry ships a rendered rules summary the picker can display,
+            // and it must be exactly what the deck's ruleset renders — the two
+            // must not drift.
+            assert_eq!(
+                meta.rules,
+                meta.default_ruleset.summary(),
+                "{:?}'s bundled rules summary does not match its ruleset",
+                meta.deck
+            );
+            assert!(
+                !meta.rules.is_empty(),
+                "{:?} has no rules summary",
+                meta.deck
+            );
+            for line in &meta.rules {
+                assert!(
+                    !line.label.is_empty(),
+                    "{:?} has an unlabeled rule",
+                    meta.deck
+                );
+                assert!(
+                    !line.detail.is_empty(),
+                    "{:?}'s '{}' rule has no detail",
+                    meta.deck,
+                    line.label
+                );
+            }
+        }
+    }
+
+    /// `HordeRuleset::summary` is the single authority for rules prose, so test it
+    /// as a building block across the full `WaveTermination` space — including the
+    /// `FixedCount` / `Fixed(n>1)` shapes no shipped deck uses yet (Theros decks
+    /// will) — not just the current decks' output.
+    #[test]
+    fn ruleset_summary_renders_every_wave_shape() {
+        let with_wave = |wave: WaveTermination| HordeRuleset {
+            challenge_deck: ChallengeDeck::CybermanHorde,
+            wave,
+            survivor_setup_turns: 3,
+            combined_base_life: 100,
+            per_extra_survivor_life_delta: -15,
+            horde_creatures_forced_attackers: true,
+            legendary_death: HordeLegendaryDeath::Normal,
+            post_combat_activation: HordePostCombatActivation::None,
+            survivor_deck_format: SurvivorDeckFormat::Constructed,
+            co_horde_decks: Vec::new(),
+            boss_stages: None,
+        };
+        // Pull the "Waves" line out of the rendered summary.
+        let wave_detail = |wave: WaveTermination| -> String {
+            with_wave(wave)
+                .summary()
+                .into_iter()
+                .find(|l| l.label == "Waves")
+                .expect("summary always has a Waves line")
+                .detail
+        };
+
+        assert_eq!(
+            wave_detail(WaveTermination::UntilNonToken {
+                count: WaveCount::Fixed(1)
+            }),
+            "Reveals until the first nontoken card is cast"
+        );
+        assert_eq!(
+            wave_detail(WaveTermination::UntilNonToken {
+                count: WaveCount::Fixed(2)
+            }),
+            "Reveals until 2 nontoken cards are cast"
+        );
+        assert_eq!(
+            wave_detail(WaveTermination::UntilNonToken {
+                count: WaveCount::Snaking { min: 1, max: 3 }
+            }),
+            "Reveals until N nontokens are cast \u{2014} N snakes 1 \u{2192} 3 \u{2192} 1 each turn"
+        );
+        assert_eq!(
+            wave_detail(WaveTermination::UntilRarityAtLeast(Rarity::Uncommon)),
+            "A wave ends at the first uncommon or better card"
+        );
+        assert_eq!(
+            wave_detail(WaveTermination::FixedCount(2)),
+            "Reveals 2 cards each Horde turn"
+        );
+        // Singular grammar for a one-card fixed wave.
+        assert_eq!(
+            wave_detail(WaveTermination::FixedCount(1)),
+            "Reveals 1 card each Horde turn"
+        );
+    }
+
+    /// The life line must fold both the shared base and the per-extra-survivor
+    /// scaling; a flat total (Theros: `delta == 0`) drops the scaling clause.
+    #[test]
+    fn ruleset_summary_life_line_handles_flat_and_scaled_totals() {
+        let line = |base: i32, delta: i32| -> String {
+            HordeRuleset {
+                challenge_deck: ChallengeDeck::CybermanHorde,
+                wave: WaveTermination::FixedCount(1),
+                survivor_setup_turns: 3,
+                combined_base_life: base,
+                per_extra_survivor_life_delta: delta,
+                horde_creatures_forced_attackers: true,
+                legendary_death: HordeLegendaryDeath::Normal,
+                post_combat_activation: HordePostCombatActivation::None,
+                survivor_deck_format: SurvivorDeckFormat::Constructed,
+                co_horde_decks: Vec::new(),
+                boss_stages: None,
+            }
+            .summary()
+            .into_iter()
+            .find(|l| l.label == "Survivor life")
+            .expect("summary always has a Survivor life line")
+            .detail
+        };
+        assert_eq!(line(100, -15), "100 life shared, -15 per extra survivor");
+        assert_eq!(line(20, 0), "20 life, shared by all survivors");
+    }
+
+    /// The legendary axis is advanced-only: a `Normal` ruleset renders no
+    /// "Legendary deaths" line (basic decks stay their five base lines), while an
+    /// `EtbThenPhaseOut` ruleset adds exactly one. This is the axis's contract
+    /// with the picker — it surfaces only where the rule actually differs.
+    #[test]
+    fn ruleset_summary_shows_legendary_line_only_for_advanced_rule() {
+        let with_legendary = |rule: HordeLegendaryDeath| HordeRuleset {
+            challenge_deck: ChallengeDeck::CybermanHorde,
+            wave: WaveTermination::FixedCount(1),
+            survivor_setup_turns: 3,
+            combined_base_life: 100,
+            per_extra_survivor_life_delta: -15,
+            horde_creatures_forced_attackers: true,
+            legendary_death: rule,
+            post_combat_activation: HordePostCombatActivation::None,
+            survivor_deck_format: SurvivorDeckFormat::Constructed,
+            co_horde_decks: Vec::new(),
+            boss_stages: None,
+        };
+
+        let basic = with_legendary(HordeLegendaryDeath::Normal).summary();
+        assert!(
+            !basic.iter().any(|l| l.label == "Legendary deaths"),
+            "a Normal ruleset must not advertise the advanced legendary rule"
+        );
+        assert_eq!(
+            basic.len(),
+            5,
+            "basic decks stay their five base rule lines"
+        );
+
+        let advanced = with_legendary(HordeLegendaryDeath::EtbThenPhaseOut).summary();
+        let legendary_line = advanced
+            .iter()
+            .find(|l| l.label == "Legendary deaths")
+            .expect("an EtbThenPhaseOut ruleset must surface a Legendary deaths line");
+        assert!(
+            legendary_line.detail.contains("phases out"),
+            "the legendary line must describe the phase-out behavior"
+        );
+    }
+
+    /// The post-combat-activation axis is advanced-only too: `None` renders no
+    /// "Post-combat" line; `OncePerPermanent` adds exactly one.
+    #[test]
+    fn ruleset_summary_shows_post_combat_line_only_for_advanced_rule() {
+        let with_activation = |rule: HordePostCombatActivation| HordeRuleset {
+            challenge_deck: ChallengeDeck::CybermanHorde,
+            wave: WaveTermination::FixedCount(1),
+            survivor_setup_turns: 3,
+            combined_base_life: 100,
+            per_extra_survivor_life_delta: -15,
+            horde_creatures_forced_attackers: true,
+            legendary_death: HordeLegendaryDeath::Normal,
+            post_combat_activation: rule,
+            survivor_deck_format: SurvivorDeckFormat::Constructed,
+            co_horde_decks: Vec::new(),
+            boss_stages: None,
+        };
+
+        let basic = with_activation(HordePostCombatActivation::None).summary();
+        assert!(
+            !basic.iter().any(|l| l.label == "Post-combat"),
+            "a None ruleset must not advertise post-combat activation"
+        );
+        assert_eq!(
+            basic.len(),
+            5,
+            "basic decks stay their five base rule lines"
+        );
+
+        let advanced = with_activation(HordePostCombatActivation::OncePerPermanent).summary();
+        let line = advanced
+            .iter()
+            .find(|l| l.label == "Post-combat")
+            .expect("an OncePerPermanent ruleset must surface a Post-combat line");
+        assert!(
+            line.detail.contains("infinite mana"),
+            "the post-combat line must mention the Horde's infinite mana"
+        );
+    }
+
+    /// The whole point of the summary is to show how decks DIFFER — two decks with
+    /// different wave rules must produce different "Waves" lines.
+    #[test]
+    fn different_decks_produce_different_wave_summaries() {
+        let waves = |deck: ChallengeDeck| -> String {
+            deck.metadata()
+                .rules
+                .into_iter()
+                .find(|l| l.label == "Waves")
+                .unwrap()
+                .detail
+        };
+        assert_ne!(
+            waves(ChallengeDeck::CybermanHorde),
+            waves(ChallengeDeck::ZombiesHorde)
+        );
+        assert_ne!(
+            waves(ChallengeDeck::CybermanHorde),
+            waves(ChallengeDeck::DndHorde)
+        );
+    }
+
+    /// Pin each deck's defining wave rule — these are what make them play
+    /// differently, and a silent swap would change the whole feel of a deck.
+    #[test]
+    fn challenge_decks_keep_their_defining_wave_rules() {
+        assert_eq!(
+            ChallengeDeck::CybermanHorde.default_ruleset().wave,
+            WaveTermination::UntilNonToken {
+                count: WaveCount::Fixed(1)
+            }
+        );
+        assert_eq!(
+            ChallengeDeck::DndHorde.default_ruleset().wave,
+            WaveTermination::UntilRarityAtLeast(Rarity::Uncommon)
+        );
+        assert_eq!(
+            ChallengeDeck::ZombiesHorde.default_ruleset().wave,
+            WaveTermination::UntilNonToken {
+                count: WaveCount::Snaking { min: 1, max: 3 }
+            }
+        );
+    }
+
+    /// Pin the published community survivor-life rule (hordemagic basic rules:
+    /// "combined, shared and start at 100 life. Each player reduces {15} life ...
+    /// beyond the 1st"). The `horde_multiplayer` mechanism tests are deliberately
+    /// balance-agnostic (they derive from the ruleset), so this is where the
+    /// concrete 100 / −15 → 100·85·70 numbers are actually asserted; a wrong base
+    /// or delta slips past those tests but not this one.
+    #[test]
+    fn community_decks_use_the_published_shared_life_rule() {
+        for deck in ChallengeDeck::ALL {
+            let r = deck.default_ruleset();
+            if *deck == ChallengeDeck::TurtleTeamUpHorde {
+                // Turtle Team-Up prints its OWN life table in the product
+                // booklet (20/30/40 shared for 2/3/4 heroes), not the community
+                // 100/−15 — pin that table deliberately instead.
+                assert_eq!(
+                    r.combined_base_life, 10,
+                    "Turtle Team-Up must use the product's 10-life hero base"
+                );
+                assert_eq!(
+                    r.per_extra_survivor_life_delta, 10,
+                    "Turtle Team-Up must add 10 per extra hero"
+                );
+                // 2 / 3 / 4 heroes → 20 / 30 / 40.
+                let combined =
+                    |n: i32| r.combined_base_life + r.per_extra_survivor_life_delta * (n - 1);
+                assert_eq!((combined(2), combined(3), combined(4)), (20, 30, 40));
+                continue;
+            }
+            assert_eq!(
+                r.combined_base_life, 100,
+                "{deck:?} must use the 100-life community base"
+            );
+            assert_eq!(
+                r.per_extra_survivor_life_delta, -15,
+                "{deck:?} must reduce 15 per extra survivor"
+            );
+            // 1 / 2 / 3 survivors → 100 / 85 / 70.
+            let combined =
+                |n: i32| r.combined_base_life + r.per_extra_survivor_life_delta * (n - 1);
+            assert_eq!((combined(1), combined(2), combined(3)), (100, 85, 70));
+        }
+    }
+
+    /// A constant schedule is the classic rule and must not vary by turn.
+    #[test]
+    fn fixed_wave_count_is_constant_across_turns() {
+        let fixed = WaveCount::Fixed(1);
+        for turn in 0..10 {
+            assert_eq!(fixed.nontokens_for_turn(turn), 1);
+        }
+    }
+
+    /// The Zombies Horde's published ramp: "Wave 1 ... then Wave 2 ... and so on
+    /// for Wave 3. On its next turn, it will descend back down to Wave 2, snaking
+    /// back and forth." Pin the exact sequence over two full periods.
+    #[test]
+    fn snaking_wave_count_ramps_up_and_back_down() {
+        let snake = WaveCount::Snaking { min: 1, max: 3 };
+        let seq: Vec<u32> = (0..9).map(|t| snake.nontokens_for_turn(t)).collect();
+        assert_eq!(seq, vec![1, 2, 3, 2, 1, 2, 3, 2, 1]);
+    }
+
+    /// The endpoints must not repeat — a naive "up then reversed" schedule would
+    /// emit 1,2,3,3,2,1 and linger a turn too long at each extreme.
+    #[test]
+    fn snaking_wave_count_does_not_repeat_its_endpoints() {
+        let snake = WaveCount::Snaking { min: 2, max: 4 };
+        let seq: Vec<u32> = (0..8).map(|t| snake.nontokens_for_turn(t)).collect();
+        assert_eq!(seq, vec![2, 3, 4, 3, 2, 3, 4, 3]);
+    }
+
+    /// A degenerate range must still yield a terminating wave rather than
+    /// dividing by zero on the period.
+    #[test]
+    fn snaking_wave_count_handles_degenerate_ranges() {
+        assert_eq!(
+            WaveCount::Snaking { min: 2, max: 2 }.nontokens_for_turn(7),
+            2
+        );
+        assert_eq!(
+            WaveCount::Snaking { min: 3, max: 1 }.nontokens_for_turn(7),
+            3
+        );
     }
 }

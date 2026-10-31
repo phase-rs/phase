@@ -14187,6 +14187,9 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::SelfManaValue
         | QuantityRef::Devotion { .. }
+        // Turtle Team-Up: global command-zone pile census — binds identically
+        // on both legs (not resolution-scoped like the linked-exile family).
+        | QuantityRef::DeployedBossCount
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::BendTypesThisTurn

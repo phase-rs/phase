@@ -1192,6 +1192,13 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
             GameFormat::Oathbreaker => face.is_oathbreaker,
             GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
+            // Horde is per-config (Commander-format survivors designate a
+            // standard-EDH-eligible commander; Constructed survivors have no
+            // commander slot and never consult this). Answer the EDH
+            // predicate: the only caller that can exist is the Commander
+            // horde's deck builder, and `false` here would silently tell it
+            // no card can be its commander.
+            GameFormat::Horde => is_commander_eligible(face),
             // CR 903.3's commander eligibility test applies unchanged —
             // planar doesn't change eligibility.
             GameFormat::PlanechaseCommander => is_commander_eligible(face),
@@ -1399,6 +1406,16 @@ pub fn sideboard_policy_for_format(format_config: JsValue) -> Result<JsValue, Js
 #[wasm_bindgen(js_name = getFormatRegistry)]
 pub fn get_format_registry() -> JsValue {
     to_js(&GameFormat::registry())
+}
+
+/// Return the authoritative list of selectable Horde challenge decks as a typed
+/// array. The Horde deck picker renders this directly, so adding a new challenge
+/// deck is a single engine-side change — the client never maintains a mirrored
+/// deck list. Each entry bundles the deck's `HordeRuleset`, so the client can
+/// build the complete `FormatConfig` for the picked deck without a second call.
+#[wasm_bindgen(js_name = getChallengeDeckRegistry)]
+pub fn get_challenge_deck_registry() -> JsValue {
+    to_js(&engine::types::format::ChallengeDeck::registry())
 }
 
 /// Evaluate deck compatibility and format legality using the loaded card database.
@@ -1728,9 +1745,16 @@ fn validate_deck_list_seats(
     match_type: Option<MatchType>,
     player_count: usize,
 ) -> Option<Vec<String>> {
+    // Horde seats run the engine-supplied challenge library, never a
+    // player-built deck: the local path submits an empty seat for them, which
+    // must not face the survivor deck-shape check (an empty submission is
+    // only exempt for non-`PlayerBuilt` supplies, and Horde is `PlayerBuilt`
+    // for its survivors). Skip the designated Horde seats; every survivor
+    // seat is still validated. Empty for non-Horde formats — a no-op there.
+    let horde_seats = format_config.horde_designated_seats();
     let seats = [
-        ("Player".to_string(), &deck_list.player),
-        ("AI opponent".to_string(), &deck_list.opponent),
+        (0usize, "Player".to_string(), &deck_list.player),
+        (1usize, "AI opponent".to_string(), &deck_list.opponent),
     ]
     .into_iter()
     .chain(
@@ -1738,9 +1762,12 @@ fn validate_deck_list_seats(
             .ai_decks
             .iter()
             .enumerate()
-            .map(|(idx, deck)| (format!("AI player {}", idx + 2), deck)),
+            .map(|(idx, deck)| (idx + 2, format!("AI player {}", idx + 2), deck)),
     );
-    for (seat, deck) in seats {
+    for (seat_idx, seat, deck) in seats {
+        if horde_seats.contains(&PlayerId(seat_idx as u8)) {
+            continue;
+        }
         if let Err(reasons) = validate_name_deck_for_format_full(
             db,
             &deck.main_deck,
@@ -8360,6 +8387,7 @@ mod deck_list_seat_validation_tests {
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType, Supertype};
     use engine::types::custom_format::CustomFormatId;
+    use engine::types::format::ChallengeDeck;
     use engine::types::mana::ManaColor;
     use std::collections::BTreeMap;
 
@@ -8548,6 +8576,62 @@ mod deck_list_seat_validation_tests {
         )
         .expect("Standard refuses an empty deck");
         assert!(refused[0].starts_with("Player deck:"), "{refused:?}");
+    }
+
+    /// Commander-survivor Hordes initialize: the full local payload carries a
+    /// 100-card EDH deck on the survivor seat and an EMPTY seat for the
+    /// designated Horde seat (seat 1, the engine-supplied challenge library).
+    /// The Horde seat must not face the survivor deck-shape check.
+    ///
+    /// Revert guard: validating every seat refuses the empty Horde seat for
+    /// the 100-card Commander shape — the `None` flips to `Some`.
+    #[test]
+    fn horde_skips_designated_seats_and_validates_survivors() {
+        let db = test_db();
+        let mut config = FormatConfig::horde(ChallengeDeck::SauronHorde.default_ruleset());
+        // Production anchors the Horde at seat 1 (the `opponent` slot).
+        config.archenemy_player = Some(PlayerId(1));
+        assert_eq!(
+            config.horde_designated_seats(),
+            vec![PlayerId(1)],
+            "reach-guard: Sauron designates exactly the Horde seat"
+        );
+
+        let mut main_deck = n_plains(99);
+        let _ = main_deck.pop();
+        main_deck.push(LEGEND_B.to_string());
+        let survivor = PlayerDeckList {
+            main_deck,
+            commander: vec![LEGEND_A.to_string()],
+            ..Default::default()
+        };
+        let list = DeckList {
+            player: survivor,
+            opponent: PlayerDeckList::default(),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_deck_list_seats(&db, &list, &config, None, 2),
+            None,
+            "a valid survivor deck plus an empty Horde seat initializes"
+        );
+
+        // The skip is seat-scoped: a 60-card survivor is still refused.
+        let bad = DeckList {
+            player: plains_seat(60),
+            opponent: PlayerDeckList::default(),
+            ..Default::default()
+        };
+        let refused = validate_deck_list_seats(&db, &bad, &config, None, 2)
+            .expect("a 60-card survivor deck is refused for Sauron");
+        assert!(
+            refused[0].starts_with("Player deck:"),
+            "the SURVIVOR seat refuses, got {refused:?}"
+        );
+        assert!(
+            refused.iter().any(|r| r.contains("exactly 100 cards")),
+            "the Commander shape check fires, got {refused:?}"
+        );
     }
 
     #[test]

@@ -24,14 +24,15 @@ use super::ability::{
     CastTimingPermission, CastVariantPaid, CastingPermission, CategoryChooserScope, ChoiceType,
     ChoiceValue, ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, ContinuousModification,
     ControlWindow, CopiableValues, CopyChooseScope, CopyScale, CopyTargetPurpose,
-    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, DelayedTriggerKind,
-    DigRestOrder, DigRestSplitScope, Duration, EffectKind, EntryAttackDestination, FaceDownProfile,
-    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice,
-    PermanentEntryMode, PileSource, QuantityExpr, ReplacementDefinition, ResolvedAbility,
-    ReturnResultId, SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint,
-    StackAbilityKind, StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef,
-    ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
+    CostPaidObjectSnapshot, CounterCostSelection, DamageContextSnapshot, DelayedTriggerCondition,
+    DelayedTriggerKind, DigRestOrder, DigRestSplitScope, Duration, EffectKind,
+    EntryAttackDestination, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant,
+    LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
+    ReplacementDefinition, ResolvedAbility, ReturnResultId, SearchDestinationSplit,
+    SearchOrderingHint, SearchSelectionConstraint, StackAbilityKind, StaticCondition,
+    TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef,
+    TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
+    TriggerEntry,
 };
 use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
@@ -42,7 +43,7 @@ use super::events::{
     EventAttachmentSnapshot, EventCombatSnapshot, EventObjectHistorySnapshot,
     EventObjectRelationSnapshot, EventObjectSnapshot, GameEvent, PlayerActionKind, Targeter,
 };
-use super::format::{FormatConfig, ZoneScope};
+use super::format::{FormatConfig, GameFormat, ZoneScope};
 pub use super::game_state_kinds::{
     CastingVariant, DayNight, DistributionUnit, NextSpellModifier, RetargetScope, SneakPlacement,
     TargetSelectionConstraint,
@@ -177,6 +178,10 @@ fn is_zero_u32(value: &u32) -> bool {
 }
 
 fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_zero_u8(value: &u8) -> bool {
     *value == 0
 }
 
@@ -2725,6 +2730,57 @@ pub struct ExploitRecord {
     pub sacrificed: ObjectId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sacrificed_incarnation: Option<u64>,
+}
+
+/// CR 120.3f + CR 120.1 + CR 616.1: post-loss work a player-damage leg
+/// still owes after its life loss paused (the Horde damage→mill redirect
+/// parking a mill/batch choice, or co-applicable life-loss replacements).
+/// Stashed by `apply_damage_after_replacement` on the deferral. A non-combat
+/// leg drains through `drain_pending_damage_post_loss` once the loss fully
+/// settles; a combat leg (`is_combat`) instead rides the combat batch's
+/// Phase C remnant — the combat resume consumes it, so the post-replacement
+/// funnel never drains it directly. Creature damage cannot pause here (only
+/// the player life-loss call defers), so the target is always a player and
+/// toxic never applies.
+///
+/// The staged cursor runs each step exactly once: `EmitAndRecord` is
+/// infallible (event push + record push), while a `LifelinkGain` drain that
+/// parks hands the gain to `pending_replacement` and consumes the stash —
+/// the LifeGain arm settles it, so the next answer never re-proposes it
+/// (mirroring `PendingCombatLifelink`'s deliberately-absent paused source).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDamagePostLoss {
+    pub source_id: ObjectId,
+    /// CR 400.7: the source incarnation captured with the damage context —
+    /// authoritative if the source changes zones across the pause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_incarnation: Option<u64>,
+    pub controller: PlayerId,
+    pub target: PlayerId,
+    /// The post-replacement damage amount (== `primary_amount`: players have
+    /// no excess and the excess-redirect rider is creature-only).
+    pub actual_amount: u32,
+    pub has_lifelink: bool,
+    /// CR 702.15b + CR 120.4a: lifelink already-dealt bonus deferred from an
+    /// earlier leg of the same modified event (redirect legs).
+    #[serde(default)]
+    pub lifelink_bonus: u32,
+    pub stage: DamagePostLossStage,
+    /// CR 510.2: a combat leg's post-loss work, owned by the batch remnant
+    /// rather than the shared drain (see the struct docs).
+    #[serde(default)]
+    pub is_combat: bool,
+}
+
+/// Cursor for [`PendingDamagePostLoss`]: which post-loss step still owes work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DamagePostLossStage {
+    /// Push the `DamageDealt` event and the CR 120.1 record, then advance.
+    EmitAndRecord,
+    /// Apply the lifelink gain. A park here consumes the stash (the pending
+    /// replacement owns the gain); the value survives only for in-flight
+    /// records, never for a re-stash.
+    LifelinkGain,
 }
 
 /// CR 608.2i + CR 608.2h: source characteristics snapshot at damage time
@@ -7506,6 +7562,23 @@ pub enum BatchCompletion {
         /// actually departed the library, so the set is a candidate list rather
         /// than a result.
         cards: Vec<ObjectId>,
+    },
+    /// Horde advanced legendary rule
+    /// ([`crate::types::format::HordeLegendaryDeath::EtbThenPhaseOut`]) + CR
+    /// 701.17a + CR 603.2c + CR 702.26 + CR 616.1: a damage-to-mill batch
+    /// settled. Publishes the ordinary `Milled` events for every card that
+    /// left the library, then synchronously phases out the deployed legendary
+    /// cohort. Runs after the batch's own trigger collection on both the
+    /// synchronous and resumed paths, so printed ETBs are already collected
+    /// and no SBA check can observe the phased-in window.
+    HordeMillFromLossDeliveryComplete {
+        player_id: PlayerId,
+        /// Every card the mill attempted (candidate list, as in
+        /// `MilledDeliveryComplete`): each non-library card yields `Milled`.
+        milled: Vec<ObjectId>,
+        /// The legendary permanents this batch deployed. Each still on the
+        /// battlefield phases out synchronously (CR 702.26).
+        legendary_cohort: Vec<ObjectId>,
     },
 }
 
@@ -16450,6 +16523,168 @@ impl ZoneOpponentChooserPurpose {
     }
 }
 
+/// Turtle Team-Up: which hero-choice Event a [`WaitingFor::HeroEventChoice`]
+/// prompt belongs to, plus the event-specific running parameters. No CR
+/// section — casual product; the variants mirror the Event names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum HeroEventKind {
+    /// "Each hero sacrifices a tapped creature they control."
+    ChromeOverload,
+    /// "As a team, the heroes discard a total of two cards." `remaining` is
+    /// the running remainder across the hero sequence.
+    KrangStratagem { remaining: usize },
+    /// "As a team, the heroes choose a creature with the greatest power
+    /// among creatures they control. Destroy it. The bosses lose life equal
+    /// to that creature's power."
+    Smackdown,
+    /// "Each hero taps a creature they control and puts X stun counters on
+    /// it, where X is the number of bosses."
+    RatKingRevolution,
+    /// "Each hero returns X creatures they control to their owners' hands,
+    /// where X is the number of bosses."
+    SavantiCurse,
+    /// "As a team, the heroes choose a creature with the greatest power
+    /// among creatures they control. Destroy it."
+    Infiltration,
+    /// "As a team, the heroes choose three creatures they control. Destroy
+    /// each other creature the heroes control."
+    VillainMayhem,
+}
+
+/// One hero's recorded answer inside a [`WaitingFor::HeroEventChoice`]
+/// sequence. Answers accumulate on the prompt (the vote-ledger precedent)
+/// and apply as one batch when the queue drains, so multi-hero Events stay
+/// simultaneous.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeroEventAnswer {
+    pub hero: PlayerId,
+    pub cards: Vec<ObjectId>,
+}
+
+/// One application step of a drained hero-choice batch. Steps apply in order;
+/// after each step the driver checks whether a nested replacement prompt
+/// (regeneration, Library of Leng) took over, and if so parks the remainder
+/// in [`PendingHeroEvent`] for the replacement funnel to resume — the
+/// `pending_discard_batch` precedent. Steps carry ids and amounts only, never
+/// `GameEvent`s, so no persisted-event rebind is owed on load.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HeroEventApplyStep {
+    /// `hero` sacrifices `card` (Chrome Dome's Overload).
+    Sacrifice { hero: PlayerId, card: ObjectId },
+    /// `hero` discards `card` to a resolving Event (Krang's Stratagem).
+    Discard { hero: PlayerId, card: ObjectId },
+    /// Destroy `card` (Smackdown, Infiltration, Mayhem).
+    Destroy { card: ObjectId },
+    /// `player` loses `amount` life (Smackdown's power drain, Karai's Planning).
+    LoseLife { player: PlayerId, amount: i32 },
+    /// `player` gains `amount` life (Karai's Planning).
+    GainLife { player: PlayerId, amount: i32 },
+    /// Deal `amount` damage to `card` (Bebop's Rampage), sourced from the
+    /// resolving Event.
+    Damage { card: ObjectId, amount: u32 },
+    /// Move `card` to `dest` through the full zone pipeline (Shredder's
+    /// Challenge returns, Villain Scheme! restocks).
+    ZoneMove { card: ObjectId, dest: Zone },
+    /// Shuffle `player`'s library (Villain Scheme!, after the restock moves).
+    ShuffleLibrary { player: PlayerId },
+    /// Move fired Baxter cards to the Boss graveyard ("after the next event
+    /// is played, put this card into the event discard pile"). Ordered AFTER
+    /// the resolution's own steps and BEFORE any owed copies, so a copied
+    /// Scheme! can never recycle a Baxter that is still firing.
+    DiscardFiredBaxters { cards: Vec<ObjectId> },
+    /// Tap `card` (Rat King's Revolution).
+    Tap { card: ObjectId },
+    /// Put `count` `counter` counters on `card` (Rat King's stun).
+    AddCounters {
+        card: ObjectId,
+        counter: crate::types::counter::CounterType,
+        count: u32,
+    },
+    /// Return `card` to its owner's hand (Savanti Romero's Curse).
+    Bounce { card: ObjectId },
+}
+
+/// A Horde wave reveal parked mid-move by a CR 616.1 replacement choice,
+/// resumed at the top of `horde::reveal_and_resolve_top_card` when the
+/// priority re-entry seam re-invokes the wave after the choice resolves.
+/// The wave budget was already consumed for the parked card, so the resume
+/// runs only the post-move tail (free-cast or Event dispatch) and never
+/// reveals again. Populated only during the pause.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PendingHordeReveal {
+    /// Nontoken wave reveal: the library→exile move paused. Resume casts the
+    /// card for free when it reached exile, else ends the wave (redirected
+    /// reveals are not cast — the standing wave policy).
+    NontokenCast {
+        /// The revealed card, mid-move to exile.
+        card: ObjectId,
+        /// Library rarity captured before the move, for the
+        /// `UntilRarityAtLeast` end-of-wave check.
+        revealed_rarity: Option<crate::types::card::Rarity>,
+    },
+    /// Revealed Event: the move out of the library paused. Resume dispatches
+    /// the Event from wherever the pipeline delivered it: the one-shot is
+    /// the Event's resolution (product order is resolve-then-discard), so a
+    /// redirected pile move changes only where the Event lands, never
+    /// whether it fires.
+    EventDispatch {
+        /// The revealed Event, mid-move out of the library.
+        card: ObjectId,
+        /// Banked Baxters taken before the move; they ride the dispatch.
+        fired: Vec<ObjectId>,
+    },
+    /// Revealed token: the CreateToken event paused on a replacement choice.
+    /// Reachable — an Esix/Jinnie-style "instead" substitute the Horde
+    /// controls applies to the reveal's token creation (CR 614.1a). Resume
+    /// runs the post-creation tail over whatever the answered choice
+    /// delivered (pinned-ability recovery, Ninja grafts, placeholder
+    /// removal), then continues the wave.
+    TokenCreation {
+        /// The revealed library placeholder, still in the library.
+        card: ObjectId,
+        /// Battlefield snapshot before the create, identifying this reveal's
+        /// products once the choice resolves.
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+        before: HashSet<ObjectId>,
+        /// Pinned preset identity for ability recovery (`None` for
+        /// vanilla/keyword-only tokens: nothing to recover).
+        pinned: Option<crate::types::card::TokenImageRef>,
+        /// The revealed card's name: pinned-ability recovery applies only to
+        /// products still carrying it (an accepted substitute creates copies
+        /// of something else, which must not inherit the reveal's identity).
+        revealed_name: String,
+    },
+    /// Revealed Army token: the Amass instruction parked on a choice (an
+    /// Esix/Jinnie-style "instead" substitute on the Army creation, or a
+    /// counter-placement choice). Reachable — the Horde controls no Army, so
+    /// Amass creates one through the token-creation replacement pipeline
+    /// (CR 614.16 + CR 701.47a). Resume removes the consumed library
+    /// placeholder — the Amass continuation (counters) already settled when
+    /// the choice resolved — then continues the wave.
+    AmassArmy {
+        /// The revealed library placeholder, still in the library.
+        card: ObjectId,
+    },
+}
+
+/// A hero-choice batch parked mid-application by a nested replacement prompt,
+/// resumed by `boss::drain_pending_hero_event` through the same
+/// post-replacement funnel as `pending_discard_batch` (arbitrary re-pauses
+/// compose: each resume re-enters the drain through the same hook).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingHeroEvent {
+    /// The resolving Event object (application source + re-dispatch identity).
+    /// Copies re-derive their kind from the Event title, so no kind rides here.
+    pub event_id: ObjectId,
+    /// The Boss seat (life-loss recipient, counter actor).
+    pub horde: PlayerId,
+    /// Steps still owed, in order.
+    pub steps: Vec<HeroEventApplyStep>,
+    /// Baxter's Experiments copies still owed after the steps complete.
+    pub copies_pending: u32,
+}
+
 /// CR 508.1g–j: An eligible optional attack cost, bound before any payment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingAttackExert {
@@ -17419,6 +17654,51 @@ pub enum WaitingFor {
         /// resolving discard (not discard costs or Ward).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+    },
+    /// Turtle Team-Up: one hero's card-selection step inside a hero-choice
+    /// Event ("each hero …" sequences and "as a team" captain choices). The
+    /// pending queue rides on the prompt itself (the vote-ledger precedent):
+    /// `remaining_heroes` drains in seat order, `answers` accumulate, and the
+    /// handler batch-applies them when the queue empties. Answered with
+    /// `GameAction::SelectCards`; `count`/`up_to`/`min` validate like
+    /// `DiscardChoice` with a floor (exact `count`, or `min..=count` when
+    /// `up_to`; `min` is 0 except where the team total needs a contribution
+    /// floor, e.g. Krang's Stratagem).
+    HeroEventChoice {
+        /// The hero who must decide this step.
+        player: PlayerId,
+        /// Which Event this choice belongs to, plus its running parameters.
+        event: HeroEventKind,
+        /// The resolving Event object (batch-application source + Baxter
+        /// re-dispatch identity).
+        event_id: ObjectId,
+        /// The current offer (this hero's eligible cards).
+        cards: Vec<ObjectId>,
+        /// How many to select (`up_to` widens to `min..=count`).
+        count: usize,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        up_to: bool,
+        /// Minimum selection when `up_to` (0 for exact prompts and for
+        /// up-to prompts with no contribution floor).
+        #[serde(default, skip_serializing_if = "is_zero_usize")]
+        min: usize,
+        /// Heroes still to prompt after `player`, in seat order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remaining_heroes: Vec<PlayerId>,
+        /// Recorded answers, batch-applied when the queue drains.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        answers: Vec<HeroEventAnswer>,
+        /// Baxter's Experiments copies still owed: when the queue drains with
+        /// these outstanding, the event resolves again per copy.
+        #[serde(default)]
+        copies_pending: u32,
+        /// Fired Baxter cards held aside while this choice resolves ("after
+        /// the next event is played, put this card into the event discard
+        /// pile"): they hit the Boss graveyard when the queue drains, BEFORE
+        /// any owed copies resolve, so a copied Scheme! can never recycle a
+        /// Baxter that is still firing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fired_baxters: Vec<ObjectId>,
     },
     /// CR 608.2d: Player chooses object(s) from a zone during effect resolution.
     /// Generalizes the DiscardChoice pattern to sacrifice-from-battlefield and hand-to-battlefield.
@@ -19282,7 +19562,58 @@ pub struct PendingLifelinkGain {
 /// `CombatDamageDealtToPlayer` aggregate, then Phase D's prevention riders. Deferring Phase D
 /// rather than hoisting it makes it impossible for a rider's own continuation (CR 615.5) to run
 /// while the CR 616.1 prompt is open.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// CR 510.2 + CR 616.1: one combat-damage assignment still owed after a
+/// Phase C pause, with its post-Phase-B survivor. Owned (unlike the borrowed
+/// `BatchEntry`) so the batch remnant round-trips through saves and AI
+/// clones; the survivor is re-applied on resume WITHOUT re-running damage
+/// replacement/prevention selection. `Eq` is absent because `ProposedEvent`
+/// is only `PartialEq` (like `PendingReplacement`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingCombatLeg {
+    /// Source characteristics snapshotted at collect time (CR 400.7: the
+    /// incarnation stays authoritative if the source changes zones).
+    pub ctx: DamageContextSnapshot,
+    pub source_is_commander: bool,
+    pub target: TargetRef,
+    /// CR 119.3 + CR 702.15b: the controller this source gains lifelink for
+    /// (`None` when the source has no lifelink).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifelink_controller: Option<PlayerId>,
+    /// Post-Phase-B survivor (`None` = fully prevented: applies as 0 with
+    /// bookkeeping, exactly as the never-paused path would).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub survivor: Option<ProposedEvent>,
+}
+
+/// CR 510.2: per-player, per-source combat damage for one step —
+/// `(player, [(source_id, amount)], step_total)`.
+pub type PerPlayerCombatDamage = (PlayerId, Vec<(ObjectId, u32)>, u32);
+
+/// CR 510.2 + CR 616.1: the unfinished Phase C tail of a combat-damage batch
+/// whose leg paused on a life-loss replacement choice (the Horde damage→mill
+/// redirect parking a mill/batch choice, or co-applicable loss replacements).
+/// The paused leg itself rides `pending_damage_post_loss` (combat-flagged);
+/// its lifelink share and combat bookkeeping were folded into the accumulators
+/// below at park time (amounts are post-replacement and order-free), so the
+/// resume only owes its `DamageDealt` event + CR 120.1 record (sync order:
+/// after the loss settles), then the remaining legs, then the aggregate and
+/// the lifelink drain. `Eq` is absent (see `PendingCombatLeg`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingCombatPhaseCRemnant {
+    /// Legs never applied, in batch order.
+    pub remaining: Vec<PendingCombatLeg>,
+    /// CR 119.3 + CR 702.15b: per-source lifelink sums so far, in
+    /// first-appearance order — `(source_id, controller, total_dealt)`.
+    pub lifelink_by_source: Vec<(ObjectId, PlayerId, u32)>,
+    /// CR 510.2: per-player, per-source damage so far.
+    pub combat_damage_to_players: Vec<PerPlayerCombatDamage>,
+    /// CR 400.7: each applied source's incarnation.
+    pub source_incarnations: Vec<ObjectIncarnationRef>,
+}
+
+/// `Eq` is absent because the Phase C remnant holds `ProposedEvent`
+/// survivors (see `PendingCombatLeg`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingCombatLifelink {
     /// CR 702.15e: per-source gains still owed, in batch order — separate life
     /// gain events, never merged.
@@ -19324,6 +19655,11 @@ pub struct PendingCombatLifelink {
     /// CR 510.4: which sub-step owns this batch. Snapshotted because
     /// `combat.first_strike_done` mutates during the resume.
     pub sub_step: CombatDamageSubStep,
+    /// CR 510.2 + CR 616.1: the unfinished Phase C tail, present only when
+    /// the batch parked on a LEG's life-loss pause (rather than a lifelink
+    /// gain's). The resume completes it before draining `remaining`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_c_remnant: Option<PendingCombatPhaseCRemnant>,
 }
 
 /// CR 510.1c: A blocker with its lethal damage threshold for UI display.
@@ -19670,6 +20006,7 @@ impl WaitingFor {
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
+            WaitingFor::HeroEventChoice { .. } => "HeroEventChoice",
             WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
             WaitingFor::DrawnThisTurnTopdeckChoice { .. } => "DrawnThisTurnTopdeckChoice",
             WaitingFor::LearnChoice { .. } => "LearnChoice",
@@ -19920,6 +20257,7 @@ impl WaitingFor {
             | WaitingFor::CombatTaxPayment { player, .. }
             | WaitingFor::PhyrexianPayment { player, .. }
             | WaitingFor::DiscardChoice { player, .. }
+            | WaitingFor::HeroEventChoice { player, .. }
             | WaitingFor::MiracleReveal { player, .. }
             | WaitingFor::CommanderZoneChoice { player, .. }
             | WaitingFor::SeparatePilesChooseOpponent { player, .. }
@@ -20201,6 +20539,7 @@ impl WaitingFor {
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
+            | WaitingFor::HeroEventChoice { .. }
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::LearnChoice { .. }
@@ -20406,6 +20745,7 @@ impl WaitingFor {
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
+            | WaitingFor::HeroEventChoice { .. }
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::LearnChoice { .. }
@@ -24408,6 +24748,29 @@ declare_game_state! {
     /// box.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_discard_batch: Option<Box<PendingDiscardBatch>>,
+    /// Turtle Team-Up: a hero-choice batch parked mid-application by a nested
+    /// replacement prompt (regeneration, Library of Leng). Boxed like its
+    /// `pending_discard_batch` sibling — `GameState` moves by value under a
+    /// hard stack budget, so a multi-step parked record rides behind a box.
+    /// Populated only during the pause; drained by
+    /// `boss::drain_pending_hero_event` through the post-replacement funnel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_hero_event: Option<Box<PendingHeroEvent>>,
+    /// Horde Magic: a wave reveal parked mid-move by a CR 616.1 replacement
+    /// choice. Boxed like its `pending_hero_event` sibling — `GameState`
+    /// moves by value under a hard stack budget, so a parked record rides
+    /// behind a box. Populated only during the pause; drained at the top of
+    /// `horde::reveal_and_resolve_top_card` when the priority re-entry seam
+    /// re-invokes the wave after the choice resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_horde_reveal: Option<Box<PendingHordeReveal>>,
+    /// CR 120.3f + CR 120.1 + CR 616.1: post-loss work a non-combat
+    /// player-damage leg still owes after its life loss paused. Boxed like
+    /// its `pending_horde_reveal` sibling — populated only during the pause;
+    /// drained by `deal_damage::drain_pending_damage_post_loss` through the
+    /// post-replacement funnel once the loss fully settles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_damage_post_loss: Option<Box<PendingDamagePostLoss>>,
     /// CR 608.2c + CR 616.1: Progress for a replacement-suspended exile loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_exile_from_top_until: Option<Box<PendingExileFromTopUntil>>,
@@ -25343,6 +25706,84 @@ declare_game_state! {
     /// (CR 314.5 / CR 904.7). `None` outside an Archenemy game.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archenemy: Option<PlayerId>,
+    /// Horde Magic: how many cards remain to reveal-and-resolve in the Horde's
+    /// current precombat-main wave. Seeded at the start of the Horde's precombat
+    /// main by `horde::begin_wave` and decremented as each card is revealed and
+    /// cast/put onto the battlefield. `0` at every non-wave moment (and for every
+    /// non-Horde format). A plain counter — the reveal loop re-enters after each
+    /// Horde spell resolves (`horde::maybe_reveal_next`), because each free cast
+    /// sets `waiting_for` and only one card can be cast per resolution beat.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub horde_wave_remaining: u32,
+    /// Horde Magic: how many NON-token cards must still resolve before the
+    /// current wave ends, for a `WaveTermination::UntilNonToken` ruleset. Seeded
+    /// per Horde turn by `horde::begin_wave` from the ruleset's `WaveCount`
+    /// (which may vary per turn — the Zombies Horde snakes 1 → 2 → 3 → 2 → 1),
+    /// and decremented as each nontoken is cast. `0` at every non-wave moment and
+    /// for every non-Horde format. Distinct from `horde_wave_remaining`, which
+    /// bounds total cards revealed (tokens included) as a termination safeguard.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub horde_wave_nontokens_remaining: u32,
+    /// Horde Magic: how many turns the Horde has taken so far (0-based index of
+    /// the CURRENT Horde turn while a wave is in progress). Incremented by
+    /// `horde::begin_wave`. Drives per-turn wave schedules — `WaveCount::Snaking`
+    /// derives its triangle wave from this index, so the ramp needs no direction
+    /// flag or other mutable bookkeeping.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub horde_turn_index: u32,
+    /// Horde Magic (advanced rule): the Horde permanents still owing a post-combat
+    /// activation this turn. Seeded once as the Horde's post-combat main begins
+    /// (`horde::begin_post_combat_activation`) with a snapshot of the Horde's
+    /// permanents, then drained one at a time by `horde::maybe_activate_next_ability`
+    /// from the priority seam — each activation may set `waiting_for` (targets) and
+    /// only one can be announced per resolution beat, exactly like the reveal wave.
+    /// Snapshotting up front enforces "each permanent activates once per turn"
+    /// structurally (a permanent that enters mid-beat is not added). Empty at every
+    /// non-activation moment and for every deck without the
+    /// `HordePostCombatActivation::OncePerPermanent` axis.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub horde_postcombat_activation_queue: Vec<crate::types::identifiers::ObjectId>,
+    /// Horde Magic: the seats that make up the Horde side. A single-Horde game
+    /// leaves this EMPTY and the Horde seat is resolved from the one-vs-many
+    /// archenemy (`horde::horde_seats` falls back to that). A two-Horde-force deck
+    /// (LOTR Two Towers: Sauron + Saruman — two players, each with its own deck,
+    /// battlefield, and graveyard, taking alternating turns) lists both Horde
+    /// seats here at game setup; the Horde SIDE loses only when EVERY listed seat's
+    /// library is empty and none controls a creature ([`horde::horde_is_defeated`]).
+    /// Runtime designation (assigned at setup), not a deck-intrinsic ruleset field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub horde_seats: Vec<PlayerId>,
+    /// Horde Magic (LOTR "Two Towers"): which [`horde_seats`] commander drives the
+    /// NEXT Horde turn. The rules have the two Horde commanders alternate turns
+    /// (Reading B): the Horde side takes one turn per round (2HG-style), but the
+    /// acting seat rotates — `horde_seats[active_horde_index % len]`.
+    /// `next_turn_representative` reads it to pick the upcoming commander; it
+    /// advances (mod the seat count) once per REAL Horde turn in
+    /// [`crate::game::horde::begin_wave`] — which only runs on a Horde's own turn,
+    /// so setup-skipped turns never bump it. Only meaningful when `len >= 2`.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub active_horde_index: usize,
+    /// Turtle Team-Up: the Boss deck pile (11 Bosses, face down). Front = top;
+    /// stages deploy from here (`boss::deploy_bosses`), mirroring the
+    /// Archenemy `scheme_deck`. Empty for every non-boss-deck game.
+    #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
+    pub boss_deck: im::Vector<ObjectId>,
+    /// Turtle Team-Up: the currently deployed Boss stage (1-based). `0` before
+    /// stage 1 deploys at setup and for every non-boss-deck game. Advances in
+    /// `boss::maybe_clear_boss_stage` when the Boss life hits zero on a
+    /// non-final stage; the final stage falling eliminates the Boss seat
+    /// instead (normal CR 704.5a loss — boss-deck games keep a real life
+    /// total, unlike the classic mill race).
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub boss_stage: u8,
+    /// Turtle Team-Up: Baxter's Experiments cards set aside ("beside the
+    /// event deck") awaiting the next event. Fired copies move to the Boss
+    /// graveyard when they trigger, so Villain Scheme! can never touch a
+    /// live Baxter. At most one entry in practice (a single Baxter exists
+    /// and re-dispatch dedupes), but a Vec keeps the fire-on-next shape
+    /// honest. Empty for every non-boss-deck game.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub baxter_set_aside: Vec<ObjectId>,
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
@@ -26210,7 +26651,8 @@ fn visit_batch_completion_chains<'a>(
         | BatchCompletion::MeldExile { .. }
         | BatchCompletion::MeldEntry { .. }
         | BatchCompletion::MeldRedirect { .. }
-        | BatchCompletion::MilledDeliveryComplete { .. } => Ok(()),
+        | BatchCompletion::MilledDeliveryComplete { .. }
+        | BatchCompletion::HordeMillFromLossDeliveryComplete { .. } => Ok(()),
     }
 }
 
@@ -26386,6 +26828,9 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }
         | WaitingFor::EffectZoneChoice { .. }
+        // Turtle Team-Up: self-contained card-selection prompt (ids/params only,
+        // batch-applied by the handler) — holds no suspended chain.
+        | WaitingFor::HeroEventChoice { .. }
         | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
@@ -32148,7 +32593,7 @@ impl GameState {
 
     /// Create a new game with the given format configuration and player count.
     pub fn new(config: FormatConfig, player_count: u8, seed: u64) -> Self {
-        let players: Vec<Player> = (0..player_count)
+        let mut players: Vec<Player> = (0..player_count)
             .map(|i| Player {
                 id: PlayerId(i),
                 life: config.starting_life_for_player(PlayerId(i), usize::from(player_count)),
@@ -32158,6 +32603,106 @@ impl GameState {
         let seat_order: Vec<PlayerId> = (0..player_count).map(PlayerId).collect();
         let starting_player = config.starting_player();
         let archenemy = config.archenemy_player();
+        // Horde Magic (casual variant): the survivors share ONE combined life
+        // total (CR 810.8/810.9a, pooled via `topology::has_shared_life`).
+        // `starting_life_for_player` seeded every seat — Horde included — with the
+        // full combined total (it can't split until the seat count is known here),
+        // so N survivors would sum to N × combined. Distribute the combined total
+        // across the SURVIVOR seats (every seat except the Horde) so
+        // `team_life_total` sums to it. The Horde seat's life is left untouched:
+        // it has no life total (damage mills it; exempt from the CR 704.5a life
+        // SBA) and is never consulted.
+        // The Horde seats: the primary archenemy seat, plus — for a two-Horde deck
+        // (LOTR "Two Towers") — the co-horde commanders at the seats immediately
+        // after it. Anchored on `archenemy` (NOT seat 0) because the transport layer
+        // remaps the archenemy onto the AI seat (`server-core::session`); survivors
+        // take every other seat. A single-Horde game is exactly `[archenemy]`.
+        // Designation reads the shared `horde_designated_seats` authority so it
+        // cannot drift from `validate_for_player_count`; the filter is a
+        // defensive backstop for direct `GameState::new` callers (validated
+        // ingresses reject truncated rosters before a session exists).
+        let horde_seats_designated: Vec<PlayerId> = config
+            .horde_designated_seats()
+            .into_iter()
+            .filter(|id| seat_order.contains(id))
+            .collect();
+        if config.format == GameFormat::Horde {
+            let survivor_seats: Vec<PlayerId> = seat_order
+                .iter()
+                .copied()
+                .filter(|id| !horde_seats_designated.contains(id))
+                .collect();
+            let survivor_count = survivor_seats.len() as i32;
+            if survivor_count > 0 {
+                // Combined total = base + delta per extra survivor beyond the
+                // first. Both halves live on the per-deck ruleset (community
+                // decks: 100 base, −15 delta → 100/85/70 for 1/2/3 survivors;
+                // Theros: 20 base, 0 delta → flat shared 20). CR 810.9a routes
+                // every individual read through the team total, so an uneven
+                // split is fine. Fall back to the format-wide values only if a
+                // Horde config was built without a ruleset.
+                let (base_life, delta) =
+                    config
+                        .horde_ruleset
+                        .as_ref()
+                        .map_or((config.starting_life, 0), |ruleset| {
+                            (
+                                ruleset.combined_base_life,
+                                ruleset.per_extra_survivor_life_delta,
+                            )
+                        });
+                let combined_total = base_life + delta * (survivor_count - 1);
+                let base = combined_total / survivor_count;
+                let remainder = combined_total - base * survivor_count;
+                for (idx, &seat) in survivor_seats.iter().enumerate() {
+                    // Any remainder from an uneven split lands on the first survivor.
+                    let extra = if idx == 0 { remainder } else { 0 };
+                    players[seat.0 as usize].life = base + extra;
+                }
+            }
+            // Publish the no-life-total fact ON the Horde seat so clients can
+            // render it truthfully (its library is the real clock — it loses by
+            // decking out) instead of a life total frozen at its starting value.
+            // Set here, at the single point where the format config first meets
+            // the seats, so every construction path agrees — not only the live
+            // deck-loading one.
+            // Every classic-Horde seat has no life total (damage mills it;
+            // exempt from the CR 704.5a life SBA) — its library is the real
+            // clock. Boss-deck games (Turtle Team-Up) are the exception: the
+            // Boss seat keeps a real per-stage life total, seeded here from
+            // the ruleset's life table so every construction path agrees.
+            let boss_life = config
+                .horde_ruleset
+                .as_ref()
+                .and_then(|r| r.boss_stages.as_ref())
+                .map(|b| b.life_for_survivor_count(survivor_seats.len()));
+            for &horde_seat in &horde_seats_designated {
+                match boss_life {
+                    Some(life) => players[horde_seat.0 as usize].life = life,
+                    None => players[horde_seat.0 as usize].has_no_life_total = true,
+                }
+            }
+        }
+
+        // Horde Magic setup turns: the survivors take `survivor_setup_turns`
+        // consecutive turns to establish a board before the Horde's first turn
+        // (the published rules give them 3). `starting_player` already hands the
+        // first turn to a survivor (PR1). With shared team turns (CR 805.4), the
+        // turn rotation alternates survivor-team / Horde-team; seeding the Horde
+        // seat's `turns_to_skip` makes the Horde skip its early turns so the
+        // survivor team acts again. `start_next_turn` consumes ONE skip after
+        // each survivor turn (the Horde's would-be turn is fast-path skipped and
+        // recurses back to the survivor rep), so K skips yield K+1 survivor turns
+        // before the Horde's first: seed K = survivor_setup_turns - 1.
+        let mut turns_to_skip = vec![0u32; player_count as usize];
+        if config.format == GameFormat::Horde {
+            if let Some(horde_seat) = archenemy {
+                if let Some(ruleset) = config.horde_ruleset.as_ref() {
+                    turns_to_skip[horde_seat.0 as usize] =
+                        u32::from(ruleset.survivor_setup_turns.saturating_sub(1));
+                }
+            }
+        }
         GameState {
             turn_number: 0,
             active_player: starting_player,
@@ -32275,7 +32820,7 @@ impl GameState {
             commander_cast_owners: HashMap::new(),
             extra_turns: Vec::new(),
             extra_turn_sequence_anchor: None,
-            turns_to_skip: vec![0; player_count as usize],
+            turns_to_skip,
             steps_to_skip: vec![HashMap::new(); player_count as usize],
             pending_combat_phase_skips: Vec::new(),
             combat_phase_skip_next_turn: vec![
@@ -32400,6 +32945,9 @@ impl GameState {
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
+            pending_hero_event: None,
+            pending_horde_reveal: None,
+            pending_damage_post_loss: None,
             pending_exile_from_top_until: None,
             pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
@@ -32505,6 +33053,15 @@ impl GameState {
             planar_die_actions_this_turn: HashMap::new(),
             scheme_deck: im::Vector::new(),
             archenemy,
+            horde_wave_remaining: 0,
+            horde_wave_nontokens_remaining: 0,
+            horde_turn_index: 0,
+            horde_postcombat_activation_queue: Vec::new(),
+            horde_seats: horde_seats_designated,
+            active_horde_index: 0,
+            boss_deck: im::Vector::new(),
+            boss_stage: 0,
+            baxter_set_aside: Vec::new(),
             initiative: None,
             combat_prevention_tally: None,
             combat_one_shot_applications: None,
@@ -34526,6 +35083,7 @@ impl GameState {
         !self.resolution_stack.holds_unsettled_delivery_frame()
             && self.pending_player_scope_sacrifice_choice.is_none()
             && self.pending_discard_batch.is_none()
+            && self.pending_hero_event.is_none()
             && self.pending_combat_lifelink.is_none()
             && self.deferred_entry_events.is_empty()
             && self.pending_attack_trigger_events.is_empty()
@@ -35450,6 +36008,10 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         // spell remains on the stack. Comparing it is fail-safe for loop detection.
         && x.cast_occurrence == y.cast_occurrence
         && x.spell_announcement == y.spell_announcement
+        // Horde-deck-token provenance: compare fail-closed so a token mid-reveal
+        // never equates to its pre-reveal self on this axis alone.
+        && x.is_horde_deck_token == y.is_horde_deck_token
+        && x.horde_library_rarity == y.horde_library_rarity
 }
 
 /// CR 104.4b compile-time totality guard for the object-growth cover gate's
@@ -35850,6 +36412,19 @@ fn _gamestate_partition_is_total(s: &GameState) {
         planar_die_actions_this_turn: _,
         scheme_deck: _,
         archenemy: _,
+        // Horde Magic wave/turn bookkeeping: strict-compared in `impl
+        // PartialEq for GameState` below (fail-safe: wave progress and the
+        // Two Towers seat rotation are game-semantic, and they only move
+        // alongside turn_number/zone changes, so no certification-death).
+        horde_wave_remaining: _,
+        horde_wave_nontokens_remaining: _,
+        horde_turn_index: _,
+        horde_postcombat_activation_queue: _,
+        horde_seats: _,
+        active_horde_index: _,
+        boss_deck: _,
+        boss_stage: _,
+        baxter_set_aside: _,
         initiative: _,
         combat_prevention_tally: _,
         combat_one_shot_applications: _,
@@ -35890,9 +36465,17 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     only SHRINKS as the batch drains and it is `None` outside a pause, so a differing
         //     value is correctly not a fixed-point repeat and COMPARING it can never suppress a
         //     legitimate loop's detection.
+        //   - `pending_damage_post_loss`: COMPARED (hand-written `impl PartialEq` conjunct) — a
+        //     paused damage-leg interaction state, classified like `pending_discard_batch`. Its
+        //     stage cursor only ADVANCES toward clearing and it is `None` outside a pause (and at
+        //     every Priority sample beat — the drain consumes it before priority is restored), so
+        //     COMPARING it can never suppress a legitimate loop's detection.
         pending_player_scope_sacrifice_choice: _,
         pending_player_scope_unless_payment: _,
         pending_discard_batch: _,
+        pending_hero_event: _,
+        pending_horde_reveal: _,
+        pending_damage_post_loss: _,
         pending_exile_from_top_until: _,
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
@@ -36134,6 +36717,8 @@ impl PartialEq for GameState {
             && self.pending_player_scope_unless_payment
                 == other.pending_player_scope_unless_payment
             && self.pending_discard_batch == other.pending_discard_batch
+            && self.pending_damage_post_loss == other.pending_damage_post_loss
+            && self.pending_hero_event == other.pending_hero_event
             && self.pending_exile_from_top_until == other.pending_exile_from_top_until
             && self.pending_combat_lifelink == other.pending_combat_lifelink
             && self.pending_mass_library_order_choice
@@ -36189,6 +36774,15 @@ impl PartialEq for GameState {
             && self.planar_die_actions_this_turn == other.planar_die_actions_this_turn
             && self.scheme_deck == other.scheme_deck
             && self.archenemy == other.archenemy
+            && self.horde_wave_remaining == other.horde_wave_remaining
+            && self.horde_wave_nontokens_remaining == other.horde_wave_nontokens_remaining
+            && self.horde_turn_index == other.horde_turn_index
+            && self.horde_postcombat_activation_queue == other.horde_postcombat_activation_queue
+            && self.horde_seats == other.horde_seats
+            && self.active_horde_index == other.active_horde_index
+            && self.boss_deck == other.boss_deck
+            && self.boss_stage == other.boss_stage
+            && self.baxter_set_aside == other.baxter_set_aside
     }
 }
 
@@ -40991,6 +41585,7 @@ mod tests {
             )],
             lives_before: vec![20, 20],
             sub_step: CombatDamageSubStep::Regular,
+            phase_c_remnant: None,
         })
     }
 

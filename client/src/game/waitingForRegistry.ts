@@ -143,6 +143,8 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "ChooseOneOfBranch",
     "ConniveDiscard",
     "DiscardChoice",
+    // Turtle Team-Up hero-choice Events (HeroEventModal, rendered via CardChoiceModal).
+    "HeroEventChoice",
     "EffectZoneChoice",
     "DrawnThisTurnTopdeckChoice",
     "LearnChoice",

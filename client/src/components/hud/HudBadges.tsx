@@ -2,6 +2,7 @@ import type { ParseKeys, TFunction } from "i18next";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
+import { HordeRulesPopover } from "./HordeRulesPopover.tsx";
 import { DungeonMapPopover } from "./DungeonMapPopover.tsx";
 import { RingBenefitsPopover } from "./RingBenefitsPopover.tsx";
 import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
@@ -16,6 +17,7 @@ import type {
   PlayerStatusView,
   ResourceAxis,
   ResourceAxisTag,
+  RuleSummaryLine,
   UnboundedFamily,
 } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -898,6 +900,79 @@ export function RingBenefitsBadge({
       />
       {hoverOpen && chipRef.current ? (
         <RingBenefitsPopover anchorEl={chipRef.current} level={level} bearerName={ringBearerName} />
+      ) : null}
+    </>
+  );
+}
+
+// Matches RingBenefitsBadge's dismiss smoothing.
+const HORDE_RULES_HOVER_CLOSE_DELAY_MS = 80;
+
+/**
+ * Info badge for the Horde seat: a small chip that hover-opens a popover
+ * listing the active challenge deck's engine-authored rules summary
+ * (`ChallengeDeckMetadata.rules`) — so a player can see HOW the Horde deck plays
+ * and how it differs, mid-game. It surfaces the same engine-owned text as the
+ * setup deck picker; the frontend renders `rules` verbatim and never derives
+ * rules prose from the structured ruleset.
+ *
+ * Modeled on `RingBenefitsBadge` (chip + hover-open portaled popover). The chip
+ * is a `<span>` (not a `<button>`) with no `tabIndex`, because seat renderers
+ * like `OpponentTab` are themselves `<button>`s — a focusable/interactive
+ * descendant there would be invalid HTML. Callers gate rendering on the Horde
+ * seat (`player.has_no_life_total`); this also self-guards against empty rules.
+ */
+export function HordeRulesBadge({
+  deckLabel,
+  rules,
+}: {
+  deckLabel: string;
+  rules: readonly RuleSummaryLine[];
+}) {
+  const { t } = useTranslation("game");
+  const chipRef = useRef<HTMLSpanElement>(null);
+  const [hoverOpen, setHoverOpen] = useState(false);
+  const closeTimerRef = useRef<number | null>(null);
+
+  const cancelClose = useCallback(() => {
+    if (closeTimerRef.current != null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }, []);
+  const onEnter = useCallback(() => {
+    cancelClose();
+    setHoverOpen(true);
+  }, [cancelClose]);
+  const onLeave = useCallback(() => {
+    cancelClose();
+    closeTimerRef.current = window.setTimeout(() => {
+      setHoverOpen(false);
+      closeTimerRef.current = null;
+    }, HORDE_RULES_HOVER_CLOSE_DELAY_MS);
+  }, [cancelClose]);
+  useEffect(() => () => cancelClose(), [cancelClose]);
+
+  if (rules.length === 0) return null;
+
+  return (
+    <>
+      <span
+        ref={chipRef}
+        role="img"
+        aria-label={t("badges.hordeRulesAriaLabel")}
+        onMouseEnter={onEnter}
+        onMouseLeave={onLeave}
+        className="relative inline-flex h-6 min-w-6 shrink-0 cursor-help items-center justify-center overflow-hidden rounded-full px-1 text-[12px] leading-none ring-1 bg-amber-500 ring-amber-200/80 shadow-[0_0_14px_rgba(245,158,11,0.5)]"
+      >
+        <span
+          aria-hidden
+          className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_24%,rgba(255,255,255,0.9)_0_10%,transparent_12%),linear-gradient(135deg,#fef3c7_0%,#f59e0b_45%,#78350f_100%)]"
+        />
+        <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">📜</span>
+      </span>
+      {hoverOpen && chipRef.current ? (
+        <HordeRulesPopover anchorEl={chipRef.current} deckLabel={deckLabel} rules={rules} />
       ) : null}
     </>
   );

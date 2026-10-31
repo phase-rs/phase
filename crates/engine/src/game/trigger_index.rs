@@ -1017,6 +1017,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ChooseOneOf
         | EffectKind::ChooseCounterAdjustment
         | EffectKind::Specialize
+        | EffectKind::HordePlayCard
         | EffectKind::Unimplemented
         | EffectKind::Crew
         | EffectKind::Station

@@ -481,7 +481,9 @@
     "done": "完了"
   },
   "lifeTotal": {
-    "playerLabel": "P{{seat}}"
+    "playerLabel": "P{{seat}}",
+    "libraryLabel": "CARDS",
+    "libraryTooltip": "The Horde has no life total. Damage and life loss mill it instead — it's defeated when its library runs out, so this count is its real clock."
   },
   "phaseStop": {
     "untapLabel": "アンタップ・ステップ",
@@ -645,7 +647,8 @@
     "unboundedCasts": "唱える回数",
     "unboundedCombats": "戦闘",
     "unboundedTurns": "ターン",
-    "unboundedTriggers": "誘発"
+    "unboundedTriggers": "誘発",
+    "hordeRulesAriaLabel": "Horde deck rules"
   },
   "avatar": {
     "underAttack": "{{name}}が攻撃されています"
@@ -1443,6 +1446,11 @@
     "noLegalAiDecks": {
       "withFormat": "AIが使用できる{{format}}適正デッキを追加またはインポートしてください。",
       "generic": "AIが使用できるこのフォーマットの適正デッキを追加またはインポートしてください。"
+    },
+    "hordeDeck": {
+      "title": "Horde Deck",
+      "subtitle": "The self-piloting deck your team faces. The engine supplies it — you don't need an AI deck.",
+      "selected": "Selected"
     }
   },
   "cardChoice": {
@@ -1476,7 +1484,8 @@
       "cast": "唱える",
       "crew": "搭乗（{{power}}）",
       "saddle": "騎乗（{{power}}）",
-      "station": "搭載（+{{power}}）"
+      "station": "搭載（+{{power}}）",
+      "destroy": "Destroy"
     },
     "buttons": {
       "confirm": "確認",
@@ -1820,7 +1829,8 @@
       "counterDiscard": "{{cap}}枚中{{selected}}枚を捨てる",
       "counterKeep": "{{cap}}枚中{{selected}}枚を保持",
       "keepInstead": "代わりに保持",
-      "discardInstead": "代わりに捨てる"
+      "discardInstead": "代わりに捨てる",
+      "counterChoose": "Choose {{selected}} of {{cap}}"
     },
     "discard": {
       "title": "捨てる",
@@ -1919,6 +1929,42 @@
       "hint": "ドラッグして並べ替え · 位置1がこの束の一番上になる",
       "moveLeft": "左へ移動",
       "moveRight": "右へ移動"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     }
   },
   "specializeColor": {

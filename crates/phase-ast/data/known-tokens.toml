@@ -26493,6 +26493,36 @@ scryfall_oracle_id = "2bb2f9ed-6378-40c9-9170-976711919014"
 preset_id = "1d04ecae-dec8-5c23-89bb-492697185ed1"
 
 [[token]]
+id = "1d0641fa-c4fb-5683-a8ba-1ffa6f692aea"
+category = "Boss"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Baxter, Exzzperimental Zzientist"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "4"
+released_at = "2026-03-06"
+type_line = "Boss"
+rules_text = "Creatures named Foot Disciple have flying."
+
+[token.body]
+display_name = "Baxter, Exzzperimental Zzientist"
+core_types = ["Boss"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Baxter, Exzzperimental Zzientist"
+scryfall_oracle_id = "854a0d4e-86bd-459f-b872-ea7c521354bb"
+scryfall_id = "85067e01-384c-434d-8cbf-e9dcba5e9ae8"
+
+[token.token_image_ref]
+scryfall_id = "85067e01-384c-434d-8cbf-e9dcba5e9ae8"
+scryfall_oracle_id = "854a0d4e-86bd-459f-b872-ea7c521354bb"
+preset_id = "1d0641fa-c4fb-5683-a8ba-1ffa6f692aea"
+
+[[token]]
 id = "1d186e0e-3028-52e1-8537-d1c52575e57c"
 category = "Creature"
 fidelity = "Full"
@@ -34285,6 +34315,36 @@ scryfall_oracle_id = "bd386399-69f0-4653-96a1-fd05b8fd148c"
 preset_id = "26784dd1-b95f-5e3c-bc1b-fd5a874b9fc6"
 
 [[token]]
+id = "2688b47f-bd1d-575f-a976-41add511ea95"
+category = "Event"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Event: Villain Mayhem!"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "27"
+released_at = "2026-03-06"
+type_line = "Event"
+rules_text = "As a team, the heroes choose three creatures they control. Destroy each other creature the heroes control."
+
+[token.body]
+display_name = "Event: Villain Mayhem!"
+core_types = ["Event"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Event: Villain Mayhem!"
+scryfall_oracle_id = "80136ea1-e41f-41f0-9397-b3d07f8c8d52"
+scryfall_id = "e05ee2a3-4054-48a5-8646-6588d1b39fb8"
+
+[token.token_image_ref]
+scryfall_id = "e05ee2a3-4054-48a5-8646-6588d1b39fb8"
+scryfall_oracle_id = "80136ea1-e41f-41f0-9397-b3d07f8c8d52"
+preset_id = "2688b47f-bd1d-575f-a976-41add511ea95"
+
+[[token]]
 id = "2689ebab-2ba8-5f0d-a31c-377095380395"
 fidelity = "Full"
 source_card_names = [
@@ -40010,6 +40070,38 @@ scryfall_id = "f12c6235-2e1a-43c7-a0bd-b4f564a4ef42"
 scryfall_id = "621738c7-24f6-469e-9e44-8c80cd85ba08"
 scryfall_oracle_id = "43746141-1b96-4577-bc0b-2355ab71b56d"
 preset_id = "2dd373fc-3a90-5398-bda9-faed675767a9"
+
+[[token]]
+id = "2e194383-a7e5-535c-bd30-33de7d583270"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Foot Disciple"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "30"
+released_at = "2026-03-06"
+type_line = "Creature — Ninja"
+rules_text = "This creature can't block."
+
+[token.body]
+display_name = "Foot Disciple"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Ninja"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Foot Disciple"
+scryfall_oracle_id = "cbf0b7c6-c79c-43bc-ba8a-b3c6b12a4433"
+scryfall_id = "f5dd41f4-3153-408a-a20c-09334cfd686c"
+
+[token.token_image_ref]
+scryfall_id = "f5dd41f4-3153-408a-a20c-09334cfd686c"
+scryfall_oracle_id = "cbf0b7c6-c79c-43bc-ba8a-b3c6b12a4433"
+preset_id = "2e194383-a7e5-535c-bd30-33de7d583270"
 
 [[token]]
 id = "2e2a09e2-7ee1-5fcb-af08-9501a0469cab"
@@ -54807,6 +54899,36 @@ scryfall_oracle_id = "58a1e3c9-a718-4413-b14e-d8d6257567bf"
 preset_id = "3ffa938a-a3fa-5abb-b52d-3e325cd043e2"
 
 [[token]]
+id = "4005a147-ab7c-592c-bfc1-0fbdb03de48b"
+category = "Event"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Event: Chrome Dome's Overload"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "17"
+released_at = "2026-03-06"
+type_line = "Event"
+rules_text = "Each hero sacrifices a tapped creature they control."
+
+[token.body]
+display_name = "Event: Chrome Dome's Overload"
+core_types = ["Event"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Event: Chrome Dome's Overload"
+scryfall_oracle_id = "374f9599-2f4c-411f-9f75-3b0d2495ecbd"
+scryfall_id = "7f183188-a0a2-474c-b741-63a70365fd8e"
+
+[token.token_image_ref]
+scryfall_id = "7f183188-a0a2-474c-b741-63a70365fd8e"
+scryfall_oracle_id = "374f9599-2f4c-411f-9f75-3b0d2495ecbd"
+preset_id = "4005a147-ab7c-592c-bfc1-0fbdb03de48b"
+
+[[token]]
 id = "40127fba-2bcb-55f9-ad23-9d2b375c5933"
 category = "Creature"
 fidelity = "Full"
@@ -65041,6 +65163,36 @@ scryfall_id = "13e4832d-8530-4b85-b738-51d0c18f28ec"
 scryfall_oracle_id = "814a99c8-0b64-4492-8c9f-088915a970a6"
 face_name = "Snake"
 preset_id = "4b3f0527-7e70-5d24-a8e4-6e7ae3b0ec35"
+
+[[token]]
+id = "4b53113d-c11a-552a-8310-bb545967f1ab"
+category = "Boss"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Leatherhead, Sewer Gator"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "9"
+released_at = "2026-03-06"
+type_line = "Boss"
+rules_text = "When this boss enters, the bosses gain 5 life for each boss in play."
+
+[token.body]
+display_name = "Leatherhead, Sewer Gator"
+core_types = ["Boss"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Leatherhead, Sewer Gator"
+scryfall_oracle_id = "f1c6b542-a5fc-4d00-91d6-0bcb7a63b174"
+scryfall_id = "17193bd0-63c0-49ce-9a85-12996fdcda00"
+
+[token.token_image_ref]
+scryfall_id = "17193bd0-63c0-49ce-9a85-12996fdcda00"
+scryfall_oracle_id = "f1c6b542-a5fc-4d00-91d6-0bcb7a63b174"
+preset_id = "4b53113d-c11a-552a-8310-bb545967f1ab"
 
 [[token]]
 id = "4b57b6a3-103d-50cb-94a6-82973f6136de"
@@ -78877,6 +79029,36 @@ scryfall_oracle_id = "ee740c48-59cd-4fcc-b4a5-fe3dde1361d5"
 preset_id = "58a0e346-16cd-5935-b222-66e48175d908"
 
 [[token]]
+id = "58baca03-3374-5a17-b9cc-70039a25b289"
+category = "Boss"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Bebop, Porcine Punk"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "5"
+released_at = "2026-03-06"
+type_line = "Boss"
+rules_text = "Whenever the bosses attack, put a +1/+1 counter on each creature named Foot Disciple."
+
+[token.body]
+display_name = "Bebop, Porcine Punk"
+core_types = ["Boss"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Bebop, Porcine Punk"
+scryfall_oracle_id = "4cb273a7-fdb7-4009-90a8-833e0767f708"
+scryfall_id = "66acff08-ba29-4785-8d10-127d023a055e"
+
+[token.token_image_ref]
+scryfall_id = "66acff08-ba29-4785-8d10-127d023a055e"
+scryfall_oracle_id = "4cb273a7-fdb7-4009-90a8-833e0767f708"
+preset_id = "58baca03-3374-5a17-b9cc-70039a25b289"
+
+[[token]]
 id = "58bfc65d-9684-592a-94f7-b02435e46de7"
 category = "Creature"
 fidelity = "Full"
@@ -87206,6 +87388,36 @@ scryfall_id = "04134be2-5e40-4732-832c-f616009eceff"
 scryfall_id = "09293ae7-0629-417b-9eda-9bd3f6d8e118"
 scryfall_oracle_id = "97af46cb-6209-4ae7-81cc-792894999937"
 preset_id = "625decf2-a1bc-53b6-b601-342906413033"
+
+[[token]]
+id = "62b81bb8-4da6-512c-ac02-c9146fdd01df"
+category = "Event"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Event: Villain Scheme!"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "28"
+released_at = "2026-03-06"
+type_line = "Event"
+rules_text = "Shuffle this card and the boss graveyard into the boss library."
+
+[token.body]
+display_name = "Event: Villain Scheme!"
+core_types = ["Event"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Event: Villain Scheme!"
+scryfall_oracle_id = "10a77e41-8323-46ff-9452-e8066370eee6"
+scryfall_id = "3119f359-ca5f-46f4-aa32-c03db9a4f397"
+
+[token.token_image_ref]
+scryfall_id = "3119f359-ca5f-46f4-aa32-c03db9a4f397"
+scryfall_oracle_id = "10a77e41-8323-46ff-9452-e8066370eee6"
+preset_id = "62b81bb8-4da6-512c-ac02-c9146fdd01df"
 
 [[token]]
 id = "62e0a789-7895-59d2-a239-6005380c576a"
@@ -97148,6 +97360,36 @@ scryfall_oracle_id = "e543bedd-4667-4467-8e8b-161a5a82f7ac"
 preset_id = "6c2e98d6-9d2b-563f-85b9-c902eee269e6"
 
 [[token]]
+id = "6c2eccfb-af84-57ff-bf35-ec008da2d458"
+category = "Boss"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Savanti Romero, Temporal Rogue"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "12"
+released_at = "2026-03-06"
+type_line = "Boss"
+rules_text = "Whenever one or more Ninjas the bosses control deal combat damage to the heroes, the bosses play a card."
+
+[token.body]
+display_name = "Savanti Romero, Temporal Rogue"
+core_types = ["Boss"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Savanti Romero, Temporal Rogue"
+scryfall_oracle_id = "6c58bfd9-5e9b-42a1-9300-f9a1f48d850d"
+scryfall_id = "22c51c78-a578-4a1a-87b0-430b32da7d78"
+
+[token.token_image_ref]
+scryfall_id = "22c51c78-a578-4a1a-87b0-430b32da7d78"
+scryfall_oracle_id = "6c58bfd9-5e9b-42a1-9300-f9a1f48d850d"
+preset_id = "6c2eccfb-af84-57ff-bf35-ec008da2d458"
+
+[[token]]
 id = "6c328ab8-3fdf-5fbc-8179-f4780c70df80"
 category = "Creature"
 fidelity = "Full"
@@ -101187,6 +101429,36 @@ scryfall_oracle_id = "6bb61f34-5d57-4eaa-a02c-f5d08c1ee920"
 preset_id = "7168a2ff-69b1-508f-a3cb-52bee903e83e"
 
 [[token]]
+id = "717f93b4-f34d-5b89-9266-b693ce89af91"
+category = "Boss"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Rocksteady, Rowdy Rhino"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "11"
+released_at = "2026-03-06"
+type_line = "Boss"
+rules_text = "Whenever the bosses attack, put a +1/+1 counter on each creature named Foot Disciple."
+
+[token.body]
+display_name = "Rocksteady, Rowdy Rhino"
+core_types = ["Boss"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Rocksteady, Rowdy Rhino"
+scryfall_oracle_id = "71060cbd-b575-4535-a0b9-bcd38df7d0b2"
+scryfall_id = "1b2a91d9-42ae-4f2b-ba95-46dc74e68fd6"
+
+[token.token_image_ref]
+scryfall_id = "1b2a91d9-42ae-4f2b-ba95-46dc74e68fd6"
+scryfall_oracle_id = "71060cbd-b575-4535-a0b9-bcd38df7d0b2"
+preset_id = "717f93b4-f34d-5b89-9266-b693ce89af91"
+
+[[token]]
 id = "71937c97-6963-5620-98fc-06da9bbf8937"
 category = "Creature"
 fidelity = "Full"
@@ -102112,6 +102384,36 @@ scryfall_id = "0e44f7ff-1cfa-4bc4-a0f7-9d71ba48a97a"
 scryfall_id = "d0da4f8d-cce9-4d08-8d11-792e0b2af7d0"
 scryfall_oracle_id = "3aaf906a-e749-4e86-ac79-97650b92f271"
 preset_id = "72736a8e-7059-58e0-83df-1a88d355766b"
+
+[[token]]
+id = "727e8ec1-1cc9-573c-b20d-3b7bb1308ef8"
+category = "Boss"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Karai, Shadow Warrior"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "7"
+released_at = "2026-03-06"
+type_line = "Boss"
+rules_text = "Whenever a creature the heroes control dies, the heroes lose 1 life."
+
+[token.body]
+display_name = "Karai, Shadow Warrior"
+core_types = ["Boss"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Karai, Shadow Warrior"
+scryfall_oracle_id = "8ad66604-9b41-4773-963e-0b1ea5f5db77"
+scryfall_id = "8a534b81-f4a1-4a57-85cc-be6801ebd5b0"
+
+[token.token_image_ref]
+scryfall_id = "8a534b81-f4a1-4a57-85cc-be6801ebd5b0"
+scryfall_oracle_id = "8ad66604-9b41-4773-963e-0b1ea5f5db77"
+preset_id = "727e8ec1-1cc9-573c-b20d-3b7bb1308ef8"
 
 [[token]]
 id = "729d4471-acd0-5e23-92ac-ba1d73e61fdb"
@@ -109885,6 +110187,36 @@ scryfall_id = "583bfbc1-638b-4de5-b865-0b00a69dd073"
 scryfall_id = "db41ce71-52df-4bc1-884d-b09419d8dd13"
 scryfall_oracle_id = "6788478d-e157-4483-be09-9edb3f841431"
 preset_id = "7a31461f-de1f-510e-af84-58c841687c1b"
+
+[[token]]
+id = "7a707dae-da05-5137-a759-2136ac39ad55"
+category = "Boss"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Rat King, the Chaosbringer"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "10"
+released_at = "2026-03-06"
+type_line = "Boss"
+rules_text = "Ninjas the bosses control have deathtouch."
+
+[token.body]
+display_name = "Rat King, the Chaosbringer"
+core_types = ["Boss"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Rat King, the Chaosbringer"
+scryfall_oracle_id = "528af346-ae7e-4ab4-bbb0-e4fc2ac53192"
+scryfall_id = "dd43716d-06bb-4187-ab77-414cfc59d20f"
+
+[token.token_image_ref]
+scryfall_id = "dd43716d-06bb-4187-ab77-414cfc59d20f"
+scryfall_oracle_id = "528af346-ae7e-4ab4-bbb0-e4fc2ac53192"
+preset_id = "7a707dae-da05-5137-a759-2136ac39ad55"
 
 [[token]]
 id = "7a74f894-e4ce-5f54-9156-f268f0075fee"
@@ -125374,6 +125706,36 @@ scryfall_oracle_id = "9ccb2b2a-23a9-42c4-947f-47c7eafdb018"
 preset_id = "8a2b5077-33e8-52c8-af65-28159fe2bc8f"
 
 [[token]]
+id = "8a66162e-10cd-5f12-ad48-dcad19b41de2"
+category = "Boss"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Slash, the Dark Mirror"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "14"
+released_at = "2026-03-06"
+type_line = "Boss"
+rules_text = "Attacking creatures the bosses control have first strike."
+
+[token.body]
+display_name = "Slash, the Dark Mirror"
+core_types = ["Boss"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Slash, the Dark Mirror"
+scryfall_oracle_id = "59404596-24c2-4c7e-8514-969d9f6e8e6d"
+scryfall_id = "6d84f8fc-0da6-4acc-9da2-9993daabd9f4"
+
+[token.token_image_ref]
+scryfall_id = "6d84f8fc-0da6-4acc-9da2-9993daabd9f4"
+scryfall_oracle_id = "59404596-24c2-4c7e-8514-969d9f6e8e6d"
+preset_id = "8a66162e-10cd-5f12-ad48-dcad19b41de2"
+
+[[token]]
 id = "8a91a134-801f-57c0-b095-73380ee4edba"
 category = "Creature"
 fidelity = "Full"
@@ -127675,6 +128037,36 @@ scryfall_id = "890a0ec8-9e80-4fa1-a853-b436f709c15a"
 scryfall_id = "9ae02771-2917-4d6e-9608-1a592389439a"
 scryfall_oracle_id = "3745e912-50bc-44e1-9112-660538fe1857"
 preset_id = "8d26955d-aab2-5e75-a440-00633717e857"
+
+[[token]]
+id = "8d293c7b-471b-51a4-a26a-19e4c9179f2c"
+category = "Event"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Event: Slash's Smash"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "25"
+released_at = "2026-03-06"
+type_line = "Event"
+rules_text = "Destroy all Turtles."
+
+[token.body]
+display_name = "Event: Slash's Smash"
+core_types = ["Event"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Event: Slash's Smash"
+scryfall_oracle_id = "07876f4b-5370-4cd7-9f44-9878608195dd"
+scryfall_id = "f5287c97-72fa-47a0-9316-44719e447f99"
+
+[token.token_image_ref]
+scryfall_id = "f5287c97-72fa-47a0-9316-44719e447f99"
+scryfall_oracle_id = "07876f4b-5370-4cd7-9f44-9878608195dd"
+preset_id = "8d293c7b-471b-51a4-a26a-19e4c9179f2c"
 
 [[token]]
 id = "8d2f8001-e2c5-5233-91fd-f7e91c13c35e"
@@ -130981,6 +131373,36 @@ scryfall_id = "8b63ec86-670b-4acd-b14c-3d90acbde087"
 scryfall_id = "0902163b-9a92-4df3-afdd-396db24c7fd4"
 scryfall_oracle_id = "e292b492-1918-4c92-af43-3bfbe39dcea4"
 preset_id = "8f796dc2-0025-546e-be19-a4bbfb0dc319"
+
+[[token]]
+id = "8fa1fc05-4093-5f4c-9fa1-2e7570f0640d"
+category = "Event"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Event: Bebop's Rampage"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "16"
+released_at = "2026-03-06"
+type_line = "Event"
+rules_text = "Bebop's Rampage deals 2 damage to each creature the heroes control."
+
+[token.body]
+display_name = "Event: Bebop's Rampage"
+core_types = ["Event"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Event: Bebop's Rampage"
+scryfall_oracle_id = "49ca922a-86bb-4173-8782-091b751efcd9"
+scryfall_id = "b05811b0-1856-4cf8-9910-44da1a994116"
+
+[token.token_image_ref]
+scryfall_id = "b05811b0-1856-4cf8-9910-44da1a994116"
+scryfall_oracle_id = "49ca922a-86bb-4173-8782-091b751efcd9"
+preset_id = "8fa1fc05-4093-5f4c-9fa1-2e7570f0640d"
 
 [[token]]
 id = "8fa3153c-0257-5bab-b1af-b95f1a77c905"
@@ -149178,6 +149600,36 @@ scryfall_oracle_id = "e2a15d48-9fbe-43b4-bd32-eea56391d99f"
 preset_id = "a4983cdd-213f-50d6-aeb4-8ad1d257bf46"
 
 [[token]]
+id = "a4b473e6-557b-51f2-a105-dc149ce2c492"
+category = "Event"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Event: Karai's Planning"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "18"
+released_at = "2026-03-06"
+type_line = "Event"
+rules_text = "The heroes lose 3 life and the bosses gain 3 life."
+
+[token.body]
+display_name = "Event: Karai's Planning"
+core_types = ["Event"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Event: Karai's Planning"
+scryfall_oracle_id = "c09c9d16-f203-401c-b2c2-53362b311d5d"
+scryfall_id = "33dd64d2-8656-4ee8-93a8-fccbdc950899"
+
+[token.token_image_ref]
+scryfall_id = "33dd64d2-8656-4ee8-93a8-fccbdc950899"
+scryfall_oracle_id = "c09c9d16-f203-401c-b2c2-53362b311d5d"
+preset_id = "a4b473e6-557b-51f2-a105-dc149ce2c492"
+
+[[token]]
 id = "a4d0d4b0-0ae6-538d-abd2-f2da6ee4aa5f"
 category = "Creature"
 fidelity = "Full"
@@ -153781,6 +154233,36 @@ scryfall_oracle_id = "9c035738-c8a9-4418-9aaa-7d7d494226e1"
 preset_id = "aa821c4e-0561-5ad5-a9b3-c326a3bfcbf7"
 
 [[token]]
+id = "aa8dcb67-bffa-5bb5-8ec4-6cfa6e7f87c0"
+category = "Boss"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Chrome Dome, Cyber-Ninja"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "6"
+released_at = "2026-03-06"
+type_line = "Boss"
+rules_text = "Ninjas the bosses control get +1/+0 for each boss in play."
+
+[token.body]
+display_name = "Chrome Dome, Cyber-Ninja"
+core_types = ["Boss"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Chrome Dome, Cyber-Ninja"
+scryfall_oracle_id = "00fd090a-2021-41ac-be80-07c7c23027e3"
+scryfall_id = "9a2d23c4-d381-4a92-b4b1-0cf71948f941"
+
+[token.token_image_ref]
+scryfall_id = "9a2d23c4-d381-4a92-b4b1-0cf71948f941"
+scryfall_oracle_id = "00fd090a-2021-41ac-be80-07c7c23027e3"
+preset_id = "aa8dcb67-bffa-5bb5-8ec4-6cfa6e7f87c0"
+
+[[token]]
 id = "aa9952f1-590d-551e-a881-cb4be1e83adb"
 category = "Creature"
 fidelity = "Full"
@@ -156822,6 +157304,40 @@ scryfall_oracle_id = "23c6a041-b8ff-449c-8a2c-e3939668c017"
 preset_id = "ad44b516-28bf-5949-b591-ea9cd4767bcd"
 
 [[token]]
+id = "ad49d3fe-7432-5d67-9d5a-9d3acf8c37bf"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Foot Skirmisher"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "29"
+released_at = "2026-03-06"
+type_line = "Creature — Ninja"
+rules_text = """
+Flying (This creature can't be blocked except by creatures with flying or reach.)
+This creature can't block."""
+
+[token.body]
+display_name = "Foot Skirmisher"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Ninja"]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Foot Skirmisher"
+scryfall_oracle_id = "8426fe4b-7632-4122-9a6c-70f469e1d092"
+scryfall_id = "bd58ad15-8d15-46f6-b9b3-05ee8cbecadc"
+
+[token.token_image_ref]
+scryfall_id = "bd58ad15-8d15-46f6-b9b3-05ee8cbecadc"
+scryfall_oracle_id = "8426fe4b-7632-4122-9a6c-70f469e1d092"
+preset_id = "ad49d3fe-7432-5d67-9d5a-9d3acf8c37bf"
+
+[[token]]
 id = "ad66a158-b3c3-5194-98b2-a8b263cc9d00"
 category = "Creature"
 fidelity = "PartialMissingAbilities"
@@ -159796,6 +160312,36 @@ scryfall_id = "535189ec-572f-44ed-9741-09b9f575fc40"
 scryfall_id = "e36334f1-afe3-497c-82d9-aaf149934b54"
 scryfall_oracle_id = "b96b076f-9815-457e-bbe2-4abf4c8f85cf"
 preset_id = "afe81bef-8851-5a9e-882c-66c59e09994e"
+
+[[token]]
+id = "afed8326-d4bf-5ffa-8ad0-892aecc47340"
+category = "Event"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Event: Shredder's Challenge"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "24"
+released_at = "2026-03-06"
+type_line = "Event"
+rules_text = "Return two Ninja cards at random from the boss graveyard to the battlefield under the Boss team's control. (If there's only one, return it to the battlefield.)"
+
+[token.body]
+display_name = "Event: Shredder's Challenge"
+core_types = ["Event"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Event: Shredder's Challenge"
+scryfall_oracle_id = "9dd5f4cc-2936-4957-b527-08f6aee7fe27"
+scryfall_id = "8b673d4b-0188-4225-9067-dc61386a18fd"
+
+[token.token_image_ref]
+scryfall_id = "8b673d4b-0188-4225-9067-dc61386a18fd"
+scryfall_oracle_id = "9dd5f4cc-2936-4957-b527-08f6aee7fe27"
+preset_id = "afed8326-d4bf-5ffa-8ad0-892aecc47340"
 
 [[token]]
 id = "affc1692-059c-5ac7-952c-e53bfc9d1542"
@@ -169341,6 +169887,36 @@ scryfall_oracle_id = "7c0b6b53-4ddb-4bb5-8a26-0041b2006d3f"
 preset_id = "bb5d293a-75af-53c0-9279-f560c2a9ffce"
 
 [[token]]
+id = "bb6fd47b-b2ad-5307-911c-4d9abe26c250"
+category = "Event"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Event: Savanti Romero's Curse"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "23"
+released_at = "2026-03-06"
+type_line = "Event"
+rules_text = "Each hero returns X creatures they control to their owners' hands, where X is the number of bosses."
+
+[token.body]
+display_name = "Event: Savanti Romero's Curse"
+core_types = ["Event"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Event: Savanti Romero's Curse"
+scryfall_oracle_id = "1bb96f48-4f66-4dea-a4a5-438b5e961e50"
+scryfall_id = "84c98b5c-4bec-4455-9681-045842a87721"
+
+[token.token_image_ref]
+scryfall_id = "84c98b5c-4bec-4455-9681-045842a87721"
+scryfall_oracle_id = "1bb96f48-4f66-4dea-a4a5-438b5e961e50"
+preset_id = "bb6fd47b-b2ad-5307-911c-4d9abe26c250"
+
+[[token]]
 id = "bb78da58-40bc-5bd7-8602-1e6ef8abc78f"
 category = "Creature"
 fidelity = "PartialMissingAbilities"
@@ -175604,6 +176180,36 @@ scryfall_id = "111fd453-244a-49f1-88e7-7cf1b8e975ee"
 scryfall_id = "6c6c62a5-dd1d-4d37-a2da-6e4e6b5bec40"
 scryfall_oracle_id = "3b6d8366-9459-43f7-9d3e-371b8398aee2"
 preset_id = "c26d870a-76b1-5241-9019-ec292df2e36e"
+
+[[token]]
+id = "c27bf2f4-73a2-52b6-80e9-1016e1b53927"
+category = "Event"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Event: Baxter's Experiments"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "15"
+released_at = "2026-03-06"
+type_line = "Event"
+rules_text = "Copy the next event the bosses play. (Put this card beside the event deck. After the next event is played, put this card into the event discard pile.)"
+
+[token.body]
+display_name = "Event: Baxter's Experiments"
+core_types = ["Event"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Event: Baxter's Experiments"
+scryfall_oracle_id = "4a7120b9-ab5b-48df-9c73-3bc41b2e9595"
+scryfall_id = "cb231e4d-dbba-4475-a01b-212d83859722"
+
+[token.token_image_ref]
+scryfall_id = "cb231e4d-dbba-4475-a01b-212d83859722"
+scryfall_oracle_id = "4a7120b9-ab5b-48df-9c73-3bc41b2e9595"
+preset_id = "c27bf2f4-73a2-52b6-80e9-1016e1b53927"
 
 [[token]]
 id = "c2951084-f8a8-5e6c-bb0b-4cd5f3a8b26f"
@@ -182571,6 +183177,36 @@ scryfall_id = "1f3bb284-d10e-4265-92a4-8dcaf118f3c8"
 scryfall_id = "944a40e8-5469-4d8b-b044-67ff3382ec92"
 scryfall_oracle_id = "eac25f12-6459-438c-a09e-93e23d2cf80d"
 preset_id = "c9ab1a15-5d57-567b-ade2-47532db5b778"
+
+[[token]]
+id = "c9b0f651-8762-51d7-a951-3627fc5ee6e3"
+category = "Event"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Event: Krang's Stratagem"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "19"
+released_at = "2026-03-06"
+type_line = "Event"
+rules_text = "As a team, the heroes discard a total of two cards."
+
+[token.body]
+display_name = "Event: Krang's Stratagem"
+core_types = ["Event"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Event: Krang's Stratagem"
+scryfall_oracle_id = "882a353b-ee5c-40e9-a81a-01b5eeaf705c"
+scryfall_id = "7c25a10b-e2a7-4345-ae6f-021b607a3e59"
+
+[token.token_image_ref]
+scryfall_id = "7c25a10b-e2a7-4345-ae6f-021b607a3e59"
+scryfall_oracle_id = "882a353b-ee5c-40e9-a81a-01b5eeaf705c"
+preset_id = "c9b0f651-8762-51d7-a951-3627fc5ee6e3"
 
 [[token]]
 id = "c9b9d4d4-fced-558c-92ef-81c86be7e966"
@@ -189829,6 +190465,36 @@ scryfall_oracle_id = "00bc99d9-2cc4-4dd5-a37b-4918fff8160a"
 preset_id = "d16b52df-914d-5687-9960-79704ed7218c"
 
 [[token]]
+id = "d175c6cf-f7d1-5ccc-ab94-c64294e63ae9"
+category = "Event"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Event: Rocksteady's Beatdown"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "22"
+released_at = "2026-03-06"
+type_line = "Event"
+rules_text = "Destroy all creatures with flying the heroes control."
+
+[token.body]
+display_name = "Event: Rocksteady's Beatdown"
+core_types = ["Event"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Event: Rocksteady's Beatdown"
+scryfall_oracle_id = "a84d49da-fe5e-4b9e-a98f-000856e6fbe7"
+scryfall_id = "7fbf846e-9496-470d-b039-b4cd9e71f066"
+
+[token.token_image_ref]
+scryfall_id = "7fbf846e-9496-470d-b039-b4cd9e71f066"
+scryfall_oracle_id = "a84d49da-fe5e-4b9e-a98f-000856e6fbe7"
+preset_id = "d175c6cf-f7d1-5ccc-ab94-c64294e63ae9"
+
+[[token]]
 id = "d1a28b9a-8f82-5413-a1f1-3284bd2f3f52"
 category = "Creature"
 fidelity = "Full"
@@ -190129,6 +190795,40 @@ keywords = []
 scryfall_id = "12856d0c-240f-42c6-80dd-715ccf314645"
 scryfall_oracle_id = "6a880a0f-0a98-4505-9c27-9821be3e4818"
 preset_id = "d20b175b-7e4c-5ce3-a1bc-5bc1b233f236"
+
+[[token]]
+id = "d21023d3-b5e4-5f00-b712-25eee35d6f26"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Foot Enforcer"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "31"
+released_at = "2026-03-06"
+type_line = "Creature — Ninja"
+rules_text = """
+This creature can't block.
+This creature can't be blocked by more than one creature."""
+
+[token.body]
+display_name = "Foot Enforcer"
+power = 6
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Ninja"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Foot Enforcer"
+scryfall_oracle_id = "71241776-55ae-4e3c-bf01-3387a9fca88c"
+scryfall_id = "641b27a0-7fe5-4987-81bd-aa208b7463fd"
+
+[token.token_image_ref]
+scryfall_id = "641b27a0-7fe5-4987-81bd-aa208b7463fd"
+scryfall_oracle_id = "71241776-55ae-4e3c-bf01-3387a9fca88c"
+preset_id = "d21023d3-b5e4-5f00-b712-25eee35d6f26"
 
 [[token]]
 id = "d21afaa3-ac25-5266-aa20-1a33333433a9"
@@ -203469,6 +204169,38 @@ scryfall_oracle_id = "a685171a-616f-42e1-9161-4a64fb51a977"
 preset_id = "dec61bf5-2416-53f8-b0e3-db968def5381"
 
 [[token]]
+id = "df03a49b-89dd-536c-8d5a-819cb0318e4b"
+category = "Boss"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Krang, Dimension X Overlord"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "8"
+released_at = "2026-03-06"
+type_line = "Boss"
+rules_text = """
+The bosses play an additional card each turn.
+At the start of the Boss turn, the bosses lose 2 life."""
+
+[token.body]
+display_name = "Krang, Dimension X Overlord"
+core_types = ["Boss"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Krang, Dimension X Overlord"
+scryfall_oracle_id = "d63579be-52d9-469d-8976-60c16b73bc93"
+scryfall_id = "8742baf6-2bf9-48ac-af68-6427704b3593"
+
+[token.token_image_ref]
+scryfall_id = "8742baf6-2bf9-48ac-af68-6427704b3593"
+scryfall_oracle_id = "d63579be-52d9-469d-8976-60c16b73bc93"
+preset_id = "df03a49b-89dd-536c-8d5a-819cb0318e4b"
+
+[[token]]
 id = "df20ddbd-d52e-5a26-9f0e-3d6367b60378"
 category = "Creature"
 fidelity = "PartialMissingAbilities"
@@ -208447,6 +209179,36 @@ scryfall_id = "35e11911-799c-4d82-9109-3ca27964bef0"
 scryfall_id = "da23a10f-7ac6-4cdc-a35c-ef6bba6b6b6f"
 scryfall_oracle_id = "c949b3f6-c042-4323-b36c-7f10391c8610"
 preset_id = "e548ca9f-dc51-53c3-9651-07a054d70d31"
+
+[[token]]
+id = "e579a333-1d17-50cb-a375-2f73d0c9ca53"
+category = "Event"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Event: Rat King's Revolution"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "21"
+released_at = "2026-03-06"
+type_line = "Event"
+rules_text = "Each hero taps a creature they control and puts X stun counters on it, where X is the number of bosses. (If a permanent with a stun counter would become untapped, remove one from it instead.)"
+
+[token.body]
+display_name = "Event: Rat King's Revolution"
+core_types = ["Event"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Event: Rat King's Revolution"
+scryfall_oracle_id = "234c7df7-68da-467c-835d-708ee95714db"
+scryfall_id = "bbafc14d-099c-4bad-a90c-788d2b838186"
+
+[token.token_image_ref]
+scryfall_id = "bbafc14d-099c-4bad-a90c-788d2b838186"
+scryfall_oracle_id = "234c7df7-68da-467c-835d-708ee95714db"
+preset_id = "e579a333-1d17-50cb-a375-2f73d0c9ca53"
 
 [[token]]
 id = "e59691aa-e1f1-5b09-836c-3104c1f45bfb"
@@ -218379,6 +219141,36 @@ scryfall_oracle_id = "91da73fe-d028-43d7-bf75-f7ef30b45664"
 preset_id = "f1369647-2863-5cc6-91b4-00d9c735e19e"
 
 [[token]]
+id = "f13c9091-91b6-51b4-91d5-214180ff03ee"
+category = "Event"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Event: Leatherhead's Smackdown"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "20"
+released_at = "2026-03-06"
+type_line = "Event"
+rules_text = "As a team, the heroes choose a creature with the greatest power among creatures they control. Destroy it. The bosses lose life equal to that creature's power."
+
+[token.body]
+display_name = "Event: Leatherhead's Smackdown"
+core_types = ["Event"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Event: Leatherhead's Smackdown"
+scryfall_oracle_id = "4e7833c7-e9ff-4550-b2fd-36afe6087e0f"
+scryfall_id = "fac36345-b2fb-444-a499-f68bbe87e736"
+
+[token.token_image_ref]
+scryfall_id = "fac36345-b2fb-444-a499-f68bbe87e736"
+scryfall_oracle_id = "4e7833c7-e9ff-4550-b2fd-36afe6087e0f"
+preset_id = "f13c9091-91b6-51b4-91d5-214180ff03ee"
+
+[[token]]
 id = "f15efe3e-beca-5f27-9dea-2923991611b4"
 category = "Aura"
 fidelity = "PartialMissingAbilities"
@@ -218421,6 +219213,36 @@ scryfall_id = "3340b83e-72dc-42e2-9f93-92f732c047df"
 scryfall_id = "b21b5504-c5ef-4dfc-8219-8db90aca7694"
 scryfall_oracle_id = "5f634a21-82ea-4f84-951f-e7a9f5ef1379"
 preset_id = "f15efe3e-beca-5f27-9dea-2923991611b4"
+
+[[token]]
+id = "f164b86f-196f-5372-8c7e-279b7d1281de"
+category = "Boss"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Shredder, Foot Clan Overlord"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "13"
+released_at = "2026-03-06"
+type_line = "Boss"
+rules_text = "Whenever a creature the bosses control dies, the heroes lose 1 life."
+
+[token.body]
+display_name = "Shredder, Foot Clan Overlord"
+core_types = ["Boss"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Shredder, Foot Clan Overlord"
+scryfall_oracle_id = "8fbaded5-2847-4cee-869f-6bee45294ba4"
+scryfall_id = "19f04282-ef44-4474-bb0f-bcc938bdba7a"
+
+[token.token_image_ref]
+scryfall_id = "19f04282-ef44-4474-bb0f-bcc938bdba7a"
+scryfall_oracle_id = "8fbaded5-2847-4cee-869f-6bee45294ba4"
+preset_id = "f164b86f-196f-5372-8c7e-279b7d1281de"
 
 [[token]]
 id = "f1687f59-2d44-5bda-8906-3d016ac4c460"
@@ -218797,6 +219619,36 @@ scryfall_id = "ba1240d4-dbd0-483b-934a-5f7c505fad42"
 scryfall_id = "1659d2ee-1831-4ba1-a08d-03af31c9a043"
 scryfall_oracle_id = "9e266374-80f1-458a-9417-16220d2a013a"
 preset_id = "f21130a4-98f8-5e32-875a-b0ffe39d1d6b"
+
+[[token]]
+id = "f2227981-b536-5664-ba74-9d90303c3f33"
+category = "Event"
+fidelity = "PartialMissingAbilities"
+source_card_names = ["Event: Villain Infiltration"]
+set_code = "TTMC"
+set_name = "Teenage Mutant Ninja Turtles Eternal Tokens"
+collector_number = "26"
+released_at = "2026-03-06"
+type_line = "Event"
+rules_text = "As a team, the heroes choose a creature with the greatest power among creatures they control. Destroy it."
+
+[token.body]
+display_name = "Event: Villain Infiltration"
+core_types = ["Event"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Event: Villain Infiltration"
+scryfall_oracle_id = "47a2cd61-ac4d-4828-83a2-b4606c927719"
+scryfall_id = "321f758f-a738-4f9b-a1d8-8edeb4fd9aff"
+
+[token.token_image_ref]
+scryfall_id = "321f758f-a738-4f9b-a1d8-8edeb4fd9aff"
+scryfall_oracle_id = "47a2cd61-ac4d-4828-83a2-b4606c927719"
+preset_id = "f2227981-b536-5664-ba74-9d90303c3f33"
 
 [[token]]
 id = "f22f3e10-8d4f-55df-8bb6-c8774c1a3f51"

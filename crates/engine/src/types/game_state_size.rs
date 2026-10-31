@@ -67,6 +67,14 @@
 //! are already boxed, so nothing large went inline; the ceiling moved to
 //! 14,352.next_multiple_of(256) + 256 = 14,848.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-04-19`) at
+//! 15,072 B when the Horde stack merged: ~110 B of small Horde bookkeeping
+//! (three `u32`s, three `Vec`s, a `usize`, a `u8`, an `im::Vector`, and an
+//! already-boxed `pending_hero_event`) plus upstream's accumulated small fields
+//! since the Horde base. No single large rarely-populated field went inline, so
+//! the ceiling moves by the rule to
+//! 15,072.next_multiple_of(256) + 256 = 15,360.
+//!
 //! `GameState` re-measured on x86_64-pc-windows-msvc at 14,864 B when the
 //! scheme-support branch merged main's tracked-set member origins
 //! (`tracked_set_member_origins`, an `im::HashMap`, 24 B inline) alongside

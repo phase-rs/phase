@@ -957,7 +957,9 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::Unimplemented { .. } => None,
+        | Effect::Unimplemented { .. }
+        // Turtle Team-Up: plays cards; moves nothing from the battlefield.
+        | Effect::HordePlayCard { .. } => None,
     }
 }
 
@@ -4120,6 +4122,7 @@ impl ResolvedAbility {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => None,
         }
     }

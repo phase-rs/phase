@@ -305,7 +305,8 @@
     "unboundedTokens": "衍生物",
     "unboundedTooltip": "无限{{resource}}（∞）",
     "unboundedTriggers": "触发",
-    "unboundedTurns": "回合"
+    "unboundedTurns": "回合",
+    "hordeRulesAriaLabel": "Horde deck rules"
   },
   "battleProtector": {
     "battleFallback": "战役",
@@ -473,7 +474,8 @@
       "tap": "横置",
       "target": "目标",
       "top": "牌库顶",
-      "untap": "竖置"
+      "untap": "竖置",
+      "destroy": "Destroy"
     },
     "behold": {
       "labelBehold": "请援",
@@ -510,7 +512,8 @@
       "searchLabel": "筛选",
       "searchPlaceholder": "牌名",
       "selectAll": "全选",
-      "sortLabel": "排序"
+      "sortLabel": "排序",
+      "counterChoose": "Choose {{selected}} of {{cap}}"
     },
     "buttons": {
       "collectCount": "搜证（{{total}}/{{minimum}}）",
@@ -923,6 +926,42 @@
       "subtitle": "选择一个要牺牲的永久物",
       "title_one": "守护 —— 牺牲一个永久物",
       "title_other": "守护 —— 牺牲{{count}}个永久物"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     }
   },
   "cardDataMissing": {
@@ -1676,7 +1715,12 @@
     "selectDeckPrompt": "选择套牌",
     "startMatch": "开始对局",
     "startMatchWithOpponents": "开始对局（{{count}}名对手）",
-    "title": "开始一场对局。"
+    "title": "开始一场对局。",
+    "hordeDeck": {
+      "title": "Horde Deck",
+      "subtitle": "The self-piloting deck your team faces. The engine supplies it — you don't need an AI deck.",
+      "selected": "Selected"
+    }
   },
   "giftRecipient": {
     "subtitle": "选择由哪位对手获得所承诺的赠礼。",
@@ -1731,7 +1775,9 @@
     "title": "将{{name}}移出？"
   },
   "lifeTotal": {
-    "playerLabel": "P{{seat}}"
+    "playerLabel": "P{{seat}}",
+    "libraryLabel": "CARDS",
+    "libraryTooltip": "The Horde has no life total. Damage and life loss mill it instead — it's defeated when its library runs out, so this count is its real clock."
   },
   "log": {
     "abilityActivated": "异能已起动（来源 {{sourceId}}）",

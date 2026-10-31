@@ -24,7 +24,7 @@ use engine::game::{
 use engine::types::action_rejection::ActionRejection;
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::events::GameEvent;
-use engine::types::format::{validate_starting_life_bounds, FormatConfig};
+use engine::types::format::{validate_starting_life_bounds, FormatConfig, GameFormat};
 use engine::types::game_state::{GameState, PersistedGameState, PlayerDeckPool};
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
@@ -478,6 +478,15 @@ pub enum StartGameError {
     SeatDeckMissing {
         seat_index: u8,
     },
+    /// Horde Magic: the whole Horde roster (primary + co-Horde seats) must
+    /// land on one contiguous run of AI seats — a human seat given the
+    /// challenge library would be unplayable, and silently reassigning one
+    /// is worse than refusing to start. The host must rearrange the seats
+    /// (or add AI seats) so such a run exists.
+    HordeSeatsNotAi {
+        horde_seat_count: u8,
+        player_count: u8,
+    },
 }
 
 impl From<CedhBracketError> for StartGameError {
@@ -493,6 +502,13 @@ impl std::fmt::Display for StartGameError {
             StartGameError::SeatDeckMissing { seat_index } => write!(
                 f,
                 "Seat {seat_index} has no deck; the game cannot start until it does"
+            ),
+            StartGameError::HordeSeatsNotAi {
+                horde_seat_count,
+                player_count,
+            } => write!(
+                f,
+                "Horde needs {horde_seat_count} contiguous AI seats and this {player_count}-player table has no such run; the Horde roster cannot take a human seat"
             ),
         }
     }
@@ -967,8 +983,53 @@ impl GameSession {
         }
     }
 
+    /// Horde Magic: the lowest seat anchoring one contiguous run of AI
+    /// seats covering the whole Horde roster — `None` when the layout has
+    /// no such run. `GameState::new` designates seats
+    /// `archenemy..archenemy+N` as the Horde (N = the number of Horde
+    /// libraries; 1 for a single-Horde deck, 2 for the LOTR "Two Towers"
+    /// pairing), and those seats must ALL be AI: the survivors are the
+    /// humans. There is deliberately no lowest-AI-seat fallback — anchoring
+    /// a partial run would load the challenge library onto a human seat.
+    /// The same rule runs on the P2P path (client-side start); both reject
+    /// the layout instead of reassigning a human seat.
+    fn horde_anchor(&self, player_count: u8) -> Option<PlayerId> {
+        let horde_seat_count = self
+            .state
+            .format_config
+            .horde_ruleset
+            .as_ref()
+            .map_or(1, |r| r.horde_decks().len()) as u8;
+        (0..player_count)
+            .find(|&s| {
+                (0..horde_seat_count)
+                    .all(|offset| self.ai_seats.contains(&PlayerId(s.saturating_add(offset))))
+            })
+            .map(PlayerId)
+    }
+
     fn rebuild_pregame_state(&mut self, player_count: u8) {
-        let format_config = self.state.format_config.clone();
+        let mut format_config = self.state.format_config.clone();
+        // Horde Magic: the Horde is the self-piloting deck, which is played by an
+        // AI seat — not the host (seat 0), who is a survivor. The default
+        // `FormatConfig::horde()` points `archenemy_player` at seat 0; remap it to
+        // the anchor of the lowest contiguous AI run covering the roster so the
+        // engine designates those seats as the Horde — loading the challenge-deck
+        // libraries there, seating the humans as the survivor team, and giving
+        // the survivors the first turn.
+        if format_config.format == GameFormat::Horde {
+            match self.horde_anchor(player_count) {
+                Some(anchor) => {
+                    format_config.archenemy_player = Some(anchor);
+                }
+                // No AI run covers the roster: clear the default anchor so the
+                // pregame state designates nothing, and let `start_game` reject
+                // the layout — never silently take a human seat.
+                None => {
+                    format_config.archenemy_player = None;
+                }
+            }
+        }
         let match_config = self.state.match_config;
         self.state = GameState::new(format_config, player_count, rand::rng().random());
         // CR 732.2a: re-read the immutable match config (incl. the combo-detector
@@ -1304,6 +1365,25 @@ impl GameSession {
                 .filter_map(|slot| slot.as_ref())
                 .collect::<Vec<_>>();
             validate_cedh_bracket(&deck_refs)?;
+        }
+        // Horde Magic: every designated Horde seat must be an AI seat. A
+        // layout with no contiguous AI run covering the roster (e.g. Two
+        // Towers at [human, AI, human]) is rejected here, before the rebuild
+        // — designating it would load the challenge library onto a human
+        // seat. Same rule as the P2P path's client-side start.
+        if self.state.format_config.format == GameFormat::Horde
+            && self.horde_anchor(self.player_count).is_none()
+        {
+            let horde_seat_count = self
+                .state
+                .format_config
+                .horde_ruleset
+                .as_ref()
+                .map_or(1, |r| r.horde_decks().len()) as u8;
+            return Err(StartGameError::HordeSeatsNotAi {
+                horde_seat_count,
+                player_count: self.player_count,
+            });
         }
 
         let player_deck = self.decks[0].clone().unwrap_or_default();
@@ -2942,6 +3022,7 @@ mod tests {
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
+    use engine::types::format::ChallengeDeck;
     use engine::types::game_state::{
         AutoPassMode, CastPaymentMode, PersistedGameState, StackEntry, StackEntryKind,
         StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
@@ -7593,6 +7674,87 @@ mod tests {
         // No session state should have been mutated — game_started stays false.
         assert_eq!(session.game_started, game_started_before);
         assert!(!session.game_started);
+    }
+
+    /// R2-#4: Two Towers at [human, AI, human] has no contiguous AI run for
+    /// the 2-seat Horde roster, so `start_game` rejects the layout instead
+    /// of designating seat 2 — a human — as a Horde seat carrying the
+    /// challenge library.
+    #[test]
+    fn horde_two_towers_split_layout_is_rejected_at_start() {
+        let db = Arc::new(CardDatabase::default());
+        let mut mgr = SessionManager::new();
+        let two_towers = FormatConfig::horde(ChallengeDeck::LotrTwoTowersHorde.default_ruleset());
+        let (code, _token0) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                Some(two_towers),
+            )
+            .expect("3-player Horde room creates");
+        let (_token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let (_token2, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+
+        // Seat 1 is the lone AI seat between two humans.
+        let mut session = mgr.try_session(&code).unwrap();
+        session.ai_seats.insert(PlayerId(1));
+
+        let result = session.start_game(&db);
+        assert!(
+            matches!(
+                result,
+                Err(StartGameError::HordeSeatsNotAi {
+                    horde_seat_count: 2,
+                    player_count: 3,
+                })
+            ),
+            "split layout must be rejected, got: {result:?}",
+        );
+        assert!(!session.game_started);
+    }
+
+    /// R2-#4: the Horde anchor is the lowest seat starting a full-AI run
+    /// covering the roster; without one the rebuild clears the default
+    /// anchor so the pregame state designates nothing (and `start_game`
+    /// rejects — see the test above).
+    #[test]
+    fn horde_anchor_requires_a_full_ai_run() {
+        let mut mgr = SessionManager::new();
+        let two_towers = FormatConfig::horde(ChallengeDeck::LotrTwoTowersHorde.default_ruleset());
+        let (code, _token0) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                Some(two_towers),
+            )
+            .expect("3-player Horde room creates");
+        let (_token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let (_token2, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+
+        let mut session = mgr.try_session(&code).unwrap();
+        // Contiguous AI run on seats 1+2: anchor 1, both Horde libraries
+        // land on AI seats.
+        session.ai_seats.insert(PlayerId(1));
+        session.ai_seats.insert(PlayerId(2));
+        session.rebuild_pregame_state(3);
+        assert_eq!(
+            session.state.format_config.archenemy_player,
+            Some(PlayerId(1))
+        );
+
+        // Lone AI seat between two humans: no anchor, and the default
+        // seat-0 anchor is cleared rather than left pointing at the host.
+        session.ai_seats.remove(&PlayerId(2));
+        session.rebuild_pregame_state(3);
+        assert_eq!(session.state.format_config.archenemy_player, None);
     }
 
     /// CR 701.22a / CR 701.25a: a reordered (and partial-2+) scry keep-on-top

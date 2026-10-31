@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Anfitrión","waiting":"Esperando","value":"{{ms}} ms","description":"Latencia de ida y vuelta al anfitrión. La falta de respuesta no desconecta la partida."},
+  "playerLatency": {
+    "host": "Anfitrión",
+    "waiting": "Esperando",
+    "value": "{{ms}} ms",
+    "description": "Latencia de ida y vuelta al anfitrión. La falta de respuesta no desconecta la partida."
+  },
   "abilityBlock": {
     "badge": "Bloqueada",
     "cantBeActivated": "Esta habilidad no puede activarse",
@@ -443,7 +448,9 @@
     "done": "Listo"
   },
   "lifeTotal": {
-    "playerLabel": "J{{seat}}"
+    "playerLabel": "J{{seat}}",
+    "libraryLabel": "CARTAS",
+    "libraryTooltip": "La Horda no tiene total de vidas. El daño y la pérdida de vidas la hacen descartar cartas de su biblioteca en su lugar: es derrotada cuando su biblioteca se agota, así que este número es su verdadero reloj."
   },
   "phaseStop": {
     "untapLabel": "Paso de enderezar",
@@ -534,6 +541,7 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Reglas del mazo de la Horda",
     "monarch": "Monarca",
     "monarchTooltip": "El Monarca — roba una carta extra al final del turno",
     "initiative": "Iniciativa",
@@ -1400,6 +1408,11 @@
     "noLegalAiDecks": {
       "withFormat": "Añade o importa un mazo legal en {{format}} para que lo use la IA.",
       "generic": "Añade o importa un mazo legal en este formato para que lo use la IA."
+    },
+    "hordeDeck": {
+      "title": "Mazo de la Horda",
+      "subtitle": "El mazo autónomo al que se enfrenta tu equipo. Lo proporciona el motor: no necesitas un mazo de IA.",
+      "selected": "Seleccionado"
     }
   },
   "cardChoice": {
@@ -1433,7 +1446,8 @@
       "cast": "Lanzar",
       "crew": "Tripular ({{power}})",
       "saddle": "Ensillar ({{power}})",
-      "station": "Estación (+{{power}})"
+      "station": "Estación (+{{power}})",
+      "destroy": "Destroy"
     },
     "buttons": {
       "confirm": "Confirmar",
@@ -1777,7 +1791,8 @@
       "counterDiscard": "Descartar {{selected}} de {{cap}}",
       "counterKeep": "Conservar {{selected}} de {{cap}}",
       "keepInstead": "Conservar en su lugar",
-      "discardInstead": "Descartar en su lugar"
+      "discardInstead": "Descartar en su lugar",
+      "counterChoose": "Choose {{selected}} of {{cap}}"
     },
     "discard": {
       "title": "Descartar",
@@ -1876,6 +1891,42 @@
       "hint": "Arrastra para reordenar · la posición 1 queda arriba de este montón",
       "moveLeft": "Mover a la izquierda",
       "moveRight": "Mover a la derecha"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     }
   },
   "specializeColor": {

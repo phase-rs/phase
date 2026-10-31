@@ -2329,6 +2329,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
@@ -3932,6 +3933,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::ManifestDread
         | Effect::Choose { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::HordePlayCard { .. } => false,
         | Effect::Unimplemented { .. } => false,
     }
 }
@@ -5677,6 +5679,18 @@ fn rw_effect(
             p.merge(rw_quantity_expr(mana_value_limit));
             (p, None)
         }
+        // Turtle Team-Up "play a card": reveals library cards into play — the
+        // Discover shape (library membership → anywhere), minus the stack:
+        // Boss libraries are all-token, so nothing is ever cast. The
+        // any-census/any-zone membership write covers creature ETBs, Event
+        // graveyarding, and the Events' own damage/destroy/life writes.
+        Effect::HordePlayCard { .. } => {
+            let mut p = ext_write(StateKind::SetMembership);
+            p.writes_external.set(StateKind::HandLibrary);
+            p.writes_membership_external_census.merge(Census::Any);
+            p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            (p, None)
+        }
         Effect::RevealUntil {
             player: _,
             filter: _,
@@ -6788,6 +6802,9 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
             reads_event_live()
         }
         QuantityRef::GraveyardSize { .. } => reads_zone_membership(),
+        // Turtle Team-Up: a command-zone pile census — zone membership like
+        // GraveyardSize, global (not per-source member-bound).
+        QuantityRef::DeployedBossCount => reads_zone_membership(),
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }

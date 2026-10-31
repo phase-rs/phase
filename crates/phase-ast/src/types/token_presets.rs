@@ -86,6 +86,13 @@ pub enum TokenCategory {
     /// CR 301.1: Plain artifact token that isn't Equipment, Vehicle, or a
     /// predefined-ability subtype (Book artifacts, custom curiosities, etc.).
     Artifact,
+    /// Turtle Team-Up (casual co-op product): any token with the Boss core
+    /// type. Overlay-only — the tokens-gen converter classifies MTGJSON set
+    /// tokens, which never carry this casual-product type.
+    Boss,
+    /// Turtle Team-Up: any token with the Event core type. Overlay-only, as
+    /// above.
+    Event,
 }
 
 /// How completely this preset's body represents its source data.

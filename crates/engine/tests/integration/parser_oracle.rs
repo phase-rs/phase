@@ -789,7 +789,10 @@ fn census_variant_names(body: &str) -> Vec<String> {
 /// it.
 #[test]
 fn render_net_effect_carrier_census() {
-    const EFFECT_VARIANT_PIN: usize = 238;
+    // 239 = base 237 + `Effect::HordePlayCard` (Turtle Team-Up; bare-`u32`
+    // payload, reaches no `description`, so no RENDER_DESCEND arm) +
+    // `Effect::AbandonScheme` (CR 701.33b; fieldless, reaches no `description`).
+    const EFFECT_VARIANT_PIN: usize = 239;
     /// `(enum header, pinned variant count, the ONE variant the net destructures)`.
     const PAYLOAD_ENUM_PINS: &[(&str, usize, &str)] = &[
         ("pub enum CastingPermission {", 8, "ExileWithAltCost"),

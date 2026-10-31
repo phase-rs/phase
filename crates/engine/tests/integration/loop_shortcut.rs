@@ -5094,8 +5094,8 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // ── the classifier's own reach-guard: the enum was actually found ──
     let total = enum_variants(&enum_src, "WaitingFor").len();
     assert_eq!(
-        total, 144,
-        "`WaitingFor` has 144 variants at this tip, read off the `syn` parse. This number is \
+        total, 145,
+        "`WaitingFor` has 145 variants at this tip, read off the `syn` parse. This number is \
          pinned so a variant REMOVED is as visible as one added; if you added a variant and it \
          carries no `DecisionTemplate`, update this number. A wildly different count means the \
          reader lost its anchor, and every assertion below would then be measuring an empty enum"
@@ -5169,6 +5169,12 @@ fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redac
     // `PhysicalContest { state: ContestState }`. Measured, not inferred from the diff:
     // that body holds NO `DecisionTemplate` (zero matches) — it is an actorless
     // real-time physical clicking contest driven by the host engine contest driver,
+    // not a shortcut-style template — so it is not a third carrier and the carrier
+    // assertion below is unchanged by it.
+    // 144 ⇒ 145 is ADJUDICATED: Turtle Team-Up added `HeroEventChoice` (hero-choice
+    // Events answered with `GameAction::SelectCards`, handled in
+    // `engine_resolution_choices`). Measured, not inferred from the diff: that body
+    // holds NO `DecisionTemplate` (zero matches) — it is a resolution-choice prompt,
     // not a shortcut-style template — so it is not a third carrier and the carrier
     // assertion below is unchanged by it.
 

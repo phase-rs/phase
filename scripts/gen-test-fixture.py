@@ -63,6 +63,10 @@ def src_fixture_files() -> list[Path]:
     """Source files whose test card-name literals should be fixture-backed."""
     files = {path for path in ALWAYS_SCAN_SRC_FILES if path.exists()}
     files.update(SRC_DIR.rglob("*tests.rs"))
+    # The Horde challenge-deck lists are corpus rows consumed by
+    # horde_deck_card_names.rs through shared_card_db(); without them a
+    # regeneration would silently drop every Horde deck card from the fixture.
+    files.update((SRC_DIR / "game" / "decks").rglob("*.rs"))
 
     for rs in SRC_DIR.rglob("*.rs"):
         text = rs.read_text(encoding="utf-8", errors="ignore")

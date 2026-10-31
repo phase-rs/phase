@@ -2367,6 +2367,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::SharedCardTypes { .. }
         | QuantityRef::DistinctSubtypes { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::BasicLandTypeCount { .. }
@@ -2713,6 +2714,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
@@ -3007,6 +3009,11 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         // CR 400.7 + CR 613.1b: look-back attachment snapshot, optionally scoped
         // by a `ControllerRef` (payload rule 2).
         QuantityRef::AttachmentsOnLeavingObject { .. } => CharacteristicKinds::CONTROLLER,
+        // Turtle Team-Up (no CR section — casual product): the deployed-Boss census
+        // reads live card types (Boss membership) — a layer-4 change to a
+        // command-zone object perturbs the count.
+        QuantityRef::DeployedBossCount => CharacteristicKinds::CARD_TYPES,
+
 
         // ---- Reads no layer-writable characteristic. ----
         // Player-level totals, counters (CR 122.1 — counters are not
@@ -3317,6 +3324,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
@@ -5699,6 +5707,13 @@ fn resolve_ref(
         // read the live exile-link store.
         QuantityRef::CardsExiledBySource => {
             usize_to_i32_saturating(linked_exile_for_context(state, &ctx).len())
+        }
+        // Turtle Team-Up (no CR section — casual product): the number of
+        // Bosses currently deployed. Delegates to the single authority so the
+        // count matches stage sizes, Krang's wave bonus, and Leatherhead's
+        // entry gain on every layer pass.
+        QuantityRef::DeployedBossCount => {
+            usize_to_i32_saturating(crate::game::boss::bosses_in_command_zone(state).len())
         }
         // CR 607.2a: The power of a specific card exiled by the source, indexed by order.
         // Its only producer is The Mimeoplasm's entry replacement: the ordinal

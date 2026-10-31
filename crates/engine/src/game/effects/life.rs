@@ -86,13 +86,17 @@ enum SubstitutionDrainOutcome {
 }
 
 /// Final settle step of a life event: applies the (possibly replaced) event and
-/// reports the amount actually changed.
+/// reports the amount actually changed. The error widens to [`LifeChangeError`]
+/// (not just [`LifeChangeUnrepresentable`]) because the Horde no-life-total
+/// redirect substitutes a full mill resolution for the bare life mutation, and
+/// that mill can pause on its own replacement choice (CR 616.1) — which the
+/// settle must surface as [`LifeChangeError::Deferred`], never swallow.
 type LifeSettleFn = fn(
     &mut GameState,
     ProposedEvent,
     UnrepresentablePolicy,
     &mut Vec<GameEvent>,
-) -> Result<u32, LifeChangeUnrepresentable>;
+) -> Result<u32, LifeChangeError>;
 
 /// Runs `body` with a fresh action-ingress window open and returns its result
 /// together with the window as it stood at close. Any player-resource
@@ -334,8 +338,7 @@ fn apply_life_change_core(
 ) -> Result<u32, LifeChangeError> {
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            let applied =
-                settle(state, event, policy, events).map_err(LifeChangeError::Unrepresentable)?;
+            let applied = settle(state, event, policy, events)?;
             // CR 614.6 + CR 704.3: Drain any mandatory-post-effect continuation
             // (cross-event substitutes such as Lich; same-event work beyond the
             // applier's amount substitution) inside this resolution step so
@@ -489,7 +492,7 @@ fn settle_life_gain(
     event: ProposedEvent,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> Result<u32, LifeChangeUnrepresentable> {
+) -> Result<u32, LifeChangeError> {
     let ProposedEvent::LifeGain {
         player_id: pid,
         amount: gain_amount,
@@ -503,11 +506,20 @@ fn settle_life_gain(
         return Ok(0);
     };
     if let Some(settled) = settle_quantity_overflow(state, pid, policy, "life gain") {
-        return settled;
+        return settled.map_err(LifeChangeError::Unrepresentable);
     }
     if ingress_window_has_failed(state) {
         return Ok(0);
     }
+
+    // Horde Magic (casual variant): the Horde seat has no life total, so life
+    // gain does nothing to it (mirrors the CR 119.7 "can't gain life" no-op
+    // shape, though here the cause is the absence of a life total, not a
+    // static ability). No mutation, no LifeChanged event.
+    if crate::game::horde::player_has_no_life_total(state, pid) {
+        return Ok(0);
+    }
+
     // CR 119.8: gaining 0 life doesn't count as gaining life — no state
     // mutation and no journal command; the event below still fires as before.
     if gain_amount != 0 {
@@ -515,7 +527,8 @@ fn settle_life_gain(
             .map_err(|_| LifeChangeUnrepresentable { player: pid })
             .and_then(|delta| apply_final_life_edit(state, pid, delta));
         if let Err(unrepresentable) = edit {
-            return settle_unrepresentable(state, unrepresentable, policy, "life gain");
+            return settle_unrepresentable(state, unrepresentable, policy, "life gain")
+                .map_err(LifeChangeError::Unrepresentable);
         }
     }
     // CR 611.3a + CR 119: gate escalation on a live life-reading static.
@@ -669,15 +682,30 @@ pub(crate) fn settle_life_gain_after_choice(
     event: ProposedEvent,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> Result<u32, LifeChangeUnrepresentable> {
+) -> Result<u32, LifeChangeError> {
     settle_life_gain(state, event, policy, events)
 }
 
 /// Compatibility-policy settle result as a plain amount. `IgnoreImpossible`
 /// records ingress failure for the public owner to reject and restore, or uses
-/// the logged skip outside a boundary; the `Err` arm is defensive.
-fn ordinary_settled_amount(result: Result<u32, LifeChangeUnrepresentable>) -> u32 {
-    ordinary_settlement(result, 0, "ordinary life settle")
+/// the logged skip outside a boundary; the `Err` arms are defensive. Only for
+/// settles that can never pause (life gain has no redirect): a settle that CAN
+/// pause must propagate [`LifeChangeError::Deferred`] to its caller instead of
+/// collapsing it here.
+fn ordinary_settled_amount(result: Result<u32, LifeChangeError>) -> u32 {
+    match result {
+        Ok(applied) => applied,
+        Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
+            ordinary_settlement(Err(unrepresentable), 0, "ordinary life settle")
+        }
+        Err(LifeChangeError::Deferred(_)) => {
+            debug_assert!(
+                false,
+                "ordinary_settled_amount called on a settle that parked a prompt"
+            );
+            0
+        }
+    }
 }
 
 /// Compatibility-policy settle result for any player-resource settle step.
@@ -761,7 +789,7 @@ fn settle_life_loss(
     event: ProposedEvent,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> Result<u32, LifeChangeUnrepresentable> {
+) -> Result<u32, LifeChangeError> {
     let ProposedEvent::LifeLoss {
         player_id: pid,
         amount: loss_amount,
@@ -775,11 +803,39 @@ fn settle_life_loss(
         return Ok(0);
     };
     if let Some(settled) = settle_quantity_overflow(state, pid, policy, "life loss") {
-        return settled;
+        return settled.map_err(LifeChangeError::Unrepresentable);
     }
     if ingress_window_has_failed(state) {
         return Ok(0);
     }
+
+    // Horde Magic (casual variant): the Horde seat has no life total. Damage it
+    // suffers (CR 120.3a: damage to a player causes that much life loss) and any
+    // direct life loss (CR 119.3) is redirected to milling that many cards from
+    // the top of its own library — the milled count stands in for the "loss".
+    // The Horde's `life` is NOT decremented and `life_lost_this_turn` is NOT
+    // incremented, so it can never lose to the CR 704.5a life state-based
+    // action. Lifelink is unaffected: the dealer's life GAIN is a separate
+    // upstream `LifeGain` event, not routed through this loss-mutation point.
+    if crate::game::horde::player_has_no_life_total(state, pid) {
+        // Single authority for the Horde damage→mill redirect. It proposes a
+        // real Mill event through the replacement pipeline (so the Bruvac
+        // doubling class folds its count) and applies the community advanced
+        // legendary rule when the ruleset opts in (a milled legendary
+        // permanent enters + phases out instead of being buried). A mill
+        // replacement choice that parks mid-redirect surfaces here as a
+        // `Deferred` pause — the prompt is already in `waiting_for` — so the
+        // caller stops exactly as it would for a life-loss ordering choice.
+        match crate::game::horde::mill_from_loss(state, pid, loss_amount, events) {
+            crate::game::horde::MillFromLossOutcome::Settled => return Ok(loss_amount),
+            crate::game::horde::MillFromLossOutcome::Paused => {
+                return Err(LifeChangeError::Deferred(
+                    ReplacementDeferred::ReplacementChoice,
+                ));
+            }
+        }
+    }
+
     // CR 119.8: losing 0 life doesn't count as losing life — no state
     // mutation and no journal command; the event below still fires as before.
     if loss_amount != 0 {
@@ -790,7 +846,8 @@ fn settle_life_loss(
             .map_err(|_| LifeChangeUnrepresentable { player: pid })
             .and_then(|magnitude| apply_final_life_edit(state, pid, -magnitude));
         if let Err(unrepresentable) = edit {
-            return settle_unrepresentable(state, unrepresentable, policy, "life loss");
+            return settle_unrepresentable(state, unrepresentable, policy, "life loss")
+                .map_err(LifeChangeError::Unrepresentable);
         }
         let after = crate::game::players::team_life_total(state, pid);
         // The clone-local preview observes the real edit before events or a
@@ -827,19 +884,32 @@ fn settle_life_loss(
 /// result for the public boundary to reject and restore; without one, ordinary
 /// resolution and legacy parked records log and skip it for compatibility.
 ///
+/// Returns `Err` when the Horde no-life-total redirect parked a mill
+/// replacement choice mid-settle — the prompt is already in `waiting_for`.
+/// Callers must stop (or mirror their own `NeedsChoice` handling), never
+/// proceed as if the loss settled.
+///
 /// Extracted from `apply_life_loss`'s Execute arm. Caller is responsible for
 /// emitting `EffectResolved`.
 pub fn apply_life_loss_after_replacement(
     state: &mut GameState,
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
-) -> u32 {
-    ordinary_settled_amount(settle_life_loss(
+) -> Result<u32, ReplacementDeferred> {
+    match settle_life_loss(
         state,
         event,
         UnrepresentablePolicy::IgnoreImpossible,
         events,
-    ))
+    ) {
+        Ok(applied) => Ok(applied),
+        Err(LifeChangeError::Deferred(deferred)) => Err(deferred),
+        Err(LifeChangeError::Unrepresentable(unrepresentable)) => Ok(ordinary_settlement(
+            Err(unrepresentable),
+            0,
+            "ordinary life settle",
+        )),
+    }
 }
 
 /// Resume-path settle for a parked life loss: the loss twin of
@@ -849,7 +919,7 @@ pub(crate) fn settle_life_loss_after_choice(
     event: ProposedEvent,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> Result<u32, LifeChangeUnrepresentable> {
+) -> Result<u32, LifeChangeError> {
     settle_life_loss(state, event, policy, events)
 }
 
@@ -2957,7 +3027,9 @@ mod tests {
                     UnrepresentablePolicy::Reject,
                     &mut events
                 ),
-                Err(LifeChangeUnrepresentable { player })
+                Err(LifeChangeError::Unrepresentable(
+                    LifeChangeUnrepresentable { player }
+                ))
             );
             assert_eq!(state.replacement_quantity_overflow, None);
             state.record_replacement_quantity_overflow(source);
@@ -2968,7 +3040,9 @@ mod tests {
                     UnrepresentablePolicy::Reject,
                     &mut events
                 ),
-                Err(LifeChangeUnrepresentable { player })
+                Err(LifeChangeError::Unrepresentable(
+                    LifeChangeUnrepresentable { player }
+                ))
             );
             assert_eq!(state.replacement_quantity_overflow, None);
 

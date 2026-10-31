@@ -9,6 +9,7 @@ use crate::types::ability::{
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
+use crate::types::format::GameFormat;
 use crate::types::game_state::{
     AutoPassMode, EmptyPoolLifeLossCause, ExtraPhase, ExtraTurn, GameState, InsertedPhaseResume,
     LoopCollapseAxis, PayableResource, PendingCounterAddition, PendingEffectResolved,
@@ -748,6 +749,18 @@ fn enter_phase(
     //     `resume_pending_combat_lifelink` BEFORE the skip. A `Some` observed at
     //     the line below can therefore no longer have come from that door.
     state.pending_combat_lifelink = None;
+    // CR 510.2 + CR 724.1a: abandoning the batch abandons its Phase C remnant
+    // too — drop a combat-flagged post-loss stash with it (a non-combat stash
+    // belongs to an unrelated resolution and survives). Unreachable with a
+    // live prompt (prompts block phase movement), but stranding the stash
+    // would pin `pending_damage_post_loss` forever.
+    if state
+        .pending_damage_post_loss
+        .as_ref()
+        .is_some_and(|stashed| stashed.is_combat)
+    {
+        state.pending_damage_post_loss = None;
+    }
 
     // CR 500.1: captured BEFORE the assignment below, which is the only place
     // the outgoing phase still exists. A phase-group crossing is a property of
@@ -1101,9 +1114,10 @@ pub(super) fn drain_pending_phase_transition_progress(
             let next_phase = progress.next_phase;
             // CR 500.5 + CR 106.4 + CR 104.4b: de-realize every LOOP-backed ∞-mana axis as this
             // step/phase ends. The per-player drain above already emptied these pools (keep-gate
-            // false for non-debug players); clearing the axis stops `refill_infinite_mana` from
-            // re-seeding it on the next action. Debug-toggle players (`debug_infinite_mana`) are
-            // EXCLUDED — their mana persists. Placed BEFORE the token-collapse check so that when a
+            // false for non-exempt players); clearing the axis stops `refill_infinite_mana` from
+            // re-seeding it on the next action. Debug-toggle players (`debug_infinite_mana`) and
+            // Horde advanced-rule mana seats (`horde::has_horde_infinite_mana`) are EXCLUDED —
+            // their mana persists. Placed BEFORE the token-collapse check so that when a
             // controller holds BOTH a mana axis and a token stash, the mana axis is cleared before
             // the token pause returns — otherwise the intervening `LoopCollapse`-submit `apply()`
             // would call `refill_infinite_mana` and re-seed the just-drained pool. Runs at true
@@ -1114,6 +1128,7 @@ pub(super) fn drain_pending_phase_transition_progress(
                 .iter()
                 .filter(|(pid, axes)| {
                     !state.debug_infinite_mana.contains(*pid)
+                        && !super::horde::has_horde_infinite_mana(state, **pid)
                         && axes.iter().any(|a| matches!(a, ResourceAxis::Mana(_)))
                 })
                 .map(|(pid, _)| *pid)
@@ -1242,13 +1257,16 @@ pub(super) fn drain_pending_phase_transition_progress(
         // decisions. The `enumerate` runs over the full pool so `pool_index`
         // stays aligned with the retained expiry units that remain in pool
         // order (`ManaPool::units`).
-        // CR 500.5: unspent mana empties as a step/phase ends. The ONLY exemption is the developer
-        // `DebugAction::SetInfiniteMana` toggle (a documented debug departure). A loop-backed ∞-mana
-        // axis is NOT exempt — it drains here and is de-realized in the queue-empty pass below. Gate
-        // the keep-override on the explicit debug marker, never on "has a Mana axis" (a real loop
+        // CR 500.5: unspent mana empties as a step/phase ends. There are TWO exemptions: the
+        // developer `DebugAction::SetInfiniteMana` toggle (a documented debug departure), and the
+        // Horde advanced-rule infinite mana (`horde::has_horde_infinite_mana`, a standing game
+        // rule derived from the ruleset). A loop-backed ∞-mana axis is NOT exempt — it drains
+        // here and is de-realized in the queue-empty pass below. Gate the keep-override on the
+        // explicit debug marker or the Horde authority, never on "has a Mana axis" (a real loop
         // sets one too — MEASURED identical footprint). This is the partner of
-        // `mana_payment::refill_infinite_mana`; together they keep a debug-flagged pool full.
-        let keep_for_infinite_mana = state.debug_infinite_mana.contains(&player_id);
+        // `mana_payment::refill_infinite_mana`; together they keep an exempt pool full.
+        let keep_for_infinite_mana = state.debug_infinite_mana.contains(&player_id)
+            || super::horde::has_horde_infinite_mana(state, player_id);
         let units: Vec<crate::types::mana::UnitDecision> = state
             .players
             .iter()
@@ -1498,10 +1516,39 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     // they set the top scheme of their scheme deck in motion (a turn-based action
     // that doesn't use the stack). No-op outside an Archenemy game, when the active
     // player isn't the archenemy, or when the scheme deck is empty.
-    if next == Phase::PreCombatMain
-        && super::topology::archenemy(state) == Some(state.active_player)
+    //
+    // Horde Magic reuses the OneVsMany topology with the Horde in the archenemy
+    // seat, so the two share this precombat-main entry point. Keep them mutually
+    // exclusive: a Horde game seeds its reveal-and-resolve wave counter
+    // (`horde::begin_wave`) instead of setting a scheme in motion.
+    // (`set_in_motion` would in any case no-op on the Horde's empty
+    // `scheme_deck`, but dispatching explicitly documents the overlap and keeps
+    // the two runtimes distinct.)
+    //
+    // The Horde dispatch gates on the Horde-seat authority
+    // (`horde::is_horde_turn`), NOT the one-vs-many archenemy (the primary Horde
+    // seat only): two-Horde decks alternate commanders (Reading B), and the
+    // secondary commander's precombat must seed its wave too.
+    if next == Phase::PreCombatMain {
+        if state.format_config.format == GameFormat::Horde {
+            if super::horde::is_horde_turn(state) {
+                crate::game::horde::begin_wave(state, events);
+            }
+        } else if super::topology::archenemy(state) == Some(state.active_player) {
+            crate::game::archenemy::set_in_motion(state, events);
+        }
+    }
+
+    // Horde Magic (advanced rule): as the Horde's post-combat main begins, seed
+    // its post-combat activation queue (sibling of `begin_wave` above). No-op for
+    // basic decks; the beat itself is driven one activation per priority window by
+    // `horde::maybe_activate_next_ability`. Gated on the Horde-seat authority for
+    // the same two-commander reason as the precombat wave above.
+    if next == Phase::PostCombatMain
+        && state.format_config.format == GameFormat::Horde
+        && super::horde::is_horde_turn(state)
     {
-        crate::game::archenemy::set_in_motion(state, events);
+        crate::game::horde::begin_post_combat_activation(state, events);
     }
 }
 
@@ -2838,7 +2885,7 @@ fn execute_seedborn_statics(state: &mut GameState, events: &mut Vec<GameEvent>, 
 pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
     if state.pending_team_draw_step.is_empty() {
         state.pending_team_draw_step.push(state.active_player);
-        if state.format_config.topology().has_shared_team_turns() {
+        if super::topology::side_takes_shared_turn(state, state.active_player) {
             state
                 .pending_team_draw_step
                 .extend(super::players::teammates(state, state.active_player));
@@ -3541,7 +3588,11 @@ fn first_player_skips_first_draw(state: &GameState) -> bool {
 /// the draw step right now. Combines the first-turn rule above with any
 /// "skip your draw step" static / one-shot replacements.
 pub fn should_skip_draw(state: &GameState) -> bool {
-    step_skip(state, Phase::Draw).is_some()
+    // Horde Magic: the Horde has no hand and never draws — every Horde turn
+    // it reveals-and-casts from its library instead (skipping the draw also
+    // keeps it clear of the deck-out draw-loss SBA). Kept in lockstep with
+    // the executor's Draw gate below.
+    step_skip(state, Phase::Draw).is_some() || super::horde::is_horde_turn(state)
 }
 
 /// CR 614.1b + CR 614.10: Check whether the active player should skip the given
@@ -4074,7 +4125,10 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
         }
         Phase::Draw => {
             // CR 103.8a + CR 614.10: decided by step_skip.
-            if should_skip_step_now(state, Phase::Draw) {
+            // Horde Magic: the Horde has no hand and never draws — every
+            // Horde turn it reveals-and-casts from its library instead.
+            // Kept in lockstep with `should_skip_draw`.
+            if should_skip_step_now(state, Phase::Draw) || super::horde::is_horde_turn(state) {
                 match advance_phase_once(state, events) {
                     AdvancePhaseOnce::Deferred => return AutoAdvanceStep::Deferred,
                     AdvancePhaseOnce::Entry(_) => {}
@@ -4115,6 +4169,27 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 let active = state.active_player;
                 if super::effects::paradigm::enqueue_offer_if_any(state, active) {
                     return AutoAdvanceStep::waiting(state.waiting_for.clone());
+                }
+                // Horde Magic: reveal-and-resolve the FIRST card of the
+                // Horde's wave here (a turn-based action at the start of the
+                // Horde's precombat main, mirroring the Paradigm hook above).
+                // `begin_wave` seeded the counter in `finish_enter_phase`;
+                // this casts one card (setting `waiting_for` with the spell on
+                // the stack). Subsequent cards are revealed by
+                // `horde::maybe_reveal_next` from the priority-grant seam once
+                // each Horde spell resolves.
+                if let Some(wf) = super::horde::maybe_reveal_next(state, events) {
+                    return AutoAdvanceStep::waiting(wf);
+                }
+            }
+            // Horde Magic (advanced rule): kick off the Horde's post-combat
+            // activation beat (queue seeded in `finish_enter_phase`). This
+            // activates the FIRST eligible ability; subsequent ones are driven
+            // by `horde::maybe_activate_next_ability` from the priority seam as
+            // each resolves. No-op for basic decks / non-post-combat phases.
+            if state.phase == Phase::PostCombatMain {
+                if let Some(wf) = super::horde::maybe_activate_next_ability(state, events) {
+                    return AutoAdvanceStep::waiting(wf);
                 }
             }
             // CR 603.2b + CR 603.3: beginning-of-main-phase triggers are

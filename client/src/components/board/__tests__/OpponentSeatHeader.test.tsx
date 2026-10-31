@@ -5,6 +5,7 @@ import type { TargetRef, WaitingFor } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import {
+  buildFormatConfig,
   buildGameState,
   buildPendingCast,
   buildPlayers,
@@ -36,6 +37,31 @@ function createGameState(waitingFor: WaitingFor) {
     ]),
     waiting_for: waitingFor,
     seat_order: [0, 1, 2, 3],
+    eliminated_players: [],
+  });
+}
+
+// A Horde game: seat 1 is the Horde (engine flag `has_no_life_total`), and the
+// format config carries the challenge deck the rules badge looks up.
+function createHordeGameState(waitingFor: WaitingFor) {
+  return buildGameState({
+    players: buildPlayers([
+      { id: 0, life: 100 },
+      { id: 1, life: 0, has_no_life_total: true },
+    ]),
+    format_config: buildFormatConfig({
+      format: "Horde",
+      horde_ruleset: {
+        challenge_deck: "CybermanHorde",
+        wave: { type: "UntilNonToken", data: { count: { type: "Fixed", data: 1 } } },
+        survivor_setup_turns: 3,
+        combined_base_life: 100,
+        per_extra_survivor_life_delta: -15,
+        horde_creatures_forced_attackers: true,
+      },
+    }),
+    waiting_for: waitingFor,
+    seat_order: [0, 1],
     eliminated_players: [],
   });
 }
@@ -125,6 +151,35 @@ describe("OpponentSeatHeader", () => {
     render(<OpponentSeatHeader playerId={1} />);
 
     expect(screen.getByTitle("This player's turn is next.")).toHaveTextContent("Next Up");
+  });
+
+  it("shows the Horde rules badge on the Horde seat and lists the deck's engine rules", () => {
+    const waitingFor = targetSelectionWaitingFor([]);
+    useGameStore.setState({ gameState: createHordeGameState(waitingFor), waitingFor });
+
+    render(<OpponentSeatHeader playerId={1} />);
+
+    const badge = screen.getByRole("img", { name: "Horde deck rules" });
+    expect(badge).toBeInTheDocument();
+
+    // Hovering surfaces the engine-authored rules for the configured deck,
+    // resolved through the challenge-deck registry (no client-side derivation).
+    fireEvent.mouseEnter(badge);
+    expect(screen.getByText("Cyberman Horde")).toBeInTheDocument();
+    expect(
+      screen.getByText("Reveals until the first nontoken card is cast"),
+    ).toBeInTheDocument();
+  });
+
+  it("does not show the Horde rules badge on a normal (non-Horde) opponent seat", () => {
+    const waitingFor = targetSelectionWaitingFor([]);
+    useGameStore.setState({ gameState: createGameState(waitingFor), waitingFor });
+
+    render(<OpponentSeatHeader playerId={1} />);
+
+    expect(
+      screen.queryByRole("img", { name: "Horde deck rules" }),
+    ).not.toBeInTheDocument();
   });
 
   // V8 — the actor-gate fix on the split-board seat surface. The target

@@ -3382,6 +3382,9 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        // Turtle Team-Up (no CR section — casual product): "the bosses play a
+        // card" is a one-shot — a duration does not govern it.
+        | Effect::HordePlayCard { .. } => false,
         | Effect::Unimplemented { .. } => false,
     }
 }

@@ -521,6 +521,9 @@ fn effect_offers_choice(e: &Effect) -> bool {
         // Jace tokens) — fail-closed MayPrompt.
         | Effect::EmpowerJace { .. }
         | Effect::Monstrosity { .. }
+        // A revealed spell with targets/choices prompts (fail-closed: the AST
+        // gate cannot see that Boss libraries are all-token).
+        | Effect::HordePlayCard { .. }
         | Effect::Specialize
         | Effect::Renown { .. }
         | Effect::Bolster { .. }

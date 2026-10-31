@@ -275,6 +275,13 @@ export function formatConfigForCustomRules(custom_rules: any): any;
 export function getAiActionProposalFromLlmResponse(player_id: number, fingerprint: string, provider_label: string, status: number, response_body: string): any;
 
 /**
+ * Return the authoritative list of selectable Horde challenge decks as a typed
+ * array. The Horde deck picker renders this directly — the client never
+ * maintains a mirrored deck list. Each entry bundles the deck's `HordeRuleset`.
+ */
+export function getChallengeDeckRegistry(): any;
+
+/**
  * Return the authoritative list of user-selectable formats as a typed array.
  * The frontend treats this as the single source of truth for rendering
  * format pickers, badges, and default configs — no hand-maintained mirrors.

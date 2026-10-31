@@ -7967,6 +7967,7 @@ fn project_out_player_consumables(p: &mut Player) {
         contraption_crank_sprocket: _,
         sticker_sheets: _,
         has_drawn_this_turn: _,
+        has_no_life_total: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
 
@@ -8291,6 +8292,7 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         contraption_crank_sprocket: _,
         sticker_sheets: _,
         has_drawn_this_turn: _,
+        has_no_life_total: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
         cards_drawn_last_turn: _,
@@ -8351,6 +8353,7 @@ fn projected_player_maps(
         contraption_crank_sprocket: _,
         sticker_sheets: _,
         has_drawn_this_turn: _,
+        has_no_life_total: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
         cards_drawn_last_turn: _,

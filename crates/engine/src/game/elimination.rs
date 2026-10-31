@@ -2060,11 +2060,33 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .collect();
 
     if let Some(archenemy) = super::topology::archenemy(state) {
-        let archenemy_alive = living.contains(&archenemy);
+        // CR 104.2a win check. Horde Magic (casual variant): the Horde seat has
+        // no life total and can never be eliminated by the ordinary
+        // life/poison SBAs, so "archenemy alive" is replaced by the Horde-loss
+        // condition — the Horde is defeated when its library is empty AND it
+        // controls no creature. All other formats keep the generic living-set
+        // check.
+        let archenemy_alive =
+            if state.format_config.format == crate::types::format::GameFormat::Horde {
+                !super::horde::horde_is_defeated(state)
+            } else {
+                living.contains(&archenemy)
+            };
+        // CR 104.2a heroes = the living non-Horde seats. For a two-Horde-force
+        // Horde game (LOTR Two Towers) BOTH Horde seats must be excluded, not just
+        // the one archenemy — a second Horde seat has no life total and is never
+        // eliminated, so counting it as a living hero would keep the survivors from
+        // ever winning. Single-Horde and Archenemy reduce to `pid != archenemy`.
         let living_heroes: Vec<PlayerId> = living
             .iter()
             .copied()
-            .filter(|&pid| pid != archenemy)
+            .filter(|&pid| {
+                if state.format_config.format == crate::types::format::GameFormat::Horde {
+                    !super::horde::is_horde_seat(state, pid)
+                } else {
+                    pid != archenemy
+                }
+            })
             .collect();
         let winner = if archenemy_alive && living_heroes.is_empty() {
             Some(archenemy)
@@ -2077,6 +2099,12 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         };
         end_game(state, winner, events);
     } else if super::topology::has_two_headed_giant_shared_resources(state) {
+        // Horde note: a Horde game never reaches this `else if` — the
+        // `if let Some(archenemy)` branch above evaluates FIRST and always
+        // matches (Horde maps to `OneVsMany`, so `topology::archenemy`
+        // returns the Horde seat). This branch therefore stays the pure
+        // Two-Headed Giant team-win path; Horde win/loss is fully handled on
+        // the archenemy path above.
         let mut living_teams = std::collections::BTreeSet::new();
         for &pid in &living {
             living_teams.insert(super::topology::team_dedup_key(state, pid));

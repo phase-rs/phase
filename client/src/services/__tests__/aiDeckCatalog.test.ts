@@ -156,6 +156,39 @@ describe("buildLegalAiDeckCatalog", () => {
     );
   });
 
+  it("validates Horde survivor candidates against the picked challenge with no format tag", async () => {
+    saveDeck("EDH Deck", deck("EDH Card", "EDH Commander"));
+    saveDeck("Constructed Deck", deck("Constructed Card"));
+    // The engine answers the picked challenge's survivor verdict per
+    // candidate (here scripted: only the EDH-shaped deck fits Sauron).
+    vi.mocked(evaluateDeckCompatibility).mockImplementation(async (parsed) =>
+      compatibility(parsed.main[0]?.name === "EDH Card")
+    );
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedMatchType: "Bo1",
+      selectedChallengeDeck: "SauronHorde",
+    });
+
+    // The request contract: no format tag (unrestricted pool), challenge set.
+    expect(evaluateDeckCompatibility).toHaveBeenCalledWith(
+      expect.anything(),
+      {
+        selectedFormat: undefined,
+        selectedMatchType: "Bo1",
+        selectedChallengeDeck: "SauronHorde",
+        summaryOnly: true,
+      },
+    );
+    // Only the survivor-compatible candidate survives.
+    expect(catalog.candidates.map((candidate) => candidate.id)).toContain("saved:EDH Deck");
+    expect(catalog.candidates.map((candidate) => candidate.id)).not.toContain("saved:Constructed Deck");
+    // Scans for different challenges must not share a request key.
+    expect(catalogRequestKey(null, "Bo1", "SauronHorde")).not.toBe(
+      catalogRequestKey(null, "Bo1", "CybermanHorde"),
+    );
+  });
+
   it("dedupes mirrored feed decks while preserving same-name decks from distinct feeds", async () => {
     saveDeck("Mirrored Deck", deck("Mirrored Card"));
     localStorage.setItem(FEED_DECK_ORIGINS_KEY, JSON.stringify({ "Mirrored Deck": "feed-a" }));

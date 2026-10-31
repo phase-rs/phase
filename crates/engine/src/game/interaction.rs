@@ -248,7 +248,8 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::WardDiscardChoice { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::SeparatePilesPartition { .. }
-        | WaitingFor::DiscardChoice { .. } => HumanResponseModel::Select,
+        | WaitingFor::DiscardChoice { .. }
+        | WaitingFor::HeroEventChoice { .. } => HumanResponseModel::Select,
         WaitingFor::DeclareAttackers { .. } => {
             HumanResponseModel::CombatRelations(CombatRelationAction::Attackers)
         }
@@ -550,7 +551,8 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::DiscardToHandSize { .. }
         | WaitingFor::WardDiscardChoice { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
-        | WaitingFor::SeparatePilesPartition { .. } => (
+        | WaitingFor::SeparatePilesPartition { .. }
+        | WaitingFor::HeroEventChoice { .. } => (
             InteractionWaitingForCode::Select,
             None,
             Some(InteractionSlotKind::Single),
@@ -4387,6 +4389,7 @@ fn selection_projection(
         | WaitingFor::ChooseFromZoneChoice { cards, .. }
         | WaitingFor::ConniveDiscard { cards, .. }
         | WaitingFor::DiscardChoice { cards, .. }
+        | WaitingFor::HeroEventChoice { cards, .. }
         | WaitingFor::DrawnThisTurnTopdeckChoice { cards, .. }
         | WaitingFor::DiscardToHandSize { cards, .. }
         | WaitingFor::WardDiscardChoice { cards, .. }
@@ -4885,6 +4888,37 @@ fn selection_projection(
             intent: InteractionIntentCode::Choose,
             action: SelectionAction::SelectCards,
             source_id: Some(*source_id),
+        }),
+        // Turtle Team-Up hero-choice: the same SelectCards projection as a
+        // discard, sourced from the resolving Event. No unless-filter shape.
+        WaitingFor::HeroEventChoice {
+            cards,
+            count,
+            event_id,
+            up_to: false,
+            ..
+        } => Some(SelectionProjection {
+            object_ids: cards.clone(),
+            constraint: count_constraint(*count, *count),
+            confirm: ConfirmSemantics::Explicit,
+            intent: InteractionIntentCode::Choose,
+            action: SelectionAction::SelectCards,
+            source_id: Some(*event_id),
+        }),
+        WaitingFor::HeroEventChoice {
+            cards,
+            count,
+            event_id,
+            up_to: true,
+            min,
+            ..
+        } => Some(SelectionProjection {
+            object_ids: cards.clone(),
+            constraint: count_constraint(*min, *count),
+            confirm: ConfirmSemantics::Explicit,
+            intent: InteractionIntentCode::Choose,
+            action: SelectionAction::SelectCards,
+            source_id: Some(*event_id),
         }),
         WaitingFor::DiscardChoice {
             cards,
@@ -5547,6 +5581,8 @@ fn core_type_code(core_type: CoreType) -> &'static str {
         CoreType::Phenomenon => "phenomenon",
         CoreType::Scheme => "scheme",
         CoreType::Conspiracy => "conspiracy",
+        CoreType::Boss => "boss",
+        CoreType::Event => "event",
     }
 }
 

@@ -366,7 +366,9 @@ function buildPlayerOnlyDeckList(player: ExpandedDeckWithTier): DeckListPayload 
   return { player, opponent: emptySeat(), ai_decks: [], ai_difficulties: [] };
 }
 
-async function buildLocalAiDeckList(
+// Exported for the Horde payload regression tests; production callers go
+// through the GameProvider start flow.
+export async function buildLocalAiDeckList(
   t: TFunction<["game", "multiplayer"]>,
   deck: ParsedDeck | null,
   playerCount: number,
@@ -388,6 +390,88 @@ async function buildLocalAiDeckList(
       player: { ...pile, bracket_tier: "core" },
       opponent: emptySeat(),
       ai_decks: Array.from({ length: opponentCount - 1 }, emptySeat),
+      ai_difficulties: aiDifficulties,
+    };
+  }
+
+  // Horde: the human is a survivor bringing their own constructed deck; the
+  // Horde seats are the self-piloting Horde, whose libraries are the
+  // engine-supplied challenge decks injected by `load_horde_library`. No saved
+  // deck is tagged "Horde", so Horde seats submit empty and must NOT be drawn
+  // from the (empty) Horde-filtered catalog — but AI seats OUTSIDE the Horde
+  // roster are allied survivors and need real decks from the unfiltered
+  // catalog, or they start with an empty library and lose on their first draw.
+  if (formatConfig && formatConfig.format === "Horde") {
+    const { aiSeats, cedhMode } = usePreferencesStore.getState();
+    const opponentCount = Math.max(1, playerCount - 1);
+    const emptySeat = (): ExpandedDeckWithTier => ({
+      main_deck: [],
+      sideboard: [],
+      commander: [],
+      planar_deck: [],
+      scheme_deck: [],
+      signature_spell: [],
+      companion: [],
+      sticker_sheets: [],
+      bracket_tier: "core",
+    });
+    // One catalog fetch serves the human Random fallback AND the AI survivor
+    // seats: no format tag (the pool is unrestricted), but the picked
+    // challenge deck, so the engine validates each candidate against the
+    // challenge's survivor requirements (Commander shape for EDH hordes,
+    // unrestricted for constructed-block hordes).
+    const survivorCatalog = await buildLegalAiDeckCatalog({
+      selectedMatchType,
+      selectedChallengeDeck: formatConfig.horde_ruleset?.challenge_deck ?? null,
+    });
+    let hordePlayerDeck = deck;
+    let hordePlayerBracket = playerBracket ?? null;
+    if (!hordePlayerDeck) {
+      // Human chose "Random Deck": pick from the unfiltered catalog rather
+      // than the Horde-tagged one (which is empty).
+      const pick = pickRandomDeckCandidate(survivorCatalog.candidates, {});
+      if (!pick) {
+        throw new Error(t("gameProvider.noLegalAiDecks.generic"));
+      }
+      hordePlayerDeck = pick.deck;
+      hordePlayerBracket = pick.bracket;
+    }
+    // Seat map: player = seat 0 (human survivor), opponent = seat 1 (Horde
+    // primary — the init path remaps archenemy_player onto the first AI seat),
+    // ai_decks[i] = seat 2+i. The Horde roster is the primary plus one seat
+    // per co-Horde deck; roster seats submit empty (the engine injects
+    // challenge libraries), every other AI seat is an allied survivor.
+    const hordeSeatCount =
+      1 + (formatConfig.horde_ruleset?.co_horde_decks?.length ?? 0);
+    const takenDeckIds = new Set<string>();
+    const aiDecks: ExpandedDeckWithTier[] = [];
+    for (let i = 0; i < opponentCount - 1; i++) {
+      if (i < hordeSeatCount - 1) {
+        aiDecks.push(emptySeat());
+        continue;
+      }
+      const pick = pickRandomDeckCandidate(survivorCatalog.candidates, {
+        excludeIds: takenDeckIds,
+      });
+      if (!pick) {
+        throw new Error(t("gameProvider.noLegalAiDecks.generic"));
+      }
+      takenDeckIds.add(pick.id);
+      aiDecks.push({
+        ...expandParsedDeck(pick.deck),
+        bracket_tier: bracketToEngineTier(pick.bracket),
+      });
+    }
+    const aiDifficulties = Array.from({ length: opponentCount }, (_, i) =>
+      effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
+    );
+    return {
+      player: {
+        ...expandParsedDeck(hordePlayerDeck),
+        bracket_tier: bracketToEngineTier(hordePlayerBracket),
+      },
+      opponent: emptySeat(),
+      ai_decks: aiDecks,
       ai_difficulties: aiDifficulties,
     };
   }
@@ -1722,6 +1806,16 @@ export function GameProvider({
       }
       if (cancelled) return;
 
+      // Horde: the archenemy (Horde) seat is an AI, never the local human (who
+      // is always seat 0 in solo Play-vs-AI). Remap the registry default
+      // (archenemy_player: 0) onto the first AI seat (seat 1) so
+      // `load_horde_library` injects the challenge deck under the AI, not the
+      // player — otherwise the human is dealt the Cyberman library (the
+      // seat-inversion bug). Mirrors the P2PHostAdapter remap on the host path.
+      const initFormatConfig =
+        formatConfig?.format === "Horde"
+          ? { ...formatConfig, archenemy_player: 1 }
+          : formatConfig;
       if (soloDraft) {
         try {
           draftDeckRaw = sessionStorage.getItem(draftDeckKey);
@@ -1837,7 +1931,7 @@ export function GameProvider({
             return;
           }
           try {
-            await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
+            await initGame(gameId, adapter, deckList, initFormatConfig, playerCount, matchConfig, firstPlayer);
             if (cancelled) return;
             if (!adapter.cardDbLoaded) {
               onCardDataMissingRef.current?.();
@@ -1912,7 +2006,7 @@ export function GameProvider({
           gameId,
           adapter,
           deckList,
-          formatConfig,
+          initFormatConfig,
           playerCount,
           matchConfig,
           firstPlayer,

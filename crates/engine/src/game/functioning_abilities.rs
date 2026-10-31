@@ -90,11 +90,17 @@ use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
 /// CR 905.4a + CR 113.6b: Face-down hidden-agenda conspiracies do not function
-/// even though synthesis stamps their definitions with `Zone::Command`. Other
-/// non-emblem command-zone objects keep the existing explicit opt-in path.
+/// even though synthesis stamps their definitions with `Zone::Command`. Turtle
+/// Team-Up Bosses take the same gate: a face-down Boss (still in the Boss deck
+/// pile) does not function until deployed face up. Other non-emblem
+/// command-zone objects keep the existing explicit opt-in path.
 fn non_emblem_command_zone_static_functions(obj: &GameObject, def: &StaticDefinition) -> bool {
     if crate::game::conspiracy::is_conspiracy(obj) {
         return crate::game::conspiracy::functions_from_command_zone(obj)
+            && static_opts_in_to_command_zone(def);
+    }
+    if crate::game::boss::is_boss(obj) {
+        return crate::game::boss::functions_from_command_zone(obj)
             && static_opts_in_to_command_zone(def);
     }
     static_opts_in_to_command_zone(def)
@@ -108,6 +114,10 @@ pub(crate) fn non_emblem_command_zone_trigger_functions(
 ) -> bool {
     if crate::game::conspiracy::is_conspiracy(obj) {
         return crate::game::conspiracy::functions_from_command_zone(obj)
+            && trigger_opts_in_to_command_zone(def);
+    }
+    if crate::game::boss::is_boss(obj) {
+        return crate::game::boss::functions_from_command_zone(obj)
             && trigger_opts_in_to_command_zone(def);
     }
     trigger_opts_in_to_command_zone(def)
@@ -178,6 +188,10 @@ pub(crate) fn non_emblem_command_zone_replacement_functions(
 ) -> bool {
     if crate::game::conspiracy::is_conspiracy(obj) {
         return crate::game::conspiracy::functions_from_command_zone(obj)
+            && replacement_opts_in_to_command_zone(def);
+    }
+    if crate::game::boss::is_boss(obj) {
+        return crate::game::boss::functions_from_command_zone(obj)
             && replacement_opts_in_to_command_zone(def);
     }
     replacement_opts_in_to_command_zone(def)
