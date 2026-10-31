@@ -826,7 +826,8 @@ fn render_net_effect_carrier_census() {
         "Vote",
     ];
 
-    let ability_src = crate::source_census::code_lines(include_str!("../../src/types/ability.rs"));
+    let ability_src =
+        crate::source_census::code_lines(include_str!("../../../phase-ast/src/types/ability.rs"));
     let variants = census_variant_names(census_body(&ability_src, "pub enum Effect {"));
     assert!(
         variants.len() > 200 && variants.iter().any(|v| v == "GenericEffect"),
@@ -843,7 +844,8 @@ fn render_net_effect_carrier_census() {
          RENDER_DESCEND, then bump this pin."
     );
 
-    let mana_src = crate::source_census::code_lines(include_str!("../../src/types/mana.rs"));
+    let mana_src =
+        crate::source_census::code_lines(include_str!("../../../phase-ast/src/types/mana.rs"));
     for (header, pin, destructured) in PAYLOAD_ENUM_PINS.iter().copied().chain([(
         "pub enum ManaSpellGrant {",
         4usize,

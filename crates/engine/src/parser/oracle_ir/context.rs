@@ -1082,6 +1082,50 @@ impl ParseContext {
         self.relative_player_scope = prev;
         result
     }
+
+    /// CR 608.2k: Execute `f` with a temporary bare-object-pronoun antecedent,
+    /// restoring the prior value on return. The object-anaphor counterpart of
+    /// [`Self::with_player_scope`], for a seam that establishes a NEARER
+    /// antecedent than the enclosing one for a bounded span of text (a subject
+    /// phrase's own predicate). Save/restore, never set/clear, for the same
+    /// reason [`Self::stated_clause_duration`] is: a binding one clause
+    /// establishes must not outlive it, and a span that establishes none must
+    /// not clobber the enclosing one.
+    ///
+    /// Unlike [`Self::with_player_scope`]'s caller, which yields to an
+    /// already-set scope, this OVERRIDES: a possessor printed inside the span
+    /// outranks whatever the enclosing text established.
+    ///
+    /// CR 509.3c: [`Self::condition_object_antecedent`] is cleared for the span
+    /// and restored with the pin. That field says what an ambiguous
+    /// `object_pronoun_ref` names and is only meaningful for the pin it
+    /// travelled with (see its own doc: "Set only together with the matching
+    /// pin"), so a nearer pin must not be read through the outer pin's label.
+    ///
+    /// The clearing FAILS OPEN, and knowingly: a reader that tests the label
+    /// AND the pin together (`oracle_effect::mod`'s
+    /// `subject_is_unbindable_damage_source`) has its `BlockedAttacker` leg
+    /// forced false inside the span while its `ParentTarget` leg is true by
+    /// construction, so a nested `ParentTarget` damage subject under a bare
+    /// "becomes blocked" trigger would lose its honest `Effect::unimplemented`
+    /// rather than gain a wrong binding. Clearing is still right — the span's
+    /// pin is a DIFFERENT referent and no `ConditionObjectAntecedent` variant
+    /// describes it — and the open direction is unreachable today, because that
+    /// reader also requires the subject itself to be `ParentTarget`, which a
+    /// possessive-player subject never is. A variant naming the possessor is
+    /// what would close it.
+    pub fn with_object_pronoun_ref<R>(
+        &mut self,
+        antecedent: TargetFilter,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let prev = self.object_pronoun_ref.replace(antecedent);
+        let prev_antecedent = self.condition_object_antecedent.take();
+        let result = f(self);
+        self.object_pronoun_ref = prev;
+        self.condition_object_antecedent = prev_antecedent;
+        result
+    }
 }
 
 #[cfg(test)]
@@ -1095,6 +1139,47 @@ mod tests {
             context: "parse_target could not classify".into(),
             text: text.into(),
             line_index: 0,
+        }
+    }
+
+    /// CR 608.2k: the object-pronoun antecedent is SAVE/RESTORE, not set/clear.
+    /// A span that establishes a nearer antecedent must hand the enclosing one
+    /// back on return — otherwise a clause's own possessor would outlive it and
+    /// claim a later clause's pronoun — and that holds whether the enclosing
+    /// value was a pin or `None`.
+    #[test]
+    fn with_object_pronoun_ref_hands_the_enclosing_antecedent_back() {
+        for enclosing in [None, Some(TargetFilter::TriggeringSource)] {
+            let mut ctx = ParseContext {
+                object_pronoun_ref: enclosing.clone(),
+                condition_object_antecedent: Some(ConditionObjectAntecedent::BlockedAttacker),
+                ..ParseContext::default()
+            };
+            let seen = ctx.with_object_pronoun_ref(TargetFilter::ParentTarget, |ctx| {
+                (
+                    ctx.object_pronoun_ref.clone(),
+                    ctx.condition_object_antecedent,
+                )
+            });
+            assert_eq!(
+                seen.0,
+                Some(TargetFilter::ParentTarget),
+                "reach guard: the span really did see the nearer antecedent"
+            );
+            // CR 509.3c: the outer pin's label must not describe the nearer pin.
+            assert_eq!(
+                seen.1, None,
+                "the companion antecedent label is cleared for the span"
+            );
+            assert_eq!(
+                ctx.object_pronoun_ref, enclosing,
+                "the enclosing antecedent must be restored, including when it was None"
+            );
+            assert_eq!(
+                ctx.condition_object_antecedent,
+                Some(ConditionObjectAntecedent::BlockedAttacker),
+                "and so must its companion label"
+            );
         }
     }
 

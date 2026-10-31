@@ -25274,7 +25274,7 @@ mod characteristic_read_classification_tests {
 
     /// [`declared_controller_ref_carriers`] over any enum declaration in `ability.rs`.
     pub(super) fn controller_ref_carriers_of(decl: &str) -> Vec<String> {
-        let src = include_str!("../types/ability.rs");
+        let src = include_str!("../../../phase-ast/src/types/ability.rs");
         let start = src.find(decl).expect("enum declaration");
         let body = &src[start + decl.len()..];
         let body = &body[..body.find("\n}").expect("end of enum")];

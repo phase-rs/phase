@@ -65,8 +65,13 @@ jobs:
       # every later cargo invocation silently rewrites the file, and Nightly
       # Release dies on `cargo release`'s dirty-tree check -- which is exactly
       # what #7556 did. `--locked` is already used for the Tauri manifest below.
+      # The first invocation checks the integration test binaries on their own so
+      # they never overlap the engine lib-test target (together they exceed the
+      # hosted runner's memory); the second is the full command and reuses them.
       - name: Clippy
-        run: cargo clippy --locked --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
+        run: |
+          cargo clippy --locked --workspace --exclude phase-tauri --test integration --features engine/proptest -- -D warnings
+          cargo clippy --locked --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
 
       - name: Interaction bindings are current
         run: ./scripts/check-interaction-bindings.sh --check
@@ -426,8 +431,8 @@ jobs:
         # card-data into the validate/coverage gates downstream. Cargo.lock is
         # included so dep bumps that affect parsing (e.g. nom) invalidate.
         #
-        # `crates/engine/data/**` and `build.rs` are hashed because the engine
-        # lib compiles those files IN: oracle-subtypes.json via `include_str!`,
+        # `crates/phase-ast/data/**` and `build.rs` are hashed because the
+        # phase-ast lib (linked into the engine) compiles those files IN: oracle-subtypes.json via `include_str!`,
         # known-tokens.toml via build.rs → OUT_DIR embed. A PR touching only
         # those changes parser behaviour, so omitting them would serve stale
         # card-data from this cache and (via gates-cache below) skip the
@@ -494,7 +499,7 @@ jobs:
       - name: Card export must not mutate the tracked parser vocabulary
         # Regression guard: the export is a PURE READ of the tracked tree.
         #
-        # It used to rewrite crates/engine/data/oracle-subtypes.json on every run,
+        # It used to rewrite crates/phase-ast/data/oracle-subtypes.json on every run,
         # from CardTypes.json ∪ the AtomicCards harvest — but this job downloads
         # only AtomicCards.json (see the mtgjson cache above), so CardTypes.json
         # was always absent and the regeneration silently fell back to the harvest
@@ -511,7 +516,7 @@ jobs:
         # Scoped to the same condition as the generate step so it is never
         # vacuous: it runs exactly when an export ran.
         if: steps.cardgen-cache.outputs.cache-hit != 'true'
-        run: git diff --exit-code -- crates/engine/data/oracle-subtypes.json
+        run: git diff --exit-code -- crates/phase-ast/data/oracle-subtypes.json
 
       - name: Validate card-data against engine schema
         # PR-time gate — the same parse the WASM does at runtime, run against
@@ -522,7 +527,7 @@ jobs:
         # passed. card-data.json is byte-identical either way, restored from
         # cardgen or regenerated above.
         # Same [tool, cli] fingerprint as card-gen above → engine cache hit. That
-        # hit is real because the export never writes to crates/engine/data: the
+        # hit is real because the export never writes to crates/phase-ast/data: the
         # engine lib pulls oracle-subtypes.json in via `include_str!`, so any
         # write would bump its mtime, dirty the crate's dep-info fingerprint, and
         # force a full engine recompile right here — against a vocabulary this job

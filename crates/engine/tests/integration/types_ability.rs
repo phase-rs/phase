@@ -124,7 +124,7 @@ fn assert_constant_arm(mut effect: Effect, constant: &TargetFilter) {
 
 /// `Effect::target_filter_mut` is `Effect::target_filter`'s mutable twin:
 /// the same arms in the same order with the same patterns (structural half,
-/// over this file's source), each addressing the same field (behavioural
+/// over `phase-ast`'s `types/ability.rs` source), each addressing the same field (behavioural
 /// half, by pointer equality). A variant moved between one function's
 /// `Some` and `None` sides fails the structural half; an arm whose twin
 /// addresses another field fails the behavioural half on its sample.
@@ -132,7 +132,8 @@ fn assert_constant_arm(mut effect: Effect, constant: &TargetFilter) {
 fn target_filter_mut_is_target_filters_twin() {
     // Routed through the repo's single comment-policy authority
     // (`crate::source_census`), per `no_source_reading_file_carries_a_private_comment_policy`.
-    let stripped = crate::source_census::code_lines(include_str!("../../src/types/ability.rs"));
+    let stripped =
+        crate::source_census::code_lines(include_str!("../../../phase-ast/src/types/ability.rs"));
     let file = syn::parse_file(&stripped)
         .expect("this file must parse as Rust for the structural half to mean anything");
     let effect_methods: Vec<&syn::ImplItemFn> = file

@@ -9703,6 +9703,90 @@ pub(crate) fn abort_resolution_cast(
     }
 }
 
+/// CR 701.18b + CR 712.12 + CR 305.2a: play the land face of a spell//land
+/// modal double-faced card elected by a resolution-owned Play election. The
+/// cleanup has already been taken from (or never installed as) the temporary
+/// cast permission, so no residual permission remains. A land play is not the
+/// offered cast, so any delayed trigger the offer installed is withdrawn; the
+/// free Play route carries no receipts. Like the plain resolution land play
+/// (`cast_from_zone::play_land_during_resolution_instruction`), the land
+/// route gives `exiled_misses` no disposition: a single-card Play instruction
+/// never has misses. `Ok(None)` is CR 305.2b / CR 305.3's "ignore": nothing
+/// was played or counted.
+pub(crate) fn play_resolution_land_face(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    object_id: ObjectId,
+    cleanup: crate::types::ability::ResolutionCastCleanup,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<super::engine::LandPlayCommit>, EngineError> {
+    validate_resolution_cast_cleanup_authority(player, &cleanup)?;
+    withdraw_resolution_cast_delayed_triggers(state, &cleanup)?;
+    Ok(super::engine::play_land_face_during_resolution(
+        state, player, object_id, events,
+    ))
+}
+
+/// CR 712.12 + CR 701.18b: finish a `ModalFaceChoice` whose player elected the
+/// land face under a Play election. The land face's admission is re-checked
+/// against the exact indexed permission's policy before anything changes, so a
+/// forged or stale choice is an error with no mutation. The temporary
+/// permission is then consumed, and the land is played during resolution.
+/// CR 614.12a: an entry choice pauses as the next prompt and its resume path
+/// finishes the parked parent; otherwise the parent resolution continues at
+/// once (CR 608.2c).
+pub(crate) fn complete_resolution_land_face_choice(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    object_id: ObjectId,
+    card_id: crate::types::identifiers::CardId,
+    permission_index: crate::types::game_state::CastingPermissionIndex,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let admitted = state
+        .objects
+        .get(&object_id)
+        .filter(|object| object.card_id == card_id)
+        .and_then(|object| object.casting_permissions.get(permission_index.0))
+        .is_some_and(|permission| match permission {
+            crate::types::ability::CastingPermission::ExileWithAltCost {
+                granted_to: Some(grantee),
+                resolution_cleanup: Some(cleanup),
+                ..
+            } if *grantee == player => casting::resolution_land_face_admission(
+                state,
+                player,
+                object_id,
+                &cleanup.face_policy,
+            ),
+            _ => false,
+        });
+    if !admitted {
+        return Err(EngineError::ActionNotAllowed(
+            "The land face may not be played now (CR 712.12 + CR 305.2)".to_string(),
+        ));
+    }
+    let cleanup =
+        casting::take_resolution_cast_cleanup(state, player, object_id, card_id, permission_index)?
+            .ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "Resolution face choice permission provenance is stale or mismatched"
+                        .to_string(),
+                )
+            })?;
+    match play_resolution_land_face(state, player, object_id, cleanup, events)? {
+        Some(super::engine::LandPlayCommit::AwaitingEntryChoice(waiting_for)) => {
+            state.waiting_for = *waiting_for;
+            Ok(state.waiting_for.clone())
+        }
+        None
+        | Some(super::engine::LandPlayCommit::Entered)
+        | Some(super::engine::LandPlayCommit::Prevented) => {
+            Ok(finish_with_continuation(state, player, events))
+        }
+    }
+}
+
 /// The player and source on a persisted cleanup must remain the exact frozen
 /// authority which opened the resolution-time offer.
 pub(crate) fn validate_resolution_cast_cleanup_authority(

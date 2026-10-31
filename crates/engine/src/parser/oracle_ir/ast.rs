@@ -97,6 +97,13 @@ pub(crate) struct SubjectApplication {
     /// CR 608.2c: the player anaphor the subject phrase printed, which names its
     /// antecedent where `affected` alone cannot ("that player" and "its controller"
     /// both lower to `ParentTargetController`).
+    ///
+    /// Set only by the arms that print one of those two surface forms. Absence
+    /// therefore means "this phrase printed no recognized player anaphor", NOT
+    /// "this phrase is not a player subject" — several arms that resolve to a
+    /// player filter leave it `None`, which is why
+    /// [`super::super::oracle_effect::subject::subject_possessive_object_antecedent`]
+    /// reads the POSITIVE variant it needs rather than refusing a blacklist.
     #[serde(skip)]
     pub(crate) player_anaphor: Option<PlayerAnaphor>,
 }
