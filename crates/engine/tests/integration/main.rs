@@ -358,6 +358,7 @@ mod demon_of_fates_design;
 mod derived_target_carriers;
 mod descendants_fury_sacrificed_referent_4795;
 mod descendants_path_shared_creature_type_gate;
+mod desecration_demon_any_opponent_sacrifice;
 mod desperate_futurescribe_instead;
 mod destroy_redirect_to_battlefield_delivery_tail;
 mod deterministic_blocker_prompt_order;
