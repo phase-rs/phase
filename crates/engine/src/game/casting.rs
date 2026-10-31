@@ -6133,6 +6133,24 @@ pub(crate) fn exile_static_permission_grants_flash(
         .is_some_and(|source| source.grants_flash)
 }
 
+/// CR 702.8a + CR 601.3b: Does `player` have flash for `object_id`: its own
+/// Flash keyword, a granted one (a `CastWithKeyword` static, a transient or
+/// next-spell grant; `effective_spell_keyword_kinds_for`), or an exile-cast
+/// permission that grants flash ("you may cast them as though they had
+/// flash")? `fused` projects a pre-payment fused split spell's combined
+/// characteristics (CR 702.102b). The single authority that
+/// `prepare_spell_cast`'s timing check and
+/// `restrictions::spell_confined_to_sorcery_timing` read.
+pub(crate) fn spell_has_effective_flash(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    fused: bool,
+) -> bool {
+    effective_spell_keyword_kinds_for(state, player, object_id, fused).contains(&KeywordKind::Flash)
+        || exile_static_permission_grants_flash(state, player, object_id)
+}
+
 /// CR 118.9 + CR 601.2f: When `exiled_id` is castable via the
 /// `ExileCastPermission` static carried by `elected_source`, return that
 /// permission's `extra_cost` rider (Valgavoth alternative pay-life; Dawnhand
@@ -10659,10 +10677,7 @@ fn prepare_spell_cast_announced(
     // `CastWithKeyword{Flash}` static, and this read gates timing legality
     // pre-payment; project the fused split spell's COMBINED characteristics so a
     // value-keyed flash grant is not dropped on the front half.
-    let has_granted_flash =
-        effective_spell_keyword_kinds_for(state, player, object_id, is_fuse_variant)
-            .contains(&KeywordKind::Flash)
-            || exile_static_permission_grants_flash(state, player, object_id);
+    let has_granted_flash = spell_has_effective_flash(state, player, object_id, is_fuse_variant);
     let cast_outside_sorcery_timing = !restrictions::is_sorcery_speed_window(state, player);
     // CR 304.1: Instants can be cast any time a player has priority.
     // CR 301.1 / CR 306.1: Artifacts and planeswalkers are cast at sorcery speed.

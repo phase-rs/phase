@@ -1522,6 +1522,7 @@ mod sliver_overlord_activation_offer;
 mod sliver_static_grants;
 mod smaug_noncombat_damage_treasure;
 mod snow_mana_production;
+mod sorcery_timing_queries;
 mod sothera_supervoid_edict_reanimate;
 mod soul_tether_heartwood_token;
 mod source_counter_gate_anaphor_8549;

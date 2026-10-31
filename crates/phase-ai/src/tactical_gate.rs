@@ -66,14 +66,14 @@ use crate::policies::context::{
     collect_ability_effects, collect_resolved_abilities, PolicyContext,
 };
 use crate::policies::effect_classify::{
-    effect_polarity, extract_target_filter, targets_creatures_only, EffectPolarity,
+    ability_is_temporary_combat_modifier, effect_polarity, extract_target_filter,
+    targets_creatures_only, EffectPolarity,
 };
 use crate::policies::stack_awareness::{
     can_be_destroyed, damage_kills, has_pending_removal, node_damage, nodes_acting_on,
     will_target_die_from_stack,
 };
 use crate::policies::strategy_helpers::can_pay_ward_cost;
-use crate::search::ability_is_temporary_combat_modifier;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GateDecision {

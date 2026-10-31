@@ -191,15 +191,26 @@ fn modification_has_defensive_payload(m: &ContinuousModification) -> bool {
 fn ability_has_defensive_payload(ability: &AbilityDefinition) -> bool {
     collect_chain_effects(ability)
         .iter()
-        .any(|effect| match effect {
-            Effect::PreventDamage { .. } => true,
-            Effect::GenericEffect {
-                static_abilities, ..
-            } => static_abilities
-                .iter()
-                .any(static_definition_has_defensive_payload),
-            _ => false,
-        })
+        .any(|effect| effect_has_defensive_payload(effect))
+}
+
+/// CR 702.11b + CR 702.12b + CR 702.16b + CR 702.18a: a hexproof, indestructible,
+/// protection or shroud grant stops removal from targeting or destroying what it affects,
+/// and CR 615.1a: a prevention effect stops damage. Also true for the other static modes
+/// `static_mode_is_defensive` lists and for a granted ability carrying such a payload.
+/// Read off the effect alone, whoever it
+/// affects — `is_self_protection_effect` adds the "does it protect the AI's own" scope that
+/// ReactiveSelfProtection's payoff needs.
+pub(crate) fn effect_has_defensive_payload(effect: &Effect) -> bool {
+    match effect {
+        Effect::PreventDamage { .. } => true,
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities
+            .iter()
+            .any(static_definition_has_defensive_payload),
+        _ => false,
+    }
 }
 
 fn keyword_is_defensive(keyword: &Keyword) -> bool {

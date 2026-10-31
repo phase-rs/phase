@@ -348,8 +348,9 @@ fn a_draw_replacement_is_not_held_in_the_upkeep() {
             &|action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == words),
         ) - score(&|action| matches!(action, GameAction::PassPriority))
     };
-    // At Hard the patience hold moves the root margin by about 0.17 (its -1.68 verdict times the
-    // 0.1 root tactical weight); with the draw replacement exempt, the floating-mana reference
+    // At Hard a patience hold would move the root margin by its full -1.68 verdict (the search
+    // root applies ActivationPatience unweighted) and lift Pass by the held line's continuation;
+    // with the draw replacement exempt, neither board is held, so the floating-mana reference
     // must agree with the unfloated board well inside that.
     let held = margin(Phase::Upkeep, true) - margin(Phase::Upkeep, false);
     assert!(
