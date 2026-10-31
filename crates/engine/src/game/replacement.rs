@@ -27,10 +27,11 @@ use super::filter::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     DrainStatus, GameState, LiminalEntry, LiminalEntryKind, NamedChoiceSource,
-    NamedChoiceSourceBinding, PayableResource, PendingReplacement, PostReplacementDrain,
-    ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
-    ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail, ReplacementCandidateSummary,
-    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
+    NamedChoiceSourceBinding, PayableResource, PendingCombatDamageAwait, PendingReplacement,
+    PostReplacementDrain, ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity,
+    ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail,
+    ReplacementCandidateSummary, ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy,
+    WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
@@ -912,6 +913,17 @@ pub enum ApplyResult {
     Prevented,
 }
 
+/// CR 615.5 + CR 614.1a: the replaced (or prevented) event's own context that a
+/// stashed continuation reads back from its drain — the damage dealer
+/// (`PostReplacementSourceController`), the recipient
+/// (`PostReplacementDamageTarget`) and, for a damage substitution only, the
+/// replaced amount ("that many", `PostReplacementDrain::event_amount`).
+struct ReplacedEventContext {
+    source: Option<ObjectId>,
+    target: Option<TargetRef>,
+    amount: Option<u32>,
+}
+
 /// CR 614.6: Install a mandatory post-effect's continuation — the replacement's own
 /// actions, which run as part of the modified event that occurs instead.
 ///
@@ -941,9 +953,13 @@ fn stash_post_replacement_continuation(
     source: ObjectId,
     controller: Option<PlayerId>,
     applied: HashSet<AppliedReplacementKey>,
-    event_source: Option<ObjectId>,
-    event_target: Option<TargetRef>,
+    replaced: ReplacedEventContext,
 ) {
+    let ReplacedEventContext {
+        source: event_source,
+        target: event_target,
+        amount: event_amount,
+    } = replaced;
     state.install_post_replacement_drain(
         PostReplacementDrain {
             status: DrainStatus::Ready(continuation),
@@ -951,6 +967,7 @@ fn stash_post_replacement_continuation(
             applied,
             event_source,
             event_target,
+            event_amount,
             // CR 109.5: "you" in the continuation is the REPLACING ability's
             // controller. Carried beside `source` rather than derived from it,
             // because `source` is the affected object on every zone-change
@@ -3161,8 +3178,60 @@ fn damage_done_applier(
         }
     }
 
+    // Branch 3: CR 614.1a + CR 614.6 — cross-event-type substitution. "If a
+    // source you control would deal noncombat damage to a creature an opponent
+    // controls, put that many -1/-1 counters on that creature instead" (Soul-Scar
+    // Mage). The damage event is REPLACED, not prevented (CR 615 does not apply):
+    // it never happens (CR 614.6), so there is no `DamagePrevented`, no marked
+    // damage, no lifelink and no "deals damage" trigger. The substitute runs as
+    // the post-replacement continuation stashed by `apply_single_replacement`'s
+    // `Prevented` arm, which also latches the replaced event's amount on the
+    // drain for "that many" (`PostReplacementDrain::event_amount`). Mirrors the
+    // LifeGain cross-type substitution (Lich).
+    if damage_execute_substitutes_event_type(state, rid) {
+        return ApplyResult::Prevented;
+    }
+
     // No modification and no prevention shield — pass through
     ApplyResult::Modified(event)
+}
+
+/// CR 614.1a: True iff a damage replacement substitutes a DIFFERENT event for
+/// the damage — no prevention/redirection shield, no amount modification, and an
+/// `execute` whose effect is not itself damage. `Effect::Unimplemented` is
+/// treated as **not** a substitution (silent passthrough rather than deleting
+/// damage on a partially-parsed line), exactly like
+/// `gain_life_execute_substitutes_event_type`.
+fn damage_execute_substitutes_event_type(state: &GameState, rid: ReplacementId) -> bool {
+    let repl = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get(rid.index)
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+    };
+    repl.is_some_and(is_damage_substitution)
+}
+
+/// CR 614.1a + CR 614.6: the definition-level predicate behind
+/// [`damage_execute_substitutes_event_type`] — a `DamageDone` replacement whose
+/// `execute` substitutes a different event for the damage. Shared by the
+/// applier (Branch 3), the stash that latches the replaced amount, and the
+/// CR 616.1 materiality classification, so the three can never disagree.
+fn is_damage_substitution(repl: &ReplacementDefinition) -> bool {
+    if repl.event != ReplacementEvent::DamageDone
+        || !matches!(repl.shield_kind, ShieldKind::None)
+        || repl.damage_modification.is_some()
+    {
+        return false;
+    }
+    repl.execute.as_deref().is_some_and(|execute| {
+        !matches!(
+            &*execute.effect,
+            Effect::Unimplemented { .. } | Effect::DealDamage { .. }
+        )
+    })
 }
 
 /// CR 510.2 + CR 700.1 + CR 615.8: A consumed one-shot may still cover another
@@ -10643,6 +10712,18 @@ fn apply_single_replacement(
         ProposedEvent::Draw { player_id, .. } => Some(TargetRef::Player(*player_id)),
         _ => None,
     };
+    // CR 614.1a + CR 614.6: the replaced event's amount for a damage
+    // substitution's "that many" — the amount the applier receives, i.e. after
+    // every earlier-applied modification (CR 616.1). `None` for every other
+    // replacement, so no other continuation's "that many" changes.
+    let substituted_damage_amount = match &proposed {
+        ProposedEvent::Damage { amount, .. }
+            if damage_execute_substitutes_event_type(state, rid) =>
+        {
+            Some(*amount)
+        }
+        _ => None,
+    };
     let replacement_applied = proposed.applied_set().clone();
     // CR 609.7b + CR 120.8: Membership requires positive damage actually changed
     // or prevented. Capture scalar provenance only; do not clone damage events.
@@ -10897,14 +10978,18 @@ fn apply_single_replacement(
                         new_event.affected_object_id().unwrap_or(rid.source),
                         ability_controller,
                         replacement_applied.clone(),
-                        None,
-                        // CR 614.6 + CR 608.2d: carry the replaced Draw's affected
-                        // player (the drawing player) so an "any other player may"
-                        // execute (Zur's Weirding) can exclude them from the APNAP
-                        // fan-out. `None` for every other event kind (see the
-                        // `proposed_event_target` match above), so no existing
-                        // continuation's event-target slot changes.
-                        proposed_event_target.clone(),
+                        ReplacedEventContext {
+                            source: None,
+                            // CR 614.6 + CR 608.2d: carry the replaced Draw's
+                            // affected player (the drawing player) so an "any
+                            // other player may" execute (Zur's Weirding) can
+                            // exclude them from the APNAP fan-out. `None` for
+                            // every other event kind (see the
+                            // `proposed_event_target` match above), so no
+                            // existing continuation's event-target slot changes.
+                            target: proposed_event_target.clone(),
+                            amount: None,
+                        },
                     );
                 }
                 events.push(GameEvent::ReplacementApplied {
@@ -10945,8 +11030,13 @@ fn apply_single_replacement(
                         // it.
                         ability_controller,
                         replacement_applied.clone(),
-                        proposed_damage_source,
-                        proposed_event_target.clone(),
+                        ReplacedEventContext {
+                            source: proposed_damage_source,
+                            target: proposed_event_target.clone(),
+                            // CR 614.1a: a damage substitution's continuation
+                            // reads the replaced amount as "that many".
+                            amount: substituted_damage_amount,
+                        },
                     );
                 }
                 events.push(GameEvent::ReplacementApplied {
@@ -11558,6 +11648,17 @@ fn candidate_materiality(
             field: EventField::Damage,
             commute: CommuteClass::NonCommuting,
         };
+    }
+    // CR 614.6 + CR 616.1: a damage substitution (Soul-Scar Mage, Szadek)
+    // replaces the damage event with a different event, so once it applies no
+    // other damage replacement applies any more — and applied after them, it
+    // replaces whatever they left. Which applies first decides the outcome, so
+    // the affected player or controller chooses, exactly as for the
+    // found-card replacements below. Without this its `PutCounter` execute
+    // classified as an ETB counter append (`Disjoint`) and the choice was
+    // skipped against a prevention shield.
+    if is_damage_substitution(repl_def) {
+        return CandidateMateriality::Unconditional;
     }
     if repl_def.event == ReplacementEvent::SearchFound {
         // CR 616.1: applying one found-card replacement changes the event out
@@ -13243,24 +13344,35 @@ pub fn replace_event(
 /// player-choice path is not modeled — the shields apply per-event in pipeline
 /// order instead.
 ///
-/// Returns a vector aligned 1:1 with `proposed`: `Some(event)` is a survivor
-/// post-replacement `Damage` event for `combat_damage.rs` Phase C to apply;
-/// `None` means that source's damage was fully prevented or skipped. The
-/// `HashMap` holds each aggregating shield's total prevented amount.
+/// The batch is resumable. A CR 616.1 ordering choice on one of its events, or
+/// a prompt raised by a replacement's own continuation (CR 616.1g: the
+/// substitute's counters or mill), parks the pass — `pass` keeps every settled
+/// outcome, every unstarted event and the tally so far — and the caller parks
+/// the batch around it (`combat_damage::CombatDamageBatch::Paused`). CR 510.2
+/// rules out a priority window here, not these choices.
+///
+/// When the pass completes, `pass.resolved` is aligned 1:1 with the batch's
+/// events: `Some(event)` is a survivor post-replacement `Damage` event for
+/// `combat_damage.rs` Phase C to apply; `None` means that source's damage was
+/// fully prevented or replaced. `pass.tally` is the per-shield aggregate
+/// prevented amount (continuous all-damage and one-shot prevention riders).
 pub(crate) fn replace_combat_damage_batch(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-    proposed: Vec<ProposedEvent>,
-) -> (
-    Vec<Option<ProposedEvent>>,
-    HashMap<AppliedReplacementKey, i32>,
-) {
-    let registry = replacement_registry();
-
+    pass: &mut CombatDamageReplacementPass,
+    resume: Option<CombatDamageReplacementResume>,
+) -> CombatDamageReplacementOutcome {
     // CR 510.2: Activate the batch tally so the applier aggregates per shield.
+    // A parked pass carries its tally out (`pass.tally`) and the state field is
+    // restored, so nothing outside the batch aggregates while it waits.
     let restore_tally = state.combat_prevention_tally.take();
-    state.combat_prevention_tally = Some(HashMap::new());
-    let restore_applications = state.combat_one_shot_applications.replace(Vec::new());
+    state.combat_prevention_tally = Some(std::mem::take(&mut pass.tally));
+    // CR 510.2 + CR 700.1 + CR 615.8: the one-shot application ledger travels
+    // with the pass exactly like the tally, so a parked batch resumes with the
+    // applications its earlier portions recorded.
+    let restore_applications = state
+        .combat_one_shot_applications
+        .replace(std::mem::take(&mut pass.one_shot_applications));
     // AppliedReplacementKey is registry-index based, exactly as combat_prevention_tally's keys are.
     // Absolute indices stay valid only while the replacement lists are unchanged between portions:
     // consumption marks entries in place, but a follow-up drain can rebuild or prune lists (layer flush;
@@ -13268,49 +13380,172 @@ pub(crate) fn replace_combat_damage_batch(
     // this batch). Suspending the ledger isolates independent events; it does not rebase its keys after
     // such a mutation. Printed cards in this class run no such follow-up between portions.
 
-    let mut survivors = Vec::with_capacity(proposed.len());
-    for event in proposed {
-        prepare_replacement_index_for_pipeline(state);
-        let result = pipeline_loop(state, event, 0, registry, events);
-        clear_replacement_index_pipeline(state);
-        // CR 615.5: A `Prevention::Next(N)` shield's rider is stashed per-event
-        // by the applier (the all-damage and one-shot prevention batch paths
-        // suppress their stash and fire once post-batch instead). Resolve any such per-event
-        // continuation inline — for both full prevention (`Prevented`) and
-        // partial prevention (`Modified` → `Execute`) — so a depletion-shield
-        // rider fires "immediately afterward" and never leaks past the batch.
-        if !matches!(result, ReplacementResult::NeedsChoice(_))
-            && state.has_post_replacement_drain()
+    let mut step = resume.map(|resume| match resume {
+        CombatDamageReplacementResume::Choice(Some(index))
+            if state.pending_replacement.is_some() =>
         {
-            // CR 700.1: Follow-up damage is an independent event, even if its
-            // source also participates in the original simultaneous instance.
-            let applications = state.combat_one_shot_applications.take();
-            let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                state, None, None, None, events,
-            );
-            state.combat_one_shot_applications = applications;
+            let result = continue_replacement(state, index, events);
+            settle_combat_damage_replacement(state, result, events)
         }
-        match result {
-            ReplacementResult::Execute(survivor) => survivors.push(Some(survivor)),
-            ReplacementResult::Prevented => {
-                survivors.push(None);
+        // CR 800.4a + CR 800.4e: no answer can arrive — the seat that owed it
+        // left the game and `elimination` cleared the pending event. Combat
+        // damage to a player who has left is not dealt, so the event settles
+        // with no survivor. strict-failure: when the departed seat only
+        // CONTROLLED a damaged permanent it does not own, CR 800.4h would have
+        // the next player choose; that event is skipped here as well, exactly
+        // as every combat-damage ordering choice was before the batch could
+        // park.
+        CombatDamageReplacementResume::Choice(_) => {
+            state.pending_replacement = None;
+            CombatDamageReplacementStep::Settled(None)
+        }
+        CombatDamageReplacementResume::ContinuationSettled(survivor) => {
+            drain_combat_damage_continuation(state, survivor, events)
+        }
+    });
+
+    let outcome = loop {
+        let current = match step.take() {
+            Some(current) => current,
+            None => match pass.unstarted.pop_front() {
+                Some(event) => {
+                    prepare_replacement_index_for_pipeline(state);
+                    let result = pipeline_loop(state, event, 0, replacement_registry(), events);
+                    clear_replacement_index_pipeline(state);
+                    settle_combat_damage_replacement(state, result, events)
+                }
+                None => break CombatDamageReplacementOutcome::Complete,
+            },
+        };
+        match current {
+            CombatDamageReplacementStep::Settled(survivor) => pass.resolved.push(survivor),
+            // CR 616.1: the affected player chooses which replacement applies
+            // first. `state.pending_replacement` holds the event; the batch
+            // parks until `ChooseReplacement` answers it.
+            CombatDamageReplacementStep::NeedsChoice(player) => {
+                break CombatDamageReplacementOutcome::Paused {
+                    awaiting: PendingCombatDamageAwait::ReplacementChoice,
+                    waiting_for: Box::new(replacement_choice_waiting_for(player, state)),
+                };
             }
-            ReplacementResult::NeedsChoice(_) => {
-                // CR 510.2: Combat damage cannot pause for a replacement
-                // ordering choice. Mirror the legacy per-event behavior
-                // (`apply_damage_to_target`'s combat `NeedsChoice` arm) — skip
-                // this source's damage. Clear the pending pause so it does not
-                // leak out of the batch.
-                state.pending_replacement = None;
-                survivors.push(None);
+            // CR 616.1g: the event settled, but its substitute raised a prompt.
+            CombatDamageReplacementStep::ContinuationPaused {
+                survivor,
+                waiting_for,
+            } => {
+                break CombatDamageReplacementOutcome::Paused {
+                    awaiting: PendingCombatDamageAwait::Continuation { survivor },
+                    waiting_for,
+                };
             }
+        }
+    };
+
+    pass.tally = state.combat_prevention_tally.take().unwrap_or_default();
+    state.combat_prevention_tally = restore_tally;
+    pass.one_shot_applications = state
+        .combat_one_shot_applications
+        .take()
+        .unwrap_or_default();
+    state.combat_one_shot_applications = restore_applications;
+    outcome
+}
+
+/// CR 510.2 + CR 616.1: the progress of one combat-damage batch's replacement
+/// pass. `resolved` holds the settled outcome of each event in batch order;
+/// `unstarted` the events not yet proposed; `tally` the `Prevention::All`
+/// aggregate so far.
+#[derive(Debug, Default)]
+pub(crate) struct CombatDamageReplacementPass {
+    pub(crate) resolved: Vec<Option<ProposedEvent>>,
+    pub(crate) unstarted: std::collections::VecDeque<ProposedEvent>,
+    pub(crate) tally: HashMap<AppliedReplacementKey, i32>,
+    /// CR 615.8: successful one-shot applications so far (see
+    /// `GameState::combat_one_shot_applications`).
+    pub(crate) one_shot_applications: Vec<(AppliedReplacementKey, ObjectId)>,
+}
+
+/// How a parked [`CombatDamageReplacementPass`] resumes.
+#[derive(Debug)]
+pub(crate) enum CombatDamageReplacementResume {
+    /// CR 616.1: the answer to the parked event's ordering choice. `None` when
+    /// no answer can arrive (the chooser left the game).
+    Choice(Option<usize>),
+    /// CR 616.1g: the parked event settled to this survivor and its
+    /// continuation's prompt has been answered.
+    ContinuationSettled(Option<ProposedEvent>),
+}
+
+/// Result of driving a [`CombatDamageReplacementPass`].
+#[derive(Debug)]
+pub(crate) enum CombatDamageReplacementOutcome {
+    /// Every event of the batch has a settled outcome in `pass.resolved`.
+    Complete,
+    /// The entry after `pass.resolved` is waiting on `waiting_for` (boxed, as
+    /// in `combat_damage::CombatDamageBatch::Paused`: `WaitingFor` dwarfs the
+    /// other variants).
+    Paused {
+        awaiting: PendingCombatDamageAwait,
+        waiting_for: Box<WaitingFor>,
+    },
+}
+
+/// One damage event's progress through the combat replacement pass.
+enum CombatDamageReplacementStep {
+    Settled(Option<ProposedEvent>),
+    NeedsChoice(PlayerId),
+    ContinuationPaused {
+        survivor: Option<ProposedEvent>,
+        waiting_for: Box<WaitingFor>,
+    },
+}
+
+/// CR 615.5 + CR 614.6: a settled combat damage event's replacement
+/// continuation — a `Prevention::Next(N)` shield's rider (the `Prevention::All`
+/// batch path suppresses its stash and fires once post-batch instead), or a
+/// damage substitution's substitute (Szadek's counters and mill) — runs
+/// inline, "immediately afterward", for full replacement (`Prevented`) and
+/// partial prevention (`Execute`) alike, and never leaks past the batch.
+fn settle_combat_damage_replacement(
+    state: &mut GameState,
+    result: ReplacementResult,
+    events: &mut Vec<GameEvent>,
+) -> CombatDamageReplacementStep {
+    let survivor = match result {
+        ReplacementResult::Execute(survivor) => Some(survivor),
+        ReplacementResult::Prevented => None,
+        ReplacementResult::NeedsChoice(player) => {
+            return CombatDamageReplacementStep::NeedsChoice(player)
+        }
+    };
+    drain_combat_damage_continuation(state, survivor, events)
+}
+
+/// CR 616.1g: drain the settled event's continuation. A prompt it raises (a
+/// counter-replacement ordering choice inside the substitute, a per-card zone
+/// replacement choice inside its mill) is surfaced, never discarded: the
+/// continuation stays resident and paused, and the batch waits for it.
+fn drain_combat_damage_continuation(
+    state: &mut GameState,
+    survivor: Option<ProposedEvent>,
+    events: &mut Vec<GameEvent>,
+) -> CombatDamageReplacementStep {
+    if state.has_post_replacement_drain() {
+        // CR 700.1: Follow-up damage is an independent event, even if its
+        // source also participates in the original simultaneous instance.
+        let applications = state.combat_one_shot_applications.take();
+        let paused = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+            state, None, None, None, events,
+        );
+        state.combat_one_shot_applications = applications;
+        if let Some(waiting_for) = paused {
+            return CombatDamageReplacementStep::ContinuationPaused {
+                survivor,
+                waiting_for: Box::new(waiting_for),
+            };
         }
     }
-
-    let tally = state.combat_prevention_tally.take().unwrap_or_default();
-    state.combat_prevention_tally = restore_tally;
-    state.combat_one_shot_applications = restore_applications;
-    (survivors, tally)
+    CombatDamageReplacementStep::Settled(survivor)
 }
 
 /// Resume a frozen SearchFound candidate set after one optional candidate was
@@ -13719,6 +13954,7 @@ fn continue_replacement_impl(
                         applied: proposed.applied_set().clone(),
                         event_source: None,
                         event_target: None,
+                        event_amount: None,
                         // CR 109.5: same split as the mandatory stash — the
                         // zone-change drain rebinds `source` to the entering /
                         // moving object, so the branch's "you" needs its own slot.
@@ -19253,6 +19489,7 @@ mod tests {
                     applied: HashSet::new(),
                     event_source: None,
                     event_target: Some(TargetRef::Player(PlayerId(0))),
+                    event_amount: None,
                     controller: Some(PlayerId(0)),
                 },
                 ResidentDrainPolicy::KeepResident,
@@ -27391,7 +27628,11 @@ mod tests {
 
         let mut events = Vec::new();
         let batch_recorded = record_proposed_events(|| {
-            let _ = replace_combat_damage_batch(&mut state, &mut events, vec![damage.clone()]);
+            let mut pass = CombatDamageReplacementPass {
+                unstarted: [damage.clone()].into(),
+                ..Default::default()
+            };
+            let _ = replace_combat_damage_batch(&mut state, &mut events, &mut pass, None);
         });
         assert!(
             batch_recorded.iter().any(is_our_damage),

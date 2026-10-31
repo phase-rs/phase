@@ -3786,9 +3786,12 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
         // this one from the CR 724.1a/724.2a doors that must NOT discharge).
         if state.pending_combat_lifelink.is_some() {
             let event_start = events.len();
-            if let Some(waiting_for) =
-                super::combat_damage::resume_pending_combat_lifelink(state, event_start, events)
-            {
+            if let Some(waiting_for) = super::combat_damage::resume_pending_combat_lifelink(
+                state,
+                event_start,
+                None,
+                events,
+            ) {
                 // `Priority` is the resume's "nothing further is owed" sentinel and
                 // is always addressed to `state.active_player` — the seat that just
                 // left. Fall through to the skip rather than surfacing it.

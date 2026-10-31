@@ -19270,7 +19270,7 @@ pub struct PendingLifelinkGain {
 /// `CombatDamageDealtToPlayer` aggregate, then Phase D's prevention riders. Deferring Phase D
 /// rather than hoisting it makes it impossible for a rider's own continuation (CR 615.5) to run
 /// while the CR 616.1 prompt is open.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingCombatLifelink {
     /// CR 702.15e: per-source gains still owed, in batch order — separate life
     /// gain events, never merged.
@@ -19312,6 +19312,66 @@ pub struct PendingCombatLifelink {
     /// CR 510.4: which sub-step owns this batch. Snapshotted because
     /// `combat.first_strike_done` mutates during the resume.
     pub sub_step: CombatDamageSubStep,
+    /// CR 616.1 + CR 616.1g: set when the batch parked EARLIER than the
+    /// lifelink tail — inside the replacement pass over its damage events
+    /// (Phase B), before any damage was dealt. `remaining` and
+    /// `damage_to_players` are then still empty (Phase C builds them), and
+    /// `prevention_tally` holds the `Prevention::All` aggregate of the events
+    /// already replaced. `None` for a lifelink-only park, and absent from saves
+    /// written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<PendingCombatDamageReplacement>,
+}
+
+/// CR 510.2 + CR 616.1 + CR 616.1g: the replacement pass of ONE simultaneous
+/// combat-damage batch, parked mid-way. CR 510.2 forbids a priority window
+/// between assignment and dealing, not the CR 616.1 choice of which
+/// replacement applies first, nor a choice raised by an event the replacement
+/// substitutes (CR 616.1g: "put that many +1/+1 counters", "mills that many
+/// cards"). Every entry keeps its place, so the resumed batch applies exactly
+/// the events the un-paused one would, once.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingCombatDamageReplacement {
+    /// Every assignment that passed the pre-replacement gate, in batch order.
+    pub entries: Vec<PendingCombatDamageEntry>,
+    /// The settled replacement outcome of `entries[..resolved.len()]`:
+    /// `Some(event)` survives to Phase C, `None` was fully replaced/prevented.
+    pub resolved: Vec<Option<ProposedEvent>>,
+    /// The events of `entries[resolved.len() + 1..]`, not yet proposed. The
+    /// parked entry's own event is owned by `awaiting`.
+    pub unstarted: VecDeque<ProposedEvent>,
+    /// What the parked entry `entries[resolved.len()]` is waiting on.
+    pub awaiting: PendingCombatDamageAwait,
+}
+
+/// CR 616.1 / CR 616.1g: why the parked entry of a
+/// [`PendingCombatDamageReplacement`] has not settled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum PendingCombatDamageAwait {
+    /// CR 616.1: the affected player orders two or more applicable
+    /// replacements. `state.pending_replacement` holds the entry's damage event
+    /// and is the resume's authority.
+    ReplacementChoice,
+    /// CR 616.1g: the entry's event settled to `survivor`, but the
+    /// replacement's own continuation (the substitute event) raised a prompt.
+    /// The batch resumes once that continuation has fully drained.
+    Continuation { survivor: Option<ProposedEvent> },
+}
+
+/// CR 510.2: one collected combat-damage assignment of a parked batch — what
+/// Phase C needs to apply its survivor and book it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCombatDamageEntry {
+    /// CR 510.2: the source's damage context captured when the batch was
+    /// collected. The batch is one simultaneous event, so a resume never
+    /// re-derives it.
+    pub context: crate::types::ability::DamageContextSnapshot,
+    /// CR 704.6c: whether the source is a commander (commander-damage tally).
+    pub source_is_commander: bool,
+    pub target: crate::game::combat::DamageTarget,
+    /// CR 702.15b: the controller a lifelink source gains life for.
+    pub lifelink_controller: Option<PlayerId>,
 }
 
 /// CR 510.1c: A blocker with its lethal damage threshold for UI display.
@@ -27244,6 +27304,17 @@ pub struct PostReplacementDrain {
     /// `TargetFilter::PostReplacementDamageTarget`.
     pub event_target: Option<crate::types::ability::TargetRef>,
 
+    /// CR 614.1a + CR 614.6: the amount of the damage event a damage
+    /// SUBSTITUTION replaced (Soul-Scar Mage: "put that many -1/-1 counters on
+    /// that creature instead"; Szadek). Read by `QuantityRef::EventContextAmount`
+    /// ahead of the enclosing trigger's event while this drain is resident, so
+    /// "that many" names the replaced damage — not the amount of a trigger
+    /// whose resolution dealt it, and not a count a preceding link of the same
+    /// continuation produced. `None` on every other install path: prevention
+    /// riders keep their "damage prevented this way" stamp.
+    #[serde(default)]
+    pub event_amount: Option<u32>,
+
     /// CR 109.5: the player "you" names inside this continuation — the
     /// controller of the object whose ability is doing the replacing.
     ///
@@ -27386,6 +27457,7 @@ impl PostReplacementDrain {
             applied: HashSet::new(),
             event_source: None,
             event_target: None,
+            event_amount: None,
             controller: None,
         }
     }
@@ -33514,6 +33586,14 @@ impl GameState {
         self.active_post_replacement_drains()?
             .resident()
             .and_then(|drain| drain.event_target.as_ref())
+    }
+
+    /// CR 614.1a: the resident drain's replaced damage amount — set only by a
+    /// damage substitution (see [`PostReplacementDrain::event_amount`]).
+    pub fn post_replacement_event_amount(&self) -> Option<u32> {
+        self.active_post_replacement_drains()?
+            .resident()
+            .and_then(|drain| drain.event_amount)
     }
 
     /// Clear the resident drain's replacement source while leaving the
@@ -40960,6 +41040,7 @@ mod tests {
             )],
             lives_before: vec![20, 20],
             sub_step: CombatDamageSubStep::Regular,
+            replacement: None,
         })
     }
 
