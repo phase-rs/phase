@@ -34572,6 +34572,65 @@ fn scan_loss_enumeration_recognizes_land_types() {
     );
 }
 
+/// CR 613.1f + CR 602.1: "lose(s) this ability" is the singular object of the
+/// same lose-verb head, and lowers to `RemoveSourceAbility` with the printed
+/// slot left unbound for the post-assembly stamp.
+///
+/// Cards: the thirteen Licids, where it heads the compound predicate. Great
+/// Fang Chroniclers prints "…, then this creature loses this ability", whose
+/// intra-sentence tail is not yet chunked, so it does not reach this arm.
+#[test]
+fn lose_this_ability_lowers_to_a_single_printed_ability_removal() {
+    assert_eq!(
+        scan_loss_enumeration("lose this ability"),
+        vec![LossMember::ThisAbility]
+    );
+    assert_eq!(
+        parse_continuous_modifications("lose this ability"),
+        vec![ContinuousModification::RemoveSourceAbility {
+            ability_index: None,
+            ability: None
+        }],
+    );
+    // Licid shape: the removal heads the compound, the animation follows.
+    let licid = parse_continuous_modifications(
+        "lose this ability and becomes an Aura enchantment with enchant creature",
+    );
+    assert!(
+        licid.contains(&ContinuousModification::RemoveSourceAbility {
+            ability_index: None,
+            ability: None
+        }),
+        "the removal conjunct must survive the compound, got {licid:?}"
+    );
+    assert!(
+        licid.len() > 1,
+        "reach: the animation conjuncts are still produced, got {licid:?}"
+    );
+}
+
+/// The singular arm must not swallow the total one, nor the keyword one.
+/// Paired negatives for `lose_this_ability_lowers_to_a_single_printed_ability_removal`.
+#[test]
+fn lose_this_ability_does_not_displace_the_total_or_keyword_removals() {
+    // CR 613.1f: "loses all abilities" stays the total wipe.
+    let all = parse_continuous_modifications("loses all abilities");
+    assert_eq!(all, vec![ContinuousModification::RemoveAllAbilities]);
+    assert!(!all
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::RemoveSourceAbility { .. })));
+    // CR 702: "loses flying" stays a keyword removal.
+    let keyword = parse_continuous_modifications("loses flying");
+    assert_eq!(
+        keyword,
+        vec![ContinuousModification::RemoveKeyword {
+            keyword: crate::types::keywords::Keyword::Flying
+        }]
+    );
+    // A bare "this ability" with no lose verb is not a removal.
+    assert!(scan_loss_enumeration("has this ability").is_empty());
+}
+
 /// Lithoform Blight: "Enchanted land loses all land types and abilities and
 /// has "{T}: Add {C}" and "{T}, Pay 1 life: Add one mana of any color.""
 /// CR 205.3i (land-type removal) + CR 613.1d (Layer 4) / CR 613.1f (Layer 6,

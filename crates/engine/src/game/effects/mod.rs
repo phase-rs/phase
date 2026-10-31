@@ -10436,6 +10436,9 @@ fn continuous_modification_reads_filter_population(
         | ContinuousModification::GrantAbility { .. }
         | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::RemoveAllAbilities
+        // CR 613.1f: a printed-slot index, not a filter, keyword, mode or
+        // quantity — it names no population.
+        | ContinuousModification::RemoveSourceAbility { .. }
         | ContinuousModification::AddType { .. }
         | ContinuousModification::RemoveType { .. }
         | ContinuousModification::AddSubtype { .. }

@@ -1201,6 +1201,7 @@ mod living_death_same_destination_disambiguation_2932;
 mod llanowar_greenwidow_quoted_grant_cost_reduction_9514;
 mod loki_becomes_target_ability;
 mod loop_only_dependency_fallback;
+mod loses_this_ability_removal;
 mod lost_monarch_combat_damage_by_type_intervening_if;
 mod louisoix_sacrifice_counter;
 mod lurking_predators_1604_repro;

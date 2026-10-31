@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CR 113.10 + CR 611.2a: ContinuousModification gains RemoveSourceAbility { ability_index, ability }, the layer-6 removal of one named activated ability (\"this creature loses this ability\" — the thirteen Licids; Great Fang Chroniclers prints the same clause as an intra-sentence \", then\" tail that is not yet chunked, so it produces nothing today). `ability_index` is the parse-time printed slot carried in card data; `ability` is the resolution-time snapshot of the ability that resolved, stamped in GameState only, which is what makes the removal correct for an ability GAINED from another object (Agatha's Soul Cauldron, Necrotic Ooze, Experiment Kraj). The variant rides in card data and in GameState (StaticDefinition.modifications and TransientContinuousEffect.modifications), so a peer on the previous version cannot deserialize the new tagged variant; full-game and P2P wire move in lockstep."
+}

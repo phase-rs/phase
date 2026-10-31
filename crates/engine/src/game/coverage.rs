@@ -5451,6 +5451,16 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::GrantTrigger { .. } => "grant trigger".into(),
         ContinuousModification::GrantReplacement { .. } => "grant replacement".into(),
         ContinuousModification::RemoveAllAbilities => "remove all abilities".into(),
+        // CR 113.10: mirrors the `retain printed ability N` label — same printed
+        // slot vocabulary, opposite direction. Labels the PARSE-TIME slot, which
+        // is what card data carries; the resolution-time `ability` snapshot is
+        // never present in an exported definition. An unstamped removal (no
+        // printed activated-ability slot) is labelled so it reads as a no-op
+        // rather than as a removal of slot 0.
+        ContinuousModification::RemoveSourceAbility { ability_index, .. } => match ability_index {
+            Some(index) => format!("remove printed ability {index}"),
+            None => "remove printed ability (unbound)".into(),
+        },
         ContinuousModification::AddType { core_type } => {
             format!("add type {}", fmt_core_type(core_type))
         }

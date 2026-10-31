@@ -3088,6 +3088,12 @@ fn legacy_static_definition(s: &StaticDefinition) -> bool {
 fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
     match m {
         ContinuousModification::GrantAbility { definition } => legacy_definition(definition),
+        // CR 113.10: the resolution-time snapshot of the removed ability nests a
+        // whole `AbilityDefinition`, so a frozen event-context tag can sit
+        // inside it exactly as it can inside a grant. Walked for that reason.
+        ContinuousModification::RemoveSourceAbility { ability, .. } => {
+            ability.as_deref().is_some_and(legacy_definition)
+        }
         ContinuousModification::GrantStaticAbility { definition } => {
             legacy_static_definition(definition)
         }

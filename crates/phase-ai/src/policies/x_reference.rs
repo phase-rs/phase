@@ -200,6 +200,8 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         | ContinuousModification::RemoveAllAbilities
+        // CR 613.1f: a printed-slot index, never an X-scaled value.
+        | ContinuousModification::RemoveSourceAbility { .. }
         | ContinuousModification::AddType { .. }
         | ContinuousModification::RemoveType { .. }
         | ContinuousModification::AddSubtype { .. }

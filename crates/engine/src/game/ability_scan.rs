@@ -6565,6 +6565,17 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         // descend a granted ability body (GrantAbility). Presence of Gond's aura
         // grants a `{T}: Create ...` activated ability whose token body reads
         // nothing sibling — descending is what lets the firewall NOT over-veto it.
+        // CR 113.10: the resolution-time snapshot of the removed ability is a
+        // nested `AbilityDefinition`. It is only ever COMPARED (the layer arm's
+        // `retain`), never resolved, so it reads nothing — but it is descended
+        // anyway, conservatively, so a future read-bearing body inside a
+        // snapshot cannot be missed. Over-reporting costs a wider firewall
+        // verdict; under-reporting would be unsound.
+        ContinuousModification::RemoveSourceAbility {
+            ability: Some(snapshot),
+            ..
+        } => ability_definition_axes(snapshot, mode),
+        ContinuousModification::RemoveSourceAbility { ability: None, .. } => Axes::NONE,
         ContinuousModification::GrantAbility { definition } => {
             ability_definition_axes(definition, mode)
         }

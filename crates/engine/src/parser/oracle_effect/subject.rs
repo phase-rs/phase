@@ -9,8 +9,9 @@ use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
 use super::animation::{
-    animation_modifications_with_replacement, has_in_addition_to_other_colors,
-    has_in_addition_to_other_types, parse_animation_spec, split_in_addition_tail,
+    animation_modifications_with_replacement, core_type_from_animation_word,
+    has_in_addition_to_other_colors, has_in_addition_to_other_types, parse_animation_spec,
+    split_in_addition_tail,
 };
 use super::imperative;
 use super::lower::BOUNDED_TARGET_CARDINALITIES;
@@ -5499,9 +5500,75 @@ fn build_pt_choice_clause(
     })
 }
 
-/// Continuous-clause builder. Unstated durations default to Permanent at four
-/// keyword-driven arms: Suspend, in-addition-to-types, Licid attachable
-/// subtypes, and pure `GrantTrigger` grants (CR 611.2a).
+/// CR 205.1a + CR 612.1: True when the predicate states a type-set EXCLUSION
+/// (`"… instead of a <card type>"`) that `parse_continuous_modifications` does
+/// not perform.
+///
+/// CR 205.1a: "Some effects set an object's card type. In most such cases, the
+/// new card type(s) replaces any existing card types." The continuous-modification
+/// grammar emits `SetCardTypes` over only the types it RECOGNIZED in the
+/// predicate, so an explicitly excluded type survives the animation. Flanking
+/// Licid — "becomes a creature enchantment that reads \"Enchanted creature gains
+/// flanking\" INSTEAD OF A CREATURE" — lowered to
+/// `SetCardTypes{[Creature, Enchantment]}`, keeping the very type the clause
+/// excludes. Its `that reads "…"` half is a CR 612.1 text-changing effect — "some
+/// continuous effects change an object's text … such an effect is a
+/// text-changing effect" — and the engine has no `ContinuousModification` for
+/// one at all, so that half is unmodelled too. (CR 612.1 only DEFINES the
+/// category; it is cited here for the classification, not for any claim about
+/// what the replacement does.)
+///
+/// Consumed by exactly one caller: the CR 611.2a `Duration::Permanent`
+/// promotion for a removal clause that states no duration. Withholding the
+/// promotion leaves such a clause at its pre-existing `None` duration, so the
+/// half-modelled state it installs still reverts at the cleanup step (CR 514.2)
+/// rather than lasting until the end of the game.
+///
+/// It deliberately does NOT decline the clause outright. That was measured and
+/// is worse: the CR 116.2c termination permission ("You may pay {R} to end this
+/// effect") rides on the `GenericEffect`'s `end_cost`, so with no
+/// `GenericEffect` the sentence falls back to a MANDATORY resolution-time
+/// `Effect::PayCost` — the force-paid behaviour the `end_cost` design exists to
+/// prevent (issue #4000; `issue_605_calming_licid.rs` pins it for all thirteen
+/// cards in the class). Fixing the `becomes <type> enchantment that reads "…"
+/// instead of a creature` lowering is a separate unit; this guard only keeps the
+/// present unit from making the existing gap permanent.
+///
+/// Keyed on the grammatical exclusion — the `instead of a[n]` qualifier plus a
+/// `CoreType` word recognized by the shared animation type vocabulary — never on
+/// any card's sentence. One corpus card reaches it today (Flanking Licid).
+///
+/// # Death condition
+///
+/// This helper and the conjunct it feeds must be DELETED with the gap they
+/// proxy. `flanking_licid_type_exclusion_gap_tripwire`
+/// (`oracle_effect/tests.rs`) asserts the GAP itself — that the lowering still
+/// keeps the excluded type — so it FAILS the moment the
+/// `becomes <type> … instead of a <type>` lowering lands. That failure is the
+/// signal to remove both, and is why this guard cannot outlive its gap
+/// silently.
+fn predicate_states_unmodeled_type_exclusion(predicate: &str) -> bool {
+    let lower = predicate.to_ascii_lowercase();
+    nom_primitives::scan_at_word_boundaries(lower.as_str(), |input| {
+        value(
+            (),
+            preceded(
+                (tag("instead of a"), opt(tag("n")), tag(" ")),
+                verify(
+                    alt((take_till1(|c: char| !c.is_ascii_alphabetic()), rest)),
+                    |word: &str| core_type_from_animation_word(word).is_some(),
+                ),
+            ),
+        )
+        .parse(input)
+    })
+    .is_some()
+}
+
+/// Continuous-clause builder. Unstated durations default to Permanent at five
+/// keyword-driven arms: Suspend, "loses this ability" (CR 113.10),
+/// in-addition-to-types, Licid attachable subtypes, and pure `GrantTrigger`
+/// grants (CR 611.2a).
 fn build_continuous_clause(
     application: SubjectApplication,
     predicate: &str,
@@ -5628,6 +5695,45 @@ fn build_continuous_clause(
             keyword: crate::types::keywords::Keyword::Suspend { .. },
         }]
     ) {
+        Some(Duration::Permanent)
+    } else {
+        duration
+    };
+
+    // CR 113.10 + CR 611.2a: "<object> loses this ability" states no duration,
+    // and a continuous effect with no stated duration lasts until the end of
+    // the game. Left at `None` it would flip to `UntilEndOfTurn` in
+    // `effect.rs::resolve` and the removed ability would come back at cleanup —
+    // Great Fang Chroniclers' activated ability would be reusable next turn,
+    // and a Licid would regain the ability it is printed to lose while still an
+    // Aura. Only fires when NO duration was parsed, so an explicit turn-scoped
+    // loss would keep its stated duration. Mirrors the Suspend precedent above
+    // and the `build_become_clause` (CR 611.2b) default-permanent rule rather
+    // than flipping the global `effect.rs` fallback.
+    //
+    // Gated on the affected set being the SOURCE ITSELF, exactly like the
+    // animate-then-attach rule below: `RemoveSourceAbility`'s index is the
+    // source's printed slot (CR 602.1), so `layers.rs` refuses to apply it to
+    // any other object. A clause that names some other affected set
+    // ("enchanted creature loses this ability") therefore removes nothing, and
+    // promoting the rest of its grant to `Permanent` on the strength of a
+    // removal that never happens would be wrong. No corpus card has that shape.
+    //
+    // Gated a second time on the clause being FULLY modelled — see
+    // [`predicate_states_unmodeled_type_exclusion`]. Promoting a clause the
+    // grammar only half-lowered would make a board state we already know is
+    // wrong last until the end of the game instead of reverting at the cleanup
+    // step, which is strictly worse than leaving it as it is.
+    let duration = if duration.is_none()
+        && matches!(
+            static_affected_for_application(&application),
+            TargetFilter::SelfRef
+        )
+        && !predicate_states_unmodeled_type_exclusion(predicate_text)
+        && modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::RemoveSourceAbility { .. }))
+    {
         Some(Duration::Permanent)
     } else {
         duration

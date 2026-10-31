@@ -17674,17 +17674,6 @@ fn clause_is_extra_loyalty_activation_grant(clause: &ParsedEffectClause) -> bool
     matches!(&clause.effect, Effect::GrantExtraLoyaltyActivations { .. })
 }
 
-/// CR 116.2c: no longer the PRIMARY path for the mana-cost shape — that clause is
-/// now absorbed into `Effect::GenericEffect.end_cost` by the `EndEffectCost`
-/// continuation. Kept as defense-in-depth for the non-mana shape (a hypothetical
-/// "pay 2 life to end this effect"), which the narrow extractor rejects and which
-/// therefore still lowers to a non-optional `PayCost`.
-fn clause_is_pay_to_end_effect_termination(source_text: &str) -> bool {
-    crate::parser::clause_shell::is_you_may_pay_to_end_effect_phrase(
-        &source_text.to_ascii_lowercase(),
-    )
-}
-
 pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
     text: &str,
     kind: AbilityKind,
@@ -49309,7 +49298,16 @@ fn parse_effect_chain_ir_body(
             )
             || clause_is_additional_land_permission(&clause)
             || clause_is_extra_loyalty_activation_grant(&clause)
-            || clause_is_pay_to_end_effect_termination(normalized_text)
+        // CR 116.2c is deliberately ABSENT from this force-mandatory list.
+        // "You may pay {X} to end this effect" grants a standing permission
+        // ("any time they have priority"), and a permission is never
+        // mandatory. The mana shape is absorbed into
+        // `Effect::GenericEffect.end_cost` by the `EndEffectCost`
+        // continuation and never reaches here; the non-mana shape (a
+        // hypothetical "pay 2 life to end this effect") the narrow extractor
+        // rejects falls through to an OPTIONAL `PayCost` — still not the
+        // CR 116.2c special action, but no longer a cost the engine forces
+        // its controller to pay on resolution.
         {
             false
         } else {

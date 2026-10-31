@@ -417,6 +417,16 @@ where
         ContinuousModification::GrantAbility { definition } => {
             visit_ability_def_scoped(definition, scope, visit)?
         }
+        // CR 113.10 + CR 608.2c: the resolution-time snapshot of the ability
+        // being removed is a nested `AbilityDefinition` carrier like the grants
+        // above, so it is walked rather than treated as a leaf. It is a
+        // COMPARISON key, never resolved or installed, and `None` before
+        // `effects/effect.rs::snapshot_transient_modifications` stamps it.
+        ContinuousModification::RemoveSourceAbility {
+            ability: Some(snapshot),
+            ..
+        } => visit_ability_def_scoped(snapshot, scope, visit)?,
+        ContinuousModification::RemoveSourceAbility { ability: None, .. } => {}
         ContinuousModification::GrantTrigger { trigger } => {
             visit_trigger_scoped(trigger, scope, visit)?
         }

@@ -869,6 +869,10 @@ fn modification_can_add_keyword_kind(
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::GrantReplacement { .. }
+        // CR 613.1f: removes one printed ACTIVATED ability from `obj.abilities`;
+        // it never writes `keywords`, so it is not a keyword-query arm and is
+        // correctly rejected by `supports_off_zone_keyword_query` above.
+        | ContinuousModification::RemoveSourceAbility { .. }
         | ContinuousModification::AddType { .. }
         | ContinuousModification::RemoveType { .. }
         | ContinuousModification::AddSubtype { .. }

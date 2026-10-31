@@ -145,6 +145,9 @@ impl ContinuousModification {
             // ability-adding effect (Layer 6), beside GrantTrigger.
             | ContinuousModification::GrantReplacement { .. }
             | ContinuousModification::RemoveAllAbilities
+            // CR 613.1f: removing ONE named printed ability is an
+            // ability-removing effect, the same layer as the total wipe.
+            | ContinuousModification::RemoveSourceAbility { .. }
             | ContinuousModification::AddStaticMode { .. }
             | ContinuousModification::GrantStaticAbility { .. } => Layer::Ability,
             // CR 613.1d (Layer 4): type-changing effects cover an object's card

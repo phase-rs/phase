@@ -28531,6 +28531,9 @@ fn immediate_modification_target_slot_filter(
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::RemoveAllAbilities
+        // CR 613.1f: the removal names a printed ability slot, not a quantity —
+        // no count-derived target slot, exactly like `RemoveAllAbilities`.
+        | ContinuousModification::RemoveSourceAbility { .. }
         | ContinuousModification::AddType { .. }
         | ContinuousModification::RemoveType { .. }
         | ContinuousModification::AddSubtype { .. }
@@ -44576,6 +44579,81 @@ pub enum ContinuousModification {
         replacement: Box<ReplacementDefinition>,
     },
     RemoveAllAbilities,
+    /// CR 113.10 + CR 613.1f + CR 611.2a: removal of ONE named activated
+    /// ability, as opposed to `RemoveAllAbilities`' total wipe.
+    ///
+    /// **Authorizing rule: CR 113.10** — "Effects can add or remove abilities of
+    /// objects… An effect that removes an ability will state that the object
+    /// 'loses' that ability." CR 613.1f is the LAYER it applies in (layer 6,
+    /// ability-removing effects) and CR 113.10b ("effects that remove an ability
+    /// remove all instances of it") is why the apply arm strips every
+    /// structurally-equal instance rather than one position.
+    ///
+    /// Written by "<object> loses this ability": the thirteen Licids ("This
+    /// creature loses this ability and becomes an Aura enchantment with enchant
+    /// creature", Flanking Licid's "becomes a creature enchantment that reads
+    /// \"…\" instead of a creature" variant included). Great Fang Chroniclers
+    /// prints the same clause as an intra-sentence ", then this creature loses
+    /// this ability" tail, which `split_comma_clause_boundary` does not yet cut,
+    /// so that card produces nothing today and is covered only by the
+    /// two-sentence fixture in
+    /// `tests/integration/loses_this_ability_removal.rs`.
+    ///
+    /// CR 113.7a lets the activated ability that installs this effect finish
+    /// resolving after it has removed itself: once activated, the ability exists
+    /// on the stack independently of its source. Neither printed text states a
+    /// duration, so per CR 611.2a the installing effect carries
+    /// `Duration::Permanent` — it lasts until the end of the game, or, for a
+    /// Licid, until its CR 116.2c "pay {X} to end this effect" permission is
+    /// taken (`calming_licid_loses_its_own_ability_when_it_becomes_an_aura`
+    /// drives that path).
+    ///
+    /// # Identity: two representations, one consumer
+    ///
+    /// `ability_index` is the PARSE-TIME representation and the card-data wire
+    /// shape. It addresses the printed activated-ability track (CR 602.1) and is
+    /// the index convention `RetainPrintedAbilityFromSource` already uses: baked
+    /// as `None` by the clause lowerer — which does not know its own printed
+    /// position — and resolved post-assembly by
+    /// `oracle_ir::doc::stamp_printed_ability_slot`, the same pass CR 707.9a's
+    /// copy-except retains use. `None` means "this clause names no printed
+    /// activated-ability slot" — a triggered ability's body, whose "this
+    /// ability" lives in `base_trigger_definitions` (CR 603.1 vs CR 602.1). No
+    /// printed card produces the `None` form today.
+    ///
+    /// `ability` is the RESOLUTION-TIME identity and the only thing the layer
+    /// arm reads. CR 608.2c's "this ability" is the ability that actually
+    /// resolved, which a printed slot cannot name: the same `AbilityDefinition`
+    /// can be GAINED by another object (Agatha's Soul Cauldron exiling a Licid
+    /// and donating its ability; Necrotic Ooze, Experiment Kraj, Myr Welder and
+    /// the rest of that family), and a gained ability occupies a live slot whose
+    /// number says nothing about the recipient's printed list — index 0 on the
+    /// recipient is the RECIPIENT's own first printed ability. Reading the index
+    /// there would permanently delete an unrelated ability and leave the gained
+    /// one activatable; on Necrotic Ooze, whose printed list is empty, it would
+    /// silently do nothing at all. So `effects/effect.rs::
+    /// snapshot_transient_modifications` concretizes the live resolving ability
+    /// into this field at install time — the same seam that concretizes dynamic
+    /// P/T and the reanimator Enchant filter (CR 608.2h + CR 611.2d: information
+    /// an effect needs is determined once, when it is applied) — reading
+    /// `ResolvedAbility::ability_index` against the source's LIVE `abilities`,
+    /// the authority `AbilityCondition::AbilityUseCountThisTurn` already uses
+    /// for "this ability".
+    ///
+    /// `None` resolves to nothing (CR 609.3: an effect does only as much as it
+    /// can). That is the fail-closed state for every path that never reaches the
+    /// resolution snapshot: a printed `StaticDefinition` carrying this
+    /// modification (gathered by `def_index`, never snapshotted), a parse-time
+    /// value decoded from card data, and an unstamped clause. The snapshot is
+    /// taken from a live ability whose own nested modifications are parser
+    /// values, so the embedded definition always carries `ability: None` — the
+    /// nesting is one level deep by construction and cannot recurse.
+    RemoveSourceAbility {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ability_index: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ability: Option<Box<AbilityDefinition>>,
+    },
     AddType {
         core_type: CoreType,
     },

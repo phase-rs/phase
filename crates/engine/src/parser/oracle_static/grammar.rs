@@ -1210,9 +1210,12 @@ pub(crate) fn scale_pt_quantity(amount: i32, quantity: &QuantityExpr) -> Quantit
     }
 }
 
-/// A member of a "loses all [other] abilities, card types, creature types, and
-/// land types" enumeration. Parser-local — maps to one `ContinuousModification`
-/// each.
+/// What a "lose(s) <object>" predicate names. Parser-local — maps to one
+/// `ContinuousModification` each.
+///
+/// Two object shapes share the one lose-verb head: the "all [other] abilities,
+/// card types, creature types, and land types" enumeration, and the singular
+/// CR 113.10 self-reference "this ability".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LossMember {
     Abilities,
@@ -1221,35 +1224,61 @@ pub(crate) enum LossMember {
     /// CR 205.3i: land types (Alpine Moon, Lithoform Blight, Ultima, Origin of
     /// Oblivion — "loses all land types and abilities").
     LandTypes,
+    /// CR 113.10 + CR 602.1: the ONE activated ability whose own resolution says
+    /// so — "this creature loses this ability". Produced today by the thirteen
+    /// Licids, where it heads the compound "loses this ability and becomes an
+    /// Aura enchantment with enchant creature" (Flanking Licid's "becomes a
+    /// creature enchantment that reads \"…\" instead of a creature" variant
+    /// included). Great Fang Chroniclers prints the same clause as an
+    /// intra-sentence ", then this creature loses this ability" tail, which
+    /// `split_comma_clause_boundary` does not yet cut, so it reaches this arm
+    /// only through the two-sentence fixture in
+    /// `tests/integration/loses_this_ability_removal.rs`.
+    /// CR 113.10 is the authorizing rule and names this exact predicate: "an
+    /// effect that removes an ability will state that the object 'loses' that
+    /// ability." Singular where `Abilities` is total.
+    ThisAbility,
 }
 
-/// CR 205.1a + CR 205.3i + CR 613.1d/f: Parse a "loses all [other] <list>"
-/// enumeration at the start of `input` (lowercase). The list is a comma-and
-/// enumeration of `abilities` / `card types` / `creature types` / `land types`
-/// in any subset and order, so `separated_list1` over a four-way `alt` covers
-/// every combination — the literal substrings "loses all other card types"
-/// never appear contiguously in the Oxford-comma form, so whole-phrase `tag()`
-/// arms would be dead code. None of the four tags share a prefix, so `alt`
-/// ordering carries no hazard.
+/// CR 205.1a + CR 205.3i + CR 613.1d/f: Parse a "lose(s) <object>" predicate at
+/// the start of `input` (lowercase).
+///
+/// The lose-verb head is factored out of both objects it can take, so the
+/// conjugation axis is matched once:
+///
+/// * "all [other] <list>" — a comma-and enumeration of `abilities` /
+///   `card types` / `creature types` / `land types` in any subset and order, so
+///   `separated_list1` over a four-way `alt` covers every combination. The
+///   literal substrings "loses all other card types" never appear contiguously
+///   in the Oxford-comma form, so whole-phrase `tag()` arms would be dead code.
+///   None of the four tags share a prefix, so `alt` ordering carries no hazard.
+/// * "this ability" — CR 113.10's singular self-reference (the thirteen Licids;
+///   Great Fang Chroniclers once its ", then" tail is chunked). CR 113.10: "An
+///   effect that removes an ability will state that the object 'loses' that
+///   ability." Disjoint from the "all " head, so the two arms cannot shadow
+///   each other.
 pub(crate) fn parse_loss_enumeration(input: &str) -> OracleResult<'_, Vec<LossMember>> {
     preceded(
+        alt((tag("loses "), tag("lose "))),
         alt((
-            tag("loses all other "),
-            tag("lose all other "),
-            tag("loses all "),
-            tag("lose all "),
+            preceded(
+                alt((tag("all other "), tag("all "))),
+                separated_list1(
+                    // Oxford-comma tolerant: longest separator first so ", and "
+                    // is not pre-consumed by ", ".
+                    alt((tag(", and "), tag(" and "), tag(", "))),
+                    alt((
+                        value(LossMember::Abilities, tag("abilities")),
+                        value(LossMember::CardTypes, tag("card types")),
+                        value(LossMember::CreatureTypes, tag("creature types")),
+                        value(LossMember::LandTypes, tag("land types")),
+                    )),
+                ),
+            ),
+            // CR 113.10 + CR 602.1: the singular form names the one printed
+            // activated ability the clause belongs to, not a category.
+            value(vec![LossMember::ThisAbility], tag("this ability")),
         )),
-        separated_list1(
-            // Oxford-comma tolerant: longest separator first so ", and "
-            // is not pre-consumed by ", ".
-            alt((tag(", and "), tag(" and "), tag(", "))),
-            alt((
-                value(LossMember::Abilities, tag("abilities")),
-                value(LossMember::CardTypes, tag("card types")),
-                value(LossMember::CreatureTypes, tag("creature types")),
-                value(LossMember::LandTypes, tag("land types")),
-            )),
-        ),
     )
     .parse(input)
 }
