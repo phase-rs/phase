@@ -1,5 +1,5 @@
 //! CR 111.1 + CR 111.10 + CR 111.4: Debug-only catalog of pre-defined token
-//! presets. Sourced from `crates/engine/data/known-tokens.toml` (committed
+//! presets. Sourced from `crates/phase-ast/data/known-tokens.toml` (committed
 //! phase-native source generated from MTGJSON set token data by the
 //! `tokens-gen` bin), converted to JSON at build time by `build.rs`, and
 //! embedded via `include_bytes!` — the debug-mode toml_edit parse of the

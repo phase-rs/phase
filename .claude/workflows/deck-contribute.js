@@ -522,8 +522,8 @@ function clusterPrPrompt(mechanic, cards, { impl, verify, partial }) {
     `added, modified, deleted, and renamed paths. Stop and return opened=false if ownership is ` +
     `ambiguous, a path includes unowned edits, or any final owned change lacks a clean review. ` +
     `Leave unowned files AND index entries untouched; do not discard or unstage them.\n` +
-    `Do not stage build-generated noise in crates/engine/data/known-tokens.toml or ` +
-    `crates/engine/data/oracle-subtypes.json. Leave that working-tree dirt unstaged. ` +
+    `Do not stage build-generated noise in crates/phase-ast/data/known-tokens.toml or ` +
+    `crates/phase-ast/data/oracle-subtypes.json. Leave that working-tree dirt unstaged. ` +
     `data/engine-inventory.json is ignored and needs neither staging nor cleanup.\n` +
     `Replace <OWNED_PATHS> in BOTH commands below with the same explicit final reviewed filenames. ` +
     `Use one repo-relative literal Git pathspec per file, single-quoted for the shell, for example ` +

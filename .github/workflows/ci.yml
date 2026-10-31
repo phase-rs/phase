@@ -426,8 +426,8 @@ jobs:
         # card-data into the validate/coverage gates downstream. Cargo.lock is
         # included so dep bumps that affect parsing (e.g. nom) invalidate.
         #
-        # `crates/phase-ast/data/**` and `build.rs` are hashed because the engine
-        # lib compiles those files IN: oracle-subtypes.json via `include_str!`,
+        # `crates/phase-ast/data/**` and `build.rs` are hashed because the
+        # phase-ast lib (linked into the engine) compiles those files IN: oracle-subtypes.json via `include_str!`,
         # known-tokens.toml via build.rs → OUT_DIR embed. A PR touching only
         # those changes parser behaviour, so omitting them would serve stale
         # card-data from this cache and (via gates-cache below) skip the

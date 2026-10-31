@@ -232,7 +232,7 @@ TOOL_BINS=(--bin tokens-gen --bin oracle-gen --bin coverage-report --bin card-da
 TOOL_BIN="${CARGO_TARGET_DIR:-target}/tool"
 cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
 
-# The token catalog is baked into the engine lib at compile time (build.rs
+# The token catalog is baked into the phase-ast lib at compile time (its build.rs
 # converts data/known-tokens.toml to JSON in OUT_DIR; token_presets.rs embeds
 # it via include_bytes!). Regenerate it, then re-embed it only if it actually
 # changed.

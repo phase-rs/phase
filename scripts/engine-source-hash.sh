@@ -15,7 +15,7 @@
 # into it (see .github/workflows/ci.yml "Parse-detail diff").
 #
 # The fingerprint covers exactly the inputs that determine parse output and
-# mirrors the cardgen-cache key (ci.yml): the engine and phase-ast source
+# mirrors the cardgen-cache key (`.github/actions/cardgen-cache-key`): the engine and phase-ast source
 # trees, the data dir (`crates/phase-ast/data/**`; `crates/engine/data/**`
 # before the phase-ast split — e.g. oracle-subtypes.json is `include_str!`d
 # into the parser, known-tokens.toml is embedded via build.rs → OUT_DIR), the

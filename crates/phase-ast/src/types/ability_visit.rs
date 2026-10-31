@@ -1643,7 +1643,7 @@ pub fn token_static_grants_to_itself(def: &StaticDefinition) -> bool {
 /// those embedded in compound effects (`FlipCoins`, `RollDie`, `GrantAbility`, etc.).
 /// Returns `true` if the predicate returns `true` for any node in the tree.
 ///
-/// `pub(crate)`: also the single-authority walker `PerpetualGrantModification::try_from`
+/// `pub`: also the single-authority walker `PerpetualGrantModification::try_from`
 /// (`types/ability.rs`) reuses to reject a `GrantAbility` whose nested tree contains
 /// `Effect::Unimplemented` -- never reimplement tree-walking at that call site.
 pub fn ability_tree_any(

@@ -3080,6 +3080,9 @@ const PLANTED_CRATE: &[(&str, &str)] = &[
         // A macro-declared struct in the state layer: neither macro seeds the AST closure.
         macro_rules! declare_session { ($($f:tt)*) => { pub struct Session { $($f)* } }; }
         declare_session! { pub obj: crate::game::obj::Obj }
+        // A macro declaring an item outside T: both its units seed the AST closure.
+        macro_rules! declare_stray { () => { pub struct Stray; }; }
+        declare_stray! {}
         // Items embedding a state-layer struct.
         pub enum VariantEmbeds { V(super::deep::Handle) }
         pub struct FieldEmbeds { pub h: crate::types::deep::Handle }
@@ -3105,6 +3108,20 @@ const PLANTED_CRATE: &[(&str, &str)] = &[
          pub fn via_left() { let _ = Gone::Runtime; }
          use crate::types::{self as tys};
          pub fn via_alias() -> Option<tys::Runtime> { None }
+         // Reference shapes: each names the state-layer `make_handle` or `Handle` one way.
+         pub mod renamed { use crate::types::deep::make_handle as mh; pub fn renamed() { mh(); } }
+         pub mod grouped {
+             use crate::types::{deep::{make_handle, Handle}};
+             pub fn grouped() -> Option<Handle> { make_handle(); None }
+         }
+         pub mod nested { pub fn super_super() { super::super::types::deep::make_handle(); } }
+         pub mod selfy {
+             use crate::types::deep::make_handle;
+             pub fn self_path() { self::make_handle(); }
+         }
+         // Function-local `use` trees: a nested group's entries and a glob are full paths.
+         pub fn stmt_grouped() { use crate::types::{deep::{make_handle, Handle}}; }
+         pub fn stmt_glob() { use crate::types::deep::*; }
          // A test-only definition shadowing, under `Scope::Tests` only, the name a glob supplies
          // library code: clause 5 resolves `Handle` to the state-layer one.
          pub mod shadow {
@@ -3173,6 +3190,9 @@ const PLANTED_CRATE: &[(&str, &str)] = &[
     ),
 ];
 
+/// Clause 5 over the planted crate: every reference shape planted in a parser unit or a
+/// `types/` item. A `#[macro_export]` macro named bare or through the crate root
+/// (`LayerIndex::root_macro`) has no planted unit.
 #[test]
 fn the_layer_census_resolves_every_reference_shape() {
     let files: HashMap<&str, &str> = PLANTED_CRATE.iter().copied().collect();
@@ -3232,6 +3252,8 @@ fn the_layer_census_resolves_every_reference_shape() {
         assert!(!in_state(name), "`{name}` is not in the state layer");
     }
 
+    let make_handle = "types/deep.rs:make_handle";
+    let handle = "types/deep.rs:Handle";
     let mut expected: Vec<(ViolationKind, &str, &str)> = vec![
         // 5a: a T item named directly, through the `types` root re-export, and through a glob.
         (
@@ -3291,6 +3313,91 @@ fn the_layer_census_resolves_every_reference_shape() {
             "leftover_default",
             "types/ast.rs:leftover_default",
         ),
+        // Each reference shape names its T item and passes through `deep`: an item rename, a
+        // nested group, `super::super`, `self::`, and a function-local group and glob. The
+        // shapes' `use` units and entries add theirs.
+        (ViolationKind::ParserNamesState, "renamed", make_handle),
+        (
+            ViolationKind::StatePassage,
+            "renamed",
+            "crate::types::deep::make_handle",
+        ),
+        (ViolationKind::ParserNamesState, "grouped", make_handle),
+        (ViolationKind::ParserNamesState, "grouped", handle),
+        (
+            ViolationKind::StatePassage,
+            "grouped",
+            "crate::types::deep::make_handle",
+        ),
+        (
+            ViolationKind::StatePassage,
+            "grouped",
+            "crate::types::deep::Handle",
+        ),
+        (ViolationKind::ParserNamesState, "super_super", make_handle),
+        (
+            ViolationKind::StatePassage,
+            "super_super",
+            "crate::types::deep::make_handle",
+        ),
+        (ViolationKind::ParserNamesState, "self_path", make_handle),
+        (ViolationKind::ParserNamesState, "stmt_grouped", make_handle),
+        (ViolationKind::ParserNamesState, "stmt_grouped", handle),
+        (
+            ViolationKind::StatePassage,
+            "stmt_grouped",
+            "crate::types::deep::make_handle",
+        ),
+        (
+            ViolationKind::StatePassage,
+            "stmt_grouped",
+            "crate::types::deep::Handle",
+        ),
+        (
+            ViolationKind::StatePassage,
+            "stmt_glob",
+            "crate::types::deep::*",
+        ),
+        (ViolationKind::ParserNamesState, "use", make_handle),
+        (ViolationKind::ParserNamesState, "use", handle),
+        (
+            ViolationKind::StatePassage,
+            "use",
+            "crate::types::deep::make_handle",
+        ),
+        (
+            ViolationKind::StatePassage,
+            "use",
+            "crate::types::deep::Handle",
+        ),
+        (
+            ViolationKind::StatePassage,
+            "<use>",
+            "crate::types::deep::make_handle",
+        ),
+        (
+            ViolationKind::StatePassage,
+            "<use>",
+            "crate::types::deep::Handle",
+        ),
+        // A macro declaring an item outside T seeds the closure: its two macro units, the
+        // `macro_rules!` item they name, and the struct they declare.
+        (
+            ViolationKind::EngineAstItem,
+            "declare_stray!",
+            "declare_stray!",
+        ),
+        (
+            ViolationKind::EngineAstItem,
+            "declare_stray! #1",
+            "declare_stray! #1",
+        ),
+        (
+            ViolationKind::EngineAstItem,
+            "declare_stray",
+            "types/ast.rs:declare_stray",
+        ),
+        (ViolationKind::EngineAstItem, "Stray", "types/ast.rs:Stray"),
         // The anchors: a façade, and a path that is no file.
         (ViolationKind::Anchor, "anchor", "types/ast.rs"),
         (ViolationKind::Anchor, "anchor", "types/gone.rs"),

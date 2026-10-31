@@ -14662,7 +14662,7 @@ impl SeatDirection {
 /// control", Human—Time Lord Meta-Crisis); `Neighbor { direction }` = objects
 /// controlled by the player seated to the chooser's left/right ("… controlled by
 /// the player to their left", Caught in a Parallel Universe), resolved live
-/// (CR 608.2c) via [`crate::game::players::neighbor`].
+/// (CR 608.2c) via `game::players::neighbor`.
 ///
 /// DISCOVERABILITY / DIVERGENCE FROM `ControllerRef`: `Chooser` is the semantic
 /// twin of [`ControllerRef::ScopedPlayer`], and `Neighbor` mirrors a hypothetical

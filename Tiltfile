@@ -582,7 +582,7 @@ local_resource('probe-pin-e2e',
 #    "TWO PRICE HAZARDS" below; they are DISCLOSED, not measured.
 #
 # THE ENGINE BUILD *IS* ADDITIONAL -- 'probe-pin-check''s note was right to flag it, and measuring
-# it was not a formality. `build-native` runs `cargo nextest run -p phase-engine -p phase-ai --no-run`;
+# it was not a formality. `build-native` runs `cargo nextest run -p phase-ast -p phase-engine -p phase-ai --no-run`;
 # probe-pin's inner resolve runs `cargo test -p phase-engine --test integration --no-run`. The
 # two keep SEPARATE artifact sets (different feature unification across the -p set), so after an
 # ENGINE_SRC touch the inner resolve costs 32.86s even with build-native already complete --

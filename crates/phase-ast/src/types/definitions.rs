@@ -20,8 +20,7 @@
 //! way to iterate is the `game::functioning_abilities` module, which applies
 //! the correct CR gates for each definition kind.
 //!
-//! Mutation APIs (`push`, `clear`, `retain`, plus the internal
-//! `iter_all`) are crate-visible so construction and layer recomputation
+//! Mutation APIs (`push`, `clear`, `retain`, plus `iter_all`) are public so construction and layer recomputation
 //! can rebuild the collection; external read paths must use the helpers.
 
 use std::sync::Arc;
@@ -92,7 +91,7 @@ impl<T: Clone> Definitions<T> {
         });
     }
 
-    /// Positional mutable access — crate-visible so effects that need to
+    /// Positional mutable access — public so engine effects that need to
     /// mutate a specific existing definition (regeneration shield consumption,
     /// prevention-amount updates) can do so without bypassing the gated reads.
     pub fn get_mut(&mut self, i: usize) -> Option<&mut T> {
@@ -127,8 +126,8 @@ impl<T> Definitions<T> {
         self.0.last()
     }
 
-    /// Iterate all definitions without applying any CR gate. Crate-visible —
-    /// callers at the engine boundary must use `functioning_abilities` helpers.
+    /// Iterate all definitions without applying any CR gate. Public for the engine (`phase-ast` cannot see `functioning_abilities`) —
+    /// callers outside the engine must use `functioning_abilities` helpers.
     pub fn iter_all(&self) -> std::slice::Iter<'_, T> {
         self.0.iter()
     }
