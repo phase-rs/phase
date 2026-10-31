@@ -695,13 +695,14 @@ describe("HostControlTile", () => {
       expect(art.face).toHaveBeenCalledTimes(2); // one preparation per send
     });
 
-    it("keeps local keys invariant only under printing changes", () => {
+    it("keeps local keys invariant under printing and tier changes, and distinct under list changes", () => {
       const names = expandParsedDeck(A.deck);
       const key = deckChoiceKey({ type: "DeckList", data: names });
       for (const printings of [[], printedA, printedB]) {
         expect(deckChoiceKey({ type: "DeckList", data: { ...names, printings } })).toBe(key);
       }
-      expect(deckChoiceKey({ type: "DeckList", data: { ...names, bracket_tier: "core" } })).not.toBe(key);
+      // The declared tier is not part of which deck it is (upstream's deck identity key).
+      expect(deckChoiceKey({ type: "DeckList", data: { ...names, bracket_tier: "core" } })).toBe(key);
       expect(deckChoiceKey({ type: "DeckList", data: { ...names, planar_deck: ["Plane"] } })).not.toBe(key);
       expect(deckChoiceKey({ type: "Random" })).toBe("Random");
       expect(deckChoiceKey({ type: "Named", data: "A" })).toBe("Named:A");
@@ -792,7 +793,8 @@ describe("HostControlTile", () => {
     });
 
     function renderSeat(candidates: unknown[], deck: DeckChoice) {
-      const seatMutate = vi.fn();
+      // The pick prepares its art and sends through the awaited path, so both entry points share one mock.
+      const seatMutate = vi.fn().mockResolvedValue(undefined);
       catalogMocks.candidates = candidates;
       useMultiplayerStore.setState({
         hostGameCode: "ABCD1",
@@ -801,6 +803,7 @@ describe("HostControlTile", () => {
         playerSlots: [host, aiWith(deck)],
         serverInfo: null,
         seatMutate,
+        seatMutateAsync: seatMutate,
       });
       render(
         <MemoryRouter initialEntries={["/multiplayer"]}>
@@ -835,7 +838,7 @@ describe("HostControlTile", () => {
       expect(selectedLabel(select)).toBe("B");
     });
 
-    it("keeps the picked deck selected once the engine echoes it", () => {
+    it("keeps the picked deck selected once the engine echoes it", async () => {
       const seatMutate = renderSeat([DECK_A, DECK_B, DECK_C], echo.plain);
       expect(seatMutate).not.toHaveBeenCalled();
 
@@ -843,8 +846,9 @@ describe("HostControlTile", () => {
       const optionC = Array.from(select.options).find((option) => option.textContent === "C")!;
       fireEvent.change(select, { target: { value: optionC.value } });
 
-      // Positive control: the pick reaches the catalog deck, companion and all.
-      expect(seatMutate).toHaveBeenCalledTimes(1);
+      // Positive control: the pick reaches the catalog deck, companion and all. The pick
+      // prepares its art first, so the send lands after the preparation settles.
+      await waitFor(() => expect(seatMutate).toHaveBeenCalledTimes(1));
       expect(seatMutate).toHaveBeenCalledWith({
         type: "SetKind",
         data: {
@@ -871,7 +875,7 @@ describe("HostControlTile", () => {
       expect(selectedLabel(deckSelect("A"))).toBe("B");
     });
 
-    it("keeps decks that differ only in card order apart through pick and echo", () => {
+    it("keeps decks that differ only in card order apart through pick and echo", async () => {
       const seatMutate = renderSeat([DECK_FI, DECK_IF], echo.forestIsland);
 
       const select = deckSelect("FI");
@@ -881,7 +885,7 @@ describe("HostControlTile", () => {
       expect(select.options[0].value).not.toBe(select.options[1].value);
 
       fireEvent.change(select, { target: { value: select.options[1].value } });
-      expect(seatMutate).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(seatMutate).toHaveBeenCalledTimes(1));
       expect(seatMutate).toHaveBeenCalledWith({
         type: "SetKind",
         data: {

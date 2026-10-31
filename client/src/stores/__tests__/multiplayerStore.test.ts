@@ -1302,10 +1302,8 @@ describe("multiplayerStore", () => {
     const settings = hostingSettings({
       aiSeats: [{ seatIndex: 1, difficulty: "Hard", deckName: null, deck: aiDeck }],
     });
-    const expected = {
-      main_deck: ["Forest"], sideboard: ["Island"], commander: ["Commander"],
-      planar_deck: ["Plane"], scheme_deck: ["Scheme"], bracket_tier: "cedh", printings,
-    };
+    // Hosting hands off every deck list (upstream #10446); the printings ride beside them unchanged.
+    const expected = { ...deck };
     if (transport === "server") {
       useMultiplayerStore.getState().startHosting(settings, deck, HOST_URL);
       await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
@@ -1318,7 +1316,7 @@ describe("multiplayerStore", () => {
       expect(calls[calls.length - 1][0]).toMatchObject({ player: expected });
       expect(p2pMocks.applySeatMutation).toHaveBeenCalledWith({
         type: "SetKind",
-        data: { seatIndex: 1, kind: { type: "Ai", data: { difficulty: "Hard", deck: aiDeck } } },
+        data: { seatIndex: 1, expectedKind: { type: "WaitingHuman" }, kind: { type: "Ai", data: { difficulty: "Hard", deck: aiDeck } } },
       });
     }
   });

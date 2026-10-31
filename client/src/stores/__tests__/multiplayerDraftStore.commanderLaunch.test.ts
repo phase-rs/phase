@@ -3208,21 +3208,26 @@ describe("multiplayerDraftStore Commander launch", () => {
       expect(useMultiplayerDraftStore.getState().matchAdapter).toBeNull();
     });
 
-    it.each([false, true])("classifies the fresh connected=%s roster after independent booster preparation", async (connected) => {
-      await installCompletedPod(commanderView(4, { humanSeats: [1], droppedSeats: connected ? [1] : [] }));
+    it.each([false, true])("classifies engine seats from the launch view read once the room is open (seat dropped=%s), not a roster that changes during booster preparation", async (dropped) => {
+      // Upstream #10459 moved the live/engine split to the host finalizer: the store reads the
+      // launch view once after the room opens and hands it on; a roster change during the
+      // independent booster await must not rewrite the seat decks already synthesized from it.
+      const launchRoster = commanderView(4, { humanSeats: [1], droppedSeats: dropped ? [1] : [] });
+      await installCompletedPod(launchRoster);
       const source = held<string[] | null>();
       boosterPackPoolForGame.mockReturnValueOnce(source.promise);
       commanderSeatDecks.mockImplementation(async (view, seat) => seatDecksFor(view, seat));
       const launching = useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
       await vi.waitFor(() => expect(boosterPackPoolForGame).toHaveBeenCalledOnce());
-      const fresh = commanderView(4, { humanSeats: [1], droppedSeats: connected ? [] : [1] });
-      useMultiplayerDraftStore.setState({ view: fresh });
+      useMultiplayerDraftStore.setState({
+        view: commanderView(4, { humanSeats: [1], droppedSeats: dropped ? [] : [1] }),
+      });
       source.resolve(["Undealt"]);
       await vi.waitFor(() => expect(sendCommanderLaunches).toHaveBeenCalledOnce());
       transport.instances[0].finish();
       await launching;
-      expect(commanderSeatDecks, "Commander roster follows independent preparation").toHaveBeenCalledWith(fresh, 0);
-      expect(transport.applySeatMutation.mock.calls.map(([mutation]) => mutation.data.seatIndex)).toEqual(connected ? [2, 3] : [1, 2, 3]);
+      expect(commanderSeatDecks, "seat decks come from the launch view").toHaveBeenCalledWith(launchRoster, 0);
+      expect(transport.applySeatMutation.mock.calls.map(([mutation]) => mutation.data.seatIndex)).toEqual(dropped ? [1, 2, 3] : [2, 3]);
       expect(navigate).toHaveBeenCalledOnce();
     });
   });

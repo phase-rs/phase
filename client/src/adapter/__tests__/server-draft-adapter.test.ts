@@ -1278,7 +1278,8 @@ describe("ServerDraftAdapter", () => {
       if (changed === "socket") {
         const reconnecting = adapter.reconnectDraft();
         live = await completeHandshake();
-        receive(live, "DraftCreated", { draft_code: "ABCD12", player_token: "tok123", seat_index: 0 });
+        // A reconnect settles on the authoritative draft update (upstream #10457).
+        receive(live, "DraftStateUpdate", { view: createMockDraftView() });
         await reconnecting;
         live.send.mockClear();
       } else if (changed === "closed") {
