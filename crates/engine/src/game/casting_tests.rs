@@ -62768,3 +62768,37 @@ fn echo_upper_bound_defers_to_spend_any_color_permission() {
         "without the concession the green unit cannot cover the black pips"
     );
 }
+
+#[test]
+fn split_source_tap_cost_legs_takes_every_tap_and_untap_leg_in_order() {
+    let life = |amount| AbilityCost::PayLife {
+        amount: QuantityExpr::Fixed { value: amount },
+    };
+    let lands = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1));
+    let cost = AbilityCost::Composite {
+        costs: vec![
+            life(1),
+            AbilityCost::Untap,
+            AbilityCost::Composite {
+                costs: vec![lands.clone(), AbilityCost::Tap],
+            },
+            life(2),
+        ],
+    };
+    assert_eq!(
+        split_source_tap_cost_legs(cost),
+        (
+            Some(AbilityCost::Composite {
+                costs: vec![AbilityCost::Untap, AbilityCost::Tap],
+            }),
+            Some(AbilityCost::Composite {
+                costs: vec![life(1), lands, life(2)],
+            }),
+        )
+    );
+    assert_eq!(
+        split_source_tap_cost_legs(AbilityCost::Tap),
+        (Some(AbilityCost::Tap), None)
+    );
+    assert_eq!(split_source_tap_cost_legs(life(3)), (None, Some(life(3))));
+}

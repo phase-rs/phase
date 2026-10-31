@@ -4769,16 +4769,18 @@ pub(crate) fn handle_sacrifice_for_cost(
             pending.activation_cost_snapshot.as_deref(),
             super::casting::ActivationCostGuardSite::SacrificeSource,
         )?;
-        let mut source_legs = Vec::new();
-        if let Some(cost) = pending.activation_cost.as_ref() {
-            collect_source_tap_legs(cost, &mut source_legs);
-        }
-        for leg in source_legs {
+        let (source_legs, residual) = pending
+            .activation_cost
+            .take()
+            .map(super::casting::split_source_tap_cost_legs)
+            .unwrap_or((None, None));
+        pending.activation_cost = residual;
+        if let Some(source_legs) = source_legs {
             match super::casting::pay_ability_cost_for_activation(
                 state,
                 player,
                 pending.object_id,
-                &leg,
+                &source_legs,
                 pending.activation_ability_index,
                 &mut pending.ability.context.cost_removed_counter_amount,
                 events,
@@ -4793,10 +4795,6 @@ pub(crate) fn handle_sacrifice_for_cost(
                     return Err(EngineError::ActionNotAllowed(reason.reason));
                 }
             }
-            pending.activation_cost = pending
-                .activation_cost
-                .take()
-                .and_then(|cost| remove_first_activation_cost_matching(cost, |c| *c == leg));
             pending.mark_activation_cost_committed();
         }
     }
@@ -7617,20 +7615,6 @@ pub(crate) fn resume_activation_mill_cost_payment(
         return Ok(waiting_for);
     }
     finish_pending_cost_or_cast(state, player, *pending, events)
-}
-
-/// The source's own {T}/{Q} legs, walking only what
-/// `remove_first_activation_cost_matching` can remove so no paid leg stays owed.
-fn collect_source_tap_legs(cost: &AbilityCost, legs: &mut Vec<AbilityCost>) {
-    match cost {
-        AbilityCost::Tap | AbilityCost::Untap => legs.push(cost.clone()),
-        AbilityCost::Composite { costs } => {
-            for cost in costs {
-                collect_source_tap_legs(cost, legs);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn remove_first_activation_cost_matching(
