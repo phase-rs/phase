@@ -353,6 +353,7 @@
     "requestedMessage": "要将牌局回退到其最后一步行动之前吗？",
     "requestedTitle": "{{name}} 请求悔棋"
   },
+  "p2pStateWithheld": "此操作后的游戏状态过大，无法发送，因此当前棋盘已过时。点对点游戏不支持悔棋；当后续状态小到可以发送时，棋盘会更新。",
   "terminalRecovery": {
     "finalViewsUnpublished": "认输已进入 Full 终局状态，但无法发布原生最终视图。",
     "concedeUnreconciled": "无法核对认输结果；该席位仍处于锁定状态。",

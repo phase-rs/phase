@@ -1194,6 +1194,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::GameOver { .. }
         // CR 732.2: a halted-resolution notification carries no trigger subject.
         | GameEvent::ResolutionHalted { .. }
+        | GameEvent::ShortcutRepetition { .. }
         | GameEvent::DamagePrevented { .. }
         | GameEvent::SpellCountered { .. }
         | GameEvent::ObjectIntensified { .. }

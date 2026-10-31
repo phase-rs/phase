@@ -46,6 +46,8 @@ use engine::types::match_config::{MatchConfig, MatchPhase, MatchType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
+use crate::loop_period_remade_token_source::{markers, repetitions, take_recorded};
+
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
 const P2: PlayerId = PlayerId(2);
@@ -11353,6 +11355,67 @@ fn bounded_fixed_count_commits_exactly_n_periods() {
     }
 }
 
+/// CR 732.1b + CR 732.2c: a Ring take of the real Dina/Conqueror drain keeps its first and last
+/// repetition. One repetition: a Dina, Soul Steeper trigger ("Whenever you gain life, each opponent
+/// loses 1 life.") makes P1, P2 and P3 each lose 1 (CR 119.3); each loss triggers Bloodthirsty
+/// Conqueror ("Whenever an opponent loses life, you gain that much life.") once (CR 603.2c); one of
+/// those resolves and P0 gains 1, and the Dina trigger that gain makes goes on top of the other two
+/// (CR 405.2) and resolves first (CR 405.5).
+#[test]
+fn a_ring_take_of_the_dina_drain_keeps_its_first_and_last_repetition() {
+    const P3: PlayerId = PlayerId(3);
+    for (count, kept) in [(1, vec![1]), (2, vec![1, 2]), (3, vec![1, 3])] {
+        let mut state = restore_dump(&gunzip_dump(include_bytes!(
+            "../fixtures/dina_conqueror_4p.json.gz"
+        )));
+        drive_to_bounded_offer(&mut state, 400).expect("the bounded offer");
+        let WaitingFor::LoopShortcut {
+            proposer, period, ..
+        } = &state.waiting_for
+        else {
+            unreachable!("the bounded offer")
+        };
+        assert!(period.is_empty(), "the Ring route takes an empty period");
+        assert_eq!(*proposer, P0);
+        let offered: Vec<i32> = state.players.iter().map(|p| p.life).collect();
+
+        let result = take_recorded(&mut state, count);
+
+        assert_eq!(
+            markers(&result.events),
+            kept.iter()
+                .map(|repetition| (P0, *repetition))
+                .collect::<Vec<_>>(),
+            "Fixed({count})"
+        );
+        for events in repetitions(&result.events) {
+            let mut changes: Vec<(PlayerId, i32)> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::LifeChanged {
+                        player_id, amount, ..
+                    } => Some((*player_id, *amount)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(changes.pop(), Some((P0, 1)), "Fixed({count})");
+            changes.sort();
+            assert_eq!(changes, [(P1, -1), (P2, -1), (P3, -1)], "Fixed({count})");
+        }
+        let per_repetition = [1, -1, -1, -1];
+        let expected: Vec<i32> = offered
+            .iter()
+            .zip(per_repetition)
+            .map(|(life, delta)| life + count as i32 * delta)
+            .collect();
+        assert_eq!(
+            state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
+            expected,
+            "Fixed({count})"
+        );
+    }
+}
+
 /// ITEM 2 (CR 732.2a) — the ACCEPT side: an opponent's play in the window's trace must not divert
 /// an accepted bounded grant away from the drain materializer.
 ///
@@ -12276,7 +12339,17 @@ fn bounded_fixed_drive_commits_the_terminal_cycle_that_eliminates_one_seat() {
         let mut doctored = state.clone();
         let n = u32::try_from(first_crossing).expect("fits");
 
-        r6a_declare_and_accept_all(&mut doctored, proposer, n);
+        let result = take_recorded(&mut doctored, n);
+
+        // CR 732.1b + CR 704.5a: each repetition is Dina, Soul Steeper's "Whenever you gain life,
+        // each opponent loses 1 life." answered by Bloodthirsty Conqueror's "Whenever an opponent
+        // loses life, you gain that much life."; all `n` commit, the n-th taking the first victim
+        // to 0, and the record keeps the first and the n-th.
+        assert_eq!(
+            markers(&result.events),
+            [(proposer, 1), (proposer, n)],
+            "n={n}"
+        );
 
         // (a) EXACTLY the unique first crosser is eliminated. Not zero (the terminal cycle
         //     COMMITS) and not the whole table (that is the mirror row's arm).
@@ -14111,7 +14184,17 @@ fn the_honest_count_reaches_the_cross_lethal_arm_when_the_crossing_takes_the_las
          vs crossing {crossing}"
     );
 
-    r6a_declare_and_accept_all(&mut state, proposer, honest);
+    let result = take_recorded(&mut state, honest);
+
+    // CR 732.1b + CR 104.2a: each repetition is Psychosis Crawler's "Whenever you draw a card,
+    // each opponent loses 1 life." answered by a draw, as Kefka, Ruler of Ruin's "Whenever an
+    // opponent loses life during your turn, you draw that many cards." does on P0's turn at a
+    // loss of 1; the crossing repetition ends the game, and the record keeps the first and it.
+    let crossing = u32::try_from(crossing).expect("fits");
+    assert_eq!(
+        markers(&result.events),
+        [(proposer, 1), (proposer, crossing)]
+    );
 
     assert_eq!(
         state.waiting_for,

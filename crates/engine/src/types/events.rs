@@ -1392,6 +1392,11 @@ pub enum GameEvent {
     ResolutionHalted {
         involved: Vec<ObjectId>,
     },
+    /// CR 732.1b + CR 732.2c: marks the start of one committed repetition of a taken shortcut.
+    ShortcutRepetition {
+        controller: PlayerId,
+        repetition: u32,
+    },
     DamageDealt {
         source_id: ObjectId,
         target: TargetRef,

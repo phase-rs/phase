@@ -52,6 +52,9 @@ const NON_VISUAL_EVENTS = new Set([
   "DieRollIgnored",
   "StartingPlayerContest",
   "CoinFlipped",
+  // Engine bookkeeping with nothing on the board to show: the repetition's own events animate.
+  "ResolutionHalted",
+  "ShortcutRepetition",
 ]);
 
 /** Whether an event produces no visual output. CR 605.3b: a mana ability's

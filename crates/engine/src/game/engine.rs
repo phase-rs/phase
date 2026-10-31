@@ -2391,6 +2391,7 @@ fn finish_action_boundary_with_lifecycle(
     // consumer of `public_state_dirty`, so marking once here over the complete
     // event stream is correct and cheapest.
     mark_public_state_from_events(state, &result.events);
+    elide_middle_repetitions(&mut result.events);
     finalize_rules_state(state);
     result.waiting_for = state.waiting_for.clone();
     if matches!(mode, PublicFinalizeMode::Immediate) {
@@ -7328,8 +7329,14 @@ fn materialize_fixed_shortcut(
                     }
                 }
                 committed = *s; // ATOMIC: commit state ...
-                result.events.append(&mut events); // ... with its events together
                 committed_cycles += 1;
+                // ... with its events together
+                commit_repetition(
+                    &mut result.events,
+                    proposal.proposer,
+                    committed_cycles,
+                    &mut events,
+                );
                 continue 'cycles;
             }
             // Cross-lethal: COMMIT + STOP, ON THE NAME THE OFFER PUBLISHED. CR 704.5a: the win
@@ -7371,7 +7378,12 @@ fn materialize_fixed_shortcut(
                     break 'cycles;
                 }
                 *state = *s;
-                result.events.append(&mut events);
+                commit_repetition(
+                    &mut result.events,
+                    proposal.proposer,
+                    committed_cycles + 1,
+                    &mut events,
+                );
                 result.waiting_for = state.waiting_for.clone();
                 return Ok(());
             }
@@ -7475,8 +7487,13 @@ fn materialize_fixed_shortcut(
                             // reached unchanged.
                             DepartureVerdict::Predicted => {
                                 committed = *s;
-                                result.events.append(&mut events);
                                 committed_cycles += 1;
+                                commit_repetition(
+                                    &mut result.events,
+                                    proposal.proposer,
+                                    committed_cycles,
+                                    &mut events,
+                                );
                                 continue 'cycles;
                             }
                             // `NoDeparture` is unreachable under this outcome's own gate, which
@@ -7492,8 +7509,13 @@ fn materialize_fixed_shortcut(
                 // THE UNSIGNED FALL-THROUGH ALONE: commit and STOP, the disposition every
                 // producer that publishes no signature shipped with.
                 committed = *s;
-                result.events.append(&mut events);
                 committed_cycles += 1;
+                commit_repetition(
+                    &mut result.events,
+                    proposal.proposer,
+                    committed_cycles,
+                    &mut events,
+                );
                 break 'cycles;
             }
             // Runaway cap / unpinned prompt / engine error ⇒ abort to manual. The aborting
@@ -8589,6 +8611,44 @@ fn materialize_object_growth_shortcut(
     result.waiting_for = state.waiting_for.clone();
 }
 
+/// Appends one committed repetition of a taken shortcut, opened by its marker.
+fn commit_repetition(
+    events: &mut Vec<GameEvent>,
+    controller: PlayerId,
+    repetition: u32,
+    cycle: &mut Vec<GameEvent>,
+) {
+    events.push(GameEvent::ShortcutRepetition {
+        controller,
+        repetition,
+    });
+    events.append(cycle);
+}
+
+/// CR 732.1b: the shortcut's result is the board; the record keeps the first and last repetition,
+/// and every seat that lost and left the game in between (CR 704.5a + CR 800.4a).
+fn elide_middle_repetitions(events: &mut Vec<GameEvent>) {
+    let markers: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| matches!(event, GameEvent::ShortcutRepetition { .. }))
+        .map(|(index, _)| index)
+        .collect();
+    let [_, second, .., last] = markers[..] else {
+        return;
+    };
+    let mut index = 0;
+    events.retain(|event| {
+        let kept = !(second..last).contains(&index)
+            || matches!(
+                event,
+                GameEvent::PlayerLost { .. } | GameEvent::PlayerEliminated { .. }
+            );
+        index += 1;
+        kept
+    });
+}
+
 /// CR 732.2a: perform a confirmed period `n` times through real `apply()` at the take, committing
 /// each period atomically — observers (Heliod / Corpsejack) fire each cycle, so an OBSERVED loop's
 /// N-cycle result is exact where a single batched N×δ would be wrong. The simulation guard is HELD
@@ -8671,8 +8731,8 @@ pub(crate) fn drive_persistent_axis_collapse(
         let departed =
             state.game_end.is_some() || !crate::game::players::is_alive(state, controller);
         if !performed && departed && verdict == Some(DepartureVerdict::Predicted) {
-            events.append(&mut cycle_events);
             delivered += 1;
+            commit_repetition(events, controller, delivered, &mut cycle_events);
             #[cfg(feature = "test-support")]
             take_cost.end_cycle();
             break;
@@ -8689,20 +8749,32 @@ pub(crate) fn drive_persistent_axis_collapse(
             delivered = 0;
             for _ in 0..prefix {
                 reseed(state);
-                match super::period_confirm::perform_cycle(state, period, controller, events) {
-                    Ok(()) => delivered += 1,
+                let mut cycle_events = Vec::new();
+                match super::period_confirm::perform_cycle(
+                    state,
+                    period,
+                    controller,
+                    &mut cycle_events,
+                ) {
+                    Ok(()) => {
+                        delivered += 1;
+                        commit_repetition(events, controller, delivered, &mut cycle_events);
+                    }
                     Err(OfferRefusal::LifeChangeUnrepresentable { player }) => {
                         *state = snapshot;
                         events.truncate(committed_events);
                         return Err(EngineError::LifeChangeUnrepresentable { player });
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        events.append(&mut cycle_events);
+                        break;
+                    }
                 }
             }
             break;
         }
-        events.append(&mut cycle_events);
         delivered += 1;
+        commit_repetition(events, controller, delivered, &mut cycle_events);
         #[cfg(feature = "test-support")]
         take_cost.end_cycle();
     }
