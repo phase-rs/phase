@@ -185,6 +185,10 @@ fn diagnostic_provenance_inherited_prefix_structural_composites() {
     // duplicate). Nearest printed cards: Jermane, Pride of the Circus (line-1 must-block warning)
     // and Rankle, Master of Pranksters (triggered modal). Rankle's metadata is required for
     // self-reference normalization of both modal headers.
+    // The duplicated warning is the pre-existing whole-vector extension in oracle_modal.rs
+    // (the trigger context clones the inherited prefix and the whole vector is appended back).
+    // It is pinned only because this change must not alter warning membership; a fix to that
+    // duplication updates this expectation deliberately.
     let first = format!("{DIAGNOSTIC_JERMANE}\n{DIAGNOSTIC_RANKLE}");
     let repeated = format!("{first}\n{DIAGNOSTIC_RANKLE}");
     let mut expected = vec![diagnostic_must_block(1), diagnostic_must_block(1)];
