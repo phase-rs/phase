@@ -686,6 +686,17 @@ fn default_true() -> bool {
     true
 }
 
+/// Which frame a [`ServerMessage::StateWithheld`] replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum WithheldFrame {
+    /// Carries the recipient's seat, the only seat assignment a board-less client receives.
+    GameStarted {
+        your_player: PlayerId,
+    },
+    StateUpdate,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ServerMessage {
@@ -874,6 +885,15 @@ pub enum ServerMessage {
     /// transition. The submitting adapter resolves its pending request without
     /// caching or publishing a replacement snapshot.
     ActionNoOp,
+    /// Sent in place of a `GameStarted` or `StateUpdate` over the frame bound.
+    /// The action it answers applied; only its state was not delivered.
+    StateWithheld {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
+        state_revision: u64,
+        withheld: WithheldFrame,
+        reason: String,
+    },
     /// Acknowledges a host-authorized permanent game cleanup.
     GameAbandoned {
         game_code: String,
@@ -2319,6 +2339,7 @@ mod tests {
         let msg = ClientMessage::SeatMutate {
             mutation: SeatMutation::SetKind {
                 seat_index: 1,
+                expected_kind: None,
                 kind: SeatKind::Ai {
                     difficulty: AiDifficulty::Medium,
                     deck: DeckChoice::DeckList(Box::new(DeckData {
@@ -2348,6 +2369,65 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn decoded_conditional_seat_mutation_preserves_joined_human() {
+        struct Resolver;
+        impl seat_reducer::types::DeckResolver for Resolver {
+            fn resolve(
+                &self,
+                _choice: &DeckChoice,
+            ) -> Result<engine::game::deck_loading::PlayerDeckList, String> {
+                Ok(Default::default())
+            }
+        }
+        let context = seat_reducer::types::ReducerCtx {
+            platform: phase_ai::config::Platform::Native,
+            deck_resolver: &Resolver,
+        };
+        let mut state = seat_reducer::types::SeatState {
+            seats: vec![SeatKind::HostHuman, SeatKind::JoinedHuman],
+            tokens: vec!["host".to_string(), "guest".to_string()],
+            format: engine::types::format::FormatConfig::standard(),
+            game_started: false,
+        };
+        let mut frame = serde_json::json!({
+            "type": "SeatMutate",
+            "data": { "mutation": {
+                "type": "SetKind",
+                "data": {
+                    "seatIndex": 1,
+                    "kind": { "type": "Ai", "data": {
+                        "difficulty": "Medium", "deck": { "type": "Random" }
+                    }},
+                    "expectedKind": { "type": "WaitingHuman" }
+                }
+            }}
+        });
+        let ClientMessage::SeatMutate { mutation } = serde_json::from_value(frame.clone()).unwrap()
+        else {
+            panic!("expected seat mutation");
+        };
+        crate::seat_mutation_wire_guard::guard_seat_mutation(&mutation).unwrap();
+        let delta = seat_reducer::apply(&mut state, mutation, &context).unwrap();
+        assert_eq!(state.seats[1], SeatKind::JoinedHuman);
+        assert_eq!(state.tokens[1], "guest");
+        assert!(delta.invalidated_tokens.is_empty());
+
+        frame["data"]["mutation"]["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("expectedKind");
+        let ClientMessage::SeatMutate { mutation } = serde_json::from_value(frame).unwrap() else {
+            panic!("expected seat mutation");
+        };
+        assert!(serde_json::to_value(&mutation).unwrap()["data"]
+            .get("expectedKind")
+            .is_none());
+        let delta = seat_reducer::apply(&mut state, mutation, &context).unwrap();
+        assert_eq!(delta.invalidated_tokens, vec!["guest"]);
+        assert!(matches!(state.seats[1], SeatKind::Ai { .. }));
     }
 
     #[test]
@@ -4021,6 +4101,66 @@ mod tests {
         assert!(matches!(
             serde_json::from_str::<ServerMessage>(&json).unwrap(),
             ServerMessage::ActionNoOp
+        ));
+    }
+
+    #[test]
+    fn server_message_state_withheld_wire_shape_roundtrips() {
+        let msg = ServerMessage::StateWithheld {
+            full_key: None,
+            state_revision: 6,
+            withheld: WithheldFrame::StateUpdate,
+            reason: "too large".to_string(),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "StateWithheld",
+                "data": {
+                    "state_revision": 6,
+                    "withheld": { "type": "StateUpdate" },
+                    "reason": "too large",
+                },
+            })
+        );
+        assert!(matches!(
+            serde_json::from_value::<ServerMessage>(json).unwrap(),
+            ServerMessage::StateWithheld {
+                full_key: None,
+                state_revision: 6,
+                withheld: WithheldFrame::StateUpdate,
+                ..
+            }
+        ));
+        let started = serde_json::to_value(ServerMessage::StateWithheld {
+            full_key: None,
+            state_revision: 2,
+            withheld: WithheldFrame::GameStarted {
+                your_player: PlayerId(1),
+            },
+            reason: String::new(),
+        })
+        .unwrap();
+        assert_eq!(
+            started,
+            serde_json::json!({
+                "type": "StateWithheld",
+                "data": {
+                    "state_revision": 2,
+                    "withheld": { "type": "GameStarted", "data": { "your_player": 1 } },
+                    "reason": "",
+                },
+            })
+        );
+        assert!(matches!(
+            serde_json::from_value::<ServerMessage>(started).unwrap(),
+            ServerMessage::StateWithheld {
+                withheld: WithheldFrame::GameStarted {
+                    your_player: PlayerId(1)
+                },
+                ..
+            }
         ));
     }
 

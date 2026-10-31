@@ -95,7 +95,7 @@ pub(crate) fn bind_controller_phrase(
 
 /// Parser-only lookahead for token body clauses split across adjacent sentences.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TokenPtFollowup {
+pub enum TokenPtFollowup {
     PowerToughness { power: PtValue, toughness: PtValue },
 }
 
@@ -110,7 +110,7 @@ pub(crate) enum TokenPtFollowup {
 /// instead of binding its source to `Any`. A typed scope rather than a bare bool
 /// per the codebase's "typed enum over bool" convention.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum TriggerConditionScope {
+pub enum TriggerConditionScope {
     /// A trigger printed on the card. Delayed-only anaphoric subjects stay `Unknown`.
     #[default]
     Printed,
@@ -160,7 +160,7 @@ pub(crate) enum TriggerConditionScope {
 ///      appears. No other site runs a speculative sub-parse against the real
 ///      `&mut ctx` while this gate is `ChainBound`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum ChosenColorQualifierScope {
+pub enum ChosenColorQualifierScope {
     /// Default, and the value every `ParseContext::default()` carries — which
     /// is every `parse_type_phrase_folding` call site, by construction of the wrapper
     /// in `oracle_target.rs`. The printed form must NOT be consumed here.
@@ -193,7 +193,7 @@ pub(crate) enum ChosenColorQualifierScope {
 /// (including the case where its nearest zone choice is some other shape).
 /// Consumers must match the carried source EXPLICITLY.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PriorZoneChoicePartition {
+pub struct PriorZoneChoicePartition {
     /// The `candidate_source` of that `ChooseFromZone` clause — i.e. where the
     /// partitioned pile came from (`CostPaidObjects` for Coin of Fate's
     /// cost-exiled pair, `Legacy` for Wake to Slaughter's, …).
@@ -226,7 +226,7 @@ pub(crate) struct PriorZoneChoicePartition {
 /// (a speculative probe, a branch alternative). Both reset this field; a plain
 /// `.clone()` continues the same body.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct TriggerZoneChangeProvenance(Option<(Zone, Zone)>);
+pub struct TriggerZoneChangeProvenance(Option<(Zone, Zone)>);
 
 impl TriggerZoneChangeProvenance {
     /// No enclosing zone-change authority.
@@ -246,6 +246,19 @@ impl TriggerZoneChangeProvenance {
     }
 }
 
+/// CR 608.2c + CR 115.1: what a bare card-set aggregate surface (the
+/// demonstrative "those cards" shape) binds to in this chunk — either a
+/// chain-set cause or the ability's own chosen targets. A typed two-leaf
+/// binding rather than a bare `TrackedAnaphorSource`, which under-expresses
+/// the referent axis (a target-set referent is not a chain-set cause).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BareCardAggregateBinding {
+    /// A chain-set cause (mill, discard, sacrifice, …).
+    ChainSet(crate::types::ability::TrackedAnaphorSource),
+    /// The ability's own chosen targets (`TargetedObjects { slot: None }`).
+    AbilityTargets,
+}
+
 /// CR 601.2c + CR 608.2c: the target slots announced by the earlier clauses of
 /// an effect chain, for resolving a demonstrative ("that creature") to the
 /// declared slot it names. Only the stable prefix is numbered: once a clause
@@ -254,7 +267,7 @@ impl TriggerZoneChangeProvenance {
 /// runtime, so that clause's slots and every later slot are recorded without
 /// an index — they still take part in ambiguity checks but cannot be bound.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DeclaredSlotRegistry {
+pub enum DeclaredSlotRegistry {
     /// A clause shape whose declared numbering this walk cannot reproduce
     /// (multi-slot effects, else-branches, …). Nothing binds.
     Indeterminate,
@@ -270,7 +283,7 @@ impl Default for DeclaredSlotRegistry {
 
 /// One announced target slot of an earlier clause.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DeclaredSlotEntry {
+pub struct DeclaredSlotEntry {
     /// The declared-slot index (the `declared_targets_in_chain` numbering),
     /// `None` past the stable prefix.
     pub index: Option<usize>,
@@ -281,7 +294,7 @@ pub(crate) struct DeclaredSlotEntry {
 /// CR 700.2: the body a [`ParseContext`] parses — a whole ability, or one mode
 /// of a modal spell or ability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum BodyScope {
+pub enum BodyScope {
     #[default]
     WholeAbility,
     ModalMode,
@@ -290,7 +303,7 @@ pub(crate) enum BodyScope {
 /// CR 608.2k: the object a trigger condition introduces for its body's bare
 /// object pronouns, where the pinned `TargetFilter` is ambiguous on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConditionObjectAntecedent {
+pub enum ConditionObjectAntecedent {
     /// CR 509.3c: the attacker of a bare "<creature> becomes blocked" condition.
     BlockedAttacker,
 }
@@ -300,7 +313,7 @@ pub(crate) enum ConditionObjectAntecedent {
 ///
 /// Callers set only the fields they need; all fields are Default-able (D-02).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct ParseContext {
+pub struct ParseContext {
     /// The current subject (resolved target — "it", "that creature").
     pub subject: Option<TargetFilter>,
     /// Card name for self-reference (~) normalization.
@@ -330,7 +343,10 @@ pub(crate) struct ParseContext {
     /// Contextual source for the exact bare aggregate surface "those cards".
     /// Set per effect-chain chunk from the nearest typed producer, or from a
     /// proven trigger subject batch when no compatible chain producer wins.
-    pub bare_card_aggregate_source: Option<crate::types::ability::TrackedAnaphorSource>,
+    /// A two-leaf binding (never a bare `TrackedAnaphorSource`, which
+    /// under-expresses the referent axis): a chain-set cause or the ability's
+    /// own targets (CR 608.2c + CR 115.1).
+    pub bare_card_aggregate_source: Option<BareCardAggregateBinding>,
     /// CR 611.2a: the durational scope the clause currently being lowered stated
     /// at a printed position the clause BODY can no longer see, because the
     /// positional strip seams peel it before the body parser runs.
@@ -695,6 +711,16 @@ pub(crate) struct ParseContext {
     /// alongside `parent_target_is_chosen` in the chunk loop; `None` on every
     /// standalone and non-chosen parse.
     pub chain_prior_chosen_target: Option<TargetFilter>,
+    /// CR 608.2c + CR 109.4 + CR 115.1: the nearest player-referent clause
+    /// earlier in this same chain names a TARGETED player — a `Choose` with a
+    /// targeted chooser ("target opponent chooses self or others", the
+    /// self-or-others scheme class) or a player-typed `TargetOnly`. A later
+    /// "that player" / "the player" anaphor then names that announced target
+    /// (`ParentTarget`), not the trigger event's player (`TriggeringPlayer`).
+    /// Seeded per chunk in the chunk loop via
+    /// `chain_prior_targeted_player(builder.clauses())`; `false` on every
+    /// standalone parse and on the first chunk of every chain.
+    pub chain_prior_targeted_player: bool,
     /// CR 601.2c + CR 608.2c: the object-target FILTER declared by the nearest
     /// EARLIER clause of this same effect chain — the antecedent a later
     /// clause's demonstrative anaphor ("that token", "that artifact") can name.
@@ -1056,6 +1082,50 @@ impl ParseContext {
         self.relative_player_scope = prev;
         result
     }
+
+    /// CR 608.2k: Execute `f` with a temporary bare-object-pronoun antecedent,
+    /// restoring the prior value on return. The object-anaphor counterpart of
+    /// [`Self::with_player_scope`], for a seam that establishes a NEARER
+    /// antecedent than the enclosing one for a bounded span of text (a subject
+    /// phrase's own predicate). Save/restore, never set/clear, for the same
+    /// reason [`Self::stated_clause_duration`] is: a binding one clause
+    /// establishes must not outlive it, and a span that establishes none must
+    /// not clobber the enclosing one.
+    ///
+    /// Unlike [`Self::with_player_scope`]'s caller, which yields to an
+    /// already-set scope, this OVERRIDES: a possessor printed inside the span
+    /// outranks whatever the enclosing text established.
+    ///
+    /// CR 509.3c: [`Self::condition_object_antecedent`] is cleared for the span
+    /// and restored with the pin. That field says what an ambiguous
+    /// `object_pronoun_ref` names and is only meaningful for the pin it
+    /// travelled with (see its own doc: "Set only together with the matching
+    /// pin"), so a nearer pin must not be read through the outer pin's label.
+    ///
+    /// The clearing FAILS OPEN, and knowingly: a reader that tests the label
+    /// AND the pin together (`oracle_effect::mod`'s
+    /// `subject_is_unbindable_damage_source`) has its `BlockedAttacker` leg
+    /// forced false inside the span while its `ParentTarget` leg is true by
+    /// construction, so a nested `ParentTarget` damage subject under a bare
+    /// "becomes blocked" trigger would lose its honest `Effect::unimplemented`
+    /// rather than gain a wrong binding. Clearing is still right — the span's
+    /// pin is a DIFFERENT referent and no `ConditionObjectAntecedent` variant
+    /// describes it — and the open direction is unreachable today, because that
+    /// reader also requires the subject itself to be `ParentTarget`, which a
+    /// possessive-player subject never is. A variant naming the possessor is
+    /// what would close it.
+    pub fn with_object_pronoun_ref<R>(
+        &mut self,
+        antecedent: TargetFilter,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let prev = self.object_pronoun_ref.replace(antecedent);
+        let prev_antecedent = self.condition_object_antecedent.take();
+        let result = f(self);
+        self.object_pronoun_ref = prev;
+        self.condition_object_antecedent = prev_antecedent;
+        result
+    }
 }
 
 #[cfg(test)]
@@ -1069,6 +1139,47 @@ mod tests {
             context: "parse_target could not classify".into(),
             text: text.into(),
             line_index: 0,
+        }
+    }
+
+    /// CR 608.2k: the object-pronoun antecedent is SAVE/RESTORE, not set/clear.
+    /// A span that establishes a nearer antecedent must hand the enclosing one
+    /// back on return — otherwise a clause's own possessor would outlive it and
+    /// claim a later clause's pronoun — and that holds whether the enclosing
+    /// value was a pin or `None`.
+    #[test]
+    fn with_object_pronoun_ref_hands_the_enclosing_antecedent_back() {
+        for enclosing in [None, Some(TargetFilter::TriggeringSource)] {
+            let mut ctx = ParseContext {
+                object_pronoun_ref: enclosing.clone(),
+                condition_object_antecedent: Some(ConditionObjectAntecedent::BlockedAttacker),
+                ..ParseContext::default()
+            };
+            let seen = ctx.with_object_pronoun_ref(TargetFilter::ParentTarget, |ctx| {
+                (
+                    ctx.object_pronoun_ref.clone(),
+                    ctx.condition_object_antecedent,
+                )
+            });
+            assert_eq!(
+                seen.0,
+                Some(TargetFilter::ParentTarget),
+                "reach guard: the span really did see the nearer antecedent"
+            );
+            // CR 509.3c: the outer pin's label must not describe the nearer pin.
+            assert_eq!(
+                seen.1, None,
+                "the companion antecedent label is cleared for the span"
+            );
+            assert_eq!(
+                ctx.object_pronoun_ref, enclosing,
+                "the enclosing antecedent must be restored, including when it was None"
+            );
+            assert_eq!(
+                ctx.condition_object_antecedent,
+                Some(ConditionObjectAntecedent::BlockedAttacker),
+                "and so must its companion label"
+            );
         }
     }
 

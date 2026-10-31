@@ -3,7 +3,7 @@
 //! retain their existing wire shape.
 
 use serde::{Deserialize, Serialize};
-use server_core::protocol::{ClientMessage, CommandId, ServerMessage};
+use server_core::protocol::{ClientMessage, CommandId, ServerMessage, WithheldFrame};
 use std::sync::Arc;
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 
@@ -13,6 +13,22 @@ pub(crate) const MAX_PENDING_QUOTA_REFUSALS: usize = 8;
 pub(crate) enum RefusalError {
     Full,
     Closed,
+}
+
+/// Why a correlated command was refused before reaching its handler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RefusalReason {
+    RateQuota,
+    GameBusy,
+}
+
+impl RefusalReason {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::RateQuota => "Command rate quota exceeded",
+            Self::GameBusy => "Server is still processing an earlier command",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,6 +95,151 @@ pub(crate) struct Envelope {
     pub(crate) command_id: Option<CommandId>,
     #[serde(skip)]
     pub(crate) quota_refusal: Option<OwnedSemaphorePermit>,
+}
+
+/// Shown in place of a `StateUpdate` over the frame bound.
+pub(crate) const STATE_UPDATE_WITHHELD: &str = "The game state after this action is too large to send. A player can undo or request a takeback of the last action from the game menu to continue (for a loop, take it with a smaller count).";
+/// Shown in place of a `GameStarted` over the frame bound.
+pub(crate) const GAME_STARTED_WITHHELD: &str = "The game state is too large to send. A player whose window still shows the board can undo or request a takeback of the last action from the game menu to continue (for a loop, take it with a smaller count).";
+
+/// What the encoder sends instead of a frame over the bound.
+#[derive(Debug)]
+pub(crate) enum OverBound {
+    Retry(Box<Envelope>),
+    Skip(String),
+}
+
+impl Envelope {
+    /// Each state-bearing frame shrinks toward a notice; the rest cannot shrink.
+    pub(crate) fn over_bound(self, reason: String) -> OverBound {
+        let Self {
+            mut message,
+            command_id,
+            ..
+        } = self;
+        let withheld = |full_key: &mut Option<_>, state_revision: u64, frame| {
+            Some(ServerMessage::StateWithheld {
+                full_key: full_key.take(),
+                state_revision,
+                withheld: frame,
+                reason: match frame {
+                    WithheldFrame::GameStarted { .. } => GAME_STARTED_WITHHELD,
+                    WithheldFrame::StateUpdate => STATE_UPDATE_WITHHELD,
+                }
+                .to_string(),
+            })
+        };
+        let replacement = match &mut message {
+            ServerMessage::StateUpdate {
+                events,
+                log_entries,
+                ..
+            } if !events.is_empty() || !log_entries.is_empty() => {
+                events.clear();
+                log_entries.clear();
+                None
+            }
+            ServerMessage::StateUpdate {
+                full_key,
+                state_revision,
+                ..
+            } => withheld(full_key, *state_revision, WithheldFrame::StateUpdate),
+            ServerMessage::GameStarted {
+                full_key,
+                state_revision,
+                your_player,
+                ..
+            } => withheld(
+                full_key,
+                *state_revision,
+                WithheldFrame::GameStarted {
+                    your_player: *your_player,
+                },
+            ),
+            ServerMessage::TerminalResult {
+                delivery: Some(delivery),
+            }
+            | ServerMessage::TerminalBootstrapResult {
+                delivery: Some(delivery),
+            } if delivery.final_view.is_some() => {
+                delivery.final_view = None;
+                None
+            }
+            ServerMessage::AuthoritativeStateExport { .. } => {
+                Some(ServerMessage::AuthoritativeStateExportFailed { message: reason })
+            }
+            ServerMessage::ManaPaymentPreview { request_id, .. } => {
+                Some(ServerMessage::ManaPaymentPreviewFailed {
+                    request_id: *request_id,
+                    message: reason,
+                })
+            }
+            ServerMessage::InteractionPreview { preview } => {
+                Some(ServerMessage::InteractionPreviewFailed {
+                    request_id: preview.request_id.clone(),
+                    message: reason,
+                })
+            }
+            ServerMessage::ServerHello { .. }
+            | ServerMessage::GameCreated { .. }
+            | ServerMessage::SessionAttached { .. }
+            | ServerMessage::ActionRejected { .. }
+            | ServerMessage::ActionFailed { .. }
+            | ServerMessage::RequestRejected { .. }
+            | ServerMessage::ActionNoOp
+            | ServerMessage::StateWithheld { .. }
+            | ServerMessage::GameAbandoned { .. }
+            | ServerMessage::ManaPaymentPreviewRejected { .. }
+            | ServerMessage::ManaPaymentPreviewFailed { .. }
+            | ServerMessage::AuthoritativeStateExportFailed { .. }
+            | ServerMessage::InteractionPreviewFailed { .. }
+            | ServerMessage::OpponentDisconnected { .. }
+            | ServerMessage::OpponentReconnected { .. }
+            | ServerMessage::GameOver { .. }
+            | ServerMessage::AiDriverFault { .. }
+            | ServerMessage::TerminalBootstrapResult { .. }
+            | ServerMessage::TerminalResult { .. }
+            | ServerMessage::TerminalDeliveryAcknowledged { .. }
+            | ServerMessage::Error { .. }
+            | ServerMessage::LobbyUpdate { .. }
+            | ServerMessage::LobbyGameAdded { .. }
+            | ServerMessage::LobbyGameUpdated { .. }
+            | ServerMessage::LobbyGameRemoved { .. }
+            | ServerMessage::PlayerCount { .. }
+            | ServerMessage::PasswordRequired { .. }
+            | ServerMessage::JoinTargetInfo { .. }
+            | ServerMessage::PlayerSlotsUpdate { .. }
+            | ServerMessage::Conceded { .. }
+            | ServerMessage::Emote { .. }
+            | ServerMessage::ContestProgress { .. }
+            | ServerMessage::TimerUpdate { .. }
+            | ServerMessage::Pong { .. }
+            | ServerMessage::PeerInfo { .. }
+            | ServerMessage::DraftCreated { .. }
+            | ServerMessage::DraftJoined { .. }
+            | ServerMessage::DraftStateUpdate { .. }
+            | ServerMessage::DraftMatchStart { .. }
+            | ServerMessage::DraftTimerSync { .. }
+            | ServerMessage::DraftActionRejected { .. }
+            | ServerMessage::DraftOver { .. }
+            | ServerMessage::DraftSpectatorView { .. }
+            | ServerMessage::TakebackRequested { .. }
+            | ServerMessage::TakebackResolved { .. }
+            | ServerMessage::TournamentCreated { .. }
+            | ServerMessage::TournamentJoined { .. }
+            | ServerMessage::TournamentUpdate { .. }
+            | ServerMessage::TournamentRemoved { .. }
+            | ServerMessage::TournamentListUpdate { .. }
+            | ServerMessage::TournamentActionAck { .. }
+            | ServerMessage::TournamentActionRejected { .. }
+            | ServerMessage::TournamentCredentialRenewed { .. } => return OverBound::Skip(reason),
+        };
+        OverBound::Retry(Box::new(Envelope {
+            message: replacement.unwrap_or(message),
+            command_id,
+            quota_refusal: None,
+        }))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -260,6 +421,229 @@ mod tests {
             None,
             "control traffic never owns an application completion"
         );
+    }
+
+    fn state_update(events: usize) -> ServerMessage {
+        use engine::types::events::GameEvent;
+        use engine::types::game_state::GameState;
+        use engine::types::log::{GameLogEntry, LogCategory, LogSegment};
+        use engine::types::phase::Phase;
+        use engine::types::player::PlayerId;
+
+        let state = GameState::new_two_player(42);
+        let events: Vec<_> = (0..events)
+            .map(|_| GameEvent::PriorityPassed {
+                player_id: PlayerId(0),
+            })
+            .collect();
+        let log: Vec<_> = (0..events.len() as u32)
+            .map(|seq| GameLogEntry {
+                seq,
+                turn: 1,
+                phase: Phase::PreCombatMain,
+                category: LogCategory::Game,
+                segments: vec![LogSegment::Text("entry".to_string())],
+                presentation: Default::default(),
+            })
+            .collect();
+        crate::build_state_update_message(
+            &crate::game_executor::StateUpdateSource {
+                revision: 6,
+                state: &state,
+                events: &events,
+                log_entries: &log,
+                decision: None,
+            },
+            &server_core::FullSessionKey {
+                game_code: "BOUND1".to_string(),
+                generation: 1,
+            },
+            PlayerId(0),
+            Vec::new(),
+            &[],
+        )
+    }
+
+    fn envelope(message: ServerMessage, command_id: Option<CommandId>) -> Envelope {
+        Envelope {
+            message,
+            command_id,
+            quota_refusal: None,
+        }
+    }
+
+    fn retried(outcome: OverBound) -> Envelope {
+        match outcome {
+            OverBound::Retry(next) => *next,
+            OverBound::Skip(reason) => panic!("skipped: {reason}"),
+        }
+    }
+
+    #[test]
+    fn over_bound_state_update_strips_presentation_then_withholds_keeping_correlation() {
+        let id = Some(CommandId(5));
+        let stripped = retried(envelope(state_update(3), id).over_bound("r".to_string()));
+        assert_eq!(stripped.command_id, id);
+        let ServerMessage::StateUpdate {
+            state_revision,
+            events,
+            log_entries,
+            ..
+        } = &stripped.message
+        else {
+            panic!("{:?}", stripped.message);
+        };
+        assert_eq!(*state_revision, 6);
+        assert!(events.is_empty() && log_entries.is_empty());
+
+        let notice = retried(stripped.over_bound("r".to_string()));
+        assert_eq!(notice.command_id, id);
+        let ServerMessage::StateWithheld {
+            full_key,
+            state_revision,
+            withheld,
+            reason,
+        } = notice.message
+        else {
+            panic!("{:?}", notice.message);
+        };
+        assert_eq!(full_key.unwrap().game_code, "BOUND1");
+        assert_eq!(state_revision, 6);
+        assert_eq!(withheld, WithheldFrame::StateUpdate);
+        assert_eq!(reason, STATE_UPDATE_WITHHELD);
+
+        let again = envelope(state_update(0), None).over_bound("r".to_string());
+        assert!(matches!(
+            retried(again).message,
+            ServerMessage::StateWithheld {
+                withheld: WithheldFrame::StateUpdate,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn over_bound_game_started_is_withheld() {
+        let ServerMessage::StateUpdate {
+            state,
+            viewer_interaction,
+            derived,
+            ..
+        } = state_update(0)
+        else {
+            unreachable!()
+        };
+        let started = ServerMessage::GameStarted {
+            state_revision: 4,
+            state,
+            your_player: engine::types::player::PlayerId(1),
+            opponent_name: None,
+            player_names: Vec::new(),
+            legal_actions: Vec::new(),
+            auto_pass_recommended: false,
+            end_continuous_effect_offers: Vec::new(),
+            mana_payment_shortcut_actions: Vec::new(),
+            spell_costs: Default::default(),
+            legal_actions_by_object: Default::default(),
+            activation_block_reasons: Default::default(),
+            derived,
+            viewer_interaction,
+            player_token: None,
+            full_key: None,
+            events: Vec::new(),
+            rewind_targets: Vec::new(),
+        };
+        let notice = retried(envelope(started, Some(CommandId(2))).over_bound("r".to_string()));
+        assert_eq!(notice.command_id, Some(CommandId(2)));
+        assert!(matches!(
+            notice.message,
+            ServerMessage::StateWithheld {
+                full_key: None,
+                state_revision: 4,
+                withheld: WithheldFrame::GameStarted {
+                    your_player: engine::types::player::PlayerId(1)
+                },
+                ref reason,
+            } if reason == GAME_STARTED_WITHHELD
+        ));
+    }
+
+    #[test]
+    fn over_bound_replies_become_their_failure_siblings() {
+        let reason = "too large to send: 9 bytes; at most 8 allowed".to_string();
+        let export = ServerMessage::AuthoritativeStateExport {
+            state: "{}".to_string(),
+        };
+        let failed =
+            retried(envelope(export.clone(), Some(CommandId(3))).over_bound(reason.clone()));
+        assert_eq!(failed.command_id, Some(CommandId(3)));
+        assert!(matches!(
+            failed.message,
+            ServerMessage::AuthoritativeStateExportFailed { ref message } if *message == reason
+        ));
+        let uncorrelated = retried(envelope(export, None).over_bound(reason.clone()));
+        assert_eq!(uncorrelated.command_id, None);
+        assert!(matches!(
+            uncorrelated.message,
+            ServerMessage::AuthoritativeStateExportFailed { .. }
+        ));
+        let preview = ServerMessage::ManaPaymentPreview {
+            request_id: 7,
+            source_ids: Vec::new(),
+        };
+        assert!(matches!(
+            retried(envelope(preview, None).over_bound(reason.clone())).message,
+            ServerMessage::ManaPaymentPreviewFailed { request_id: 7, ref message } if *message == reason
+        ));
+    }
+
+    #[test]
+    fn over_bound_terminal_delivery_drops_its_final_view_once() {
+        let delivery = server_core::CurrentTerminalDelivery {
+            key: server_core::FullSessionKey {
+                game_code: "TERM01".to_string(),
+                generation: 1,
+            },
+            terminal_revision: 9,
+            delivery_id: server_core::TerminalDeliveryId("delivery".to_string()),
+            credential: server_core::TerminalCredential("credential".to_string()),
+            display: server_core::TerminalMatchDisplay {
+                winner: None,
+                reason: "Match conceded".to_string(),
+                ranked_result: None,
+            },
+            final_view: Some(serde_json::value::RawValue::from_string("{}".to_string()).unwrap()),
+        };
+        let result = ServerMessage::TerminalResult {
+            delivery: Some(delivery),
+        };
+        let viewless = retried(envelope(result, None).over_bound("r".to_string()));
+        assert!(matches!(
+            &viewless.message,
+            ServerMessage::TerminalResult { delivery: Some(delivery) } if delivery.final_view.is_none()
+        ));
+        assert!(matches!(
+            viewless.over_bound("r".to_string()),
+            OverBound::Skip(_)
+        ));
+    }
+
+    #[test]
+    fn over_bound_frames_without_state_are_skipped() {
+        for message in [
+            ServerMessage::ActionNoOp,
+            ServerMessage::StateWithheld {
+                full_key: None,
+                state_revision: 1,
+                withheld: WithheldFrame::StateUpdate,
+                reason: STATE_UPDATE_WITHHELD.to_string(),
+            },
+        ] {
+            assert!(matches!(
+                envelope(message, Some(CommandId(1))).over_bound("r".to_string()),
+                OverBound::Skip(reason) if reason == "r"
+            ));
+        }
     }
 
     #[test]

@@ -7,7 +7,7 @@ use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, separated_pair, terminated};
 use nom::Parser;
 
-use super::oracle_effect::imperative::parse_discard_card_filter;
+use super::oracle_effect::imperative::{parse_discard_card_filter, parse_say_phrase_payment};
 use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
@@ -18,7 +18,7 @@ use super::oracle_nom::target::{
 };
 use super::oracle_static::parse_dynamic_x_clause;
 use super::oracle_target::{
-    distribute_shared_properties, fold_article_led_type_union, parse_target,
+    distribute_shared_properties, fold_article_led_type_union, parse_shared_quality, parse_target,
     parse_type_phrase_folding,
 };
 use super::oracle_util::parse_count_expr;
@@ -803,6 +803,15 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         return cost;
     }
 
+    // Un-card (no CR entry): `say "<phrase>" [in a <adjective> voice]` as an
+    // activation cost (Infernal Spawn of Evil). Must precede the effect-parser
+    // fallback, whose `EffectCost { PayCost(SayPhrase) }` wrapper is unpayable.
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |i| value((), tag("say ")).parse(i)) {
+        if let Ok((_, phrase)) = parse_say_phrase_payment(rest) {
+            return AbilityCost::SayPhrase { phrase };
+        }
+    }
+
     // CR 701.4a + CR 601.2f: spelled-out "choose … or reveal …" behold cost
     // (Monstrous Emergence). Tried after the keyword form; both yield `Behold`.
     if let Some(cost) = parse_choose_or_reveal_behold_cost(&lower) {
@@ -1365,6 +1374,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         return AbilityCost::Reveal {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
+            shared_quality: None,
         };
     }
 
@@ -1379,7 +1389,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 
     // "Reveal a [Type] card from your hand" — fallback for reveal shapes the
     // strict `parse_reveal_from_hand_cost_body` grammar declines (self-name
-    // reveals, trailing relative clauses such as "that share a color").
+    // reveals).
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("reveal ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
         if let Ok((_, (before, _))) = split_once_on(&rest_lower, "from your hand") {
@@ -1394,6 +1404,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             return AbilityCost::Reveal {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: Some(filter),
+                shared_quality: None,
             };
         }
     }
@@ -1513,7 +1524,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 /// the caller's fallback keeps handling those.
 fn parse_reveal_from_hand_cost_body(body: &str) -> Option<AbilityCost> {
     type E<'a> = super::oracle_nom::error::OracleError<'a>;
-    let (_, (count, noun)) = all_consuming((
+    let (_, (count, noun, trailing_quality)) = all_consuming((
         terminated(
             nom_quantity::parse_quantity_expr_number,
             tag::<_, _, E<'_>>(" "),
@@ -1525,13 +1536,50 @@ fn parse_reveal_from_hand_cost_body(body: &str) -> Option<AbilityCost> {
                 terminated(tag(" in your hand"), opt(tag("."))),
             ),
         )),
+        opt(preceded(tag(" that share "), rest)),
     ))
     .parse(body)
     .ok()?;
-    let filter = parse_discard_card_filter(noun)?;
+    // CR 701.20a: The shared-quality clause may precede the zone ("two cards
+    // that share a color from your hand") or follow it (Illuminated Folio:
+    // "two cards from your hand that share a color").
+    let (noun, leading_quality) = match (
+        take_until::<_, _, E<'_>>(" that share "),
+        tag(" that share "),
+        rest,
+    )
+        .parse(noun)
+    {
+        Ok((_, (noun, _, quality))) => (noun, Some(quality)),
+        Err(_) => (noun, None),
+    };
+    let shared_quality = match leading_quality.or(trailing_quality) {
+        None => None,
+        Some(quality) => match all_consuming(preceded(
+            opt(alt((tag::<_, _, E<'_>>("a "), tag("an ")))),
+            parse_shared_quality,
+        ))
+        .parse(quality)
+        {
+            Ok((_, quality)) => Some(quality),
+            // A present clause naming a quality the engine cannot type stays a
+            // parse gap rather than becoming a permissive reveal.
+            Err(_) => {
+                return Some(AbilityCost::Unimplemented {
+                    description: format!("reveal {body}"),
+                })
+            }
+        },
+    };
+    // An untyped noun ("two cards") reveals any card from hand.
+    let filter = match all_consuming(alt((tag::<_, _, E<'_>>("cards"), tag("card")))).parse(noun) {
+        Ok(_) => TargetFilter::Typed(TypedFilter::card()),
+        Err(_) => parse_discard_card_filter(noun)?,
+    };
     Some(AbilityCost::Reveal {
         count,
         filter: Some(filter),
+        shared_quality,
     })
 }
 
@@ -4875,7 +4923,8 @@ mod tests {
             parse_oracle_cost("Reveal this card from your hand"),
             AbilityCost::Reveal {
                 count: QuantityExpr::Fixed { value: 1 },
-                filter: None
+                filter: None,
+                shared_quality: None,
             }
         );
     }
@@ -4932,6 +4981,7 @@ mod tests {
                                 TypedFilter::card()
                                     .properties(vec![FilterProp::HasColor { color }]),
                             )),
+                            shared_quality: None,
                         },
                         AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
                     ],
@@ -4952,8 +5002,72 @@ mod tests {
                 filter: Some(TargetFilter::Typed(
                     TypedFilter::default().subtype("Dragon".to_string())
                 )),
+                shared_quality: None,
             }
         );
+    }
+
+    /// CR 701.20a: Illuminated Folio's verbatim cost reveals two cards that
+    /// must share a color; the clause is read on either side of "from your
+    /// hand" and the untyped noun reveals any card.
+    #[test]
+    fn cost_reveal_cards_that_share_a_quality() {
+        use crate::types::ability::SharedQuality;
+        let expected = |quality| AbilityCost::Reveal {
+            count: QuantityExpr::Fixed { value: 2 },
+            filter: Some(TargetFilter::Typed(TypedFilter::card())),
+            shared_quality: Some(quality),
+        };
+        assert_eq!(
+            parse_oracle_cost("{1}, {T}, Reveal two cards from your hand that share a color"),
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                    AbilityCost::Tap,
+                    expected(SharedQuality::Color),
+                ],
+            }
+        );
+        assert_eq!(
+            parse_oracle_cost("Reveal two cards that share a color from your hand"),
+            expected(SharedQuality::Color)
+        );
+        assert_eq!(
+            parse_oracle_cost("Reveal two cards from your hand that share a creature type"),
+            expected(SharedQuality::CreatureType)
+        );
+    }
+
+    /// CR 701.20a: a typed reveal keeps its type filter alongside the
+    /// shared-quality constraint.
+    #[test]
+    fn cost_reveal_typed_cards_that_share_a_quality_keep_filter() {
+        assert_eq!(
+            parse_oracle_cost("Reveal three creature cards from your hand that share a card type"),
+            AbilityCost::Reveal {
+                count: QuantityExpr::Fixed { value: 3 },
+                filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+                shared_quality: Some(crate::types::ability::SharedQuality::CardType),
+            }
+        );
+    }
+
+    /// A present shared-quality clause naming an unmodeled quality must stay a
+    /// parse gap, never a reveal that ignores the restriction.
+    #[test]
+    fn cost_reveal_unsupported_shared_quality_is_unimplemented() {
+        for text in [
+            "Reveal two cards from your hand that share a supertype",
+            "Reveal two cards that share a supertype from your hand",
+        ] {
+            assert!(
+                matches!(parse_oracle_cost(text), AbilityCost::Unimplemented { .. }),
+                "{text}: {:?}",
+                parse_oracle_cost(text)
+            );
+        }
     }
 
     #[test]
@@ -4966,7 +5080,8 @@ mod tests {
                     FilterProp::HasColor {
                         color: crate::types::mana::ManaColor::Black
                     }
-                ])))
+                ]))),
+                shared_quality: None,
             }
         );
     }
@@ -5841,7 +5956,8 @@ mod tests {
             valid,
             AbilityCost::Reveal {
                 count: QuantityExpr::Fixed { value: 1 },
-                filter: Some(_)
+                filter: Some(_),
+                shared_quality: None,
             }
         ));
     }
@@ -5904,6 +6020,7 @@ mod tests {
                     qty: QuantityRef::Variable { ref name },
                 },
                 filter: Some(_),
+                shared_quality: None,
             } if name == "X"
         ));
         // Production strips the leading "return " before this helper runs.
@@ -5926,7 +6043,8 @@ mod tests {
             valid,
             AbilityCost::Reveal {
                 count: QuantityExpr::Fixed { value: 1 },
-                filter: Some(_)
+                filter: Some(_),
+                shared_quality: None,
             }
         ));
     }

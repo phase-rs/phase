@@ -37,9 +37,10 @@ mod prelude {
         parse_cda_quantity, parse_event_context_quantity, parse_for_each_clause, parse_quantity_ref,
     };
     pub(super) use super::super::oracle_target::{
-        distribute_controller_to_or, parse_combat_status_prefix, parse_counter_suffix,
+        distribute_controller_to_or, parse_block_exception_phrase, parse_block_filter_phrase,
+        parse_combat_status_prefix, parse_counter_suffix, parse_filter_phrase_union,
         parse_mana_value_suffix, parse_target, parse_that_clause_suffix, parse_type_phrase_folding,
-        scope_target_spell_phrase,
+        scope_target_spell_phrase, BlockFilterPhrase,
     };
     pub(super) use super::super::oracle_util::{
         has_unconsumed_conditional, infer_core_type_for_subtype, parse_comparator_prefix,
@@ -69,8 +70,8 @@ mod prelude {
         CombatAloneAction, CombatAloneRequirement, CostModifyMode, CostPaymentProhibition,
         CostReductionReach, CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost,
         ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool, HandSizeModification,
-        ProhibitionScope, RequiredDefender, StaticMode, SuppressedTriggerEvent, TriggerCause,
-        ZoneChangeQualifier,
+        PermissionCastLimit, ProhibitionScope, RequiredDefender, StaticMode,
+        SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
     };
     pub(super) use crate::types::zones::Zone;
 }
@@ -260,6 +261,14 @@ pub(crate) fn lower_static_ir(ir: &StaticIr) -> crate::types::ability::StaticDef
 
 #[cfg(test)]
 mod tests;
+
+/// Test helpers shared by `tests.rs` and the tests relocated out of it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers {
+    /// The interposed player class Weathered Sentinels prints, shared by every
+    /// static-side row below so the three-production rows cannot drift from the card.
+    pub const P3_SEG: &str = "players who attacked you during their last turn";
+}
 
 #[cfg(test)]
 mod snapshot_tests;

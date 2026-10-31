@@ -97,6 +97,13 @@ pub(crate) struct SubjectApplication {
     /// CR 608.2c: the player anaphor the subject phrase printed, which names its
     /// antecedent where `affected` alone cannot ("that player" and "its controller"
     /// both lower to `ParentTargetController`).
+    ///
+    /// Set only by the arms that print one of those two surface forms. Absence
+    /// therefore means "this phrase printed no recognized player anaphor", NOT
+    /// "this phrase is not a player subject" — several arms that resolve to a
+    /// player filter leave it `None`, which is why
+    /// [`super::super::oracle_effect::subject::subject_possessive_object_antecedent`]
+    /// reads the POSITIVE variant it needs rather than refusing a blacklist.
     #[serde(skip)]
     pub(crate) player_anaphor: Option<PlayerAnaphor>,
 }
@@ -1028,6 +1035,10 @@ pub(crate) enum ImperativeFamilyAst {
     /// the TARDIS, TARDIS Bay). Resolves to a no-op outside a Planechase game
     /// (CR 701.31a).
     Planeswalk,
+    /// CR 701.33a-b: An ability abandons the face-up ongoing scheme that
+    /// sourced it (ongoing-scheme "abandon this scheme" clauses). No-op unless
+    /// the source is a face-up ongoing scheme.
+    AbandonScheme,
     /// CR 701.51b: "open N Attractions"
     OpenAttractions {
         count: u32,
@@ -1274,6 +1285,16 @@ pub(crate) enum TargetedImperativeAst {
     UntapAll {
         target: TargetFilter,
     },
+    /// CR 118.12 + CR 601.2f: "tap any number of <target> with total power
+    /// <power> or greater" — an aggregate tap COST paid at resolution (Bow to
+    /// My Command's end-step leg; Crew CR 702.122a grammar in resolution
+    /// position). Lowers to `Effect::PayCost(TapCreatures(total_power_at_least))`
+    /// so the cost authority enforces the aggregate — never to a bare Tap,
+    /// which would drop the restriction.
+    TapAggregate {
+        target: TargetFilter,
+        power: i32,
+    },
     Goad {
         target: TargetFilter,
     },
@@ -1301,7 +1322,7 @@ pub(crate) enum TargetedImperativeAst {
     },
     Discard {
         count: QuantityExpr,
-        /// CR 701.9a: When true, the discard is random.
+        /// CR 701.9b: When true, the discard is random.
         random: bool,
         /// CR 701.9b: When true, the player may discard 0..=count cards.
         up_to: bool,
@@ -2204,6 +2225,35 @@ pub(crate) enum ZoneCounterImperativeAst {
     },
 }
 
+/// CR 701.13a + CR 608.2f: the objects of a "<player> exiles A[, B][, and C]"
+/// instruction, in printed order. The list is non-empty by construction: a
+/// first object, then any further ones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct SubjectExileObjectsAst {
+    pub(crate) first: SubjectExileObjectAst,
+    pub(crate) rest: Vec<SubjectExileObjectAst>,
+}
+
+/// CR 701.13a: one object of a "<player> exiles …" instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum SubjectExileObjectAst {
+    /// The top cards of a library.
+    LibraryTop(SubjectExileLibraryTopAst),
+    /// One card selected at random from the subject's graveyard or hand.
+    AtRandomFrom(Zone),
+}
+
+/// CR 401.2 + CR 701.13a: the top N cards of `owner`'s library. `owner` is the
+/// filter the shared library-owner authority (`parse_library_owner_phrase`) maps
+/// the printed possessive to; the lowering decides whether it names the exiling
+/// subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct SubjectExileLibraryTopAst {
+    pub(crate) count: QuantityExpr,
+    pub(crate) face_down: bool,
+    pub(crate) owner: TargetFilter,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum ClauseBoundary {
     Sentence,
@@ -2531,6 +2581,33 @@ fn apply_sentence_duration_to_coordinated_cast_defs(
     if let Some(alt) = def.else_ability.as_deref_mut() {
         apply_sentence_duration_to_coordinated_cast_defs(alt, duration);
     }
+}
+
+/// CR 601.3 + CR 611.2c: the permission a resolution-created graveyard cast
+/// grant ([`is_graveyard_permission_grant`]) grants, for a rider that modifies
+/// it to fold onto. `None` for any other effect.
+pub(crate) fn granted_graveyard_permission_mut(
+    effect: &mut Effect,
+) -> Option<&mut crate::types::statics::StaticMode> {
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = effect
+    else {
+        return None;
+    };
+    let [grant] = static_abilities.as_mut_slice() else {
+        return None;
+    };
+    let [ContinuousModification::GrantStaticAbility { definition }] =
+        grant.modifications.as_mut_slice()
+    else {
+        return None;
+    };
+    matches!(
+        definition.mode,
+        crate::types::statics::StaticMode::GraveyardCastPermission { .. }
+    )
+    .then_some(&mut definition.mode)
 }
 
 /// CR 601.3 + CR 611.2c: whether `effect` is a resolution-created graveyard
@@ -3217,6 +3294,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals

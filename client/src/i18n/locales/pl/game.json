@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Host","waiting":"Oczekiwanie","value":"{{ms}} ms","description":"Opóźnienie w obie strony do hosta. Brak odpowiedzi nie rozłącza gry."},
+  "playerLatency": {
+    "host": "Host",
+    "waiting": "Oczekiwanie",
+    "value": "{{ms}} ms",
+    "description": "Opóźnienie w obie strony do hosta. Brak odpowiedzi nie rozłącza gry."
+  },
   "abilityBlock": {
     "badge": "Zablokowana",
     "cantBeActivated": "Tej zdolności nie można aktywować",
@@ -27,6 +32,7 @@
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
+    "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
@@ -840,7 +846,7 @@
     "targetingLabel": "Obiera za cel {{label}}",
     "titleTargets": "Cele: {{targets}}",
     "titlePaid": "Zapłacono: {{paid}}",
-    "titleContext": "Kontekst: {{context}}",
+    "titleContext": "Kontekst: {{items}}",
     "revealedCards": "Odkryta: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} many",
@@ -2501,6 +2507,7 @@
     "triggerFallback": "Wyzwalacz {{number}}"
   },
   "costReductionOrder": {
+    "announcedHybrids": "Zapowiedziane płatności hybrydowe",
     "eyebrow": "Kolejność obniżek kosztu",
     "title": "Ustal kolejność swoich obniżek kosztu",
     "subtitle": "Te obniżki ustalają inny koszt całkowity w zależności od kolejności, w jakiej je zastosujesz (CR 601.2f). Wierzch tej listy stosowany jest jako pierwszy.",
@@ -2901,6 +2908,36 @@
       "winner": "{{name}} wygrywa zawody.",
       "tie": "Remis – nic się nie dzieje.",
       "cancelled": "Zawody anulowano – nic się nie dzieje."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

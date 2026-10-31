@@ -299,6 +299,7 @@ function buildDefaultPreferences(): PreferencesState {
     priorityAlertVisual: true,
     priorityAlertSound: true,
     priorityAlertTitle: true,
+    unCardActionsEnabled: false,
     experimentalTournamentsEnabled: false,
     masterVolume: 100,
     sfxVolume: 70,
@@ -332,6 +333,7 @@ function buildDefaultPreferences(): PreferencesState {
     multiplayerSplitLayoutNudgeDismissed: true,
     aiSeats: [defaultAiSeat()],
     cedhMode: false,
+    draftPickEnhancements: false,
     aiArchetypeFilter: "Any",
     aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
     aiBracketFilter: [] as CommanderBracket[],
@@ -383,6 +385,10 @@ interface PreferencesState {
   /** Prefix the browser tab title while a priority alert is pending in a
    *  background tab. */
   priorityAlertTitle: boolean;
+  /** Opt in to Un-card actions (silver-border sets): say-it prompts, the
+   *  Gotcha! button and the Un-actions menu. Mirrored to the engine, which
+   *  never prompts or offers anything to a player who has not opted in. */
+  unCardActionsEnabled: boolean;
   /** Whether the in-progress tournament UI appears in app navigation. */
   experimentalTournamentsEnabled: boolean;
   masterVolume: number;
@@ -452,6 +458,9 @@ interface PreferencesState {
    *  pools are restricted to bracket-5 decks. cEDH is a table property, not a
    *  per-seat difficulty — see `effectiveAiDifficulty` in `services/cedhLock`. */
   cedhMode: boolean;
+  /** Draft bots (Medium and above) apply the built-in per-format draft guides
+   *  to their picks. Off by default; formats without a guide are unaffected. */
+  draftPickEnhancements: boolean;
   aiArchetypeFilter: AiArchetypeFilter;
   aiCoverageFloor: number;
   aiBracketFilter: CommanderBracket[];
@@ -510,6 +519,7 @@ interface PreferencesActions {
   setPriorityAlertVisual: (enabled: boolean) => void;
   setPriorityAlertSound: (enabled: boolean) => void;
   setPriorityAlertTitle: (enabled: boolean) => void;
+  setUnCardActionsEnabled: (enabled: boolean) => void;
   setExperimentalTournamentsEnabled: (enabled: boolean) => void;
   setMasterVolume: (vol: number) => void;
   setSfxVolume: (vol: number) => void;
@@ -546,6 +556,7 @@ interface PreferencesActions {
   ensureAiSeatCount: (count: number) => void;
   /** Toggle the table-wide cEDH mode (all AI play cEDH, deck pools → bracket 5). */
   setCedhMode: (enabled: boolean) => void;
+  setDraftPickEnhancements: (enabled: boolean) => void;
   setAiArchetypeFilter: (filter: AiArchetypeFilter) => void;
   setAiCoverageFloor: (floor: number) => void;
   setAiBracketFilter: (brackets: CommanderBracket[]) => void;
@@ -670,6 +681,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setPriorityAlertVisual: (enabled) => set({ priorityAlertVisual: enabled }),
       setPriorityAlertSound: (enabled) => set({ priorityAlertSound: enabled }),
       setPriorityAlertTitle: (enabled) => set({ priorityAlertTitle: enabled }),
+      setUnCardActionsEnabled: (enabled) => set({ unCardActionsEnabled: enabled }),
       setExperimentalTournamentsEnabled: (enabled) => set({ experimentalTournamentsEnabled: enabled }),
       setMasterVolume: (vol) => set({ masterVolume: vol }),
       setSfxVolume: (vol) => set({ sfxVolume: vol }),
@@ -746,6 +758,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           return { aiSeats: grown };
         }),
       setCedhMode: (enabled) => set({ cedhMode: enabled }),
+      setDraftPickEnhancements: (enabled) => set({ draftPickEnhancements: enabled }),
       setAiArchetypeFilter: (filter) => set({ aiArchetypeFilter: filter }),
       setAiCoverageFloor: (floor) => set({ aiCoverageFloor: floor }),
       setAiBracketFilter: (brackets) => set({ aiBracketFilter: brackets }),

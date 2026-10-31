@@ -14,9 +14,11 @@ use super::oracle_effect::conditions::{
     parse_phase_name_set, source_saddled_filter, split_leading_conditional,
 };
 use super::oracle_effect::gap_diagnosis::clause_gap_unimplemented;
+#[cfg(test)]
+use super::oracle_effect::parse_effect_chain_ir;
 use super::oracle_effect::{
     attach_terminal_die_result_branches_before_finalization, condition_text_is_rehomeable,
-    lower_effect_chain_ir, parse_effect_chain_ir, parse_player_relative_clause,
+    lower_effect_chain_ir, parse_effect_chain_ir_ability_root, parse_player_relative_clause,
     rebind_event_context_amount_counts_in_ability, target_filter_controller_ref,
     try_parse_reanimator_aura_etb_effect_ir, try_parse_reanimator_aura_grant_etb_effect_ir,
 };
@@ -71,6 +73,10 @@ use super::oracle_util::{
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::ManaProduction;
 use crate::types::ability::{
+    indicated_action_commit, optional_addressee_is_always_controller, CardPlayMode,
+    CastFromZoneDriver, IndicatedActionCommit,
+};
+use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
     AttachmentReferent, AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource,
@@ -83,8 +89,8 @@ use crate::types::ability::{
     PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, SpentColor,
     StaticCondition, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause,
+    TriggerConstraint, TriggerDefinition, TriggerLimitSpend, TypeFilter, TypedFilter,
+    UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -96,6 +102,7 @@ use crate::types::triggers::{
     AbilityLifecyclePoint, AttackTargetFilter, ControlChangeSide, PlaneswalkRole, TriggerMode,
 };
 use crate::types::zones::Zone;
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 
 /// Returns true if `filter` references the trigger source itself — directly
@@ -259,7 +266,10 @@ fn parse_self_return_origin_zone(lower: &str) -> Option<Zone> {
     .and_then(|(_, zone, _)| zone)
 }
 
-fn self_recursion_trigger_zone(
+/// CR 113.6m: self-moving abilities function in the specified origin zone,
+/// including delayed self-moves. Callers retain trigger-condition precedence
+/// and the attached-Aura exception.
+pub(super) fn self_recursion_trigger_zone(
     ability: &crate::types::ability::AbilityDefinition,
     source_lower: &str,
 ) -> Option<Zone> {
@@ -574,6 +584,7 @@ fn rewrite_cost_x_in_condition(cond: &mut crate::types::ability::AbilityConditio
         | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::WhenYouDo
         | AbilityCondition::WasCast { .. }
         | AbilityCondition::CastDuringPhase { .. }
@@ -871,6 +882,7 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
                 ctx,
             ));
         }
+        share_split_limit(&mut results);
         return results;
     }
 
@@ -924,16 +936,15 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
                 ir
             })
             .collect();
-        // Shared-constraint marker. A constraint that counts firings per
-        // definition (`constraint_counts_per_definition`) must span both halves
-        // of the one printed ability: CR 603.2h for "Do this only once each
-        // turn" (Glava, Five-Advents Mage); for "This ability triggers only
-        // once each turn" (Bill Potts) the engine fact is that the counter is
-        // keyed per `TriggerDefinitionRef`, so two lowered halves would each
-        // fire once. Until a single-definition disjunctive trigger lets one
-        // counter span both events, the activation half is a strict failure
-        // and the spell half keeps the constraint, so exactly one counted
-        // definition is live.
+        // A constraint with a per-definition ledger
+        // (`constraint_counts_per_definition`) spans both halves of the one
+        // printed ability (CR 113.2c + CR 603.2h): "Do this only once each turn"
+        // (Glava, Five-Advents Mage) and "This ability triggers only once each
+        // turn" (Bill Potts). The shared-limit marker (`share_split_limit`) would
+        // key both halves' ledgers on the spell half, but the activation half's
+        // runtime is not yet covered by tests, so it stays a strict failure: the
+        // spell half keeps the constraint and is the one live counted definition.
+        // Lifting this is gated on activation-half runtime tests.
         if results.iter().any(|ir| {
             lowered_trigger_constraint(&ir.modifiers, ir.partial_def.constraint.clone())
                 .as_ref()
@@ -965,6 +976,7 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
                 ctx,
             ));
         }
+        share_split_limit(&mut results);
         return results;
     }
 
@@ -1934,7 +1946,8 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             // conservative side of that line: a split body that would have been
             // answerable stays an honest gap rather than a guessed binding.
             let mut reflexive_ctx = effect_ctx.clone_for_independent_body();
-            let mut effect_chain = parse_effect_chain_ir(
+            // CR 603.12: the split reflexive trigger has its own ability body.
+            let mut effect_chain = parse_effect_chain_ir_ability_root(
                 &reflexive_effect_text,
                 AbilityKind::Spell,
                 &mut reflexive_ctx,
@@ -2048,7 +2061,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     extract_illegal_targets_disposition(&effect_for_parse);
                 let (chain_text, ir) = match disposition {
                     IllegalTargetsDisposition::DoesNotResolve => {
-                        let ir = parse_effect_chain_ir(
+                        let ir = parse_effect_chain_ir_ability_root(
                             &stripped_text,
                             AbilityKind::Spell,
                             &mut effect_ctx,
@@ -2058,7 +2071,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     IllegalTargetsDisposition::StillResolves => {
                         // Parse the stripped chain on a clone: it is committed only if kept.
                         let mut stripped_ctx = effect_ctx.clone();
-                        let ir = parse_effect_chain_ir(
+                        let ir = parse_effect_chain_ir_ability_root(
                             &stripped_text,
                             AbilityKind::Spell,
                             &mut stripped_ctx,
@@ -2068,7 +2081,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                             // with its own targets; the root stamp would not govern it. Fail
                             // closed: re-parse the unstripped body so the sentence stays a
                             // strict failure and the disposition stays the default.
-                            let ir = parse_effect_chain_ir(
+                            let ir = parse_effect_chain_ir_ability_root(
                                 &effect_for_parse,
                                 AbilityKind::Spell,
                                 &mut effect_ctx,
@@ -2219,7 +2232,15 @@ fn lower_trigger_effect_chain(
     // CR 603.5: A triggered ability whose effect is optional ("may") goes
     // on the stack regardless; the choice is made when it resolves. Carry
     // that optionality onto the execute ability, which is what resolves.
-    if modifiers.optional {
+    //
+    // CR 601.3: except for a granted graveyard cast permission ("you may cast a
+    // creature spell from that player's graveyard this turn" — Whispersteel
+    // Dagger): its "may" is the later cast the permission allows, not a choice
+    // made as the trigger resolves, as for the same grant in a spell or an
+    // activated ability.
+    if modifiers.optional
+        && !crate::parser::oracle_ir::ast::is_graveyard_permission_grant(&ability.effect)
+    {
         ability.optional = true;
     }
     ability
@@ -2408,6 +2429,50 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         if let Some(ability) = execute.as_deref_mut() {
             if ability.optional_player.is_none() && ability.optional_for.is_none() {
                 ability.optional_player = Some(optional_player.clone());
+                // CR 608.2d + CR 118.12: the stamped announcer is also the payer
+                // when the head is a still-default-payer `PayCost` — the "they
+                // may <cost>" shape in a trigger whose subject names no player
+                // (Bow to My Command's "they may tap … with total power 8 or
+                // greater" under a phase head). Subject injection never rebound
+                // the payer there (no player `affected`), so without this the
+                // stamped opponent would announce whether the CONTROLLER pays.
+                // Heads whose payer subject injection already bound (Horn of
+                // Plenty, Wandering Archaic: TriggeringPlayer) are untouched.
+                if let Effect::PayCost { payer, cost, .. } = ability.effect.as_mut() {
+                    if matches!(payer, TargetFilter::Controller) {
+                        *payer = optional_player.clone();
+                        // CR 805.4 + CR 805.6: under a phase head, "they" is the
+                        // team whose turn it is — not the singular active seat
+                        // `TriggeringPlayer` resolves to. The stamped announcer
+                        // still announces the may, but a tap-aggregate cost
+                        // head is paid COLLECTIVELY: each teammate selects
+                        // their own creatures and the combined total is
+                        // checked once (Bow to My Command, 2017-06-13
+                        // ruling). Gated to phase heads because every other
+                        // event records a genuinely singular player, where
+                        // "they" stays singular. In single-seat teams this
+                        // flag is behavior-neutral (the one seat pays through
+                        // the ordinary single prompt).
+                        if def.mode == TriggerMode::Phase {
+                            if let AbilityCost::TapCreatures { requirement, .. } = cost {
+                                if let TapCreaturesRequirement::Aggregate {
+                                    stat,
+                                    comparator,
+                                    value,
+                                    ..
+                                } = *requirement
+                                {
+                                    *requirement = TapCreaturesRequirement::Aggregate {
+                                        stat,
+                                        comparator,
+                                        value,
+                                        collective: true,
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -2718,6 +2783,22 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     }
 
     def.constraint = lowered_trigger_constraint(modifiers, def.constraint.take());
+    // CR 603.2h + CR 608.2d: the engine observes the indicated action as the controller
+    // accepting the ability's single non-iterated "you may" instruction. Any other body
+    // names an action the engine cannot observe — strict failure, not a limit that never
+    // (or wrongly) spends.
+    if matches!(
+        def.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::IndicatedAction
+        })
+    ) && !def
+        .execute
+        .as_deref()
+        .is_some_and(has_single_indicated_action_instruction)
+    {
+        return unknown_trigger_definition(&ir.source_text).1;
+    }
     constrain_triggering_spell_with_nth_filter(&mut def);
 
     // Preserve original oracle text for coverage/UI annotation.
@@ -4190,12 +4271,10 @@ pub(crate) fn parse_trigger_line_with_index(
 fn parse_trigger_constraint(lower: &str) -> Option<TriggerConstraint> {
     // Order is load-bearing: longer/more-specific matches must precede shorter ones
     // ("only once each turn" before "only once", etc.).
-    if scan_contains(lower, "this ability triggers only once each turn")
-        || scan_contains(lower, "triggers only once each turn")
-        // CR 603.2h: "Do this only once each turn" is functionally equivalent.
-        || scan_contains(lower, "do this only once each turn")
-    {
-        return Some(TriggerConstraint::OncePerTurn);
+    // CR 603.2 + CR 603.2h: "triggers only once each turn" is spent by triggering;
+    // "Do this only once each turn" is spent by the controller taking the indicated action.
+    if let Some((_, constraint, _)) = scan_preceded(lower, parse_once_each_turn_limit) {
+        return Some(constraint);
     }
     if scan_contains(lower, "this ability triggers only once") {
         return Some(TriggerConstraint::OncePerGame);
@@ -4223,6 +4302,24 @@ fn parse_trigger_constraint(lower: &str) -> Option<TriggerConstraint> {
         return Some(constraint);
     }
     None
+}
+
+/// CR 603.2 + CR 603.2h: the two once-each-turn limit sentences, distinguished by what
+/// spends the limit. The word-boundary scan also covers the "this ability triggers only
+/// once each turn" wording.
+fn parse_once_each_turn_limit(input: &str) -> OracleResult<'_, TriggerConstraint> {
+    alt((
+        value(
+            TriggerLimitSpend::IndicatedAction,
+            tag::<_, _, OracleError<'_>>("do this only once each turn"),
+        ),
+        value(
+            TriggerLimitSpend::Triggering,
+            tag("triggers only once each turn"),
+        ),
+    ))
+    .map(|spent_by| TriggerConstraint::OncePerTurn { spent_by })
+    .parse(input)
 }
 
 fn parse_nth_spell_this_turn_intervening_if(input: &str) -> OracleResult<'_, TriggerConstraint> {
@@ -4309,23 +4406,51 @@ fn lowered_trigger_constraint(
         .or_else(|| {
             // CR 603.2: Apply trigger-event frequency limits as a fallback.
             modifiers.first_time_limit.map(|limit| match limit {
-                FirstTimeLimit::EachTurn => TriggerConstraint::OncePerTurn,
+                FirstTimeLimit::EachTurn => TriggerConstraint::OncePerTurn {
+                    spent_by: TriggerLimitSpend::Triggering,
+                },
                 FirstTimeLimit::EachOpponentTurn => TriggerConstraint::OncePerOpponentPerTurn,
             })
         })
 }
 
-/// Whether `constraint` counts firings per trigger definition. The four
-/// counting arms are keyed by `TriggerDefinitionRef` in
-/// `triggers.rs::check_trigger_constraint_with_ref`, so a printed line that a
-/// compound split lowers to two definitions would count each half separately
-/// (CR 603.2h: "Do this only once each turn" limits the one printed ability, not
-/// each of its events). The remaining arms are predicates on the event or the
-/// game state, which every half evaluates identically. Exhaustive, so a new
+/// CR 113.2c + CR 603.2 + CR 603.2h: the halves of one printed triggered ability that a
+/// compound split lowered to several definitions spend one per-definition limit. When
+/// the line's own limit sentence (`modifiers.constraint`, parsed from the full line)
+/// keeps a per-definition ledger, each later half records its distance back to the
+/// leading half, whose identity keys the ledgers at runtime. The halves occupy adjacent
+/// printed slots (`base_trigger_index.offset(i)`). A "for the first time each turn"
+/// event qualifier (`first_time_limit`) limits only the half whose event it qualifies,
+/// so it is not shared.
+fn share_split_limit(results: &mut [TriggerIr]) {
+    let shares_limit = results.iter().any(|ir| {
+        ir.modifiers
+            .constraint
+            .as_ref()
+            .is_some_and(constraint_counts_per_definition)
+    });
+    if !shares_limit {
+        return;
+    }
+    for (i, ir) in results.iter_mut().enumerate() {
+        ir.partial_def.limit_leader_offset = NonZeroUsize::new(i);
+    }
+}
+
+/// Whether `constraint` keeps a per-trigger-definition ledger. The four
+/// ledger arms are keyed by `TriggerDefinitionRef` in
+/// `triggers.rs::check_trigger_constraint_with_ref` (firings, or for CR 603.2h
+/// the controller's indicated action), so a printed line that a compound split
+/// lowers to two definitions must spend one limit across its halves (CR 603.2h:
+/// "Do this only once each turn" limits the one printed ability, not each of its
+/// events): `share_split_limit` marks the later halves with
+/// `TriggerDefinition::limit_leader_offset`, and the ledgers key on the leading
+/// half. The remaining arms are predicates on the event or the game state,
+/// which every half evaluates identically. Exhaustive, so a new
 /// `TriggerConstraint` variant is forced into this decision.
 fn constraint_counts_per_definition(constraint: &TriggerConstraint) -> bool {
     match constraint {
-        TriggerConstraint::OncePerTurn
+        TriggerConstraint::OncePerTurn { .. }
         | TriggerConstraint::OncePerGame
         | TriggerConstraint::MaxTimesPerTurn { .. }
         | TriggerConstraint::OncePerOpponentPerTurn => true,
@@ -4447,7 +4572,7 @@ fn parse_illegal_targets_disposition(input: &str) -> OracleResult<'_, IllegalTar
 /// sentence unit of the body. Any other position returns the text unchanged
 /// with the default disposition (fail closed: the sentence stays in the chain
 /// as a strict failure).
-fn extract_illegal_targets_disposition(text: &str) -> (String, IllegalTargetsDisposition) {
+pub fn extract_illegal_targets_disposition(text: &str) -> (String, IllegalTargetsDisposition) {
     let Some(last_unit) = split_sentence_units(text).pop() else {
         return (text.to_string(), IllegalTargetsDisposition::DoesNotResolve);
     };
@@ -4501,6 +4626,99 @@ fn chain_creates_reflexive_ability(def: &AbilityDefinition) -> bool {
             .else_ability
             .as_deref()
             .is_some_and(chain_creates_reflexive_ability)
+}
+
+/// CR 603.2h: whether this chain names exactly one observable indicated action — a single
+/// non-iterated "you may" instruction (`optional`) across its `sub_ability` /
+/// `else_ability` spine, answered by the source's controller at resolution. Its
+/// acceptance is the controller taking the indicated action. Fail-closed rejections:
+/// - an optional modal root ("you may choose one"), whose acceptance is consumed while
+///   the trigger is put on the stack (CR 603.3c + CR 700.2);
+/// - a per-player fan-out anywhere on the spine (`player_scope`, CR 608.2c), which makes
+///   each scoped player the acting player;
+/// - an instruction offered to other players (`optional_for`, CR 608.2d + CR 101.4);
+/// - any instruction whose prompt the shared routing classification
+///   ([`optional_addressee_is_always_controller`]) cannot prove is addressed to the
+///   controller ("they may", another player's payment, subject-anchored and scoped
+///   instructions, a copy offered to a targeted player);
+/// - a cast indicated action that is not a single-card cast made during this resolution
+///   (CR 601.2i + CR 608.2g), or that can cast a spell copy the chain put on the stack
+///   (CR 707.12; the engine's stack-copy cast route carries no limit): only that shape
+///   reaches the commit that spends the limit.
+fn has_single_indicated_action_instruction(def: &AbilityDefinition) -> bool {
+    fn spine<'a>(def: &'a AbilityDefinition, nodes: &mut Vec<&'a AbilityDefinition>) {
+        nodes.push(def);
+        for branch in [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            spine(branch, nodes);
+        }
+    }
+    let mut nodes = Vec::new();
+    spine(def, &mut nodes);
+    let optional: Vec<_> = nodes.iter().copied().filter(|node| node.optional).collect();
+    // CR 707.10: a player target reaches an instruction only through its own chosen
+    // target slot or by inheritance from an ancestor. The root's targets are its own; a
+    // root that copies the triggering spell (`TriggeringSource`) can name no player.
+    // Anything else is conservatively assumed to admit a player target.
+    let targets_may_include_player = |node: &AbilityDefinition| {
+        !(std::ptr::eq(node, def)
+            && matches!(
+                node.effect.target_filter(),
+                Some(TargetFilter::TriggeringSource)
+            ))
+    };
+    // CR 707.12 + CR 603.2h: casting a copy this chain put on the stack (Spellbinder's
+    // "copy the exiled card … you may cast the copy") is a cast, but the engine completes
+    // it through `cast_stack_spell_copy_during_resolution` → `casting_costs::commit_copy_cast`,
+    // which carries no indicated-action limit, so the guard fails closed.
+    let chain_copies_a_spell = nodes.iter().any(|node| {
+        matches!(
+            &*node.effect,
+            Effect::CopySpell { .. } | Effect::EpicCopy { .. }
+        )
+    });
+    // CR 608.2g + CR 601.2i: only a single-card cast made during this resolution, of a
+    // card not already on the stack, reaches the commit that spends the limit; a
+    // lingering grant, a window, a play, a borrowed alternative cost, the cast of a
+    // stack spell copy or any other cast instruction has no observable commit → strict
+    // failure.
+    let commit_is_observable =
+        |node: &AbilityDefinition| match indicated_action_commit(&node.effect) {
+            IndicatedActionCommit::OnAccept => true,
+            IndicatedActionCommit::OnSpellCast => {
+                matches!(
+                    &*node.effect,
+                    Effect::CastFromZone {
+                        mode: CardPlayMode::Cast,
+                        driver: CastFromZoneDriver::DuringResolution,
+                        duration: None,
+                        alt_ability_cost: None,
+                        ..
+                    }
+                ) && node.multi_target.is_none()
+                    && !chain_copies_a_spell
+            }
+        };
+    def.modal.is_none()
+        && nodes.iter().all(|node| node.player_scope.is_none())
+        && matches!(optional.as_slice(), [only]
+        if only.repeat_for.is_none()
+            && only.optional_for.is_none()
+            && optional_addressee_is_always_controller(
+                &only.effect,
+                only.optional_player.as_ref(),
+                targets_may_include_player(only),
+            )
+            && commit_is_observable(only)
+            // The carrier builders stamp the limit from any `CastFromZone` node of the
+            // chain, and no other cast instruction has a commit at all: the indicated
+            // action must be the chain's only cast instruction.
+            && nodes.iter().all(|node| {
+                indicated_action_commit(&node.effect) == IndicatedActionCommit::OnAccept
+                    || std::ptr::eq(*node, *only)
+            }))
 }
 
 /// Strip constraint sentences from effect text so they don't produce spurious sub-abilities.
@@ -5163,6 +5381,7 @@ fn reflexive_optional_cost_payable_by_resolution_prompt(cost: &AbilityCost) -> b
         AbilityCost::Mana { .. }
         | AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
         | AbilityCost::Sacrifice(_)
@@ -5356,6 +5575,8 @@ fn parse_unless_discard_cost_phrase(branch_text: &str) -> Option<AbilityCost> {
 /// - `you pay N life[.]`                      → `AbilityCost::PayLife { amount }`
 /// - `you mill [N] card(s)[.]`  → `AbilityCost::Mill { count }`
 /// - `you remove [N] [type] counter(s) from [target][.]` → `AbilityCost::RemoveCounter`
+/// - `you <cost> or <cost> [or <cost>][.]` → `AbilityCost::OneOf { costs }`
+///   (Fear My Authority's "unless you discard a card or pay 3 life")
 ///
 /// Returns `None` for any other shape (mana costs and unknown forms fall
 /// through to the existing mana-cost path in `extract_unless_pay_modifier`).
@@ -5365,6 +5586,53 @@ fn parse_unless_discard_cost_phrase(branch_text: &str) -> Option<AbilityCost> {
 /// (player-chosen). Those phrases stay unimplemented (Balduvian Horde class)
 /// until the unless-payment path preserves `CardSelectionMode::Random`.
 pub(crate) fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
+    // CR 118.12a: "you <cost> or <cost>" disjunctions bind before the
+    // single-cost arms below, which would otherwise prefix-match the first
+    // branch and drop the rest. Falls through (None) unless every branch
+    // parses, so single-cost riders — and riders whose " or " sits inside a
+    // filter ("power 2 or greater") — reach the singles unchanged.
+    if let Some(cost) = parse_unless_you_disjunction(after_unless) {
+        return Some(cost);
+    }
+    parse_unless_you_single_alt_cost(after_unless)
+}
+
+/// CR 118.12a: "you <cost> or <cost> [or <cost>]" — disjunctive controller
+/// unless-costs. English elides the repeated subject, so branch 2+ re-enters
+/// the single-cost grammar with "you " restored. Segments rejoin to the full
+/// rider by construction, so a parse of every branch is full consumption;
+/// any branch failure (including an empty branch from a trailing " or ")
+/// returns None.
+fn parse_unless_you_disjunction(after_unless: &str) -> Option<AbilityCost> {
+    let text = after_unless.trim_end_matches('.').trim();
+    tag::<_, _, OracleError<'_>>("you ").parse(text).ok()?;
+    let mut segments = Vec::new();
+    let mut rest = text;
+    while let Ok(("", (before, after))) = nom_primitives::split_once_on(rest, " or ") {
+        segments.push(before);
+        rest = after;
+    }
+    segments.push(rest);
+    if segments.len() < 2 {
+        return None;
+    }
+    let mut costs = Vec::with_capacity(segments.len());
+    for (i, seg) in segments.iter().enumerate() {
+        let branch = seg.trim();
+        if branch.is_empty() {
+            return None;
+        }
+        let branch_text = if i == 0 {
+            branch.to_string()
+        } else {
+            format!("you {branch}")
+        };
+        costs.push(parse_unless_you_single_alt_cost(&branch_text)?);
+    }
+    Some(AbilityCost::OneOf { costs })
+}
+
+fn parse_unless_you_single_alt_cost(after_unless: &str) -> Option<AbilityCost> {
     // CR 118.12 + CR 118.7a: "you pay its mana cost reduced by {N}" reduces only
     // the generic component of the source's own mana cost.
     if let Ok((_, (_, _, _, crate::types::mana::ManaCost::Cost { shards, generic }))) =
@@ -6164,9 +6432,23 @@ fn substitute_another_in_aggregate_source(source: &CardTypeSetSource) -> CardTyp
                 .collect(),
         )
         .expect("rewriting preserves union arity"),
-        CardTypeSetSource::TrackedSet { .. }
-        | CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource => source.clone(),
+        CardTypeSetSource::TrackedSet {
+            set,
+            caused_by,
+            filter,
+        } => CardTypeSetSource::TrackedSet {
+            set: *set,
+            caused_by: *caused_by,
+            filter: filter.as_ref().map(substitute_another_in_filter),
+        },
+        // CR 608.2c + CR 115.1: the slot axis carries no `Another` — the
+        // substitution above only rewrites `Typed`/`Not`/`And`/`Or` shapes, so
+        // a targeted-objects population passes through unchanged, provably
+        // (no shape exists that `substitute_another_in_filter` could alter
+        // into a different slot).
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TargetedObjects { .. } => source.clone(),
     }
 }
 
@@ -17117,6 +17399,29 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         return Some((TriggerMode::SetInMotion, def));
     }
 
+    // CR 904.9 + CR 603.1: "As you set this scheme in motion" (Bow to My
+    // Command) is a choice made inside the turn-based action, NOT a triggered
+    // ability — it must never touch the stack (no priority, not counterable).
+    // It lowers to the dedicated `AsSetInMotion` mode, which the matcher
+    // dispatch and the index both skip; the post-action scan resolves it via
+    // `archenemy::resolve_pending_as_set_in_motion_choices` before the
+    // scheme's "when" triggers collect. The persist post-pass in
+    // `lower_trigger_ir` still stores the choice for the scheme's linked
+    // "the chosen player" abilities (CR 607.2d). Composed per-axis
+    // (temporal-prefix × subject × event) in the neighboring planeswalk
+    // tuple's style, all-consuming so a qualified variant never binds here.
+    if all_consuming((
+        tag::<_, _, OracleError<'_>>("as "),
+        tag("you "),
+        tag("set this scheme in motion"),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        def.mode = TriggerMode::AsSetInMotion;
+        return Some((TriggerMode::AsSetInMotion, def));
+    }
+
     if matches!(
         lower,
         "whenever you crank this contraption"
@@ -20275,6 +20580,51 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((def.mode.clone(), def));
     }
 
+    // CR 603.2 + CR 603.10d: "Whenever an opponent gains control of <subject>
+    // from you" — the opponent-gains half of CR 603.10d's look-back control
+    // triggers (Zidane, Tantalus Thief). Same ChangesController event as "you
+    // lose control of ~": `valid_card` scopes the changing permanent and
+    // `valid_target` names the gaining player, judged against the pre-event
+    // "you" (`match_changes_controller`).
+    fn parse_opponent_gains_control_from_you(i: &str) -> OracleResult<'_, &str> {
+        all_consuming(preceded(
+            (
+                alt((tag("when "), tag("whenever "))),
+                tag("an opponent gains control of "),
+            ),
+            terminated(take_until(" from you"), tag(" from you")),
+        ))
+        .parse(i)
+    }
+    if let Ok((_, subject_text)) = parse_opponent_gains_control_from_you(lower) {
+        // "from you" fixes the losing controller. Collection runs after the
+        // change, so only subjects whose match can't depend on the permanent's
+        // post-change state are claimed (CR 603.10d look-back), and only in
+        // the singular, which triggers once per permanent (CR 603.2c): "~",
+        // and "a permanent", which every object on the battlefield is
+        // (CR 110.1). Any other type, a controller, a property or a quantified
+        // subject ("one or more permanents") fails closed (stays Unknown).
+        let Ok((_, subject)) = all_consuming(alt((
+            value(TargetFilter::SelfRef, tag::<_, _, OracleError<'_>>("~")),
+            value(
+                TargetFilter::Typed(TypedFilter::permanent()),
+                tag("a permanent"),
+            ),
+        )))
+        .parse(subject_text) else {
+            return None;
+        };
+        let mut def = make_base();
+        def.mode = TriggerMode::ChangesController {
+            side: ControlChangeSide::Loses,
+        };
+        def.valid_card = Some(subject);
+        def.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+        return Some((def.mode.clone(), def));
+    }
+
     if matches!(lower, "whenever you lose life" | "when you lose life") {
         let mut def = make_base();
         def.mode = TriggerMode::LifeLost;
@@ -21120,8 +21470,8 @@ fn try_parse_nth_spell_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefin
         OtherThanFirstSpellParse::Accepted(def) => {
             return Some((TriggerMode::SpellCast, *def));
         }
-        // The marker commits this grammar: never let a malformed qualifier
-        // silently broaden through the generic SpellCast parser.
+        // A recognized exclusion determiner commits this grammar: never let a
+        // malformed qualifier silently broaden through the generic SpellCast parser.
         OtherThanFirstSpellParse::Rejected => {
             return Some((
                 TriggerMode::Unknown("malformed other-than-first spell trigger".to_string()),
@@ -21159,9 +21509,15 @@ enum OtherThanFirstSpellActor {
     EnchantedPlayer,
 }
 
+#[derive(Clone, Copy)]
+enum NonFirstExclusionForm {
+    Definite,
+    Possessive,
+}
+
 /// CR 603.2: this event qualifier is fire-time only, unlike a CR 603.4
-/// intervening-if condition. The recognizer owns the predicate only after it
-/// reaches the marker, so a malformed repeated qualifier fails closed.
+/// intervening-if condition. A recognized exclusion determiner commits the
+/// predicate, so a malformed repeated qualifier or tail fails closed.
 fn parse_other_than_first_spell_trigger(input: &str) -> OtherThanFirstSpellParse {
     // `parse_trigger_condition` passes the complete trigger head (including
     // "whenever"), while direct classifier tests pass its payload. Normalize
@@ -21205,37 +21561,61 @@ fn parse_other_than_first_spell_trigger(input: &str) -> OtherThanFirstSpellParse
     };
     let Ok((after_marker, first_qualifier)) = alt((
         terminated(
-            take_until(" spell other than the first "),
-            tag::<_, _, OracleError<'_>>(" spell other than the first "),
+            take_until(" spell other than "),
+            tag::<_, _, OracleError<'_>>(" spell other than "),
         ),
-        value("", tag("spell other than the first ")),
+        value("", tag("spell other than ")),
     ))
     .parse(after_actor) else {
+        return OtherThanFirstSpellParse::NotCandidate;
+    };
+    let Ok((after_determiner, form)) = alt((
+        value(
+            NonFirstExclusionForm::Definite,
+            tag::<_, _, OracleError<'_>>("the first "),
+        ),
+        value(NonFirstExclusionForm::Possessive, tag("your first ")),
+    ))
+    .parse(after_marker) else {
         return OtherThanFirstSpellParse::NotCandidate;
     };
     let Ok((after_repeated, repeated_qualifier)) = alt((
         terminated(take_until(" spell "), tag(" spell ")),
         value("", tag::<_, _, OracleError<'_>>("spell ")),
     ))
-    .parse(after_marker) else {
+    .parse(after_determiner) else {
         return OtherThanFirstSpellParse::Rejected;
     };
-    let pronoun_is_valid = match actor {
-        OtherThanFirstSpellActor::You => {
+    let tail_is_valid = match (form, actor) {
+        (NonFirstExclusionForm::Possessive, OtherThanFirstSpellActor::You) => {
+            all_consuming(tag::<_, _, OracleError<'_>>("each turn"))
+                .parse(after_repeated)
+                .is_ok()
+        }
+        (
+            NonFirstExclusionForm::Possessive,
+            OtherThanFirstSpellActor::Opponent
+            | OtherThanFirstSpellActor::AnyPlayer
+            | OtherThanFirstSpellActor::EnchantedPlayer,
+        ) => false,
+        (NonFirstExclusionForm::Definite, OtherThanFirstSpellActor::You) => {
             all_consuming(tag::<_, _, OracleError<'_>>("you cast each turn"))
                 .parse(after_repeated)
                 .is_ok()
         }
-        OtherThanFirstSpellActor::Opponent
-        | OtherThanFirstSpellActor::AnyPlayer
-        | OtherThanFirstSpellActor::EnchantedPlayer => all_consuming(alt((
+        (
+            NonFirstExclusionForm::Definite,
+            OtherThanFirstSpellActor::Opponent
+            | OtherThanFirstSpellActor::AnyPlayer
+            | OtherThanFirstSpellActor::EnchantedPlayer,
+        ) => all_consuming(alt((
             tag::<_, _, OracleError<'_>>("that player casts each turn"),
             tag("they cast each turn"),
         )))
         .parse(after_repeated)
         .is_ok(),
     };
-    if !pronoun_is_valid {
+    if !tail_is_valid {
         return OtherThanFirstSpellParse::Rejected;
     }
     let parse_qualifier = |qualifier: &str| {
@@ -21642,6 +22022,7 @@ fn rewrite_each_other_player_scope_for_any_caster_spell_triggers(
     }
     ability.player_scope = Some(PlayerFilter::AllExcept {
         exclude: Box::new(PlayerFilter::TriggeringPlayer),
+        relation: PlayerRelation::All,
     });
 }
 
@@ -23845,7 +24226,7 @@ fn turn_window_condition(constraint: TriggerConstraint) -> Option<TriggerConditi
     let player = match constraint {
         TriggerConstraint::OnlyDuringYourTurn => PlayerFilter::Controller,
         TriggerConstraint::OnlyDuringOpponentsTurn => PlayerFilter::Opponent,
-        TriggerConstraint::OncePerTurn
+        TriggerConstraint::OncePerTurn { .. }
         | TriggerConstraint::OncePerGame
         | TriggerConstraint::NthSpellThisTurn { .. }
         | TriggerConstraint::NthDrawThisTurn { .. }
@@ -24249,6 +24630,39 @@ fn parse_control_none_filter(text: &str) -> Option<TargetFilter> {
 #[cfg(test)]
 #[path = "oracle_trigger_tests.rs"]
 mod tests;
+
+/// Test helpers shared by `oracle_trigger_tests.rs` and the tests relocated out of it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers {
+    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
+
+    /// Verbatim from Scryfall (`cards/named?exact=Gilded%20Drake`).
+    pub const GILDED_DRAKE_TEXT: &str =
+        "Flying\nWhen this creature enters, exchange control of this \
+    creature and up to one target creature an opponent controls. If you don't or can't make an \
+    exchange, sacrifice this creature. This ability still resolves if its target becomes illegal.";
+
+    /// Parse `text` through the whole-card pipeline as a Drake creature and return
+    /// its single trigger's execute.
+    pub fn drake_shaped_trigger_execute(text: &str) -> AbilityDefinition {
+        let parsed = parse_oracle_text(
+            text,
+            "Gilded Drake",
+            &[],
+            &["Creature".to_string()],
+            &["Drake".to_string()],
+        );
+        let [trigger] = parsed.triggers.as_slice() else {
+            panic!("expected exactly one trigger, got {:?}", parsed.triggers);
+        };
+        trigger
+            .execute
+            .as_deref()
+            .cloned()
+            .expect("the trigger has an execute")
+    }
+}
 
 /// Snapshot tests locking current trigger parser output before the IR split.
 /// These verify behavioral parity: identical snapshots before and after the
@@ -25398,36 +25812,6 @@ mod attached_set_trigger_tests {
             FilterProp::AttachedTo {
                 to: AttachmentReferent::Host { filter }
             } if **filter == TargetFilter::Typed(TypedFilter::creature())
-        ));
-    }
-
-    /// CR 109.2: "a creature card" keeps its `Card` qualifier on a
-    /// becomes-target subject, while "a creature" stays a bare permanent type.
-    #[test]
-    fn becomes_target_subject_keeps_card_qualifier() {
-        let card = parse_trigger_line(
-            "Whenever a creature card becomes the target of a spell or ability, draw a card.",
-            "Test",
-        );
-        let Some(TargetFilter::Typed(typed)) = &card.valid_card else {
-            panic!("expected typed subject, got {:?}", card.valid_card);
-        };
-        assert!(typed.type_filters.contains(&TypeFilter::Card));
-        assert!(typed.type_filters.contains(&TypeFilter::Creature));
-        assert!(!crate::game::filter::filter_denotes_battlefield_permanent(
-            card.valid_card.as_ref().unwrap()
-        ));
-
-        let bare = parse_trigger_line(
-            "Whenever a creature becomes the target of a spell or ability, draw a card.",
-            "Test",
-        );
-        let Some(TargetFilter::Typed(typed)) = &bare.valid_card else {
-            panic!("expected typed subject, got {:?}", bare.valid_card);
-        };
-        assert!(!typed.type_filters.contains(&TypeFilter::Card));
-        assert!(crate::game::filter::filter_denotes_battlefield_permanent(
-            bare.valid_card.as_ref().unwrap()
         ));
     }
 }

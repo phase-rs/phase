@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "DerivedViews gains life_magnitude, the engine-owned per-player life-display magnitude (CR 732.2a); the client renders ∞ life only from this field, so an older server that omits it silently loses the ∞ readout — full-game and P2P move in lockstep; GameState gains unbounded_rising and LoopCertificate/ShortcutProposal gain rising (the marked axes a loop drives up), which peers read to show a gaining seat's life as ∞"
+}

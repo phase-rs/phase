@@ -3,6 +3,7 @@ use super::keyword_grant::*;
 use super::prelude::*;
 use super::restriction::*;
 use super::support::*;
+use super::test_helpers::P3_SEG;
 use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
@@ -11,9 +12,10 @@ use crate::types::ability::{
     PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
     SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
+use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::keywords::{Keyword, WardCost};
-use crate::types::mana::ManaCost;
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 use crate::types::zones::Zone;
 
@@ -4324,6 +4326,408 @@ fn static_cant_be_blocked_by_greater_power() {
     );
 }
 
+/// CR 509.1b + CR 608.2c (issue #10364): the printed blocking-restriction
+/// family that carries a union separator AFTER a leg's own trailing suffix, or a
+/// trailing duration/gate the union fold must leave alone. One row per corpus
+/// SHAPE, so a fold that over-consumed (swallowing " as long as …") or
+/// under-consumed (dropping a disjunct) fails here rather than silently
+/// narrowing a card.
+#[test]
+fn static_block_restriction_union_and_tail_shapes() {
+    fn or_legs(filter: &TargetFilter) -> usize {
+        match filter {
+            TargetFilter::Or { filters } => filters.len(),
+            _ => 1,
+        }
+    }
+    // (printed line, expected disjunct count, expected trailing condition?)
+    let rows: &[(&str, usize, bool)] = &[
+        // Doorman's class on a printed static: suffix, then "and/or", then a subtype.
+        (
+            "~ can't be blocked by creatures with power 2 or less and/or Walls.",
+            2,
+            false,
+        ),
+        // Sacred Knight — color disjuncts sharing one head noun (one leg each).
+        ("~ can't be blocked by black and/or red creatures.", 2, false),
+        // Rampart Smasher — a bare subtype union, folded by the early within-leg loop.
+        ("~ can't be blocked by Knights or Walls.", 2, false),
+        // Arctic Foxes — suffix then a GATE, not a disjunct. The fold must not
+        // touch it and the condition must still attach.
+        (
+            "~ can't be blocked by creatures with power 2 or greater as long as defending player controls a snow land.",
+            1,
+            true,
+        ),
+        // Questing Beast — single leg, no tail (the unchanged base case).
+        (
+            "~ can't be blocked by creatures with power 2 or less.",
+            1,
+            false,
+        ),
+    ];
+    for (line, expected_legs, expects_condition) in rows {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} must parse"));
+        let StaticMode::CantBeBlockedBy { filter } = &def.mode else {
+            panic!("{line}: expected CantBeBlockedBy, got {:?}", def.mode);
+        };
+        assert_eq!(or_legs(filter), *expected_legs, "{line}: {filter:?}");
+        assert_eq!(
+            def.condition.is_some(),
+            *expects_condition,
+            "{line}: condition {:?}",
+            def.condition
+        );
+    }
+}
+
+/// CR 509.1b: the "except by" half of the same family. Elven Riders carries the
+/// suffix-then-"and/or" shape; the other rows are the sibling tails the fold
+/// must leave untouched.
+#[test]
+fn static_block_exception_union_and_tail_shapes() {
+    fn or_legs(filter: &TargetFilter) -> usize {
+        match filter {
+            TargetFilter::Or { filters } => filters.len(),
+            _ => 1,
+        }
+    }
+    let rows: &[(&str, usize)] = &[
+        // THE DISCRIMINATOR for the `classify_block_exception` hunk: every
+        // printed "except by" union puts its separator right after the head
+        // noun, where the leg grammar's own early loop already folds it, so no
+        // printed card distinguishes the fold here. This row does - the
+        // separator follows the first leg's trailing power suffix, and with the
+        // fold reverted the Walls disjunct is dropped and the count is 1.
+        (
+            "~ can't be blocked except by creatures with power 2 or less and/or Walls.",
+            2,
+        ),
+        (
+            "~ can't be blocked except by Walls and/or creatures with flying.",
+            2,
+        ),
+        (
+            "~ can't be blocked except by artifact creatures and/or red creatures.",
+            2,
+        ),
+        // Fast // Furious — the repeated "by" before the second disjunct.
+        (
+            "~ can't be blocked except by Vehicles or by creatures with haste.",
+            2,
+        ),
+        // Serpent of Yawning Depths — a four-way Oxford-comma subtype union.
+        (
+            "~ can't be blocked except by Krakens, Leviathans, Octopuses, and Serpents.",
+            4,
+        ),
+        // Canopy Cover — "flying or reach" is a KEYWORD disjunction, already
+        // split into one leg per keyword by the `with <kw> or <kw>` suffix
+        // grammar (not by this fold: "reach" is not a type word, so the
+        // continuation guard rejects it). Pinned so the fold cannot start
+        // double-counting or collapsing it.
+        (
+            "~ can't be blocked except by creatures with flying or reach.",
+            2,
+        ),
+        ("~ can't be blocked except by creatures with defender.", 1),
+    ];
+    for (line, expected_legs) in rows {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} must parse"));
+        let StaticMode::CantBeBlockedExceptBy {
+            kind: BlockExceptionKind::Quality(filter),
+        } = &def.mode
+        else {
+            panic!(
+                "{line}: expected a Quality block exception, got {:?}",
+                def.mode
+            );
+        };
+        assert_eq!(or_legs(filter), *expected_legs, "{line}: {filter:?}");
+    }
+}
+
+/// CR 509.1b: the blocker-side sibling — "<subject> can't block <object>" reads
+/// its object through the same shared filter authority, so the union fold covers
+/// it too, and its non-object tails ("unless …") must still decline to the
+/// condition grammar instead of being eaten.
+#[test]
+fn static_block_object_union_and_tail_shapes() {
+    // Cyclops Tyrant's printed shape plus the Doorman-class union on it.
+    for (line, expected_legs) in [
+        ("~ can't block creatures with power 2 or less.", 1usize),
+        (
+            "~ can't block creatures with power 2 or less and/or Walls.",
+            2,
+        ),
+    ] {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} must parse"));
+        let StaticMode::BlockRestriction {
+            filter: TargetFilter::Not { filter },
+        } = &def.mode
+        else {
+            panic!(
+                "{line}: expected BlockRestriction(Not(..)), got {:?}",
+                def.mode
+            );
+        };
+        let legs = match filter.as_ref() {
+            TargetFilter::Or { filters } => filters.len(),
+            _ => 1,
+        };
+        assert_eq!(legs, expected_legs, "{line}: {filter:?}");
+    }
+    // Hipparion — the object is followed by an "unless" gate, which is NOT a
+    // union leg and must not be consumed by the fold.
+    let def =
+        parse_static_line("~ can't block creatures with power 3 or greater unless you pay {1}.")
+            .unwrap_or_else(|| panic!("Hipparion's line must parse"));
+    assert!(
+        matches!(def.mode, StaticMode::BlockRestriction { .. }),
+        "expected a BlockRestriction, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 509.1b (issue #10364) — FAIL CLOSED. An "and/or" disjunct the filter
+/// grammar cannot read must decline the whole line, never fall through to the
+/// blanket `CantBeBlocked` form these dispatch blocks end in: that would publish
+/// total unblockability, which is WIDER than the printed restriction, not
+/// narrower — and in `parse_enchanted_equipped_predicate` it carries no
+/// `Unrecognized` marker, so it would be green.
+///
+/// Covers BOTH axes. The `except by` row is load-bearing: its propagation site
+/// (`parse_enchanted_equipped_predicate`'s `else { return Vec::new() }`) had no
+/// revert detector, so replacing it with a blanket `CantBeBlocked` left all
+/// 25,817 lib tests green.
+///
+/// Every row here is negative; the positive reach-guard is the row set below
+/// them, which proves the same wordings with a READABLE second disjunct still
+/// publish their two-leg restriction.
+#[test]
+fn static_block_restriction_declines_an_unreadable_disjunct_without_going_blanket() {
+    for line in [
+        "~ can't be blocked by creatures with power 2 or less and/or your commander.",
+        "Enchanted creature can't be blocked by creatures with power 2 or less and/or your commander.",
+        "Enchanted creature can't be blocked except by creatures with power 2 or less and/or your commander.",
+    ] {
+        let modes: Vec<_> = parse_static_line_multi(line)
+            .iter()
+            .map(|d| d.mode.clone())
+            .collect();
+        assert!(
+            !modes
+                .iter()
+                .any(|m| matches!(m, StaticMode::CantBeBlocked)),
+            "{line} must NOT lower to a blanket CantBeBlocked, got {modes:?}"
+        );
+        assert!(
+            !modes.iter().any(|m| matches!(
+                m,
+                StaticMode::CantBeBlockedBy { .. } | StaticMode::CantBeBlockedExceptBy { .. }
+            )),
+            "{line} must NOT publish a half-read blocker filter, got {modes:?}"
+        );
+    }
+    // Positive reach-guard: the same wordings with a readable second disjunct DO
+    // publish the two-leg restriction, so the assertions above are remainder
+    // rejections and not a dead arm.
+    for line in [
+        "~ can't be blocked by creatures with power 2 or less and/or Walls.",
+        "Enchanted creature can't be blocked by creatures with power 2 or less and/or Walls.",
+        "Enchanted creature can't be blocked except by creatures with power 2 or less and/or Walls.",
+    ] {
+        let legs = parse_static_line_multi(line)
+            .iter()
+            .find_map(|d| match &d.mode {
+                StaticMode::CantBeBlockedBy {
+                    filter: TargetFilter::Or { filters },
+                }
+                | StaticMode::CantBeBlockedExceptBy {
+                    kind: BlockExceptionKind::Quality(TargetFilter::Or { filters }),
+                } => Some(filters.len()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{line} must publish a union blocker restriction"));
+        assert_eq!(legs, 2, "{line}");
+    }
+}
+
+/// CR 509.1c (issue #10364) — the REQUIREMENT half, which had no test at all.
+/// `must_be_blocked_quality_to_filter` reads its quality through the same
+/// `BlockFilterPhrase` authority, so an "and/or" disjunct it cannot read must
+/// DECLINE the requirement rather than publish a stricter-than-printed one.
+///
+/// The article-led disjunct is the live shape here, because the qualities this
+/// grammar captures are article-led.
+#[test]
+fn static_must_be_blocked_quality_declines_an_unreadable_disjunct() {
+    // Positive reach-guard FIRST, so the `None` rows below are known to be
+    // remainder rejections rather than a grammar that never matched.
+    let def = parse_static_line("Equipped creature must be blocked by a Dalek if able.")
+        .expect("the single-quality requirement must still parse");
+    assert!(
+        matches!(
+            &def.mode,
+            StaticMode::MustBeBlocked { by: Some(TargetFilter::Typed(t)) }
+                if t.type_filters.contains(&TypeFilter::Subtype("Dalek".into()))
+        ),
+        "expected MustBeBlocked by a Dalek, got {:?}",
+        def.mode
+    );
+
+    for line in [
+        "Equipped creature must be blocked by a Dalek and/or a Wall if able.",
+        "Equipped creature gets +2/+2 and must be blocked by a Dalek and/or a Wall if able.",
+    ] {
+        let by: Vec<_> = parse_static_line_multi(line)
+            .iter()
+            .filter_map(|d| match &d.mode {
+                StaticMode::MustBeBlocked { by } => Some(by.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            by.is_empty(),
+            "{line}: a half-read CR 509.1c quality must not be published, got {by:?}"
+        );
+    }
+}
+
+/// CR 509.1b (issue #10364) — the POSITIVE fold path on the route a `~` subject
+/// actually takes: `parse_subject_rule_static` (`oracle_static::dispatch`)
+/// delegates to `evasion::cant_be_blocked_mode`, which claims the line ~280
+/// lines before `parse_static_line_inner`'s own "can't be blocked" block.
+///
+/// `parse_static_line_inner`'s UNION accept path is therefore not covered by
+/// this test and remains untested; its single-leg path is pinned by the two
+/// pre-existing `static_cant_be_blocked_by_power_{le,ge}` tests and its decline
+/// path by `static_block_restriction_declines_an_unreadable_disjunct_without_going_blanket`.
+#[test]
+fn static_self_ref_block_restriction_folds_the_union() {
+    let def =
+        parse_static_line("~ can't be blocked by creatures with power 2 or less and/or Walls.")
+            .expect("the union restriction must parse");
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    let StaticMode::CantBeBlockedBy {
+        filter: TargetFilter::Or { filters },
+    } = &def.mode
+    else {
+        panic!(
+            "expected a two-leg union CantBeBlockedBy, got {:?}",
+            def.mode
+        );
+    };
+    assert_eq!(filters.len(), 2, "{filters:?}");
+    assert!(
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(t)
+                if t.type_filters.contains(&TypeFilter::Subtype("Wall".into()))
+                    && t.properties.is_empty()
+        )),
+        "the Wall disjunct must be present and unconstrained: {filters:?}"
+    );
+}
+
+/// CR 608.2c (issue #10364) — the `TypePhrase` fold must not swallow a
+/// following INDEPENDENT clause. ", and creatures blocking it get -1/-1" passes
+/// the syntactic continuation guard (it leads with a type word that parses to a
+/// non-empty filter), but its leg leaves a verb phrase behind, so it is not a
+/// union leg. Folding it would union in a bare `Typed{Creature}` that matches
+/// every blocker — total unblockability — and drop the rider with no gap.
+#[test]
+fn static_block_restriction_does_not_fold_a_following_clause() {
+    // EXACTLY ONE space after the comma. A longer whitespace run makes
+    // `starts_with_type_word` reject the continuation before
+    // `type_phrase_leg_closed` is ever consulted (`match_mass_union_separator`
+    // consumes only ", "), which silently removes this test's coverage of the
+    // leg-closure guard. Mutation-verified: disabling that guard turns this red.
+    let line = concat!(
+        "~ can't be blocked by creatures with power 1 or less, ",
+        "and creatures blocking it get -1/-1."
+    );
+    let filters: Vec<_> = parse_static_line_multi(line)
+        .iter()
+        .filter_map(|d| match &d.mode {
+            StaticMode::CantBeBlockedBy { filter } => Some(filter.clone()),
+            _ => None,
+        })
+        .collect();
+    for filter in &filters {
+        assert!(
+            !matches!(filter, TargetFilter::Or { .. }),
+            "the following clause must not become a union leg: {filter:?}"
+        );
+        assert!(
+            !matches!(filter, TargetFilter::Typed(t) if t.type_filters == vec![TypeFilter::Creature] && t.properties.is_empty()),
+            "no leg may be a bare creature filter matching every blocker: {filter:?}"
+        );
+    }
+    // Positive reach-guard: the identical phrase whose continuation IS a union
+    // leg still folds, so the assertions above are the leg-consumption guard
+    // firing rather than the separator scan declining.
+    let folded =
+        parse_static_line("~ can't be blocked by creatures with power 1 or less, and Walls.")
+            .expect("a real union continuation must still parse");
+    assert!(
+        matches!(
+            &folded.mode,
+            StaticMode::CantBeBlockedBy { filter: TargetFilter::Or { filters } } if filters.len() == 2
+        ),
+        "expected the two-leg union, got {:?}",
+        folded.mode
+    );
+}
+
+/// CR 509.1b (issue #10364) — the `except by` SIBLING of
+/// `static_block_restriction_does_not_fold_a_following_clause`. This axis folds
+/// `TypeUnionLeg::TargetPhrase` legs, so before leg closure became a property of
+/// the CALL (`LegClosure`) rather than of the leg grammar, the exception
+/// whitelist gained a match-everything leg here and the evasion ability became a
+/// total no-op — the wider-than-printed direction.
+#[test]
+fn static_block_exception_does_not_fold_a_following_clause() {
+    let line = concat!(
+        "~ can't be blocked except by creatures with power 1 or less, ",
+        "and creatures blocking it get -1/-1."
+    );
+    let kinds: Vec<_> = parse_static_line_multi(line)
+        .iter()
+        .filter_map(|d| match &d.mode {
+            StaticMode::CantBeBlockedExceptBy { kind } => Some(kind.clone()),
+            _ => None,
+        })
+        .collect();
+    for kind in &kinds {
+        let BlockExceptionKind::Quality(filter) = kind else {
+            continue;
+        };
+        assert!(
+            !matches!(filter, TargetFilter::Or { .. }),
+            "the following clause must not become an exception disjunct: {filter:?}"
+        );
+        assert!(
+            !matches!(filter, TargetFilter::Typed(t) if t.type_filters == vec![TypeFilter::Creature] && t.properties.is_empty()),
+            "no exception leg may match every blocker: {filter:?}"
+        );
+    }
+    // Positive reach-guard: the same shape whose continuation closes its leg
+    // still folds, so the assertions above are the closure guard firing rather
+    // than the separator scan or the type-word guard declining.
+    let folded = parse_static_line(
+        "~ can't be blocked except by creatures with power 1 or less, and Walls.",
+    )
+    .expect("a real exception union must still parse");
+    let StaticMode::CantBeBlockedExceptBy {
+        kind: BlockExceptionKind::Quality(TargetFilter::Or { filters }),
+    } = &folded.mode
+    else {
+        panic!("expected a two-leg exception union, got {:?}", folded.mode);
+    };
+    assert_eq!(filters.len(), 2, "{filters:?}");
+}
+
 #[test]
 fn static_cant_be_blocked_by_more_than_one_creature() {
     // CR 509.1b: Stalking Tiger — per-creature blocker maximum. Must NOT collapse
@@ -5792,7 +6196,7 @@ fn visions_of_ruin_cast_this_way_cost_reduction_binds_commander_mv() {
     assert!(matches!(
         def.condition,
         Some(StaticCondition::CastingAsVariant {
-            variant: crate::types::game_state::CastingVariant::Flashback
+            variant: crate::types::game_state_kinds::CastingVariant::Flashback
         })
     ));
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
@@ -6274,7 +6678,7 @@ fn self_cost_reduction_if_night_uses_day_night_condition() {
     assert_eq!(
         def.condition,
         Some(StaticCondition::DayNightIs {
-            state: crate::types::game_state::DayNight::Night
+            state: crate::types::game_state_kinds::DayNight::Night
         })
     );
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
@@ -10029,7 +10433,7 @@ fn cant_untap_gate_rejects_every_unenforceable_leaf_at_any_depth() {
         // CR 601.2f: decided by the in-flight cast, absent at the untap step.
         StaticCondition::AdditionalCostPaid,
         StaticCondition::CastingAsVariant {
-            variant: crate::types::game_state::CastingVariant::Flashback,
+            variant: crate::types::game_state_kinds::CastingVariant::Flashback,
         },
         // CR 725.1: scoped-player designation with no binding authority here.
         StaticCondition::IsMonarch {
@@ -10215,7 +10619,7 @@ fn payment_gate_acceptance_follows_the_mode_that_owns_the_prompt() {
     // fix: a cast-variant gate stays enforceable everywhere except the untap
     // step (CR 502.3 — a turn-based action, so no cast is ever in flight).
     let cast_variant = StaticCondition::CastingAsVariant {
-        variant: crate::types::game_state::CastingVariant::Flashback,
+        variant: crate::types::game_state_kinds::CastingVariant::Flashback,
     };
     assert_eq!(
         gate_static_condition(&StaticMode::Continuous, cast_variant.clone(), "gap text"),
@@ -13684,6 +14088,146 @@ fn triarch_stalker_choose_opponent_persists_for_last_chosen_player_static() {
 }
 
 #[test]
+fn static_bow_to_my_command_chosen_player_cant_attack() {
+    // CR 508.1c + CR 607.2d: Bow to My Command — "Creatures the chosen player
+    // controls can't attack you or planeswalkers you control." The subject
+    // composes the creature head noun with the shared "the chosen player
+    // controls" controller suffix (the source's persisted set-in-motion
+    // choice); the predicate is the Vow defended scope, not a blanket
+    // lockout.
+    let def = parse_static_line(
+        "Creatures the chosen player controls can't attack you or planeswalkers you control.",
+    )
+    .expect("Bow to My Command static leg must parse");
+    assert_eq!(def.mode, StaticMode::CantAttack);
+    assert_eq!(
+        def.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker),
+        "Bow leg must carry the Vow defended scope, got {:?}",
+        def.attack_defended
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::SourceChosenPlayer),
+        )),
+        "Bow leg must scope to the chosen player's creatures, got {:?}",
+        def.affected
+    );
+}
+
+#[test]
+fn static_imprison_chosen_player_cant_untap() {
+    // CR 502.3 + CR 607.2d: Imprison This Insolent Wretch — "Permanents the
+    // chosen player controls don't untap during their untap step." Same
+    // controller suffix as the Bow leg; the "their untap step" remainder
+    // needs no validation (the CantUntap predicate is prefix-matched).
+    let def = parse_static_line(
+        "Permanents the chosen player controls don't untap during their untap step.",
+    )
+    .expect("Imprison static leg must parse");
+    assert_eq!(def.mode, StaticMode::CantUntap);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::SourceChosenPlayer),
+        )),
+        "Imprison leg must scope to the chosen player's permanents, got {:?}",
+        def.affected
+    );
+}
+
+#[test]
+fn bow_to_my_command_choice_persists_for_chosen_player_static() {
+    // CR 607.2d + CR 613.1 + CR 608.2c: Bow to My Command's "As you set this
+    // scheme in motion, choose an opponent" must persist (as
+    // `ChosenAttribute::Player`) BECAUSE the CantAttack static reads it via
+    // `ControllerRef::SourceChosenPlayer`. Mirrors the Triarch Stalker pin.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ChoiceType;
+
+    let parsed = parse_oracle_text(
+        "(An ongoing scheme remains face up until it's abandoned.)\nAs you set this scheme in motion, choose an opponent.\nCreatures the chosen player controls can't attack you or planeswalkers you control.\nAt the beginning of your opponents' end step, they may tap any number of untapped creatures they control with total power 8 or greater. If they do, abandon this scheme.",
+        "Bow to My Command",
+        &[],
+        &["Scheme".to_string()],
+        &[],
+    );
+
+    assert!(
+        parsed.statics.iter().any(|s| matches!(
+            &s.affected,
+            Some(TargetFilter::Typed(tf)) if tf.controller == Some(ControllerRef::SourceChosenPlayer)
+        )),
+        "Bow static must scope by SourceChosenPlayer, got {:?}",
+        parsed.statics
+    );
+
+    let choose = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("expected a triggered choose ability");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                persist: true,
+                ..
+            }
+        ),
+        "As-you-set-in-motion choice must persist when a SourceChosenPlayer static reads it, got {:?}",
+        choose.effect
+    );
+}
+
+#[test]
+fn imprison_choice_persists_for_chosen_player_static() {
+    // CR 607.2d + CR 613.1 + CR 608.2c: Imprison This Insolent Wretch's
+    // "When you set this scheme in motion, choose an opponent" must persist
+    // BECAUSE the CantUntap static reads it via
+    // `ControllerRef::SourceChosenPlayer`. Same pin as Bow, When-framed.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ChoiceType;
+
+    let parsed = parse_oracle_text(
+        "(An ongoing scheme remains face up until it's abandoned.)\nWhen you set this scheme in motion, choose an opponent.\nPermanents the chosen player controls don't untap during their untap step.\nWhen the chosen player is attacked or becomes the target of a spell or ability, abandon this scheme.",
+        "Imprison This Insolent Wretch",
+        &[],
+        &["Scheme".to_string()],
+        &[],
+    );
+
+    assert!(
+        parsed.statics.iter().any(|s| matches!(
+            &s.affected,
+            Some(TargetFilter::Typed(tf)) if tf.controller == Some(ControllerRef::SourceChosenPlayer)
+        )),
+        "Imprison static must scope by SourceChosenPlayer, got {:?}",
+        parsed.statics
+    );
+
+    let choose = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("expected a triggered choose ability");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                persist: true,
+                ..
+            }
+        ),
+        "When-you-set-in-motion choice must persist when a SourceChosenPlayer static reads it, got {:?}",
+        choose.effect
+    );
+}
+
+#[test]
 fn granted_static_reader_persists_last_chosen_player() {
     // CR 607.2d + CR 613.1 + CR 608.2c: the document relation scan must see a
     // granted static that is emitted through `OracleNodeIr::Static`, otherwise
@@ -15738,6 +16282,9 @@ fn own_unlimited_cast_permission(
             enters_with_counter: None,
             required_cast_keyword: None,
             pool: GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
         },
         Some(TargetFilter::SelfRef),
         zones,
@@ -23079,18 +23626,36 @@ fn cant_be_blocked_unconditional() {
 fn classify_block_exception_count_vs_quality() {
     assert_eq!(
         classify_block_exception("three or more creatures."),
-        BlockExceptionKind::MinBlockers { min: 3 }
+        Some(BlockExceptionKind::MinBlockers { min: 3 })
     );
     assert_eq!(
         classify_block_exception("six or more creatures"),
-        BlockExceptionKind::MinBlockers { min: 6 }
+        Some(BlockExceptionKind::MinBlockers { min: 6 })
     );
     assert!(
         matches!(
             classify_block_exception("artifact creatures."),
-            BlockExceptionKind::Quality(_)
+            Some(BlockExceptionKind::Quality(_))
         ),
         "Expected Quality kind for a quality phrase"
+    );
+    // CR 509.1b + CR 608.2c (issue #10364): a printed "and/or" disjunct the leg
+    // grammar cannot read must DECLINE, because dropping it makes the whitelist
+    // narrower than printed - the attacker becomes harder to block than its text
+    // says. The readable-union row above is the positive reach-guard.
+    assert_eq!(
+        classify_block_exception("creatures with power 2 or less and/or your commander"),
+        None
+    );
+    // An UNCONSTRAINED tail still lowers to `Quality`, unchanged: that is the
+    // pre-existing shape of every "except by" phrase the filter grammar cannot
+    // read, and flipping those to unsupported is a different change.
+    assert!(
+        matches!(
+            classify_block_exception("three or"),
+            Some(BlockExceptionKind::Quality(_))
+        ),
+        "an unreadable-but-separator-free tail keeps its Quality lowering"
     );
 }
 
@@ -25554,6 +26119,86 @@ fn static_chosen_type_pump() {
         }
         other => panic!("Expected Some(Typed filter), got {other:?}"),
     }
+}
+
+/// SHAPE — Engineered Plague (MTGJSON):
+/// "All creatures of the chosen type get -1/-1."
+/// CR 611.3a + CR 205.3m + CR 607.2d: the affected creatures must have
+/// the creature type chosen for this Engineered Plague.
+#[test]
+fn all_creatures_engineered_plague_preserves_chosen_type_shape() {
+    let def = parse_static_line("All creatures of the chosen type get -1/-1.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::AddPower { value: -1 },
+            ContinuousModification::AddToughness { value: -1 },
+        ]
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::IsChosenCreatureType])
+        ))
+    );
+}
+
+/// SHAPE — Shiv (MTGJSON):
+/// "All creatures have \"{R}: This creature gets +1/+0 until end of turn.\""
+/// Humility (MTGJSON):
+/// "All creatures lose all abilities and have base power and toughness 1/1."
+/// CR 611.3a: both subjects include every creature without a qualifier.
+/// Shiv's quoted inner "gets" must not replace the leading "have" boundary.
+#[test]
+fn all_creatures_shiv_and_humility_keep_bare_subject_shape() {
+    let bare = Some(TargetFilter::Typed(TypedFilter::creature()));
+    for text in [
+        "All creatures have \"{R}: This creature gets +1/+0 until end of turn.\"",
+        "All creatures lose all abilities and have base power and toughness 1/1.",
+    ] {
+        let def = parse_static_line(text).unwrap_or_else(|| panic!("{text:?} must parse"));
+        assert_eq!(def.mode, StaticMode::Continuous, "{text:?}");
+        assert_eq!(def.affected, bare, "{text:?}");
+    }
+}
+
+/// SHAPE — synthetic rejection case, not a supported-card claim.
+/// No printed static ability in the pinned MTGJSON corpus begins
+/// "All creatures with art by". The nearest printed static is Drawn Together:
+/// "As this enchantment enters, choose an artist.
+/// Creatures with art by the chosen artist get +2/+2."
+/// Its subject lacks "All", so it does not reach this dispatch arm.
+/// The nearest printed "All creatures with art by" line is the instant
+/// Graphic Violence:
+/// "All creatures with art by the artist of your choice get +2/+2 and gain
+/// trample until end of turn."
+/// CR 611.2a + CR 611.2c govern Graphic Violence's resolving continuous
+/// effect. This test does not claim to implement either card.
+/// Retain this synthetic static input to guard the changed arm against
+/// discarding a subject it cannot recognize and substituting all creatures.
+/// The printed positive control is Engineered Plague:
+/// "All creatures of the chosen type get -1/-1."
+/// CR 611.3a + CR 607.2d: its static applies only to its chosen creature type.
+#[test]
+fn all_creatures_synthetic_artist_qualifier_does_not_widen_shape() {
+    let bare = Some(TargetFilter::Typed(TypedFilter::creature()));
+    if let Some(def) =
+        parse_static_line("All creatures with art by the artist of your choice get +2/+2.")
+    {
+        assert_ne!(def.affected, bare, "qualifier was dropped: {def:?}");
+    }
+
+    // Printed positive control: Engineered Plague reaches the same dispatch arm
+    // and preserves its recognized subject. The separate production-revert run
+    // establishes that the synthetic negative also reaches the widening defect.
+    let recognized = parse_static_line("All creatures of the chosen type get -1/-1.").unwrap();
+    assert_eq!(
+        recognized.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::IsChosenCreatureType])
+        ))
+    );
 }
 
 #[test]
@@ -34533,7 +35178,7 @@ fn static_alpine_moon_loses_land_types_and_abilities() {
 /// `PlayerPerformedAction` over [Scry, Surveil, SearchedLibrary].
 #[test]
 fn river_song_full_card_parses_without_unimplemented() {
-    use crate::types::events::PlayerActionKind;
+    use crate::types::event_kinds::PlayerActionKind;
     use crate::types::triggers::TriggerMode;
 
     let oracle = "Meet in Reverse \u{2014} You draw cards from the bottom of your library rather than the top.\n\
@@ -35787,74 +36432,6 @@ fn rayami_exiled_keyword_grant_splits_into_conditional_per_keyword_statics() {
     assert!(
         granted.contains(&Keyword::Deathtouch),
         "grants deathtouch: {granted:?}"
-    );
-}
-
-/// #5257 Rayami runtime discriminator: the keyword grant is CONDITIONAL and
-/// re-evaluated (CR 611.3a). With no matching exiled card, Rayami must NOT have
-/// flying; once an exiled creature card with a blood counter that itself has
-/// flying is present, Rayami gains flying — and only that keyword.
-///
-/// Discriminator: on `main` the condition is `Unrecognized`, so Rayami has
-/// flying (and every other listed keyword) unconditionally and the negative
-/// assertion flips.
-#[test]
-fn rayami_flying_grant_is_conditional_on_matching_exiled_card() {
-    use crate::game::scenario::{GameScenario, P0};
-    use crate::game::zones::create_object;
-    use crate::types::actions::GameAction;
-    use crate::types::card_type::CoreType;
-    use crate::types::counter::CounterType;
-    use crate::types::identifiers::CardId;
-    use crate::types::zones::Zone;
-
-    const RAYAMI: &str = "As long as an exiled creature card with a blood counter on it has flying, Rayami has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, protection, reach, trample, and vigilance.";
-
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let rayami_id = scenario
-        .add_creature_from_oracle(P0, "Rayami, First of the Fallen", 4, 4, RAYAMI)
-        .id();
-    let mut runner = scenario.build();
-    // Force layer evaluation (SBAs run, continuous effects recomputed).
-    runner.act(GameAction::PassPriority).ok();
-
-    assert!(
-        !runner.state().objects[&rayami_id].has_keyword(&Keyword::Flying),
-        "Rayami must not have flying with no matching exiled card present"
-    );
-
-    // Positive reach-guard: an exiled creature card with a blood counter that has
-    // flying. Rayami now gains flying — proving the grant path actually fires, so
-    // the negative above is a genuine conditional rather than flying being
-    // unreachable. (Seed the object directly, then re-run the continuous-effect
-    // engine — a raw state edit bypasses the normal change tracking.)
-    {
-        let state = runner.state_mut();
-        let exiled = create_object(
-            state,
-            CardId(900),
-            P0,
-            "Exiled Bat".to_string(),
-            Zone::Exile,
-        );
-        let obj = state.objects.get_mut(&exiled).expect("exiled card exists");
-        obj.card_types.core_types.push(CoreType::Creature);
-        obj.base_card_types = obj.card_types.clone();
-        obj.keywords.push(Keyword::Flying);
-        *obj.counters
-            .entry(CounterType::Generic("blood".to_string()))
-            .or_insert(0) += 1;
-    }
-    crate::game::layers::evaluate_layers(runner.state_mut());
-
-    assert!(
-        runner.state().objects[&rayami_id].has_keyword(&Keyword::Flying),
-        "Rayami must gain flying while an exiled flying creature card with a blood counter is present"
-    );
-    assert!(
-        !runner.state().objects[&rayami_id].has_keyword(&Keyword::Vigilance),
-        "Rayami must not gain vigilance — no exiled card has vigilance"
     );
 }
 
@@ -39087,10 +39664,6 @@ fn during_your_turn_keyword_grant_unchanged() {
 // differ. Do NOT "correct" these assertions against the artifact.
 // =========================================================================
 
-/// The interposed player class Weathered Sentinels prints, shared by every
-/// static-side row below so the three-production rows cannot drift from the card.
-const P3_SEG: &str = "players who attacked you during their last turn";
-
 /// Weathered Sentinels, printed line 2 — VERBATIM (verified against the base
 /// card-data artifact's `oracle_text`). Note the ASCII `'`: the parser
 /// lowercases and every defender-exception tag uses ASCII `didn't`, so a curly
@@ -39265,98 +39838,6 @@ fn defender_exception_duration_form_is_declined_by_both_static_productions() {
             }),
         }),
         "a duration-plus-class segment must fail closed, not drop the duration"
-    );
-}
-
-/// ROW 5: an unrecognized interposed class is
-/// PERMANENTLY INERT at runtime AND leaves the card RED in coverage.
-///
-/// Two fixtures differing ONLY in the interposed segment. `unenforceable_gate_marker`
-/// yields `Not(Unrecognized{..})`: `layers::evaluate_condition_inner` reads a BARE
-/// `Unrecognized` as TRUE (layers.rs:2120), so the `Not` wrapper is what makes the
-/// gate evaluate FALSE forever — a bare `Unrecognized` here would grant the
-/// PERMISSION against EVERY defender — the fail-OPEN outcome this row forbids —
-/// while `contains_unrecognized` still reports the gap either way.
-///
-/// BASE-SHAPE RECORD: before this change the same line parsed to a
-/// `Continuous`/`AddKeyword(Defender)` grant whose `card_face_gaps` was `[]` —
-/// dishonestly GREEN. This row therefore measures a real supported -> unsupported
-/// FLIP, and its value must not be mistaken for "it was always red".
-#[test]
-fn unrecognized_interposed_class_is_permanently_inert_and_leaves_the_card_red() {
-    let ok = format!("This creature can attack {P3_SEG} as though it didn't have defender.");
-    const BAD: &str =
-        "This creature can attack players who wear a hat as though it didn't have defender.";
-
-    // (i) REACH-GUARD / PAIRED POSITIVE CONTROL: the widened scan consumed THIS
-    // line shape. Without it, BAD's inert marker could be produced for a line the
-    // scan never saw — a shadowed fixture is inert and red for the WRONG reason.
-    assert_eq!(
-        parse_static_line(&ok)
-            .expect("reach-guard: the recognized class must be consumed")
-            .condition,
-        Some(StaticCondition::AnyPlayerAttackedYouLastTurn {
-            scope: AttackedYouScope::AttackedPlayer,
-        })
-    );
-
-    // (ii) the inert marker, POSITIVE shape.
-    let bad = parse_static_line(BAD).expect(
-        "the line shape is still consumed — the production must OWN the line rather \
-         than decline it back to the AddKeyword(Defender) fallback",
-    );
-    assert_eq!(bad.mode, StaticMode::CanAttackWithDefender);
-    assert_eq!(
-        bad.condition,
-        Some(StaticCondition::Not {
-            condition: Box::new(StaticCondition::Unrecognized {
-                text: "players who wear a hat".to_string(),
-            }),
-        })
-    );
-
-    // (iii) INERT AT RUNTIME — the half a parse-shape assertion cannot buy.
-    let state = crate::types::game_state::GameState::new(
-        crate::types::format::FormatConfig::standard(),
-        2,
-        42,
-    );
-    assert!(
-        !crate::game::layers::evaluate_condition_for_test(
-            &state,
-            bad.condition.as_ref().unwrap(),
-            crate::types::player::PlayerId(0),
-            crate::types::identifiers::ObjectId(1),
-        ),
-        "a Not(Unrecognized) gate must evaluate FALSE (a bare Unrecognized is TRUE, layers.rs:2120)"
-    );
-
-    // (iv) RED IN COVERAGE — the half the fallback's NAME does not guarantee:
-    // being permanently inert at runtime does not by itself make the card red.
-    let bad_face = crate::types::card::CardFace {
-        static_abilities: vec![bad.clone()],
-        ..Default::default()
-    };
-    let gaps = crate::game::coverage::card_face_gaps(&bad_face);
-    assert!(
-        gaps.iter()
-            .any(|g| g.contains("Static:Unrecognized(players who wear a hat)")),
-        "the unparsed class must leave the card RED; got {gaps:?}"
-    );
-
-    // SECOND CONTROL, SAME FIXTURE: the recognized class is GREEN, proving the gap
-    // signal comes from the MARKER and not from `CanAttackWithDefender` being
-    // unsupported in the coverage registry.
-    let ok_face = crate::types::card::CardFace {
-        static_abilities: vec![parse_static_line(&ok).unwrap()],
-        ..Default::default()
-    };
-    assert_eq!(
-        crate::game::coverage::card_face_gaps(&ok_face),
-        Vec::<String>::new(),
-        "a RECOGNIZED anchored class must report NO coverage gap — the gap signal \
-         comes from the unenforceable marker, not from `CanAttackWithDefender` \
-         being unsupported in the registry"
     );
 }
 
@@ -41384,7 +41865,7 @@ fn granted_loyalty_abilities_carry_cr_606_3_timing() {
         "{:?}",
         def.activation_restrictions
     );
-    assert!(crate::game::mana_abilities::is_mana_ability(def));
+    assert!(crate::types::ability::is_mana_ability(def));
 }
 
 /// CR 702.16i + CR 903.4: Commander's Plate — "Equipped creature gets +3/+3 and
@@ -41546,4 +42027,50 @@ fn static_gaeas_liege_full_oracle_dispatch() {
         "{:?}",
         parsed.parse_warnings
     );
+}
+
+// CR 205.1a + CR 205.1b: a type-replacing Aura with a retention clause keeps
+// the retained card type (Corrupted Zendikon: "It's still a land.") in both
+// the standalone-sentence and relative-clause spellings.
+#[test]
+fn enchanted_land_creature_retention_clause_keeps_land_type() {
+    for line in [
+        "Enchanted land is a 3/3 black Ooze creature. It's still a land.",
+        "Enchanted land is a 3/3 black Ooze creature that's still a land.",
+    ] {
+        let defs = parse_static_line_multi(line);
+        assert_eq!(defs.len(), 1, "{line}");
+        let mods = &defs[0].modifications;
+        // CR 205.1b: retention is additive, so no SetCardTypes may wipe prior
+        // types (artifact lands stay artifacts).
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+            "{line}: {mods:?}"
+        );
+        // CR 205.1b: prior subtypes are retained too.
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+            "{line}: {mods:?}"
+        );
+        for core_type in [CoreType::Creature, CoreType::Land] {
+            assert!(
+                mods.contains(&ContinuousModification::AddType { core_type }),
+                "{line}: {mods:?}"
+            );
+        }
+        assert!(
+            mods.contains(&ContinuousModification::SetColor {
+                colors: vec![ManaColor::Black]
+            }),
+            "{line}: {mods:?}"
+        );
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Ooze".to_string()
+        }));
+    }
 }

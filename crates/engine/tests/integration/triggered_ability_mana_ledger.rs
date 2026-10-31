@@ -439,14 +439,16 @@ fn carpet_copy_by_opponent_does_not_suppress_original() {
     assert_eq!(pool_count(&runner, P0, ManaType::Green), 0);
     assert_eq!(ledger(&runner), &HashSet::from([(definition.clone(), P1)]));
 
+    // CR 400.2 + CR 401.2: the authoritative ledger above keeps the entry, while
+    // every viewer projection redacts the trigger-limit ledgers.
     let projected = serde_json::to_value(ClientGameStateRef::wrap(runner.state(), Some(P0)))
         .expect("paused state projects to the client");
-    let pair = serde_json::to_value((definition.clone(), P1)).expect("pair serializes");
-    assert!(
+    assert_eq!(
         projected["state"]["triggered_abilities_added_mana_this_turn"]
             .as_array()
-            .expect("projected ledger")
-            .contains(&pair)
+            .expect("projected ledger"),
+        &Vec::<serde_json::Value>::new(),
+        "the viewer projection redacts the trigger-limit ledger"
     );
     assert!(projected["state"]["stack"]
         .to_string()

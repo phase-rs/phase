@@ -1341,6 +1341,11 @@ pub const SELF_REF_TYPE_PHRASES: &[&str] = &[
 ///
 /// "this spell" — `oracle_casting.rs` matches literal "this spell" for alternative costs/restrictions.
 /// "this card" — context-dependent in costs, conditions, and static abilities.
+/// "this scheme" — the `SetInMotion` trigger matcher (`oracle_trigger.rs`) matches
+/// literal "when[ever] you set this scheme in motion"; normalizing to `~` would
+/// break all 102 scheme triggers. Parse-only recognition lets "this scheme
+/// deals …" subjects bind `SelfRef` while the trigger phrases keep their
+/// literal form. Pool-verified: "this scheme" appears only on scheme cards.
 /// "this sorcery" / "this instant" — spell-subject self-reference ("This
 /// sorcery deals 4 damage …", Mephit's Enthusiasm / Molten Impact). Parse-only
 /// like "this spell": a spell subject must stay literal so possessive tails
@@ -1355,6 +1360,7 @@ pub const SELF_REF_TYPE_PHRASES: &[&str] = &[
 pub const SELF_REF_PARSE_ONLY_PHRASES: &[&str] = &[
     "this spell",
     "this card",
+    "this scheme",
     "this sorcery",
     "this instant",
     "this boon",
@@ -1586,7 +1592,7 @@ pub(crate) fn is_supertype_word(candidate_lower: &str) -> bool {
 /// types (e.g. "Time Lord") match before shorter prefixes.
 static CREATURE_ONLY_SUBTYPES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
     let mut creature: Vec<String> =
-        serde_json::from_str(include_str!("../../data/oracle-subtypes.json"))
+        serde_json::from_str(include_str!("../../../phase-ast/data/oracle-subtypes.json"))
             .expect("oracle-subtypes.json well-formed");
     creature.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     creature
@@ -2484,7 +2490,7 @@ fn unmask_keyword_action_walker_names(text: String, originals: &[String]) -> Str
 ///
 /// Naming all three entry points here makes the leak surface auditable from the
 /// constant itself. The standing completeness authority for the display channel
-/// is not this comment: it is `parser::oracle::tests::render_net_effect_carrier_census`
+/// is not this comment: it is `parser_oracle::render_net_effect_carrier_census` (integration)
 /// (a new `Effect` variant, or a new variant on an intermediate payload enum,
 /// reds it), `parser::oracle::tests::render_net_reaches_every_nested_description_carrier`
 /// (a new description-bearing FIELD on an existing carrier reds it), and the
@@ -2843,13 +2849,18 @@ pub fn normalize_card_name_refs_reporting(
         if let Some(of_pos) = effective_name.find(" of ") {
             let short_name = &effective_name[..of_pos];
             let lower_short = short_name.to_lowercase();
-            // structural: not dispatch — guarding single-word short names only
+            // structural: not dispatch — guarding short names composed of common words
             // CR 201.5 / CR 201.5c: "Next of Kin" short name "Next" must not
             // rewrite temporal "the next end step" → "the ~ end step" (Gift of
-            // Immortality peer class; issue #4956).
-            let is_common_english_word = !short_name.contains(' ')
-                && matches!(
-                    lower_short.as_str(),
+            // Immortality peer class; issue #4956). The same guard applies
+            // word-by-word to multi-word shorts: "For Each of You, a Gift"
+            // yields "For Each", which must not rewrite the "for each"
+            // iteration phrase. A short is skipped when EVERY word is a
+            // common/game word — "Rosie Cotton" still normalizes (proper
+            // nouns), "For Each" does not.
+            let is_all_common_words = short_name.split_whitespace().all(|word| {
+                matches!(
+                    word.to_ascii_lowercase().as_str(),
                     "out"
                         | "in"
                         | "on"
@@ -2867,7 +2878,9 @@ pub fn normalize_card_name_refs_reporting(
                         | "away"
                         | "off"
                         | "next"
-                );
+                        | "each"
+                )
+            });
             // CR 201.3a: a card's "of"-derived short name normalizes to `~`
             // (interchangeable name reference). Suppress this ONLY when the
             // short name is a creature subtype AND the text adds that subtype to
@@ -2889,7 +2902,7 @@ pub fn normalize_card_name_refs_reporting(
                 .iter()
                 .any(|anchor| nom_primitives::scan_contains(&result.to_ascii_lowercase(), anchor));
             if short_name.len() >= 3
-                && !is_common_english_word
+                && !is_all_common_words
                 && !subtype_in_type_change_context
                 && !of_short_name_collides_with_possessive_zone_phrase(&result, short_name)
             {
@@ -3734,6 +3747,27 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("When Tivadar enters", "Tivadar of Thorn"),
             "When ~ enters"
+        );
+    }
+
+    #[test]
+    fn normalize_of_short_name_skips_all_common_word_phrases() {
+        // CR 201.5c: "For Each of You, a Gift" yields the "of"-short "For
+        // Each", which must not rewrite the "for each" iteration phrase to
+        // "~" (that misfire produced an "unrecognized_clause_head" gap on
+        // the real card). Red without the guard ("~ opponent, create ...").
+        assert_eq!(
+            normalize_card_name_refs(
+                "When you set this scheme in motion, for each opponent, create a token.",
+                "For Each of You, a Gift",
+            ),
+            "When you set this scheme in motion, for each opponent, create a token."
+        );
+        // Paired positive: a real multi-word "of"-short self-reference still
+        // normalizes, so the all-words guard cannot over-skip proper nouns.
+        assert_eq!(
+            normalize_card_name_refs("Rosie Cotton enters", "Rosie Cotton of South Lane"),
+            "~ enters"
         );
     }
 

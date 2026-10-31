@@ -14,7 +14,6 @@ use engine::ai_support::{
     retarget_actions, root_may_yield_adverse_exchange, targeted_exchange_verdict,
     validated_candidate_actions_for_semantic_owner, AiDecisionContract, TargetedExchangeVerdict,
 };
-use engine::game::cost_payability::AbilityCostPayability;
 use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, ContinuousModification, Duration, Effect, ResolvedAbility,
@@ -47,7 +46,7 @@ use crate::features::DeckFeatures;
 use crate::plan::{PlanSnapshot, PlanState};
 use crate::planner::{
     prepare_payment_candidates, BeamContinuationPlanner, PlannerServices, PreparedCandidate,
-    RankedCandidate, RungStat, SearchBudget,
+    PromptAnswerValidation, RankedCandidate, RungStat, SearchBudget,
 };
 use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::copy_value::score_legend_rule_keep;
@@ -470,11 +469,12 @@ fn choose_action_with_session_inner(
 
     // CR 608.2c + CR 701.23: SearchChoice picks have their own dedicated
     // beam-bounded scorer in `deterministic_choice`. Routing them through
-    // `score_candidates` first would force `validate_candidates` to clone
-    // state and re-apply every legal SelectCards combination — for a
-    // multi-card tutor against a large library that is hundreds of state
-    // clones (already capped engine-side, but still wasteful relative to
-    // the dedicated scorer). The deterministic path returns the chosen
+    // the scored path first would reach the same `deterministic_choice` (in
+    // `score_candidates_core_for_root`) only after its legality gate, which
+    // simulates each selection `structurally_valid_prompt_answer` defers (such
+    // as a scoped search's), and every selection in each determinized sample —
+    // wasteful relative to calling the dedicated scorer directly. The deterministic path
+    // returns the chosen
     // SelectCards directly; only fall through if it produces nothing.
     if matches!(state.waiting_for, WaitingFor::SearchChoice { .. }) {
         if let Ok(mut pending) = session.prospective_fetch_prompt.write() {
@@ -588,22 +588,62 @@ fn choose_action_with_session_inner(
         }
     }
 
-    let mut scored = score_candidates_uncertified(
-        &root_domain,
-        config,
-        session,
-        ensemble_deadline,
-        RootReuse::FromChooser {
-            contract,
-            priority_shortcut,
-        },
-    );
-    if durable_pact_routes {
-        draft_pact_routes_for_scored_actions(state, ai_player, &scored, session);
-    } else {
-        scored.retain(|(action, _)| !is_certified_pact_root(state, ai_player, action));
+    // The scored path, as one step this decision may take twice. Under
+    // `PromptAnswerValidation::AtSubmission` the legality gate admits, without
+    // simulating them, the named-choice answers and library search selections
+    // `structurally_valid_prompt_answer` admits. The root search simulates the
+    // ones in its beam on its first rung, in beam order, and at the first that
+    // fails the scorer scores the decision again under `EachCandidate`, the
+    // gate that simulates every answer, before returning, so nothing here
+    // selects from a beam that gate would not have built. A selected answer
+    // admitted that way is simulated before anything commits it; if that
+    // simulation fails, the decision is taken again under `EachCandidate`, from
+    // the same selection draw and under the same root-search deadline, so it
+    // selects what that gate selects.
+    //
+    // Where the root search does not simulate the beam (search disabled, or a
+    // wall-clock deadline that expires before its first rung), an admitted
+    // answer that fails and is not selected stays among the scored candidates:
+    // the selection can then differ from that gate's, and can take a draw that
+    // gate's would not. An admitted answer that fails and is selected there is
+    // replaced as above, but its selection's draw is already taken, also where
+    // that gate's selection would not draw.
+    let root = RootReuse::FromChooser {
+        contract,
+        priority_shortcut,
+    };
+    let mut draw = SelectionDraw::default();
+    let mut root_deadline = RootSearchDeadline::default();
+    let mut score_and_select = |prompt_answers: PromptAnswerValidation| {
+        let mut scored = score_candidates_uncertified(
+            &root_domain,
+            config,
+            session,
+            ensemble_deadline,
+            &mut root_deadline,
+            root,
+            prompt_answers,
+        );
+        if durable_pact_routes {
+            draft_pact_routes_for_scored_actions(state, ai_player, &scored, session);
+        } else {
+            scored.retain(|(action, _)| !is_certified_pact_root(state, ai_player, action));
+        }
+        // Issue #4878: total order before softmax so equal scores never depend on
+        // HashSet/HashMap allocation order.
+        scored.sort_by(|a, b| a.0.cmp_stable(&b.0));
+        let index = softmax_select_index_with(&scored, config.temperature, || draw.uniform(rng))?;
+        Some(ScoredPick { scored, index })
+    };
+    let prompt_answers = PromptAnswerValidation::for_chooser(config);
+    let mut pick = score_and_select(prompt_answers);
+    if pick.as_ref().is_some_and(|pick| {
+        prompt_answers.admits_without_simulation(state, pick.action())
+            && !PlannerServices::simulation_accepts(state, pick.action())
+    }) {
+        pick = score_and_select(PromptAnswerValidation::EachCandidate);
     }
-    if scored.is_empty() {
+    let Some(ScoredPick { scored, index }) = pick else {
         // No valid candidates from search — fall back to a safe escape action
         // so the game never deadlocks waiting for the AI.
         return direct(
@@ -614,25 +654,15 @@ fn choose_action_with_session_inner(
                 })
                 .filter(&in_contract),
         );
-    }
-    // Issue #4878: total order before softmax so equal scores never depend on
-    // HashSet/HashMap allocation order.
-    scored.sort_by(|a, b| a.0.cmp_stable(&b.0));
-    let chosen = if scored.len() == 1 {
-        Some((0, scored[0].0.clone()))
-    } else {
-        softmax_select_index(&scored, config.temperature, rng)
-            .map(|index| (index, scored[index].0.clone()))
     };
-    if let Some((_, action)) = &chosen {
-        arm_certified_fetch_prompt(action, ai_player, session);
-        if durable_pact_routes {
-            arm_certified_pact_route(state, action, ai_player, session);
-        }
-        emit_decision_trace(state, ai_player, config, action, session);
+    let chosen = scored[index].0.clone();
+    arm_certified_fetch_prompt(&chosen, ai_player, session);
+    if durable_pact_routes {
+        arm_certified_pact_route(state, &chosen, ai_player, session);
     }
-    let selected_index = chosen.as_ref().map(|(index, _)| *index);
-    let action = chosen.map(|(_, action)| action).filter(&in_contract);
+    emit_decision_trace(state, ai_player, config, &chosen, session);
+    let selected_index = Some(index);
+    let action = Some(chosen).filter(&in_contract);
     AiDecisionSelection {
         receipt: diagnostics
             .then(|| {
@@ -648,6 +678,31 @@ fn choose_action_with_session_inner(
             })
             .flatten(),
         action,
+    }
+}
+
+/// One selection of the chooser's scored path: the scored candidates in the
+/// selector's order and the index it selected.
+struct ScoredPick {
+    scored: Vec<(GameAction, f64)>,
+    index: usize,
+}
+
+impl ScoredPick {
+    fn action(&self) -> &GameAction {
+        &self.scored[self.index].0
+    }
+}
+
+/// A decision's one softmax draw from the caller's RNG: taken the first time a
+/// selection needs it and reused by a later selection of the same decision, so
+/// a decision consumes at most one draw however many times it selects.
+#[derive(Default)]
+struct SelectionDraw(Option<f64>);
+
+impl SelectionDraw {
+    fn uniform(&mut self, rng: &mut impl Rng) -> f64 {
+        *self.0.get_or_insert_with(|| rng.random::<f64>())
     }
 }
 
@@ -1657,6 +1712,21 @@ pub fn fallback_action(
         }
         return gate(issued(|action| matches!(action, GameAction::CancelCast)));
     }
+    // CR 601.2h + CR 602.2b: a disjunctive activation cost is a payment
+    // choice, not an uncompletable cast, so it is answered before the
+    // pending-cast guard below: the first engine-issued branch (the engine
+    // offers only branches the activation can pay), else the issued cancel.
+    if matches!(
+        state.waiting_for,
+        WaitingFor::ActivationCostOneOfChoice { .. }
+    ) {
+        let branch =
+            issued(|action| matches!(action, GameAction::ChooseActivationCostBranch { .. }));
+        if branch.is_some() {
+            return gate(branch);
+        }
+        return gate(issued(|action| matches!(action, GameAction::CancelCast)));
+    }
 
     // Pending-cast states can always be escaped with CancelCast (CR 601.2).
     // Check this before the exhaustive match so every pending-cast variant
@@ -2047,15 +2117,9 @@ pub fn fallback_action(
             pay: zero_counter_payment_owed_by(state, *player),
         }),
 
-        // Disjunctive activation costs: default to the first payable branch.
-        WaitingFor::ActivationCostOneOfChoice {
-            player,
-            costs,
-            pending_cast,
-        } => costs
-            .iter()
-            .position(|cost| cost.is_payable(state, *player, pending_cast.object_id))
-            .map(|index| GameAction::ChooseActivationCostBranch { index }),
+        WaitingFor::ActivationCostOneOfChoice { .. } => {
+            unreachable!("handled before fallback match")
+        }
         // CR 118.12a: Disjunctive unless-cost choice. Fallback is to decline
         // the choice (let the effect resolve), mirroring `UnlessPayment`'s
         // pessimistic-default policy.
@@ -2758,7 +2822,10 @@ pub fn fallback_action(
             ..
         } => issued_selection(contract),
         WaitingFor::PayCost {
-            resume: CostResume::Resolution | CostResume::TurnFaceUp { .. },
+            resume:
+                CostResume::Resolution
+                | CostResume::TeamTapPayment { .. }
+                | CostResume::TurnFaceUp { .. },
             ..
         } => issued(|action| matches!(action, GameAction::SelectCards { .. })),
 
@@ -2986,7 +3053,18 @@ pub(crate) fn score_candidates_with_session(
     if let Some(action) = certified_lethal_action(config, deadline, &root_domain, None) {
         return vec![(action, 1.0)];
     }
-    score_candidates_uncertified(&root_domain, config, session, deadline, RootReuse::Fresh)
+    // A score-only caller (the public scorer, a WASM pool worker) selects
+    // elsewhere and cannot simulate the answer it submits, so every prompt
+    // answer is simulated here.
+    score_candidates_uncertified(
+        &root_domain,
+        config,
+        session,
+        deadline,
+        &mut RootSearchDeadline::default(),
+        RootReuse::Fresh,
+        PromptAnswerValidation::EachCandidate,
+    )
 }
 
 /// The ensemble's ONE shared wall-clock ceiling across all K sequential
@@ -3003,6 +3081,29 @@ fn ensemble_deadline(config: &AiConfig) -> engine::util::Deadline {
     match config.search.time_budget_ms {
         Some(ms) => engine::util::Deadline::after(ms),
         None => engine::util::Deadline::none(),
+    }
+}
+
+/// The wall-clock deadline of a decision's root search, kept across the passes
+/// that score one decision state. The first pass's `PlannerServices` starts it
+/// from `time_budget_ms`, as every root search does; a pass that takes the
+/// decision again (`PromptAnswerValidation`) runs under that same deadline, so
+/// retaking a decision does not restart its budget, as the determinized
+/// samples of one decision share one (`ensemble_deadline`). Measurement mode
+/// has no deadline either way (`PlannerServices::with_deadline`).
+#[derive(Debug, Default)]
+struct RootSearchDeadline(Option<engine::util::Deadline>);
+
+impl RootSearchDeadline {
+    /// The deadline an earlier pass started, if any.
+    fn shared(&self) -> Option<engine::util::Deadline> {
+        self.0
+    }
+
+    /// Keep `deadline`, the one a pass just started, unless an earlier pass
+    /// started one.
+    fn start(&mut self, deadline: engine::util::Deadline) {
+        self.0.get_or_insert(deadline);
     }
 }
 
@@ -3062,32 +3163,56 @@ thread_local! {
     static FETCH_ROUTE_DOMAIN_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Times Pact drafting computed the validated domain.
     static PACT_DRAFT_DOMAIN_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The deadline each `score_candidates_core_for_root` call that builds its
+    /// search services runs under (`PlannerServices::deadline`), in call order.
+    /// `pub(crate)` so the driver tests in `planner::tests` read it.
+    pub(crate) static ROOT_SEARCH_DEADLINES: std::cell::RefCell<Vec<engine::util::Deadline>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// [`score_candidates_with_session`] after its lethal-reach certification has
 /// declined: shortcuts and scoring only, per sampled world when K > 0.
-/// `root_domain` is the decision state's own priority domain and `root` the
-/// caller's knowledge of that state; both are forwarded only to the search that
-/// runs on the decision state itself, while every determinized sample is a
-/// different state that builds its own domain and is scored `Fresh`.
+/// `root_domain` is the decision state's own priority domain, `root_deadline`
+/// the deadline of its root search and `root` the caller's knowledge of that
+/// state; all three are forwarded only to the search that runs on the decision
+/// state itself, while every determinized sample is a different state that
+/// builds its own domain and is scored `Fresh`.
 fn score_candidates_uncertified(
     root_domain: &RootPriorityDomain<'_>,
     config: &AiConfig,
     session: &Arc<AiSession>,
     deadline: engine::util::Deadline,
+    root_deadline: &mut RootSearchDeadline,
     root: RootReuse<'_>,
+    prompt_answers: PromptAnswerValidation,
 ) -> Vec<(GameAction, f64)> {
     let (state, ai_player) = (root_domain.state, root_domain.ai_player);
     // Attacker declarations are public-state tactical choices. Running K hidden
     // information samples cannot improve them, but would multiply the bounded
     // multiplayer comparison and make a singleton support drift.
     if matches!(state.waiting_for, WaitingFor::DeclareAttackers { .. }) {
-        return score_candidates_core_for_root(root_domain, config, session, None, root);
+        return score_candidates_core_for_root(
+            root_domain,
+            config,
+            session,
+            None,
+            root_deadline,
+            root,
+            prompt_answers,
+        );
     }
     let k = config.search.determinization_samples;
     if k == 0 {
         // Unchanged path: no determinization, no shared-deadline override.
-        return score_candidates_core_for_root(root_domain, config, session, None, root);
+        return score_candidates_core_for_root(
+            root_domain,
+            config,
+            session,
+            None,
+            root_deadline,
+            root,
+            prompt_answers,
+        );
     }
 
     let mut acc: Vec<(GameAction, f64)> = Vec::new();
@@ -3731,12 +3856,16 @@ fn score_candidates_core(
     session: &Arc<AiSession>,
     deadline_override: Option<engine::util::Deadline>,
 ) -> Vec<(GameAction, f64)> {
+    // A sampled world is not the decision state the chooser simulates its
+    // submitted answer on, so each world simulates every prompt answer itself.
     score_candidates_core_for_root(
         &RootPriorityDomain::new(state, ai_player),
         config,
         session,
         deadline_override,
+        &mut RootSearchDeadline::default(),
         RootReuse::Fresh,
+        PromptAnswerValidation::EachCandidate,
     )
 }
 
@@ -3844,12 +3973,16 @@ impl RootDecisionContext {
 /// the root. Under [`RootReuse::FromChooser`] the contract's candidates stand
 /// in for a second contract issue, and a priority shortcut the chooser found
 /// absent is not run again; everything else is identical to the `Fresh` path.
+/// Without a `deadline_override`, the search runs under `root_deadline`, the
+/// deadline an earlier pass over this decision state started, or starts it.
 fn score_candidates_core_for_root(
     domain: &RootPriorityDomain<'_>,
     config: &AiConfig,
     session: &Arc<AiSession>,
     deadline_override: Option<engine::util::Deadline>,
+    root_deadline: &mut RootSearchDeadline,
     root: RootReuse<'_>,
+    prompt_answers: PromptAnswerValidation,
 ) -> Vec<(GameAction, f64)> {
     let (state, ai_player) = (domain.state, domain.ai_player);
     // The scored/parallel-worker path bypasses `choose_action_with_session_inner`.
@@ -3916,8 +4049,17 @@ fn score_candidates_core_for_root(
     let policies = PolicyRegistry::shared();
     let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
 
-    let mut services =
-        PlannerServices::with_deadline(ai_player, config, policies, context, deadline_override);
+    let mut services = PlannerServices::with_deadline(
+        ai_player,
+        config,
+        policies,
+        context,
+        deadline_override.or(root_deadline.shared()),
+    );
+    root_deadline.start(services.deadline);
+    #[cfg(test)]
+    ROOT_SEARCH_DEADLINES.with_borrow_mut(|deadlines| deadlines.push(services.deadline));
+    services.prompt_answers = prompt_answers;
 
     // Combat decisions bypass the candidate pipeline entirely — the combat AI
     // reads directly from game state and never uses generated candidates.
@@ -4015,7 +4157,30 @@ fn score_candidates_core_for_root(
             branching,
         );
 
-        run_iterative_deepening(state, ranked, tactical_weight, config, &mut services)
+        match run_iterative_deepening(state, ranked, tactical_weight, config, &mut services) {
+            Ok(scored) => scored,
+            Err(FailedAdmittedAnswer(failed)) => {
+                // An answer the gate admitted without simulating it
+                // (`PromptAnswerValidation::AtSubmission`) failed when the search
+                // applied it, so the beam is not the one `EachCandidate`, the gate
+                // that simulates every answer, builds. Score the decision again
+                // under that gate, under this pass's deadline, so no caller selects
+                // from that beam.
+                tracing::debug!(
+                    ?failed,
+                    "an admitted prompt answer failed its root simulation; scoring with every answer simulated"
+                );
+                score_candidates_core_for_root(
+                    domain,
+                    config,
+                    session,
+                    deadline_override,
+                    root_deadline,
+                    root,
+                    PromptAnswerValidation::EachCandidate,
+                )
+            }
+        }
     } else {
         // Heuristic-only scoring
         let mut out: Vec<_> = gated
@@ -4036,6 +4201,15 @@ fn score_candidates_core_for_root(
     }
 }
 
+/// A root search's report that an answer the legality gate admitted without
+/// simulating it (`PromptAnswerValidation::AtSubmission`) failed its simulation
+/// on the search's first rung. Its beam is then not the one `EachCandidate`, the
+/// gate that simulates every answer, builds, so it has no scores to select
+/// from. The answer is boxed because `GameAction` is large (as in
+/// `AiActionsStop::ApplyFailed`).
+#[derive(Debug)]
+struct FailedAdmittedAnswer(Box<GameAction>);
+
 /// Runs rung-0..=ceiling iterative deepening over the pre-ranked root beam.
 /// Extracted from `score_candidates_core` so tests can construct
 /// `PlannerServices`, run the loop, and inspect witness state (`rung_stats`,
@@ -4043,21 +4217,28 @@ fn score_candidates_core_for_root(
 /// `search_value` calls. The pre-rung tactical-only floor, the rung loop, and
 /// the acceptance logic all live here; `score_candidates_core` just delegates.
 ///
-/// PV threading (D2) and the rung witness (D3) are the only additions over the
-/// pre-extraction behavior; both are no-ops for `rung_stats`/ordering when the
-/// beam is a single candidate or the killers are empty.
+/// After each searched rung it accepts, the loop moves that rung's best
+/// candidate to the front of the beam for the next rung (PV threading, D2),
+/// and it records every rung it runs in `rung_stats` (the rung witness, D3).
 ///
 /// `state` becomes one tracked search root for the whole call, shared by every
 /// rung, so a rung reuses the root successors and the positions below them
 /// that an earlier rung already simulated. Root successors are keyed by action,
 /// so reordering the beam between rungs cannot misalign them.
+///
+/// Under `PromptAnswerValidation::AtSubmission`, rung 0's simulation of a beam
+/// answer the legality gate admitted without simulating it is also that
+/// answer's legality check. If one fails, rung 0 stops at that answer, without
+/// simulating or evaluating the beam answers after it, and is recorded in
+/// `rung_stats` as not completed; no further rung runs, and the search returns
+/// that answer as [`FailedAdmittedAnswer`] instead of scores.
 fn run_iterative_deepening(
     state: &GameState,
     mut ranked: Vec<RankedCandidate>,
     tactical_weight: f64,
     config: &AiConfig,
     services: &mut PlannerServices<'_>,
-) -> Vec<(GameAction, f64)> {
+) -> Result<Vec<(GameAction, f64)>, FailedAdmittedAnswer> {
     // Iterative deepening: rung 0 (quiesced eval per candidate) -> ceiling.
     // Return the deepest *fully completed* rung. The deepest rung reproduces
     // origin/main's fixed-depth pass; the TT (per-decision, on `services`)
@@ -4076,6 +4257,9 @@ fn run_iterative_deepening(
         .map(|r| (r.candidate.action.clone(), r.root_score(tactical_weight)))
         .collect();
 
+    // Under `PromptAnswerValidation::AtSubmission`, the first beam answer the
+    // legality gate admitted without simulating it whose rung-0 simulation failed.
+    let mut failed_admitted_answer: Option<GameAction> = None;
     let root = services.new_search_root();
     for iter_depth in 0..=ceiling {
         // Guard EVERY rung (incl. rung 0) at entry. Interactive: a pre-expired
@@ -4100,31 +4284,57 @@ fn run_iterative_deepening(
         for r in &ranked {
             // Rungs >= 1 may bail mid-rung (interior search is expensive) and
             // discard the partial. Rung 0 is cheap (branching quiesced evals)
-            // and runs atomically once entered, so it is never left partial.
+            // and the deadline never cuts it short once entered; it stops early
+            // only at a failed admitted answer (below), which ends the search.
             if iter_depth > 0 && services.deadline.expired() {
                 completed = false;
                 break;
             }
-            let score = if r.score == f64::NEG_INFINITY {
+            // Rung 0's simulation of an answer the gate admitted without
+            // simulating it (`PromptAnswerValidation::AtSubmission`) is also that
+            // answer's legality check, so it runs even for a policy Reject.
+            let unverified = iter_depth == 0
+                && services
+                    .prompt_answers
+                    .admits_without_simulation(state, &r.candidate.action);
+            let score = if r.score == f64::NEG_INFINITY && !unverified {
                 // A policy Reject: `continuation + score * tactical_weight` is −∞
                 // for every finite continuation, so the simulation cannot change it.
                 f64::NEG_INFINITY
-            } else if let Some((child, sim)) = services.successor_edge(
-                Some(root),
-                state,
-                &r.candidate,
-                r.payment_successor.clone(),
-            ) {
-                let cont = planner.evaluate_after_action_at(child, &sim, services, &mut budget);
-                let continuation = r
-                    .continuation_witness
-                    .filter(|witness| witness.is_finite())
-                    .map_or(cont, |witness| cont.max(witness));
-                continuation + (r.score * tactical_weight)
             } else {
-                // Action failed simulation — same penalty as origin/main so the
-                // AI prefers any valid alternative.
-                r.score - 1000.0
+                match services.successor_edge(
+                    Some(root),
+                    state,
+                    &r.candidate,
+                    r.payment_successor.clone(),
+                ) {
+                    // An unverified Reject that applies: the simulation was its
+                    // legality check, and its score stands.
+                    Some(_) if r.score == f64::NEG_INFINITY => f64::NEG_INFINITY,
+                    Some((child, sim)) => {
+                        let cont =
+                            planner.evaluate_after_action_at(child, &sim, services, &mut budget);
+                        let continuation = r
+                            .continuation_witness
+                            .filter(|witness| witness.is_finite())
+                            .map_or(cont, |witness| cont.max(witness));
+                        continuation + (r.score * tactical_weight)
+                    }
+                    None => {
+                        if unverified {
+                            // This beam is not the one `EachCandidate` builds and
+                            // the caller scores the decision again, so no answer
+                            // after this one is simulated or evaluated, and rung 0
+                            // is not accepted.
+                            failed_admitted_answer = Some(r.candidate.action.clone());
+                            completed = false;
+                            break;
+                        }
+                        // Action failed simulation — same penalty as origin/main so the
+                        // AI prefers any valid alternative.
+                        r.score - 1000.0
+                    }
+                }
             };
             rung_scored.push((r.candidate.action.clone(), score));
         }
@@ -4132,10 +4342,11 @@ fn run_iterative_deepening(
         // "Fully completed" also requires the deadline to be live after the
         // LAST candidate: expiry mid-final-evaluation is invisible to the
         // per-candidate entry check and would accept a rung whose tail score
-        // was truncated. Rung 0 stays exempt (atomic once entered — it is the
-        // no-regression floor, == origin/main's deadline collapse). Node-budget
-        // exhaustion deliberately does NOT discard: the deepest rung consuming
-        // its full `max_nodes` reproduces origin/main's single fixed-depth pass.
+        // was truncated. Rung 0 stays exempt from this check (once entered, the
+        // deadline never cuts it short — it is the no-regression floor, ==
+        // origin/main's deadline collapse). Node-budget exhaustion deliberately
+        // does NOT discard: the deepest rung consuming its full `max_nodes`
+        // reproduces origin/main's single fixed-depth pass.
         let accepted = completed && (iter_depth == 0 || !services.deadline.expired());
 
         // D3: one witness per executed rung (completion + node headroom). A
@@ -4180,9 +4391,12 @@ fn run_iterative_deepening(
         "iterative deepening rung summary"
     );
 
+    if let Some(answer) = failed_admitted_answer {
+        return Err(FailedAdmittedAnswer(Box::new(answer)));
+    }
     let mut out = best_scored;
     out.sort_by(|a, b| a.0.cmp_stable(&b.0));
-    out
+    Ok(out)
 }
 
 /// Deterministic principal-variation selection over a completed rung's scores.
@@ -5400,6 +5614,17 @@ fn softmax_select_index(
     temperature: f64,
     rng: &mut impl Rng,
 ) -> Option<usize> {
+    softmax_select_index_with(scored, temperature, || rng.random::<f64>())
+}
+
+/// [`softmax_select_index`] with its uniform draw in `[0, 1)` taken from
+/// `uniform`, which runs at most once, and only when the pick is random: two or
+/// more rows whose weights have a finite, positive total.
+fn softmax_select_index_with(
+    scored: &[(GameAction, f64)],
+    temperature: f64,
+    uniform: impl FnOnce() -> f64,
+) -> Option<usize> {
     if scored.is_empty() {
         return None;
     }
@@ -5431,7 +5656,7 @@ fn softmax_select_index(
             .map(|(index, _)| index);
     }
 
-    let threshold: f64 = rng.random::<f64>() * total;
+    let threshold: f64 = uniform() * total;
     let mut cumulative = 0.0;
     for (i, w) in weights.iter().enumerate() {
         cumulative += w;
@@ -7121,6 +7346,66 @@ mod tests {
         AiDecisionContract::issue(state, owner)
     }
 
+    /// CR 601.2h + CR 602.2b: Bloodthorn Flail's "Equip—Pay {3} or discard a
+    /// card" reaches the disjunctive activation-cost prompt through a real
+    /// activation. The fallback answers it with an engine-issued branch, not
+    /// the pending-cast guard's CancelCast.
+    #[test]
+    fn fallback_answers_activation_cost_one_of_choice_with_an_issued_branch() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+        let flail = scenario
+            .add_creature(P0, "Bloodthorn Flail", 0, 0)
+            .as_artifact()
+            .with_subtypes(vec!["Equipment"])
+            .from_oracle_text(
+                "Equipped creature gets +2/+1.\nEquip\u{2014}Pay {3} or discard a card.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        for _ in 0..3 {
+            runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Colorless,
+                engine::types::identifiers::ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: flail,
+                ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            })
+            .expect("equip is activatable with {3} available");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ActivationCostOneOfChoice { player, .. } if player == P0
+            ),
+            "reach: the disjunctive equip cost prompts, got {:?}",
+            runner.state().waiting_for
+        );
+        let contract = AiDecisionContract::issue(runner.state(), P0);
+        assert!(
+            contract.candidates.iter().any(|candidate| matches!(
+                candidate.action,
+                GameAction::ChooseActivationCostBranch { .. }
+            )),
+            "reach: the engine issues a payable branch"
+        );
+
+        let config = create_config(AiDifficulty::Easy, Platform::Native);
+        let fallback = fallback_action(runner.state(), &config, &contract).expect("fallback");
+        assert!(
+            matches!(fallback, GameAction::ChooseActivationCostBranch { .. }),
+            "the fallback picks an issued branch, got {fallback:?}"
+        );
+        assert!(contract.contains_action(runner.state(), &fallback));
+        runner.act(fallback).expect("the issued branch applies");
+    }
+
     /// A mechanism fixture for the Counter specialist's cost/seat boundary.
     /// The Counter targets a spell on the stack that the payer controls.
     fn unless_payment_state(
@@ -7677,6 +7962,7 @@ mod tests {
             predicted_winner: Some(PlayerId(1)),
             certificate: engine::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
+                rising: vec![],
                 win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
                 win_kind_at: None,
                 mandatory: false,
@@ -7686,6 +7972,7 @@ mod tests {
             schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
             road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
 
@@ -15428,7 +15715,8 @@ mod tests {
             0.1,
             &config,
             &mut hostile_services,
-        );
+        )
+        .expect("services that simulate every answer admit none unsimulated");
         let mut control_services = PlannerServices::new_default(PlayerId(0), &config, policies);
         let control_result = run_iterative_deepening(
             &state,
@@ -15443,7 +15731,8 @@ mod tests {
             0.1,
             &config,
             &mut control_services,
-        );
+        )
+        .expect("services that simulate every answer admit none unsimulated");
         assert_eq!(hostile_result[0].1, control_result[0].1);
         assert!(
             hostile_result[0].1 > -900.0,
@@ -15509,7 +15798,8 @@ mod tests {
         config.search.planner_mode = PlannerMode::BeamOnly; // ceiling 0
         let mut services = PlannerServices::new_default(PlayerId(0), &config, policies);
         let ranked = build_root_beam(&state, &services);
-        let out = run_iterative_deepening(&state, ranked, 0.1, &config, &mut services);
+        let out = run_iterative_deepening(&state, ranked, 0.1, &config, &mut services)
+            .expect("services that simulate every answer admit none unsimulated");
 
         assert!(!out.is_empty(), "rung 0 produces the floor");
         // Reach-guard: rung 0 ran (non-vacuous).
@@ -15554,13 +15844,94 @@ mod tests {
         let mut services =
             PlannerServices::new_default(PlayerId(0), &config, PolicyRegistry::shared());
         let ranked = vec![RankedCandidate::new(cast.clone(), f64::NEG_INFINITY)];
-        let out = run_iterative_deepening(&state, ranked, 0.1, &config, &mut services);
+        let out = run_iterative_deepening(&state, ranked, 0.1, &config, &mut services)
+            .expect("services that simulate every answer admit none unsimulated");
         assert_eq!(
             services.memo_witness.successor_simulations + services.memo_witness.successor_hits,
             0,
             "a rejected candidate must not request a successor"
         );
         assert_eq!(out, vec![(cast.action, f64::NEG_INFINITY)]);
+    }
+
+    /// Under `PromptAnswerValidation::AtSubmission`, rung 0 stops at the first
+    /// beam answer the legality gate admitted without simulating it whose
+    /// simulation fails: it returns that answer, simulates (and so evaluates)
+    /// no beam answer after it, and records rung 0 as not completed. The board
+    /// is Luminescent Rain (its Oracle text verbatim) for a P0 at
+    /// `i32::MAX - 1` life controlling an Ally and an Elf, so those two types
+    /// fail and Advisor and Angel apply. The paired reach guard runs the same
+    /// beam under `EachCandidate`.
+    ///
+    /// Fails if rung 0 goes on past the failure, or reports a later failure.
+    #[test]
+    fn rung_zero_stops_at_the_first_admitted_answer_that_fails() {
+        let state = crate::planner::tests::luminescent_rain_prompt_rejecting(&["Ally", "Elf"]);
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        assert!(
+            matches!(config.search.planner_mode, PlannerMode::BeamPlusRollout)
+                && config.search.max_depth >= 2,
+            "fixture: the search deepens past rung 0"
+        );
+        let mut beam_only = config.clone();
+        beam_only.search.planner_mode = PlannerMode::BeamOnly; // rung 0 only
+        let ctx = build_decision_context(&state);
+        let choose = |choice: &str| GameAction::ChooseOption {
+            choice: choice.to_string(),
+        };
+        let row = |choice: &str| {
+            let action = choose(choice);
+            let candidate = ctx
+                .candidates
+                .iter()
+                .find(|candidate| candidate.action == action)
+                .cloned()
+                .unwrap_or_else(|| panic!("{choice} is offered"));
+            RankedCandidate::new(candidate, 0.0)
+        };
+        let beam = || vec![row("Advisor"), row("Ally"), row("Elf"), row("Angel")];
+        let rungs = |services: &PlannerServices<'_>| {
+            services
+                .rung_stats
+                .iter()
+                .map(|rung| (rung.depth, rung.completed))
+                .collect::<Vec<_>>()
+        };
+
+        // Paired reach guard: simulating every answer, rung 0 simulates the whole beam.
+        let mut services =
+            PlannerServices::new_default(PlayerId(0), &beam_only, PolicyRegistry::shared());
+        let scored = run_iterative_deepening(&state, beam(), 0.1, &beam_only, &mut services)
+            .expect("services that simulate every answer admit none unsimulated");
+        assert_eq!(scored.len(), 4, "reach guard: every beam answer is scored");
+        assert_eq!(
+            services.memo_witness.successor_simulations, 4,
+            "reach guard: the counter counts every beam answer rung 0 simulates"
+        );
+        assert_eq!(rungs(&services), [(0, true)]);
+
+        let mut services =
+            PlannerServices::new_default(PlayerId(0), &config, PolicyRegistry::shared());
+        services.prompt_answers = PromptAnswerValidation::AtSubmission;
+        let Err(FailedAdmittedAnswer(failed)) =
+            run_iterative_deepening(&state, beam(), 0.1, &config, &mut services)
+        else {
+            panic!("an admitted beam answer that fails must be returned instead of scores");
+        };
+        assert_eq!(
+            *failed,
+            choose("Ally"),
+            "the first admitted answer that fails is returned"
+        );
+        assert_eq!(
+            services.memo_witness.successor_simulations, 2,
+            "rung 0 simulates Advisor and Ally, and no answer after Ally"
+        );
+        assert_eq!(
+            rungs(&services),
+            [(0, false)],
+            "rung 0 is recorded as not completed, and no later rung runs"
+        );
     }
 
     // V6: the rung witness records completion + node usage for every executed rung.
@@ -15643,7 +16014,8 @@ mod tests {
         );
         let ranked = build_root_beam(&state, &services);
         assert!(!ranked.is_empty(), "reach-guard: the beam is non-empty");
-        let out = run_iterative_deepening(&state, ranked, 0.1, &config, &mut services);
+        let out = run_iterative_deepening(&state, ranked, 0.1, &config, &mut services)
+            .expect("services that simulate every answer admit none unsimulated");
         assert!(!out.is_empty(), "the tactical-only floor is still returned");
         assert!(
             services.rung_stats.is_empty(),
@@ -15710,7 +16082,8 @@ mod tests {
             let mut cfg1 = config.clone();
             cfg1.search.max_depth = 2; // ceiling 1
             let mut s = PlannerServices::new_default(PlayerId(0), &cfg1, policies);
-            let rung1 = run_iterative_deepening(&state, ranked.clone(), tw, &cfg1, &mut s);
+            let rung1 = run_iterative_deepening(&state, ranked.clone(), tw, &cfg1, &mut s)
+                .expect("services that simulate every answer admit none unsimulated");
             pv_argmax(&rung1).cloned().expect("rung 1 has an argmax")
         };
         assert_ne!(b, a, "reach-guard: the PV must differ from ranked[0]");
@@ -15756,7 +16129,8 @@ mod tests {
         // Measured run: ceiling 2, pass-first beam. Rung 1 sets PV = B; rung 2
         // rotates B to the front and searches it first with the fresh per-rung pool.
         let mut services = PlannerServices::new_default(PlayerId(0), &config, policies);
-        let out = run_iterative_deepening(&state, ranked, tw, &config, &mut services);
+        let out = run_iterative_deepening(&state, ranked, tw, &config, &mut services)
+            .expect("services that simulate every answer admit none unsimulated");
 
         // TT-contamination reach-guard: the measured/control equality is TT-free.
         assert_eq!(
@@ -15814,7 +16188,8 @@ mod tests {
             let mut cfg0 = config.clone();
             cfg0.search.planner_mode = PlannerMode::BeamOnly; // ceiling 0
             let mut s = PlannerServices::new_default(PlayerId(0), &cfg0, policies);
-            let rung0 = run_iterative_deepening(&state, ranked.clone(), tw, &cfg0, &mut s);
+            let rung0 = run_iterative_deepening(&state, ranked.clone(), tw, &cfg0, &mut s)
+                .expect("services that simulate every answer admit none unsimulated");
             pv_argmax(&rung0).cloned().expect("rung 0 has an argmax")
         };
         // Reach-guard: rung-0 argmax must differ from ranked[0], else pre-rotating
@@ -15828,6 +16203,7 @@ mod tests {
         let out_natural = {
             let mut s = PlannerServices::new_default(PlayerId(0), &config, policies);
             run_iterative_deepening(&state, ranked.clone(), tw, &config, &mut s)
+                .expect("services that simulate every answer admit none unsimulated")
         };
         // Run 2: beam pre-rotated so B0 is first (mimics an un-gated rung-0 rotate).
         let out_prerotated = {
@@ -15835,6 +16211,7 @@ mod tests {
             rotate_pv_to_front(&mut pre, &b0);
             let mut s = PlannerServices::new_default(PlayerId(0), &config, policies);
             run_iterative_deepening(&state, pre, tw, &config, &mut s)
+                .expect("services that simulate every answer admit none unsimulated")
         };
 
         assert_ne!(
@@ -17821,6 +18198,7 @@ mod tests {
                     chooser: engine::types::ability::Chooser::Controller.into(),
                     candidate_source: engine::types::ability::ZoneChoiceCandidateSource::Legacy,
                     reciprocal_role: None,
+                    gather_role: None,
                     up_to: true,
                     constraint: Some(
                         engine::types::ability::ChooseFromZoneConstraint::DistinctCardTypes {
@@ -18935,7 +19313,8 @@ one on the bottom of your library.";
             !ranked.is_empty(),
             "reach-guard: the root beam is non-empty"
         );
-        let scored = run_iterative_deepening(state, ranked, 0.1, &config, &mut services);
+        let scored = run_iterative_deepening(state, ranked, 0.1, &config, &mut services)
+            .expect("services that simulate every answer admit none unsimulated");
         let trace = DeepeningTrace {
             scored: score_bits(&scored),
             rung_stats: services.rung_stats.clone(),
@@ -19364,10 +19743,12 @@ one on the bottom of your library.";
             &config,
             &session,
             None,
+            &mut RootSearchDeadline::default(),
             RootReuse::FromChooser {
                 contract: &contract,
                 priority_shortcut: RootPriorityShortcut::Recompute,
             },
+            PromptAnswerValidation::EachCandidate,
         );
         assert!(
             scored
@@ -19452,10 +19833,12 @@ one on the bottom of your library.";
             &config,
             &session,
             None,
+            &mut RootSearchDeadline::default(),
             RootReuse::FromChooser {
                 contract: &contract,
                 priority_shortcut: RootPriorityShortcut::Recompute,
             },
+            PromptAnswerValidation::EachCandidate,
         );
         assert_eq!(root_witnesses(), (0, 1));
         assert_eq!(score_bits(&recomputed), score_bits(&direct));
@@ -19479,7 +19862,9 @@ one on the bottom of your library.";
                     &config,
                     &session,
                     ensemble_deadline(&config),
+                    &mut RootSearchDeadline::default(),
                     root,
+                    PromptAnswerValidation::EachCandidate,
                 ))
             };
             let fresh = score(RootReuse::Fresh);
@@ -19509,6 +19894,69 @@ one on the bottom of your library.";
             assert_eq!(root_witnesses(), (0, 0), "{name}: reach-guard, reuse ran");
             assert_eq!(reused, fresh, "{name}: root reuse changed a score");
         }
+    }
+
+    /// A pass over a decision state whose root search an earlier pass of the
+    /// same decision started runs under that pass's deadline, not a fresh
+    /// budget: with that deadline already expired, the search stops before its
+    /// first rung exactly as under an expired `deadline_override`, and the
+    /// scores differ from a search with no deadline. A pass that starts the
+    /// root search records the deadline it runs under.
+    #[test]
+    fn a_retaken_root_search_runs_under_the_deadline_its_first_pass_started() {
+        let state = searchable_state();
+        let interactive = create_config(AiDifficulty::Hard, Platform::Native);
+        assert!(
+            !interactive.execution_mode.is_measurement() && interactive.search.enabled,
+            "fixture: a searching seat under a wall-clock budget"
+        );
+        let score = |config: &AiConfig,
+                     deadline_override: Option<engine::util::Deadline>,
+                     root_deadline: &mut RootSearchDeadline| {
+            let session = AiSession::arc_from_game(&state);
+            score_bits(&score_candidates_core_for_root(
+                &RootPriorityDomain::new(&state, PlayerId(0)),
+                config,
+                &session,
+                deadline_override,
+                root_deadline,
+                RootReuse::Fresh,
+                PromptAnswerValidation::EachCandidate,
+            ))
+        };
+
+        let mut started = RootSearchDeadline::default();
+        let _ = score(&interactive, None, &mut started);
+        assert!(
+            started
+                .shared()
+                .and_then(|deadline| deadline.remaining())
+                .is_some(),
+            "the first pass records the wall-clock deadline its root search runs under"
+        );
+
+        let searched = score(
+            &interactive.clone().into_measurement(0),
+            None,
+            &mut RootSearchDeadline::default(),
+        );
+        assert!(searched.len() >= 2, "reach guard: the root is searched");
+        let expired_override = score(
+            &interactive,
+            Some(engine::util::Deadline::after(0)),
+            &mut RootSearchDeadline::default(),
+        );
+        assert_ne!(
+            expired_override, searched,
+            "reach guard: an expired deadline stops the search before its first rung"
+        );
+        let mut expired = RootSearchDeadline::default();
+        expired.start(engine::util::Deadline::after(0));
+        assert_eq!(
+            score(&interactive, None, &mut expired),
+            expired_override,
+            "a retaken root search must run under the deadline its first pass started"
+        );
     }
 
     /// T16: Pact drafting computes the validated domain only when a scored

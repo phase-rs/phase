@@ -172,6 +172,7 @@ fn atraxa_choice_fixture() -> (GameState, Vec<ObjectId>, ObjectId, ObjectId) {
                 chooser: Chooser::Controller.into(),
                 candidate_source: ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: true,
                 selection: CardSelectionMode::Chosen,
                 constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),

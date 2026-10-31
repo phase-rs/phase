@@ -363,6 +363,7 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
     // Wrong win_kind ⇒ Failed. Revert "classify any Some(cert) as Confirmed" flips this.
     let wrong_win = LoopCertificate {
         unbounded: vec![ResourceAxis::DamageDealt(P1)],
+        rising: vec![ResourceAxis::DamageDealt(P1)],
         win_kind: Some(WinKind::LethalDamage),
         win_kind_at: None,
         mandatory: false,
@@ -380,6 +381,7 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
     // Right win_kind but wrong family ⇒ Failed. Revert "drop the family check" flips this.
     let wrong_family = LoopCertificate {
         unbounded: vec![ResourceAxis::TokensCreated],
+        rising: vec![ResourceAxis::TokensCreated],
         win_kind: Some(WinKind::Advantage),
         win_kind_at: None,
         mandatory: false,
@@ -407,6 +409,7 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
     // the three Failed assertions above are discriminating, not always-Failed.
     let right = LoopCertificate {
         unbounded: vec![ResourceAxis::Mana(ManaType::Green)],
+        rising: vec![ResourceAxis::Mana(ManaType::Green)],
         win_kind: Some(WinKind::Advantage),
         win_kind_at: None,
         mandatory: false,
@@ -1679,8 +1682,7 @@ fn pr6_gate_loop_detection_serde_defaults_off() {
 /// Bloodthirsty Conqueror), all three opponents at 1 life. One drain cycle takes all
 /// three to 0; the CR 704.5a state-based actions eliminate them in ONE simultaneous
 /// batch and CR 104.2a leaves P0 the sole survivor → `GameOver { winner: Some(P0) }`.
-/// This is the NATURAL win (real SBA deaths), not the 2-player §3 shortcut (gated off
-/// at >2 living) — the production path the commander audit validated as safe.
+/// This is the NATURAL win (real SBA deaths), not a loop shortcut.
 ///
 /// DISCRIMINATION (the audit's revert-probe, run inline): swapping to a TARGETED
 /// "target opponent loses life" drain (Sanguine Bond) drains only ONE chosen opponent
@@ -1736,8 +1738,7 @@ fn mp_each_opponent_drain_natural_win_continues_to_sole_survivor() {
 /// "whenever you gain life, target opponent loses that much life" drain (Sanguine Bond +
 /// Exquisite Blood) with THREE legal opponents. `auto_select_targets` refuses to choose
 /// among 2+ legal targets, so the trigger STOPS at a target-selection window — it never
-/// silently auto-resolves into a game-ending drain. This is why the targeted shape is
-/// safe in multiplayer: a human (or AI) must pick the victim each iteration.
+/// silently auto-resolves into a game-ending drain.
 ///
 /// DISCRIMINATION: the SAME cards with a SINGLE legal opponent (2-player) auto-resolve
 /// to the sole target with no selection window. So the stop is caused by 2+ legal
@@ -1801,8 +1802,8 @@ fn mp_targeted_drain_stops_for_opponent_choice() {
 /// cycle (one opponent's life fell) must NOT compare equal (→ the gate does not fire and
 /// the game continues — no wrongful draw of a still-advancing loop).
 ///
-/// Scope: this pins the 4-player correctness of the draw gate's equality predicate and
-/// the no-false-winner guarantee. A full live auto-resolve of a net-zero loop to
+/// Scope: this asserts the draw gate's equality predicate and `live_mandatory_loop_winner`'s
+/// `None` at four players. A full live auto-resolve of a net-zero loop to
 /// `GameOver{winner:None}` needs a specific net-zero mandatory combo, which the
 /// committed card fixture does not contain (every corpus loop is net-progress).
 ///

@@ -104,11 +104,23 @@ pub(super) fn parse_search_library_details(
 
     // Fallback: "for N cards" / "for X cards" without "up to".
     let for_match = if up_to_match.is_none() && any_number_tail.is_none() {
-        scan_preceded(lower, "for ", nom_quantity::parse_quantity_expr_number)
-            // Require a word break after the number (" cards" / " creature ...").
-            // Guards against matching "for a", "for an", etc. where parse_number fails
-            // (good) but also avoids partial matches like "for the".
-            .filter(|(_, off)| lower.as_bytes().get(*off).is_some_and(|b| *b == b' '))
+        // An article yields `None`: its filter belongs to the "for a/an" extras path below.
+        scan_preceded(lower, "for ", |input| {
+            alt((
+                value(None, nom_primitives::parse_article),
+                map(
+                    terminated(
+                        preceded(
+                            opt(tag::<_, _, OracleError<'_>>("exactly ")),
+                            nom_quantity::parse_quantity_expr_number,
+                        ),
+                        peek(tag(" ")),
+                    ),
+                    Some,
+                ),
+            ))
+            .parse(input)
+        })
     } else {
         None
     };
@@ -146,12 +158,15 @@ pub(super) fn parse_search_library_details(
         match (any_number_tail, up_to_match, for_match, for_that_many_match) {
             (Some(off), _, _, _) => (QuantityExpr::Fixed { value: i32::MAX }, Some(off), true),
             (None, Some((expr, off)), _, _) => (expr, Some(off), true),
-            (None, None, Some((expr, _)), _) => (expr, None, false),
+            // CR 701.23d: a count without "up to" is the number to find, not a ceiling;
+            // CR 701.23b decides whether a stated-quality search may find fewer.
+            (None, None, Some((Some(expr), off)), _) => (expr, Some(off), false),
             // CR 608.2c: exact anaphoric count — keep the offset so the trailing type
-            // phrase is parsed into the filter (unlike the numeric `for` path, whose
-            // pre-existing filter handling is intentionally left unchanged here).
+            // phrase is parsed into the filter.
             (None, None, None, Some((expr, off))) => (expr, Some(off), false),
-            (None, None, None, None) => (QuantityExpr::Fixed { value: 1 }, None, false),
+            (None, None, Some((None, _)), _) | (None, None, None, None) => {
+                (QuantityExpr::Fixed { value: 1 }, None, false)
+            }
         };
 
     // Extract the type filter from after "for a/an" or from the tail after "up to N"
@@ -6093,5 +6108,94 @@ mod tests {
                 "CR 202.3: the {label} leg must inherit the mana value suffix: {typed:?}"
             );
         }
+    }
+
+    fn has_supertype(filter: &TypedFilter, supertype: Supertype) -> bool {
+        filter.properties.iter().any(
+            |property| matches!(property, FilterProp::HasSupertype { value } if *value == supertype),
+        )
+    }
+
+    #[test]
+    fn search_exactly_n_is_fixed_count_and_keeps_not_named_filter() {
+        let details = parse_search_library_details(
+            "search your library for exactly two cards not named burning-rune demon that have different names",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
+        assert!(!details.up_to);
+        let TargetFilter::Typed(filter) = &details.filter else {
+            panic!("expected Typed filter, got {:?}", details.filter);
+        };
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Name,
+                reference: Some(reference),
+                relation: SharedQualityRelation::DoesNotShare,
+            } if matches!(
+                reference.as_ref(),
+                TargetFilter::Typed(TypedFilter { properties, .. })
+                    if properties.iter().any(|property| matches!(property, FilterProp::Named { name } if name == "burning-rune demon"))
+            )
+        )));
+        assert_eq!(
+            details.selection_constraint,
+            SearchSelectionConstraint::SharesQualities {
+                qualities: vec![SharedQuality::Name],
+                relation: SharedQualityRelation::DoesNotShare,
+            }
+        );
+
+        let up_to = parse_search_library_details(
+            "search your library for up to two cards not named burning-rune demon",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(up_to.count, QuantityExpr::Fixed { value: 2 });
+        assert!(up_to.up_to);
+    }
+
+    #[test]
+    fn search_exactly_n_keeps_typed_owned_legendary_filter() {
+        let details = parse_search_library_details(
+            "search your library and/or outside the game for exactly four legendary creature cards you own with different names, then reveal those cards",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 4 });
+        assert!(!details.up_to);
+        let TargetFilter::Typed(filter) = &details.filter else {
+            panic!("expected Typed filter, got {:?}", details.filter);
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Creature));
+        assert!(has_supertype(filter, Supertype::Legendary));
+        assert!(filter.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::You,
+        }));
+    }
+
+    #[test]
+    fn search_numeric_count_keeps_trailing_type_filter() {
+        let details = parse_search_library_details(
+            "search your library for four basic land cards, put them onto the battlefield tapped, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 4 });
+        assert!(!details.up_to);
+        let TargetFilter::Typed(filter) = &details.filter else {
+            panic!("expected Typed filter, got {:?}", details.filter);
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Land));
+        assert!(has_supertype(filter, Supertype::Basic));
+
+        let bare = parse_search_library_details(
+            "search your library for three cards",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(bare.count, QuantityExpr::Fixed { value: 3 });
+        assert!(!bare.up_to);
+        assert_eq!(
+            bare.filter,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Card))
+        );
     }
 }

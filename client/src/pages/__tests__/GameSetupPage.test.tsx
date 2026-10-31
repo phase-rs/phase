@@ -202,6 +202,13 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
     expect(screen.getByText(/AI matches are not supported/i)).toBeInTheDocument();
   });
 
+  it("accepts Planechase Commander on the setup page and explains the AI limitation", async () => {
+    renderGameSetupPage("/game-setup?format=PlanechaseCommander");
+
+    expect(await screen.findByText("Planechase Commander")).toBeInTheDocument();
+    expect(screen.getByText(/AI matches are not supported/i)).toBeInTheDocument();
+  });
+
   it("restores a Two-Headed Giant setup preference", async () => {
     act(() => {
       usePreferencesStore.setState({

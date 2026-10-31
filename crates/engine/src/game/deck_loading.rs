@@ -592,7 +592,7 @@ pub fn momir_emblem_ability() -> crate::types::ability::AbilityDefinition {
     };
     use crate::types::mana::{ManaCost, ManaCostShard};
 
-    // CR 707.2 + CR 202.3 + CR 701.9a (analogous): random copy of a creature card
+    // CR 707.2 + CR 202.3 + CR 701.9b (analogous): random copy of a creature card
     // whose mana value equals the X paid.
     let effect = Effect::CreateTokenCopyFromPool {
         owner: TargetFilter::Controller,
@@ -1164,10 +1164,12 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         }
     }
 
-    if state.format_config.format == crate::types::format::GameFormat::Planechase {
+    if state.format_config.format.is_planechase_family() {
         load_shared_planar_deck(state, &payload.player.planar_deck, PlayerId(0));
     }
-    if state.format_config.format == crate::types::format::GameFormat::Archenemy {
+    // CR 904.3 / CR 904.13d: both Archenemy variants load the archenemy
+    // seat's scheme deck as the shared scheme deck.
+    if state.format_config.format.is_archenemy_family() {
         let archenemy = crate::game::topology::archenemy(state).unwrap_or(PlayerId(0));
         let entries = &payload_for_player(payload, archenemy).scheme_deck;
         load_shared_scheme_deck(state, entries, archenemy);
@@ -1349,7 +1351,7 @@ pub fn load_and_hydrate_decks(
         payload
     };
     let planechase_payload;
-    let payload = if state.format_config.format == crate::types::format::GameFormat::Planechase
+    let payload = if state.format_config.format.is_planechase_family()
         && payload.player.planar_deck.is_empty()
     {
         match db {
@@ -1367,7 +1369,10 @@ pub fn load_and_hydrate_decks(
         payload
     };
     let archenemy_payload;
-    let payload = if state.format_config.format == crate::types::format::GameFormat::Archenemy {
+    // Both Archenemy variants inject the default scheme deck when the
+    // archenemy seat submitted none — 20 distinct schemes satisfies
+    // CR 904.3 and CR 904.13d alike.
+    let payload = if state.format_config.format.is_archenemy_family() {
         let archenemy = crate::game::topology::archenemy(state).unwrap_or(PlayerId(0));
         if payload_for_player(payload, archenemy)
             .scheme_deck
@@ -1796,6 +1801,30 @@ mod tests {
         }
         let json = serde_json::Value::Object(map).to_string();
         CardDatabase::from_json_str(&json).expect("scheme fixture parses")
+    }
+
+    #[test]
+    fn archenemy_commander_empty_scheme_deck_injects_default() {
+        // CR 904.13d via the shared Archenemy family path: an empty
+        // archenemy-seat scheme deck injects the 20-distinct-scheme
+        // default, which satisfies the 10-singleton minimum too.
+        let db = archenemy_scheme_db();
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::archenemy_commander(),
+            4,
+            42,
+        );
+        let payload = DeckPayload::default();
+
+        load_and_hydrate_decks(&mut state, &payload, Some(&db));
+
+        assert_eq!(state.archenemy, Some(PlayerId(0)));
+        assert_eq!(state.scheme_deck.len(), 20);
+        assert_eq!(state.deck_pools[0].registered_scheme_deck.len(), 20);
+        assert!(state
+            .scheme_deck
+            .iter()
+            .all(|id| state.objects[id].face_down));
     }
 
     #[test]

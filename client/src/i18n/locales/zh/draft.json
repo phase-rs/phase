@@ -285,6 +285,7 @@
     "confirmPick": "确认选牌",
     "currentPick": "第 {{pack}} 包 · 第 {{pick}} 选",
     "draftEffects": "轮抽效应：",
+    "label": "轮抽补充包",
     "pickToDeck": "将 {{card}} 选入套牌",
     "pickToSideboard": "将 {{card}} 选入备牌",
     "picking": "选牌中…",
@@ -559,10 +560,20 @@
     "addPackFromSet": "添加补充包",
     "addPackOf": "添加一个 {{name}} 的补充包",
     "botDifficulty": "机器人难度",
+    "pickEnhancements": {
+      "label": "使用带有选牌增强的内置 AI",
+      "hint": "对于有指南的赛制(目前为 Mirrodin、Darksteel 和 Fifth Dawn),机器人会遵循书面选牌顺序指南。中等及以上难度生效。"
+    },
     "candidateCount": "已选 {{selected}} 个候选系列",
     "candidateSets": "候选系列",
     "chooseSet": "选择系列",
     "clearPacks": "清除",
+    "randomSet": "随机系列",
+    "randomSetHint": "用一个随机选择的系列填满所有补充包",
+    "randomPacks": "随机补充包",
+    "randomPacksHint": "为每个补充包各自随机选择一个系列",
+    "randomCandidates": "随机系列组",
+    "randomCandidatesHint": "随机选择不同的候选系列",
     "difficultyLevels": {
       "Easy": "简单",
       "Hard": "困难",

@@ -48,8 +48,8 @@ use super::super::oracle_static::{
     parse_targeting_bypass_tail, peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{
-    parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, TargetSyntax,
+    parse_block_filter_phrase, parse_target, parse_target_with_ctx, parse_target_with_syntax,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, BlockFilterPhrase, TargetSyntax,
 };
 use super::super::oracle_util::{
     merge_or_filters, parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
@@ -2268,6 +2268,50 @@ fn try_parse_subject_restriction_clause(
                 });
             }
         }
+        // CR 108.3 + CR 508.1d + CR 608.2c: owner-relative `ForceAttack`
+        // with an inherited (non-broadcast) subject — "Each of them attacks
+        // its owner" / "Each of those creatures attacks its owner", whose
+        // subject lowers to `ParentTarget`. The broadcast site above excludes
+        // `ParentTarget` subjects, so without this they fall to
+        // `Unimplemented`. Gated on the `AffectedObjectOwner` marker: no
+        // other defender kind takes this path, so every existing routing is
+        // unchanged. Scope All (no targeting slots); the resolver enumerates
+        // the inherited members per object and pins each requirement to that
+        // member's owner.
+        match imperative::try_parse_attack_if_able(&predicate) {
+            Some(ImperativeFamilyAst::ForceAttack {
+                duration,
+                required_defender,
+            }) if matches!(required_defender, TargetFilter::AffectedObjectOwner) => {
+                let application =
+                    parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
+                if matches!(
+                    static_affected_for_application(&application),
+                    TargetFilter::ParentTarget
+                ) {
+                    return Some(ParsedEffectClause {
+                        optional_targeting: false,
+                        unlowered_guard: None,
+                        entry_onset: ContinuousEffectOnset::WhenFollowed,
+                        effect: Effect::ForceAttack {
+                            target: TargetFilter::ParentTarget,
+                            required_defender,
+                            scope: EffectScope::All,
+                            duration: duration.clone().unwrap_or(Duration::UntilEndOfTurn),
+                        },
+                        distribute: None,
+                        multi_target: application.multi_target,
+                        duration,
+                        sub_ability: None,
+                        condition: None,
+                        optional: application.is_optional,
+                        unless_pay: None,
+                    });
+                }
+            }
+            // Any other predicate shape falls through to the recognizers below.
+            _ => {}
+        }
         // Classify via the existing recognizer. Only the bare GenericEffect form
         // (MustAttack) is re-bound here.
         if let Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect { duration, .. })) =
@@ -2865,6 +2909,148 @@ pub(super) fn subject_player_antecedent(subject: &SubjectPhraseAst) -> Option<Co
         },
         _ => None,
     }
+}
+
+/// CR 608.2c + CR 608.2k + CR 109.4 / CR 108.3: The single OBJECT a subject
+/// phrase introduces as the antecedent of a bare object pronoun ("it", "them")
+/// in its own predicate.
+///
+/// A POSSESSIVE-PLAYER subject names a player only by way of an object that
+/// player controls or owns, so the possessor is still in scope for the
+/// predicate and is the nearest antecedent its pronoun has. The printed shape
+/// is `"<determiner> <noun>'s controller|owner <verb>s it"` — "that creature's
+/// controller sacrifices IT at end of combat" (Basalt Golem), "its controller
+/// may sacrifice IT" (Star Athlete), "that creature's owner shuffles IT into
+/// their library" (Weeping Angel), "Target creature's owner shuffles IT into
+/// their library" (Ominous Cemetery), "That creature's owner puts IT on their
+/// choice of the top or bottom of their library" (Tolarian Contempt). The new
+/// authority covers all of them on the typed AST; one card's lowering actually
+/// MOVES, because the rest are already claimed or already bound (below).
+/// CR 608.2c is the authorizing rule — "read the whole text and apply the rules
+/// of English to the text" — and CR 608.2k is what lets that untargeted
+/// reference keep naming the same object once the effect applies.
+///
+/// `ParentTargetController` (CR 109.4) and `ParentTargetOwner` (CR 108.3) are
+/// the actor filters this grammar's possessor produces, so the pronoun names
+/// `ParentTarget` — the same referent those two actors resolve through at
+/// runtime (`ability_utils::parent_target_controller` / `parent_target_owner`).
+///
+/// # Two conditions, and the second is a safety property, not a nicety
+///
+/// The subject must resolve to one of those two actor filters AND must carry
+/// `PlayerAnaphor::ItsController`, the discriminant the four subject arms that
+/// print the possessive anaphor stamp ("its controller", "their controller",
+/// "[the|that] `<noun>`'s controller", plus their `may` forms). The
+/// chain-spanning antecedent in `oracle_effect::mod`'s chunk loop shares that
+/// rung — deliberately, so the two seams agree on the shapes they both see —
+/// but the predicates are NOT equal: the arming rung additionally admits any
+/// `is_optional` subject (a base behaviour it must not narrow) and never
+/// admits `ParentTargetOwner`, which has its own single-shot local.
+///
+/// The discriminant is a PROXY, and the thing it stands for is what makes the
+/// pin sound: every subject it accepts must resolve to a referent that carries
+/// a currency guard. `only_a_pinned_referents_possessor_is_pinnable` is the
+/// tripwire for the day that proxy stops holding — read it before widening
+/// this predicate.
+///
+/// Requiring the discriminant is what keeps this pin off referents that carry
+/// no CR 400.7 guard. `ParentTarget` resolves through a ladder
+/// (`targeting::resolved_targets`) whose last rung, for an ability that pinned
+/// no target, falls back to the ability's own source object WITHOUT the
+/// self-reference currency check the `SelfRef` arm of that same function
+/// applies. Pinning a possessive subject whose runtime referent degrades to
+/// that rung therefore converts a CR 400.7-correct no-op into an action on a
+/// source that left and returned under the same storage id. Measured: Reality
+/// Acid's "enchanted permanent's controller sacrifices it" reaches
+/// `ParentTargetController` through `parse_target`'s verbatim attached-host
+/// recognizer and the generic `subject_filter_application`, which stamp no
+/// discriminant, and its leaves-the-battlefield trigger pins nothing — so
+/// pinning it made an Aura blinked back in response get sacrificed, where the
+/// printed `SelfRef` subject had correctly found nothing. It is left on that
+/// guarded referent (an unchanged, pre-existing misparse) rather than moved
+/// onto an unguarded one. Basalt Golem is unaffected either way: its DELAYED
+/// ability snapshots the blocker into `ability.targets`, so its referent is
+/// pin-checked against `ResolvedAbility::target_incarnations` — for a
+/// single-object pin the early return at `effects/sacrifice.rs`'s
+/// `pinned_object_targets_all_stale` fires first, and
+/// `ResolvedAbility::live_object_targets` applies the same
+/// `target_pin_is_current` on the paths that reach it.
+///
+/// # Why the measured blast radius is one card (Basalt Golem)
+///
+/// Every other printed member of the shape is claimed by a DEDICATED
+/// WHOLE-CLAUSE recognizer that runs before `parse_clause_ast` and derives the
+/// moved object from the possessor text itself, so it never reaches this
+/// function at all: `try_parse_owner_of_target_shuffle` (Ominous Cemetery,
+/// Watery Grasp, Cerulean Sphinx, and Weeping Angel's prevention rider) and
+/// `try_parse_put_on_top_or_bottom` (Tolarian Contempt). Animate Dead and
+/// Dance of the Dead are built by `try_parse_reanimator_aura_etb_effect_ir`,
+/// which hard-codes `Sacrifice { ParentTarget }` in `build_aura_attach_clause`;
+/// Necromancy prints the same sentence but is NOT claimed by that recognizer's
+/// grant-shape sibling — its whole ETB line is a `granter_reference_unreached`
+/// gap at base and at head, so its possessive never reaches this seam either.
+/// Two further rungs would reach the same `ParentTarget` value if a card
+/// arrived through them, which is why the pin is idempotent rather than
+/// additive — an earlier clause's declared referent via `prior_typed_referent`,
+/// and `oracle_replacement::rewrite_parent_target_to_post_replacement_damage_target`.
+///
+/// # What the discriminant requirement excludes
+///
+/// * A SOURCE-possessive subject ("~'s controller sacrifices it" — Soul Ransom)
+///   produces `TargetFilter::SourceController`, never either parent-target
+///   actor, so it cannot reach this function at all: its possessor IS the
+///   ability's own source.
+/// * The BARE player anaphors — "that player" / "the player", which stamp
+///   `PlayerAnaphor::ThatPlayer`, and "they" / "they may" / "they each", whose
+///   arm stamps nothing — print no possessor. They RE-STATE an antecedent an
+///   earlier clause introduced rather than introducing one, so pinning their
+///   predicate's pronoun would override a nearer binding the trigger condition
+///   or the chain already established. Both are refused by the positive
+///   requirement above; neither needed a blacklist entry, which is why the
+///   predicate reads one variant instead of enumerating the rest.
+/// * Three routes print a possessor, or none, while stamping no discriminant,
+///   and are excluded with it: the generic `subject_filter_application` route a
+///   `parse_target`-recognized possessor takes (Reality Acid, above), the
+///   "`<noun>'s controller or that player`" disjunct (Acorn Catapult), and the
+///   attacking-player anaphor, which prints no possessor and reaches
+///   `ParentTargetController` whenever no nearer player scope is live. The one
+///   printed attacking-player subject with a bare object pronoun in its
+///   predicate (Contested Game Ball, "the attacking player gains control of
+///   this artifact and untaps it") answers with its event-context filter and is
+///   measured unchanged base-to-head.
+///
+/// The owner half of the grammar is reachable in principle but not in practice:
+/// the four `its owner` / `[the|that] <noun>'s owner` subject arms stamp
+/// `player_anaphor: None` where their controller counterparts stamp
+/// `ItsController`. That asymmetry is pre-existing and is left alone here;
+/// `ParentTargetOwner` stays in the accepted set because it is the same printed
+/// grammar, and a future card arriving with the discriminant should bind.
+///
+/// Declines a multi-target subject for the same reason
+/// [`subject_player_antecedent`] does: each announced object is the antecedent
+/// in turn, so no single `ParentTarget` can stand for them. No route that
+/// yields either actor filter builds a `multi_target` today, so that guard
+/// mirrors the sibling rather than gating a reachable shape.
+///
+/// NOT a field-for-field sibling of [`subject_player_antecedent`], which keys
+/// on `subject.target` and returns `None` whenever it is absent. This keys on
+/// `subject.affected`, because a possessive-player subject announces no object
+/// target of its own — the possessor is the referent its ACTOR filter resolves
+/// through, which is what `affected` carries.
+pub(super) fn subject_possessive_object_antecedent(
+    subject: &SubjectPhraseAst,
+) -> Option<TargetFilter> {
+    if subject.multi_target.is_some() {
+        return None;
+    }
+    if !matches!(subject.player_anaphor, Some(PlayerAnaphor::ItsController)) {
+        return None;
+    }
+    matches!(
+        subject.affected,
+        Some(TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner)
+    )
+    .then_some(TargetFilter::ParentTarget)
 }
 
 /// Which player-subject anaphor a standalone "that/the player" clause names.
@@ -3570,6 +3756,43 @@ fn parse_subject_application_for(
                 // `ctx.subject.is_some()` fallback below (Archnemesis vs. the Curse
                 // cycle).
                 filter
+            } else if ctx.chain_prior_targeted_player
+                && ctx.subject.is_some()
+                && matches!(subject_anaphor, PlayerSubjectAnaphor::Player)
+            {
+                // CR 608.2c + CR 109.4 + CR 115.1: "that player" / "the player"
+                // / "that opponent" after a targeted `Choose` ("target opponent
+                // chooses self or others") or a player-typed `TargetOnly` names
+                // the ANNOUNCED target — the most recent player mention — not
+                // the trigger event's player. Narrowed to the plain `Player`
+                // anaphor: "that/the attacking player" keeps its event-context
+                // binding. Placed after the explicit `relative_player_scope`
+                // pins (which win) and before the trigger-context default.
+                // Trigger context only: outside a trigger the announced-target
+                // reading is `ParentTargetController` (the `else` below), whose
+                // player-denoting shape the physical-contest binder and the
+                // other static subject checks require; `ParentTarget` here
+                // would strand them on an object-typed back-reference.
+                //
+                // CR 115.1 (R1/R2 proof channel): the announced player target
+                // is PROVEN here, so inherit it (`inherits_parent`, the Din
+                // of the Fireherd `Declared`-carry shape). The injection
+                // mints `TargetPlayer` for an inherited unit `ParentTarget`
+                // and fails an uninherited one closed; `target` stays `None`
+                // so no `TargetOnly` wrapper is minted for a target the head
+                // clause already announced. With two or more declared player
+                // slots the singular anaphor is ambiguous, so it keeps the
+                // pre-change bare shape (and fails closed downstream on
+                // scope-bearing verbs) instead of binding one slot.
+                let singular = declared_player_slot_indexes(ctx).len() < 2;
+                return Some(SubjectApplication {
+                    affected: TargetFilter::ParentTarget,
+                    target: None,
+                    multi_target: None,
+                    inherits_parent: singular,
+                    player_anaphor: None,
+                    is_optional,
+                });
             } else if ctx.subject.is_some() {
                 ctx_filter
             } else {
@@ -3970,15 +4193,45 @@ fn parse_subject_application_for(
         let names_created_tokens = consumer == AnaphorConsumer::AffectedObject
             && ctx.token_created_in_chain
             && ctx.chain_prior_mass_population.is_none();
+        let affected = if names_created_tokens {
+            TargetFilter::LastCreated
+        } else {
+            resolve_they_pronoun(ctx, consumer)
+        };
+        // CR 115.1 + CR 608.2c (R1/R2 proof channel): a subject-position
+        // "they" resolving to the bare anaphor while the chain proves an
+        // announced player target (Teferi, Temporal Pilgrim's −12: "Target
+        // opponent chooses a permanent … Then they shuffle …") names that
+        // announced player — inherit it, the `Declared`-carry shape.
+        // Restricted to subject position (a grant-object "they" keeps its
+        // object binding), to the bare-anaphor shape (a scope-bound or
+        // slot-bound `affected` already names its referent), to unset
+        // scope (a nearer seeded scope — e.g. an "its controller" guard —
+        // wins, mirroring the "that player" arm's ordering below), and to
+        // fewer than two declared player slots (see below).
+        // `target` stays `None`: the head clause already announced the
+        // target, so no `TargetOnly` wrapper may be minted here.
+        //
+        // CR 608.2c distributive plural: with two or more declared player
+        // slots ("two target players … They each …" — Parker Luck), "they"
+        // names the announced players distributively — proven as a group,
+        // unbindable as a single. Mark it with a `ParentTarget` target
+        // (a context-ref, so no `TargetOnly` wrapper is minted) and no
+        // inheritance: the injection neither stamps a singular scope nor
+        // gap-marks, preserving the per-target fan-out exactly.
+        let multi_distributive = consumer == AnaphorConsumer::Other
+            && affected == TargetFilter::ParentTarget
+            && declared_player_slot_indexes(ctx).len() >= 2;
+        let proven_player = consumer == AnaphorConsumer::Other
+            && affected == TargetFilter::ParentTarget
+            && ctx.relative_player_scope.is_none()
+            && ctx.chain_prior_targeted_player
+            && !multi_distributive;
         return Some(SubjectApplication {
-            affected: if names_created_tokens {
-                TargetFilter::LastCreated
-            } else {
-                resolve_they_pronoun(ctx, consumer)
-            },
-            target: None,
+            affected,
+            target: multi_distributive.then_some(TargetFilter::ParentTarget),
             multi_target: None,
-            inherits_parent: false,
+            inherits_parent: proven_player,
             is_optional,
             player_anaphor: None,
         });
@@ -4428,6 +4681,25 @@ fn strip_possessive_subject_suffix(subject: &str) -> &str {
 /// ref (e.g., `controller: Opponent`). For object-type subjects, "they" refers
 /// to the triggering source. Without trigger context, "they" is an anaphoric
 /// reference to previously mentioned objects (`ParentTarget`).
+/// Declared player-typed target slot indexes ("two target players").
+/// Shared by the unique-slot binder in `resolve_they_pronoun` (exactly one
+/// binds `ParentTargetSlot`) and the "they" application site (two or more
+/// marks the distributive multi shape, which names the announced players
+/// without binding — or gap-marking — any single one).
+fn declared_player_slot_indexes(ctx: &ParseContext) -> Vec<usize> {
+    ctx.declared_target_slots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| {
+            let is_player = match slot {
+                TargetFilter::Player | TargetFilter::Opponent => true,
+                filter => filter.is_player_scope(),
+            };
+            is_player.then_some(index)
+        })
+        .collect()
+}
+
 fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> TargetFilter {
     // CR 608.2c + CR 611.2c: an iterated-player frame (a fan-out vote body, an
     // each-player or each-upkeep scope) is the referent of a bare "they" unless
@@ -4501,23 +4773,10 @@ fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> Ta
     // unique earlier player slot even when a later object slot intervenes.
     // Bind by the declared slot's typed player shape, never by card text or
     // position alone; zero or multiple player slots remain ambiguous and fall
-    // through to the established pronoun rules below.
-    let mut declared_player_slot = None;
-    for (index, slot) in ctx.declared_target_slots.iter().enumerate() {
-        let is_player = match slot {
-            TargetFilter::Player | TargetFilter::Opponent => true,
-            filter => filter.is_player_scope(),
-        };
-        if is_player {
-            if declared_player_slot.is_some() {
-                declared_player_slot = None;
-                break;
-            }
-            declared_player_slot = Some(index);
-        }
-    }
-    if let Some(index) = declared_player_slot {
-        return TargetFilter::ParentTargetSlot { index };
+    // through to the established pronoun rules below (multiple slots take
+    // the distributive shape at the application site).
+    if let [index] = declared_player_slot_indexes(ctx).as_slice() {
+        return TargetFilter::ParentTargetSlot { index: *index };
     }
     match &ctx.subject {
         // Player-type trigger subject: no type_filters, has controller ref
@@ -4539,10 +4798,22 @@ fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> Ta
         // A mass effect chooses no target, so `ParentTarget` cannot express this
         // (see `has_typed_target_widened`'s single-target whitelist); the anaphor
         // inherits the population FILTER itself.
-        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => ctx
-            .chain_prior_mass_population
-            .clone()
-            .unwrap_or(TargetFilter::TriggeringSource),
+        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
+            // CR 608.2c: a nearer clause that operated on the chain's tracked
+            // set is the nearer antecedent ("Untap those permanents. They gain
+            // haste" — "They" is those permanents). The mass-population filter
+            // below describes the head's pre-move selection, which is stale
+            // once the head moved them (My Crushing Masterstroke: seized
+            // permanents are no longer opponent-controlled, so the filter
+            // matches nothing at resolution).
+            if let Some(set) = ctx.chain_prior_object_set.clone() {
+                set
+            } else {
+                ctx.chain_prior_mass_population
+                    .clone()
+                    .unwrap_or(TargetFilter::TriggeringSource)
+            }
+        }
         // CR 608.2c: the nearest earlier clause announced a player; "they" is that
         // player, spelled as "that player" is.
         _ if ctx.prior_player_declaration => TargetFilter::ParentTargetController,
@@ -5928,7 +6199,7 @@ fn build_become_clause(
         return Some(clause);
     }
 
-    // CR 730.1: "it becomes night" / "it becomes day" — set game day/night designation.
+    // CR 731.1: "it becomes night" / "it becomes day" — set game day/night designation.
     // Must intercept before parse_animation_spec which produces AddSubtype("Night"/"Day").
     if let Some(clause) = try_parse_set_day_night(become_text) {
         return Some(clause);
@@ -6598,7 +6869,7 @@ fn try_parse_set_life_total(
     })
 }
 
-/// CR 730.1: Parse "night" / "day" after "becomes" into SetDayNight effect.
+/// CR 731.1: Parse "night" / "day" after "becomes" into SetDayNight effect.
 /// Accepts a trailing "as ~ enters" timing qualifier and ignores it.
 fn try_parse_set_day_night(become_text: &str) -> Option<ParsedEffectClause> {
     let lower = become_text.to_lowercase();
@@ -6849,6 +7120,7 @@ fn try_parse_become_choice(
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type,
             persist: false,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -7095,6 +7367,11 @@ fn build_restriction_clause(
             TargetFilter::ParentTarget
             | TargetFilter::TrackedSet { .. }
             | TargetFilter::SelfRef
+            // CR 108.3 + CR 508.1d: per-member owner anchor — no subject
+            // grammar emits it, but if one ever did, its set would be the
+            // fixed anaphoric set, consistent with the per-member grafts
+            // `force_attack::resolve` installs.
+            | TargetFilter::AffectedObjectOwner
             | TargetFilter::SpecificObject { .. } => true,
 
             // DEFERRED — broadcast subject, whose affected set must stay LIVE.
@@ -7623,8 +7900,11 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     )
         .parse(lower)
     {
+        // Fail closed on a dropped disjunct (see `classify_block_exception`):
+        // `None` here declines the whole predicate rather than publishing a
+        // whitelist narrower than the printed one.
         return Some(vec![StaticMode::CantBeBlockedExceptBy {
-            kind: classify_block_exception(except_text),
+            kind: classify_block_exception(except_text)?,
         }]);
     }
     // CR 509.1b: "can't be blocked by <filter>" — blocker restriction
@@ -7642,12 +7922,27 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
         // leave the filter as a bare-creature match, making the restriction
         // accept ALL creatures rather than only those of the chosen color.
         let filter_tp = TextPair::new(filter_text, filter_text);
-        let filter = parse_chosen_qualifier_subject(&filter_tp).unwrap_or_else(|| {
-            let (f, _) = parse_type_phrase_folding(filter_text);
-            f
-        });
-        if !matches!(filter, TargetFilter::Any) {
-            return Some(vec![StaticMode::CantBeBlockedBy { filter }]);
+        // CR 509.1b + CR 608.2c (issue #10364): the whole tail after "by " is the
+        // blocker filter, so read it with the union-folding reader - "creatures
+        // with power 2 or less and/or Walls" (Doorman) closes its first leg on
+        // the power suffix, which the leg grammar's own early union loop runs
+        // before and therefore never folds.
+        let phrase = match parse_chosen_qualifier_subject(&filter_tp) {
+            Some(chosen) => BlockFilterPhrase::from_whole_phrase_filter(chosen),
+            None => parse_block_filter_phrase(filter_text),
+        };
+        match phrase {
+            BlockFilterPhrase::Filter { filter, .. } => {
+                return Some(vec![StaticMode::CantBeBlockedBy { filter }]);
+            }
+            // Coverage honesty: a printed disjunct no leg grammar could read.
+            // Declining the whole predicate routes the clause to the
+            // Unimplemented/gap fallback instead of publishing a restriction
+            // narrower than the printed one.
+            BlockFilterPhrase::DroppedDisjunct => return None,
+            // Pre-existing fall-through: the tail after "by " named no filter at
+            // all, so the later arms get their try at this predicate.
+            BlockFilterPhrase::Unconstrained => {}
         }
     }
     // CR 702.18a: "can't be the target of spells or abilities" is blanket Shroud,
@@ -8751,12 +9046,185 @@ mod tests {
     use super::*;
     use crate::types::ability::AttackerBlockStatus;
     use crate::types::ability::{
-        AbilityKind, BasicLandType, ChoiceType, ContinuousModification, ControllerRef, Effect,
-        QuantityRef, TypeFilter,
+        AbilityKind, BasicLandType, ChoiceType, Comparator, ContinuousModification, ControllerRef,
+        Effect, PtStat, PtValueScope, QuantityRef, TypeFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::identifiers::TrackedSetId;
     use crate::types::statics::BlockExceptionKind;
+
+    /// A possessive-player subject phrase as the four printed-possessive arms
+    /// build it: the actor filter plus the `ItsController` discriminant the pin
+    /// requires.
+    fn subject_phrase_with(affected: TargetFilter) -> SubjectPhraseAst {
+        SubjectPhraseAst {
+            affected: Some(affected),
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+            player_anaphor: Some(PlayerAnaphor::ItsController),
+        }
+    }
+
+    /// CR 400.7 + CR 608.2c: TRIPWIRE for the safety property
+    /// [`subject_possessive_object_antecedent`] rests on.
+    ///
+    /// The pin is sound only because every subject phrase it accepts resolves to
+    /// a referent that carries a currency guard. It enforces that by requiring
+    /// `PlayerAnaphor::ItsController`, which is a PROXY: the real property is
+    /// "this possessor's runtime referent is pinned, not the unguarded
+    /// source-fallback rung of `targeting::resolved_targets`". The proxy holds
+    /// today because the one printed possessor whose referent is unpinned —
+    /// Reality Acid's attached-host "enchanted permanent's controller", whose
+    /// leaves-the-battlefield trigger pins nothing — reaches
+    /// `ParentTargetController` through `oracle_target`'s verbatim
+    /// `"enchanted permanent's controller"` match and the generic
+    /// `subject_filter_application`, neither of which stamps the discriminant.
+    ///
+    /// That coupling is the hazard this test exists to catch. CLAUDE.md
+    /// prohibits that verbatim match, so a later round is LIKELY to replace it
+    /// with a composable parse; if the replacement routes through the
+    /// `[the|that] <noun>'s controller` subject arm, which DOES stamp
+    /// `ItsController`, Reality Acid becomes pinnable and its sacrifice silently
+    /// reacquires the CR 400.7 violation this predicate was written to remove —
+    /// an Aura destroyed, blinked back in response, and then sacrificed as a new
+    /// object. If this row goes red, the predicate needs the real property
+    /// (a pinned referent), not a wider proxy.
+    ///
+    /// Asserted over PARSED phrases, not hand-built fixtures, because the
+    /// coupling lives in which arm claims each phrase.
+    #[test]
+    fn only_a_pinned_referents_possessor_is_pinnable() {
+        // Every phrase here resolves to the same actor filter; what differs is
+        // whether the arm that claimed it printed the possessive anaphor.
+        for (phrase, pinnable) in [
+            // Printed possessive anaphors, referent pinned by the chain.
+            ("its controller", true),
+            ("their controller", true),
+            ("that creature's controller", true),
+            ("the permanent's controller", true),
+            // Reality Acid: prints a possessor, but its referent is UNPINNED.
+            ("enchanted permanent's controller", false),
+            // Bare player anaphors: print no possessor at all.
+            ("that player", false),
+            ("they", false),
+        ] {
+            let mut ctx = ParseContext {
+                relative_player_scope: Some(ControllerRef::ParentTargetController),
+                ..ParseContext::default()
+            };
+            let application = parse_subject_application(phrase, &mut ctx)
+                .unwrap_or_else(|| panic!("{phrase:?} is a player subject"));
+            // Reach guard: the distinction is real — every phrase here lands on
+            // the same actor filter, so `affected` alone cannot separate them.
+            assert_eq!(
+                application.affected,
+                TargetFilter::ParentTargetController,
+                "{phrase:?} must reach the actor filter for this row to mean anything"
+            );
+            let antecedent = subject_possessive_object_antecedent(&SubjectPhraseAst {
+                affected: Some(application.affected.clone()),
+                target: application.target.clone(),
+                multi_target: application.multi_target.clone(),
+                inherits_parent: application.inherits_parent,
+                is_optional: application.is_optional,
+                player_anaphor: application.player_anaphor,
+            });
+            assert_eq!(
+                antecedent.is_some(),
+                pinnable,
+                "{phrase:?}: pinnable should be {pinnable}, got {antecedent:?} \
+                 (player_anaphor = {:?})",
+                application.player_anaphor
+            );
+            if pinnable {
+                assert_eq!(antecedent, Some(TargetFilter::ParentTarget));
+            }
+        }
+    }
+
+    /// CR 608.2c + CR 608.2k: the possessor of a PRINTED-possessive
+    /// parent-target subject is the antecedent its predicate's bare object
+    /// pronoun names. A source-possessive or non-possessive actor introduces
+    /// none; a multi-target subject names no single object; and a subject that
+    /// resolves to the same actor filter WITHOUT printing the possessive
+    /// anaphor is refused, which is what keeps the pin off referents that carry
+    /// no CR 400.7 currency guard (Reality Acid's attached-host route).
+    #[test]
+    fn a_parent_target_possessive_subject_names_its_possessor() {
+        for actor in [
+            TargetFilter::ParentTargetController,
+            TargetFilter::ParentTargetOwner,
+        ] {
+            assert_eq!(
+                subject_possessive_object_antecedent(&subject_phrase_with(actor.clone())),
+                Some(TargetFilter::ParentTarget),
+                "{actor:?} is derived from a parent-target possessor"
+            );
+        }
+        for other in [
+            // "~'s controller sacrifices it" (Soul Ransom) — the possessor is
+            // the ability's own source.
+            TargetFilter::SourceController,
+            TargetFilter::Controller,
+            TargetFilter::TriggeringPlayer,
+            TargetFilter::Player,
+            TargetFilter::SelfRef,
+        ] {
+            assert_eq!(
+                subject_possessive_object_antecedent(&subject_phrase_with(other.clone())),
+                None,
+                "{other:?} is not a parent-target possessive actor"
+            );
+        }
+        assert_eq!(
+            subject_possessive_object_antecedent(&SubjectPhraseAst {
+                affected: None,
+                ..subject_phrase_with(TargetFilter::ParentTargetController)
+            }),
+            None,
+            "an unbound subject introduces no antecedent"
+        );
+        assert_eq!(
+            subject_possessive_object_antecedent(&SubjectPhraseAst {
+                multi_target: Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 })),
+                ..subject_phrase_with(TargetFilter::ParentTargetController)
+            }),
+            None,
+            "CR 608.2c: each announced object is the antecedent in turn, so no single \
+             ParentTarget can stand for them"
+        );
+        // Every non-`ItsController` variant is refused, whether a subject arm
+        // stamps it today (`ThatPlayer`) or not (`They`).
+        for pronoun in [PlayerAnaphor::ThatPlayer, PlayerAnaphor::They] {
+            assert_eq!(
+                subject_possessive_object_antecedent(&SubjectPhraseAst {
+                    player_anaphor: Some(pronoun),
+                    ..subject_phrase_with(TargetFilter::ParentTargetController)
+                }),
+                None,
+                "{pronoun:?} prints no possessor — it re-states an antecedent an earlier \
+                 clause introduced, so its predicate's pronoun keeps the nearer binding"
+            );
+        }
+        // CR 400.7: a subject that reaches the actor filter without printing
+        // the possessive anaphor is refused. `parse_target`'s attached-host
+        // recognizer and the "`<noun>'s controller or that player`" disjunct
+        // both land here, and Reality Acid is the measured reason: its
+        // leaves-the-battlefield trigger pins no target, so a `ParentTarget`
+        // pin would degrade to the unguarded source-fallback rung of
+        // `targeting::resolved_targets` and sacrifice an Aura blinked back in
+        // response, where its printed `SelfRef` subject correctly finds nothing.
+        assert_eq!(
+            subject_possessive_object_antecedent(&SubjectPhraseAst {
+                player_anaphor: None,
+                ..subject_phrase_with(TargetFilter::ParentTargetController)
+            }),
+            None,
+            "an undiscriminated route to the same actor filter must not be pinned"
+        );
+    }
 
     /// CR 613.1d: "isn't"/"aren't" head a type-removal predicate only when no
     /// relative pronoun introduces them. After "that"/"who"/"which" the copula
@@ -8886,8 +9354,11 @@ mod tests {
             ),
             TargetFilter::ParentTarget,
         );
-        // (3) Once the frame yields, an object trigger subject still defers to a
-        // nearer mass population, as in a frameless body.
+        // (3) Once the frame yields, the nearer tracked-set operand beats the
+        // farther mass population: `chain_prior_object_set` reads ONLY the
+        // nearest clause, so `Some` proves the set clause is nearer than any
+        // mass clause ("Untap those permanents. They gain haste" — "They" is
+        // those permanents, not the head's pre-move population filter).
         let population =
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
         assert_eq!(
@@ -8896,6 +9367,22 @@ mod tests {
                     subject: Some(TargetFilter::Typed(TypedFilter::creature())),
                     chain_prior_mass_population: Some(population.clone()),
                     ..framed(object_set.clone())
+                },
+                AnaphorConsumer::AffectedObject,
+            ),
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            },
+        );
+        // (3b) With no nearer set operand, the mass population still wins
+        // (Ardbert: "… on each legendary creature you control. They gain
+        // vigilance until end of turn").
+        assert_eq!(
+            resolve_they_pronoun(
+                &mut ParseContext {
+                    subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+                    chain_prior_mass_population: Some(population.clone()),
+                    ..Default::default()
                 },
                 AnaphorConsumer::AffectedObject,
             ),
@@ -11616,6 +12103,66 @@ mod tests {
         );
     }
 
+    /// CR 509.1b + CR 608.2c (issue #10364): the blocker filter is a union of
+    /// legs even when the separator follows a leg's own trailing suffix
+    /// (Doorman). The power suffix must stay bound to the leg it follows — a
+    /// `Wall` disjunct carries NO power constraint.
+    #[test]
+    fn parse_restriction_modes_cant_be_blocked_by_suffix_then_union() {
+        let creature_power_2_or_less = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 2 },
+            }],
+        });
+        let walls = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Wall".to_string())],
+            controller: None,
+            properties: vec![],
+        });
+        for predicate in [
+            "can't be blocked by creatures with power 2 or less and/or walls",
+            "can't be blocked by creatures with power 2 or less or walls",
+            "can't be blocked by creatures with power 2 or less and walls",
+        ] {
+            assert_eq!(
+                parse_restriction_modes(predicate),
+                Some(vec![StaticMode::CantBeBlockedBy {
+                    filter: TargetFilter::Or {
+                        filters: vec![creature_power_2_or_less.clone(), walls.clone()],
+                    },
+                }]),
+                "{predicate}"
+            );
+        }
+    }
+
+    /// Coverage honesty (issue #10364): an "and/or" disjunct the filter grammar
+    /// cannot read must DECLINE rather than publish a restriction narrower than
+    /// the printed one. The positive case above is the reach-guard proving this
+    /// `None` is a remainder rejection and not a dead arm: the same predicate
+    /// with a READABLE second disjunct returns the two-leg union.
+    #[test]
+    fn parse_restriction_modes_cant_be_blocked_by_declines_unreadable_disjunct() {
+        assert_eq!(
+            parse_restriction_modes(
+                "can't be blocked by creatures with power 2 or less and/or your commander"
+            ),
+            None
+        );
+        assert!(
+            parse_restriction_modes(
+                "can't be blocked by creatures with power 2 or less and/or walls"
+            )
+            .is_some(),
+            "reach guard: the arm is live — a readable disjunct still parses"
+        );
+    }
+
     #[test]
     fn parse_restriction_modes_cant_crew_variants() {
         assert_eq!(
@@ -11998,7 +12545,8 @@ mod tests {
     /// must be stripped so the full union parses, not just its first disjunct.
     #[test]
     fn classify_block_exception_strips_redundant_by() {
-        let kind = classify_block_exception("vehicles or by creatures with haste");
+        let kind = classify_block_exception("vehicles or by creatures with haste")
+            .expect("a readable exception union must classify");
         let BlockExceptionKind::Quality(TargetFilter::Or { filters }) = kind else {
             panic!("expected a quality Or filter, got {kind:?}");
         };

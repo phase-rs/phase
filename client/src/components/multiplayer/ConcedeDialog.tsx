@@ -32,7 +32,7 @@ export function ConcedeDialog({
   onCancel,
   returnFocusRef,
 }: ConcedeDialogProps) {
-  const { t } = useTranslation("multiplayer");
+  const { t } = useTranslation(["multiplayer", "common"]);
   const titleId = useId();
   const gameMessageId = useId();
   const matchMessageId = useId();

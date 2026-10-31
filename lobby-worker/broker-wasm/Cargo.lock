@@ -238,6 +238,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "phase-ast"
+version = "0.119.0"
+dependencies = [
+ "im",
+ "nom",
+ "serde",
+ "serde_ignored",
+ "serde_json",
+ "strum",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "phase-engine"
 version = "0.119.0"
 dependencies = [
@@ -245,6 +259,7 @@ dependencies = [
  "indexmap",
  "nom",
  "petgraph",
+ "phase-ast",
  "rand",
  "rand_chacha",
  "rustc-hash",

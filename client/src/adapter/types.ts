@@ -163,8 +163,11 @@ export type BuiltInGameFormat =
   | "HistoricBrawl"
   | "FreeForAll"
   | "TwoHeadedGiant"
+  | "TwoHeadedGiantCommander"
   | "Archenemy"
+  | "ArchenemyCommander"
   | "Planechase"
+  | "PlanechaseCommander"
   | "Limited"
   | "Momir"
   | "CommanderDraft"
@@ -809,7 +812,10 @@ export type TapCreaturesSelectionMode =
 // to the chosen objects. Internally tagged (`#[serde(tag = "type")]`).
 export type PayCostKind =
   | { type: "Discard" }
-  | { type: "Reveal" }
+  // CR 701.20a: `shared_quality` is the engine-side constraint the revealed
+  // cards must satisfy ("two cards that share a color"); the engine validates
+  // the selection, so it is opaque pass-through here.
+  | { type: "Reveal"; shared_quality?: unknown }
   | { type: "Sacrifice" }
   | { type: "ReturnToHand" }
   | { type: "ExileFromZone"; zone: ExileCostSourceZone }
@@ -845,6 +851,18 @@ export type CostResume =
       object_id?: number;
       cost_source: "Morph" | "Megamorph" | "Disguise" | "ManifestManaCost";
       remaining_cost?: unknown;
+    }
+  // CR 805.6: one hero's step of a collective tap-creatures payment. The
+  // client renders it as an ordinary any-subset prompt; the engine owns the
+  // session (per-hero prompts, combined threshold).
+  | {
+      type: "TeamTapPayment";
+      aggregate: TapCreaturesAggregate;
+      eligible: ObjectId[];
+      selected: ObjectId[];
+      remaining: PlayerId[];
+      filter: unknown;
+      ability: unknown;
     };
 
 export type ManaColor = "White" | "Blue" | "Black" | "Red" | "Green";
@@ -1170,7 +1188,52 @@ export type CastPaymentMode =
   | { type: "AutoExceptSacrificialMana" }
   | { type: "Manual" };
 
+// Un-card actions (silver-border sets; no CR entry). Mirrors
+// `crates/engine/src/types/un_actions.rs`.
+export type PhysicalTell = "TouchFace" | "TouchTable" | "Laugh" | "FlickCards";
+
+export type UnTell =
+  | { type: "Physical"; data: PhysicalTell }
+  | { type: "Said"; data: { text: string } };
+
+/** One entry of the Un-actions menu, derived by the engine from the Gotcha
+ *  abilities in play (`UnActionState.menu`). */
+export type UnTellKind =
+  | { type: "Physical"; data: PhysicalTell }
+  | { type: "SaysWord" }
+  | { type: "SaysNumber" };
+
+export type UnAction =
+  | { type: "SetEnabled"; data: { enabled: boolean } }
+  | { type: "PerformTell"; data: { tell: UnTell } }
+  | { type: "SayGotcha"; data: { source_id: ObjectId; returns: ObjectId } };
+
+export interface GotchaOffer {
+  id: number;
+  player: PlayerId;
+  /// The object carrying the Gotcha ability and the card it returns, each bound
+  /// to its occurrence (object id + incarnation) and the zone it was in when the
+  /// window opened (CR 400.7: a zone change makes a new object, so a bare
+  /// ObjectId goes stale).
+  source: ObjectIdentityBinding;
+  returns: ObjectIdentityBinding;
+}
+
+/// Mirrors `crates/engine/src/types/identifiers.rs::ObjectIdentityBinding`:
+/// an object occurrence (id + incarnation) pinned to the zone it was in.
+export interface ObjectIdentityBinding {
+  reference: { object_id: ObjectId; incarnation: number };
+  expected_zone: Zone;
+}
+
+export interface UnActionState {
+  enabled_players?: PlayerId[];
+  gotcha_offers?: GotchaOffer[];
+  menu?: UnTellKind[];
+}
+
 export type UnlessCost =
+  | { type: "SayPhrase"; phrase: string }
   | { type: "Fixed"; cost: ManaCost }
   | { type: "DynamicGeneric"; quantity: unknown }
   | { type: "PayLife"; amount: number }
@@ -1403,6 +1466,8 @@ export interface ResolutionCastFacePolicy {
   controller: PlayerId;
   /** Fixed cast-time constraint; null is the explicit no-extra-constraint form. */
   constraint: Record<string, unknown> | null;
+  /** Instruction authority; absent means "Cast". "Play" also admits a land face. */
+  play_mode?: "Cast" | "Play";
 }
 
 /** Opaque identity for a delayed trigger installed by a resolution cast offer. */
@@ -3435,6 +3500,8 @@ export type GameAction =
   | { type: "SetPriorityPassingMode"; data: { mode: PriorityPassingMode } }
   | { type: "SetPriorityYield"; data: { op: PriorityYieldOp } }
   | { type: "SetMayTriggerAutoChoice"; data: { op: MayTriggerAutoChoiceOp } }
+  // Un-card actions (no CR entry): opt-in toggle, menu gestures, and "Gotcha!".
+  | { type: "UnAction"; data: { action: UnAction } }
   // CR 603.3b: mirror engine GameAction::SetTriggerOrderTemplate (PR-7 phase-2 boundary sync).
   | { type: "SetTriggerOrderTemplate"; data: { op: TriggerOrderTemplateOp } }
   | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
@@ -3589,6 +3656,8 @@ export type GameEvent =
   | { type: "EnduringStoryGained"; data: { player_id: PlayerId } }
   | { type: "DamageCleared"; data: { object_id: ObjectId } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
+  | { type: "ResolutionHalted"; data: { involved: ObjectId[] } }
+  | { type: "ShortcutRepetition"; data: { controller: PlayerId; repetition: number } }
   | { type: "DamageDealt"; data: { source_id: ObjectId; target: TargetRef; amount: number; is_combat: boolean; excess?: number } }
   | { type: "DamagePrevented"; data: { source_id: ObjectId; target: TargetRef; amount: number } }
   | { type: "SpellCountered"; data: { object_id: ObjectId; countered_by: ObjectId } }
@@ -3683,6 +3752,10 @@ export type GameEvent =
   // (relative to that player) — there is no engine-named face; the heads/tails
   // depiction is a presentation choice.
   | { type: "CoinFlipped"; data: { player_id: PlayerId; won: boolean } }
+  // Un-card gestures / speech (no CR entry); mirror engine GameEvent::{UnTellPerformed, PhraseSaid, GotchaSaid}.
+  | { type: "UnTellPerformed"; data: { player: PlayerId; tell: UnTell } }
+  | { type: "PhraseSaid"; data: { player: PlayerId; phrase: string } }
+  | { type: "GotchaSaid"; data: { player: PlayerId; source: ObjectIdentityBinding; returns: ObjectIdentityBinding } }
   // CR 116.2c: a player took the special action of paying a continuous effect's
   // printed termination cost. `group` is the engine-minted group key;
   // `source_id` is the permanent whose resolution installed the effect.
@@ -3894,8 +3967,8 @@ export interface UnboundedFamilyView {
   state: FamilyCollapseState;
 }
 
-/** Mirrors `engine::game::derived_views::CounterMagnitude`. Absent on the wire ⇒ `"Finite"`. */
-export type CounterMagnitude = "Finite" | "Unbounded";
+/** Mirrors `engine::game::derived_views::DisplayMagnitude`. Absent on the wire ⇒ `"Finite"`. */
+export type DisplayMagnitude = "Finite" | "Unbounded";
 
 /**
  * One renderable counter row on one object. Mirrors
@@ -3911,7 +3984,7 @@ export type CounterMagnitude = "Finite" | "Unbounded";
 export interface CounterRowView {
   counter: CounterType;
   count: number;
-  magnitude?: CounterMagnitude;
+  magnitude?: DisplayMagnitude;
 }
 
 /**
@@ -3965,7 +4038,7 @@ export interface LoopCertificate {
  * Mirrors `engine::analysis::decision_template::IterationCount` (serde externally
  * tagged: unit variant → bare string, data variant → single-key object).
  */
-export type IterationCount = "UntilLethal" | { Fixed: number };
+export type IterationCount = "UntilLethal" | "WithoutEnd" | { Fixed: number };
 
 /**
  * Mirrors `engine::analysis::decision_template::ShortcutDecisionSchema`
@@ -4373,6 +4446,11 @@ export interface DerivedViews {
    * `engine::game::derived_views::DerivedViews::counter_display`.
    */
   counter_display?: Record<string, ObjectCounterDisplay>;
+  /**
+   * Per-player life-readout magnitude, keyed by player id; an absent seat is `"Finite"`. Read
+   * it through `lifeReadout`. Mirrors `engine::game::derived_views::DerivedViews::life_magnitude`.
+   */
+  life_magnitude?: Record<string, DisplayMagnitude>;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */
@@ -4575,6 +4653,7 @@ export interface GameState {
   priority_yields?: PriorityYield[];
   /** CR 603.5: the viewer's stored "don't ask again" auto-choices for optional ("may") triggers. */
   may_trigger_auto_choices?: MayTriggerAutoChoiceRecord[];
+  un_actions?: UnActionState;
   replacement_auto_choices?: ReplacementAutoChoiceRecord[];
   lands_tapped_for_mana?: Record<number, number[]>;
   scheduled_turn_controls?: Array<{
@@ -4938,7 +5017,20 @@ export const AdapterErrorCode = {
   /** The Action frame was definitely not handed to the WebSocket. */
   ACTION_NOT_SENT: "ACTION_NOT_SENT",
   STALE_ACTION: "STALE_ACTION",
+  /** The server refused one request; the connection stays open. */
+  REQUEST_FAILED: "REQUEST_FAILED",
 } as const;
+
+/** Which frame a `StateWithheld` replaced; a withheld `GameStarted` carries the recipient's seat. */
+export type WithheldFrame =
+  | { type: "GameStarted"; data: { your_player: PlayerId } }
+  | { type: "StateUpdate" };
+
+/** The server applied a state it could not send (`StateWithheld`). */
+export interface StateWithheldNotice {
+  revision: number;
+  reason: string;
+}
 
 /**
  * Detect the Rust-side sentinel used by `with_state`/`with_state_mut` in

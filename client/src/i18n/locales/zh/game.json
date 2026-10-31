@@ -1152,6 +1152,7 @@
     "respondTitle": "有人提议循环捷径",
     "shorten": "缩短循环",
     "untilLethal": "重复直到游戏结束。",
+    "withoutEnd": "无限重复。若所有玩家都接受，本局游戏为平局。",
     "winKind": {
       "Advantage": "此循环能产生无限的优势。",
       "Decking": "此循环让一名对手抓空牌库。",
@@ -1162,6 +1163,7 @@
     }
   },
   "costReductionOrder": {
+    "announcedHybrids": "已宣告的混血法术力支付",
     "appliedFirst": "最先应用",
     "appliedLast": "最后应用",
     "cancel": "取消",
@@ -2508,7 +2510,7 @@
     "selectedModes": "已选模式",
     "targetingLabel": "正在指定目标：{{label}}",
     "title": "堆叠",
-    "titleContext": "上下文：{{context}}",
+    "titleContext": "上下文：{{items}}",
     "titlePaid": "已支付：{{paid}}",
     "titleTargets": "目标：{{targets}}",
     "triggered": "触发式",
@@ -2906,6 +2908,36 @@
       "winner": "{{name}} 赢得了比赛。",
       "tie": "平局：什么也不会发生。",
       "cancelled": "比赛已取消：什么也不会发生。"
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

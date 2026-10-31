@@ -11,7 +11,7 @@ import { createPortal } from "react-dom";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
+import type { ParseKeys, TFunction } from "i18next";
 
 import type {
   CompanionRevealChoice,
@@ -39,6 +39,7 @@ import type { DraftMatchResult } from "../services/quickDraftPersistence";
 import { useResolvedGridRows, useResolvedSplitGridRows } from "../hooks/useResolvedGridRows.ts";
 import { useDebugHandReveal } from "../hooks/useDebugHandReveal";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
+import { formatLifeReadout, lifeReadout } from "../hooks/useDisplayedLife.ts";
 import { useLocalizedCardContent } from "../hooks/useLocalizedCardContent.ts";
 import { CardTextReference } from "../components/card/CardTextReference.tsx";
 import { useGameViewportLock } from "../hooks/useGameViewportLock.ts";
@@ -51,6 +52,7 @@ import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { RevealOverlay } from "../components/animation/RevealOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
 import { DiceRollOverlay } from "../components/animation/DiceRollOverlay.tsx";
+import { UnActionsHost } from "../components/unactions/UnActionsHost.tsx";
 import { ScryOutcomeOverlay } from "../components/animation/ScryOutcomeOverlay.tsx";
 import { flashStartingPlayerContest } from "../game/diceContest.ts";
 import { loopDetectionModeFromQuery } from "../game/loopDetectionMode.ts";
@@ -252,15 +254,12 @@ function directSetupFormatConfig(format: GameFormat | null) {
  * a compile error — the idiomatic TS replacement for a `switch`-with-`never`-default
  * when the union has a single arm today but will grow.
  */
-const HOSTING_FAILURE_MESSAGE_KEYS: Record<
-  Extract<P2PAdapterEvent, { type: "hostingFailed" }>["reason"],
-  string
-> = {
+const HOSTING_FAILURE_MESSAGE_KEYS = {
   room_still_claimed: "gamePage.toasts.roomStillClaimed",
-};
+} as const satisfies Record<Extract<P2PAdapterEvent, { type: "hostingFailed" }>["reason"], ParseKeys<"game">>;
 
 export function GamePage() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "multiplayer"]);
   const navigate = useNavigate();
   const { id: gameId } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
@@ -1050,6 +1049,7 @@ function GamePageContent({
     (s) => s.toggleDebugClickModeButtonVisible,
   );
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
+  const stateWithheld = useMultiplayerStore((s) => s.stateWithheld);
   const adapter = useGameStore((s) => s.adapter);
   const aiDecisionCaptureEnabled = useUiStore((s) => s.aiDecisionCaptureEnabled);
   const setAiDecisionCaptureEnabled = useUiStore((s) => s.setAiDecisionCaptureEnabled);
@@ -1519,6 +1519,17 @@ function GamePageContent({
           aria-label={t("gamePage.sandbox.bannerAria")}
         >
           {t("gamePage.sandbox.banner")}
+        </div>
+      )}
+
+      {/* Adapter-supplied reason, shown raw; non-interactive so the menu stays reachable. */}
+      {stateWithheld && (
+        <div
+          className="pointer-events-none fixed left-0 right-0 top-0 z-30 select-none bg-amber-600 px-4 py-1 text-center text-xs font-bold text-white shadow-md"
+          role="status"
+          data-testid="state-withheld-banner"
+        >
+          {stateWithheld.reason}
         </div>
       )}
 
@@ -2002,6 +2013,7 @@ function GamePageContent({
           <TurnBanner />
           <DiceRollOverlay />
           <ScryOutcomeOverlay />
+          <UnActionsHost />
 
           {/* Combat SVG overlays: blocker assignments + attack target arrows */}
           <BlockAssignmentLines effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout} />
@@ -2432,8 +2444,11 @@ function MulliganPanel({
         transition={{ duration: 0.24, ease: "easeOut" }}
       />
       <div className="relative flex min-h-full items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
+        {/* Grow with the card row so a whole hand shows without scrolling when
+            the viewport fits it; never narrower than 72rem (or the viewport),
+            never wider than the viewport (the row scrolls again below that). */}
         <motion.div
-          className="card-scale-reset pointer-events-auto relative z-10 w-full max-w-6xl"
+          className="card-scale-reset pointer-events-auto relative z-10 w-fit min-w-[min(100%,72rem)] max-w-full"
           initial={{ opacity: 0, y: 18, scale: 0.98 }}
           animate={{ opacity: 1, scale: 1, ...slideTransform }}
           transition={{ duration: 0.24, ease: "easeOut" }}
@@ -2976,10 +2991,10 @@ function GameOverScreen({
 
   const activePlayerId = useMultiplayerStore((s) => s.activePlayerId) ?? 0;
 
-  const playerLife = players?.[activePlayerId]?.life ?? 0;
-  const opponentLife = players
-    ? (players.find((p) => p.id !== activePlayerId)?.life ?? 0)
-    : 0;
+  const playerLife = formatLifeReadout(lifeReadout(gameState, activePlayerId));
+  const opponentId = players?.find((p) => p.id !== activePlayerId)?.id;
+  const opponentLife =
+    opponentId === undefined ? "0" : formatLifeReadout(lifeReadout(gameState, opponentId));
 
   const isVictory = winner === activePlayerId;
   const isDraw = winner == null;
@@ -3777,6 +3792,8 @@ function formatUnlessCost(
         cost?: { type: string; shards?: string[]; generic?: number };
         amount?: number;
         count?: number;
+        /** Un-card `SayPhrase` cost: the phrase the payer says. */
+        phrase?: string;
       },
   t: TFunction<"game">,
 ): string {
@@ -3810,6 +3827,8 @@ function formatUnlessCost(
   switch (cost.type) {
     // Legacy `UnlessCost` JSON (pre-2026-05-09 fold) — preserved for
     // saved-game compat.
+    case "SayPhrase":
+      return t("unActions.sayPhrase.say", { phrase: cost.phrase ?? "" });
     case "Fixed":
       return cost.cost ? formatManaCost(cost.cost) : "0";
     case "DiscardCard":
@@ -3841,6 +3860,57 @@ function formatUnlessCost(
   }
 }
 
+/** The say-it prompt for a `SayPhrase` unless-cost. Answering "pay" says the phrase. */
+function SayPhrasePanel({ phrase, effect }: { phrase: string; effect?: string }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+
+  return (
+    <AnimatePresence>
+      <motion.div
+        className="fixed inset-x-0 bottom-0 z-40 flex justify-center px-2 pb-4"
+        initial={{ y: 80, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        exit={{ y: 80, opacity: 0 }}
+        transition={{ duration: 0.25 }}
+      >
+        <div className="w-full max-w-md rounded-xl border border-fuchsia-300/30 bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700">
+          <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
+            {t("unActions.sayPhrase.title")}
+          </h3>
+          {effect && (
+            <p className="mb-2 text-center text-xs text-gray-400">{effect}</p>
+          )}
+          <div className="flex flex-col items-center gap-3">
+            <motion.button
+              type="button"
+              onClick={() =>
+                dispatch({ type: "PayUnlessCost", data: { pay: true } })
+              }
+              className={gameButtonClass({ tone: "emerald", size: "md" })}
+              animate={{ rotate: [0, -2, 2, -2, 0], scale: [1, 1.03, 1] }}
+              transition={{ duration: 1.2, repeat: Infinity }}
+              whileTap={{ scale: 0.92, rotate: 6 }}
+            >
+              <span aria-hidden className="mr-2">{"\u{1F64F}"}</span>
+              {t("unActions.sayPhrase.say", { phrase })}
+            </motion.button>
+            <button
+              type="button"
+              onClick={() =>
+                dispatch({ type: "PayUnlessCost", data: { pay: false } })
+              }
+              className="min-h-11 rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
+            >
+              {t("unActions.sayPhrase.stayQuiet")}
+            </button>
+          </div>
+        </div>
+      </motion.div>
+    </AnimatePresence>
+  );
+}
+
 function UnlessPaymentPanel() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
@@ -3848,9 +3918,16 @@ function UnlessPaymentPanel() {
 
   if (waitingFor?.type !== "UnlessPayment") return null;
 
-  const costDisplay = formatUnlessCost(waitingFor.data.cost, t);
   const description = waitingFor.data.effect_description ?? t("gamePage.unlessPayment.defaultEffect");
   const effect = description.charAt(0).toUpperCase() + description.slice(1);
+
+  // Un-card say-it payment (Rod of Spanking's "unless that player says ..."):
+  // the "payment" is a spoken phrase, so it gets its own button and gag.
+  if (waitingFor.data.cost.type === "SayPhrase") {
+    return <SayPhrasePanel phrase={waitingFor.data.cost.phrase} effect={effect} />;
+  }
+
+  const costDisplay = formatUnlessCost(waitingFor.data.cost, t);
 
   return (
     <AnimatePresence>

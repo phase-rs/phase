@@ -1479,12 +1479,16 @@ pub fn candidate_actions_broad_with_probe(
                 } else {
                     vec![*count]
                 };
-            // Engine-side beam cap for *combinatorial* enumerations only. Every
-            // candidate returned here flows into
-            // `PlannerServices::validate_candidates`, which clones state +
-            // applies the action per candidate, so a count=4 search against an
-            // 80-card library would produce ~C(80,4) ≈ 1.6M combinations and
-            // stall validation for hours. The cap is constraint-aware so
+            // Engine-side beam cap for *combinatorial* enumerations only. The AI
+            // scores every candidate returned here one selection at a time, and
+            // `SimulationFilter` and phase-ai's planner legality gate simulate
+            // each one `structurally_valid_prompt_answer` defers. The gate
+            // simulates every one on phase-ai's score-only route, in each
+            // determinized sample, and when phase-ai scores a decision again
+            // after an answer the gate admitted without simulating it fails. So
+            // a count=4 search against an 80-card library would produce
+            // ~C(80,4) ≈ 1.6M combinations and stall the AI for hours.
+            // The cap is constraint-aware so
             // distinct-name searches collapse duplicate-named entries before
             // combinatorial explosion (Gifts Ungiven against an 80-card pool with
             // 8 distinct names → 8 candidate ids, C(8,4)=70 legal combos).
@@ -1510,7 +1514,7 @@ pub fn candidate_actions_broad_with_probe(
             };
             sizes
                 .into_iter()
-                .flat_map(|size| combinations(&beam_cards, size))
+                .flat_map(|size| combinations_generic(&beam_cards, size))
                 // CR 608.2c: Drop combinations that violate the printed-text
                 // selection restriction (e.g., Gifts Ungiven's "with different
                 // names") so the AI never scores or submits an illegal pick.
@@ -1537,7 +1541,7 @@ pub fn candidate_actions_broad_with_probe(
             cards,
             primary_count,
             ..
-        } => combinations(cards, *primary_count as usize)
+        } => combinations_generic(cards, *primary_count as usize)
             .into_iter()
             .map(|combo| {
                 candidate(
@@ -2479,6 +2483,123 @@ pub fn candidate_actions_broad_with_probe(
                 |cards| GameAction::SelectCards { cards },
             )
         }
+        // CR 701.20a: A shared-quality reveal ("two cards that share a color")
+        // offers only selections the payment validator accepts.
+        // CR 701.20a: The AI must consider the full eligible pool, not just the
+        // first SELECTION_POOL_CAP cards. Group by shared quality value first,
+        // then enumerate combinations within each qualifying group so legal pairs
+        // beyond the pool boundary are not omitted.
+        WaitingFor::PayCost {
+            player,
+            kind: PayCostKind::Reveal {
+                shared_quality: Some(quality),
+            },
+            choices,
+            count,
+            ..
+        } => {
+            // Group eligible cards by each quality value they have.
+            // A card can belong to multiple groups (e.g., a multicolor card).
+            // We need combinations of `count` cards that share at least one quality value.
+            // Approach: find the largest qualifying groups and enumerate combinations within them.
+
+            // `count` is `&usize` because we match on a reference to `WaitingFor::PayCost`
+            let count = *count;
+            if choices.len() < count {
+                return Vec::new();
+            }
+
+            // Build mapping from quality value -> list of card IDs that have that value.
+            // Use BTreeMap for stable iteration order so candidate generation is
+            // deterministic across runs.
+            let mut value_to_cards: std::collections::BTreeMap<String, Vec<ObjectId>> =
+                std::collections::BTreeMap::new();
+            for &id in choices {
+                let Some(obj) = state.objects.get(&id) else {
+                    continue;
+                };
+                let values = crate::game::filter::object_shared_quality_values_public(
+                    obj,
+                    quality,
+                    &state.all_creature_types,
+                );
+                for value in values {
+                    value_to_cards.entry(value).or_default().push(id);
+                }
+            }
+
+            // Filter to qualifying groups (those with at least `count` cards) and
+            // collect them in stable order.
+            let qualifying_groups: Vec<_> = value_to_cards
+                .into_iter()
+                .filter(|(_, _cards)| _cards.len() >= count)
+                .collect();
+
+            if qualifying_groups.is_empty() {
+                return Vec::new();
+            }
+
+            // Allocate the SELECTION_CANDIDATE_CAP budget fairly across qualifying
+            // groups so a single large group cannot consume the entire cap before
+            // later groups contribute candidates. Give each group a base share, then
+            // distribute remaining slots round-robin by group size (largest first).
+            let num_groups = qualifying_groups.len();
+            let base_share = SELECTION_CANDIDATE_CAP / num_groups;
+            let mut remaining = SELECTION_CANDIDATE_CAP % num_groups;
+
+            // Sort groups by size descending for fair remainder distribution.
+            let mut groups_by_size = qualifying_groups.clone();
+            groups_by_size.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
+
+            let mut per_group_cap: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for (value, _cards) in &groups_by_size {
+                let mut cap = base_share;
+                if remaining > 0 {
+                    cap += 1;
+                    remaining -= 1;
+                }
+                // Ensure at least 1 slot per qualifying group.
+                per_group_cap.insert(value.clone(), cap.max(1));
+            }
+
+            let mut all_combos = Vec::new();
+            for (value, cards_with_value) in qualifying_groups {
+                let group_cap = *per_group_cap.get(&value).unwrap_or(&1);
+                if all_combos.len() >= SELECTION_CANDIDATE_CAP {
+                    break;
+                }
+                // Enumerate combinations within this group using the full group as the pool.
+                // The pool cap (SELECTION_POOL_CAP) must not be applied here — a legal
+                // combination beyond the first 12 cards of a qualifying group would
+                // otherwise be omitted. Combinatorial blowup is prevented because
+                // bounded_combinations_for_sizes stops recursion as soon as the output budget
+                // (group_cap) is reached while keeping the full eligible pool.
+                let group_combos = bounded_combinations_for_sizes(
+                    &cards_with_value,
+                    [count],
+                    cards_with_value.len(),
+                    group_cap,
+                );
+                for combo in group_combos {
+                    if all_combos.len() >= SELECTION_CANDIDATE_CAP {
+                        break;
+                    }
+                    all_combos.push(combo);
+                }
+            }
+
+            all_combos
+                .into_iter()
+                .map(|combo| {
+                    candidate(
+                        GameAction::SelectCards { cards: combo },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect()
+        }
         WaitingFor::PayCost {
             player,
             choices,
@@ -2582,8 +2703,10 @@ pub fn candidate_actions_broad_with_probe(
         // CR 712.11b-c / CR 709.3-3a: a face election exposes only faces whose
         // own characteristics can be cast. Ordinary MDFC land/spell prompts
         // retain both actions. A resolution-owned prompt, however, exposes
-        // only faces the exact temporary permission can still cast; the handler
-        // independently enforces the same policy for forged direct submissions.
+        // only faces the exact temporary permission can still cast — plus,
+        // under a Play election, the land face when it can be played now
+        // (CR 701.18b + CR 712.12); the handler independently enforces the
+        // same policy for forged direct submissions.
         WaitingFor::ModalFaceChoice {
             player,
             object_id,
@@ -2603,28 +2726,22 @@ pub fn candidate_actions_broad_with_probe(
                         crate::types::ability::CastingPermission::ExileWithAltCost {
                             resolution_cleanup: Some(cleanup),
                             ..
-                        } => Some(crate::game::casting::resolution_spell_face_legality_for_current_permission(
-                            state,
-                            *player,
-                            *object_id,
-                            &cleanup.face_policy,
-                            index,
-                        )),
+                        } => Some(
+                            crate::game::casting::resolution_face_legality_for_current_permission(
+                                state,
+                                *player,
+                                *object_id,
+                                &cleanup.face_policy,
+                                index,
+                            ),
+                        ),
                         _ => None,
                     })
             });
             let mut actions: Vec<_> = [false, true]
                 .into_iter()
                 .filter(|back_face| {
-                    legal_faces.is_none_or(
-                        |faces| {
-                            if *back_face {
-                                faces.back
-                            } else {
-                                faces.front
-                            }
-                        },
-                    )
+                    legal_faces.is_none_or(|faces| faces.face(*back_face).is_some())
                 })
                 .map(|back_face| {
                     candidate(
@@ -3733,6 +3850,7 @@ pub fn candidate_actions_broad_with_probe(
         // (Scored by `phase_ai::policies::loop_shortcut::LoopShortcutPolicy`.)
         WaitingFor::LoopShortcut {
             proposer,
+            predicted_winner,
             schema,
             declaration,
             period,
@@ -3753,10 +3871,22 @@ pub fn candidate_actions_broad_with_probe(
             // `template: None` declaration; where neither applies, `DeclineShortcut` really is
             // the only legal answer at the node, and representing that honestly is the point.
             let mut v = Vec::new();
-            if !schema.is_bounded() {
+            // CR 732.2a: an offer to repeat without end is declared as one.
+            let unbounded = match schema.iteration_count {
+                crate::analysis::decision_template::IterationCount::WithoutEnd => {
+                    Some(crate::analysis::decision_template::IterationCount::WithoutEnd)
+                }
+                // CR 732.2a: until lethal ends only where the offer's named winner wins.
+                crate::analysis::decision_template::IterationCount::Fixed(_)
+                | crate::analysis::decision_template::IterationCount::UntilLethal => {
+                    (!schema.is_bounded() && predicted_winner.is_some())
+                        .then_some(crate::analysis::decision_template::IterationCount::UntilLethal)
+                }
+            };
+            if let Some(count) = unbounded {
                 v.push(candidate(
                     GameAction::DeclareShortcut {
-                        count: crate::analysis::decision_template::IterationCount::UntilLethal,
+                        count,
                         template: None,
                     },
                     TacticalClass::Utility,
@@ -3796,7 +3926,8 @@ pub fn candidate_actions_broad_with_probe(
             // suggestion here has no count to name and emits nothing rather than guessing one.
             let suggested = match schema.iteration_count {
                 crate::analysis::decision_template::IterationCount::Fixed(n) => Some(n),
-                crate::analysis::decision_template::IterationCount::UntilLethal => None,
+                crate::analysis::decision_template::IterationCount::UntilLethal
+                | crate::analysis::decision_template::IterationCount::WithoutEnd => None,
             };
             if let Some(n) = suggested.filter(|_| {
                 schema.is_bounded()
@@ -5864,7 +5995,7 @@ fn bottom_card_actions(
         )];
     }
 
-    combinations(&hand, count as usize)
+    combinations_generic(&hand, count as usize)
         .into_iter()
         .map(|combo| {
             candidate(
@@ -6131,7 +6262,7 @@ where
 
     let mut actions = Vec::new();
     for size in 1..=creatures_with_power.len() {
-        for combo in combinations(&ids, size) {
+        for combo in combinations_generic(&ids, size) {
             let total: i32 = combo
                 .iter()
                 .filter_map(|id| {
@@ -6186,9 +6317,13 @@ fn station_target_candidates(
 /// duplicates are inert because they cannot legally appear in any chosen set
 /// alongside their twin), so the cap collapses sized libraries with many
 /// repeated names down to the unique-name set first. The cap exists strictly
-/// to bound `PlannerServices::validate_candidates`, which clones state per
-/// candidate; without it, multi-card searches against large libraries stall
-/// the AI for hours. Player submissions are validated by the engine
+/// to bound the AI's per-selection work (scoring every issued selection, and
+/// simulating each one `structurally_valid_prompt_answer` defers, or every one
+/// on phase-ai's score-only route, in each determinized sample, and when
+/// phase-ai scores a decision again after an answer its planner legality gate
+/// admitted without simulating it fails); without it,
+/// multi-card searches against large libraries stall the AI for hours. Player
+/// submissions are validated by the engine
 /// submission guard, not by this enumeration, so capping here cannot make a
 /// legal play unsubmittable — it only narrows the AI's *considered* set.
 fn cap_search_choice_pool(
@@ -6234,27 +6369,40 @@ fn cap_search_choice_pool(
     }
 }
 
-fn combinations(
+fn generate_bounded_combinations(
     items: &[crate::types::identifiers::ObjectId],
     k: usize,
-) -> Vec<Vec<crate::types::identifiers::ObjectId>> {
+    prefix: &mut Vec<crate::types::identifiers::ObjectId>,
+    output_cap: usize,
+    seen: &mut HashSet<Vec<u64>>,
+    output: &mut Vec<Vec<crate::types::identifiers::ObjectId>>,
+) {
+    if output.len() >= output_cap {
+        return;
+    }
     if k == 0 {
-        return vec![Vec::new()];
+        push_object_combo(output, seen, prefix.iter().copied());
+        return;
     }
     if items.len() < k {
-        return Vec::new();
+        return;
     }
     if items.len() == k {
-        return vec![items.to_vec()];
+        let mut combo = prefix.clone();
+        combo.extend_from_slice(items);
+        push_object_combo(output, seen, combo);
+        return;
     }
 
-    let mut result = Vec::new();
-    for mut combo in combinations(&items[1..], k - 1) {
-        combo.insert(0, items[0]);
-        result.push(combo);
+    prefix.push(items[0]);
+    generate_bounded_combinations(&items[1..], k - 1, prefix, output_cap, seen, output);
+    prefix.pop();
+
+    if output.len() >= output_cap {
+        return;
     }
-    result.extend(combinations(&items[1..], k));
-    result
+
+    generate_bounded_combinations(&items[1..], k, prefix, output_cap, seen, output);
 }
 
 fn bounded_combinations_for_sizes(
@@ -6275,12 +6423,15 @@ fn bounded_combinations_for_sizes(
             continue;
         }
         let pool_len = items.len().min(pool_cap);
-        for combo in combinations(&items[..pool_len], size) {
-            push_object_combo(&mut output, &mut seen, combo);
-            if output.len() >= output_cap {
-                break;
-            }
-        }
+        let mut prefix = Vec::with_capacity(size);
+        generate_bounded_combinations(
+            &items[..pool_len],
+            size,
+            &mut prefix,
+            output_cap,
+            &mut seen,
+            &mut output,
+        );
     }
 
     output
@@ -7072,6 +7223,7 @@ mod tests {
             predicted_winner: Some(PlayerId(0)),
             certificate: crate::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
+                rising: vec![],
                 win_kind: Some(crate::analysis::loop_check::WinKind::LethalDamage),
                 win_kind_at: None,
                 mandatory: false,
@@ -7081,6 +7233,7 @@ mod tests {
             schema: crate::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
             road: crate::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
 
@@ -10034,6 +10187,7 @@ mod tests {
             predicted_winner: None,
             certificate: crate::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
+                rising: vec![],
                 win_kind: Some(crate::analysis::loop_check::WinKind::Advantage),
                 win_kind_at: None,
                 mandatory: false,
@@ -10059,6 +10213,7 @@ mod tests {
             },
             declaration,
             road: crate::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
         state
@@ -10287,5 +10442,72 @@ mod tests {
             !candidate_actions(&state).is_empty(),
             "reach: the bottoming prompt still has candidates"
         );
+    }
+
+    #[test]
+    fn bounded_combinations_large_pool_and_size_stops_at_budget() {
+        let items: Vec<ObjectId> = (1..=30).map(ObjectId).collect();
+        // 30 choose 15 would be 155,117,520 combinations without early bounding.
+        let combos = bounded_combinations_for_sizes(&items, [15], 30, 64);
+        assert_eq!(combos.len(), 64);
+        for combo in &combos {
+            assert_eq!(combo.len(), 15);
+        }
+    }
+
+    #[test]
+    fn shared_quality_reveal_candidate_generation_bounds_large_group() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::{SharedQuality, TurnUpCostSource};
+        use crate::types::game_state::{CostResume, PayCostKind, WaitingFor};
+        use crate::types::identifiers::ObjectIncarnationRef;
+        use crate::types::mana::ManaColor;
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let cards: Vec<ObjectId> = (1..=30)
+            .map(|i| {
+                scenario
+                    .add_creature_to_hand(P0, &format!("Blue Dude {i}"), 1, 1)
+                    .with_color(vec![ManaColor::Blue])
+                    .id()
+            })
+            .collect();
+        let runner = scenario.build();
+        let source = &runner.state().objects[&ObjectId(1)];
+        let prompt = WaitingFor::PayCost {
+            player: P0,
+            kind: PayCostKind::Reveal {
+                shared_quality: Some(SharedQuality::Color),
+            },
+            choices: cards.clone(),
+            count: 15,
+            min_count: 15,
+            resume: CostResume::TurnFaceUp {
+                source: ObjectIncarnationRef::of(source.id, source.incarnation),
+                cost_source: TurnUpCostSource::Morph,
+                remaining_cost: None,
+            },
+        };
+        let mut state = runner.state().clone();
+        state.waiting_for = prompt;
+        let actions = crate::ai_support::legal_actions(&state);
+        // Filter for SelectCards actions (CancelCast is also legal for PayCost)
+        let select_cards_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, GameAction::SelectCards { .. }))
+            .collect();
+        assert!(
+            !select_cards_actions.is_empty(),
+            "expected at least one SelectCards action"
+        );
+        assert!(select_cards_actions.len() <= SELECTION_CANDIDATE_CAP);
+        for action in &select_cards_actions {
+            let GameAction::SelectCards { cards } = action else {
+                panic!("expected SelectCards, got {action:?}");
+            };
+            assert_eq!(cards.len(), 15);
+        }
     }
 }

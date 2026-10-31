@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import type {
   DraftCardInstance,
   DraftPoolGroup,
@@ -257,7 +258,7 @@ export type WorkspaceHeaderDescriptor =
   | {
       kind: "engine-group";
       groupKind: DraftPoolGroupKind;
-      labelKey: string;
+      labelKey: ParseKeys<"draft">;
       presentation: WorkspaceHeaderPresentation;
     }
   | { kind: "added-basics"; labelKey: "workspace.headers.addedBasics" }
@@ -302,7 +303,7 @@ export interface WorkspaceCardEntryModel {
 export interface WorkspaceDropPresentation {
   state: "idle" | "active";
   active: boolean;
-  descriptionKey: string | null;
+  descriptionKey: ParseKeys<"draft"> | null;
 }
 
 export interface WorkspaceBoardRowModel {
@@ -856,7 +857,7 @@ export function activateWorkspaceInstance(
   });
 }
 
-function dropPresentation(active: boolean, descriptionKey: string): WorkspaceDropPresentation {
+function dropPresentation(active: boolean, descriptionKey: ParseKeys<"draft">): WorkspaceDropPresentation {
   return active ? { state: "active", active: true, descriptionKey } : IDLE_DROP;
 }
 

@@ -9,7 +9,7 @@ import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
-import { useDisplayedLife } from "../../hooks/useDisplayedLife.ts";
+import { formatLifeReadout, lifeReadoutTitle, useDisplayedLife } from "../../hooks/useDisplayedLife.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { usePlayerAvatarImage } from "../../hooks/usePlayerAvatarImage.ts";
 import type { PlayerAvatarIdentity } from "../../services/playerAvatars.ts";
@@ -615,7 +615,8 @@ function OpponentTab({
   const player = gameState?.players[playerId];
   // Ticks with the damage animation rather than at snapshot commit, in step with
   // the seat's `LifeTotal` above it.
-  const displayedLife = useDisplayedLife(playerId, player?.life ?? 0);
+  const displayedLife = useDisplayedLife(playerId);
+  const lifeTitle = lifeReadoutTitle(t, displayedLife);
   const isDisconnected = useMultiplayerStore((s) => s.disconnectedPlayers.has(playerId));
   const isOnline = useMultiplayerStore((s) => s.connectionStatus) !== "disconnected";
   const avatarIdentity = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
@@ -707,7 +708,7 @@ function OpponentTab({
             ? "border-amber-400/40 bg-amber-950/38 ring-1 ring-amber-300/30"
             : "border-white/10 bg-slate-950/70 hover:border-white/20 hover:bg-slate-900/72";
   const waitingReasonText = isWaitingOnThem
-    ? t(reason?.key ?? "status.reason.thinking", reason?.params)
+    ? t(`status.reason.${reason?.id ?? "thinking"}`, reason?.params)
     : null;
 
   const ariaLabel = commitReady
@@ -750,7 +751,7 @@ function OpponentTab({
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden className="h-2.5 w-2.5 text-rose-400/90">
           <path d="M11.645 20.91l-.007-.003-.022-.012a15.247 15.247 0 01-.383-.218 25.18 25.18 0 01-4.244-3.17C4.688 15.36 2.25 12.174 2.25 8.25 2.25 5.322 4.714 3 7.688 3A5.5 5.5 0 0112 5.052 5.5 5.5 0 0116.313 3c2.973 0 5.437 2.322 5.437 5.25 0 3.925-2.438 7.111-4.739 9.256a25.175 25.175 0 01-4.244 3.17 15.247 15.247 0 01-.383.219l-.022.012-.007.004-.003.001a.752.752 0 01-.704 0l-.003-.001z" />
         </svg>
-        {displayedLife}
+        <span title={lifeTitle} aria-label={lifeTitle}>{formatLifeReadout(displayedLife)}</span>
       </span>
       {designations.isMonarch ? <MonarchBadge /> : null}
       {designations.hasInitiative ? <InitiativeBadge /> : null}

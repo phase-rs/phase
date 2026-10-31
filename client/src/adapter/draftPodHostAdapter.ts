@@ -15,7 +15,7 @@ import type { DraftKind, DraftPlayerView, PairingView, PodPolicy, PoolInput, Sea
 import type { DraftLobbyMetadata, MatchScore } from "./types";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
 import { hostRoom, type HostResult } from "../network/connection";
-import type { CommanderSeatDecks, DraftCommanderLaunch, DraftMatchDeckPayload, DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
+import type { CommanderSeatDecks, DraftCommanderLaunch, DraftDeckPayload, DraftMatchDeckPayload, DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from "../network/draftProtocol";
 import type { BrokerClient, RegisterHostRequest } from "../services/brokerClient";
 import { loadDraftHostSession } from "../services/draftPersistence";
 import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
@@ -636,9 +636,8 @@ export class DraftPodHostAdapter {
   }
 
   /**
-   * CR 903.13a: every deck the completed Commander pod's launch needs. Sends
-   * nothing — pair it with `sendCommanderLaunches` once the game is up. `view`
-   * must be read at call time — see `P2PDraftHost.commanderSeatDecks`.
+   * CR 903.13a: prepare every deck once from a bound pod view. Sends nothing; the host
+   * finalizer decides transport participation after the game is initialized.
    */
   async commanderSeatDecks(view: DraftPlayerView, localSeat: number): Promise<CommanderSeatDecks> {
     if (!this.host) throw new Error("Host not initialized");
@@ -646,17 +645,19 @@ export class DraftPodHostAdapter {
   }
 
   /**
-   * CR 903.13a: put the pod's launch on every live human seat, the host's own
-   * included, from decks `commanderSeatDecks` already computed.
+   * CR 903.13a: install engine seats and dispatch invitations using the host's current
+   * transport roster. Resolves after all selected sends settle.
    */
-  sendCommanderLaunches(
+  async sendCommanderLaunches(
     view: DraftPlayerView,
     gameId: string,
     roomCode: string,
     decks: CommanderSeatDecks,
-  ): void {
+    installEngineSeat: (seat: number, deck: DraftDeckPayload) => Promise<void>,
+    signal: AbortSignal,
+  ): Promise<void> {
     if (!this.host) throw new Error("Host not initialized");
-    this.host.sendCommanderLaunches(view, gameId, roomCode, decks);
+    return this.host.sendCommanderLaunches(view, gameId, roomCode, decks, installEngineSeat, signal);
   }
 
   async replaceSeatWithBot(seat: number): Promise<void> {

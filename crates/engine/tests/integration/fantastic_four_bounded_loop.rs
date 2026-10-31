@@ -95,7 +95,7 @@ pub(crate) fn published_suggestion(
 ) -> u32 {
     match schema.iteration_count {
         IterationCount::Fixed(n) => n,
-        IterationCount::UntilLethal => panic!(
+        IterationCount::UntilLethal | IterationCount::WithoutEnd => panic!(
             "a bounded offer publishes a `Fixed` suggestion; this one measured {:?}",
             schema.measured_repetition_bound
         ),
@@ -1231,9 +1231,7 @@ fn r2a_an_accepted_declaration_commits_exactly_n_cycles_because_reeds_may_is_ann
 /// empty, `loop_answer_journal == None`), and this same `apply()` does NOT re-offer.
 ///
 /// The seam is the drive-end block in `game::engine` — `*state = committed;`, then the ring
-/// clear and journal clear, then the priority handback. That is **site 2** of the eight
-/// ring-clear sites [`c1_every_ring_clear_site_also_clears_the_loop_answer_journal`]
-/// enumerates, and that census covers site 2 STRUCTURALLY only (its own doc says so). This
+/// clear and journal clear, then the priority handback. This
 /// row drives it.
 ///
 /// # Why the f4 board, and why it is not substitutable
@@ -1247,7 +1245,7 @@ fn r2a_an_accepted_declaration_commits_exactly_n_cycles_because_reeds_may_is_ann
 ///
 /// # Discrimination — REVERT-PROBE, RUN, not adopted from a code read
 ///
-/// Delete the seam's `state.loop_detect_ring.clear();` + `state.loop_answer_journal = None;`
+/// Delete the seam's `state.clear_loop_detect_window();`
 /// ⇒ MEASURED `ring=12, answers=3, wf=LoopShortcut` against this drive's `0, 0, Priority`:
 /// all three assertions below flip together and the engine re-offers within the same
 /// `apply()`.
@@ -2635,23 +2633,12 @@ fn c1_row2b_sibling_an_identical_second_answer_stays_uniform() {
 
 /// **Row 7b″.** The journal is invalidated with `loop_detect_ring`, ON THE SAME RECEIVER.
 ///
-/// Three of the eight ring-clear sites act on a `clone`/`self` rather than on `state`, so a
-/// journal clear applied to the wrong receiver would leave a stored sample carrying the live
-/// window's answers. Sites 6 and 7 are only observable downstream, through
-/// `LoopDetectSample`'s `pub normalized` / `pub live` halves on the ring — this row asserts
-/// there, simultaneously with the LIVE state being non-empty, so no single-receiver bug
-/// satisfies both halves.
-///
-/// Site 5 (`apply_action`'s pre-action clear, a `state` receiver) is driven directly.
-/// Sites 1–4 and 8 are covered structurally instead, by
-/// [`c1_every_ring_clear_site_also_clears_the_loop_answer_journal`] — stated here so the coverage of
-/// this row is not read as more than it is.
-///
 /// # Discrimination
 ///
 /// Delete `clone.loop_answer_journal = None;` from `normalize_for_loop` or from
-/// `loop_detect_live_sample` ⇒ the corresponding per-sample assertion flips. Delete it from
-/// `apply_action`'s clear block ⇒ the final assertion flips.
+/// `loop_detect_live_sample` ⇒ the corresponding per-sample assertion flips. Delete
+/// `self.loop_answer_journal = None;` from `clear_loop_detect_window`, which `apply_action`'s
+/// clear block calls ⇒ the final assertion flips.
 #[test]
 fn c1_row7b_the_may_journal_follows_the_ring_on_the_same_receiver() {
     let mut state = load_f4();
@@ -2732,37 +2719,30 @@ fn c1_row7c_the_may_journal_does_not_cross_save_load() {
     );
 }
 
-/// **Row 7b″, structural half.** EVERY production `loop_detect_ring.clear()` is paired with
-/// a `loop_answer_journal = None` on the same receiver, at all nine sites.
+/// `types/game_state.rs` owns every ring clear: one outside its four window methods fails, and
+/// each of them except `record_shrinking_beat` also clears the CR 603.5 loop-answer journal.
 ///
-/// The driven row above reaches sites 5, 6 and 7 on the F4 board; sites 1–4 and 8 need
-/// materialize / until-lethal / pipeline / unobserved-life-move boards that this fixture does
-/// not produce. A source-level census covers the whole set at the only tier that can, and
-/// fails loudly if a TENTH clear site is added without the journal, which is the actual
-/// regression this guards.
-///
-/// THE WALK IS THE WHOLE CRATE, not a named pair of files. A hard-coded
-/// `["game/engine.rs", "types/game_state.rs"]` cannot see a tenth site in any THIRD file: such
-/// a site is neither paired nor reported, so `paired == 9` still passes while the regression is
-/// live. MEASURED on this tree: the recursive walk finds exactly the 9 sites the named pair did
-/// (5 in `game/engine.rs`, 4 in `types/game_state.rs`), so THE COUNT ASSERTION IS BLIND TO THE
-/// WIDENING — the planted-third-file probe below is the only thing that measures it.
-///
-/// Discrimination, BOTH DIRECTIONS, RUN:
-/// * delete any one `loop_answer_journal = None;` that follows a ring clear ⇒ the pairing count
-///   drops and this row reds naming the file and line;
-/// * add an unpaired `state.loop_detect_ring.clear();` to a THIRD file under
-///   `crates/engine/src` ⇒ `unpaired` names that file and this row reds. Under the named-pair
-///   walk the identical plant left the row GREEN.
+/// `record_shrinking_beat` empties the visible ring of a window that stays open, so it keeps the
+/// journal.
 #[test]
 fn c1_every_ring_clear_site_also_clears_the_loop_answer_journal() {
+    use super::format_axis_census::fn_span;
+    use super::source_census::code;
+    use std::collections::BTreeSet;
     use std::path::Path;
 
+    const AUTHORITY: &str = "types/game_state.rs";
+    const WINDOW_METHODS: [&str; 4] = [
+        "pub(crate) fn clear_loop_detect_window(",
+        "pub(crate) fn record_shrinking_beat(",
+        "pub(crate) fn normalize_for_loop(",
+        "pub(crate) fn loop_detect_live_sample(",
+    ];
+    const KEEPS_JOURNAL: &str = "pub(crate) fn record_shrinking_beat(";
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut unpaired: Vec<String> = Vec::new();
-    let mut paired = 0usize;
-    // The walker is the sibling census's, not a second copy: one home for "every `.rs` file
-    // under a root", already shared by the census rows in this binary.
+    let mut outside: Vec<String> = Vec::new();
+    let mut journal_kept: Vec<&str> = Vec::new();
+    let mut reached: BTreeSet<&str> = BTreeSet::new();
     for path in super::loop_shortcut_offer_writer_census::rs_files(&src) {
         let rel = path
             .strip_prefix(&src)
@@ -2771,44 +2751,56 @@ fn c1_every_ring_clear_site_also_clears_the_loop_answer_journal() {
             .replace('\\', "/");
         let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
         let lines: Vec<&str> = text.lines().collect();
-        // Both halves read the CODE of a line, never its comment: prose neither clears the ring
-        // nor clears the journal. Whole-line-only exclusion is not enough here and the failure is
-        // two-sided — a comment naming the clear would be counted as a site, and a comment naming
-        // `loop_answer_journal = None` inside a window would mark a genuinely UNPAIRED site as
-        // paired, which is the direction that hides the regression. Shared rule, one home:
-        // `src/source_census.rs`, the same file the crate's own unit-test censuses use.
-        use super::source_census::code;
+        let spans: Vec<(&str, std::ops::Range<usize>)> = if rel == AUTHORITY {
+            WINDOW_METHODS
+                .iter()
+                .filter_map(|header| {
+                    let first = lines
+                        .iter()
+                        .position(|line| code(line).trim_start().starts_with(header))?;
+                    Some((
+                        *header,
+                        first..first + fn_span(&text, header).lines().count(),
+                    ))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for (header, span) in &spans {
+            if *header != KEEPS_JOURNAL
+                && !lines[span.clone()]
+                    .iter()
+                    .any(|l| code(l).contains("loop_answer_journal = None"))
+            {
+                journal_kept.push(header);
+            }
+        }
         for (i, line) in lines.iter().enumerate() {
             if !code(line).contains("loop_detect_ring.clear()") {
                 continue;
             }
-            // The journal assignment sits within the same block, immediately after the ring
-            // clear (a comment line may separate them).
-            let window = lines[i + 1..(i + 5).min(lines.len())]
-                .iter()
-                .map(|l| code(l))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if window.contains("loop_answer_journal = None") {
-                paired += 1;
-            } else {
-                unpaired.push(format!("{rel}:{}", i + 1));
+            match spans.iter().find(|(_, span)| span.contains(&i)) {
+                Some((header, _)) => {
+                    reached.insert(*header);
+                }
+                None => outside.push(format!("{rel}:{}", i + 1)),
             }
         }
     }
     assert!(
-        unpaired.is_empty(),
-        "every ring-clear site must also clear the CR 603.5 + CR 608.2b loop-answer journal; \
-         unpaired: \
-         {unpaired:?}"
+        outside.is_empty(),
+        "a ring clear outside the window methods of {AUTHORITY}: {outside:?}"
+    );
+    assert!(
+        journal_kept.is_empty(),
+        "these window methods clear the ring but not the CR 603.5 loop-answer journal: \
+         {journal_kept:?}"
     );
     assert_eq!(
-        paired, 9,
-        "the ring has NINE production clear sites across the whole of `crates/engine/src` \
-         (5 in game/engine.rs, 4 in types/game_state.rs, the fourth being the CR 104.4b \
-         not-loop-comparable sampler gate; MEASURED by this recursive walk). A \
-         different count means a site was added or removed and this census must be re-derived, \
-         not re-numbered"
+        reached,
+        WINDOW_METHODS.into_iter().collect::<BTreeSet<_>>(),
+        "reach: each window method must exist in {AUTHORITY} and clear the ring"
     );
 }
 
@@ -5637,7 +5629,11 @@ fn t8_the_token_axis_reaches_the_certificate_while_the_unbounded_channel_stays_c
         state.unbounded_resources
     );
     let mut marked = state.clone();
-    marked.mark_unbounded_loop(proposer, &[ResourceAxis::TokensCreated]);
+    marked.mark_unbounded_loop(
+        proposer,
+        &[ResourceAxis::TokensCreated],
+        &[ResourceAxis::TokensCreated],
+    );
     assert!(
         !marked.unbounded_resources.is_empty(),
         "POSITIVE CONTROL: the same reader returns non-empty on a hand-marked state, so the \
@@ -6715,7 +6711,11 @@ fn e1_a_narrowed_offer_publishes_its_bound_beside_an_untouched_infinity_channel(
             views.unbounded_resources
         );
         let mut marked = state.clone();
-        marked.mark_unbounded_loop(proposer, &[ResourceAxis::TokensCreated]);
+        marked.mark_unbounded_loop(
+            proposer,
+            &[ResourceAxis::TokensCreated],
+            &[ResourceAxis::TokensCreated],
+        );
         let marked_views = derive_views(&marked, None);
         assert_eq!(
             marked_views

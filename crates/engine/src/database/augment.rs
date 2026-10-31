@@ -89,6 +89,7 @@ fn synthesize_augment_half(face: &mut CardFace, oracle: &str) {
             AbilityCost::Reveal {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: Some(TargetFilter::SelfRef),
+                shared_quality: None,
             },
         ],
     })

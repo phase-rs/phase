@@ -76,7 +76,7 @@ describe("useTurnStatus", () => {
     expect(result.current.canIActNow).toBe(true);
     expect(result.current.waitingSeatId).toBe(0);
     expect(result.current.waitingOnOpponent).toBe(false);
-    expect(result.current.reason?.key).toBe("status.reason.priorityMain");
+    expect(result.current.reason?.id).toBe("priorityMain");
   });
 
   it("separates turn from priority: opponent holds priority during MY turn", () => {
@@ -92,7 +92,7 @@ describe("useTurnStatus", () => {
     expect(result.current.canIActNow).toBe(false); // but not my decision
     expect(result.current.waitingSeatId).toBe(1);
     expect(result.current.waitingOnOpponent).toBe(true);
-    expect(result.current.reason?.key).toBe("status.reason.respondingToStack");
+    expect(result.current.reason?.id).toBe("respondingToStack");
   });
 
   it("turn control (Mindslaver): isMyTurn is false but I am the authorized actor", () => {

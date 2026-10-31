@@ -17,9 +17,9 @@
 //!   * CR 202.3 + CR 608.2c — the card-property (mana value) comparison
 //!     against a dynamic quantity (the number of lands the controller
 //!     controls) that branches the found card's destination.
-//!   * CR 608.2c (`TriggerConstraint::OncePerTurn`) — "this ability triggers
-//!     only once each turn" is a per-turn triggered-ability frequency
-//!     limiter, applied as the ability's own written instruction.
+//!   * CR 603.2 (`TriggerConstraint::OncePerTurn { spent_by: Triggering }`) —
+//!     "this ability triggers only once each turn" is a per-turn
+//!     triggered-ability frequency limiter that triggering spends.
 //!
 //! Four scenarios, each a distinct discriminating fixture:
 //!   T1 cheap creature (MV <= lands controlled) → battlefield, miss → library.
@@ -170,9 +170,8 @@ fn part_in_friendship_expensive_creature_goes_to_hand() {
 }
 
 /// T3 — the single most important hostile fixture: a SECOND nontoken creature
-/// dying in the same turn must NOT retrigger the ability (CR 608.2c: "This
-/// ability triggers only once each turn" is the ability's own written
-/// instruction). The library's second creature card is left completely
+/// dying in the same turn must NOT retrigger the ability (CR 603.2: "This
+/// ability triggers only once each turn" is spent by triggering). The library's second creature card is left completely
 /// untouched by the second death.
 #[test]
 fn part_in_friendship_second_death_same_turn_does_not_retrigger() {

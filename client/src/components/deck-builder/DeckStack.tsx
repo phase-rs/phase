@@ -13,7 +13,7 @@ import type { GameFormat } from "../../adapter/types";
 import { DeckCardContextMenu } from "./DeckCardContextMenu";
 import { PrintingPickerModal } from "./PrintingPickerModal";
 import { mouseHoverPreview, type CardHoverHandler } from "./hoverPreview";
-import { groupAccent, groupKey, groupRank, groupTitleKey, type GroupMode } from "./deckGrouping";
+import { groupAccent, groupKey, groupRank, type DeckGroup, type GroupMode } from "./deckGrouping";
 import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
 
 interface DeckStackProps {
@@ -43,15 +43,17 @@ interface DeckStackItem {
   count: number;
   name: string;
   section: DeckStackSection;
-  groupTitle: string;
+  groupTitle: DeckGroup | null;
   sortKey: [number, number, string];
   scryfallId?: string;
   sourcePrinting?: SourcePrinting;
 }
 
+type DeckStackTitle = DeckGroup | "maybeboardGroup" | "sideboardGroup";
+
 interface DeckStackGroup {
   key: string;
-  title: string;
+  title: DeckStackTitle | null;
   entries: DeckStackItem[];
 }
 
@@ -84,7 +86,7 @@ function createDeckStackItems(
       name,
       scryfallId: card?.id,
       section: "commander",
-      groupTitle: "",
+      groupTitle: null,
       sortKey: [0, card?.cmc ?? 0, name.toLowerCase()],
     });
   }
@@ -98,7 +100,7 @@ function createDeckStackItems(
       scryfallId: card?.id,
       sourcePrinting: entry.sourcePrinting,
       section: "main",
-      groupTitle: groupTitleKey(mode, groupKey(mode, card)),
+      groupTitle: groupKey(mode, card),
       sortKey: [groupRank(mode, card), card?.cmc ?? 0, entry.name.toLowerCase()],
     });
   }
@@ -112,7 +114,7 @@ function createDeckStackItems(
       scryfallId: card?.id,
       sourcePrinting: entry.sourcePrinting,
       section: "sideboard",
-      groupTitle: groupTitleKey(mode, groupKey(mode, card)),
+      groupTitle: groupKey(mode, card),
       sortKey: [groupRank(mode, card), card?.cmc ?? 0, entry.name.toLowerCase()],
     });
   }
@@ -132,7 +134,7 @@ function buildGroups(entries: DeckStackItem[]): DeckStackGroup[] {
   if (entries.length === 0) return [];
 
   const groups: DeckStackGroup[] = [];
-  let currentTitle: string | null = null;
+  let currentTitle: DeckGroup | null = null;
   let currentEntries: DeckStackItem[] = [];
 
   const flush = () => {
@@ -370,10 +372,9 @@ function DeckStackSectionLane({
   const groups = useMemo(() => {
     const base = showGroupSections
       ? buildGroups(entries)
-      : [{ key: "all", title: "", entries }];
+      : [{ key: "all", title: null, entries }];
     return extraGroups && extraGroups.length > 0 ? [...base, ...extraGroups] : base;
   }, [entries, showGroupSections, extraGroups]);
-  const showGroupHeaders = showGroupSections || (extraGroups?.length ?? 0) > 0;
 
   return (
     <section className="flex min-w-0 flex-col rounded-[20px] border border-white/8 bg-black/14 px-3 py-3">
@@ -393,13 +394,13 @@ function DeckStackSectionLane({
           <div className="flex min-w-0 flex-col gap-6">
             {groups.map((group, groupIndex) => (
               <div key={group.key} className={groupIndex > 0 ? "pt-1" : undefined}>
-                {showGroupHeaders && (() => {
-                  const accent = groupAccent(group.title);
+                {group.title !== null && ((title: DeckStackTitle) => {
+                  const accent = groupAccent(title);
                   return (
                   <div className="mb-3 flex items-center gap-3">
                     <span className={`h-3.5 w-1 shrink-0 rounded-full ${accent.bar}`} aria-hidden="true" />
                     <div className={`text-[0.68rem] font-semibold uppercase tracking-[0.22em] ${accent.text}`}>
-                      {t(`stack.${group.title}`)}
+                      {t(`stack.${title}`)}
                     </div>
                     <div className="h-px flex-1 bg-white/8" />
                     <div className="text-[11px] text-slate-500">
@@ -409,7 +410,7 @@ function DeckStackSectionLane({
                     </div>
                   </div>
                   );
-                })()}
+                })(group.title)}
                 <div
                   className="grid justify-start gap-4"
                   style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${CARD_WIDTH}px, ${CARD_WIDTH}px))` }}

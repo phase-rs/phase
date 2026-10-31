@@ -13,7 +13,8 @@
 //!
 //! CR 603.10a: sacrifice triggers look back in time at the sacrificed object's
 //! last-known information.
-//! CR 603.2h: "only once each turn" is modeled by `TriggerConstraint::OncePerTurn`.
+//! CR 603.2: "This ability triggers only once each turn" is modeled by
+//! `TriggerConstraint::OncePerTurn { spent_by: TriggerLimitSpend::Triggering }`.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::counter::CounterType;

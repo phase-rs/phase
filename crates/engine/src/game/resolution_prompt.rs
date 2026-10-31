@@ -83,10 +83,8 @@ pub(crate) fn probe_resolution(
     a: &ResolvedAbility,
     budget: &mut ProbeBudget,
 ) -> ResolutionProbe {
-    // CR 732.2a: BUDGET-EXCEEDED ⇒ `Prompted`. Cost is a COVERAGE knob, never a
-    // soundness knob — an unaffordable probe degrades to honest-red (no
-    // certificate, no offer), never to a wrong certificate and never to an
-    // unbounded stall. Same shape as the `is_empty ⇒ Prompted` arm below.
+    // CR 732.2a: BUDGET-EXCEEDED ⇒ `Prompted`, the answer a real prompt gets. Same shape as
+    // the `is_empty ⇒ Prompted` arm below.
     if !budget.try_charge_one() {
         return ResolutionProbe::Prompted;
     }
@@ -120,10 +118,6 @@ pub(crate) fn probe_resolution(
     // a non-priority `waiting_for` on entry is itself a reason to refuse rather than a
     // baseline to compare against. The discriminant test is KEPT alongside, so a board
     // that entered at priority and left at a different variant still refuses.
-    //
-    // Strictly stronger than the struck form on every input, so it can only ever cost
-    // COVERAGE (a missed offer), never soundness — the same direction as the
-    // budget-exceeded and empty-derivation arms around it.
     if !matches!(work.waiting_for, WaitingFor::Priority { .. })
         || std::mem::discriminant(&work.waiting_for) != std::mem::discriminant(&state.waiting_for)
     {
@@ -459,6 +453,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptions { .. }
@@ -565,11 +560,31 @@ fn effect_offers_choice(e: &Effect) -> bool {
 /// choice-bearing). A FUTURE field fails to compile here until classified for the
 /// choice question.
 pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
+    // CR 608.2c: gate-check the whole chain — this node's modifiers and effect,
+    // plus the sub_ability / else_ability branches. Recursion is retained HERE,
+    // where it is a pure AST walk costing nothing, and dropped from the probe below.
+    node_modifiers_offer_choice(a)
+        || effect_offers_choice(&a.effect)
+        || a.sub_ability.as_deref().is_some_and(chain_offers_choice)
+        || a.else_ability.as_deref().is_some_and(chain_offers_choice)
+}
+
+/// CR 608.2d + CR 118.12: can this one node's executable modifiers (its
+/// optional / unless-pay / chooser / timing / modal / repeat fields) enter a
+/// resolution-time player choice, independent of what its effect does? The
+/// field-level half of [`chain_offers_choice`], shared with the scoped
+/// control-capture admission (`effects::fan_out_head_is_allowlisted`), so both
+/// read one exhaustive classification of every `ResolvedAbility` field.
+///
+/// The `ResolvedAbility` destructure is EXHAUSTIVE with no `..`: a FUTURE field
+/// fails to compile here until classified for the choice question.
+pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
     let ResolvedAbility {
+        // ---- structural: classified by chain_offers_choice ----
+        effect: _,
+        sub_ability: _,
+        else_ability: _,
         // ---- choice-bearing: folded into the verdict below ----
-        effect,
-        sub_ability,
-        else_ability,
         optional,
         optional_player: _, // selects the optional actor; `optional` already records the choice
         optional_for,
@@ -649,6 +664,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
+        control_change_instruction: _,
     } = a;
 
     // CR 603.5 + CR 608.2d: an optional effect / optional targeting /
@@ -701,12 +717,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         return true;
     }
 
-    // CR 608.2c: gate-check the whole chain — this node's effect, plus the
-    // sub_ability / else_ability branches. Recursion is retained HERE, where it is a
-    // pure AST walk costing nothing, and dropped from the probe below.
-    effect_offers_choice(effect)
-        || sub_ability.as_deref().is_some_and(chain_offers_choice)
-        || else_ability.as_deref().is_some_and(chain_offers_choice)
+    false
 }
 
 /// CR 608.2d + CR 732.2a: the resolution-choice verdict for a whole ability chain.
