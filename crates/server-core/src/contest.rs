@@ -1473,7 +1473,10 @@ mod tests {
                 None,
             )
             .expect("a connected player can concede during a contest");
-        assert!(matches!(result.0.waiting_for, WaitingFor::GameOver { .. }));
+        assert!(matches!(
+            result.result.0.waiting_for,
+            WaitingFor::GameOver { .. }
+        ));
         session.advance_state_revision();
         let drain = session.drain_contest_outbox();
         assert!(
@@ -1659,10 +1662,7 @@ mod tests {
             error.contains("contest"),
             "refused for the contest: {error}"
         );
-        assert!(
-            session.pending_takeback.is_none(),
-            "and no vote was installed"
-        );
+        assert!(!session.takeback.is_pending(), "and no vote was installed");
     }
 
     #[test]

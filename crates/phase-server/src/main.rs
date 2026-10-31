@@ -104,13 +104,13 @@ use server_core::seat_mutation_wire_guard::guard_seat_mutation;
 use server_core::session::ActionResult;
 use server_core::session::{
     AiRunOutcome, AiTransition, CreateGameError, DecisionSnapshot, FullRuntime, GameSession,
-    HostingMode, PreviewRefusal, SessionActionError, SessionManager,
+    HandledAction, HostingMode, PreviewRefusal, SessionActionError, SessionManager,
 };
 use server_core::spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
     guard_spectator_join,
 };
-use server_core::takeback::RewindOption;
+use server_core::takeback::{RewindOption, TakebackOutcome, TakebackResolution};
 use std::borrow::Cow;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -8328,14 +8328,47 @@ async fn broadcast_takeback_approved(
                 }),
             };
             publisher.publish(&source);
-            publisher.notify_players(ServerMessage::TakebackResolved {
-                approved: true,
+            publisher.notify_players(takeback_resolved_message(
+                TakebackResolution::Approved,
                 resolved_by,
-            });
+            ));
             publisher
         })
         .await;
     publisher.finish(executor).await;
+}
+
+/// The wire notice for a resolved takeback vote.
+fn takeback_resolved_message(
+    resolution: TakebackResolution,
+    resolved_by: Option<PlayerId>,
+) -> ServerMessage {
+    let approved = match resolution {
+        TakebackResolution::Approved => true,
+        TakebackResolution::Declined
+        | TakebackResolution::Cancelled
+        | TakebackResolution::Withdrawn => false,
+    };
+    ServerMessage::TakebackResolved {
+        approved,
+        resolved_by,
+    }
+}
+
+/// A concession's takeback notice as `(before, after)` its state delivery: an
+/// approval follows the restored state it installed, as
+/// [`broadcast_takeback_approved`] orders it; any other resolution precedes
+/// the concession's state.
+fn concession_takeback_notices(
+    takeback: Option<TakebackResolution>,
+    conceding: PlayerId,
+) -> (Option<ServerMessage>, Option<ServerMessage>) {
+    let notice = takeback.map(|resolution| takeback_resolved_message(resolution, Some(conceding)));
+    if takeback == Some(TakebackResolution::Approved) {
+        (None, notice)
+    } else {
+        (notice, None)
+    }
 }
 
 /// What a Full-mode game socket submitted: a client-materialized `GameAction`,
@@ -8354,6 +8387,8 @@ enum GameSubmission {
 struct AppliedHumanSubmission {
     revision: u64,
     unpublished: Option<ActionResult>,
+    /// The takeback approval notice still owed after the unpublished result.
+    takeback_after: Option<ServerMessage>,
     publisher: game_executor::StateUpdatePublisher,
     ai: std::ops::ControlFlow<AiRunOutcome, server_core::session::AiRunCursor>,
 }
@@ -8603,6 +8638,7 @@ async fn handle_full_concession(
     context: &ServerContext,
     state: &SharedState,
     connections: &SharedConnections,
+    game_spectators: &SharedGameSpectators,
     draft_state: &SharedDraftState,
     game_db: &SharedGameDb,
     identity: &SocketIdentity,
@@ -8637,14 +8673,14 @@ async fn handle_full_concession(
         let (session, result) = context
             .game_executor
             .with_session(session, move |session| {
-                let (revision, result) = match scope {
+                let (revision, HandledAction { result, takeback }) = match scope {
                     ConcessionScope::Game => {
-                        let result = session.handle_action_with_card_db_outcome(
+                        let handled = session.handle_action_with_card_db_outcome(
                             &player_token,
                             GameAction::Concede { player_id: player },
                             None,
                         )?;
-                        (session.advance_state_revision(), result)
+                        (session.advance_state_revision(), handled)
                     }
                     ConcessionScope::Match => {
                         session.handle_match_concede_outcome(&player_token)?
@@ -8695,6 +8731,7 @@ async fn handle_full_concession(
                 Ok::<_, SessionActionError>((
                     revision,
                     result,
+                    takeback,
                     winner,
                     terminal,
                     session.rewind_options(),
@@ -8709,7 +8746,7 @@ async fn handle_full_concession(
             FULL_SOCKET_AUTHORITY_REJECTION.to_string(),
         ))
     };
-    let (lease, (revision, result, winner, terminal, rewinds, full_key, player_count)) =
+    let (lease, (revision, result, takeback, winner, terminal, rewinds, full_key, player_count)) =
         match result {
             Ok(result) => result,
             Err(error) => {
@@ -8744,7 +8781,7 @@ async fn handle_full_concession(
     let retire = !deliveries.is_empty() || matches!(scope, ConcessionScope::Match);
     let mut publisher = game_executor::StateUpdatePublisher::capture(
         connections,
-        None,
+        Some(game_spectators),
         full_key,
         player_count,
         result.0.eliminated_players.clone(),
@@ -8752,9 +8789,13 @@ async fn handle_full_concession(
     )
     .await;
     let code = game_code.clone();
+    let (takeback_before, takeback_after) = concession_takeback_notices(takeback, player);
     publisher = context
         .game_executor
         .run(move || {
+            if let Some(notice) = takeback_before {
+                publisher.notify_players(notice);
+            }
             let source = game_executor::StateUpdateSource::from_result(&result, revision);
             match source.guarded(&code) {
                 Ok(source) => publisher.publish(&source),
@@ -8766,6 +8807,9 @@ async fn handle_full_concession(
                         "concession snapshot exceeds broadcast bounds; not published"
                     );
                 }
+            }
+            if let Some(notice) = takeback_after {
+                publisher.notify_players(notice);
             }
             if matches!(scope, ConcessionScope::Game) {
                 publisher.notify_players(ServerMessage::Conceded { player });
@@ -8868,19 +8912,25 @@ async fn handle_full_game_submission(
     let persistence = game_db.clone();
     let persistence_executor = executor.clone();
     let code = game_code.clone();
+    let seat = identity
+        .player_id
+        .expect("the authority gate proved this seat");
     // The owned game guard spans admission waits, AI continuations and all
     // publication. Other games can use the CPU between these work units.
     let (session, applied) = executor
         .with_session(session, move |session| {
-            let result = match submission {
+            let HandledAction { result, takeback } = match submission {
                 GameSubmission::Action(action) => session.handle_action_with_card_db_outcome(
                     &player_token,
                     action,
                     Some(card_db.as_ref()),
                 ),
-                GameSubmission::Interaction(submission) => {
-                    session.handle_interaction_with_rejection(&player_token, submission)
-                }
+                GameSubmission::Interaction(submission) => session
+                    .handle_interaction_with_rejection(&player_token, submission)
+                    .map(|result| HandledAction {
+                        result,
+                        takeback: None,
+                    }),
             }?;
             if is_zero_count_debug_create {
                 return Ok(None);
@@ -8888,11 +8938,15 @@ async fn handle_full_game_submission(
             let revision = session.advance_state_revision();
             let ai = session.begin_ai_run();
             let mut publisher = publisher.expect("a non-noop submission captures its routes");
+            let (takeback_before, takeback_after) = concession_takeback_notices(takeback, seat);
+            if let Some(notice) = takeback_before {
+                publisher.notify_players(notice);
+            }
             let terminal = matches!(
                 &session.state.waiting_for,
                 engine::types::game_state::WaitingFor::GameOver { .. }
             );
-            let unpublished = if ai.is_break() && !terminal {
+            let (unpublished, takeback_after) = if ai.is_break() && !terminal {
                 // A short human-only transition and its projection share one CPU
                 // unit; an unrelated AI sequence cannot queue between them.
                 persist_full_session_async(&persistence_executor, &persistence, session);
@@ -8912,13 +8966,17 @@ async fn handle_full_game_submission(
                     session.rewind_options(),
                 );
                 publisher.publish(&source);
-                None
+                if let Some(notice) = takeback_after {
+                    publisher.notify_players(notice);
+                }
+                (None, None)
             } else {
-                Some(result)
+                (Some(result), takeback_after)
             };
             Ok::<_, SessionActionError>(Some(AppliedHumanSubmission {
                 revision,
                 unpublished,
+                takeback_after,
                 publisher,
                 ai,
             }))
@@ -8943,6 +9001,7 @@ async fn handle_full_game_submission(
     let AppliedHumanSubmission {
         revision,
         unpublished,
+        takeback_after,
         mut publisher,
         ai,
     } = applied;
@@ -9038,6 +9097,9 @@ async fn handle_full_game_submission(
                         "action snapshot exceeds broadcast bounds; not published"
                     );
                 }
+            }
+            if let Some(notice) = takeback_after {
+                publisher.notify_players(notice);
             }
             publisher
         })
@@ -10049,7 +10111,7 @@ async fn handle_client_message(
                     // An absent game keeps this arm's own message, so
                     // `lock_session`'s refusal is discarded.
                     match lock_session(state, game_code).await.ok() {
-                        Some(session) if session.hosting == HostingMode::SingleUser => {
+                        Some(session) if session.hosting() == HostingMode::SingleUser => {
                             context
                                 .game_executor
                                 .with_session(session, |session| {
@@ -11430,6 +11492,7 @@ async fn handle_client_message(
                 context,
                 state,
                 connections,
+                game_spectators,
                 draft_state,
                 game_db,
                 identity,
@@ -11444,6 +11507,7 @@ async fn handle_client_message(
                 context,
                 state,
                 connections,
+                game_spectators,
                 draft_state,
                 game_db,
                 identity,
@@ -11491,13 +11555,16 @@ async fn handle_client_message(
                 .with_session(guard, move |session| {
                     let outcome = session.request_takeback(player_id, target.unwrap_or_default());
                     let requested = session.pending_takeback_message();
-                    let snapshot = matches!(outcome, Ok(server_core::TakebackOutcome::Approved))
-                        .then(|| {
-                            (
-                                session.advance_state_revision(),
-                                session.current_broadcast_snapshot(),
-                            )
-                        });
+                    let snapshot = matches!(
+                        outcome,
+                        Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
+                    )
+                    .then(|| {
+                        (
+                            session.advance_state_revision(),
+                            session.current_broadcast_snapshot(),
+                        )
+                    });
                     (outcome, requested, session.player_count, snapshot)
                 })
                 .await;
@@ -11548,7 +11615,7 @@ async fn handle_client_message(
                     let msg = ServerMessage::RequestRejected { reason };
                     let _ = socket.enqueue_reply(msg);
                 }
-                Ok(server_core::TakebackOutcome::Pending) => {
+                Ok(TakebackOutcome::Pending) => {
                     info!(game = %game_code, player = ?player_id, "takeback requested");
                     if let Some(msg) = requested_msg {
                         let conns = connections.lock().await;
@@ -11559,8 +11626,8 @@ async fn handle_client_message(
                         }
                     }
                 }
-                Ok(server_core::TakebackOutcome::Approved) => {
-                    info!(game = %game_code, player = ?player_id, "takeback auto-approved (sole human seat)");
+                Ok(TakebackOutcome::Resolved(TakebackResolution::Approved)) => {
+                    info!(game = %game_code, player = ?player_id, "takeback auto-approved (no voter to ask)");
                     let (state_revision, snapshot) =
                         approved_snapshot.expect("Approved outcome always computes a snapshot");
                     broadcast_takeback_approved(
@@ -11588,8 +11655,14 @@ async fn handle_client_message(
                     .await;
                     broadcast_ai_failure(connections, &game_code, ai_failure).await;
                 }
-                Ok(server_core::TakebackOutcome::Rejected) => {
-                    // request_takeback never returns Rejected — only respond_takeback does.
+                Ok(TakebackOutcome::Resolved(other)) => {
+                    let conns = connections.lock().await;
+                    if let Some(players) = conns.get(&game_code) {
+                        let msg = takeback_resolved_message(other, Some(player_id));
+                        for sender in players.values() {
+                            let _ = sender.send(msg.clone());
+                        }
+                    }
                 }
             }
             drop(guard);
@@ -11628,13 +11701,16 @@ async fn handle_client_message(
                 .game_executor
                 .with_session(guard, move |session| {
                     let outcome = session.respond_takeback(player_id, approve);
-                    let snapshot = matches!(outcome, Ok(server_core::TakebackOutcome::Approved))
-                        .then(|| {
-                            (
-                                session.advance_state_revision(),
-                                session.current_broadcast_snapshot(),
-                            )
-                        });
+                    let snapshot = matches!(
+                        outcome,
+                        Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
+                    )
+                    .then(|| {
+                        (
+                            session.advance_state_revision(),
+                            session.current_broadcast_snapshot(),
+                        )
+                    });
                     (outcome, session.player_count, snapshot)
                 })
                 .await;
@@ -11675,10 +11751,10 @@ async fn handle_client_message(
                     let msg = ServerMessage::RequestRejected { reason };
                     let _ = socket.enqueue_reply(msg);
                 }
-                Ok(server_core::TakebackOutcome::Pending) => {
+                Ok(TakebackOutcome::Pending) => {
                     info!(game = %game_code, player = ?player_id, approve, "takeback approval recorded");
                 }
-                Ok(server_core::TakebackOutcome::Approved) => {
+                Ok(TakebackOutcome::Resolved(TakebackResolution::Approved)) => {
                     info!(game = %game_code, player = ?player_id, "takeback unanimously approved");
                     let (state_revision, snapshot) =
                         approved_snapshot.expect("Approved outcome always computes a snapshot");
@@ -11707,14 +11783,11 @@ async fn handle_client_message(
                     .await;
                     broadcast_ai_failure(connections, &game_code, ai_failure).await;
                 }
-                Ok(server_core::TakebackOutcome::Rejected) => {
-                    info!(game = %game_code, player = ?player_id, "takeback declined");
+                Ok(TakebackOutcome::Resolved(other)) => {
+                    info!(game = %game_code, player = ?player_id, ?other, "takeback declined");
                     let conns = connections.lock().await;
                     if let Some(players) = conns.get(&game_code) {
-                        let msg = ServerMessage::TakebackResolved {
-                            approved: false,
-                            resolved_by: Some(player_id),
-                        };
+                        let msg = takeback_resolved_message(other, Some(player_id));
                         for sender in players.values() {
                             let _ = sender.send(msg.clone());
                         }
@@ -11773,10 +11846,10 @@ async fn handle_client_message(
                     info!(game = %game_code, player = ?player_id, "takeback request cancelled");
                     let conns = connections.lock().await;
                     if let Some(players) = conns.get(&game_code) {
-                        let msg = ServerMessage::TakebackResolved {
-                            approved: false,
-                            resolved_by: Some(player_id),
-                        };
+                        let msg = takeback_resolved_message(
+                            TakebackResolution::Cancelled,
+                            Some(player_id),
+                        );
                         for sender in players.values() {
                             let _ = sender.send(msg.clone());
                         }
