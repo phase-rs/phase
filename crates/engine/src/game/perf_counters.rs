@@ -183,6 +183,18 @@ pub struct TriggerIndexCounters {
     pub full_rebuilds: u64,
 }
 
+/// Test-only count of `stack_reach::stack_entry_node_reach` calls for an entry with
+/// an ability: the calls that reach `resolution_board`, which copies the board
+/// unless it refuses the entry first. Kept out of [`PerfCounterSnapshot`] for the
+/// same reason as the counter sets above: that struct's serialized field set
+/// powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StackReachCounters {
+    /// Calls to `stack_entry_node_reach` past its no-ability return.
+    pub entry_reaches: u64,
+}
+
 /// Test-only counters for the CR 508.1d attack-declaration solver
 /// (`combat::selectable_targets_by_attacker` and the strict validator it
 /// drives). Kept out of [`PerfCounterSnapshot`] for the same reason the two
@@ -584,6 +596,10 @@ thread_local! {
     #[cfg(feature = "test-support")]
     static TRIGGER_INDEX_COUNTERS: Cell<TriggerIndexCounters> = const {
         Cell::new(TriggerIndexCounters { full_rebuilds: 0 })
+    };
+    #[cfg(feature = "test-support")]
+    static STACK_REACH_COUNTERS: Cell<StackReachCounters> = const {
+        Cell::new(StackReachCounters { entry_reaches: 0 })
     };
     #[cfg(feature = "test-support")]
     static CAST_UNDO_RECORD_COUNTERS: Cell<CastUndoRecordCounters> = const {
@@ -1271,6 +1287,8 @@ pub fn reset() {
     #[cfg(feature = "test-support")]
     TRIGGER_INDEX_COUNTERS.with(|counters| counters.set(TriggerIndexCounters::default()));
     #[cfg(feature = "test-support")]
+    STACK_REACH_COUNTERS.with(|counters| counters.set(StackReachCounters::default()));
+    #[cfg(feature = "test-support")]
     CAST_UNDO_RECORD_COUNTERS.with(|counters| counters.set(CastUndoRecordCounters::default()));
 }
 
@@ -1312,6 +1330,21 @@ pub fn record_trigger_index_rebuild() {
 #[cfg(feature = "test-support")]
 pub fn trigger_index_snapshot() -> TriggerIndexCounters {
     TRIGGER_INDEX_COUNTERS.with(Cell::get)
+}
+
+/// One `stack_reach::stack_entry_node_reach` call for an entry with an ability.
+#[cfg(feature = "test-support")]
+pub fn record_stack_entry_reach() {
+    STACK_REACH_COUNTERS.with(|cell| {
+        let mut c = cell.get();
+        c.entry_reaches += 1;
+        cell.set(c);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn stack_reach_snapshot() -> StackReachCounters {
+    STACK_REACH_COUNTERS.with(Cell::get)
 }
 
 #[cfg(feature = "test-support")]
