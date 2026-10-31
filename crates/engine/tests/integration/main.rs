@@ -1597,6 +1597,7 @@ mod target_controller_population;
 mod target_instance_identity_9280;
 mod target_player_zone_count_slot_6856;
 mod targeted_exchange_preview_budget;
+mod targeted_offer_witness;
 mod targeted_player_mass_library_shuffle;
 mod tataru_taru;
 mod tchaka_venerable_king;
