@@ -1995,6 +1995,8 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -2082,7 +2084,7 @@ fn player_filter_uses_filter_prop(
         PlayerFilter::TrackedSetPossessor { filter, .. } => {
             target_filter_uses_filter_prop(filter, pred)
         }
-        PlayerFilter::AllExcept { exclude } => player_filter_uses_filter_prop(exclude, pred),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_uses_filter_prop(exclude, pred),
         PlayerFilter::AnyOf { filters } => filters
             .iter()
             .any(|f| player_filter_uses_filter_prop(f, pred)),
@@ -7530,6 +7532,7 @@ fn parse_normalized_oracle_ir(
             let def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type: ChoiceType::color(),
                     persist: true,
                     selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -9543,6 +9546,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -10628,6 +10632,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -13302,6 +13307,10 @@ pub mod test_helpers {
 #[cfg(test)]
 #[path = "oracle_pipeline_snapshot_tests.rs"]
 mod pipeline_snapshot_tests;
+
+#[cfg(test)]
+#[path = "scheme_tests.rs"]
+mod scheme_tests;
 
 /// Row 1.J — the continuation gate's failure-recursion helper must see a parse
 /// failure nested inside a WRAPPER EFFECT, not only inside a `sub_ability` chain.

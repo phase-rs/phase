@@ -36,7 +36,7 @@ use crate::types::ability::{
 /// every living player), and the library must be each scoped player's own.
 /// Returns the text after the action sentence's terminal period.
 fn parse_contest_action(text: &str) -> Option<String> {
-    let (scope, rest) = strip_each_player_subject(text);
+    let (scope, rest) = strip_each_player_subject(text, false);
     if scope != Some(PlayerFilter::All) {
         return None;
     }

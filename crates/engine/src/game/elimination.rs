@@ -215,7 +215,10 @@ fn eliminate_players(
             continue;
         }
         leaving_set.insert(player);
-        if super::topology::has_two_headed_giant_shared_resources(state) {
+        // Team loss rides with shared life: CR 810.8a in 2HG, and
+        // CR 810.8a-via-904.13b for Archenemy Commander heroes (the
+        // archenemy has no teammates, so the fold is a no-op there).
+        if super::topology::has_shared_life(state, player) {
             for teammate in players::teammates(state, player) {
                 if players::is_alive(state, teammate) {
                     leaving_set.insert(teammate);
@@ -327,7 +330,8 @@ fn eliminate_players(
         leave_nodes.push((player, do_eliminate(state, player, &leaving_set, events)));
         eliminated_any = true;
 
-        if super::topology::has_two_headed_giant_shared_resources(state) {
+        // Twin of the leaving-set cascade above: teammates depart together.
+        if super::topology::has_shared_life(state, player) {
             for teammate in players::teammates(state, player) {
                 if players::is_alive(state, teammate) {
                     leave_nodes.push((
@@ -677,6 +681,16 @@ fn eliminate_players(
             if let Err(error) = super::engine::abandon_copy_walk(state, &walk, events) {
                 tracing::error!(%error, "an unannounceable copy was not abandoned");
             }
+        }
+
+        // CR 800.4f + CR 805.6 + CR 118.12: an in-progress collective
+        // tap-creatures payment is reconciled with the surviving heroes
+        // (pruned session, next contributor, or explicit settlement) before
+        // the generic dead-actor repoint below, which would otherwise
+        // discard the session and strand the resolving chain.
+        if let Err(error) = super::costs::reconcile_team_tap_payment_after_departure(state, events)
+        {
+            debug_assert!(false, "team tap payment elimination resume failed: {error}");
         }
 
         if let Some(waiting_pid) = state.waiting_for.acting_player() {

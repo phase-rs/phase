@@ -16,7 +16,7 @@ use crate::types::ability::{
     DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageModification, DamageSource,
     DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
     ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectProperty,
-    ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerScope,
+    ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope,
     PropertyAggregate, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RoundingMode,
     SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
     TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, XModification,
@@ -111,7 +111,8 @@ fn assert_owner_relative_loss_scope(ability: &AbilityDefinition) {
     assert_eq!(
         ability.player_scope,
         Some(PlayerFilter::AllExcept {
-            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner)
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::All,
         })
     );
 }
@@ -152,7 +153,8 @@ fn dies_trigger_owner_subject_anchors_each_other_player_scope() {
     assert_eq!(
         lose.player_scope,
         Some(PlayerFilter::AllExcept {
-            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner)
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::All,
         })
     );
 }
@@ -18328,6 +18330,44 @@ fn trigger_unless_they_pay_disjunctive_mana_builds_one_of() {
 }
 
 #[test]
+fn trigger_unless_you_disjunction_builds_controller_one_of() {
+    // CR 118.12a: Fear My Authority — "abandon this scheme unless you
+    // discard a card or pay 3 life". The you-disjunction binds both
+    // branches with the controller as payer; the cleaned body must lower
+    // to AbandonScheme (not Unimplemented, not the bare leaf).
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, abandon this scheme unless you discard a card or pay 3 life.",
+        "Fear My Authority",
+    );
+    let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::Controller);
+    let AbilityCost::OneOf { costs } = &unless_pay.cost else {
+        panic!("cost should be OneOf, got {:?}", unless_pay.cost);
+    };
+    assert_eq!(
+        costs.len(),
+        2,
+        "OneOf should have discard + pay-life branches: {costs:?}"
+    );
+    assert!(
+        matches!(&costs[0], AbilityCost::Discard { .. }),
+        "first branch should be Discard, got {:?}",
+        costs[0]
+    );
+    assert!(
+        matches!(&costs[1], AbilityCost::PayLife { .. }),
+        "second branch should be PayLife, got {:?}",
+        costs[1]
+    );
+    let execute = def.execute.as_deref().expect("trigger has a body");
+    assert!(
+        matches!(*execute.effect, Effect::AbandonScheme),
+        "cleaned body must be AbandonScheme, got {:?}",
+        execute.effect
+    );
+}
+
+#[test]
 fn trigger_unless_they_pay_binds_to_that_player_damage_target() {
     let def = parse_trigger_line(
             "Whenever an opponent casts a creature spell, this enchantment deals 2 damage to that player unless they pay {2}.",
@@ -19839,6 +19879,60 @@ fn trigger_chaos_no_zone_stamped_by_parser() {
 fn trigger_set_in_motion_mode() {
     let def = parse_trigger_line("When you set this scheme in motion, draw a card.", "Scheme");
     assert_eq!(def.mode, TriggerMode::SetInMotion);
+}
+
+/// CR 904.9 + CR 607.2d: "When you set this scheme in motion, choose an
+/// opponent" (Imprison This Insolent Wretch) keeps the choice
+/// resolution-local in isolation — the `LinkedChoice(PersistedPlayer)`
+/// relation flips `persist` at document lowering only when a
+/// `SourceChosenPlayer` reader exists on the same card.
+#[test]
+fn trigger_set_in_motion_choose_opponent_stays_local_in_isolation() {
+    use crate::types::ability::ChoiceType;
+    let def = parse_trigger_line(
+        "When you set this scheme in motion, choose an opponent.",
+        "Imprison This Insolent Wretch",
+    );
+    assert_eq!(def.mode, TriggerMode::SetInMotion);
+    let execute = def.execute.as_deref().expect("choose body");
+    match execute.effect.as_ref() {
+        Effect::Choose {
+            choice_type: ChoiceType::Opponent { .. },
+            persist,
+            ..
+        } => assert!(
+            !persist,
+            "isolated choice must stay resolution-local; the document relation owns the flip"
+        ),
+        other => panic!("expected Choose{{Opponent}} body, got {other:?}"),
+    }
+}
+
+/// CR 904.9 + CR 603.1: "As you set this scheme in motion, choose an
+/// opponent" (Bow to My Command) lowers to the dedicated `AsSetInMotion`
+/// mode — NOT the "When ..." sibling's `SetInMotion`: the choice is made
+/// inside the turn-based action and must never touch the stack. Persist is
+/// likewise relation-owned (see above).
+#[test]
+fn trigger_as_set_in_motion_choose_opponent_mode() {
+    use crate::types::ability::ChoiceType;
+    let def = parse_trigger_line(
+        "As you set this scheme in motion, choose an opponent.",
+        "Bow to My Command",
+    );
+    assert_eq!(def.mode, TriggerMode::AsSetInMotion);
+    let execute = def.execute.as_deref().expect("choose body");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                ..
+            }
+        ),
+        "expected Choose{{Opponent}} body, got {:?}",
+        execute.effect
+    );
 }
 
 #[test]
@@ -39346,6 +39440,7 @@ fn akroan_horse_etb_parsed_trigger() {
     assert_eq!(
         etb_exec.effect.as_ref(),
         &Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: crate::types::ability::ChoiceType::opponent(),
             persist: false,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -39531,6 +39626,23 @@ fn count_qualified_blocks_preserves_article_qualified_shapes() {
         assert_eq!(trigger.condition, None);
         assert_no_unimplemented(trigger.execute.as_deref().unwrap());
     }
+}
+
+/// CR 701.33a-b: verbatim The Very Soil Shall Shake abandon line.
+#[test]
+fn very_soil_abandon_clause_parses_to_abandon_scheme() {
+    let def = parse_trigger_line(
+        "When a creature you control dies, abandon this scheme.",
+        "The Very Soil Shall Shake",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    let execute = def.execute.as_deref().expect("abandon body");
+    assert!(
+        matches!(*execute.effect, Effect::AbandonScheme),
+        "expected Effect::AbandonScheme, got {:?}",
+        execute.effect
+    );
+    assert_no_unimplemented(execute);
 }
 
 /// PU4: the same text without the override sentence parses to the same chain

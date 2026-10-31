@@ -163,8 +163,11 @@ export type BuiltInGameFormat =
   | "HistoricBrawl"
   | "FreeForAll"
   | "TwoHeadedGiant"
+  | "TwoHeadedGiantCommander"
   | "Archenemy"
+  | "ArchenemyCommander"
   | "Planechase"
+  | "PlanechaseCommander"
   | "Limited"
   | "Momir"
   | "CommanderDraft"
@@ -848,6 +851,18 @@ export type CostResume =
       object_id?: number;
       cost_source: "Morph" | "Megamorph" | "Disguise" | "ManifestManaCost";
       remaining_cost?: unknown;
+    }
+  // CR 805.6: one hero's step of a collective tap-creatures payment. The
+  // client renders it as an ordinary any-subset prompt; the engine owns the
+  // session (per-hero prompts, combined threshold).
+  | {
+      type: "TeamTapPayment";
+      aggregate: TapCreaturesAggregate;
+      eligible: ObjectId[];
+      selected: ObjectId[];
+      remaining: PlayerId[];
+      filter: unknown;
+      ability: unknown;
     };
 
 export type ManaColor = "White" | "Blue" | "Black" | "Red" | "Green";

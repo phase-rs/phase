@@ -12562,6 +12562,9 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // Archenemy attack-owner rider: names no one player (per-member
+        // force_attack fan-out only), so the latched capture can't judge it.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::AllPlayers => return None,
     })
@@ -13813,6 +13816,7 @@ fn gate_binding_diverges_at_fire_time(condition: &AbilityCondition) -> bool {
         | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::WhenYouDo
         | AbilityCondition::RevealedHasCardType { .. }
         | AbilityCondition::PreviousEffectAmount { .. }
@@ -14041,6 +14045,8 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player }
         | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::CardsDrawnLastTurn { player }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
         | QuantityRef::CardsDiscardedThisTurn { player }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
             player_scope_unbound_at_fire_time(player)
@@ -14309,6 +14315,10 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — a resolution-time
+        // per-member binding, matching nothing at fire time like the
+        // resolution-scoped anaphora above.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::ScopedPlayer
         // CR 608.2k: the cost-paid / effect-context referent lives on
         // `ResolvedAbility`, so this matches nothing at fire time. The
@@ -14772,7 +14782,7 @@ fn count_scope_binding_diverges(scope: &crate::types::ability::CountScope) -> bo
 /// gap this classifier exists to catch.
 fn player_filter_binding_diverges(player: &PlayerFilter) -> bool {
     match player {
-        PlayerFilter::AllExcept { exclude } => player_filter_binding_diverges(exclude),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_binding_diverges(exclude),
         PlayerFilter::AnyOf { filters } => filters.iter().any(player_filter_binding_diverges),
         // CR 109.4 + CR 115.1 + CR 601.2a: the anchor lives on the resolving ability
         // (`targets` / `chosen_players` / `cast_occurrence`).
@@ -19688,6 +19698,20 @@ pub mod tests {
             latched_doubler_scope(&state, &watcher, &live, &doubler),
             None
         );
+        // The Archenemy attack-owner rider names no one player (a per-member
+        // force_attack fan-out), so the latched capture can't judge it either.
+        assert!(!latched_doubler_scope_is_judged(
+            &TargetFilter::AffectedObjectOwner
+        ));
+        assert_eq!(
+            latched_doubler_scope(
+                &state,
+                &watcher,
+                &TargetFilter::AffectedObjectOwner,
+                &doubler
+            ),
+            None
+        );
     }
 
     /// CR 603.2d: the structural cause predicate agrees with the runtime
@@ -21633,6 +21657,174 @@ pub mod tests {
     /// bug the definition is battlefield-only and never reaches the
     /// `EventSourceControlledBy` constraint, so the positive case would fail.
     ///
+    /// CR 603.4 + CR 700.4: Dark Wings Bring Your Downfall — "if two or more
+    /// creatures died under your control this turn". The REAL parsed
+    /// intervening-if (parser + bridge, not a hand-built condition) over
+    /// seeded death records: 2 controlled creatures fire; 1, 2 uncontrolled,
+    /// and 2 non-creatures do not. Each negative varies exactly one axis, so
+    /// a threshold/possession/type regression fails its own case.
+    #[test]
+    fn dark_wings_two_controlled_deaths_fire_but_one_or_uncontrolled_do_not() {
+        let parsed = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each end step, if two or more creatures died under your control this turn, abandon this scheme.",
+            "Dark Wings Bring Your Downfall",
+        );
+        let condition = parsed.condition.clone().expect("has intervening-if");
+        let you = PlayerId(0);
+        let foe = PlayerId(1);
+        let death = |id: u32, controller: PlayerId, creature: bool| {
+            let mut record = ZoneChangeRecord::test_minimal(
+                ObjectId(id as u64),
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            );
+            record.name = "Victim".to_string();
+            record.core_types = if creature {
+                vec![CoreType::Creature]
+            } else {
+                vec![CoreType::Land]
+            };
+            record.controller = controller;
+            record.owner = controller;
+            // The zone-change matcher reads the arrival identity, not the
+            // legacy top-level controller — keep the fixture coherent.
+            record.arrival.controller = controller;
+            record.arrival.owner = controller;
+            record
+        };
+        let run_case = |records: Vec<ZoneChangeRecord>| -> bool {
+            let mut state = setup();
+            state.zone_changes_this_turn = records.into();
+            check_trigger_condition(&state, &condition, you, None, None)
+        };
+        assert!(
+            run_case(vec![death(1, you, true), death(2, you, true)]),
+            "two controlled creature deaths must fire"
+        );
+        assert!(
+            !run_case(vec![death(1, you, true)]),
+            "one death must not meet two-or-more"
+        );
+        assert!(
+            !run_case(vec![death(1, foe, true), death(2, foe, true)]),
+            "opponent-controlled deaths must not count as yours"
+        );
+        assert!(
+            !run_case(vec![death(1, you, false), death(2, you, false)]),
+            "non-creature deaths must not count as creatures"
+        );
+    }
+
+    /// CR 603.2b + CR 603.4 + CR 119: You Cannot Hide from Me — "if that
+    /// player has less than half their starting life total" at an opponent's
+    /// end step. The REAL parsed intervening-if over life totals: the
+    /// below-half opponent fires; the at-half boundary, the healthy
+    /// opponent, and (critically) a dying controller with a healthy
+    /// opponent do not. The last case discriminates the ScopedPlayer
+    /// binding — resolving against the controller would wrongly fire.
+    #[test]
+    fn you_cannot_hide_below_half_scoped_opponent_fires_but_boundary_or_controller_do_not() {
+        let parsed = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player has less than half their starting life total, abandon this scheme.",
+            "You Cannot Hide from Me",
+        );
+        let condition = parsed.condition.clone().expect("has intervening-if");
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        let phase_event = GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::End,
+        };
+        let run_case = |controller_life: i32, opponent_life: i32| -> bool {
+            let mut state = GameState::new_two_player(7);
+            state.active_player = opponent;
+            state.players[0].life = controller_life;
+            state.players[1].life = opponent_life;
+            let source = make_creature(&mut state, controller, "Scheme Source", 1, 1);
+            check_trigger_condition(
+                &state,
+                &condition,
+                controller,
+                Some(source),
+                Some(&phase_event),
+            )
+        };
+        assert!(
+            run_case(20, 9),
+            "opponent at 9 of 20 (below half of 10) must fire"
+        );
+        assert!(
+            !run_case(20, 10),
+            "opponent exactly at half must not fire (strict less-than)"
+        );
+        assert!(!run_case(20, 20), "healthy opponent must not fire");
+        assert!(
+            !run_case(5, 20),
+            "dying controller with healthy opponent must not fire (scoped player, not controller)"
+        );
+    }
+
+    /// CR 603.4 + CR 121.1: Mine Is the Only Truth — "if you drew a card
+    /// last turn" at your upkeep. The REAL parsed intervening-if over seeded
+    /// snapshots: controller drew last turn fires (1 or 2); zero does not;
+    /// opponent-only draws do not (controller scope, not any-player). Each
+    /// negative varies exactly one axis.
+    #[test]
+    fn mine_drew_last_turn_fires_but_zero_or_opponent_only_do_not() {
+        let parsed = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of your upkeep, if you drew a card last turn, abandon this scheme.",
+            "Mine Is the Only Truth",
+        );
+        let condition = parsed.condition.clone().expect("has intervening-if");
+        let you = PlayerId(0);
+        let run_case = |you_last: u32, foe_last: u32| -> bool {
+            let mut state = setup();
+            state.players[0].cards_drawn_last_turn = you_last;
+            state.players[1].cards_drawn_last_turn = foe_last;
+            check_trigger_condition(&state, &condition, you, None, None)
+        };
+        assert!(run_case(1, 0), "controller drew last turn must fire");
+        assert!(run_case(2, 0), "two draws last turn must fire");
+        assert!(!run_case(0, 0), "no draws last turn must not fire");
+        assert!(
+            !run_case(0, 3),
+            "opponent-only draws must not fire (controller scope)"
+        );
+    }
+
+    /// CR 603.4 + CR 601.2i: I Bask in Your Silent Awe — "if no opponent
+    /// cast a spell since your last turn ended" at your upkeep. The REAL
+    /// parsed intervening-if over seeded windows: an empty controller window
+    /// fires (abandons); a nonzero window does not; a nonzero OPPONENT window
+    /// with an empty controller window still fires (controller scope, not
+    /// any-player).
+    #[test]
+    fn bask_empty_window_fires_but_cast_or_opponent_window_do_not() {
+        let parsed = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of your upkeep, if no opponent cast a spell since your last turn ended, abandon this scheme.",
+            "I Bask in Your Silent Awe",
+        );
+        let condition = parsed.condition.clone().expect("has intervening-if");
+        let you = PlayerId(0);
+        let run_case = |you_window: u32, foe_window: u32| -> bool {
+            let mut state = setup();
+            state.players[0].opponent_spells_cast_since_own_last_turn = you_window;
+            state.players[1].opponent_spells_cast_since_own_last_turn = foe_window;
+            check_trigger_condition(&state, &condition, you, None, None)
+        };
+        assert!(
+            run_case(0, 0),
+            "quiet window must fire (abandon the scheme)"
+        );
+        assert!(
+            !run_case(1, 0),
+            "opponent cast in the window must keep the scheme"
+        );
+        assert!(
+            run_case(0, 4),
+            "opponent's own window must not matter (controller scope)"
+        );
+    }
+
     /// Installs the *parsed* trigger (not a hand-built one) on a card in HAND and
     /// varies only the discard's cause across the three cases.
     #[test]
@@ -51395,6 +51587,7 @@ pub mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Database,
                 Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type: ChoiceType::creature_type(),
                     persist: true,
                     selection: TargetSelectionMode::Chosen,
@@ -51475,6 +51668,7 @@ pub mod tests {
             &mut source_less,
             &ResolvedAbility::new(
                 Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type: choice_type.clone(),
                     persist: false,
                     selection: TargetSelectionMode::Chosen,
@@ -51512,6 +51706,7 @@ pub mod tests {
             &mut exact,
             &ResolvedAbility::new(
                 Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type: choice_type.clone(),
                     persist: true,
                     selection: TargetSelectionMode::Chosen,
@@ -51561,6 +51756,7 @@ pub mod tests {
         );
         let mut departed_ability = ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::CardPredicateGuess {
                     options: ChoiceType::land_or_nonland_card_predicate_options(),
                 },
@@ -51618,6 +51814,7 @@ pub mod tests {
             make_creature(&mut player_bound, PlayerId(0), "Player choice source", 2, 2);
         let mut player_ability = ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type,
                 persist: true,
                 selection: TargetSelectionMode::Chosen,
@@ -51680,6 +51877,7 @@ pub mod tests {
         );
         let mut random_ability = ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::Labeled {
                     options: vec!["Anchor".to_string()],
                 },

@@ -297,7 +297,7 @@ matching `Effect` variant is the bug this whole layer exists to delete.
 > pool — so `LastEmitted`, `LastWithRole`, and any other nearest-match rule are all output-identical,
 > and a full-pool byte-for-byte parity run cannot tell a correct binding from a wrongly-collapsed one.
 > Validating a binding change needs a **forced diagonal** (drive the selector to a different candidate
-> and confirm the output moves) or a synthetic discriminating card. **Never sign off a binding
+> and confirm the output moves) or a synthetic discriminating card ([real cards](../engine-implementer/SKILL.md#real-cards) governs it). **Never sign off a binding
 > migration on byte-identity alone.**
 
 **Retired in Milestone 1** (do not re-introduce): the category-ordered `parsed_abilities_to_doc_ir`

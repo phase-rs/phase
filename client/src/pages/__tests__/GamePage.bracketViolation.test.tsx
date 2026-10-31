@@ -541,6 +541,12 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
     expect(capturedFormatConfig?.format).toBe("Planechase");
   });
 
+  it("passes Planechase Commander to GameProvider for a direct local URL", () => {
+    renderGamePage("/game/test-game-123?format=PlanechaseCommander&players=4");
+
+    expect(capturedFormatConfig?.format).toBe("PlanechaseCommander");
+  });
+
   // The setup screen hands its edited config over on the navigation rather than
   // in the URL, which carries the format NAME only. Without this the memo falls
   // back to the format registry and a custom starting life is silently replaced

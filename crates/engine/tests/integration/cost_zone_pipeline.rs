@@ -900,6 +900,7 @@ fn redirect_moved_to_with_post_effect(
         .sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: engine::types::ability::ControllerRef::You,
             choice_type: ChoiceType::Labeled {
                 options: vec!["first".to_string(), "second".to_string()],
             },

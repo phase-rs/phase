@@ -2389,6 +2389,8 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::BattlefieldEntriesThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
@@ -2731,6 +2733,8 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -3052,6 +3056,8 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         // CR 400.7 + CR 700.4: zone-change records store last-known information.
@@ -3331,6 +3337,8 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -4919,14 +4927,18 @@ fn resolve_ref(
         // double-count, and Archenemy's 40/20 baseline follows that controller.
         QuantityRef::LifeAboveStarting => player.map_or(0, |p| {
             crate::game::players::team_life_total(state, p.id)
-                - state.format_config.starting_life_total_for_player(p.id)
+                - state
+                    .format_config
+                    .starting_life_total_for_player(p.id, state.players.len())
         }),
         // CR 103.4 + CR 904.5: the rules starting total for the referenced
         // player or players selected by `scope`, including the archenemy's
         // 40-life baseline.
         QuantityRef::StartingLifeTotal { player: scope } => {
             resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
-                state.format_config.starting_life_total_for_player(p.id)
+                state
+                    .format_config
+                    .starting_life_total_for_player(p.id, state.players.len())
             })
         }
         // CR 701.57a: the mana-value limit of the discover that fired the current
@@ -6311,6 +6323,32 @@ fn resolve_ref(
             ability,
             |p| u32_to_i32_saturating(p.cards_drawn_this_turn),
         ),
+        // CR 121.1 + CR 603.4: Cards drawn during the previous turn, scoped
+        // via PlayerScope. Reads the turn-start snapshot, mirroring the
+        // this-turn arm above.
+        QuantityRef::CardsDrawnLastTurn { player } => resolve_per_player_history_scalar(
+            state,
+            player,
+            controller,
+            ctx,
+            targets,
+            ability,
+            |p| u32_to_i32_saturating(p.cards_drawn_last_turn),
+        ),
+        // CR 601.2i + CR 603.4: Spells cast by opponents since the previous
+        // turn ended, scoped via PlayerScope. Reads the per-player window
+        // counter bumped on every finalized cast.
+        QuantityRef::OpponentSpellsCastSinceLastTurn { player } => {
+            resolve_per_player_history_scalar(
+                state,
+                player,
+                controller,
+                ctx,
+                targets,
+                ability,
+                |p| u32_to_i32_saturating(p.opponent_spells_cast_since_own_last_turn),
+            )
+        }
         // CR 403.3 + CR 608.2h + CR 608.2i: Battlefield entries this turn for the
         // scoped player. CR 608.2i is the look-back exception that makes a
         // departed permanent still count.
@@ -9518,7 +9556,7 @@ fn resolve_per_team_life(
     match scope {
         // CR 102.2 + CR 104.3 + CR 104.5 + CR 800.4: aggregate over all
         // opponents' teams still in the game. An eliminated player's
-        // `team_life_total` reads 0 (`shared_resource_members` returns empty
+        // `team_life_total` reads 0 (`shared_life_members` returns empty
         // for a departed player off-2HG), so leaving them in this fold lets
         // 0 win a `Min` read below every live player's actual life.
         PlayerScope::Opponent { aggregate } => crate::game::players::aggregate_over_teams(
@@ -9968,10 +10006,11 @@ pub(crate) fn player_count_matching_ids(
                     // set (count context). Uses the generic predicate
                     // authority; ability-target anchors are resolved by the
                     // player_scope driver, not by this count helper.
-                    PlayerFilter::AllExcept { exclude } => {
-                        !crate::game::effects::matches_player_scope(
-                            state, p.id, exclude, controller, source_id,
-                        )
+                    PlayerFilter::AllExcept { exclude, relation } => {
+                        crate::game::players::matches_relation(state, p.id, controller, *relation)
+                            && !crate::game::effects::matches_player_scope(
+                                state, p.id, exclude, controller, source_id,
+                            )
                     }
                     // CR 102.1 + CR 608.2c: the union of the members (count
                     // context). Delegates to the single-authority predicate in
@@ -13586,7 +13625,7 @@ mod tests {
     /// `crates/engine/tests/integration/superlative_player_subject_control.rs`).
     /// WITHOUT that filter this read returns 0 rather than the lowest live
     /// life total, and this test fails.
-    /// Because `topology::shared_resource_members` returns EMPTY for a departed
+    /// Because `topology::shared_life_members` returns EMPTY for a departed
     /// (non-2HG) player, `team_life_total` for an eliminated player reads 0 —
     /// which becomes the new Min whenever it undercuts every live player's
     /// actual life. `Max` is unaffected (0 never wins a Max fold unless every
@@ -13953,7 +13992,9 @@ mod tests {
         }
         for (id, baseline) in [(PlayerId(0), 40), (PlayerId(1), 20)] {
             assert_eq!(
-                state.format_config.starting_life_total_for_player(id),
+                state
+                    .format_config
+                    .starting_life_total_for_player(id, state.players.len()),
                 baseline
             );
             assert_eq!(

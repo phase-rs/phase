@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::game::combat::AttackTarget;
 use crate::game::planechase::PlanarDieFace;
@@ -14,7 +14,7 @@ use crate::types::log::{
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::resolved_commands::{ResolvedRulesCommand, RulesExecutionNodeRef};
+use crate::types::resolved_commands::{PlayerLeaveMove, ResolvedRulesJournal};
 use crate::types::stickers::StickerKind;
 use crate::types::zones::Zone;
 
@@ -170,35 +170,16 @@ struct BatchIndex<'a> {
     moves: HashMap<ObjectId, Vec<BatchMove<'a>>>,
     turn_starts: Vec<usize>,
     eliminations: Vec<(usize, PlayerId)>,
-    /// The event carries no incarnation, so the turn zone-change index tells repeated
-    /// identical moves apart.
-    player_leave_moves: HashSet<(ObjectId, Zone, Zone, usize)>,
+    journal: &'a ResolvedRulesJournal,
 }
 
 impl<'a> BatchIndex<'a> {
-    fn new(events: &'a [GameEvent], state: &GameState) -> Self {
+    fn new(events: &'a [GameEvent], state: &'a GameState) -> Self {
         let mut batch = Self {
             moves: HashMap::new(),
             turn_starts: Vec::new(),
             eliminations: Vec::new(),
-            player_leave_moves: state
-                .resolved_rules_journal
-                .entries()
-                .iter()
-                .filter_map(|entry| match entry.command.as_ref() {
-                    Some(ResolvedRulesCommand::ZoneChange(command))
-                        if matches!(command.cause, RulesExecutionNodeRef::PlayerLeave(_)) =>
-                    {
-                        Some((
-                            command.object.object_id,
-                            command.from,
-                            command.to,
-                            command.turn_zone_change_index,
-                        ))
-                    }
-                    _ => None,
-                })
-                .collect(),
+            journal: &state.resolved_rules_journal,
         };
         for (position, event) in events.iter().enumerate() {
             match event {
@@ -309,12 +290,12 @@ fn is_player_leave_move(events: &[GameEvent], index: usize, batch: &BatchIndex) 
                     player_id == record.owner && (index..turn_start).contains(&position)
                 })
         }
-        None => batch.player_leave_moves.contains(&(
-            *object_id,
-            *from,
-            *to,
-            record.turn_zone_change_index,
-        )),
+        None => batch.journal.records_player_leave_move(&PlayerLeaveMove {
+            object_id: *object_id,
+            from: *from,
+            to: *to,
+            turn_zone_change_index: record.turn_zone_change_index,
+        }),
     }
 }
 
@@ -2373,6 +2354,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::game_state::StackEntryKind;
     use crate::types::identifiers::CardId;
+    use crate::types::resolved_commands::RulesExecutionNodeRef;
 
     /// CR 701.17a + CR 701.17c: the paired `ZoneChanged` names the milled card, so the
     /// trigger-facing mill event is dropped rather than narrated twice.

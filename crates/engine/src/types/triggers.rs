@@ -608,6 +608,14 @@ pub enum TriggerMode {
     SearchedLibrary,
     SeekAll,
     SetInMotion,
+    /// CR 904.9: "As you set this scheme in motion" (Bow to My Command) — a
+    /// choice made inside the turn-based action, not a triggered ability
+    /// (CR 603.1). The matcher dispatch returns `None` and the index skips
+    /// it; the post-action scan resolves it via
+    /// `archenemy::resolve_pending_as_set_in_motion_choices` before its
+    /// "when" triggers collect, so no player receives priority first and
+    /// nothing can counter it.
+    AsSetInMotion,
     Specializes,
     Stationed,
     Trains,
@@ -889,6 +897,7 @@ impl FromStr for TriggerMode {
             "SearchedLibrary" => TriggerMode::SearchedLibrary,
             "SeekAll" => TriggerMode::SeekAll,
             "SetInMotion" => TriggerMode::SetInMotion,
+            "AsSetInMotion" => TriggerMode::AsSetInMotion,
             "Shuffled" => TriggerMode::Shuffled,
             "Specializes" => TriggerMode::Specializes,
             "SpellAbilityCast" => TriggerMode::SpellAbilityCast,
@@ -1191,6 +1200,7 @@ mod tests {
             "Adapt",
             "Airbend",
             "Always",
+            "AsSetInMotion",
             "Attached",
             "AttackerBlocked",
             "AttackerBlockedOnce",

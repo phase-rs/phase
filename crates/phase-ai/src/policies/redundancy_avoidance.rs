@@ -564,6 +564,10 @@ fn redundancy_delta(
         // CR 311.7: ChaosEnsues fires the current plane's "whenever chaos ensues"
         // triggered ability — it has no target and no static redundancy signal.
         | Effect::ChaosEnsues
+        // CR 701.33: AbandonScheme turns a face-up ongoing scheme face down
+        // onto the bottom of its owner's scheme deck — no target and no
+        // static redundancy signal.
+        | Effect::AbandonScheme
         // CR 119.7 + CR 119.8: RedistributeLifeTotals is a one-time interactive life
         // permutation — no target and no static redundancy signal.
         | Effect::RedistributeLifeTotals

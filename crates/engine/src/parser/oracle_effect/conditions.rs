@@ -29,6 +29,7 @@ use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair
 #[cfg(test)]
 use super::parse_effect_chain;
 use super::sequence::parse_dig_from_among;
+use super::subject;
 use super::{parse_effect_clause_inner, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst};
 use crate::parser::oracle_ir::context::TriggerZoneChangeProvenance;
@@ -343,6 +344,46 @@ impl LeadingConditionRoute {
     }
 }
 
+/// CR 608.2c + CR 109.4 (R2 object-controller binding): a leading
+/// conditional whose actor is the parent target's controller or owner ("If
+/// its controller has more than four cards in hand, they exile …" —
+/// Isildur's Fateful Strike) introduces that player for the body's
+/// anaphors. Seed `relative_player_scope` so the existing "they" /
+/// "that player" arms bind it, even when the gate itself never lowers to a
+/// typed condition. Never clobbers an established scope, and only
+/// object-controller actors seed: a "you" / "opponent" actor must not
+/// capture a later "they" (the nearest-mention reading would be wrong
+/// there). The actor is read through the single subject-grammar authority
+/// (`parse_leading_subject_application`), not a text match.
+fn seed_object_controller_scope_from_condition(condition_fragment: &str, ctx: &mut ParseContext) {
+    if ctx.relative_player_scope.is_some() {
+        return;
+    }
+    let condition_lower = condition_fragment.to_lowercase();
+    // Strip the guard prefix through the single prefix authority. The
+    // prefix byte length is measured on the LOWERCASED side (both lengths
+    // below come from `condition_lower`, so no cross-case subtraction can
+    // underflow on length-changing case folds like U+0130); the prefixes
+    // themselves are ASCII, so that length is a safe cut point into the
+    // original-case fragment (same idiom as `parse_clause_ast`).
+    let Some(after_prefix) = parse_leading_conditional_prefix(&condition_lower) else {
+        return;
+    };
+    let prefix_len = condition_lower.len() - after_prefix.len();
+    let actor_text = condition_fragment[prefix_len..].trim();
+    let mut probe_ctx = ctx.clone_throwaway();
+    let actor = subject::parse_leading_subject_application(actor_text, &mut probe_ctx);
+    match actor.as_ref().map(|app| &app.affected) {
+        Some(TargetFilter::ParentTargetController) => {
+            ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
+        }
+        Some(TargetFilter::ParentTargetOwner) => {
+            ctx.relative_player_scope = Some(ControllerRef::ParentTargetOwner);
+        }
+        _ => {}
+    }
+}
+
 /// [`strip_leading_general_conditional`], also naming the recognizer family
 /// ([`LeadingConditionRoute`]) that produced the stripped gate. Same grammar and
 /// precedence: the route only labels which recognizer claimed the condition.
@@ -369,6 +410,11 @@ pub(crate) fn strip_routed_leading_general_conditional(
         return (Some((condition, LeadingConditionRoute::General)), body);
     }
     if let Some((condition_fragment, body)) = split_leading_conditional(text) {
+        // CR 608.2c + CR 109.4 (R2 object-controller binding): seed BEFORE
+        // the typed dispatch — the gate below may never lower (Isildur's
+        // hand-size comparison stays an honest `Condition_If` gap), but its
+        // actor still introduces the body's anaphor referent.
+        seed_object_controller_scope_from_condition(&condition_fragment, ctx);
         let condition_lower = condition_fragment.to_lowercase();
         let cond_text = nom_on_lower(&condition_fragment, &condition_lower, |i| {
             value(
@@ -5067,6 +5113,7 @@ pub(super) fn reads_cast_time_snapshot(condition: &AbilityCondition) -> bool {
         | AbilityCondition::DayNightIsNeither
         | AbilityCondition::AdditionalCostPaid { .. }
         | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::WasCast { .. }
         | AbilityCondition::CastDuringPhase { .. }
         | AbilityCondition::CurrentPhaseIs { .. }
@@ -6599,17 +6646,22 @@ pub(crate) fn static_condition_to_ability_condition(
         StaticCondition::CompletedADungeon => {
             Some(AbilityCondition::CompletedDungeon { specific: None })
         }
+        // CR 607.2d + CR 608.2c: the sequential if-chose gate ("If [that|the]
+        // player chooses <label>") — evaluated at resolution against the
+        // named-choice continuation (the label THIS resolution's `Choose {
+        // Labeled }` head named), not the persisted anchor the
+        // static/trigger mirrors read (self-or-others scheme class).
+        StaticCondition::ChosenLabelIs { label } => {
+            Some(AbilityCondition::ChosenLabelIs {
+                label: label.clone(),
+            })
+        }
         StaticCondition::DevotionGE { .. }
         // CR 702.176a + CR 611.3a: Persistent alternative-cost markers are
         // source-bound static predicates with no effect-resolution
         // `AbilityCondition` equivalent.
         | StaticCondition::CastVariantPaid { .. }
         | StaticCondition::ChosenColorIs { .. }
-        // CR 614.12c + CR 607.2d: Anchor-word linked statics are evaluated
-        // by `layers::evaluate_condition_with_context`; no effect-resolution
-        // `AbilityCondition` equivalent (the gate only makes sense for a
-        // static ability bound to the persisted source).
-        | StaticCondition::ChosenLabelIs { .. }
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::RecipientHasCounters { .. }
@@ -6786,6 +6838,7 @@ pub(crate) fn ability_condition_to_static_condition(
         | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::WhenYouDo
         | AbilityCondition::RevealedHasCardType { .. }
         | AbilityCondition::ObjectsShareQuality { .. }

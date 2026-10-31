@@ -1028,6 +1028,10 @@ pub(crate) enum ImperativeFamilyAst {
     /// the TARDIS, TARDIS Bay). Resolves to a no-op outside a Planechase game
     /// (CR 701.31a).
     Planeswalk,
+    /// CR 701.33a-b: An ability abandons the face-up ongoing scheme that
+    /// sourced it (ongoing-scheme "abandon this scheme" clauses). No-op unless
+    /// the source is a face-up ongoing scheme.
+    AbandonScheme,
     /// CR 701.51b: "open N Attractions"
     OpenAttractions {
         count: u32,
@@ -1273,6 +1277,16 @@ pub(crate) enum TargetedImperativeAst {
     },
     UntapAll {
         target: TargetFilter,
+    },
+    /// CR 118.12 + CR 601.2f: "tap any number of <target> with total power
+    /// <power> or greater" — an aggregate tap COST paid at resolution (Bow to
+    /// My Command's end-step leg; Crew CR 702.122a grammar in resolution
+    /// position). Lowers to `Effect::PayCost(TapCreatures(total_power_at_least))`
+    /// so the cost authority enforces the aggregate — never to a bare Tap,
+    /// which would drop the restriction.
+    TapAggregate {
+        target: TargetFilter,
+        power: i32,
     },
     Goad {
         target: TargetFilter,
@@ -3273,6 +3287,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals

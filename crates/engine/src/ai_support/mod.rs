@@ -875,13 +875,14 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 || chosen.len() < *min_count
                 || chosen.len() > *count
         }
-        // CR 601.2f + CR 208.1: the aggregate Crew/Saddle/Teamwork tap cost
-        // accepts ANY creature subset (drawn from `choices`, no duplicates)
-        // whose summed CURRENT positive power satisfies the advertised comparator
-        // — not a fixed cardinality. Evaluates through the same `satisfied_by`
-        // the payment validator (`handle_tap_creatures_for_spell_cost`) uses, so
-        // both seams agree on which subsets are legal. The `Fixed`/`VariableX`
-        // forms are handled by the range arm immediately below.
+        // CR 601.2f + CR 107.1b + CR 208.1: the aggregate Crew/Saddle/Teamwork
+        // tap cost accepts ANY creature subset (drawn from `choices`, no
+        // duplicates) whose summed CURRENT SIGNED power satisfies the
+        // advertised comparator — not a fixed cardinality. Evaluates through
+        // the same signed total + `satisfied_by` the payment validator
+        // (`handle_tap_creatures_for_spell_cost`) uses, so both seams agree
+        // on which subsets are legal. The `Fixed`/`VariableX` forms are
+        // handled by the range arm immediately below.
         (
             WaitingFor::PayCost {
                 kind:
@@ -893,7 +894,8 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
-            let total = crate::game::casting_costs::tap_creatures_total_power(state, chosen);
+            let total =
+                crate::game::casting_costs::tap_creatures_signed_total_power(state, chosen);
             selection_mismatch(chosen, choices, None) || !aggregate.satisfied_by(total)
         }
         // CR 107.3a + CR 118.3: the Fixed/VariableX tap-creatures forms honor the

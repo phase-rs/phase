@@ -121,6 +121,11 @@ pub(crate) struct ClauseContext {
     pub(crate) repeat_for: Option<QuantityExpr>,
     /// CR 109.5: `each opponent` / `each player` subject-prefix iteration scope.
     pub(crate) player_scope: Option<PlayerFilter>,
+    /// CR 608.2c + CR 109.4: gates the "each of your other opponents" subject
+    /// arm (whose "other" anaphors to a targeted player from an earlier
+    /// instruction in the same chain). Seeded by the caller from
+    /// `chain_prior_targeted_player`; `false` on every standalone peel.
+    pub(crate) target_anchor_in_scope: bool,
 }
 
 impl ClauseContext {
@@ -171,8 +176,27 @@ impl ClauseContext {
 /// case-insensitive head matching that produces a remainder slice with a
 /// shorter lifetime than the input. Allocation is one-per-peel and only
 /// when at least one slot fires.
+/// Standalone peel (gate closed). Production uses `peel_clause_with_anchor`;
+/// this name survives only for the in-file unit tests below.
+#[cfg(test)]
 pub(crate) fn peel_clause(text: &str) -> (String, ClauseContext) {
-    peel_inner(text.to_string(), ClauseContext::default())
+    peel_clause_with_anchor(text, false)
+}
+
+/// Chain-aware `peel_clause`: seeds the "each of your other opponents" gate
+/// from the caller's `chain_prior_targeted_player`. Standalone peels use
+/// `peel_clause` (gate closed).
+pub(crate) fn peel_clause_with_anchor(
+    text: &str,
+    target_anchor_in_scope: bool,
+) -> (String, ClauseContext) {
+    peel_inner(
+        text.to_string(),
+        ClauseContext {
+            target_anchor_in_scope,
+            ..ClauseContext::default()
+        },
+    )
 }
 
 fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
@@ -244,7 +268,7 @@ fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
 
     // Player-scope subject: "each opponent/player …" (CR 109.5).
     if ctx.player_scope.is_none() {
-        let (scope, rest) = peel_player_scope_subject(&text);
+        let (scope, rest) = peel_player_scope_subject(&text, ctx.target_anchor_in_scope);
         if let Some(scope) = scope {
             ctx.player_scope = Some(scope);
             return peel_inner(rest, ctx);
@@ -291,8 +315,13 @@ pub(crate) fn peel_repeat_count_suffix(text: &str) -> (Option<QuantityExpr>, Str
 }
 
 /// CR 109.5: Peel an `each player` / `each opponent` subject prefix.
-pub(crate) fn peel_player_scope_subject(text: &str) -> (Option<PlayerFilter>, String) {
-    super::oracle_effect::lower::strip_player_scope_subject(text)
+/// `target_anchor_in_scope` gates ONLY the "each of your other opponents"
+/// arm (the caller's `chain_prior_targeted_player`); every other arm ignores it.
+pub(crate) fn peel_player_scope_subject(
+    text: &str,
+    target_anchor_in_scope: bool,
+) -> (Option<PlayerFilter>, String) {
+    super::oracle_effect::lower::strip_player_scope_subject(text, target_anchor_in_scope)
 }
 
 /// CR 608.2d: Single authority for optional / opponent-may prefix peeling in
@@ -1141,7 +1170,7 @@ mod tests {
 
     #[test]
     fn peel_player_scope_each_opponent() {
-        let (scope, rest) = peel_player_scope_subject("each opponent discards a card");
+        let (scope, rest) = peel_player_scope_subject("each opponent discards a card", false);
         assert_eq!(scope, Some(PlayerFilter::Opponent));
         assert_eq!(rest, "discard a card");
     }
@@ -1149,7 +1178,7 @@ mod tests {
     #[test]
     fn peel_player_scope_skips_per_grantee_play_permission() {
         let text = "each player may play the card they exiled this way";
-        let (scope, rest) = peel_player_scope_subject(text);
+        let (scope, rest) = peel_player_scope_subject(text, false);
         assert_eq!(scope, None);
         assert_eq!(rest, text);
         let (peeled, ctx) = peel_clause(text);

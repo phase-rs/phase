@@ -5882,6 +5882,17 @@ fn ability_distribution_pool_needs_chosen_x(
 /// (those are opponent-agnostic). Drives the companion-slot legal-target
 /// discriminator only.
 fn effect_references_target_opponent(effect: &Effect) -> bool {
+    // CR 109.4 + CR 102.2 / CR 102.3: the opponent legality of a targeted
+    // `Choose` chooser — "target opponent chooses" offers only opponents.
+    if matches!(
+        effect,
+        Effect::Choose {
+            chooser: ControllerRef::TargetOpponent,
+            ..
+        }
+    ) {
+        return true;
+    }
     effect_bound_filter_matches(effect, filter_references_target_opponent)
 }
 
@@ -18072,6 +18083,38 @@ mod tests {
             "the `owner` axis must surface one player target slot"
         );
         assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
+    }
+
+    /// CR 115.1 + CR 608.2d: the parsed Fate head (targeted `Choose` chooser)
+    /// surfaces exactly one stack slot, opponents-only — the announcement the
+    /// subject's target declares. Without the companion arm, Fate announces no
+    /// target at all and the chooser read finds nothing (CR 609.3 fizzle).
+    #[test]
+    fn build_target_slots_targeted_choose_surfaces_opponent_only_slot() {
+        const ORACLE: &str = "When you set this scheme in motion, target opponent chooses self or others. If that player chooses self, this scheme deals 6 damage to that player. If the player chooses others, this scheme deals 3 damage to each of your other opponents.";
+        let parsed = crate::parser::parse_oracle_text(
+            ORACLE,
+            "The Fate of the Flammable",
+            &[],
+            &["Scheme".to_string()],
+            &[],
+        );
+        let body = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("Fate trigger has a body");
+        let ability = build_resolved_from_def(body, ObjectId(1), PlayerId(0));
+        let state = GameState::new(crate::types::FormatConfig::standard(), 3, 42);
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 1, "one announced opponent slot, got {slots:?}");
+        assert_eq!(
+            slots[0].legal_targets,
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2))
+            ],
+            "controller cannot target themselves with \"target opponent\""
+        );
     }
 
     /// Regression guard: "create a token that's a copy of target creature" —

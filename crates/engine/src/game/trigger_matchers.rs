@@ -205,6 +205,10 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         // CR 603.8: State triggers are not event-based — they are checked separately
         // in the priority pipeline, not through the event-matching trigger system.
         TriggerMode::StateCondition => return None,
+        // CR 904.9: "as" choices resolve via the scan hook
+        // (`archenemy::resolve_pending_as_set_in_motion_choices`), never
+        // through event matching.
+        TriggerMode::AsSetInMotion => return None,
         TriggerMode::Unknown(_) => return None,
     })
 }
@@ -924,6 +928,9 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — resolved per affected
+        // member at install, meaningless as a fire-time object predicate.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageSource

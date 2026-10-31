@@ -8298,6 +8298,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
@@ -10469,7 +10470,10 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
     // subject stripper. It returns the residual predicate with only its leading
     // verb deconjugated ("attacking" is unaffected), so the combat qualifier and
     // replication verb below parse against the untouched tail.
-    let (scope, rest) = super::lower::strip_each_player_subject(text);
+    // No chain context here (pure-text rider recognition); the target-anchored
+    // "each of your other opponents" arm stays gated off. Curse riders never
+    // carry that partitive, so behavior is unchanged.
+    let (scope, rest) = super::lower::strip_each_player_subject(text, false);
     let scope = scope?;
     let rest_lower = rest.to_lowercase();
     let (has_attacking_qualifier, remainder) = nom_on_lower(&rest, &rest_lower, |i| {

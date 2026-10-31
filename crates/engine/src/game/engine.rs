@@ -1495,6 +1495,8 @@ fn apply_action_boundary_core(
     // immediately preceding action. Drop it before a new outer action starts;
     // the active search itself remains the sole authority during the prompt.
     state.clear_completed_hidden_search_audiences();
+    // Taken once per action, so every field a replayed cycle grows must be a structurally shared
+    // container.
     let boundary_snapshot = std::sync::Arc::new(state.clone());
     let cast_undo_boundary =
         super::engine_casting::CastUndoBoundaryGuard::enter(boundary_snapshot.clone());
@@ -8420,6 +8422,7 @@ pub(crate) fn drive_persistent_axis_collapse(
     events: &mut Vec<GameEvent>,
 ) -> Result<u32, EngineError> {
     let _guard = SimulationProbeGuard::enter(); // held across the whole drive
+    let _take = super::engine_casting::ConfirmedTakeGuard::enter();
     #[cfg(feature = "test-support")]
     let mut take_cost = crate::game::perf_counters::TakeCostRecorder::begin(n);
     // One rollback snapshot per take: every cycle drives `state` in place, and a failed cycle
@@ -13509,7 +13512,9 @@ fn apply_non_priority_pass_action(
                     "Counter-cost distribution is not valid for mana abilities".to_string(),
                 ));
             }
-            CostResume::Resolution | CostResume::TurnFaceUp { .. } => {
+            CostResume::Resolution
+            | CostResume::TeamTapPayment { .. }
+            | CostResume::TurnFaceUp { .. } => {
                 return Err(EngineError::InvalidAction(
                     "Counter-cost distribution is not valid for this cost".to_string(),
                 ));
@@ -13857,6 +13862,30 @@ fn apply_non_priority_pass_action(
                     ));
                 }
             },
+            // CR 805.6: one hero's contribution to a collective tap-creatures
+            // payment. The cost authority accumulates it and either prompts
+            // the next hero or settles the session.
+            CostResume::TeamTapPayment {
+                aggregate,
+                eligible,
+                selected,
+                remaining,
+                filter,
+                ability,
+            } => super::costs::handle_team_tap_payment_selection(
+                state,
+                *player,
+                kind,
+                choices,
+                &chosen,
+                *aggregate,
+                eligible,
+                selected,
+                remaining,
+                filter,
+                ability,
+                &mut events,
+            )?,
             CostResume::TurnFaceUp {
                 source,
                 cost_source,

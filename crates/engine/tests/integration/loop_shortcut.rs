@@ -8960,6 +8960,8 @@ pub(crate) enum TakeHistoryMap {
     ActivatedAbilities,
     TrackedObjectSets,
     TrackedSetMemberCauses,
+    LkiCopiableValues,
+    ActivatedAbilitiesThisGame,
 }
 
 impl TakeHistoryMap {
@@ -8969,6 +8971,8 @@ impl TakeHistoryMap {
             Self::ActivatedAbilities => state.activated_abilities_this_turn.len(),
             Self::TrackedObjectSets => state.tracked_object_sets.len(),
             Self::TrackedSetMemberCauses => state.tracked_set_member_causes.len(),
+            Self::LkiCopiableValues => state.lki_copiable_values.len(),
+            Self::ActivatedAbilitiesThisGame => state.activated_abilities_this_game.len(),
         }
     }
 }
@@ -9111,6 +9115,74 @@ fn sprout_take_history_work_is_flat_per_cycle() {
             let mut state = r6a_offer_state();
             engine::game::perf_counters::reset();
             r6a_declare_and_accept_all(&mut state, P0, n);
+            state
+        },
+    );
+}
+
+/// A Smaug + Mayhem Devil Treasure-sacrifice take shares the LKI copiable values and per-game
+/// activation counts each cycle grows, so its per-cycle copy work does not grow with its count.
+#[test]
+fn treasure_sacrifice_take_history_work_is_flat_per_cycle() {
+    use crate::play_trace::{ability, activate, cast, is_offer, names, settle};
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::zones::Zone;
+
+    let db = crate::support::shared_card_db().expect("the committed card fixture loads");
+    let offer = || {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let smaug = scenario.add_real_card(P0, "Smaug the Impenetrable", Zone::Battlefield, db);
+        let devil = scenario.add_real_card(P0, "Mayhem Devil", Zone::Battlefield, db);
+        let breaker =
+            scenario.add_real_card(P0, "Professional Face-Breaker", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+        let shock = scenario.add_real_card(P0, "Shock", Zone::Hand, db);
+        for _ in 0..60 {
+            scenario.add_real_card(P0, "Swamp", Zone::Library, db);
+            scenario.add_real_card(P1, "Swamp", Zone::Library, db);
+        }
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+        let score = |a: &GameAction| 2 * names(&[smaug])(a) + names(&[devil, breaker])(a);
+        cast(&mut runner, shock, vec![smaug], CastPaymentMode::Auto);
+        settle(&mut runner, &score);
+        for _ in 0..8 {
+            let state = runner.state();
+            let treasure = state
+                .battlefield
+                .iter()
+                .copied()
+                .find(|id| state.objects[id].name == "Treasure" && !state.objects[id].tapped)
+                .expect("an untapped Treasure to sacrifice");
+            let index = ability(state, treasure, true);
+            activate(&mut runner, treasure, index);
+            settle(&mut runner, &score);
+            if is_offer(runner.state()) {
+                return runner.state().clone();
+            }
+        }
+        panic!("reach-guard: the Treasure loop surfaces a CR 732.2a offer within 8 cycles");
+    };
+    assert_take_history_work_is_flat(
+        32,
+        &[
+            TakeHistoryVector::JournalEntries,
+            TakeHistoryVector::BattlefieldEntries,
+        ],
+        &[
+            TakeHistoryMap::LkiCopiableValues,
+            TakeHistoryMap::ActivatedAbilitiesThisGame,
+        ],
+        |n| {
+            let mut state = offer();
+            engine::game::perf_counters::reset();
+            r6a_declare_and_accept_all(&mut state, P0, n);
+            let copy = state.clone();
+            assert!(state.lki_copiable_values.ptr_eq(&copy.lki_copiable_values));
+            assert!(state
+                .activated_abilities_this_game
+                .ptr_eq(&copy.activated_abilities_this_game));
             state
         },
     );

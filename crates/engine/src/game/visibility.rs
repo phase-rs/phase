@@ -4303,10 +4303,18 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
                 redact_pending_mana_ability_payment(mana_ability, hidden_ids);
             }
             // The spell resumes are the `pending_cast_mut()` call above.
+            // `TeamTapPayment`'s creature ids are public board state (already
+            // surfaced as prompt `choices`) and its cost filter is card text
+            // (public, like an `UnlessPayment` cost) — but its carried
+            // resolving ability needs the same viewer-keyed redaction as
+            // every other carried ability.
             CostResume::Spell { .. }
             | CostResume::SpellCost { .. }
             | CostResume::Resolution
             | CostResume::TurnFaceUp { .. } => {}
+            CostResume::TeamTapPayment { ability, .. } => {
+                redact_ability_payment(ability, hidden_ids);
+            }
         },
         WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
             CollectEvidenceResume::Effect { pending_ability } => {

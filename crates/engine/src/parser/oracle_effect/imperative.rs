@@ -62,9 +62,9 @@ use crate::types::ability::{
     ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
     PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
     PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, ReturnResultReadSpec,
-    SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment, TapStateChange,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause, TokenAttackDestination,
-    TypeFilter, TypedFilter, ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
+    SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment, TapCreaturesRequirement,
+    TapStateChange, TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TokenAttackDestination, TypeFilter, TypedFilter, ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
@@ -1762,6 +1762,33 @@ pub(super) fn aggregate_return_choice_cardinality(
     .then_some(cardinality)
 }
 
+/// CR 118.12 + CR 601.2f: parse a trailing "with total power N or greater"
+/// tap-cost restriction (Bow to My Command's end-step leg; Crew CR 702.122a
+/// grammar in resolution position). All-consuming over the lowered target
+/// remainder — a longer or differently worded restriction is not this floor.
+fn parse_tap_total_power_floor(rem_lower: &str) -> Option<i32> {
+    all_consuming(terminated(
+        preceded(
+            (space0, tag("with total power ")),
+            nom_primitives::parse_number,
+        ),
+        (space0, tag("or greater"), opt(tag(".")), space0),
+    ))
+    .parse(rem_lower)
+    .ok()
+    .and_then(|(_, floor)| i32::try_from(floor).ok())
+}
+
+/// CR 118.12: does a tap/untap target remainder carry a total-power
+/// restriction in ANY wording? The fail-closed companion of
+/// `parse_tap_total_power_floor`: a remainder it cannot parse must decline
+/// the Tap lowering rather than silently drop the restriction.
+fn tap_remainder_mentions_total_power(rem_lower: &str) -> bool {
+    take_until::<_, _, OracleError<'_>>("total power")
+        .parse(rem_lower)
+        .is_ok()
+}
+
 pub(super) fn parse_targeted_action_ast(
     text: &str,
     lower: &str,
@@ -1979,9 +2006,29 @@ pub(super) fn parse_targeted_action_ast(
         let target = if ctx.subject.is_some() && is_bare_object_pronoun(target_text.trim()) {
             resolve_it_pronoun(ctx)
         } else {
-            let (target, _rem) = parse_target_with_ctx(target_text, ctx);
+            let (target, rem) = parse_target_with_ctx(target_text, ctx);
+            // CR 118.12 + CR 601.2f: "tap any number of <target> with total
+            // power N or greater" is an aggregate tap COST paid at resolution
+            // (Bow to My Command's end-step leg), not a tap action — route it
+            // to the cost authority so the aggregate is enforced. A
+            // total-power remainder in any other wording fails closed rather
+            // than dropping the restriction into a bare Tap.
+            let rem_lower = lower
+                .len()
+                .checked_sub(rem.len())
+                .and_then(|start| lower.get(start..))
+                .unwrap_or("");
+            if let Some(power) = parse_tap_total_power_floor(rem_lower) {
+                if !matches!(state, TapStateChange::Tap) {
+                    return None;
+                }
+                return Some(TargetedImperativeAst::TapAggregate { target, power });
+            }
+            if tap_remainder_mentions_total_power(rem_lower) {
+                return None;
+            }
             #[cfg(debug_assertions)]
-            assert_no_compound_remainder(_rem, text);
+            assert_no_compound_remainder(rem, text);
             target
         };
         return Some(match state {
@@ -2810,6 +2857,20 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             target,
             scope: EffectScope::All,
             state: TapStateChange::Untap,
+        },
+        // CR 118.12 + CR 601.2f: the aggregate tap cost lowers to a
+        // resolution-time `PayCost(TapCreatures)` — the same cost authority
+        // Crew/Saddle pay through — so the total-power floor is enforced on
+        // the selected subset. The parsed target carries the payer-relative
+        // filter (`controller: You` resolves to the payer via the
+        // payer-adjusted ability); subject injection rebinds `payer` below.
+        TargetedImperativeAst::TapAggregate { target, power } => Effect::PayCost {
+            cost: AbilityCost::TapCreatures {
+                requirement: TapCreaturesRequirement::total_power_at_least(power),
+                filter: target,
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
         },
         TargetedImperativeAst::Goad { target } => Effect::Goad { target },
         TargetedImperativeAst::GoadAll { target } => Effect::GoadAll { target },
@@ -6901,6 +6962,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             choice_type,
             selection,
         } => Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             selection,
             // CR 201.3 / CR 113.6 / CR 205.2a / CR 614.12c: A chosen attribute
             // must persist on the source whenever a later clause refers back to
@@ -13703,6 +13765,7 @@ fn is_player_axis_filter(filter: &TargetFilter) -> bool {
         // rather than admitting it through the object default.
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => true,
         TargetFilter::Not { filter } => is_player_axis_filter(filter),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
@@ -15183,6 +15246,27 @@ pub(super) fn parse_imperative_family_ast(
         .parse(lower.trim())
         .ok()
         .map(|_| ImperativeFamilyAst::Planeswalk),
+        // CR 701.33a-b: "abandon this scheme" — an ability abandons the
+        // face-up ongoing scheme that sourced it (ongoing-scheme abandon
+        // clauses). Literal "this scheme", NOT `~`: normalizing "this scheme"
+        // to `~` would break the SetInMotion trigger matcher, which matches
+        // the literal phrase. The "you may " prefix and the `optional` flag
+        // are already stripped upstream, so the family parser sees only the
+        // bare verb body. The anchored all-consuming guard prevents matching
+        // a longer clause (e.g. the "unless ..." cost variant, which stays
+        // honestly Unimplemented until unless-alternative-costs are modeled).
+        "abandon" | "abandons" => all_consuming(terminated(
+            // Longer alternative first so "abandons" matches the full token
+            // before the "abandon" prefix can short-circuit the `alt`.
+            alt((
+                tag::<_, _, OracleError<'_>>("abandons this scheme"),
+                tag("abandon this scheme"),
+            )),
+            opt(tag(".")),
+        ))
+        .parse(lower.trim())
+        .ok()
+        .map(|_| ImperativeFamilyAst::AbandonScheme),
         // CR 500.7: "take an extra turn after this one"
         // CR 726.1: "take the initiative"
         "take" | "takes" => {
@@ -17007,6 +17091,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.sub_ability = Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Choose {
+                    chooser: ControllerRef::You,
                     choice_type: player,
                     persist: false,
                     selection: TargetSelectionMode::Chosen,
@@ -17826,6 +17911,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::TakeTheInitiative => Effect::TakeTheInitiative,
         // CR 701.31c: An ability instructs a player to planeswalk.
         ImperativeFamilyAst::Planeswalk => Effect::Planeswalk,
+        // CR 701.33a-b: An ability abandons its source scheme.
+        ImperativeFamilyAst::AbandonScheme => Effect::AbandonScheme,
         ImperativeFamilyAst::OpenAttractions { count } => Effect::OpenAttractions { count },
         ImperativeFamilyAst::RollToVisitAttractions => Effect::RollToVisitAttractions,
         ImperativeFamilyAst::AssembleContraptions { count } => {
@@ -18728,6 +18815,15 @@ pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAs
                     ),
                     tag("that player"),
                 ),
+                // CR 108.3 + CR 508.1d: "its owner" names the owner of each
+                // affected object, resolved per member at install — "Each of
+                // them attacks its owner" (My Crushing Masterstroke), "Each
+                // of those creatures attacks its owner" (The Dead Shall
+                // Serve). Distinct from `ParentTargetOwner` (owner of the
+                // parent ability's single target): every member can have a
+                // different owner, so only `force_attack::resolve`'s
+                // per-member graft consumes this anchor.
+                value(TargetFilter::AffectedObjectOwner, tag("its owner")),
                 value(TargetFilter::SelfRef, tag("~")),
             )),
         ),
@@ -18742,12 +18838,19 @@ pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAs
                 value(Some(Duration::UntilEndOfTurn), tag("this turn if able")),
                 value(
                     Some(Duration::UntilEndOfCombat),
-                    alt((
-                        tag("this combat if able"),
-                        tag("that combat if able"),
-                        tag("each combat if able"),
-                    )),
+                    alt((tag("this combat if able"), tag("that combat if able"))),
                 ),
+                // CR 508.1d + CR 611.2a: unbounded "each combat" is not "this
+                // combat" — a resolution-installed requirement with no end
+                // ("Each of those creatures attacks its owner each combat if
+                // able", The Dead Shall Serve) persists every future combat,
+                // like an intrinsic token grant. The only prior consumer of
+                // this arm (Silver Surfer's "attacks that player each combat",
+                // whose enclosing "until the end of your next turn" wins over
+                // the field at resolve via `ability.duration` precedence) is
+                // behaviorally unchanged — pinned by
+                // `silver_surfer_effective_duration_uses_enclosing_span`.
+                value(Some(Duration::Permanent), tag("each combat if able")),
                 value(None, tag("if able")),
             )),
         ),
@@ -26791,6 +26894,52 @@ mod tests {
     }
 
     #[test]
+    fn parse_attack_its_owner_this_turn_if_able() {
+        // CR 108.3 + CR 508.1d: "its owner" names the owner of each affected
+        // object, resolved per member at install — "Each of them attacks its
+        // owner this turn if able" (My Crushing Masterstroke).
+        let result = try_parse_attack_if_able("attack its owner this turn if able")
+            .expect("should parse 'attack its owner this turn if able'");
+        match result {
+            ImperativeFamilyAst::ForceAttack {
+                duration,
+                required_defender,
+            } => {
+                assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+                assert_eq!(
+                    required_defender,
+                    TargetFilter::AffectedObjectOwner,
+                    "its owner must bind the per-member owner anchor, got {required_defender:?}"
+                );
+            }
+            other => panic!("Expected ForceAttack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_attack_its_owner_each_combat_if_able() {
+        // CR 108.3 + CR 508.1d + CR 611.2a: unbounded "each combat" persists
+        // every future combat ("Each of those creatures attacks its owner
+        // each combat if able", The Dead Shall Serve) — not UntilEndOfCombat.
+        let result = try_parse_attack_if_able("attack its owner each combat if able")
+            .expect("should parse 'attack its owner each combat if able'");
+        match result {
+            ImperativeFamilyAst::ForceAttack {
+                duration,
+                required_defender,
+            } => {
+                assert_eq!(duration, Some(Duration::Permanent));
+                assert_eq!(
+                    required_defender,
+                    TargetFilter::AffectedObjectOwner,
+                    "its owner must bind the per-member owner anchor, got {required_defender:?}"
+                );
+            }
+            other => panic!("Expected ForceAttack, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn ruhan_choose_opponent_then_force_attack_composes() {
         use crate::types::ability::{ChoiceType, Effect};
 
@@ -29492,6 +29641,102 @@ mod tests {
         assert!(
             !def.optional,
             "expected optional: false for 'then planeswalk'"
+        );
+    }
+
+    /// CR 701.33a-b: the bare "abandon this scheme" verb body dispatches to
+    /// the `AbandonScheme` imperative-family leaf. Both "abandon" and
+    /// "abandons" verb tokens map to the same leaf.
+    #[test]
+    fn abandon_this_scheme_verb_dispatches_to_abandon_leaf() {
+        for input in ["abandon this scheme", "abandons this scheme"] {
+            let ast = parse_imperative_family_ast(input, input, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("'{input}' should parse to an AbandonScheme leaf"));
+            assert!(
+                matches!(ast, ImperativeFamilyAst::AbandonScheme),
+                "expected AbandonScheme leaf for '{input}', got {ast:?}"
+            );
+        }
+    }
+
+    /// CR 701.33a-b: "abandon this scheme." → mandatory
+    /// `Effect::AbandonScheme` (I Bask in Your Silent Awe abandon clause).
+    #[test]
+    fn effect_abandon_this_scheme_is_mandatory_abandon() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "abandon this scheme.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::AbandonScheme),
+            "expected Effect::AbandonScheme, got {:?}",
+            def.effect
+        );
+        assert!(
+            !def.optional,
+            "expected optional: false for 'abandon this scheme'"
+        );
+    }
+
+    /// CR 701.33a-b: "you may abandon this scheme" → optional
+    /// `Effect::AbandonScheme` (My Laughter Echoes rider). The optional shell
+    /// is produced by the upstream optional-prefix strip.
+    #[test]
+    fn effect_you_may_abandon_this_scheme_is_optional_abandon() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "You may abandon this scheme.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::AbandonScheme),
+            "expected Effect::AbandonScheme, got {:?}",
+            def.effect
+        );
+        assert!(
+            def.optional,
+            "expected optional: true for 'you may abandon this scheme'"
+        );
+    }
+
+    /// CR 701.33a-b + CR 118.12a: "abandon this scheme unless you discard a
+    /// card or pay 3 life" (Fear My Authority) → `Effect::AbandonScheme`
+    /// with a disjunctive controller unless-cost. Previously pinned the
+    /// honest `Unsupported unless clause` gap; the you-disjunction grammar
+    /// now binds both branches. The bare-leaf arm stays rejected: the
+    /// all-consuming guard must not swallow the unless rider.
+    #[test]
+    fn abandon_unless_cost_disjunction_is_supported() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "abandon this scheme unless you discard a card or pay 3 life",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::AbandonScheme),
+            "expected Effect::AbandonScheme, got {:?}",
+            def.effect
+        );
+        let Some(unless) = &def.unless_pay else {
+            panic!("expected unless_pay on abandon, got none");
+        };
+        assert_eq!(
+            unless.payer,
+            crate::types::ability::TargetFilter::Controller,
+            "you-rider payer must be the controller, got {:?}",
+            unless.payer
+        );
+        let crate::types::ability::AbilityCost::OneOf { costs } = &unless.cost else {
+            panic!("expected OneOf unless cost, got {:?}", unless.cost);
+        };
+        assert_eq!(costs.len(), 2, "expected two branches, got {costs:?}");
+        assert!(
+            matches!(costs[0], crate::types::ability::AbilityCost::Discard { .. }),
+            "first branch must be Discard, got {:?}",
+            costs[0]
+        );
+        assert!(
+            matches!(costs[1], crate::types::ability::AbilityCost::PayLife { .. }),
+            "second branch must be PayLife, got {:?}",
+            costs[1]
         );
     }
 
