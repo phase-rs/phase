@@ -412,6 +412,8 @@ fn section_index(section: DeckSection) -> usize {
 #[derive(Clone, Copy)]
 enum LookupNames<'a> {
     Database(&'a CardDatabase),
+    /// Names come from `DeckPrintingRecord::lookup_name`, a scan of the record's bound
+    /// (section, face) entries, so each lookup is linear in them (see `bind_printing_rows`).
     Retained(&'a DeckPrintingRecord),
 }
 
@@ -442,10 +444,9 @@ impl<'a> LookupNames<'a> {
 /// The copies a section's entries hold under one round-trip name.
 struct NameBudget {
     remaining: u64,
-    /// Indices of the entries named so, ascending.
+    /// Indices of the entries named so, ascending. Taken (left empty) when the name's
+    /// bindings are emitted at its first row, so an empty vector means "already emitted".
     entries: Vec<usize>,
-    /// Whether this name's bindings have been emitted (at its first row).
-    bound: bool,
 }
 
 /// Every entry of `section` resolved to its lookup name once, grouped by name.
@@ -460,7 +461,6 @@ fn section_budgets<'a>(
             let budget = budgets.entry(name).or_insert_with(|| NameBudget {
                 remaining: 0,
                 entries: Vec::new(),
-                bound: false,
             });
             budget.remaining += u64::from(entry.count);
             budget.entries.push(entry_index);
@@ -473,6 +473,12 @@ fn section_budgets<'a>(
 /// entries. Invalid rows disappear. Each (section, round-trip name) row stream is clamped,
 /// in row order, to the copies its entries hold. A row left with nothing to bind is
 /// dropped. Never changes deck rules or counts.
+///
+/// Cost: one map probe per row, plus one name resolution per entry of each section that
+/// has a row. With the retained authority that resolution scans the record's bound faces
+/// (`LookupNames::Retained`), so a section costs O(entries x bound faces): quadratic in
+/// the distinct cards of one deck, which is at most a few hundred, and run once per game
+/// rebuild. No name is allocated per probe.
 fn bind_printing_rows<'a>(
     payload: &mut PlayerDeckPayload,
     rows: impl IntoIterator<Item = DeckPrinting>,
@@ -503,22 +509,20 @@ fn bind_printing_rows<'a>(
         let Some(budget) = section.get_mut(row.name.as_str()) else {
             continue;
         };
-        if !budget.bound {
-            budget.bound = true;
-            if budget.remaining > 0 {
-                payload
-                    .printing_entry_names
-                    .extend(
-                        budget
-                            .entries
-                            .iter()
-                            .map(|&entry_index| DeckEntryLookupName {
-                                section: row.section,
-                                entry_index,
-                                name: row.name.clone(),
-                            }),
-                    );
-            }
+        // The name's bindings are emitted at its first row; later rows find the vector empty.
+        let unbound_entries = std::mem::take(&mut budget.entries);
+        if budget.remaining > 0 {
+            payload
+                .printing_entry_names
+                .extend(
+                    unbound_entries
+                        .into_iter()
+                        .map(|entry_index| DeckEntryLookupName {
+                            section: row.section,
+                            entry_index,
+                            name: row.name.clone(),
+                        }),
+                );
         }
         row.count = u64::from(row.count).min(budget.remaining) as u32;
         if row.count != 0 {
@@ -1148,8 +1152,13 @@ impl PrintingRecordSource<'_> {
             Self::Previous(pools) => match pools.iter().find(|pool| pool.player == seat) {
                 Some(pool) => pool.printings.clone(),
                 // Every rebuilt seat's payload comes from its own pool, so this arm is not
-                // reached in practice; a seat without one starts from its payload.
-                None => retained_printing_record(deck),
+                // reached in practice. Release builds start the seat from its payload; that
+                // record holds only the clamped rows, so a swapped-out card's printing
+                // would not return, which is why a debug build refuses it.
+                None => {
+                    debug_assert!(false, "every rebuilt seat has a previous pool: {seat:?}");
+                    retained_printing_record(deck)
+                }
             },
         }
     }

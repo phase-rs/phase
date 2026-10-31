@@ -2610,6 +2610,54 @@ mod post_load_creators {
         assert_all_qualified(&runner);
     }
 
+    /// CR 903.6 + CR 100.4: a command-zone section is rebuilt from the pool with its face
+    /// identity, so its row rebinds in game two like a main-deck row.
+    #[test]
+    fn commander_keeps_its_printing_into_game_two() {
+        let db = database();
+        let list = DeckList {
+            player: PlayerDeckList {
+                main_deck: names(&[("Forest", 20)]),
+                commander: names(&[("Island", 1)]),
+                printings: vec![
+                    choice(DeckSection::MainDeck, "Forest", 20, "forest-art"),
+                    choice(DeckSection::Commander, "Island", 1, "commander-art"),
+                ],
+                ..Default::default()
+            },
+            opponent: PlayerDeckList {
+                main_deck: names(&[("Forest", 20)]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut state = GameState::new(FormatConfig::commander(), 2, 4910);
+        state.match_config.match_type = MatchType::Bo3;
+        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+        start(&mut state);
+        let mut runner = GameRunner::from_state(state);
+        let expected = tally(&[(Some("forest-art"), 20), (Some("commander-art"), 1)]);
+        // Reach: the commander object exists in the command zone and carries its row.
+        assert_eq!(printings_of(runner.state(), P0), expected);
+        assert!(runner.state().objects.values().any(|object| {
+            object.owner == P0
+                && object.zone == Zone::Command
+                && tag(object.printing.get()) == Some("commander-art")
+        }));
+
+        concede(&mut runner, P1);
+        submit(&mut runner, P0, &[("Forest", 20)], &[]);
+        submit(&mut runner, P1, &[("Forest", 20)], &[]);
+        choose_play(&mut runner, P1);
+        assert_eq!(runner.state().game_number, 2);
+        assert_eq!(printings_of(runner.state(), P0), expected);
+        assert!(runner.state().objects.values().any(|object| {
+            object.owner == P0
+                && object.zone == Zone::Command
+                && tag(object.printing.get()) == Some("commander-art")
+        }));
+    }
+
     #[test]
     fn sideboard_swaps_clamp_printings_in_game_two_and_restore_them_in_game_three() {
         let db = database();

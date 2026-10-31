@@ -379,7 +379,8 @@ impl DeckFaceLookupName {
 /// holds it behind an `Arc`, and only visibility redaction replaces it (in filtered copies).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeckPrintingRecord {
-    /// The loaded payload's normalized rows, unchanged (round-trip names, original order).
+    /// The match's first-loaded payload's normalized rows, unchanged (round-trip names,
+    /// original order); carried unclamped into later games by `load_next_game_decks`.
     rows: Vec<DeckPrinting>,
     /// One entry per (section, face identity) the payload bound.
     lookup_names: Vec<DeckFaceLookupName>,
