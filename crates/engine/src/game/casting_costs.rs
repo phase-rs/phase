@@ -24,8 +24,8 @@ use crate::types::game_state::{
     FinalizePrePaymentChecks, GameState, ManaAbilityCostParent, ManaAbilityResume,
     PausedCounterCostRemoval, PayCostKind, PendingCast, PendingCostMoveCompletion,
     PendingCostMoveResume, PendingCounterRemoval, PendingDiscardForCostResume,
-    PendingSacrificeCostCompletion, SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot,
-    WaitingFor,
+    PendingSacrificeCostCompletion, PrepaidSpellFinalization, SpellCostSource, StackEntry,
+    StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{GiftKind, Keyword};
@@ -2514,19 +2514,25 @@ fn settled_public_discard_referent(
         .cloned()
 }
 
-/// CR 601.2h: a spell's discard paid at the payment commit (mana already spent) finishes
-/// through the prepaid finalizer, which keeps the spell's spent-mana record.
+/// CR 601.2h: a discard paid at a spell's payment commit finishes the cast from what
+/// that commit decided; any other cost discard continues the unpaid costs.
 fn continue_after_cost_discard(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
+    mut pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if pending.activation_ability_index.is_none() && pending.prepaid_actual_mana_spent.is_some() {
-        state.pending_cast = Some(Box::new(pending));
-        return finalize_automatic_mana_payment(state, player, events);
+    match pending.prepaid_finalization.take() {
+        Some(finalization) => resume_prepaid_spell_finalization(
+            state,
+            player,
+            pending,
+            finalization.phyrexian_choices.as_deref(),
+            finalization.pre_payment_checks.map(|checks| *checks),
+            events,
+        ),
+        None => finish_pending_cost_or_cast(state, player, pending, events),
     }
-    finish_pending_cost_or_cast(state, player, pending, events)
 }
 
 /// Complete the discard-for-cost flow: discard selected cards, then continue casting.
@@ -2545,6 +2551,12 @@ pub(crate) fn handle_discard_for_cost(
             expected,
             chosen.len()
         )));
+    }
+    // CR 118.3 + CR 601.2h: one card can't pay for two, and partial payments are not allowed.
+    if mana_abilities::contains_duplicate_object_id(chosen) {
+        return Err(EngineError::InvalidAction(
+            "Cannot discard the same card more than once for a cost".to_string(),
+        ));
     }
     for card_id in chosen {
         if !legal_cards.contains(card_id) {
@@ -2761,10 +2773,13 @@ fn commit_random_discard_cost_picks(
         .settle_cost_paid_provenance_recursive(state, &moved, CostMoveOutcome::Discard);
 }
 
+/// `finalization` is what a spell's commit decided; the "discard your hand" prompt carries
+/// it to the discard's continuation. An activation passes `None`.
 fn pay_deferred_hand_discard_cost(
     state: &mut GameState,
     player: PlayerId,
     pending: &mut PendingCast,
+    finalization: Option<&PrepaidSpellFinalization>,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
     let Some(deferred) = pending.deferred_hand_discard_cost.take() else {
@@ -2792,15 +2807,15 @@ fn pay_deferred_hand_discard_cost(
                 return Ok(None);
             }
             let count = eligible.len();
+            let mut spell = Box::new(pending.clone());
+            spell.prepaid_finalization = finalization.cloned().map(Box::new);
             return Ok(Some(WaitingFor::PayCost {
                 player,
                 kind: PayCostKind::Discard,
                 choices: eligible,
                 count,
                 min_count: count,
-                resume: CostResume::Spell {
-                    spell: Box::new(pending.clone()),
-                },
+                resume: CostResume::Spell { spell },
             }));
         }
     };
@@ -4521,19 +4536,26 @@ fn finish_sacrifice_for_cost(
                 chosen,
                 CostMoveOutcome::Relocation,
             );
-            if let Some(waiting_for) =
-                pay_deferred_hand_discard_cost(state, player, &mut pending, events)?
-            {
-                waiting_for
-            } else {
-                resume_prepaid_spell_finalization(
+            let finalization = PrepaidSpellFinalization {
+                phyrexian_choices,
+                pre_payment_checks: Some(pre_payment_checks),
+            };
+            match pay_deferred_hand_discard_cost(
+                state,
+                player,
+                &mut pending,
+                Some(&finalization),
+                events,
+            )? {
+                Some(waiting_for) => waiting_for,
+                None => resume_prepaid_spell_finalization(
                     state,
                     player,
                     pending,
-                    phyrexian_choices.as_deref(),
-                    Some(*pre_payment_checks),
+                    finalization.phyrexian_choices.as_deref(),
+                    finalization.pre_payment_checks.map(|checks| *checks),
                     events,
-                )?
+                )?,
             }
         }
         (None, PendingSacrificeCostCompletion::ResolutionOptionalPayment { frame, .. }) => {
@@ -4702,11 +4724,7 @@ pub(crate) fn handle_sacrifice_for_cost(
             chosen.len()
         )));
     }
-    if chosen
-        .iter()
-        .enumerate()
-        .any(|(index, id)| chosen[index + 1..].contains(id))
-    {
+    if mana_abilities::contains_duplicate_object_id(chosen) {
         return Err(EngineError::InvalidAction(
             "Cannot sacrifice the same permanent more than once for a cost".to_string(),
         ));
@@ -5222,11 +5240,7 @@ pub(crate) fn handle_return_to_hand_for_cost(
     }
     // CR 118.3 + CR 601.2h: a cost of N permanents is not paid by returning one
     // permanent N times.
-    if chosen
-        .iter()
-        .enumerate()
-        .any(|(index, id)| chosen[index + 1..].contains(id))
-    {
+    if mana_abilities::contains_duplicate_object_id(chosen) {
         return Err(EngineError::InvalidAction(
             "Cannot return the same permanent more than once for a cost".to_string(),
         ));
@@ -6011,6 +6025,12 @@ pub(crate) fn handle_behold_for_cost(
             chosen.len(),
         )));
     }
+    // CR 118.3 + CR 601.2h: one object can't pay for two, and partial payments are not allowed.
+    if mana_abilities::contains_duplicate_object_id(chosen) {
+        return Err(EngineError::InvalidAction(
+            "Cannot behold the same object more than once for a cost".to_string(),
+        ));
+    }
     for id in chosen {
         if !legal_choices.contains(id) {
             return Err(EngineError::InvalidAction(
@@ -6263,6 +6283,12 @@ fn finish_exile_selection_for_cost(
             chosen.len()
         )));
     }
+    // CR 118.3 + CR 601.2h: one object can't pay for two, and partial payments are not allowed.
+    if mana_abilities::contains_duplicate_object_id(chosen) {
+        return Err(EngineError::InvalidAction(format!(
+            "Cannot exile the same {object_label} more than once for a cost"
+        )));
+    }
     for id in chosen {
         if !legal_cards.contains(id) {
             return Err(EngineError::InvalidAction(illegal_message.to_string()));
@@ -6392,7 +6418,7 @@ pub(crate) fn handle_exile_aggregate_for_cost(
 ) -> Result<WaitingFor, EngineError> {
     let cost_event_start = events.len();
     // CR 601.2b: the chosen cards must be distinct.
-    if (0..chosen.len()).any(|i| chosen[i + 1..].contains(&chosen[i])) {
+    if mana_abilities::contains_duplicate_object_id(chosen) {
         return Err(EngineError::InvalidAction(
             "Selected cards must be unique".to_string(),
         ));
@@ -11492,7 +11518,7 @@ pub(crate) fn handle_reveal_for_cost(
     }
     // CR 601.2h + CR 701.20a: revealing X cards shows X different cards, so
     // the chosen cards must be distinct — one card can't pay for two.
-    if (0..chosen.len()).any(|i| chosen[i + 1..].contains(&chosen[i])) {
+    if mana_abilities::contains_duplicate_object_id(chosen) {
         return Err(EngineError::InvalidAction(
             "Selected cards must be unique".to_string(),
         ));
@@ -17624,7 +17650,7 @@ fn finalize_mana_payment_with_resume(
             pending.cost = ManaCost::NoCost;
             pending.prepaid_actual_mana_spent = Some(0);
             if let Some(waiting_for) =
-                pay_deferred_hand_discard_cost(state, player, &mut pending, events)?
+                pay_deferred_hand_discard_cost(state, player, &mut pending, None, events)?
             {
                 return Ok(waiting_for);
             }
@@ -17693,9 +17719,17 @@ fn finalize_mana_payment_with_resume(
         {
             pending.cost = ManaCost::NoCost;
             pending.prepaid_actual_mana_spent = prepaid_actual_mana_spent;
-            if let Some(waiting_for) =
-                pay_deferred_hand_discard_cost(state, player, &mut pending, events)?
-            {
+            let finalization = PrepaidSpellFinalization {
+                phyrexian_choices: None,
+                pre_payment_checks: pre_payment_checks.clone().map(Box::new),
+            };
+            if let Some(waiting_for) = pay_deferred_hand_discard_cost(
+                state,
+                player,
+                &mut pending,
+                Some(&finalization),
+                events,
+            )? {
                 return Ok(waiting_for);
             }
         }
@@ -18056,7 +18090,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             pending.cost = ManaCost::NoCost;
             pending.prepaid_actual_mana_spent = Some(0);
             if let Some(waiting_for) =
-                pay_deferred_hand_discard_cost(state, player, &mut pending, events)?
+                pay_deferred_hand_discard_cost(state, player, &mut pending, None, events)?
             {
                 return Ok(waiting_for);
             }
@@ -18148,9 +18182,17 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         {
             pending.cost = ManaCost::NoCost;
             pending.prepaid_actual_mana_spent = prepaid_actual_mana_spent;
-            if let Some(waiting_for) =
-                pay_deferred_hand_discard_cost(state, player, &mut pending, events)?
-            {
+            let finalization = PrepaidSpellFinalization {
+                phyrexian_choices: Some(phyrexian_choices.to_vec()),
+                pre_payment_checks: pre_payment_checks.clone().map(Box::new),
+            };
+            if let Some(waiting_for) = pay_deferred_hand_discard_cost(
+                state,
+                player,
+                &mut pending,
+                Some(&finalization),
+                events,
+            )? {
                 return Ok(waiting_for);
             }
         }
@@ -20237,6 +20279,7 @@ mod tests {
             activation_cost_snapshot: None,
             activation_cost: None,
             deferred_hand_discard_cost: None,
+            prepaid_finalization: None,
             activation_ability_index: Some(0),
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -26749,6 +26792,7 @@ mod tests {
             activation_cost_snapshot: None,
             activation_cost: None,
             deferred_hand_discard_cost: None,
+            prepaid_finalization: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -26896,6 +26940,7 @@ mod tests {
             activation_cost_snapshot: None,
             activation_cost: None,
             deferred_hand_discard_cost: None,
+            prepaid_finalization: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -27012,6 +27057,7 @@ mod tests {
             activation_cost_snapshot: None,
             activation_cost: None,
             deferred_hand_discard_cost: None,
+            prepaid_finalization: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -27117,6 +27163,7 @@ mod tests {
             activation_cost_snapshot: None,
             activation_cost: None,
             deferred_hand_discard_cost: None,
+            prepaid_finalization: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -27255,6 +27302,7 @@ mod tests {
             activation_cost_snapshot: None,
             activation_cost: None,
             deferred_hand_discard_cost: None,
+            prepaid_finalization: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),

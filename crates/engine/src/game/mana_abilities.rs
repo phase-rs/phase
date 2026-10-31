@@ -4499,7 +4499,7 @@ fn run_inline_mana_subresolution(state: &mut GameState, run: impl FnOnce(&mut Ga
     state.named_color_this_resolution = outer_named_color;
 }
 
-fn contains_duplicate_object_id(ids: &[ObjectId]) -> bool {
+pub(super) fn contains_duplicate_object_id(ids: &[ObjectId]) -> bool {
     ids.iter()
         .enumerate()
         .any(|(index, id)| ids[index + 1..].contains(id))

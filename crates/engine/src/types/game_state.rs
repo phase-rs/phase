@@ -8619,6 +8619,10 @@ pub struct PendingCast {
     /// abilities; see `DeferredHandDiscardCost` for what each kind reserves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_hand_discard_cost: Option<DeferredHandDiscardCost>,
+    /// CR 601.2h: Set only on a cast suspended by its commit-time hand discard; the
+    /// discard's continuation finishes the cast from what the commit decided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepaid_finalization: Option<Box<PrepaidSpellFinalization>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_ability_index: Option<usize>,
     /// CR 606.3: Loyalty activation history is recorded only after the loyalty
@@ -8944,6 +8948,16 @@ pub enum PendingCostMoveCompletion {
         /// `None` when the first pass had not reached the pre-payment checks.
         pre_payment_checks: Option<Box<FinalizePrePaymentChecks>>,
     },
+}
+
+/// CR 601.2h: What a spell's payment commit decided before its mana was spent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrepaidSpellFinalization {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phyrexian_choices: Option<Vec<ShardChoice>>,
+    /// `None` when the commit had not reached the pre-payment checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_payment_checks: Option<Box<FinalizePrePaymentChecks>>,
 }
 
 /// CR 601.2a-b + CR 614.1c: Pre-payment determinations of one cast finalization,
@@ -9590,6 +9604,7 @@ impl PendingCast {
             activation_cost_snapshot: None,
             activation_cost: None,
             deferred_hand_discard_cost: None,
+            prepaid_finalization: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -49516,6 +49531,7 @@ mod tests {
                 activation_cost_snapshot: None,
                 activation_cost: None,
                 deferred_hand_discard_cost: None,
+                prepaid_finalization: None,
                 activation_ability_index: None,
                 pending_loyalty_activation_player: None,
                 target_constraints: vec![],
@@ -50066,6 +50082,7 @@ mod tests {
             activation_cost_snapshot: None,
             activation_cost: None,
             deferred_hand_discard_cost: None,
+            prepaid_finalization: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: vec![],

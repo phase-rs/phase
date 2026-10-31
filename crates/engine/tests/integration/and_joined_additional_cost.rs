@@ -733,3 +733,236 @@ fn kaerveks_spite_paid_from_floating_mana_keeps_its_spent_mana_through_the_hand_
         assert_eq!(runner.life(P1), life_before - 5, "{mode:?}");
     }
 }
+
+/// CR 118.3 + CR 601.2h: one card can't be discarded twice to pay "discard your
+/// hand"; the refused selection pays nothing, and either full order pays.
+#[test]
+fn kaerveks_spite_refuses_a_card_selected_twice_for_the_hand_discard() {
+    for owner_first in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = add_kaerveks_spite(&mut scenario);
+        let hand = [
+            scenario.add_card_to_hand(P0, "H1"),
+            scenario.add_card_to_hand(P0, "H2"),
+        ];
+        for _ in 0..3 {
+            scenario.add_basic_land(P0, ManaColor::Black);
+        }
+        let mut runner = scenario.build();
+        cast_at_p1(&mut runner, spell, CastPaymentMode::Auto);
+        let prompt = runner.state().waiting_for.clone();
+        assert!(
+            matches!(
+                prompt,
+                WaitingFor::PayCost {
+                    kind: PayCostKind::Discard,
+                    ..
+                }
+            ),
+            "reach guard: the hand discard prompt, got {prompt:?}"
+        );
+
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![hand[0], hand[0]],
+            })
+            .expect_err("one card can't pay for two");
+        assert_eq!(runner.state().waiting_for, prompt);
+        for id in &hand {
+            assert_eq!(runner.state().objects[id].zone, Zone::Hand);
+        }
+
+        let order = if owner_first {
+            [hand[1], hand[0]]
+        } else {
+            hand
+        };
+        discard_rest_of_hand(&mut runner, &order);
+        assert_eq!(runner.state().stack.back().map(|e| e.id), Some(spell));
+        for id in &hand {
+            assert_eq!(runner.state().objects[id].zone, Zone::Graveyard);
+        }
+    }
+}
+
+const GEOLOGICAL_APPRAISER: &str = "When this creature enters, if you cast it, discover 3.";
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DiscoverLeg {
+    EmptyHand,
+    OtherCard,
+    /// The other card's discard parks on a replacement choice.
+    OtherCardBehindWarden,
+}
+
+/// Casts Geological Appraiser and drives its discover into Kaervek's Spite,
+/// discarding the rest of the hand. Returns the Discover completions, the
+/// library, P1's life, the spell's zone and the placement draws consumed.
+fn appraiser_discovers_kaerveks_spite(leg: DiscoverLeg) -> (usize, Vec<ObjectId>, i32, Zone, u128) {
+    use engine::types::ability::EffectKind;
+    use engine::types::actions::CastChoice;
+    use engine::types::events::GameEvent;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let appraiser = scenario
+        .add_creature_to_hand_from_oracle(P0, "Geological Appraiser", 3, 2, GEOLOGICAL_APPRAISER)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red; 2],
+            generic: 2,
+        })
+        .id();
+    scenario.add_card_to_library_top(P0, "Below");
+    let spell = scenario
+        .add_spell_to_library_top(P0, "Kaervek's Spite", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black; 3],
+            generic: 0,
+        })
+        .from_oracle_text(KAERVEKS_SPITE)
+        .id();
+    for name in ["Miss A", "Miss B", "Miss C"] {
+        scenario
+            .add_spell_to_library_top(P0, name, true)
+            .with_mana_cost(ManaCost::generic(9));
+    }
+    let other = (leg != DiscoverLeg::EmptyHand).then(|| scenario.add_card_to_hand(P0, "Other"));
+    if leg == DiscoverLeg::OtherCardBehindWarden {
+        scenario
+            .add_creature(P1, "Graveyard Warden", 1, 1)
+            .with_replacement_definition(optional_exile_instead_except(spell));
+    }
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    let life_before = runner.life(P1);
+    let words_before = runner.state().rng.get_word_pos();
+    let card_id = runner.state().objects[&appraiser].card_id;
+    let mut events = runner
+        .act(GameAction::CastSpell {
+            object_id: appraiser,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Geological Appraiser is cast")
+        .events;
+    let mut prompted_discard = false;
+    let mut parked_discard = false;
+    for _ in 0..20 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::CastOffer { .. } => GameAction::DiscoverChoice {
+                choice: CastChoice::Cast,
+            },
+            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1)),
+            },
+            WaitingFor::PayCost {
+                kind: PayCostKind::Discard,
+                ..
+            } => {
+                prompted_discard = true;
+                GameAction::SelectCards {
+                    cards: other.into_iter().collect(),
+                }
+            }
+            WaitingFor::ReplacementChoice { candidates, .. } => GameAction::ChooseReplacement {
+                index: candidates
+                    .iter()
+                    .position(|c| c.description == "Accept")
+                    .expect("an Accept option"),
+            },
+            prompt => panic!("unexpected prompt {prompt:?}"),
+        };
+        events.extend(runner.act(action).expect("the step is legal").events);
+        parked_discard |= runner.state().pending_discard_for_cost.is_some();
+    }
+    assert_eq!(
+        prompted_discard,
+        leg != DiscoverLeg::EmptyHand,
+        "reach guard"
+    );
+    assert_eq!(
+        parked_discard,
+        leg == DiscoverLeg::OtherCardBehindWarden,
+        "reach guard"
+    );
+    let discovers = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Discover,
+                    ..
+                }
+            )
+        })
+        .count();
+    let state = runner.state();
+    (
+        discovers,
+        state.players[0].library.iter().copied().collect(),
+        runner.life(P1) - life_before,
+        state.objects[&spell].zone,
+        state.rng.get_word_pos() - words_before,
+    )
+}
+
+/// CR 701.57a + CR 608.2c: discover puts the misses on the bottom once, even when
+/// the spell it casts stops to discard the rest of its caster's hand (CR 118.9d).
+#[test]
+fn geological_appraiser_discovering_kaerveks_spite_completes_discover_once() {
+    let (_, empty_hand_library, _, _, empty_hand_draws) =
+        appraiser_discovers_kaerveks_spite(DiscoverLeg::EmptyHand);
+    for leg in [DiscoverLeg::OtherCard, DiscoverLeg::OtherCardBehindWarden] {
+        let (discovers, library, life_delta, spell_zone, placement_draws) =
+            appraiser_discovers_kaerveks_spite(leg);
+        assert_eq!(discovers, 1, "{leg:?}");
+        assert_eq!(life_delta, -5, "{leg:?}");
+        assert_eq!(spell_zone, Zone::Graveyard, "{leg:?}");
+        assert_eq!(library, empty_hand_library, "{leg:?}");
+        assert_eq!(placement_draws, empty_hand_draws, "{leg:?}");
+    }
+}
+
+/// What the payment commit decided rides the hand discard prompt for the engine
+/// alone; the caster's projection of that prompt drops it.
+#[test]
+fn kaerveks_spite_hand_discard_prompt_keeps_its_commit_decisions_out_of_the_projection() {
+    use engine::game::filter_state_for_viewer;
+    use engine::types::game_state::CostResume;
+
+    fn carried(waiting_for: &WaitingFor) -> bool {
+        let WaitingFor::PayCost {
+            kind: PayCostKind::Discard,
+            resume: CostResume::Spell { spell },
+            ..
+        } = waiting_for
+        else {
+            panic!("reach guard: the hand discard prompt, got {waiting_for:?}");
+        };
+        spell.prepaid_finalization.is_some()
+    }
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = add_kaerveks_spite(&mut scenario);
+    scenario.add_card_to_hand(P0, "H1");
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Black);
+    }
+    let mut runner = scenario.build();
+    cast_at_p1(&mut runner, spell, CastPaymentMode::Auto);
+    assert!(carried(&runner.state().waiting_for));
+    assert!(!carried(
+        &filter_state_for_viewer(runner.state(), P0).waiting_for
+    ));
+}
