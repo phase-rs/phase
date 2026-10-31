@@ -22335,6 +22335,10 @@ mod issue_4548_deadlock_tests {
         let expected_derived = derive_transport_views(&state, &filtered, Some(recipient));
 
         let json = recipient_terminal_final_view_json(&state, recipient).unwrap();
+        assert_eq!(
+            json,
+            include_str!("../../../fixtures/full-terminal-final-view.template.json").trim()
+        );
         let final_view: serde_json::Value = serde_json::from_str(&json).unwrap();
         let filtered_value = serde_json::to_value(filtered).unwrap();
         for (field, value) in filtered_value.as_object().unwrap() {
@@ -22344,6 +22348,7 @@ mod issue_4548_deadlock_tests {
             final_view["derived"],
             serde_json::to_value(expected_derived).unwrap()
         );
+        assert!(json.rfind("\"derived\"").unwrap() > json.find("\"turn_number\"").unwrap());
         assert!(json.contains("P0 private card"));
         assert!(!json.contains("P1 private card"));
         assert!(final_view["derived"]["unique_authorized_submitter"].is_number());
@@ -22361,6 +22366,9 @@ mod issue_4548_deadlock_tests {
         let state = terminal_final_view_fixture_state();
         let final_view_p0 = recipient_terminal_final_view_json(&state, PlayerId(0)).unwrap();
         let final_view_p1 = recipient_terminal_final_view_json(&state, PlayerId(1)).unwrap();
+        let committed_fixture =
+            include_str!("../../../fixtures/full-terminal-final-view.template.json").trim();
+        assert_eq!(final_view_p0, committed_fixture);
         assert_ne!(
             &final_view_p0, &final_view_p1,
             "recipient projections differ because their private hands differ"
@@ -22404,7 +22412,7 @@ mod issue_4548_deadlock_tests {
             .unwrap()
             .unwrap();
         let expected_json = original.final_view.unwrap().get().to_string();
-        assert_eq!(expected_json, artifact.recipients[0].final_view_json);
+        assert_eq!(expected_json, committed_fixture);
         let credential = original.credential;
         drop(db);
 
