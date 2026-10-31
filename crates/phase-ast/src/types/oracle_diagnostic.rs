@@ -107,7 +107,7 @@ pub struct OracleSourceSpan {
 impl OracleSourceSpan {
     /// An exactly-located span. The constructor unit 3b uses once emission moves
     /// into the dispatch loop and the real line/byte range is in hand.
-    pub(crate) fn exact(
+    pub fn exact(
         first_line: usize,
         last_line: usize,
         start_byte: usize,
@@ -129,7 +129,7 @@ impl OracleSourceSpan {
     /// `ClauseIrBuilder` for per-clause provenance; carries a verbatim fragment
     /// (the guard in `check_fragment_precision` requires it) so the eventual
     /// allocator-threading unit can upgrade it to `Exact`.
-    pub(crate) fn chain_relative(
+    pub fn chain_relative(
         first_line: usize,
         last_line: usize,
         start_byte: usize,
@@ -154,10 +154,11 @@ impl OracleSourceSpan {
     /// The fragment-precision guard now consults the widened `carries_fragment`
     /// (which admits `ChainRelative`), so this exact-only accessor has no
     /// production caller in M1 — it is retained solely as the card-absolute
-    /// distinction the precision-tier tests assert on, hence `#[cfg(test)]`
-    /// rather than a dead-code allow.
-    #[cfg(test)]
-    pub(crate) fn is_exact(&self) -> bool {
+    /// distinction the precision-tier tests assert on, hence test-only
+    /// (`#[cfg(any(test, feature = "test-support"))]`, which the engine's parser
+    /// tests reach through `test-support`): it has no production caller.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn is_exact(&self) -> bool {
         matches!(self.precision, SpanPrecision::Exact)
     }
 
@@ -172,7 +173,7 @@ impl OracleSourceSpan {
     /// enum's docs anticipate) cannot be added without deciding here whether it
     /// may carry a fragment. The retired `WholeDocument` tier was the `false`
     /// case: its sole honest "fragment" would have been the entire card.
-    pub(crate) fn carries_fragment(&self) -> bool {
+    pub fn carries_fragment(&self) -> bool {
         matches!(
             self.precision,
             SpanPrecision::Exact | SpanPrecision::ChainRelative
@@ -182,14 +183,14 @@ impl OracleSourceSpan {
     /// True when `self` and `other` cover overlapping bytes *and* claim the same
     /// `ordinal_within_span`. Co-located siblings with distinct ordinals are
     /// legal; that is what `ordinal_within_span` exists for.
-    pub(crate) fn conflicts_with(&self, other: &Self) -> bool {
+    pub fn conflicts_with(&self, other: &Self) -> bool {
         self.ordinal_within_span == other.ordinal_within_span
             && self.start_byte < other.end_byte
             && other.start_byte < self.end_byte
     }
 
     /// True when `self` lies entirely within `other`'s byte range.
-    pub(crate) fn is_contained_by(&self, other: &Self) -> bool {
+    pub fn is_contained_by(&self, other: &Self) -> bool {
         self.start_byte >= other.start_byte && self.end_byte <= other.end_byte
     }
 }
@@ -521,7 +522,7 @@ impl OracleDiagnostic {
     /// `gap` is passed by the detector rather than stamped afterwards, because unlike
     /// provenance the phrase is evidence the DETECTOR holds — `detect_condition_if`'s
     /// post-exemption text exists nowhere outside that function.
-    pub(crate) fn swallowed_clause(
+    pub fn swallowed_clause(
         detector: impl Into<String>,
         description: impl Into<String>,
         gap: Option<ClauseGap>,

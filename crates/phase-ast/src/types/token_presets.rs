@@ -121,7 +121,7 @@ impl TokenPtProvenance {
         matches!(self, Self::FixedOrAbsent)
     }
 
-    pub(crate) fn is_source_defined_or_dynamic(&self) -> bool {
+    pub fn is_source_defined_or_dynamic(&self) -> bool {
         matches!(self, Self::SourceDefinedOrDynamic { .. })
     }
 }

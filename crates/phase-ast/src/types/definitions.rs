@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 /// shared state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct Definitions<T>(pub(crate) Arc<Vec<T>>);
+pub struct Definitions<T>(pub Arc<Vec<T>>);
 
 // Manual Default impl — the derive would require T: Default, but an empty
 // Definitions<T> is sensible for any T.
@@ -95,7 +95,7 @@ impl<T: Clone> Definitions<T> {
     /// Positional mutable access — crate-visible so effects that need to
     /// mutate a specific existing definition (regeneration shield consumption,
     /// prevention-amount updates) can do so without bypassing the gated reads.
-    pub(crate) fn get_mut(&mut self, i: usize) -> Option<&mut T> {
+    pub fn get_mut(&mut self, i: usize) -> Option<&mut T> {
         Arc::make_mut(&mut self.0).get_mut(i)
     }
 }
@@ -129,7 +129,7 @@ impl<T> Definitions<T> {
 
     /// Iterate all definitions without applying any CR gate. Crate-visible —
     /// callers at the engine boundary must use `functioning_abilities` helpers.
-    pub(crate) fn iter_all(&self) -> std::slice::Iter<'_, T> {
+    pub fn iter_all(&self) -> std::slice::Iter<'_, T> {
         self.0.iter()
     }
 

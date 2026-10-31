@@ -64,9 +64,11 @@ PROBE_PIN_TRIGGER = TRIGGER_MODE_AUTO if IS_LINUX else TRIGGER_MODE_MANUAL
 # `deps` here silently re-opens the false green that tilt-wait.sh exists to close.
 ENGINE_SRC = [
     'crates/engine/src/',
-    'crates/engine/data/',
-    'crates/engine/build.rs',
     'crates/engine/Cargo.toml',
+    'crates/phase-ast/src/',
+    'crates/phase-ast/data/',
+    'crates/phase-ast/build.rs',
+    'crates/phase-ast/Cargo.toml',
 ]
 ENGINE_TESTS = ['crates/engine/tests/']
 # `crates/engine/src/types/format.rs` `include_str!`s the first two files
@@ -238,7 +240,7 @@ local_resource('server',
 # `cargo test-all`) do not enable engine/proptest; a feature mismatch here would
 # force a rebuild.
 local_resource('build-native',
-    cmd = 'cargo nextest run -p phase-engine -p phase-ai --no-run',
+    cmd = 'cargo nextest run -p phase-ast -p phase-engine -p phase-ai --no-run',
     deps = ENGINE_SRC + ENGINE_TESTS + AI_SRC + AI_TESTS + CLIENT_ENGINE_INPUTS,
     ignore = TMP_IGNORE,
     allow_parallel = True,
@@ -247,7 +249,7 @@ local_resource('build-native',
 )
 
 local_resource('test-engine',
-    cmd = 'cargo nextest run -p phase-engine',
+    cmd = 'cargo nextest run -p phase-ast -p phase-engine',
     deps = ENGINE_SRC + ENGINE_TESTS + CLIENT_ENGINE_INPUTS,
     ignore = TMP_IGNORE,
     resource_deps = ['build-native'],
@@ -455,17 +457,17 @@ local_resource('card-data',
     # gets its quotes mangled by cmd.exe on Windows; list-form bypasses that).
     cmd = ['bash', '-c', './scripts/gen-card-data.sh'],
     deps = ENGINE_SRC,
-    # gen-card-data.sh promotes these tracked files under crates/engine/data/, which is
+    # gen-card-data.sh promotes these tracked files under crates/phase-ast/data/, which is
     # in ENGINE_SRC (deps). Watching card-data's own generated outputs makes every
     # promote re-trigger card-data -> an infinite regen loop. The script already stages
     # via a `.tmp.` infix (covered by TMP_IGNORE), but the final promote writes the real
     # tracked file, which TMP_IGNORE can't mask. Ignoring the outputs here breaks the
     # self-trigger without touching the engine resources, which still watch
-    # crates/engine/data/ in full so a genuine data change still rebuilds the engine.
+    # crates/phase-ast/data/ in full so a genuine data change still rebuilds the engine.
     ignore = TMP_IGNORE + [
-        'crates/engine/data/known-tokens.toml',
-        'crates/engine/data/oracle-subtypes.json',
-        'crates/engine/data/mtgjson-vintage',
+        'crates/phase-ast/data/known-tokens.toml',
+        'crates/phase-ast/data/oracle-subtypes.json',
+        'crates/phase-ast/data/mtgjson-vintage',
     ],
     auto_init = True,
     labels = ['data'],
@@ -686,7 +688,7 @@ local_resource('probe-pin-census',
     # The pin is over exactly what census() reads; ENGINE_SRC is a superset BY DESIGN (its own
     # comment requires it to stay a superset of the engine cache key: src + data + build.rs +
     # Cargo.toml), and census() reads none of the extras. The live cost of the wider set is not
-    # hypothetical: gen-card-data.sh PROMOTES tracked files under crates/engine/data/, and
+    # hypothetical: gen-card-data.sh PROMOTES tracked files under crates/phase-ast/data/, and
     # 'card-data' (auto_init = True, so under EVERY profile) documents that watching its own
     # outputs "makes every promote re-trigger card-data -> an infinite regen loop" and ignores
     # them for that reason. This resource's ignore list does not cover them, so with ENGINE_SRC
@@ -696,6 +698,7 @@ local_resource('probe-pin-census',
     # currently share a value, and a later path added to either symbol re-opens this silently.
     deps = [
         'crates/engine/src/',
+        'crates/phase-ast/src/',
         'crates/phase-ai/src/',
         # THE BUILD INPUTS OF THE TARGET THIS PIN RESOLVES BY BUILDING (`--test integration`).
         # A lockfile- or manifest-only edit changes what that target compiles while every watched
@@ -705,9 +708,10 @@ local_resource('probe-pin-census',
         # "everything that can break the build" reading the comment above already rejects for the
         # thousand-odd sibling test files.
         # WHICH manifests, MEASURED not shotgunned (`cargo tree -p phase-engine -e normal,dev`
-        # intersected with the workspace members): phase-engine is the ONLY workspace member in
-        # this target's graph, so its manifest plus the workspace root's -- [profile.test] and
-        # [workspace.dependencies], which this target resolves through -- are the whole set.
+        # intersected with the workspace members): phase-engine and phase-ast are the workspace
+        # members in this target's graph, so their manifests plus the workspace root's --
+        # [profile.test] and [workspace.dependencies], which this target resolves through -- are
+        # the whole set.
         # Sibling crate manifests are deliberately absent: they cannot reach this build.
         # probe-pin's own manifest already rides along inside the 'crates/probe-pin/' dep below.
         # Cargo may itself rewrite Cargo.lock when it is stale, which costs at most ONE extra
@@ -715,6 +719,7 @@ local_resource('probe-pin-census',
         'Cargo.lock',
         'Cargo.toml',
         'crates/engine/Cargo.toml',
+        'crates/phase-ast/Cargo.toml',
         # NOT a manifest, watched on the same one-file rule: [env] here sets
         # RUST_MIN_STACK = 16777216, which that file records as load-bearing for test threads
         # (Debug-formatting the Effect <-> AbilityDefinition recursion overflows a default

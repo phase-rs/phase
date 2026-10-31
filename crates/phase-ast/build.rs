@@ -25,7 +25,7 @@ fn main() {
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let raw = fs::read_to_string(manifest_dir.join("data/known-tokens.toml"))
-        .expect("read crates/engine/data/known-tokens.toml");
+        .expect("read crates/phase-ast/data/known-tokens.toml");
     let value: toml::Value = toml::from_str(&raw).expect("known-tokens.toml well-formed");
     // Bare TOML datetimes serialize through serde as a private wrapper struct
     // that would corrupt the JSON round-trip. tokens-gen only emits quoted

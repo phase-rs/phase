@@ -207,7 +207,7 @@ fn debug_assert_own_resolution_unreachable(scope: ResolutionScope, fn_name: &str
 /// visitor — was rejected: it would change the visitor signature for every
 /// existing caller of the eight public entry points, for no correctness gain.
 /// Recorded here so a future reader does not re-litigate it.
-pub(crate) fn visit_ability_def_costs_scoped<F>(
+pub fn visit_ability_def_costs_scoped<F>(
     def: &AbilityDefinition,
     scope: ResolutionScope,
     visit: &mut F,
@@ -275,7 +275,7 @@ where
     visit_ability_def_scoped(def, ResolutionScope::IncludeRegisteredLater, visit)
 }
 
-pub(crate) fn visit_ability_def_scoped<F>(
+pub fn visit_ability_def_scoped<F>(
     def: &$($mut_)? AbilityDefinition,
     scope: ResolutionScope,
     visit: &mut F,
@@ -1153,7 +1153,7 @@ use std::ops::ControlFlow;
 
 /// A granter symbol: the incarnation slot of a filter, an object scope, or the caster
 /// player filter.
-pub(crate) enum Symbol<'a> {
+pub enum Symbol<'a> {
     Filter(&'a $($mut_)? Option<ObjectIncarnationRef>),
     Scope(&'a $($mut_)? ObjectScope),
     Caster(&'a $($mut_)? TargetFilter),
@@ -1161,7 +1161,7 @@ pub(crate) enum Symbol<'a> {
 
 /// Visits `root` and every definition node nested in it — the nodes whose fields
 /// [`node_fields`] reads.
-pub(crate) fn each_node(root: $Node<'_>, v: &mut impl FnMut($Node<'_>)) {
+pub fn each_node(root: $Node<'_>, v: &mut impl FnMut($Node<'_>)) {
     let mut on = |node: $Node<'_>| on_node(node, v);
     let _ = match root {
         $Node::Ability(def) => $nodes::visit_ability_def(def, &mut on),
@@ -1172,12 +1172,12 @@ pub(crate) fn each_node(root: $Node<'_>, v: &mut impl FnMut($Node<'_>)) {
 }
 
 /// [`each_node`] over the definitions a modification grants.
-pub(crate) fn each_node_in(m: &$($mut_)? ContinuousModification, v: &mut impl FnMut($Node<'_>)) {
+pub fn each_node_in(m: &$($mut_)? ContinuousModification, v: &mut impl FnMut($Node<'_>)) {
     let _ = $nodes::visit_continuous_mod(m, &mut |node| on_node(node, &mut *v));
 }
 
 /// The "player who cast <granter>" filters in the definitions `m` grants.
-pub(crate) fn each_caster_in(m: &$($mut_)? ContinuousModification, v: &mut impl FnMut(&$($mut_)? TargetFilter)) {
+pub fn each_caster_in(m: &$($mut_)? ContinuousModification, v: &mut impl FnMut(&$($mut_)? TargetFilter)) {
     each_node_in(m, &mut |node| node_fields(node, &mut |symbol| {
         if let Symbol::Caster(f) = symbol {
             v(f);
@@ -1199,7 +1199,7 @@ fn on_node($($mut_)? node: $Node<'_>, v: &mut impl FnMut($Node<'_>)) -> ControlF
 }
 
 /// Visits the symbols in `node`'s own fields; nested definition nodes are not entered.
-pub(crate) fn node_fields(node: $Node<'_>, v: &mut impl FnMut(Symbol<'_>)) {
+pub fn node_fields(node: $Node<'_>, v: &mut impl FnMut(Symbol<'_>)) {
     match node {
         $Node::Ability(def) => {
             effect(&$($mut_)? def.effect, v);
@@ -1563,17 +1563,17 @@ fn object_scope(scope: &$($mut_)? ObjectScope, v: &mut impl FnMut(Symbol<'_>)) {
 }
 
 /// Shared granter-symbol walk.
-pub(crate) mod granter_symbols {
+pub mod granter_symbols {
     define_granter_walk!([]; DefinitionNode; nodes);
 }
 
 /// Exclusive granter-symbol walk.
-pub(crate) mod granter_symbols_mut {
+pub mod granter_symbols_mut {
     define_granter_walk!([mut]; DefinitionNodeMut; nodes_mut);
 
     /// CR 201.5a + CR 400.7: binds a symbol to `granter` — a scope to that incarnation
     /// whether current or not, a filter to match that incarnation and no later one.
-    pub(crate) fn bind(granter: ObjectIncarnationRef) -> impl FnMut(Symbol<'_>) {
+    pub fn bind(granter: ObjectIncarnationRef) -> impl FnMut(Symbol<'_>) {
         move |symbol| match symbol {
             Symbol::Filter(bound) => {
                 bound.get_or_insert(granter);
@@ -1585,7 +1585,7 @@ pub(crate) mod granter_symbols_mut {
 }
 
 /// Visits every granter symbol in `root` and the definition nodes nested in it.
-pub(crate) fn each_granter_symbol(
+pub fn each_granter_symbol(
     root: DefinitionNode<'_>,
     v: &mut impl FnMut(granter_symbols::Symbol<'_>),
 ) {
@@ -1593,7 +1593,7 @@ pub(crate) fn each_granter_symbol(
 }
 
 /// CR 201.5a: whether a granter symbol still names an unbound granter.
-pub(crate) fn names_unbound_granter(symbol: &granter_symbols::Symbol<'_>) -> bool {
+pub fn names_unbound_granter(symbol: &granter_symbols::Symbol<'_>) -> bool {
     match symbol {
         granter_symbols::Symbol::Filter(bound) => bound.is_none(),
         granter_symbols::Symbol::Scope(scope) => {
@@ -1605,7 +1605,7 @@ pub(crate) fn names_unbound_granter(symbol: &granter_symbols::Symbol<'_>) -> boo
 
 /// CR 201.5a: whether a static's own fields name an unbound granter. Nested definition nodes
 /// are not entered; [`nested_definitions_name_granter`] covers them.
-pub(crate) fn own_fields_name_granter(def: &StaticDefinition) -> bool {
+pub fn own_fields_name_granter(def: &StaticDefinition) -> bool {
     let mut names = false;
     granter_symbols::node_fields(DefinitionNode::Static(def), &mut |symbol| {
         names |= names_unbound_granter(&symbol);
@@ -1616,7 +1616,7 @@ pub(crate) fn own_fields_name_granter(def: &StaticDefinition) -> bool {
 /// CR 201.5a: whether a definition nested in `def`'s modifications names an unbound
 /// granter — together with [`own_fields_name_granter`], the whole of
 /// [`each_granter_symbol`]'s walk over a static.
-pub(crate) fn nested_definitions_name_granter(def: &StaticDefinition) -> bool {
+pub fn nested_definitions_name_granter(def: &StaticDefinition) -> bool {
     let mut names = false;
     for m in &def.modifications {
         granter_symbols::each_node_in(m, &mut |node| {
@@ -1635,7 +1635,7 @@ pub(crate) fn nested_definitions_name_granter(def: &StaticDefinition) -> bool {
 /// static grants its nested definitions to other objects; the token is that grant's
 /// source, so a by-name reference in them names the token and binds at layer 6
 /// (CR 613.1f).
-pub(crate) fn token_static_grants_to_itself(def: &StaticDefinition) -> bool {
+pub fn token_static_grants_to_itself(def: &StaticDefinition) -> bool {
     matches!(def.affected.as_ref(), Some(TargetFilter::SelfRef))
 }
 
@@ -1646,7 +1646,7 @@ pub(crate) fn token_static_grants_to_itself(def: &StaticDefinition) -> bool {
 /// `pub(crate)`: also the single-authority walker `PerpetualGrantModification::try_from`
 /// (`types/ability.rs`) reuses to reject a `GrantAbility` whose nested tree contains
 /// `Effect::Unimplemented` -- never reimplement tree-walking at that call site.
-pub(crate) fn ability_tree_any(
+pub fn ability_tree_any(
     def: &AbilityDefinition,
     pred: &impl Fn(&AbilityDefinition) -> bool,
 ) -> bool {
@@ -1706,7 +1706,7 @@ pub(crate) fn ability_tree_any(
 /// definition-carrying `Effect` variant is a compile error there — and every
 /// consumer in `game::coverage` inherits that guarantee instead of needing its own
 /// arm list to be kept in sync by hand.
-pub(crate) fn visit_direct_effect_ability_payloads<'a>(
+pub fn visit_direct_effect_ability_payloads<'a>(
     effect: &'a Effect,
     mut visit: impl FnMut(NestedDefinitionEdge, &'a AbilityDefinition),
 ) {
