@@ -247,18 +247,15 @@ fn compare_population(raw: &Map<String, Value>, list: &ConfirmedMisparses, label
             );
         }
     }
-    // U1 permits an empty committed population. U2 must remove this guard and
-    // require nonzero listed-present and false-green witness counts explicitly.
-    if !list.is_empty() {
-        assert!(
-            previously_supported + already_unsupported > 0,
-            "{label}: listed-present witness"
-        );
-        assert!(
-            previously_supported > 0,
-            "{label}: real false-green witness"
-        );
-    }
+    assert!(!list.is_empty(), "{label}: population must be nonempty");
+    assert!(
+        previously_supported + already_unsupported > 0,
+        "{label}: listed-present witness"
+    );
+    assert!(
+        previously_supported > 0,
+        "{label}: real false-green witness"
+    );
     eprintln!("{label}: F={previously_supported} U={already_unsupported} per_class={classes:?} compared={}", before.len());
 }
 
@@ -443,35 +440,32 @@ fn confirmed_misparse_default_schemes_full_export() {
         return;
     };
     let committed = ConfirmedMisparses::committed();
-    // U1 has no census rows. U2 must remove this guard: require a nonempty
-    // committed population, present markers, and a real listed Scheme witness.
-    if !committed.is_empty() {
-        let mut present = 0;
-        let mut listed_schemes = 0;
-        for row in committed.iter() {
-            if let Some(value) = raw.get(&row.key) {
-                let face: CardFace = serde_json::from_value(value.clone()).unwrap();
-                assert_eq!(
-                    face.metadata.confirmed_misparse,
-                    Some(row.class),
-                    "export must already carry marker: {}",
-                    row.key
-                );
-                present += 1;
-                if face.card_type.core_types.contains(&CoreType::Scheme) {
-                    assert!(card_face_gaps(&face)
-                        .iter()
-                        .any(|gap| gap == row.class.handler()));
-                    listed_schemes += 1;
-                }
+    assert!(!committed.is_empty(), "committed list must have rows");
+    let mut present = 0;
+    let mut listed_schemes = 0;
+    for row in committed.iter() {
+        if let Some(value) = raw.get(&row.key) {
+            let face: CardFace = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(
+                face.metadata.confirmed_misparse,
+                Some(row.class),
+                "export must already carry marker: {}",
+                row.key
+            );
+            present += 1;
+            if face.card_type.core_types.contains(&CoreType::Scheme) {
+                assert!(card_face_gaps(&face)
+                    .iter()
+                    .any(|gap| gap == row.class.handler()));
+                listed_schemes += 1;
             }
         }
-        assert!(present > 0, "full export must contain committed markers");
-        assert!(
-            listed_schemes > 0,
-            "full export must contain a marked real Scheme"
-        );
     }
+    assert!(present > 0, "full export must contain committed markers");
+    assert!(
+        listed_schemes > 0,
+        "full export must contain a marked real Scheme"
+    );
     let baseline = database(&stamped_export(raw, &ConfirmedMisparses::empty()));
     let supported_before = eligible_schemes(&baseline);
     let excluded_schemes: Vec<_> = baseline
@@ -483,13 +477,10 @@ fn confirmed_misparse_default_schemes_full_export() {
         })
         .map(|(key, _)| key.to_string())
         .collect();
-    // U1 only: U2 must require an actually eligible committed Scheme witness.
-    if !committed.is_empty() {
-        assert!(
-            !excluded_schemes.is_empty(),
-            "a committed real Scheme must lose eligibility because of its marker"
-        );
-    }
+    assert!(
+        !excluded_schemes.is_empty(),
+        "a committed real Scheme must lose eligibility because of its marker"
+    );
     // Constructed-row acceptance is independent of future census-row deletion.
     let witness = baseline
         .get_face_by_name("I Call for Slaughter")
@@ -525,5 +516,5 @@ fn confirmed_misparse_default_schemes_full_export() {
         assert_eq!(card_face_gaps(face), [class.handler()]);
     }
     assert_default_schemes(&marked);
-    eprintln!("confirmed_misparse_default_schemes_full_export executed full export: supported_before={supported_before} supported_after={supported_after} selected=20");
+    eprintln!("confirmed_misparse_default_schemes_full_export executed full export: committed_rows={} present_markers={present} listed_real_schemes={listed_schemes} excluded_eligible_schemes={} supported_before={supported_before} supported_after={supported_after} selected=20", committed.len(), excluded_schemes.len());
 }
