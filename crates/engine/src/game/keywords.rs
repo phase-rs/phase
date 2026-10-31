@@ -691,6 +691,11 @@ pub fn source_matches_protection_target(
             .chosen_card_type()
             .and_then(|ct| ct.protection_quality_str())
             .is_some_and(|quality| source_matches_card_type(source, quality)),
+        // CR 702.16a + CR 201.2: "Protection from the chosen card
+        // name" — resolved from the protected permanent's own chosen card name.
+        ProtectionTarget::ChosenCardName => protected
+            .chosen_card_name()
+            .is_some_and(|name| crate::game::filter::card_names_match(&source.name, name)),
         // CR 702.16k: Resolve "the chosen player" from the protected
         // permanent's persisted choice. Protection covers objects that player
         // controls and objects they own that no other player controls; CR
@@ -790,13 +795,15 @@ pub fn resolve_granted_protection(
             .into_iter()
             .map(ProtectionTarget::Color)
             .collect(),
-        // "The chosen player" stays unresolved: it is read off the protected
-        // permanent's own persisted choice, not the granting source.
+        // "The chosen player" and "the chosen card name" stay unresolved: they
+        // are read off the protected permanent's own persisted choice, not the
+        // granting source.
         ProtectionTarget::Color(_)
         | ProtectionTarget::CardType(_)
         | ProtectionTarget::Quality(_)
         | ProtectionTarget::Multicolored
         | ProtectionTarget::ChosenPlayer
+        | ProtectionTarget::ChosenCardName
         | ProtectionTarget::Everything
         | ProtectionTarget::Filter(_)
         | ProtectionTarget::FromPlayer(_) => vec![quality.clone()],
@@ -1987,6 +1994,51 @@ mod tests {
             &ProtectionTarget::ChosenCardType,
             &no_choice,
             &creature_source,
+        ));
+    }
+
+    /// CR 702.16a + CR 201.2: `source_matches_protection_target`'s
+    /// `ChosenCardName` arm resolves against the *protected* object's own
+    /// chosen card name. A source with matching name matches; a source with a
+    /// different name does not. An object with no chosen card name is matched by
+    /// nothing through this arm.
+    #[test]
+    fn source_matches_protection_target_chosen_card_name() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut protected = make_obj();
+        protected
+            .chosen_attributes
+            .push(ChosenAttribute::CardName("Grizzly Bears".to_string()));
+
+        let mut bear_source = make_obj();
+        bear_source.name = "Grizzly Bears".to_string();
+        let mut giant_source = make_obj();
+        giant_source.name = "Hill Giant".to_string();
+
+        assert!(
+            source_matches_protection_target(
+                &ProtectionTarget::ChosenCardName,
+                &protected,
+                &bear_source,
+            ),
+            "named source must match protection from chosen card name Grizzly Bears"
+        );
+        assert!(
+            !source_matches_protection_target(
+                &ProtectionTarget::ChosenCardName,
+                &protected,
+                &giant_source,
+            ),
+            "different named source must NOT match protection from chosen card name Grizzly Bears"
+        );
+
+        // No chosen card name -> the arm protects from nothing.
+        let no_choice = make_obj();
+        assert!(!source_matches_protection_target(
+            &ProtectionTarget::ChosenCardName,
+            &no_choice,
+            &bear_source,
         ));
     }
 

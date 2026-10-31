@@ -1873,6 +1873,13 @@ pub fn player_protection_from_object(
                     .chosen_card_type()
                     .and_then(|ct| ct.protection_quality_str())
                     .is_some_and(|quality| source_matches_card_type(source_obj, quality)),
+                // CR 702.16a + CR 702.16e + CR 201.2: protection from the card name
+                // chosen as the granting permanent (e.g. Runed Halo) entered.
+                ProtectionTarget::ChosenCardName => {
+                    src_obj.chosen_card_name().is_some_and(|name| {
+                        crate::game::filter::card_names_match(&source_obj.name, name)
+                    })
+                }
                 // CR 702.16k: "Protection from [a player]" at the player level — the
                 // protected player has protection from each object the specified
                 // player(s) control. "Each of your opponents" (CR 702.16i) → the
@@ -3661,6 +3668,65 @@ mod tests {
         assert!(
             !player_protection_from(&state, PlayerId(1), Some(own_source)),
             "the opponent gains no protection — affected is the controller only"
+        );
+    }
+
+    /// CR 702.16a + CR 702.16e + CR 201.2: A `PlayerProtection(ChosenCardName)`
+    /// static (Runed Halo's "You have protection from the chosen card name.")
+    /// makes its controller protected from every source whose name matches the
+    /// chosen card name, and NOT from sources with different names.
+    #[test]
+    fn player_protection_from_chosen_card_name_grants_against_matching_name_sources() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = setup();
+
+        let halo = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Runed Halo".to_string(),
+            Zone::Battlefield,
+        );
+        let halo_obj = state.objects.get_mut(&halo).unwrap();
+        halo_obj
+            .chosen_attributes
+            .push(ChosenAttribute::CardName("Grizzly Bears".to_string()));
+        halo_obj.static_definitions.push(
+            StaticDefinition::new(StaticMode::PlayerProtection(
+                crate::types::keywords::ProtectionTarget::ChosenCardName,
+            ))
+            .affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+        );
+
+        let bear_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let giant_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Hill Giant".to_string(),
+            Zone::Battlefield,
+        );
+
+        assert!(
+            player_protection_from(&state, PlayerId(0), Some(bear_source)),
+            "controller must have protection from source with chosen card name"
+        );
+        assert!(
+            !player_protection_from(&state, PlayerId(0), Some(giant_source)),
+            "controller must NOT have protection from source with different card name"
+        );
+        assert!(
+            !player_protection_from(&state, PlayerId(1), Some(bear_source)),
+            "opponent must NOT have protection from source"
         );
     }
 

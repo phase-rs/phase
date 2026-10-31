@@ -1144,6 +1144,13 @@ fn player_subject_protection_handles_color_and_everything() {
         everything.mode,
         StaticMode::PlayerProtection(ProtectionTarget::Everything)
     );
+
+    let card_name =
+        parse_static_line("You have protection from the chosen card name.").expect("card name def");
+    assert_eq!(
+        card_name.mode,
+        StaticMode::PlayerProtection(ProtectionTarget::ChosenCardName)
+    );
 }
 
 /// CR 702.16a: Regression — the permanent-SUBJECT path ("Creatures you control

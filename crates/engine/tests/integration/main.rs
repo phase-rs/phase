@@ -1446,6 +1446,7 @@ mod rules;
 mod run_for_your_life_escape;
 mod runadi_behemoth_caller_etb_counters;
 mod runaway_steam_kin_fewer_than_counters;
+mod runed_halo_chosen_card_name_protection;
 mod runo_stromkirk_reveal_transform_gate;
 mod sacrifice_cost_context_identity;
 mod sacrifice_cost_selection_validation;

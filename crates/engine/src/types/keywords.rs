@@ -703,6 +703,11 @@ pub enum ProtectionTarget {
     /// resolved at runtime from the source permanent's `chosen_attributes`
     /// (the `CardType` chosen as the permanent entered). Parallels `ChosenColor`.
     ChosenCardType,
+    /// CR 702.16a + CR 201.2: "Protection from the chosen card name" —
+    /// resolved at runtime from the source permanent's `chosen_attributes`
+    /// (the `CardName` chosen as the permanent entered). Parallels `ChosenColor`,
+    /// `ChosenCardType`, and `ChosenPlayer`.
+    ChosenCardName,
     /// CR 702.16k: "Protection from the chosen player" — resolved at runtime
     /// from the protected permanent's persisted player choice. Covers objects
     /// the chosen player controls and objects they own that no other player
@@ -3446,6 +3451,11 @@ pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
         // CR 702.16 + CR 205.2: "the chosen card type" resolves at
         // runtime from the source permanent's chosen `CardType` attribute.
         "the chosen card type" | "chosen card type" => ProtectionTarget::ChosenCardType,
+        // CR 702.16a + CR 201.2: "the chosen card name" resolves at runtime
+        // from the source permanent's chosen `CardName` attribute.
+        "the chosen card name" | "chosen card name" | "the chosen name" | "chosen name" => {
+            ProtectionTarget::ChosenCardName
+        }
         // CR 702.16: "the chosen player" resolves from the
         // protected permanent's persisted `ChosenAttribute::Player`.
         "the chosen player" | "chosen player" => ProtectionTarget::ChosenPlayer,
@@ -4912,6 +4922,30 @@ mod tests {
         assert_eq!(
             parse_protection_target("from artifacts"),
             ProtectionTarget::Quality("from artifacts".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_protection_target_chosen_card_name() {
+        assert_eq!(
+            parse_protection_target("the chosen card name"),
+            ProtectionTarget::ChosenCardName
+        );
+        assert_eq!(
+            parse_protection_target("chosen card name"),
+            ProtectionTarget::ChosenCardName
+        );
+        assert_eq!(
+            parse_protection_target("the chosen name"),
+            ProtectionTarget::ChosenCardName
+        );
+        assert_eq!(
+            parse_protection_target("chosen name"),
+            ProtectionTarget::ChosenCardName
+        );
+        assert_eq!(
+            Keyword::from_str("Protection:the chosen card name").unwrap(),
+            Keyword::Protection(ProtectionTarget::ChosenCardName)
         );
     }
 
