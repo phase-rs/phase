@@ -12,7 +12,7 @@
 //! `SpellCastReversal`. The casts cover a discard cost, a life cost, a library
 //! reveal during mana payment, an alternative cost (CR 118.9) and convoke
 //! (CR 702.51a) on a real four-player board, and each test asserts the CR 733.1
-//! cancel outcome too. The counter test bounds sparse serialization work.
+//! cancel outcome too. The counter test pins how much the record serializes.
 
 use std::collections::BTreeSet;
 
@@ -53,6 +53,13 @@ const CONVOKERS: [(ObjectId, ManaColor); 3] = [
     (ObjectId(417), ManaColor::Green),
 ];
 
+/// CR 733.1: a recorded step serializes its changed-member value once per side
+/// (before and after the action) in each of two forms: the exact restoration
+/// form that cancellation replays, and the rules-projection form that loop
+/// detection compares (CR 104.4b).
+const SIDES: u64 = 2;
+const CAPTURE_FORMS: u64 = 2;
+
 /// Runs `action` and returns the cast-undo record counts it accrued.
 fn act_counted(runner: &mut GameRunner, action: GameAction) -> CastUndoRecordCounters {
     let start = perf_counters::cast_undo_record_snapshot();
@@ -63,9 +70,14 @@ fn act_counted(runner: &mut GameRunner, action: GameAction) -> CastUndoRecordCou
     perf_counters::cast_undo_record_snapshot().since(start)
 }
 
-/// A recorded step's reference check found the stored reversal identical to
-/// the complete-state one, including exact-restoration and rules forms.
+/// A recorded step built its changed-member values (`SIDES` per form), and the
+/// reference check found the stored reversal identical to the complete-state one.
 fn assert_recorded(delta: CastUndoRecordCounters, step: &str) {
+    assert_eq!(
+        delta.values,
+        SIDES * CAPTURE_FORMS,
+        "{step} records the cast's inverse: {delta:?}"
+    );
     assert_eq!(
         delta.reference_checks, 1,
         "{step} is compared with the complete record: {delta:?}"
@@ -99,14 +111,11 @@ fn reversal_flag(state: &GameState, name: &str) -> bool {
         .unwrap_or_else(|| panic!("the reversal's {name} is a boolean"))
 }
 
-/// The path of every inverse edit the reversal stores.
-fn undo_paths(state: &GameState) -> Vec<Vec<String>> {
-    let Some(descriptor) = reversal(state) else {
-        return Vec::new();
-    };
-    descriptor["undo"]
+/// The path of every edit in one stored inverse list.
+fn edit_paths(edits: &serde_json::Value, list: &str) -> Vec<Vec<String>> {
+    edits
         .as_array()
-        .expect("the reversal stores its inverse")
+        .unwrap_or_else(|| panic!("the reversal stores its {list} list"))
         .iter()
         .map(|edit| {
             let (_, fields) = edit
@@ -123,9 +132,17 @@ fn undo_paths(state: &GameState) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// The objects the stored inverse addresses.
-fn undo_object_ids(state: &GameState) -> BTreeSet<ObjectId> {
-    undo_paths(state)
+/// The path of every inverse edit the reversal stores.
+fn undo_paths(state: &GameState) -> Vec<Vec<String>> {
+    let Some(descriptor) = reversal(state) else {
+        return Vec::new();
+    };
+    edit_paths(&descriptor["undo"], "undo")
+}
+
+/// The objects the paths address.
+fn path_object_ids(paths: &[Vec<String>]) -> BTreeSet<ObjectId> {
+    paths
         .iter()
         .filter_map(|path| match path.as_slice() {
             [member, id, ..] if member == "objects" => {
@@ -134,6 +151,24 @@ fn undo_object_ids(state: &GameState) -> BTreeSet<ObjectId> {
             _ => None,
         })
         .collect()
+}
+
+/// The objects the stored inverse addresses.
+fn undo_object_ids(state: &GameState) -> BTreeSet<ObjectId> {
+    path_object_ids(&undo_paths(state))
+}
+
+/// The objects both stored inverses address: the inputs `CastUndoMembers::changed`
+/// folds into the member selection (the restoration list and the comparison
+/// list). A descriptor without a comparison list contributes only `undo`.
+fn folded_inverse_object_ids(state: &GameState) -> BTreeSet<ObjectId> {
+    let mut ids = undo_object_ids(state);
+    if let Some(descriptor) = reversal(state) {
+        if let Some(comparison) = descriptor.get("comparison_undo") {
+            ids.extend(path_object_ids(&edit_paths(comparison, "comparison_undo")));
+        }
+    }
+    ids
 }
 
 /// The hostile step: `id` was written by an earlier step of this cast and is
@@ -621,22 +656,29 @@ fn convoke_on_a_real_four_player_board_records_like_the_complete_record() {
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
-/// A convoke step serializes fewer objects than one complete board value and
-/// none of the four shared deck pools, including both exact and rules forms.
+/// The record's cost: a convoke step serializes exactly the objects the step
+/// unshared plus those the folded inverse names, fewer than one complete
+/// value holds, and none of the four shared deck pools.
 #[test]
 fn a_convoke_step_serializes_only_unshared_objects_and_no_shared_deck_pool() {
     let mut runner = chord_announced();
     let (first, first_color) = CONVOKERS[0];
-    runner
-        .act(GameAction::TapForConvoke {
+    let delta = act_counted(
+        &mut runner,
+        GameAction::TapForConvoke {
             object_id: first,
             mana_type: ManaType::from(first_color),
-        })
-        .expect("the first convoke is accepted");
-    assert!(
-        !undo_paths(runner.state()).is_empty(),
-        "an earlier inverse is folded"
+        },
     );
+    assert_eq!(
+        delta.values,
+        SIDES * CAPTURE_FORMS,
+        "the first convoke records"
+    );
+
+    let pre = runner.state().clone();
+    let folded = folded_inverse_object_ids(&pre);
+    assert!(!undo_paths(&pre).is_empty(), "an earlier inverse is folded");
     let (object_id, color) = CONVOKERS[1];
     let delta = act_counted(
         &mut runner,
@@ -646,13 +688,24 @@ fn a_convoke_step_serializes_only_unshared_objects_and_no_shared_deck_pool() {
         },
     );
     let post = runner.state();
-    assert!(post.objects[&object_id].tapped, "the convoke cost was paid");
-    assert!(
-        undo_object_ids(post).contains(&object_id),
-        "the recorded inverse restores the convoked creature"
-    );
 
+    let ids: BTreeSet<ObjectId> = pre
+        .objects
+        .keys()
+        .chain(post.objects.keys())
+        .filter(|id| !pre.objects.shares_object_with(&post.objects, **id))
+        .copied()
+        .chain(folded)
+        .collect();
+    let expected = ids.iter().filter(|id| pre.objects.contains_key(id)).count()
+        + ids
+            .iter()
+            .filter(|id| post.objects.contains_key(id))
+            .count();
+    assert_eq!(delta.values, SIDES * CAPTURE_FORMS, "the step records");
     assert_eq!(post.deck_pools.len(), 4);
+    // `expected` counts the pre and post side once; each form serializes both.
+    assert_eq!(delta.objects, CAPTURE_FORMS * expected as u64);
     assert!(
         delta.objects < post.objects.len() as u64,
         "{} objects serialized, a complete value alone holds {}",
