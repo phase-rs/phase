@@ -279,6 +279,13 @@ fn chaotic_strike_cannot_be_cast_without_a_legal_target() {
     assert_finished(&empty);
 }
 
+// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
+// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
+// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
+// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
+// the test isolates the announced branch targets. Shape: An artifact's activated ability with one
+// coin whose win branch destroys a declared target creature an opponent controls and whose lose
+// branch destroys a separately declared target creature you control.
 fn two_branch_fixture(
     own_pool: bool,
     opponent_pool: bool,
@@ -337,6 +344,13 @@ fn two_branch_fixture(
     (runner, source, own, opposing)
 }
 
+// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
+// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
+// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
+// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
+// the test isolates the announced branch targets. Shape: Activating that two-branch coin ability
+// prompts for two target slots (opponent creature, own creature) before cost payment and flipping,
+// then each chosen object becomes a target.
 #[test]
 fn two_branch_activation_announces_both_targets_before_flipping() {
     let (mut runner, source, own, opposing) = two_branch_fixture(true, true);
@@ -413,6 +427,13 @@ fn two_branch_activation_announces_both_targets_before_flipping() {
     assert_finished(&runner);
 }
 
+// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
+// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
+// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
+// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
+// the test isolates the announced branch targets. Shape: That two-branch coin activation is offered
+// and resolves with both creature pools present, but is refused before tapping or paying when
+// either branch's target pool is empty.
 fn refuses_missing_pool(own_pool: bool, opponent_pool: bool) {
     let (mut valid, source, own, opposing) = two_branch_fixture(true, true);
     assert!(
@@ -446,21 +467,46 @@ fn refuses_missing_pool(own_pool: bool, opponent_pool: bool) {
     assert_finished(&missing);
 }
 
+// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
+// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
+// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
+// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
+// the test isolates the announced branch targets. Shape: The two-branch coin activation is refused
+// when no creature you control exists for the lose branch's declared target.
 #[test]
 fn two_branch_activation_requires_an_own_creature() {
     refuses_missing_pool(false, true);
 }
 
+// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
+// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
+// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
+// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
+// the test isolates the announced branch targets. Shape: The two-branch coin activation is refused
+// when no opponent's creature exists for the win branch's declared target.
 #[test]
 fn two_branch_activation_requires_an_opponents_creature() {
     refuses_missing_pool(true, false);
 }
 
+// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
+// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
+// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
+// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
+// the test isolates the announced branch targets. Shape: The two-branch coin activation is refused
+// when neither branch has any legal target creature.
 #[test]
 fn two_branch_activation_requires_both_creature_pools() {
     refuses_missing_pool(false, false);
 }
 
+// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
+// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
+// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
+// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
+// the test isolates the announced branch targets. Shape: A won flip of the two-branch coin destroys
+// only the announced opponent creature, leaving the lose branch's announced creature and
+// distractors untouched, with one coin terminal.
 #[test]
 fn two_branch_win_destroys_only_the_announced_opponents_creature() {
     let (mut runner, source, own, opposing) = two_branch_fixture(true, true);
@@ -488,6 +534,13 @@ fn two_branch_win_destroys_only_the_announced_opponents_creature() {
     assert_finished(&runner);
 }
 
+// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
+// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
+// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
+// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
+// the test isolates the announced branch targets. Shape: The announced two-branch coin ability on
+// the stack serializes its branch bindings; restores missing them fail for every wire version, and
+// the intact restore destroys the win branch's target.
 #[test]
 fn coin_branch_stack_persistence_is_strict_and_current_bindings_execute() {
     use engine::types::resolution::{ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION};
@@ -567,12 +620,21 @@ fn coin_branch_stack_persistence_is_strict_and_current_bindings_execute() {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A spell whose single coin has win and lose pump branches each declaring 'target nonred creature';
+// a color-word text change on the spell before resolution changes both branch filters and can make
+// both illegal. Nearest printed card: Orcish Captain ("{1}: Flip a coin. If you win the flip,
+// target Orc creature gets +2/+0 until end of turn. If you lose the flip, it gets -0/-2 until end
+// of turn."); Chaotic Strike ("Cast this spell only during combat after blockers are declared. /
+// Flip a coin. If you win the flip, target creature gets +1/+1 until end of turn. / Draw a card.")
+// -- Orcish Captain has targeted win and lose pump branches (one shared target, Orc filter, no
+// color word); Chaotic Strike has only a targeted win pump.
 #[test]
 fn text_substitution_reaches_both_live_coin_branch_filters() {
     use engine::types::mana::ManaColor;
     // Synthetic supported pump grammar; neither real pump card has a color restriction.
     const COIN: &str = "Flip a coin. If you win the flip, target nonred creature gets +1/+1 until end of turn. If you lose the flip, target nonred creature gets +2/+2 until end of turn.";
-    const CHANGE: &str = "Change the text of target spell or permanent by replacing all instances of one color word with another. (For example, you may change \"nonblack creature\" to \"nongreen creature\" or \"black mana\" to \"green mana.\")";
+    const CHANGE: &str = "Change the text of target spell or permanent by replacing all instances of one color word with another. (For example, you may change \"target black spell\" to \"target blue spell.\" This effect lasts indefinitely.)";
     for won in [true, false] {
         for changed in [false, true] {
             for chosen_color in [ManaColor::Blue, ManaColor::Green] {
@@ -590,7 +652,7 @@ fn text_substitution_reaches_both_live_coin_branch_filters() {
                     .add_spell_to_hand_from_oracle(P0, "Synthetic Coin Pump", true, COIN)
                     .id();
                 let change = scenario
-                    .add_spell_to_hand_from_oracle(P1, "Synthetic Word Change", true, CHANGE)
+                    .add_spell_to_hand_from_oracle(P1, "Sleight of Mind", true, CHANGE)
                     .id();
                 scenario.with_mana_pool(
                     P1,
@@ -645,6 +707,19 @@ fn text_substitution_reaches_both_live_coin_branch_filters() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A spell installs a one-shot draw or planeswalk replacement whose substitute is a coin with
+// life-gain win/lose branches (or a non-coin control); after save/restore the replaced event runs
+// exactly the selected branch. Nearest printed card: Saga of Krark Losing His Thumb ("Flip Ahead
+// (If you would put a lore counter on this saga, instead flip a coin. If you lose the flip, don't
+// put a counter on and repeat the current chapter.) / I — Add {U}{R}. / II — Create a token that's
+// a copy of Krark, the Thumbless and a token that's a copy of Krark's Thumb. (Keep in mind they're
+// both legendary!) / III — Choose target opponent. Flip a coin with them. The loser of the flip
+// loses a quarter of their life, rounded up."); Desperate Gambit ("Choose a source you control and
+// flip a coin. If you win the flip, the next time that source would deal damage this turn, it deals
+// double that damage instead. If you lose the flip, the next time it would deal damage this turn,
+// prevent that damage.") -- The Saga's Flip Ahead replaces a lore counter with a coin (static, not
+// installed); Desperate Gambit's coin installs replacements instead of being one.
 #[test]
 fn installed_coin_replacements_round_trip_and_execute_the_selected_bound_branch() {
     use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr};
@@ -800,6 +875,16 @@ fn installed_coin_replacements_round_trip_and_execute_the_selected_bound_branch(
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A spell whose coin win branch makes an end-step delayed counter on 'that creature' while the lose
+// branch targets a creature; the anaphor binds only an earlier ancestor target, never the lose
+// target. Nearest printed card: Goblin Kites ("{R}: Target creature you control with toughness 2 or
+// less gains flying until end of turn. Flip a coin at the beginning of the next end step. If you
+// lose the flip, sacrifice that creature."); Frenetic Sliver ("All Slivers have "{0}: If this
+// permanent is on the battlefield, flip a coin. If you win the flip, exile this permanent and
+// return it to the battlefield under its owner's control at the beginning of the next end step. If
+// you lose the flip, sacrifice it."") -- Goblin Kites delays a coin on its earlier target, with no
+// sibling branches; Frenetic Sliver's won branch delays returning itself at end step.
 #[test]
 fn delayed_parent_referent_never_reads_an_unselected_coin_siblings_declaration() {
     use engine::types::ability::{
@@ -900,6 +985,17 @@ fn delayed_parent_referent_never_reads_an_unselected_coin_siblings_declaration()
 
 // Synthetic building-block fixture: a typed owner scope reads B, not the
 // controller of the source or the owner of its distinct attached host.
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// An attached Equipment ability targets A, then a coin whose win branch targets B and flips again,
+// countering creatures controlled by B's owner, immediately or at end step, even after B leaves.
+// Nearest printed card: Goblin Lyre ("Sacrifice this artifact: Flip a coin. If you win the flip,
+// this artifact deals damage to target opponent or planeswalker equal to the number of creatures
+// you control. If you lose the flip, this artifact deals damage to you equal to the number of
+// creatures that opponent or that planeswalker's controller controls."); Goblin Kites ("{R}: Target
+// creature you control with toughness 2 or less gains flying until end of turn. Flip a coin at the
+// beginning of the next end step. If you lose the flip, sacrifice that creature.") -- Goblin Lyre's
+// lose branch counts creatures controlled by its target's controller (no nested coin); Goblin Kites
+// delays a coin referring to an earlier target.
 fn typed_owner_coin_binding_scenario(remove_b: bool, delayed_phase: Option<Phase>) {
     use engine::game::game_object::AttachTarget;
     use engine::types::ability::{
@@ -982,12 +1078,7 @@ fn typed_owner_coin_binding_scenario(remove_b: bool, delayed_phase: Option<Phase
         .with_ability_definition(definition)
         .id();
     let response = scenario
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Synthetic exile response",
-            true,
-            "Exile target creature.",
-        )
+        .add_spell_to_hand_from_oracle(P0, "Final Death", true, "Exile target creature.")
         .with_mana_cost(ManaCost::zero())
         .id();
     let mut runner = scenario.build();
@@ -1126,6 +1217,14 @@ fn typed_owner_coin_binding_scenario(remove_b: bool, delayed_phase: Option<Phase
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// The nested-coin typed-owner fixture with an immediate payload: counters go only to creatures
+// controlled by announced B's owner, and to nobody once B is exiled in response. Nearest printed
+// card: Goblin Lyre ("Sacrifice this artifact: Flip a coin. If you win the flip, this artifact
+// deals damage to target opponent or planeswalker equal to the number of creatures you control. If
+// you lose the flip, this artifact deals damage to you equal to the number of creatures that
+// opponent or that planeswalker's controller controls.") -- Goblin Lyre scopes a count by its
+// declared target's controller inside a coin branch; it lacks nesting and a mass counter payoff.
 #[test]
 fn nested_coin_typed_owner_scope_preserves_its_announced_binding() {
     for remove_b in [true, false] {
@@ -1133,6 +1232,17 @@ fn nested_coin_typed_owner_scope_preserves_its_announced_binding() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// The nested-coin typed-owner fixture with an end-step delayed payload: the delayed trigger
+// snapshots announced B (or nothing if exiled) and counters only B's owner's creatures when it
+// fires. Nearest printed card: Goblin Kites ("{R}: Target creature you control with toughness 2 or
+// less gains flying until end of turn. Flip a coin at the beginning of the next end step. If you
+// lose the flip, sacrifice that creature."); Goblin Lyre ("Sacrifice this artifact: Flip a coin. If
+// you win the flip, this artifact deals damage to target opponent or planeswalker equal to the
+// number of creatures you control. If you lose the flip, this artifact deals damage to you equal to
+// the number of creatures that opponent or that planeswalker's controller controls.") -- Goblin
+// Kites delays work that refers to an earlier declared target; Goblin Lyre scopes by a target's
+// controller; neither nests coins.
 #[test]
 fn delayed_coin_typed_owner_scope_snapshots_its_announced_binding() {
     for remove_b in [true, false] {
@@ -1140,6 +1250,16 @@ fn delayed_coin_typed_owner_scope_snapshots_its_announced_binding() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A spell targets A, then a coin whose win branch targets B and creates 'when that creature dies,
+// gain 3 life'; an exiled B installs no trigger, and an unrelated death never pays. Nearest printed
+// card: Creepy Doll ("Indestructible / Whenever this creature deals combat damage to a creature,
+// flip a coin. If you win the flip, destroy that creature."); Frenetic Sliver ("All Slivers have
+// "{0}: If this permanent is on the battlefield, flip a coin. If you win the flip, exile this
+// permanent and return it to the battlefield under its owner's control at the beginning of the next
+// end step. If you lose the flip, sacrifice it."") -- Creepy Doll's won branch destroys 'that
+// creature' immediately, not via a dies trigger; Frenetic Sliver's won branch makes a delayed
+// trigger about itself.
 #[test]
 fn delayed_death_condition_never_widens_an_unavailable_announcement() {
     use engine::types::ability::{
@@ -1204,27 +1324,17 @@ fn delayed_death_condition_never_widens_an_unavailable_announcement() {
             .with_ability_definition(definition)
             .id();
         let exile = scenario
-            .add_spell_to_hand_from_oracle(
-                P0,
-                "Synthetic exile response",
-                true,
-                "Exile target creature.",
-            )
+            .add_spell_to_hand_from_oracle(P0, "Final Death", true, "Exile target creature.")
             .with_mana_cost(ManaCost::zero())
             .id();
         let kill_c = scenario
-            .add_spell_to_hand_from_oracle(
-                P0,
-                "Synthetic unrelated death",
-                true,
-                "Destroy target creature.",
-            )
+            .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
             .with_mana_cost(ManaCost::zero())
             .id();
         let kill_b = scenario
             .add_spell_to_hand_from_oracle(
                 P0,
-                "Synthetic bound death",
+                "Bilbo's Deadly Slice",
                 true,
                 "Destroy target creature.",
             )
@@ -1309,6 +1419,16 @@ enum EmptyCoinRider {
     Replacement,
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Spell or attached Equipment targets A, then a coin (optionally nested) whose win branch targets B
+// and delays a rider on B or B's player; exiling B leaves an empty binding with no substitute.
+// Nearest printed card: Goblin Kites ("{R}: Target creature you control with toughness 2 or less
+// gains flying until end of turn. Flip a coin at the beginning of the next end step. If you lose
+// the flip, sacrifice that creature."); Frenetic Sliver ("All Slivers have "{0}: If this permanent
+// is on the battlefield, flip a coin. If you win the flip, exile this permanent and return it to
+// the battlefield under its owner's control at the beginning of the next end step. If you lose the
+// flip, sacrifice it."") -- Goblin Kites delays a coin that sacrifices its earlier target, without
+// branch targets; Frenetic Sliver's won branch makes an end-step delayed return of itself only.
 fn empty_coin_binding_scenario(
     remove_b: bool,
     attached: bool,
@@ -1529,12 +1649,7 @@ fn empty_coin_binding_scenario(
             .id()
     };
     let response = scenario
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Synthetic exile response",
-            true,
-            "Exile target creature.",
-        )
+        .add_spell_to_hand_from_oracle(P0, "Final Death", true, "Exile target creature.")
         .with_mana_cost(ManaCost::zero())
         .id();
     if keep_restore {
@@ -1930,6 +2045,16 @@ fn empty_coin_binding_scenario(
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Spell form: the coin win branch's declared B gets an end-step delayed +1/+1 counter; B exiled in
+// response leaves the delayed trigger's target list empty and nothing receives the counter. Nearest
+// printed card: Goblin Kites ("{R}: Target creature you control with toughness 2 or less gains
+// flying until end of turn. Flip a coin at the beginning of the next end step. If you lose the
+// flip, sacrifice that creature."); Frenetic Sliver ("All Slivers have "{0}: If this permanent is
+// on the battlefield, flip a coin. If you win the flip, exile this permanent and return it to the
+// battlefield under its owner's control at the beginning of the next end step. If you lose the
+// flip, sacrifice it."") -- Goblin Kites delays an effect on an earlier target; Frenetic Sliver
+// delays from a won branch; neither declares a target inside a branch.
 #[test]
 fn delayed_coin_branch_keeps_its_empty_illegal_target_binding() {
     for remove_b in [false, true] {
@@ -1937,6 +2062,13 @@ fn delayed_coin_branch_keeps_its_empty_illegal_target_binding() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Activated attached-Equipment form of the delayed-counter rider: when declared B is exiled, the
+// empty binding is not refilled with the Equipment's host creature. Nearest printed card: Goblin
+// Kites ("{R}: Target creature you control with toughness 2 or less gains flying until end of turn.
+// Flip a coin at the beginning of the next end step. If you lose the flip, sacrifice that
+// creature.") -- Goblin Kites delays an effect on its earlier declared target; it lacks an attached
+// source and a branch-declared target.
 #[test]
 fn delayed_coin_branch_empty_binding_is_not_reseeded_from_attached_host() {
     for remove_b in [false, true] {
@@ -1944,6 +2076,14 @@ fn delayed_coin_branch_empty_binding_is_not_reseeded_from_attached_host() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// The delayed-counter rider under Krark's Thumb: at the keep prompt, a save/restore round trip
+// keeps the won branch's B binding, or its empty binding if B was exiled. Nearest printed card:
+// Goblin Kites ("{R}: Target creature you control with toughness 2 or less gains flying until end
+// of turn. Flip a coin at the beginning of the next end step. If you lose the flip, sacrifice that
+// creature."); Krark's Thumb ("If you would flip a coin, instead flip two coins and ignore one.")
+// -- Goblin Kites supplies the delayed referent to an earlier target; Krark's Thumb supplies the
+// keep prompt; neither has branch-declared targets.
 #[test]
 fn delayed_coin_branch_empty_binding_survives_keep_restore() {
     for remove_b in [false, true] {
@@ -1951,6 +2091,13 @@ fn delayed_coin_branch_empty_binding_survives_keep_restore() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// The win branch's declared B feeds a second, nested coin whose win delays the counter on B; an
+// exiled B stays an unavailable binding through the inner coin. Nearest printed card: Goblin Kites
+// ("{R}: Target creature you control with toughness 2 or less gains flying until end of turn. Flip
+// a coin at the beginning of the next end step. If you lose the flip, sacrifice that creature.") --
+// Goblin Kites delays a coin acting on its earlier target; it has no coin nested inside a coin
+// branch.
 #[test]
 fn nested_coin_inherits_an_unavailable_announced_binding() {
     for remove_b in [false, true] {
@@ -1958,6 +2105,14 @@ fn nested_coin_inherits_an_unavailable_announced_binding() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Nested-coin delayed-counter rider under Krark's Thumb: the inner keep prompt carries only B's
+// binding, or its 'illegal announcement' missing reason, across save/restore. Nearest printed card:
+// Goblin Kites ("{R}: Target creature you control with toughness 2 or less gains flying until end
+// of turn. Flip a coin at the beginning of the next end step. If you lose the flip, sacrifice that
+// creature."); Krark's Thumb ("If you would flip a coin, instead flip two coins and ignore one.")
+// -- Goblin Kites delays a coin on its earlier target; Krark's Thumb gives keep prompts; neither
+// nests coins or declares branch targets.
 #[test]
 fn nested_coin_missing_only_context_survives_inner_keep_restore() {
     for remove_b in [true, false] {
@@ -1965,6 +2120,13 @@ fn nested_coin_missing_only_context_survives_inner_keep_restore() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Attached-Equipment form whose delayed end-of-combat rider makes declared attacker B become
+// blocked; an exiled B is not replaced by the Equipment's attacking host. Nearest printed card:
+// Goblin Kites ("{R}: Target creature you control with toughness 2 or less gains flying until end
+// of turn. Flip a coin at the beginning of the next end step. If you lose the flip, sacrifice that
+// creature.") -- Goblin Kites delays an effect on its earlier target; no listed coin card makes a
+// creature become blocked.
 #[test]
 fn detached_become_blocked_does_not_replace_an_illegal_announcement_with_its_host() {
     for remove_b in [false, true] {
@@ -1972,6 +2134,17 @@ fn detached_become_blocked_does_not_replace_an_illegal_announcement_with_its_hos
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Attached-Equipment form whose delayed rider gives declared B a damage-prevention replacement; an
+// exiled B gives the shield to no one, not to the host. Nearest printed card: Impulsive Maneuvers
+// ("Whenever a creature attacks, flip a coin. If you win the flip, the next time that creature
+// would deal combat damage this turn, it deals double that damage instead. If you lose the flip,
+// the next time that creature would deal combat damage this turn, prevent that damage."); Desperate
+// Gambit ("Choose a source you control and flip a coin. If you win the flip, the next time that
+// source would deal damage this turn, it deals double that damage instead. If you lose the flip,
+// the next time it would deal damage this turn, prevent that damage.") -- Both put next-time damage
+// prevention on a coin-chosen referent, but immediately rather than delayed, and without a
+// branch-declared target.
 #[test]
 fn detached_target_replacement_does_not_replace_an_illegal_announcement_with_its_host() {
     for remove_b in [false, true] {
@@ -1979,6 +2152,13 @@ fn detached_target_replacement_does_not_replace_an_illegal_announcement_with_its
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Nested-coin form where the delayed-counter trigger follows a targetless 'gain 1 life' head in the
+// inner win branch; B's binding (or emptiness) survives that head. Nearest printed card: Goblin
+// Kites ("{R}: Target creature you control with toughness 2 or less gains flying until end of turn.
+// Flip a coin at the beginning of the next end step. If you lose the flip, sacrifice that
+// creature.") -- Goblin Kites delays an effect on its earlier target; it has no targetless head
+// before the delayed instruction and no nested coin.
 #[test]
 fn nested_coin_targetless_head_preserves_delayed_binding() {
     for remove_b in [true, false] {
@@ -1992,6 +2172,13 @@ fn nested_coin_targetless_head_preserves_delayed_binding() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// The targetless-head nested-coin delayed-counter rider, also passing through Krark's Thumb keep
+// prompts and a save/restore at the inner coin. Nearest printed card: Goblin Kites ("{R}: Target
+// creature you control with toughness 2 or less gains flying until end of turn. Flip a coin at the
+// beginning of the next end step. If you lose the flip, sacrifice that creature."); Krark's Thumb
+// ("If you would flip a coin, instead flip two coins and ignore one.") -- Goblin Kites delays an
+// effect on its earlier target; Krark's Thumb gives the keep prompt; neither nests coins.
 #[test]
 fn nested_coin_targetless_head_preserves_delayed_binding_after_inner_keep_restore() {
     for remove_b in [true, false] {
@@ -2005,6 +2192,17 @@ fn nested_coin_targetless_head_preserves_delayed_binding_after_inner_keep_restor
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Three-player attached-Equipment form whose delayed rider makes B's controller or owner draw or
+// gain 3 life; an exiled B makes nobody draw or gain, not the host's player. Nearest printed card:
+// Goblin Lyre ("Sacrifice this artifact: Flip a coin. If you win the flip, this artifact deals
+// damage to target opponent or planeswalker equal to the number of creatures you control. If you
+// lose the flip, this artifact deals damage to you equal to the number of creatures that opponent
+// or that planeswalker's controller controls."); Aleatory ("Cast this spell only during combat
+// after blockers are declared. / Flip a coin. If you win the flip, target creature gets +1/+1 until
+// end of turn. / Draw a card at the beginning of the next turn's upkeep.") -- Goblin Lyre scopes by
+// its target's controller, but not delayed; Aleatory delays a draw for its caster, not for a
+// target's player.
 #[test]
 fn delayed_parent_player_projections_do_not_substitute_other_players() {
     for rider in [
@@ -2019,6 +2217,17 @@ fn delayed_parent_player_projections_do_not_substitute_other_players() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// The player-projection rider made optional ('you may'): the optional prompt holds only B's
+// binding, and accepting draws only for B's controller/owner, nobody if B was exiled. Nearest
+// printed card: Aleatory ("Cast this spell only during combat after blockers are declared. / Flip a
+// coin. If you win the flip, target creature gets +1/+1 until end of turn. / Draw a card at the
+// beginning of the next turn's upkeep."); Goblin Lyre ("Sacrifice this artifact: Flip a coin. If
+// you win the flip, this artifact deals damage to target opponent or planeswalker equal to the
+// number of creatures you control. If you lose the flip, this artifact deals damage to you equal to
+// the number of creatures that opponent or that planeswalker's controller controls.") -- Aleatory
+// delays a draw from a coin spell but to its caster, non-optional; Goblin Lyre projects a player
+// from a target.
 #[test]
 fn optional_delayed_parent_player_projections_capture_no_substitute_recipient() {
     for rider in [
@@ -2031,6 +2240,14 @@ fn optional_delayed_parent_player_projections_capture_no_substitute_recipient() 
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Attached, nested form whose delayed payload is itself a coin putting a counter on B, with and
+// without Krark's Thumb; the delayed snapshot keeps B, or nothing. Nearest printed card: Goblin
+// Kites ("{R}: Target creature you control with toughness 2 or less gains flying until end of turn.
+// Flip a coin at the beginning of the next end step. If you lose the flip, sacrifice that
+// creature."); Krark's Thumb ("If you would flip a coin, instead flip two coins and ignore one.")
+// -- Goblin Kites' delayed end-step coin acts on its earlier declared target; it lacks a
+// branch-declared target and nested coins.
 #[test]
 fn nested_coin_payload_preserves_delayed_snapshot_identity() {
     for keep_restore in [false, true] {
@@ -2046,6 +2263,12 @@ fn nested_coin_payload_preserves_delayed_snapshot_identity() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Attached-Equipment form whose delayed rider makes declared B saddled; an exiled B saddles nothing
+// rather than the Equipment's host. Nearest printed card: Goblin Kites ("{R}: Target creature you
+// control with toughness 2 or less gains flying until end of turn. Flip a coin at the beginning of
+// the next end step. If you lose the flip, sacrifice that creature.") -- Goblin Kites delays an
+// effect on an earlier declared target; no listed coin card saddles anything.
 #[test]
 fn detached_saddle_does_not_replace_an_illegal_announcement_with_its_host() {
     for remove_b in [true, false] {
@@ -2053,6 +2276,12 @@ fn detached_saddle_does_not_replace_an_illegal_announcement_with_its_host() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Attached-Equipment form whose delayed rider sacrifices declared B; an exiled B leaves nothing
+// sacrificed and the host untouched. Nearest printed card: Goblin Kites ("{R}: Target creature you
+// control with toughness 2 or less gains flying until end of turn. Flip a coin at the beginning of
+// the next end step. If you lose the flip, sacrifice that creature.") -- Goblin Kites delays a
+// sacrifice of its earlier declared target behind a coin; it lacks a branch-declared target.
 #[test]
 fn detached_sacrifice_does_not_replace_an_illegal_announcement_with_its_host() {
     for remove_b in [true, false] {
@@ -2060,6 +2289,13 @@ fn detached_sacrifice_does_not_replace_an_illegal_announcement_with_its_host() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Attached-Equipment form whose optional delayed counter rider on declared B prompts the
+// controller; accepting counters B only, nobody if B was exiled. Nearest printed card: Goblin Kites
+// ("{R}: Target creature you control with toughness 2 or less gains flying until end of turn. Flip
+// a coin at the beginning of the next end step. If you lose the flip, sacrifice that creature.") --
+// Goblin Kites delays a mandatory effect on its earlier target; it has no optional rider or
+// branch-declared target.
 #[test]
 fn optional_detached_counter_does_not_replace_an_illegal_announcement_with_its_host() {
     for remove_b in [true, false] {
@@ -2094,6 +2330,13 @@ fn pass_to_coin_keep(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
     );
 }
 
+// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
+// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
+// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
+// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
+// the test isolates the announced branch targets. Shape: The two-branch Destroy coin activation
+// under Krark's Thumb: at the keep prompt each branch holds its pinned target, a restore with a
+// tampered pin is refused, and a stale incarnation is not destroyed.
 #[test]
 fn thumb_restore_keeps_each_declared_branch_occurrence_and_refuses_pin_drift() {
     use engine::types::ability::{AbilityDefinition, AbilityKind};
@@ -2234,6 +2477,13 @@ fn thumb_restore_keeps_each_declared_branch_occurrence_and_refuses_pin_drift() {
     }
 }
 
+// Real cards: Tavern Swindler (win-only untargeted life gain) is supported; the test calls the
+// resolver directly on a hand-built ResolvedAbility, so a parsed Tavern Swindler definition could
+// replace the AST literal; Synthetic source itself is a textless body. Shape: An untargeted single
+// coin whose win-only outcome gains its controller life, resolved directly via flip_coin::resolve
+// first without its resolved branch carrier (must refuse untouched) then canonically. Printed
+// neighbours: Tavern Swindler ("{T}, Pay 3 life: Flip a coin. If you win the flip, you gain 6
+// life."); Stitch in Time ("Flip a coin. If you win the flip, take an extra turn after this one.").
 #[test]
 fn malformed_coin_carrier_refuses_before_rng_or_mutation_and_canonical_executes() {
     use engine::game::ability_utils::build_resolved_from_def;
@@ -2286,6 +2536,14 @@ fn malformed_coin_carrier_refuses_before_rng_or_mutation_and_canonical_executes(
     assert_finished(&runner);
 }
 
+// Real cards: Goblin Bangchuckers exhibits the self-damage loss variant ("{T}: Flip a coin. If you
+// win the flip, this creature deals 2 damage to any target. If you lose the flip, this creature
+// deals 2 damage to itself."). The ParentTarget loss variant is the engine's misparse of the
+// Bangchuckers/Kaboomist "deals 2 damage to itself" clause (see the PR body), not a printed shape.
+// Orcish Captain ("{1}: Flip a coin. If you win the flip, target Orc creature gets +2/+0 until end
+// of turn. If you lose the flip, it gets -0/-2 until end of turn.") has a loss clause whose "it"
+// refers to the win clause's target; this fixture does not model that and the PR body lists it as a
+// known limitation.
 #[test]
 fn bangchuckers_shaped_loss_never_borrows_the_win_only_target() {
     use engine::types::ability::{
@@ -2361,6 +2619,14 @@ fn bangchuckers_shaped_loss_never_borrows_the_win_only_target() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A spell flipping three coins or until a loss, whose win branch targets one cast-declared creature
+// and adds +1/+1 counters equal to that target's current count each win. Nearest printed card:
+// Crazed Firecat ("When this creature enters, flip a coin until you lose a flip. Put a +1/+1
+// counter on this creature for each flip you won."); Goblin Traprunner ("Whenever this creature
+// attacks, flip three coins. For each flip you win, create a 1/1 red Goblin creature token that's
+// tapped and attacking.") -- Firecat: until-loss run with a counter per win, but on itself with
+// fixed count; Traprunner: three-coin per-win effect, untargeted.
 #[test]
 fn repeated_bound_branch_recomputes_counter_quantity_from_a_pristine_template() {
     use engine::types::ability::{
@@ -2485,6 +2751,16 @@ fn repeated_bound_branch_recomputes_counter_quantity_from_a_pristine_template() 
     }
 }
 
+// Real cards: Chaotic Strike is supported and already used in this file; it adds a cast-timing
+// restriction (combat after blockers) and a draw successor. The test edits pins on the stack
+// directly, so the counter effect is incidental and Chaotic Strike's pump could serve. Shape: A
+// spell with one coin whose win-only branch targets a creature declared at cast, checking the
+// branch's own incarnation pin over stale root pins written onto the stack entry. Printed
+// neighbours: Chaotic Strike ("Cast this spell only during combat after blockers are declared. /
+// Flip a coin. If you win the flip, target creature gets +1/+1 until end of turn. / Draw a card.");
+// Aleatory ("Cast this spell only during combat after blockers are declared. / Flip a coin. If you
+// win the flip, target creature gets +1/+1 until end of turn. / Draw a card at the beginning of the
+// next turn's upkeep.").
 #[test]
 fn independent_coin_declaration_owns_its_pins_even_when_incoming_id_is_reused() {
     use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TypedFilter};
@@ -2560,6 +2836,15 @@ fn independent_coin_declaration_owns_its_pins_even_when_incoming_id_is_reused() 
     }
 }
 
+// Real cards: Risky Move (supported) has the choose-creature-you-control, flip, lose-control
+// structure but is a trigger on gaining control of the enchantment from another player and lacks
+// the trailing independent instruction this test observes (+5 life). Shape: A resolution-time
+// choice of a creature you control, then a coin whose loss gives that chosen creature to an
+// opponent, then an independent life gain, under Krark's Thumb's keep choice with a possibly empty
+// choice. Printed neighbours: Risky Move ("At the beginning of each player's upkeep, that player
+// gains control of this enchantment. / When you gain control of this enchantment from another
+// player, choose a creature you control and an opponent. Flip a coin. If you lose the flip, that
+// opponent gains control of that creature.").
 #[test]
 fn thumb_completed_empty_choice_restores_and_runs_only_independent_instructions() {
     use engine::types::ability::{
@@ -2691,6 +2976,16 @@ fn thumb_completed_empty_choice_restores_and_runs_only_independent_instructions(
 }
 
 // T2: synthetic clauses with disjoint target pools expose traversal order.
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A two-branch coin (win destroys an opponent's target creature, loss destroys your target
+// creature) followed by an independent 'exile target artifact', optionally nested in an outer
+// coin's win; declaration order Won, Lost, successor. Nearest printed card: Crooked Scales ("{4},
+// {T}: Flip a coin. If you win the flip, destroy target creature an opponent controls. If you lose
+// the flip, destroy target creature you control unless you pay {3} and repeat this process.");
+// Goblin Archaeologist ("{R}, {T}: Flip a coin. If you win the flip, destroy target artifact and
+// untap this creature. If you lose the flip, sacrifice this creature.") -- Crooked Scales: same two
+// targeted branches but Unimplemented repeat suffix, no successor; Archaeologist: targeted win plus
+// extra clause, untargeted loss.
 #[test]
 fn coin_children_precede_a_targeted_successor_and_nested_children() {
     use engine::types::ability::{AbilityDefinition, AbilityKind};
@@ -2824,6 +3119,13 @@ fn chaotic_strike_loss_still_draws_without_pumping_either_creature() {
 }
 
 // T4: remove announced targets with actual response spells, not fixture edits.
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A two-branch opponent/own targeted destroy coin followed by an independent life gain, where
+// instant responses exile one or both announced branch targets before resolution; legality is per
+// branch occurrence. Nearest printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the
+// flip, destroy target creature an opponent controls. If you lose the flip, destroy target creature
+// you control unless you pay {3} and repeat this process.") -- Same two targeted destroy branches;
+// lacks an independent tail and its repeat suffix is Unimplemented.
 #[test]
 fn illegal_coin_children_do_not_substitute_distractors_or_suppress_a_legal_tail() {
     use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr};
@@ -2861,7 +3163,7 @@ fn illegal_coin_children_do_not_substitute_distractors_or_suppress_a_legal_tail(
                     scenario
                         .add_spell_to_hand_from_oracle(
                             P0,
-                            "Synthetic removal response",
+                            "Final Death",
                             true,
                             "Exile target creature.",
                         )
@@ -2956,6 +3258,16 @@ fn illegal_coin_children_do_not_substitute_distractors_or_suppress_a_legal_tail(
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// An activated coin with a separate 'target creature' in each branch over the same pool, letting
+// one creature be declared for both occurrences (CR 115.3). Nearest printed card: Mogg Assassin
+// ("{T}: You choose target creature an opponent controls, and that opponent chooses target
+// creature. Flip a coin. If you win the flip, destroy the creature you chose. If you lose the flip,
+// destroy the creature your opponent chose."); Crooked Scales ("{4}, {T}: Flip a coin. If you win
+// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
+// creature you control unless you pay {3} and repeat this process.") -- Mogg Assassin: two declared
+// creature targets that may coincide, but declared before the coin by two choosers; Scales: branch
+// targets with disjoint pools.
 #[test]
 fn separate_coin_target_occurrences_allow_the_same_creature() {
     // CR 115.3: each branch contains a separate occurrence of "target".
@@ -2980,6 +3292,16 @@ fn separate_coin_target_occurrences_allow_the_same_creature() {
 }
 
 // T2/T8: the engine supplies opaque addresses; the public answer is positional.
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A spell with opponent/own branch target creatures and an independent artifact-target tail,
+// retargeted by a choose-new-targets spell through a positional prompt that survives save/restore,
+// optionally after one branch target was exiled. Nearest printed card: Crooked Scales ("{4}, {T}:
+// Flip a coin. If you win the flip, destroy target creature an opponent controls. If you lose the
+// flip, destroy target creature you control unless you pay {3} and repeat this process."); Invert
+// Polarity ("Choose target spell, then flip a coin. If you win the flip, gain control of that spell
+// and you may choose new targets for it. If you lose the flip, counter that spell.") -- Scales:
+// same two branch targets, no tail, Unimplemented suffix; Invert Polarity: lets a player choose new
+// targets for a spell.
 #[test]
 fn restored_retarget_changes_only_the_addressed_coin_or_later_occurrence() {
     use engine::types::ability::{AbilityDefinition, AbilityKind, CoinFlipResult};
@@ -3035,7 +3357,7 @@ fn restored_retarget_changes_only_the_addressed_coin_or_later_occurrence() {
                 let removal = scenario
                     .add_spell_to_hand_from_oracle(
                         P0,
-                        "Synthetic stale-target response",
+                        "Final Death",
                         true,
                         "Exile target creature.",
                     )
@@ -3166,6 +3488,16 @@ fn restored_retarget_changes_only_the_addressed_coin_or_later_occurrence() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// AI legal-action generation while declaring an activated coin's two branch targets in turn: each
+// slot offers only its own legal pool (opponent creatures, then yours) and no empty choice. Nearest
+// printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target
+// creature an opponent controls. If you lose the flip, destroy target creature you control unless
+// you pay {3} and repeat this process."); Mogg Assassin ("{T}: You choose target creature an
+// opponent controls, and that opponent chooses target creature. Flip a coin. If you win the flip,
+// destroy the creature you chose. If you lose the flip, destroy the creature your opponent chose.")
+// -- Scales: same two disjoint-pool branch slots, Unimplemented repeat suffix; Mogg Assassin: two
+// declared slots, different choosers, before the coin.
 #[test]
 fn ai_required_coin_branch_slots_generate_only_the_current_legal_pool() {
     let (mut runner, source, own, opposing) = two_branch_fixture(true, true);
@@ -3309,6 +3641,15 @@ fn aleatory_draws_once_at_the_next_upkeep_on_either_coin_outcome() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// An activated coin whose win branch destroys exactly two target creatures in one occurrence,
+// rejecting the same creature twice and accepting two distinct ones. Nearest printed card: Goblin
+// Archaeologist ("{R}, {T}: Flip a coin. If you win the flip, destroy target artifact and untap
+// this creature. If you lose the flip, sacrifice this creature."); Mogg Assassin ("{T}: You choose
+// target creature an opponent controls, and that opponent chooses target creature. Flip a coin. If
+// you win the flip, destroy the creature you chose. If you lose the flip, destroy the creature your
+// opponent chose.") -- Archaeologist: win-only targeted destroy with one target; Mogg Assassin: two
+// creature targets, but separate occurrences before the coin.
 #[test]
 fn one_coin_occurrence_rejects_duplicate_targets_but_accepts_two_distinct_creatures() {
     use engine::types::ability::{AbilityDefinition, AbilityKind, MultiTargetSpec, TypedFilter};
@@ -3380,6 +3721,15 @@ fn one_coin_occurrence_rejects_duplicate_targets_but_accepts_two_distinct_creatu
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// In three players, an opponent copies a two-branch opponent/own targeted coin activation and
+// chooses new branch targets relative to the copy's controller, leaving the original intact.
+// Nearest printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target
+// creature an opponent controls. If you lose the flip, destroy target creature you control unless
+// you pay {3} and repeat this process."); Odds ("Flip a coin. If it comes up heads, counter target
+// instant or sorcery spell. If it comes up tails, copy that spell and you may choose new targets
+// for the copy.") -- Scales: same two controller-relative branch targets, Unimplemented suffix;
+// Odds: copies a spell with new targets, not an activated coin.
 #[test]
 fn cross_controller_activated_copy_rebinds_each_branch_without_mutating_original() {
     use engine::types::ability::{
@@ -3556,6 +3906,13 @@ fn cross_controller_activated_copy_rebinds_each_branch_without_mutating_original
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// In three players, a two-branch opponent/own targeted coin activated from a source owned by
+// another player, with the source destroyed, the own target blinked, or the own target stolen in
+// response. Nearest printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip,
+// destroy target creature an opponent controls. If you lose the flip, destroy target creature you
+// control unless you pay {3} and repeat this process.") -- Same two controller-relative branch
+// targets; Unimplemented repeat suffix and no owner/controller split.
 #[test]
 fn three_seat_borrowed_source_and_target_keep_controller_and_incarnation_authority() {
     use engine::types::player::PlayerId;
@@ -3589,15 +3946,10 @@ fn three_seat_borrowed_source_and_target_keep_controller_and_incarnation_authori
                 .add_land_from_oracle(P0, "Blink companion", "")
                 .id();
             let remove = scenario
-                .add_spell_to_hand_from_oracle(
-                    P0,
-                    "Synthetic source removal",
-                    true,
-                    "Destroy target artifact.",
-                )
+                .add_spell_to_hand_from_oracle(P0, "Shatter", true, "Destroy target artifact.")
                 .with_mana_cost(ManaCost::zero())
                 .id();
-            let blink = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic two-object blink", true,
+            let blink = scenario.add_spell_to_hand_from_oracle(P0, "Ghostly Flicker", true,
                 "Exile two target artifacts, creatures, and/or lands you control, then return those cards to the battlefield under your control.")
                 .with_mana_cost(ManaCost::zero()).id();
             let steal = scenario
@@ -3715,6 +4067,13 @@ fn three_seat_borrowed_source_and_target_keep_controller_and_incarnation_authori
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A two-branch targeted coin whose win target is made optional (up to one) with possibly no legal
+// choice, then a mandatory loss target and an independent artifact-target tail. Nearest printed
+// card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target creature an
+// opponent controls. If you lose the flip, destroy target creature you control unless you pay {3}
+// and repeat this process.") -- Same two branch targets; neither is optional, there is no tail, and
+// the repeat suffix is Unimplemented.
 #[test]
 fn optional_empty_coin_slot_does_not_steal_the_later_target() {
     for empty in [false, true] {
@@ -3808,6 +4167,15 @@ fn optional_empty_coin_slot_does_not_steal_the_later_target() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// An untargeted coin (win gain 3 life, loss lose 2 life) as the chosen-pile effect after an
+// opponent separates creatures into piles, compared to the same coin cast alone. Nearest printed
+// card: Winter Sky ("Flip a coin. If you win the flip, Winter Sky deals 1 damage to each creature
+// and each player. If you lose the flip, each player draws a card."); Bottle of Suleiman ("{1},
+// Sacrifice this artifact: Flip a coin. If you win the flip, create a 5/5 colorless Djinn artifact
+// creature token with flying. If you lose the flip, this artifact deals 5 damage to you.") -- Both
+// have untargeted win and loss outcomes affecting players; neither is nested under a pile
+// separation.
 #[test]
 fn separate_piles_materializes_targetless_coin_children_before_execution() {
     use engine::types::ability::{
@@ -3906,6 +4274,14 @@ fn separate_piles_materializes_targetless_coin_children_before_execution() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A Mizzix's Mastery copy of an instant whose two branch targets an elected opponent announces and
+// whose land-target tail the caster announces; the announcer concedes mid-choice and is re-elected.
+// Nearest printed card: Mogg Assassin ("{T}: You choose target creature an opponent controls, and
+// that opponent chooses target creature. Flip a coin. If you win the flip, destroy the creature you
+// chose. If you lose the flip, destroy the creature your opponent chose.") -- An opponent chooses
+// one of its targets; but that target is declared before the coin, not per branch, on an activated
+// ability.
 #[test]
 fn copied_coin_child_re_elects_a_departed_announcer_without_rebinding_other_groups() {
     use engine::types::game_state::CopyChoiceMode;
@@ -4101,6 +4477,13 @@ fn copied_coin_child_re_elects_a_departed_announcer_without_rebinding_other_grou
     assert_finished(&runner);
 }
 
+// Real cards: Orcish Captain (supported, {1} cost so it can be activated twice) has a repeatable
+// branch-declared target; it has one target rather than two, and the fixture strips Scales' {4},{T}
+// cost to allow repetition. Shape: Two stacked activations of the same coin ability with identical
+// or different branch targets; stack display groups them only when branch declarations match, and
+// each resolves its own target. Printed neighbours: Orcish Captain ("{1}: Flip a coin. If you win
+// the flip, target Orc creature gets +2/+0 until end of turn. If you lose the flip, it gets -0/-2
+// until end of turn.").
 #[test]
 fn differently_bound_coin_children_do_not_coalesce_and_each_resolves_its_own_target() {
     use engine::game::stack::stack_display_groups;
@@ -4154,6 +4537,13 @@ fn differently_bound_coin_children_do_not_coalesce_and_each_resolves_its_own_tar
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// An announced two-branch targeted coin activation whose branch children get injected hidden and
+// public snapshot metadata, projected for the opponent viewer without changing authoritative state.
+// Nearest printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target
+// creature an opponent controls. If you lose the flip, destroy target creature you control unless
+// you pay {3} and repeat this process.") -- Same two announced branch targets; its repeat suffix is
+// Unimplemented and the metadata injection is card-independent.
 #[test]
 fn viewer_projection_redacts_hidden_coin_child_context_but_keeps_public_sibling_context() {
     use engine::game::visibility::filter_state_for_viewer;
@@ -4291,6 +4681,17 @@ fn viewer_projection_redacts_hidden_coin_child_context_but_keeps_public_sibling_
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// An activated coin ability (one creature target per won/lost branch, or one two-target won branch)
+// copied on the stack by a copy-activated-ability spell that may choose new targets, keeping
+// per-occurrence uniqueness. Nearest printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you
+// win the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
+// creature you control unless you pay {3} and repeat this process."); Krark, the Thumbless
+// ("Whenever you cast an instant or sorcery spell, flip a coin. If you lose the flip, return that
+// spell to its owner's hand. If you win the flip, copy that spell, and you may choose new targets
+// for the copy. / Partner (You can have two commanders if both have partner.)") -- Crooked Scales
+// has a separate target in each branch of an activated coin but no copy; Krark copies with new
+// targets but copies spells.
 #[test]
 fn copied_coin_targets_preserve_single_and_separate_occurrence_uniqueness() {
     use engine::types::ability::{
@@ -4420,6 +4821,15 @@ fn copied_coin_targets_preserve_single_and_separate_occurrence_uniqueness() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A creature target declared before the coin; the won branch opens with a target-free life gain and
+// then gives control of that earlier target away, inline and after a Krark's Thumb keep with
+// save/restore. Nearest printed card: Invert Polarity ("Choose target spell, then flip a coin. If
+// you win the flip, gain control of that spell and you may choose new targets for it. If you lose
+// the flip, counter that spell."); Goblin Kites ("{R}: Target creature you control with toughness 2
+// or less gains flying until end of turn. Flip a coin at the beginning of the next end step. If you
+// lose the flip, sacrifice that creature.") -- Both act on a target declared before the coin;
+// neither puts a target-free instruction ahead of the rider that references it.
 #[test]
 fn independent_branch_head_preserves_incoming_referent_inline_and_after_thumb_restore() {
     use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TypedFilter};
@@ -4512,6 +4922,12 @@ fn independent_branch_head_preserves_incoming_referent_inline_and_after_thumb_re
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A modal 'choose one' spell whose first mode is a coin with a won-branch life gain, saved and
+// restored at the mode-choice prompt before the mode is selected. Nearest printed card: Tavern
+// Swindler ("{T}, Pay 3 life: Flip a coin. If you win the flip, you gain 6 life."); Stitch in Time
+// ("Flip a coin. If you win the flip, take an extra turn after this one.") -- Both have a
+// target-free coin with only a won-branch reward; neither is modal.
 #[test]
 fn modal_coin_first_mode_round_trips_at_mode_choice_and_executes_its_branch() {
     use engine::types::game_state::PersistedGameState;
@@ -4570,6 +4986,13 @@ fn modal_coin_first_mode_round_trips_at_mode_choice_and_executes_its_branch() {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// An Enchant-creature Aura's activated ability, bare or under a won coin branch, gains control of
+// one target permanent per opponent and then attaches the Aura to a target host that must satisfy
+// its Enchant restriction. Nearest printed card: Invert Polarity ("Choose target spell, then flip a
+// coin. If you win the flip, gain control of that spell and you may choose new targets for it. If
+// you lose the flip, counter that spell.") -- Its won branch gains control of a targeted object; it
+// has no per-opponent fan-out, no Aura and no attach.
 #[test]
 fn fanout_attachment_tail_keeps_enchant_restriction_with_and_without_coin_parent() {
     use engine::game::effects::attach::attach_to;
@@ -4720,6 +5143,14 @@ fn fanout_attachment_tail_keeps_enchant_restriction_with_and_without_coin_parent
     }
 }
 
+// Real cards: Either has a target-free coin with only a won-branch effect. The incoming occurrences
+// come from the test, not the card. Stitch in Time's extra turn and Tavern Swindler's pay-3-life
+// cost would change the finish and life assertions. Shape: A target-free single-coin spell (won
+// branch gains life) whose stack entry is hand-seeded with one pinned and one unpinned incoming
+// occurrence, which must keep deterministic pins through a Krark's Thumb keep and save/restore.
+// Printed neighbours: Stitch in Time ("Flip a coin. If you win the flip, take an extra turn after
+// this one."); Tavern Swindler ("{T}, Pay 3 life: Flip a coin. If you win the flip, you gain 6
+// life.").
 #[test]
 fn mixed_incoming_pins_round_trip_through_a_production_thumb_keep() {
     use engine::types::game_state::PersistedGameState;
@@ -4809,6 +5240,16 @@ fn mixed_incoming_pins_round_trip_through_a_production_thumb_keep() {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A coin spell with a separate 'target creature' in each branch: both targets are announced at
+// cast, both emit BecomesTarget, and a 'whenever you cast a spell that targets this creature'
+// trigger fires once. Nearest printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the
+// flip, destroy target creature an opponent controls. If you lose the flip, destroy target creature
+// you control unless you pay {3} and repeat this process."); Orcish Captain ("{1}: Flip a coin. If
+// you win the flip, target Orc creature gets +2/+0 until end of turn. If you lose the flip, it gets
+// -0/-2 until end of turn.") -- Crooked Scales targets separately in each branch but is an
+// activated ability (and unimplemented); Orcish Captain's lost branch reuses the won branch's
+// target.
 #[test]
 fn both_coin_branch_targets_emit_events_and_the_heroic_target_triggers_once() {
     use engine::types::game_state::StackEntryKind;
@@ -4878,6 +5319,14 @@ fn both_coin_branch_targets_emit_events_and_the_heroic_target_triggers_once() {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A non-coin spell targets a creature and creates a next-end-step delayed trigger that puts a
+// counter on 'that creature'; after a two-target flicker returns it as a new object, the trigger
+// must not affect it. Nearest printed card: Goblin Kites ("{R}: Target creature you control with
+// toughness 2 or less gains flying until end of turn. Flip a coin at the beginning of the next end
+// step. If you lose the flip, sacrifice that creature.") -- Targets a creature and delays an
+// end-step instruction on 'that creature', but that instruction is a coin flip; this test is the
+// non-coin control.
 #[test]
 fn non_coin_delayed_reference_retains_its_creation_pin_across_a_blink() {
     use engine::types::ability::{
@@ -4918,7 +5367,7 @@ fn non_coin_delayed_reference_retains_its_creation_pin_across_a_blink() {
             .add_spell_to_hand(P0, "Synthetic non-coin delayed counter", true)
             .with_ability_definition(definition)
             .id();
-        let flicker = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic flicker", true,
+        let flicker = scenario.add_spell_to_hand_from_oracle(P0, "Ghostly Flicker", true,
             "Exile two target artifacts, creatures, and/or lands you control, then return those cards to the battlefield under your control.").id();
         let mut runner = scenario.build();
         runner.cast(spell).target_object(creature).resolve();
@@ -4997,6 +5446,14 @@ fn non_coin_blink_and_exile_life_riders_follow_the_moved_object() {
     assert_finished(&runner);
 }
 
+// Real cards: Bangchuckers exhibits only the plain variant (won branch deals 2 damage to any
+// target) and is an activated ability, not a spell. No printed coin card has the
+// declare-creature-then-redirect-shield variant, so that half needs a synthetic. Shape: A coin
+// spell whose won branch deals 2 damage to any target (variant: declares a creature, then a
+// damage-redirect shield to a chosen target); the pool must exclude lands and noncreature
+// artifacts. Printed neighbours: Goblin Bangchuckers ("{T}: Flip a coin. If you win the flip, this
+// creature deals 2 damage to any target. If you lose the flip, this creature deals 2 damage to
+// itself.").
 #[test]
 fn coin_damage_any_target_legality_uses_the_declaring_instruction() {
     use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TypedFilter};
@@ -5108,6 +5565,15 @@ fn coin_damage_any_target_legality_uses_the_declaring_instruction() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// An outer resolution-time 'target creature you control' choice that comes up empty, followed by a
+// coin whose won branch declares its own creature target and gains control of it, inline and after
+// Thumb save/restore. Nearest printed card: Invert Polarity ("Choose target spell, then flip a
+// coin. If you win the flip, gain control of that spell and you may choose new targets for it. If
+// you lose the flip, counter that spell."); Goblin Archaeologist ("{R}, {T}: Flip a coin. If you
+// win the flip, destroy target artifact and untap this creature. If you lose the flip, sacrifice
+// this creature.") -- Invert Polarity's won branch gains control of a target; Archaeologist's won
+// branch declares its own target; neither has an empty prior choice.
 #[test]
 fn coin_own_declaration_shadows_an_empty_incoming_result_inline_and_after_restore() {
     use engine::types::ability::{
@@ -5208,6 +5674,15 @@ fn coin_own_declaration_shadows_an_empty_incoming_result_inline_and_after_restor
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A coin spell whose won and lost branches each target an Aura, then a new host for it; the lost
+// branch's host pool must use its own Aura's Enchant restriction. Nearest printed card: Crooked
+// Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target creature an opponent
+// controls. If you lose the flip, destroy target creature you control unless you pay {3} and repeat
+// this process."); Goblin Archaeologist ("{R}, {T}: Flip a coin. If you win the flip, destroy
+// target artifact and untap this creature. If you lose the flip, sacrifice this creature.") --
+// Crooked Scales declares a separate target in each branch, Archaeologist one in its won branch;
+// neither attaches anything.
 #[test]
 fn coin_attachment_host_uses_its_own_branch_aura() {
     use engine::game::effects::attach::attach_to;
@@ -5321,6 +5796,15 @@ fn coin_attachment_host_uses_its_own_branch_aura() {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A non-coin 'return target creature card from your graveyard to the battlefield' spell whose
+// result is forwarded to an AST-added rider (resolution-timed) putting two +1/+1 counters on the
+// returned object. Nearest printed card: Ral Zarek, Guest Lecturer ("[+1]: Surveil 2. / [−1]: Any
+// number of target players each discard a card. / [−2]: Return target creature card with mana value
+// 3 or less from your graveyard to the battlefield. / [−7]: Flip five coins. Target opponent skips
+// their next X turns, where X is the number of coins that came up heads.") -- Its -2 returns a
+// target creature card from graveyard to battlefield; it has no counter rider on the returned
+// object.
 #[test]
 fn non_coin_forwarded_parent_target_resolution_rider_keeps_its_bound_object() {
     use engine::types::ability::{
@@ -5380,6 +5864,15 @@ fn non_coin_forwarded_parent_target_resolution_rider_keeps_its_bound_object() {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A coin whose won branch targets an artifact and lost branch targets a creature, then destroys a
+// permanent sharing its card type; the dependent pool must use the lost creature. Nearest printed
+// card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target creature an
+// opponent controls. If you lose the flip, destroy target creature you control unless you pay {3}
+// and repeat this process."); Goblin Archaeologist ("{R}, {T}: Flip a coin. If you win the flip,
+// destroy target artifact and untap this creature. If you lose the flip, sacrifice this creature.")
+// -- Crooked Scales has separate per-branch targets and Archaeologist a won-branch artifact target;
+// neither has a dependent shares-a-type target.
 #[test]
 fn coin_lost_dependent_target_uses_its_lexical_creature_not_won_artifact() {
     use engine::game::ability_utils::{build_resolved_from_def, build_target_slots};
@@ -5470,6 +5963,16 @@ fn coin_lost_dependent_target_uses_its_lexical_creature_not_won_artifact() {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A coin whose lost branch declares a creature you control and then an opponent's creature, with a
+// rider naming the branch's first declaration by slot index, checked under legality changes and
+// Thumb save/restore. Nearest printed card: Mogg Assassin ("{T}: You choose target creature an
+// opponent controls, and that opponent chooses target creature. Flip a coin. If you win the flip,
+// destroy the creature you chose. If you lose the flip, destroy the creature your opponent
+// chose."); Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target creature an
+// opponent controls. If you lose the flip, destroy target creature you control unless you pay {3}
+// and repeat this process.") -- Mogg Assassin splits targets between you and an opponent but
+// declares them before the coin; Crooked Scales targets per branch but only one per branch.
 #[test]
 fn coin_lost_numbered_reference_keeps_branch_base_and_outer_legality_across_restore() {
     use engine::types::ability::{
@@ -5573,6 +6076,14 @@ fn coin_lost_numbered_reference_keeps_branch_base_and_outer_legality_across_rest
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A resolved creature-target root whose incarnation pin is set by hand: its inherited 'put counters
+// on that creature' rider, resolved directly, must do nothing once the target becomes a new
+// incarnation. Nearest printed card: Goblin Kites ("{R}: Target creature you control with toughness
+// 2 or less gains flying until end of turn. Flip a coin at the beginning of the next end step. If
+// you lose the flip, sacrifice that creature.") -- A later instruction refers back to 'that
+// creature' targeted earlier; it is a coin sacrifice, not a counter rider, and is not driven by
+// hand.
 #[test]
 fn declaring_root_delayed_pin_still_guards_its_inherited_counter_rider() {
     use engine::game::ability_utils::build_resolved_from_def;
@@ -5636,6 +6147,14 @@ fn declaring_root_delayed_pin_still_guards_its_inherited_counter_rider() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A coin branch (won or lost, by argument) holding one fight instruction with two targets, a
+// creature and then a permanent that shares a card type with it; the static and live pools must
+// agree. Nearest printed card: Mogg Assassin ("{T}: You choose target creature an opponent
+// controls, and that opponent chooses target creature. Flip a coin. If you win the flip, destroy
+// the creature you chose. If you lose the flip, destroy the creature your opponent chose.") --
+// Declares two creature targets in one coin ability; it has no fight, no shares-a-type dependency,
+// and both targets precede the coin.
 fn same_node_coin_scope(won: bool) {
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, FilterProp, SharedQuality, SharedQualityRelation,
@@ -5732,16 +6251,40 @@ fn same_node_coin_scope(won: bool) {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// The same_node_coin_scope fixture with the dependent two-target fight in the won branch. Nearest
+// printed card: Mogg Assassin ("{T}: You choose target creature an opponent controls, and that
+// opponent chooses target creature. Flip a coin. If you win the flip, destroy the creature you
+// chose. If you lose the flip, destroy the creature your opponent chose.") -- Declares two creature
+// targets in one coin ability; it has no fight, no shares-a-type dependency, and both targets
+// precede the coin.
 #[test]
 fn coin_scope_same_node_won_static_pool_matches_live_prompt() {
     same_node_coin_scope(true);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// The same_node_coin_scope fixture with the dependent two-target fight in the lost branch. Nearest
+// printed card: Mogg Assassin ("{T}: You choose target creature an opponent controls, and that
+// opponent chooses target creature. Flip a coin. If you win the flip, destroy the creature you
+// chose. If you lose the flip, destroy the creature your opponent chose.") -- Declares two creature
+// targets in one coin ability; it has no fight, no shares-a-type dependency, and both targets
+// precede the coin.
 #[test]
 fn coin_scope_same_node_lost_static_pool_matches_live_prompt() {
     same_node_coin_scope(false);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// An outer creature target precedes a coin whose lost branch targets a creature and destroys a
+// target permanent attached to declared slot 0; the slot must resolve to the branch's creature, not
+// the outer target. Nearest printed card: Invert Polarity ("Choose target spell, then flip a coin.
+// If you win the flip, gain control of that spell and you may choose new targets for it. If you
+// lose the flip, counter that spell."); Crooked Scales ("{4}, {T}: Flip a coin. If you win the
+// flip, destroy target creature an opponent controls. If you lose the flip, destroy target creature
+// you control unless you pay {3} and repeat this process.") -- Invert Polarity targets before the
+// coin and Crooked Scales targets inside the branch; neither has an attached-to-declared-target
+// reference.
 #[test]
 fn coin_scope_numbered_declared_view_uses_lost_branch_base() {
     use engine::game::effects::attach::attach_to;
@@ -5857,6 +6400,13 @@ fn coin_scope_numbered_declared_view_uses_lost_branch_base() {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A lost branch declares a creature, then a player, then a target permanent sharing a card type
+// with 'it'; the antecedent must stay the creature (not the player) and fail if the creature's type
+// changes. Nearest printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip,
+// destroy target creature an opponent controls. If you lose the flip, destroy target creature you
+// control unless you pay {3} and repeat this process.") -- Its lost branch declares its own target;
+// it has no interposed player target and no dependent shares-a-type target.
 #[test]
 fn coin_scope_player_declaration_does_not_shadow_object_antecedent() {
     use engine::types::ability::{
@@ -5945,6 +6495,16 @@ fn coin_scope_player_declaration_does_not_shadow_object_antecedent() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A non-coin chain declares an artifact, a creature and a player, then a target permanent sharing a
+// card type with 'it'; the antecedent must stay the chain's first object (the artifact). Nearest
+// printed card: Ral Zarek ("[+1]: Tap target permanent, then untap another target permanent. /
+// [−2]: Ral Zarek deals 3 damage to any target. / [−7]: Flip five coins. Take an extra turn after
+// this one for each coin that comes up heads."); Mogg Assassin ("{T}: You choose target creature an
+// opponent controls, and that opponent chooses target creature. Flip a coin. If you win the flip,
+// destroy the creature you chose. If you lose the flip, destroy the creature your opponent chose.")
+// -- Both declare several targets in sequence in one ability; neither has a dependent shares-a-type
+// target, and Mogg Assassin's is a coin ability.
 #[test]
 fn non_coin_scope_keeps_first_prefix_object_across_later_declarations() {
     use engine::types::ability::{
@@ -6038,6 +6598,12 @@ fn non_coin_scope_keeps_first_prefix_object_across_later_declarations() {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A shared builder for 'destroy target permanent that shares a card type with it', whose target
+// pool depends on an earlier declared referent. Nearest printed card: Goblin Archaeologist ("{R},
+// {T}: Flip a coin. If you win the flip, destroy target artifact and untap this creature. If you
+// lose the flip, sacrifice this creature.") -- Destroys a typed target inside a coin branch; it has
+// no dependency on an earlier declared referent.
 fn shared_type_destroy() -> engine::types::ability::AbilityDefinition {
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, FilterProp, SharedQuality, SharedQualityRelation,
@@ -6058,6 +6624,16 @@ fn shared_type_destroy() -> engine::types::ability::AbilityDefinition {
     )
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A creature-you-control target precedes a coin whose lost branch destroys two target permanents
+// sharing a card type with that creature; the first dependent instance must not become the second's
+// antecedent. Nearest printed card: Invert Polarity ("Choose target spell, then flip a coin. If you
+// win the flip, gain control of that spell and you may choose new targets for it. If you lose the
+// flip, counter that spell."); Mogg Assassin ("{T}: You choose target creature an opponent
+// controls, and that opponent chooses target creature. Flip a coin. If you win the flip, destroy
+// the creature you chose. If you lose the flip, destroy the creature your opponent chose.") --
+// Invert Polarity's branch refers to a target declared before the coin; Mogg Assassin has two
+// targets; neither has dependent multi-target instances.
 #[test]
 fn coin_dependent_multitarget_instances_keep_the_ancestor_referent() {
     use engine::types::ability::{
@@ -6168,6 +6744,15 @@ fn coin_dependent_multitarget_instances_keep_the_ancestor_referent() {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A lost branch whose first fight target accepts a player or an object, then a creature, then a
+// target permanent sharing a card type with the first; the dependent pool follows whichever was
+// elected. Nearest printed card: Goblin Bangchuckers ("{T}: Flip a coin. If you win the flip, this
+// creature deals 2 damage to any target. If you lose the flip, this creature deals 2 damage to
+// itself."); Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target creature
+// an opponent controls. If you lose the flip, destroy target creature you control unless you pay
+// {3} and repeat this process.") -- Bangchuckers has an any-target slot in a coin branch and
+// Crooked Scales targets per branch; neither has a dependent shares-a-type slot.
 #[test]
 fn coin_mixed_slot_static_pool_covers_player_and_object_elections() {
     use engine::types::ability::{AbilityDefinition, AbilityKind, TypedFilter};
@@ -6261,6 +6846,16 @@ fn coin_mixed_slot_static_pool_covers_player_and_object_elections() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A creature target precedes a coin whose lost branch holds an optional two-target fight (an
+// artifact, then a permanent sharing its type); skipping the artifact leaves the outer creature as
+// antecedent. Nearest printed card: Invert Polarity ("Choose target spell, then flip a coin. If you
+// win the flip, gain control of that spell and you may choose new targets for it. If you lose the
+// flip, counter that spell."); Mogg Assassin ("{T}: You choose target creature an opponent
+// controls, and that opponent chooses target creature. Flip a coin. If you win the flip, destroy
+// the creature you chose. If you lose the flip, destroy the creature your opponent chose.") --
+// Invert Polarity's branch refers to a target declared before the coin and Mogg Assassin has two
+// targets; neither has optional targeting or a dependency.
 #[test]
 fn coin_optional_same_node_election_keeps_the_ancestor_in_static_scope() {
     use engine::types::ability::{AbilityDefinition, AbilityKind, TypedFilter};
@@ -6368,6 +6963,16 @@ fn coin_optional_same_node_election_keeps_the_ancestor_in_static_scope() {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A root creature target, then an intermediate shares-a-card-type target, then a coin whose losing
+// destroy-shares-a-card-type outcome must bind to the root, not the intermediate; also with the
+// whole chain inside the losing outcome. Nearest printed card: Invert Polarity ("Choose target
+// spell, then flip a coin. If you win the flip, gain control of that spell and you may choose new
+// targets for it. If you lose the flip, counter that spell."); Goblin Kites ("{R}: Target creature
+// you control with toughness 2 or less gains flying until end of turn. Flip a coin at the beginning
+// of the next end step. If you lose the flip, sacrifice that creature.") -- Both declare a target
+// before the coin and make an outcome act on it; neither has an outcome that declares its own
+// dependent new target.
 #[test]
 fn coin_binds_prior_intermediate_never_becomes_the_antecedent() {
     use engine::types::ability::{AbilityDefinition, AbilityKind, TypedFilter};
@@ -6479,6 +7084,15 @@ fn coin_binds_prior_intermediate_never_becomes_the_antecedent() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A coin whose losing outcome is a zero-to-two shares-a-card-type destroy with no possible referent
+// (zero announced slots), followed by a target-player instruction; the empty group must not take
+// the player slot. Nearest printed card: Dumb Ass ("At the beginning of your upkeep, flip a coin.
+// If you lose the flip, target opponent chooses whether this creature attacks this turn."); Crooked
+// Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target creature an opponent
+// controls. If you lose the flip, destroy target creature you control unless you pay {3} and repeat
+// this process.") -- Dumb Ass's losing outcome targets a player and Crooked Scales' outcomes
+// destroy targets; neither has an empty dependent group before a player target.
 #[test]
 fn coin_zero_slot_declaration_does_not_borrow_the_following_player_pool() {
     use engine::types::ability::{AbilityDefinition, AbilityKind, MultiTargetSpec};
@@ -6509,6 +7123,15 @@ fn coin_zero_slot_declaration_does_not_borrow_the_following_player_pool() {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A root creature target, then a coin whose losing outcome is a two-operand effect (two
+// shares-a-type sources deal power damage, or attach two Equipment) to a creature; checks four
+// announced slots, then cancels. Nearest printed card: Goblin Bangchuckers ("{T}: Flip a coin. If
+// you win the flip, this creature deals 2 damage to any target. If you lose the flip, this creature
+// deals 2 damage to itself."); Invert Polarity ("Choose target spell, then flip a coin. If you win
+// the flip, gain control of that spell and you may choose new targets for it. If you lose the flip,
+// counter that spell.") -- Goblin Bangchuckers has a damage outcome with its own target; Invert
+// Polarity targets before the coin. Neither has a two-operand outcome.
 #[test]
 fn coin_dependent_source_and_attachment_counts_match_their_slots() {
     use engine::types::ability::{
@@ -6622,6 +7245,17 @@ fn coin_dependent_source_and_attachment_counts_match_their_slots() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A coin whose losing outcome destroys a creature with mana value or power at least (or above) a
+// declared target's mana value; refused with no earlier object target, castable with a prior
+// creature-you-control target. Nearest printed card: Goblin Lyre ("Sacrifice this artifact: Flip a
+// coin. If you win the flip, this artifact deals damage to target opponent or planeswalker equal to
+// the number of creatures you control. If you lose the flip, this artifact deals damage to you
+// equal to the number of creatures that opponent or that planeswalker's controller controls.");
+// Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target creature an opponent
+// controls. If you lose the flip, destroy target creature you control unless you pay {3} and repeat
+// this process.") -- Goblin Lyre's losing outcome reads a value from the winning outcome's declared
+// target; it has no target filter comparing a declared object's mana value.
 #[test]
 fn coin_unbound_scalar_refuses_cast_until_an_object_antecedent_is_declared() {
     use engine::types::ability::{
@@ -6726,6 +7360,17 @@ fn coin_unbound_scalar_refuses_cast_until_an_object_antecedent_is_declared() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Root creature-you-control target, then a coin: won targets an artifact, lost destroys a permanent
+// with mana value at least the root's; if the root turns illegal, the dependent destroy fails while
+// the spell resolves. Nearest printed card: Goblin Lyre ("Sacrifice this artifact: Flip a coin. If
+// you win the flip, this artifact deals damage to target opponent or planeswalker equal to the
+// number of creatures you control. If you lose the flip, this artifact deals damage to you equal to
+// the number of creatures that opponent or that planeswalker's controller controls."); Invert
+// Polarity ("Choose target spell, then flip a coin. If you win the flip, gain control of that spell
+// and you may choose new targets for it. If you lose the flip, counter that spell.") -- Goblin Lyre
+// reads a declared target's value in an outcome; Invert Polarity's outcomes act on an earlier
+// target. Neither filters a target by it.
 #[test]
 fn coin_dependent_value_read_does_not_happen_when_the_announced_antecedent_becomes_illegal() {
     use engine::types::ability::{
@@ -6865,6 +7510,17 @@ fn coin_dependent_value_read_does_not_happen_when_the_announced_antecedent_becom
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// An optional root artifact target, then a coin whose optional losing outcome destroys a creature
+// with mana value above the root's; declining the root leaves no dependent prompt instead of an
+// unbound pool. Nearest printed card: Goblin Lyre ("Sacrifice this artifact: Flip a coin. If you
+// win the flip, this artifact deals damage to target opponent or planeswalker equal to the number
+// of creatures you control. If you lose the flip, this artifact deals damage to you equal to the
+// number of creatures that opponent or that planeswalker's controller controls."); Invert Polarity
+// ("Choose target spell, then flip a coin. If you win the flip, gain control of that spell and you
+// may choose new targets for it. If you lose the flip, counter that spell.") -- Goblin Lyre reads a
+// declared target's value in an outcome; Invert Polarity's outcomes act on an earlier target.
+// Neither has an optional antecedent.
 #[test]
 fn coin_declining_the_only_possible_antecedent_offers_no_unbound_targets() {
     use engine::types::ability::{
@@ -6997,6 +7653,15 @@ fn coin_declining_the_only_possible_antecedent_offers_no_unbound_targets() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A choose-two modal spell (invented Oracle text): tap target noncreature artifact; target creature
+// gets +1/+1, then a coin whose loss destroys a permanent sharing a card type with that creature,
+// not the artifact. Nearest printed card: Goblin Kites ("{R}: Target creature you control with
+// toughness 2 or less gains flying until end of turn. Flip a coin at the beginning of the next end
+// step. If you lose the flip, sacrifice that creature."); Orcish Captain ("{1}: Flip a coin. If you
+// win the flip, target Orc creature gets +2/+0 until end of turn. If you lose the flip, it gets
+// -0/-2 until end of turn.") -- Both target a creature, then flip with an outcome acting on that
+// creature; neither is modal or has an outcome with its own dependent target.
 #[test]
 fn modal_coin_static_scope_matches_the_combined_mode_chain() {
     let mut scenario = GameScenario::new();
@@ -7097,6 +7762,17 @@ struct ChooseThenFlip {
     expected_gain: i32,
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// An enters trigger chooses a creature type or card name, then flips a coin whose both outcomes
+// gain life per matching creature you control; optionally under Krark's Thumb with a persisted
+// round trip. Nearest printed card: Desperate Gambit ("Choose a source you control and flip a coin.
+// If you win the flip, the next time that source would deal damage this turn, it deals double that
+// damage instead. If you lose the flip, the next time it would deal damage this turn, prevent that
+// damage."); Risky Move ("At the beginning of each player's upkeep, that player gains control of
+// this enchantment. / When you gain control of this enchantment from another player, choose a
+// creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains
+// control of that creature.") -- Both choose something before the flip and have outcomes act on
+// that choice; neither chooses a creature type or card name.
 /// Drives the host's enters trigger through the production cast and priority
 /// path, answers the `NamedChoice` through `GameAction::ChooseOption`, then runs
 /// the flip inline (`thumb == false`) or after Krark's Thumb with a persisted
@@ -7284,6 +7960,17 @@ fn choose_then_flip(case: &ChooseThenFlip, thumb: bool, won: bool) {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Through choose_then_flip: a persisted creature-type choice made before the flip is read by both
+// coin outcomes, which count creatures you control of the chosen type, with and without Krark's
+// Thumb. Nearest printed card: Desperate Gambit ("Choose a source you control and flip a coin. If
+// you win the flip, the next time that source would deal damage this turn, it deals double that
+// damage instead. If you lose the flip, the next time it would deal damage this turn, prevent that
+// damage."); Risky Move ("At the beginning of each player's upkeep, that player gains control of
+// this enchantment. / When you gain control of this enchantment from another player, choose a
+// creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains
+// control of that creature.") -- Both choose something before the flip and have outcomes act on
+// that choice; neither chooses a creature type or card name.
 #[test]
 fn choose_then_flip_outcome_reads_the_published_choice() {
     use engine::types::ability::{ChoiceType, ControllerRef, FilterProp, TypedFilter};
@@ -7313,6 +8000,17 @@ fn choose_then_flip_outcome_reads_the_published_choice() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Through choose_then_flip: a non-persisted card-name choice answered through the continuation is
+// read by both coin outcomes, which count creatures you control with that name, with and without
+// Krark's Thumb. Nearest printed card: Desperate Gambit ("Choose a source you control and flip a
+// coin. If you win the flip, the next time that source would deal damage this turn, it deals double
+// that damage instead. If you lose the flip, the next time it would deal damage this turn, prevent
+// that damage."); Risky Move ("At the beginning of each player's upkeep, that player gains control
+// of this enchantment. / When you gain control of this enchantment from another player, choose a
+// creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains
+// control of that creature.") -- Both choose something before the flip and have outcomes act on
+// that choice; neither chooses a creature type or card name.
 #[test]
 fn choose_then_flip_outcome_reads_the_named_card() {
     use engine::types::ability::{ChoiceType, ControllerRef, TypedFilter};
@@ -7381,6 +8079,15 @@ fn cast_for_prompts(runner: &mut GameRunner, spell: ObjectId) {
         .expect("required announcement");
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A root exactly-one creature-you-control target (explicit multi-target spec), then a coin whose
+// losing outcome destroys a permanent sharing a card type with that creature; optionally with
+// Krark's Thumb. Nearest printed card: Goblin Kites ("{R}: Target creature you control with
+// toughness 2 or less gains flying until end of turn. Flip a coin at the beginning of the next end
+// step. If you lose the flip, sacrifice that creature."); Invert Polarity ("Choose target spell,
+// then flip a coin. If you win the flip, gain control of that spell and you may choose new targets
+// for it. If you lose the flip, counter that spell.") -- Both declare a target before the coin and
+// make an outcome act on it; neither has an outcome that declares its own dependent new target.
 /// Synthetic fixture (no real card): an exact-one ancestor declaration whose
 /// continuation is a coin whose losing outcome depends on the ancestor's target.
 /// Object ids: ancestor 1, victim 2, distractor 3, spell 4, Krark's Thumb 5.
@@ -7427,6 +8134,15 @@ fn multi_target_ancestor_runner(
     (scenario.build(), ancestor, victim, distractor, spell)
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Through multi_target_ancestor_runner: the losing outcome's dependent target announced with the
+// exactly-one root stays bound in the coin frame, including across a Krark's Thumb keep prompt and
+// wire round trip. Nearest printed card: Goblin Kites ("{R}: Target creature you control with
+// toughness 2 or less gains flying until end of turn. Flip a coin at the beginning of the next end
+// step. If you lose the flip, sacrifice that creature."); Invert Polarity ("Choose target spell,
+// then flip a coin. If you win the flip, gain control of that spell and you may choose new targets
+// for it. If you lose the flip, counter that spell.") -- Both declare a target before the coin and
+// make an outcome act on it; neither has an outcome that declares its own dependent new target.
 #[test]
 fn multi_target_ancestor_keeps_its_dependent_coin_outcome_target() {
     use engine::types::resolution::ResolutionStateWire;
@@ -7517,6 +8233,15 @@ fn multi_target_ancestor_keeps_its_dependent_coin_outcome_target() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Root creature-you-control target, a middle up-to-one opponent's-artifact target with no
+// candidates (zero slots), then a coin whose losing shares-a-card-type destroy must still see the
+// root. Nearest printed card: Goblin Kites ("{R}: Target creature you control with toughness 2 or
+// less gains flying until end of turn. Flip a coin at the beginning of the next end step. If you
+// lose the flip, sacrifice that creature."); Invert Polarity ("Choose target spell, then flip a
+// coin. If you win the flip, gain control of that spell and you may choose new targets for it. If
+// you lose the flip, counter that spell.") -- Both declare a target before the coin and make an
+// outcome act on it; neither has an outcome that declares its own dependent new target.
 #[test]
 fn empty_multi_target_node_between_ancestor_and_dependent_coin_outcome() {
     use engine::types::ability::{
@@ -7578,6 +8303,15 @@ fn empty_multi_target_node_between_ancestor_and_dependent_coin_outcome() {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A coin whose won outcome destroys up to two target artifacts (one exists) and lost destroys
+// target creature; slot-by-slot, the won group must end at its one slot, not take lost's. Nearest
+// printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target
+// creature an opponent controls. If you lose the flip, destroy target creature you control unless
+// you pay {3} and repeat this process."); Goblin Archaeologist ("{R}, {T}: Flip a coin. If you win
+// the flip, destroy target artifact and untap this creature. If you lose the flip, sacrifice this
+// creature.") -- Crooked Scales and Goblin Archaeologist give a coin outcome its own declared
+// destroy target; neither has an up-to-two outcome group.
 #[test]
 fn coin_outcome_multi_target_group_keeps_to_its_own_slots() {
     use engine::types::ability::{
@@ -7672,6 +8406,15 @@ enum LostShape {
     UpToOne,
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A coin, as a spell or an enters trigger, whose won outcome destroys up to two artifacts and lost
+// destroys a required or up-to-one creature; one bulk SelectTargets list must split into each
+// outcome's group. Nearest printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the
+// flip, destroy target creature an opponent controls. If you lose the flip, destroy target creature
+// you control unless you pay {3} and repeat this process."); Goblin Archaeologist ("{R}, {T}: Flip
+// a coin. If you win the flip, destroy target artifact and untap this creature. If you lose the
+// flip, sacrifice this creature.") -- Crooked Scales and Goblin Archaeologist give a coin outcome
+// its own declared destroy target; neither has an up-to-two outcome group.
 /// Synthetic. One coin chain whose Won outcome is a multi-target node. The
 /// bulk `GameAction::SelectTargets` declaration is driven through the
 /// production entry for `entry`, and the losing outcome is either required or
@@ -7838,6 +8581,15 @@ fn bulk_coin_groups(entry: BulkEntry, lost: LostShape, won: bool) {
     assert_finished(&runner);
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Through bulk_coin_groups, spell entry, required lost: a bulk list for won up-to-two artifacts
+// plus lost creature keeps each target in its own outcome group. Nearest printed card: Crooked
+// Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target creature an opponent
+// controls. If you lose the flip, destroy target creature you control unless you pay {3} and repeat
+// this process."); Goblin Archaeologist ("{R}, {T}: Flip a coin. If you win the flip, destroy
+// target artifact and untap this creature. If you lose the flip, sacrifice this creature.") --
+// Crooked Scales and Goblin Archaeologist give a coin outcome its own declared destroy target;
+// neither has an up-to-two outcome group.
 #[test]
 fn bulk_spell_declaration_keeps_coin_outcome_groups_to_their_own_slots() {
     // Synthetic. CR 601.2c + CR 115.1: a spell's bulk declaration is a
@@ -7848,6 +8600,15 @@ fn bulk_spell_declaration_keeps_coin_outcome_groups_to_their_own_slots() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Through bulk_coin_groups, enters-trigger entry, required lost: the trigger's bulk declaration
+// reproduces the same won/lost group partition as the spell entry. Nearest printed card: Crooked
+// Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target creature an opponent
+// controls. If you lose the flip, destroy target creature you control unless you pay {3} and repeat
+// this process."); Goblin Archaeologist ("{R}, {T}: Flip a coin. If you win the flip, destroy
+// target artifact and untap this creature. If you lose the flip, sacrifice this creature.") --
+// Crooked Scales and Goblin Archaeologist give a coin outcome its own declared destroy target;
+// neither has an up-to-two outcome group.
 #[test]
 fn bulk_trigger_declaration_keeps_coin_outcome_groups_to_their_own_slots() {
     // Synthetic. CR 601.2c + CR 115.1: the enters-trigger entry must reproduce
@@ -7857,6 +8618,14 @@ fn bulk_trigger_declaration_keeps_coin_outcome_groups_to_their_own_slots() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// Through bulk_coin_groups, spell entry, up-to-one lost: the won up-to-two artifact group must not
+// claim lost's optional slot. Nearest printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you
+// win the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
+// creature you control unless you pay {3} and repeat this process."); Goblin Archaeologist ("{R},
+// {T}: Flip a coin. If you win the flip, destroy target artifact and untap this creature. If you
+// lose the flip, sacrifice this creature.") -- Crooked Scales and Goblin Archaeologist give a coin
+// outcome its own declared destroy target; neither has an up-to-two outcome group.
 #[test]
 fn bulk_declaration_keeps_an_optional_outcome_target_in_its_own_group() {
     // Synthetic. CR 601.2c: "up to one" Lost announces one optional slot; the
@@ -7892,6 +8661,16 @@ fn answer_prompt_choices(runner: &mut GameRunner, label: &str, answers: &[Option
     );
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A root up-to-two creature group, then a coin whose losing outcome destroys its own target
+// creature; bulk lists are positional, so mid-list or whole-group declines are refused, while
+// per-slot declining works. Nearest printed card: Mogg Assassin ("{T}: You choose target creature
+// an opponent controls, and that opponent chooses target creature. Flip a coin. If you win the
+// flip, destroy the creature you chose. If you lose the flip, destroy the creature your opponent
+// chose."); Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target creature an
+// opponent controls. If you lose the flip, destroy target creature you control unless you pay {3}
+// and repeat this process.") -- Mogg Assassin declares two creature targets before a coin whose
+// outcomes destroy them; it has no variable-count group or outcome-own target.
 /// Synthetic. CR 601.2c + CR 115.1: the announcement fixes the ancestor's
 /// variable-count group and the coin outcome's own target. On a coin chain with
 /// a multi-target node the bulk list is a positional prefix of the announced
@@ -7902,6 +8681,16 @@ fn answer_prompt_choices(runner: &mut GameRunner, label: &str, answers: &[Option
 fn bulk_declaration_reads_an_ancestor_multi_target_group_positionally() {
     use engine::types::ability::{AbilityDefinition, AbilityKind, MultiTargetSpec, TypedFilter};
 
+    // Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this
+    // shape: AST ability for the positional test: up-to-two target creatures (TargetOnly), then a
+    // coin whose losing outcome destroys target creature. Nearest printed card: Mogg Assassin
+    // ("{T}: You choose target creature an opponent controls, and that opponent chooses target
+    // creature. Flip a coin. If you win the flip, destroy the creature you chose. If you lose the
+    // flip, destroy the creature your opponent chose."); Crooked Scales ("{4}, {T}: Flip a coin. If
+    // you win the flip, destroy target creature an opponent controls. If you lose the flip, destroy
+    // target creature you control unless you pay {3} and repeat this process.") -- Mogg Assassin
+    // declares two creature targets before a coin whose outcomes destroy them; it has no
+    // variable-count group or outcome-own target.
     fn definition() -> AbilityDefinition {
         let mut definition = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -7928,6 +8717,16 @@ fn bulk_declaration_reads_an_ancestor_multi_target_group_positionally() {
         definition
     }
 
+    // Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this
+    // shape: Builds the positional test board: the synthetic spell from definition() plus three
+    // textless filler creatures (two group candidates and the losing-outcome target). Nearest
+    // printed card: Mogg Assassin ("{T}: You choose target creature an opponent controls, and that
+    // opponent chooses target creature. Flip a coin. If you win the flip, destroy the creature you
+    // chose. If you lose the flip, destroy the creature your opponent chose."); Crooked Scales
+    // ("{4}, {T}: Flip a coin. If you win the flip, destroy target creature an opponent controls.
+    // If you lose the flip, destroy target creature you control unless you pay {3} and repeat this
+    // process.") -- Mogg Assassin declares two creature targets before a coin whose outcomes
+    // destroy them; it has no variable-count group or outcome-own target.
     /// Object ids: c1 1, c2 2, v 3, spell 4.
     fn scenario() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
         let mut scenario = GameScenario::new();
@@ -8094,22 +8893,41 @@ fn bulk_declaration_reads_an_ancestor_multi_target_group_positionally() {
     assert_finished(&runner);
 }
 
-/// Synthetic. CR 601.2c + CR 115.1: the activation offer's cost search must
-/// price the same announced groups the declaration does. Kopala's {2} tax
-/// applies only when the ability targets a Merfolk, so the only affordable
-/// completion of this coin chain declines the whole ancestor group and targets
-/// the untaxed creature with the losing outcome (CR 705.2 + CR 608.2c).
+// Real cards: Kopala, Warden of Waves is printed and used with its full Oracle text. The coin chain
+// itself is synthetic: none of the 86 printed coin-flip cards in the exported card data declares a
+// variable-count target group before a coin with an outcome-owned target. Nearest printed card:
+// Mogg Assassin ("{T}: You choose target creature an opponent controls, and that opponent chooses
+// target creature. Flip a coin. If you win the flip, destroy the creature you chose. If you lose
+// the flip, destroy the creature your opponent chose.") declares two creature targets before a coin
+// whose outcomes act on them; it has no variable-count group.
+/// Synthetic coin chain (Kopala is printed). CR 601.2c + CR 115.1: the activation
+/// offer's cost search must price the same announced groups the declaration does.
+/// Kopala's {2} tax applies only when the ability targets a Merfolk, so every
+/// affordable completion of this coin chain declines at least one ancestor slot
+/// before the losing outcome's slot (the one this test plays declines the whole
+/// group) and targets the untaxed creature with the losing outcome (CR 705.2 +
+/// CR 608.2c).
 #[test]
 fn activation_offer_prices_a_declined_ancestor_group_in_a_coin_chain() {
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, MultiTargetSpec, TypedFilter,
     };
 
-    // Byte-identical to the constant the tax test uses
-    // (professor_hojo_activation_cost.rs).
-    const KOPALA_ACTIVATE_HALF: &str =
-        "Abilities your opponents activate that target a Merfolk you control cost {2} more to activate.";
+    // Kopala, Warden of Waves: the printed Oracle text, verbatim.
+    const KOPALA: &str =
+        "Spells your opponents cast that target a Merfolk you control cost {2} more to cast.\nAbilities your opponents activate that target a Merfolk you control cost {2} more to activate.";
 
+    // Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this
+    // shape: Builds the activation board: Kopala (tax on abilities targeting a Merfolk), an untaxed
+    // filler creature, and the synthetic artifact with the {1} up-to-two-then-coin activated
+    // ability, plus one mana. Nearest printed card: Mogg Assassin ("{T}: You choose target creature
+    // an opponent controls, and that opponent chooses target creature. Flip a coin. If you win the
+    // flip, destroy the creature you chose. If you lose the flip, destroy the creature your
+    // opponent chose."); Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy
+    // target creature an opponent controls. If you lose the flip, destroy target creature you
+    // control unless you pay {3} and repeat this process.") -- Mogg Assassin is an activated
+    // ability declaring creature targets before coin destroy outcomes; it has no variable-count
+    // group or targeting tax.
     /// Object ids: Kopala 1, untaxed creature 2, source 3.
     fn scenario() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
         let mut definition = AbilityDefinition::new(
@@ -8141,7 +8959,7 @@ fn activation_offer_prices_a_declined_ancestor_group_in_a_coin_chain() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let kopala = scenario
-            .add_creature_from_oracle(P1, "Kopala, Warden of Waves", 2, 2, KOPALA_ACTIVATE_HALF)
+            .add_creature_from_oracle(P1, "Kopala, Warden of Waves", 2, 2, KOPALA)
             .with_subtypes(vec!["Merfolk", "Wizard"])
             .id();
         let untaxed = scenario.add_creature(P0, "Untaxed creature", 2, 2).id();
@@ -8159,7 +8977,7 @@ fn activation_offer_prices_a_declined_ancestor_group_in_a_coin_chain() {
         pin_outcomes(&mut runner, &[won]);
         assert!(
             can_activate_ability_now(runner.state(), P0, source, 0),
-            "{label}: the only untaxed completion declines the ancestor group and targets the non-Merfolk with Lost, so the activation must be offered"
+            "{label}: every untaxed completion declines an ancestor slot mid-vector, so the activation must be offered"
         );
         assert!(
             legal_actions(runner.state()).iter().any(|action| matches!(
@@ -8216,6 +9034,15 @@ fn activation_offer_prices_a_declined_ancestor_group_in_a_coin_chain() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
+// A coin whose only (won) outcome destroys up to two target artifacts, followed by an unconditional
+// 'destroy target creature' continuation; the bulk list must leave the continuation its own slot.
+// Nearest printed card: Goblin Archaeologist ("{R}, {T}: Flip a coin. If you win the flip, destroy
+// target artifact and untap this creature. If you lose the flip, sacrifice this creature.");
+// Chaotic Strike ("Cast this spell only during combat after blockers are declared. / Flip a coin.
+// If you win the flip, target creature gets +1/+1 until end of turn. / Draw a card.") -- Goblin
+// Archaeologist has a won destroy-artifact target; Chaotic Strike has an unconditional continuation
+// after the coin. Neither has a targeted continuation.
 /// Synthetic. CR 601.2c + CR 115.1: the coin node's continuation is announced
 /// up front as its own required target, so a multi-target node nested in the
 /// Won outcome must not claim it. The continuation runs whichever way the flip
@@ -8324,6 +9151,13 @@ fn bulk_declaration_keeps_a_coin_outcome_group_off_the_continuation_target() {
     }
 }
 
+// Real cards: none of the 86 printed coin-flip cards in the exported card data divides damage
+// before a coin. Nearest printed card: Goblin Bangchuckers ("{T}: Flip a coin. If you win the flip,
+// this creature deals 2 damage to any target. If you lose the flip, this creature deals 2 damage to
+// itself.") deals damage in a coin outcome; Crooked Scales ("{4}, {T}: Flip a coin. If you win the
+// flip, destroy target creature an opponent controls. If you lose the flip, destroy target creature
+// you control unless you pay {3} and repeat this process.") declares a destroy target in a coin
+// outcome. Neither divides damage before the coin.
 /// Synthetic; no printed card has this shape. Pins that a divided-damage coin
 /// chain is refused, not mis-assigned, when the pool caps the prompt.
 /// CR 601.2d: the root divides a fixed pool of one damage, so
@@ -8344,6 +9178,15 @@ fn divided_damage_coin_chain_is_refused_not_mis_assigned_when_the_pool_caps_the_
     };
     use engine::types::game_state::DistributionUnit;
 
+    // Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this
+    // shape: AST ability: deal 1 damage divided among up to two target creatures, then a coin whose
+    // losing outcome destroys target creature. Nearest printed card: Goblin Bangchuckers ("{T}:
+    // Flip a coin. If you win the flip, this creature deals 2 damage to any target. If you lose the
+    // flip, this creature deals 2 damage to itself."); Crooked Scales ("{4}, {T}: Flip a coin. If
+    // you win the flip, destroy target creature an opponent controls. If you lose the flip, destroy
+    // target creature you control unless you pay {3} and repeat this process.") -- Goblin
+    // Bangchuckers has damage in a coin outcome; Crooked Scales has destroy-target outcomes.
+    // Neither divides damage before the coin.
     fn definition() -> AbilityDefinition {
         AbilityDefinition::new(
             AbilityKind::Spell,
@@ -8375,6 +9218,15 @@ fn divided_damage_coin_chain_is_refused_not_mis_assigned_when_the_pool_caps_the_
         .distribute(DistributionUnit::Damage)
     }
 
+    // Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this
+    // shape: Builds the divided-damage board: the synthetic spell from definition() plus two
+    // textless filler creatures (damage target and an unselected distractor). Nearest printed card:
+    // Goblin Bangchuckers ("{T}: Flip a coin. If you win the flip, this creature deals 2 damage to
+    // any target. If you lose the flip, this creature deals 2 damage to itself."); Crooked Scales
+    // ("{4}, {T}: Flip a coin. If you win the flip, destroy target creature an opponent controls.
+    // If you lose the flip, destroy target creature you control unless you pay {3} and repeat this
+    // process.") -- Goblin Bangchuckers has damage in a coin outcome; Crooked Scales has
+    // destroy-target outcomes. Neither divides damage before the coin.
     /// Object ids: damage target 1, distractor 2, spell 3.
     fn scenario() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
         let mut scenario = GameScenario::new();
