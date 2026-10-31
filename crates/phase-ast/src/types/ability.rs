@@ -20752,27 +20752,6 @@ pub enum StepSkipTarget {
     CombatPhase,
 }
 
-impl StepSkipTarget {
-    pub fn constituent_steps(self) -> &'static [Phase] {
-        match self {
-            Self::Step(Phase::Untap) => &[Phase::Untap],
-            Self::Step(Phase::Upkeep) => &[Phase::Upkeep],
-            Self::Step(Phase::Draw) => &[Phase::Draw],
-            Self::Step(Phase::PreCombatMain) => &[Phase::PreCombatMain],
-            Self::Step(Phase::BeginCombat) => &[Phase::BeginCombat],
-            Self::Step(Phase::DeclareAttackers) => &[Phase::DeclareAttackers],
-            Self::Step(Phase::DeclareBlockers) => &[Phase::DeclareBlockers],
-            Self::Step(Phase::CombatDamage) => &[Phase::CombatDamage],
-            Self::Step(Phase::EndCombat) => &[Phase::EndCombat],
-            Self::Step(Phase::PostCombatMain) => &[Phase::PostCombatMain],
-            Self::Step(Phase::End) => &[Phase::End],
-            Self::Step(Phase::Cleanup) => &[Phase::Cleanup],
-            // CR 506.1: the combat phase's five steps.
-            Self::CombatPhase => PhaseGroup::Combat.steps(),
-        }
-    }
-}
-
 /// CR 500.8 + CR 500.9 + CR 500.10: where an added phase or step is inserted.
 /// `ThisStep` and `ThisPhase` are resolved when the effect resolves:
 /// `ThisStep` against the step it resolves in, `ThisPhase` against the phase in
