@@ -7239,6 +7239,36 @@ scryfall_oracle_id = "ec406831-a1d0-4e41-bd09-f76d0ba206ae"
 preset_id = "05eb3cff-0ceb-5d8f-81f5-43379f2da399"
 
 [[token]]
+id = "060956cd-74d3-5eab-8057-50a1dfc76020"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Icatian Crier",
+    "Icatian Town",
+    "Sarpadian Empires, Vol. VII",
+]
+set_code = "TRC"
+set_name = "Star Trek Commander"
+collector_number = "13"
+released_at = "2026-11-13"
+type_line = "Token Creature — Citizen"
+
+[token.body]
+display_name = "Citizen"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Citizen"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "f801903a-5db6-4566-ad33-2c1de8ac4287"
+scryfall_oracle_id = "e31c15d7-f89e-480b-a22f-5823343342bb"
+preset_id = "060956cd-74d3-5eab-8057-50a1dfc76020"
+
+[[token]]
 id = "0628f530-1f4d-5171-b7d0-da2a155273e6"
 category = "Creature"
 fidelity = "Full"
@@ -9152,6 +9182,31 @@ keywords = []
 scryfall_id = "35710226-9e2c-4ee5-a422-a708affb94ef"
 scryfall_oracle_id = "fede3b66-1380-4b18-986a-27a9a145a3a0"
 preset_id = "08086333-bd24-563d-97b8-f838c5a0c9bf"
+
+[[token]]
+id = "080a9528-ded6-510d-9bfe-e4e494e4c459"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "14"
+released_at = "2026-11-13"
+type_line = "Token Creature — Officer"
+
+[token.body]
+display_name = "Officer"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Officer"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "5a24fb46-e819-4a4f-813f-eda0e96af606"
+scryfall_oracle_id = "e9452def-ea12-4262-9714-86e5cfffaadc"
+preset_id = "080a9528-ded6-510d-9bfe-e4e494e4c459"
 
 [[token]]
 id = "08598b64-654c-5f9f-959c-858659706c10"
@@ -13313,6 +13368,31 @@ scryfall_oracle_id = "bfde681b-27f5-4d1d-9907-593364745d10"
 preset_id = "0d54973b-0600-5ea7-bb7c-28ee330c448b"
 
 [[token]]
+id = "0d5787cb-c964-58a5-9c3c-998df55cf73b"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "8"
+released_at = "2026-11-13"
+type_line = "Token Creature — Officer"
+
+[token.body]
+display_name = "Officer"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Officer"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "155a3f1d-0897-4acd-b83a-82c48356dd66"
+scryfall_oracle_id = "e9452def-ea12-4262-9714-86e5cfffaadc"
+preset_id = "0d5787cb-c964-58a5-9c3c-998df55cf73b"
+
+[[token]]
 id = "0d657a73-829c-597f-89eb-ceb62ac7bcd6"
 category = "Creature"
 fidelity = "Full"
@@ -13621,6 +13701,31 @@ keywords = []
 scryfall_id = "cd0b42a0-5e08-406d-82b0-be5f72870c47"
 scryfall_oracle_id = "8f92f8d7-ec89-426f-86dc-fbc259eb5559"
 preset_id = "0d854bcb-6335-5040-a1e6-3f19a590a625"
+
+[[token]]
+id = "0de3a88f-4c37-5180-a488-8e5624da8650"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "9"
+released_at = "2026-11-13"
+type_line = "Token Creature — Officer"
+
+[token.body]
+display_name = "Officer"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Officer"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "7de20787-fc26-4cb7-bfe1-d7d8c13082cc"
+scryfall_oracle_id = "e9452def-ea12-4262-9714-86e5cfffaadc"
+preset_id = "0de3a88f-4c37-5180-a488-8e5624da8650"
 
 [[token]]
 id = "0ded5128-d811-510b-869c-16908c0a12cb"
@@ -16535,6 +16640,30 @@ scryfall_id = "5b11bb5a-66e3-4dc6-9df4-e1683c57e488"
 scryfall_id = "75961f7c-fc3b-49c6-96cc-c42d2aa1a044"
 scryfall_oracle_id = "e2a15d48-9fbe-43b4-bd32-eea56391d99f"
 preset_id = "11645c43-6413-5f87-a7f8-2c46161d09c3"
+
+[[token]]
+id = "117d0376-d040-52e7-a74d-fee6df1fe1d8"
+category = "Land"
+fidelity = "PartialMissingAbilities"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "27"
+released_at = "2026-11-13"
+type_line = "Token Land — Planet"
+rules_text = "{T}: Add one mana of any color."
+
+[token.body]
+display_name = "New Planet"
+core_types = ["Land"]
+subtypes = ["Planet"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "21d855f7-fd5c-4eb4-b997-a905849806b9"
+scryfall_oracle_id = "d01f45d8-36ae-49c4-9f1c-ba9bce6da2bc"
+preset_id = "117d0376-d040-52e7-a74d-fee6df1fe1d8"
 
 [[token]]
 id = "1195abea-6b63-5e95-83df-0cfd89762e5b"
@@ -28657,6 +28786,36 @@ scryfall_oracle_id = "2f4a08eb-6b4b-449f-83d7-cfda59eba45a"
 preset_id = "201e2405-5ffc-50f4-80e0-a1e5df6fc25d"
 
 [[token]]
+id = "2053bb29-14c7-5321-9b26-9dc26176689e"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Ape",
+    "Pongify",
+    "Side to Side",
+]
+set_code = "TRC"
+set_name = "Star Trek Commander"
+collector_number = "3"
+released_at = "2026-11-13"
+type_line = "Token Creature — Ape"
+
+[token.body]
+display_name = "Ape"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Ape"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "a73b0752-c59f-43de-a7c9-d952a2b59062"
+scryfall_oracle_id = "6736e171-ed7d-4259-8a42-f5936ebad532"
+preset_id = "2053bb29-14c7-5321-9b26-9dc26176689e"
+
+[[token]]
 id = "2066c068-0bfe-5cf9-bde5-b2726bd59211"
 fidelity = "Full"
 source_card_names = [
@@ -30257,6 +30416,70 @@ keywords = []
 scryfall_id = "7774606b-2584-4c17-8fc1-f8e196643f1f"
 scryfall_oracle_id = "a468338f-635e-4206-89d6-72d723071d45"
 preset_id = "21a429cb-eaa5-5cfc-af12-e58da7730173"
+
+[[token]]
+id = "21be3f0f-ed56-5ea1-90dd-3828a58ade97"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Aatchik, Emerald Radian",
+    "Ant Queen",
+    "Ant-Man, Colony Commander",
+    "Beacon of Creation",
+    "Broodhatch Nantuko",
+    "Crawling Infestation",
+    "Crawling Sensation",
+    "Dragonlair Spider",
+    "Hiveheart Shaman",
+    "Infestation Expert // Infested Werewolf",
+    "Infested Roothold",
+    "Iridescent Hornbeetle",
+    "It of the Horrid Swarm",
+    "Living Hive",
+    "Old Rutstein",
+    "One Dozen Eyes",
+    "Saber Ants",
+    "Scute Swarm",
+    "Springheart Nantuko",
+    "Swarm Shambler",
+    "Symbiotic Beast",
+    "Symbiotic Elf",
+    "Symbiotic Wurm",
+    "The Astonishing Ant-Man",
+    "Vilespawn Spider",
+    "Vitality Charm",
+    "Wirewood Hivemaster",
+]
+set_code = "TRC"
+set_name = "Star Trek Commander"
+collector_number = "12"
+released_at = "2026-11-13"
+type_line = "Token Creature — Insect"
+
+[token.body]
+display_name = "Insect"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Insect"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Scute Swarm"
+scryfall_oracle_id = "aa854d50-444c-49d9-bfb1-5476b33c1c0b"
+scryfall_id = "50a6e8fd-180c-40f8-b03b-3b2d5a2c7277"
+
+[[token.source_card_refs]]
+card_name = "Scute Swarm"
+scryfall_oracle_id = "aa854d50-444c-49d9-bfb1-5476b33c1c0b"
+scryfall_id = "2632074d-51aa-47fd-9de0-4aeef8838dc0"
+
+[token.token_image_ref]
+scryfall_id = "98d54f5e-1584-48e7-bb8e-5bb1520c2d93"
+scryfall_oracle_id = "c39cd31f-c4a2-4ca8-b4f9-b2e6289743bc"
+preset_id = "21be3f0f-ed56-5ea1-90dd-3828a58ade97"
 
 [[token]]
 id = "21ca72fe-dc2f-5f4d-a974-89e4d789c0c0"
@@ -32161,6 +32384,32 @@ scryfall_id = "5e20241b-515f-420f-9012-2f693f333187"
 scryfall_id = "f74900ca-7f0d-460c-86b0-b515c8b44e67"
 scryfall_oracle_id = "bd386399-69f0-4653-96a1-fd05b8fd148c"
 preset_id = "23cf1fd4-4cb8-52d1-89ca-401b60ff3ec9"
+
+[[token]]
+id = "23fae747-83a2-56a9-9500-8ffb775113ab"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+set_code = "TRC"
+set_name = "Star Trek Commander"
+collector_number = "9"
+released_at = "2026-11-13"
+type_line = "Token Creature — Tribble"
+rules_text = "This token can't block."
+
+[token.body]
+display_name = "Tribble"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Tribble"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "81d2498f-ee5e-4d8d-80f8-eb71c3755faa"
+scryfall_oracle_id = "461aad0b-9e8c-4e80-8d13-8789da191aed"
+preset_id = "23fae747-83a2-56a9-9500-8ffb775113ab"
 
 [[token]]
 id = "24276f6c-70a9-50f5-83bc-818575dda480"
@@ -36154,6 +36403,34 @@ scryfall_oracle_id = "9e266374-80f1-458a-9417-16220d2a013a"
 preset_id = "28c7e87c-3eda-52f4-aa11-ebb0880e2bb1"
 
 [[token]]
+id = "28e6e1d1-8b8f-5e53-a3ca-7d8127d41bdc"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "19"
+released_at = "2026-11-13"
+type_line = "Token Artifact Creature — Borg"
+
+[token.body]
+display_name = "Borg"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Borg"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "60c52ea5-28b9-413d-9be5-aaadfbd8022b"
+scryfall_oracle_id = "3e5f8b8d-b8e6-48a2-a596-ee45e7e56038"
+preset_id = "28e6e1d1-8b8f-5e53-a3ca-7d8127d41bdc"
+
+[[token]]
 id = "2916cad8-e495-5469-a1d2-b80c26fb74e1"
 category = "Creature"
 fidelity = "Full"
@@ -37486,6 +37763,200 @@ keywords = ["Flying"]
 scryfall_id = "b5489e26-6aec-4706-9c3e-8454878fa6c3"
 scryfall_oracle_id = "b8df27be-118b-4a76-95ec-9d6220314533"
 preset_id = "2a425e9e-0c85-5f75-9382-2b72440165bc"
+
+[[token]]
+id = "2a67af5f-6669-5509-91e3-1b437e49e34c"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Agent 13, Sharon Carter",
+    "Air Nomad Legacy",
+    "Alquist Proft, Master Sleuth",
+    "Angelic Sleuth",
+    "Antarctic Research Base",
+    "April O'Neil, Live on the Scene",
+    "Armed with Proof",
+    "Auspicious Arrival",
+    "Azula, On the Hunt",
+    "Ballroom",
+    "Billiard Room",
+    "Blink",
+    "Blu, Mansion Prince",
+    "Briarbridge Patrol",
+    "Briarbridge Tracker",
+    "Bygone Bishop",
+    "Byway Courier",
+    "Callous Inspector",
+    "Carnage Interpreter",
+    "Case of the Filched Falcon",
+    "Case of the Pilfered Proof",
+    "Chalk Outline",
+    "Clue",
+    "Cold Case Cracker",
+    "Confirm Suspicions",
+    "Confront the Unknown",
+    "Conservatory",
+    "Cunning Maneuver",
+    "Curious Inquiry",
+    "Daring Sleuth // Bearer of Overwhelming Truths",
+    "Declaration in Stone",
+    "Deduce",
+    "Dennick, Pious Apprentice // Dennick, Pious Apparition",
+    "Detective's Satchel",
+    "Dining Room",
+    "Disorder in the Court",
+    "Drag the Canal",
+    "Drownyard Explorers",
+    "Duggan, Private Detective",
+    "Eliminate the Impossible",
+    "Elmar, Ulvenwald Informant",
+    "Eloise, Nephalia Sleuth",
+    "Erdwal Illuminator",
+    "Ethereal Investigator",
+    "Evidence Examiner",
+    "Expose Evil",
+    "Ezrim, Agency Chief",
+    "Fae Offering",
+    "Fateful Absence",
+    "Fire Nation Raider",
+    "Fire Nation Warship",
+    "Fleeting Memories",
+    "Flitwing, Lyev Detective",
+    "Floodhound",
+    "Flotsam // Jetsam",
+    "Follow the Bodies",
+    "Foreboding Steamboat",
+    "Forecasting Fortune Teller",
+    "Forensic Gadgeteer",
+    "Foul Play",
+    "Fugitive of the Judoon",
+    "Funnel-Web Recluse",
+    "Gleaming Geardrake",
+    "Gone Missing",
+    "Hall",
+    "Hard Evidence",
+    "Havengul Laboratory // Havengul Mystery",
+    "Heaven Sent",
+    "Hold for Questioning",
+    "Homicide Investigator",
+    "Hostile Investigator",
+    "Hotshot Investigators",
+    "Humble the Brute",
+    "Innocent Bystander",
+    "Innocuous Researcher",
+    "Inquisitor Eisenhorn",
+    "Inquisitor Greyfax",
+    "Jace's Scrutiny",
+    "James, Wandering Dad // Follow Him",
+    "Jet's Brainwashing",
+    "June, Bounty Hunter",
+    "Kellan, Inquisitive Prodigy // Tail the Suspect",
+    "Kitchen",
+    "Knowledge Seeker",
+    "Lavinia, Foil to Conspiracy",
+    "Lazav, Wearer of Faces",
+    "Library",
+    "Lonis, Cryptozoologist",
+    "Lonis, Genetics Expert",
+    "Lord Jyscal Guado",
+    "Lost Days",
+    "Lounge",
+    "Loxodon Eavesdropper",
+    "Madame Vastra",
+    "Magnifying Glass",
+    "Malcolm, the Eyes",
+    "Martha Jones",
+    "Meddling Youths",
+    "Merchant of Truth",
+    "Messenger Hawk",
+    "Mistway Spy",
+    "Morska, Undersea Sleuth",
+    "Nick Valentine, Private Eye",
+    "No Witnesses",
+    "Novice Inspector",
+    "Nyla, Shirshu Sleuth",
+    "Obsessive Pursuit",
+    "Officious Interrogation",
+    "On the Job",
+    "Ongoing Investigation",
+    "Osgood, Operation Double",
+    "Out Cold",
+    "Overencumbered",
+    "Panther Pounce",
+    "Persuasive Interrogators",
+    "Piper Wright, Publick Reporter",
+    "Press for Answers",
+    "Raven Eagle",
+    "Resonance Technician",
+    "Root Out",
+    "Rory Williams",
+    "Sally Sparrow",
+    "Sarah Jane Smith",
+    "Search the Premises",
+    "Secret Passage",
+    "Secrets of the Key",
+    "Serene Sleuth",
+    "Sharp-Eyed Rookie",
+    "Sokka's Sword Training",
+    "Sold Out",
+    "Sophia, Dogged Detective",
+    "Sophina, Spearsage Deserter",
+    "Study",
+    "Survive the Night",
+    "Syndicate Heavy",
+    "Tamiyo Meets the Story Circle",
+    "Tamiyo's Journal",
+    "Tamiyo, Inquisitive Student // Tamiyo, Seasoned Scholar",
+    "Teysa, Opulent Oligarch",
+    "The Chase Is On",
+    "The Fugitive Doctor",
+    "The Mechanist, Aerial Artisan",
+    "The Rani",
+    "The Seventh Doctor",
+    "The Third Doctor",
+    "They Went This Way",
+    "Thijarian Witness",
+    "Thorough Investigation",
+    "Thraben Inspector",
+    "Tireless Tracker",
+    "Tivit, Seller of Secrets",
+    "Tolls of War",
+    "Torch the Witness",
+    "Toxin Analysis",
+    "Trail of Evidence",
+    "Transmutation Font",
+    "True Ancestry",
+    "Ulvenwald Mysteries",
+    "Undercover Crocodelf",
+    "Unshakable Tail",
+    "Wavesifter",
+    "Weirding Wood",
+    "Wernog, Rider's Chaplain",
+    "Wojek Investigator",
+    "Zuko's Exile",
+]
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "21"
+released_at = "2026-11-13"
+type_line = "Token Artifact — Clue"
+rules_text = "{2}, Sacrifice this token: Draw a card."
+
+[token.category.PredefinedArtifact]
+kind = "Clue"
+
+[token.body]
+display_name = "Clue"
+core_types = ["Artifact"]
+subtypes = ["Clue"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "306c8271-ddfc-45a4-bd23-bf31212f813d"
+scryfall_oracle_id = "496e1083-c792-40a4-adf4-fec1d559cd5e"
+preset_id = "2a67af5f-6669-5509-91e3-1b437e49e34c"
 
 [[token]]
 id = "2a779ede-71be-5f0c-8ccf-c434f2892afb"
@@ -53749,6 +54220,35 @@ scryfall_oracle_id = "ddc8c973-c31e-463f-be45-f3fa7d632362"
 preset_id = "3e71087a-c958-51d8-b915-14a23d6c660f"
 
 [[token]]
+id = "3e8c6c39-18f7-5fc3-b1b9-4f58032dd46e"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Pongify",
+    "Side to Side",
+]
+set_code = "TRC"
+set_name = "Star Trek Commander"
+collector_number = "10"
+released_at = "2026-11-13"
+type_line = "Token Creature — Ape"
+
+[token.body]
+display_name = "Ape"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Ape"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "9fc2b0f6-f126-47a2-8316-febf92e90006"
+scryfall_oracle_id = "6736e171-ed7d-4259-8a42-f5936ebad532"
+preset_id = "3e8c6c39-18f7-5fc3-b1b9-4f58032dd46e"
+
+[[token]]
 id = "3e931821-df8c-5887-b360-6a18c72fa609"
 category = "Creature"
 fidelity = "Full"
@@ -57244,6 +57744,40 @@ keywords = []
 scryfall_id = "dbab4309-daca-42d9-ad0b-0457717c4503"
 scryfall_oracle_id = "a4095286-d51b-4527-b6ce-23aa539fc23a"
 preset_id = "430b2a53-73f5-51ac-ac3f-b210c522a984"
+
+[[token]]
+id = "430fd6aa-cf47-596e-b11c-65179e9543ca"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Beast",
+    "Bestial Incursion",
+    "Garruk, Curse Breaker",
+    "Garruk, Veiled Butcher",
+    "Way of the Deathbringer",
+    "Way of the Wildspeaker",
+]
+set_code = "TRC"
+set_name = "Star Trek Commander"
+collector_number = "4"
+released_at = "2026-11-13"
+type_line = "Token Creature — Beast"
+rules_text = "Trample"
+
+[token.body]
+display_name = "Beast"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Beast"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Trample"]
+
+[token.token_image_ref]
+scryfall_id = "215c8aec-f26f-4777-aa90-252e537f5df9"
+scryfall_oracle_id = "7ed8a016-a259-4fda-aae5-02f8df94f2de"
+preset_id = "430fd6aa-cf47-596e-b11c-65179e9543ca"
 
 [[token]]
 id = "4330fe79-abbc-5a3f-b382-1d849d929716"
@@ -61821,6 +62355,38 @@ scryfall_oracle_id = "3c549374-6c37-42e0-8d88-a8555d46732d"
 preset_id = "4873fe20-675e-5db5-b9ba-8d996c2806ba"
 
 [[token]]
+id = "4897bb1d-368e-5e91-b32b-539f13a1318a"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRC"
+set_name = "Star Trek Commander"
+collector_number = "7"
+released_at = "2026-11-13"
+type_line = "Token Artifact Creature — Spacecraft Illusion"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Spacecraft Illusion"
+power = 4
+toughness = 3
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Spacecraft",
+    "Illusion",
+]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[token.token_image_ref]
+scryfall_id = "9d300512-cc4d-4cf0-bd49-6536352a856c"
+scryfall_oracle_id = "58a98cf1-2169-4628-9799-278addc2efd2"
+preset_id = "4897bb1d-368e-5e91-b32b-539f13a1318a"
+
+[[token]]
 id = "48ab910b-8770-50e2-bd1f-1d505e07c1fe"
 category = "Creature"
 fidelity = "Full"
@@ -62217,6 +62783,31 @@ scryfall_id = "75f95e28-8841-4986-b183-d113beacbafa"
 scryfall_id = "461532a6-ef9c-4a9b-9815-3b5158ada976"
 scryfall_oracle_id = "eac25f12-6459-438c-a09e-93e23d2cf80d"
 preset_id = "48db8a3b-57f9-5eae-8344-4b46db06f111"
+
+[[token]]
+id = "491735d2-4e81-51ed-90b0-e223095af46e"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "6"
+released_at = "2026-11-13"
+type_line = "Token Creature — Officer"
+
+[token.body]
+display_name = "Officer"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Officer"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "d676cbef-8e31-4ae6-8dfe-6b84160f71e0"
+scryfall_oracle_id = "e9452def-ea12-4262-9714-86e5cfffaadc"
+preset_id = "491735d2-4e81-51ed-90b0-e223095af46e"
 
 [[token]]
 id = "4936a471-c34f-536c-bac9-dfdaf15fdba9"
@@ -62897,6 +63488,31 @@ scryfall_id = "9f329a0b-13cc-48c5-9fb7-38d8a537aa30"
 scryfall_id = "d16213b5-c0da-4a24-9f2e-b9432652859e"
 scryfall_oracle_id = "6788478d-e157-4483-be09-9edb3f841431"
 preset_id = "4983cf20-03e7-5f8d-a817-2d69acc1db5a"
+
+[[token]]
+id = "49ae795c-4443-5ead-9b64-a104084bc087"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "11"
+released_at = "2026-11-13"
+type_line = "Token Creature — Officer"
+
+[token.body]
+display_name = "Officer"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Officer"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "b1e8a7db-b245-4903-b41f-6d2ee06401cb"
+scryfall_oracle_id = "e9452def-ea12-4262-9714-86e5cfffaadc"
+preset_id = "49ae795c-4443-5ead-9b64-a104084bc087"
 
 [[token]]
 id = "49b2a8ce-fcd7-5a00-b706-d5001f70db86"
@@ -79296,6 +79912,38 @@ scryfall_oracle_id = "9b4f2e97-7845-4931-8ea3-824532525e92"
 preset_id = "59362450-cc94-5dbb-ae9e-135b4307ad79"
 
 [[token]]
+id = "593be39c-16b3-5da2-8c44-5d8ca0735bd2"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRC"
+set_name = "Star Trek Commander"
+collector_number = "14"
+released_at = "2026-11-13"
+type_line = "Token Artifact Creature — Spacecraft Illusion"
+rules_text = "Flying"
+
+[token.body]
+display_name = "Spacecraft Illusion"
+power = 4
+toughness = 3
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Spacecraft",
+    "Illusion",
+]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[token.token_image_ref]
+scryfall_id = "4990678f-162e-407d-8ab2-5ecf38de280a"
+scryfall_oracle_id = "58a98cf1-2169-4628-9799-278addc2efd2"
+preset_id = "593be39c-16b3-5da2-8c44-5d8ca0735bd2"
+
+[[token]]
 id = "5940e002-54ac-564a-958f-4f70f7f8becb"
 category = "Creature"
 fidelity = "Full"
@@ -80550,6 +81198,11 @@ scryfall_id = "726b3de5-f2c1-4a92-9039-f61ae9575839"
 card_name = "Pongify"
 scryfall_oracle_id = "05849bd6-8f38-4031-be2b-e2aa03beb8cc"
 scryfall_id = "4131fa63-5afc-4b63-a4b4-f47b4bced87f"
+
+[[token.source_card_refs]]
+card_name = "Pongify"
+scryfall_oracle_id = "05849bd6-8f38-4031-be2b-e2aa03beb8cc"
+scryfall_id = "299aa687-97a4-4fdd-8e73-2069e20fae43"
 
 [token.token_image_ref]
 scryfall_id = "8343e00c-5fc6-46a0-a238-3759338dced4"
@@ -84291,6 +84944,417 @@ scryfall_oracle_id = "b9631037-99e9-4cb7-91c2-fe7b23bb5d4b"
 preset_id = "5ee687f2-f19b-59a0-b6c9-e881606998a7"
 
 [[token]]
+id = "5f1b35ce-e8e2-5182-b449-e45716826816"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Alchemist's Talent",
+    "Alicia Masters, Skilled Sculptor",
+    "An Offer You Can't Refuse",
+    "Ancestors' Aid",
+    "Ancient Adamantoise",
+    "Ancient Copper Dragon",
+    "Ant-Man's Army",
+    "Ant-Man, Elusive Avenger",
+    "Ashling's Command",
+    "Atsushi, the Blazing Sky",
+    "Avengers: Under Siege",
+    "Axgard Artisan",
+    "Baeloth Barrityl, Entertainer",
+    "Bank Job",
+    "Battle Angels of Tyr",
+    "Beamtown Beatstick",
+    "Bejeweled Warg",
+    "Beza, the Bounding Spring",
+    "Big Score",
+    "Big Spender",
+    "Bilbo's Gambit",
+    "Bilbo, Retired Burglar",
+    "Bill Ferny, Bree Swindler",
+    "Black Market Connections",
+    "Black Market Tycoon",
+    "Blood Money",
+    "Bloodroot Apothecary",
+    "Blooming Blast",
+    "Bonehoard Dracosaur",
+    "Boneyard Desecrator",
+    "Bootleggers' Stash",
+    "Bottle-Cap Blast",
+    "Boxing Ring",
+    "Brass's Bounty",
+    "Brazen Freebooter",
+    "Breeches, Eager Pillager",
+    "Bucknard's Everfull Purse",
+    "Burakos, Party Leader",
+    "Burdened Aerialist",
+    "Buy Your Silence",
+    "Captain Lannery Storm",
+    "Careening Mine Cart",
+    "Casey & Raph, Hotheads",
+    "Cataclysmic Prospecting",
+    "Cavern-Hoard Dragon",
+    "Centrifuge",
+    "Charming Scoundrel",
+    "Chira, All In",
+    "City of Death",
+    "Cloud, Ex-SOLDIER",
+    "Coin of Mastery",
+    "Collector's Vault",
+    "Common Crook",
+    "Contested Game Ball",
+    "Contract Hero",
+    "Contract Killing",
+    "Corsair Captain",
+    "Covetous Elegy",
+    "Crack Open",
+    "Creative Outburst",
+    "Crossover Collaboration",
+    "Culmination of Studies",
+    "Currency Converter",
+    "Cutthroat Negotiator",
+    "Daily Bugle Newspaper",
+    "Deadeye Plunderers",
+    "Deadly Derision",
+    "Deadly Dispute",
+    "Death to Our Enemies",
+    "Decadent Dragon // Expensive Taste",
+    "Depths of Desire",
+    "Descent into Avernus",
+    "Diamond Pick-Axe",
+    "Dihada, Binder of Wills",
+    "Dire Fleet Hoarder",
+    "Discerning Financier",
+    "Dockside Extortionist",
+    "Don Andres, the Renegade",
+    "Done for the Day",
+    "Dori, Bearer of Friends",
+    "Dragon-Cursed Halls",
+    "Dungeon of the Mad Mage",
+    "Dungeoneer's Pack",
+    "Edward Kenway",
+    "Elemental Masterpiece",
+    "Emissary Green",
+    "Enterprising Scallywag",
+    "Erestor of the Council",
+    "Evin, Waterdeep Opportunist",
+    "Excavation Technique",
+    "Exhibition Magician",
+    "Exit Through the Grift Shop",
+    "Fable of the Mirror-Breaker // Reflection of Kiki-Jiki",
+    "Fae Offering",
+    "Fain, the Broker",
+    "Fake Your Own Death",
+    "Flamekin Gildweaver",
+    "Flick a Coin",
+    "Forging the Tyrite Sword",
+    "Forsworn Paladin",
+    "Fountainport",
+    "Furnace Reins",
+    "Gadrak, the Crown-Scourge",
+    "Gala Greeters",
+    "Galadriel, Gift-Giver",
+    "Galazeth Prismari",
+    "Ganax, Astral Hunter",
+    "Gemcutter Buccaneer",
+    "Generous Plunderer",
+    "Gilded Ghoda",
+    "Gilded Pinions",
+    "Gimli of the Glittering Caves",
+    "Gleaming Barrier",
+    "Gleaming Splendor",
+    "Glittermonger",
+    "Gluntch, the Bestower",
+    "Glóin, Dwarf Emissary",
+    "Goblin Airbrusher",
+    "Goblin Glasswright // Craft with Pride",
+    "Goblin Shaman",
+    "Gold Pan",
+    "Gold Rush",
+    "Goldlust Triad",
+    "Goldspan Dragon",
+    "Goldvein Hydra",
+    "Goldvein Pick",
+    "Gonti, Night Minister",
+    "Gorbag of Minas Morgul",
+    "Grabby Giant // That's Mine",
+    "Great Train Heist",
+    "Greedy Freebooter",
+    "Grim Bounty",
+    "Grim Hireling",
+    "Guild Artisan",
+    "Halo Scarab",
+    "Heap Gate",
+    "Heartless Pillage",
+    "Hell to Pay",
+    "Henry Wu, InGen Geneticist",
+    "Herald of Hadar",
+    "Heroes for Hire",
+    "Hit the Mother Lode",
+    "Hoard Hauler",
+    "Hoard Robber",
+    "Hoarding Ogre",
+    "Hornswoggle",
+    "Hullbreacher",
+    "Ignacio of Myra's Marvels",
+    "Impetuous Lootmonger",
+    "Improvised Weaponry",
+    "Impulsive Pilferer",
+    "Indulge // Excess",
+    "Ingenious Mastery",
+    "Inspired Tinkering",
+    "Instrument of the Bards",
+    "Invasion of Ergamon // Truga Cliffcharger",
+    "Involuntary Employment",
+    "Iron Man, Titan of Innovation",
+    "J. Jonah Jameson",
+    "Jan Jansen, Chaos Crafter",
+    "Jared Carthalion",
+    "Jewel Thief",
+    "Jewel-Eyed Cobra",
+    "Jolene, Plundering Pugilist",
+    "Jolene, the Plunder Queen",
+    "Kain, Traitorous Dragoon",
+    "Kalain, Reclusive Painter",
+    "Kamachal, Ship's Mascot",
+    "Kellogg, Dangerous Mind",
+    "Kerblam! Warehouse",
+    "Kheru Goldkeeper",
+    "Killmonger, Ruthless Usurper",
+    "Kingpin, Wilson Fisk",
+    "Knuckles the Echidna",
+    "Korvold and the Noble Thief",
+    "Lara Croft, Tomb Raider",
+    "Life Insurance",
+    "Lobelia Sackville-Baggins",
+    "Locke, Treasure Hunter",
+    "Long-Bodied Grey Dog",
+    "Loot Dispute",
+    "Lost Mine of Phandelver",
+    "Lotho, Corrupt Shirriff",
+    "Luck Bobblehead",
+    "Luke Cage, Hero for Hire",
+    "Luxurious Locomotive",
+    "Magda, Brazen Outlaw",
+    "Magda, the Hoardmaster",
+    "Magic Pot",
+    "Magma Opus",
+    "Magmatic Galleon",
+    "Mahadi, Emporium Master",
+    "Malcolm, Keen-Eyed Navigator",
+    "Malik, Grim Manipulator",
+    "Marching Duodrone",
+    "Mari, the Killing Quill",
+    "Marut",
+    "Mary Read and Anne Bonny",
+    "Master of Ceremonies",
+    "Mastermind Plum",
+    'Meet and Greet "Sisay"',
+    "Megaton's Fate",
+    "Meticulous Artisan",
+    "Mine Raider",
+    "Mines of Moria",
+    "Misfortune Teller",
+    "Monologue Tax",
+    "Monument to Endurance",
+    "Most Wanted",
+    "Mr. House, President and CEO",
+    "My Wealth Will Bury You",
+    "Namazu Trader",
+    "New New York",
+    "Noble's Purse",
+    "Noggle Robber",
+    "North Pole Research Base",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Ognis, the Dragon's Lash",
+    "Old Gnawbone",
+    "Old Rutstein",
+    "Olivia, Opulent Outlaw",
+    "Orcrist, Goblin-cleaver",
+    "Orochi Soul-Reaver",
+    "Pain Distributor",
+    "Patient Naturalist",
+    "Patron of the Arts",
+    "Petty Larceny",
+    "Pick-a-Beeble",
+    "Pictures of Spider-Man",
+    "Piggy Bank",
+    "Pinkie Pie",
+    "Pirate's Pillage",
+    "Pirate's Prize",
+    "Pitiless Plunderer",
+    "Plundering Barbarian",
+    "Plundering Pirate",
+    "Poetic Ingenuity",
+    "Prismari Command",
+    "Prized Statue",
+    "Prizefight",
+    "Professional Face-Breaker",
+    "Professional Wrestler",
+    "Prompto Argentum",
+    "Prosper, Tome-Bound",
+    "Prosperous Bandit",
+    "Prosperous Innkeeper",
+    "Prosperous Partnership",
+    "Prosperous Pirates",
+    "Prosperous Thief",
+    "Prying Blade",
+    "Puppet Master, String Puller",
+    "RMS Titanic",
+    "Racketeer Boss",
+    "Ragavan, Nimble Pilferer",
+    "Rain of Riches",
+    "Ramirez DePietro, Pillager",
+    "Rankle and Torbran",
+    "Rapacious Dragon",
+    "Rashmi and Ragavan",
+    "Reckless Endeavor",
+    "Reckless Lackey",
+    "Reckless Ransacking",
+    "Reckoner Bankbuster // Reckoner Bankbuster",
+    "Redcap Thief",
+    "Redrock Sentinel",
+    "Relic Retriever",
+    "Rev, Tithe Extractor",
+    "Revel in Riches",
+    "Riveteers Requisitioner",
+    "Rocketeer Boostbuggy",
+    "Rose Room Treasurer",
+    "Ruthless Knave",
+    "Ruthless Technomancer",
+    "Safana, Calimport Cutthroat",
+    "Sailor of Means",
+    "Sanar, Unfinished Genius // Wild Idea",
+    "Sarkhan, Dragon Ascendant",
+    "Scion of Opulence",
+    "Scuzzback Scrounger",
+    "Season of the Bold",
+    "Seize the Spoils",
+    "Seize the Spotlight",
+    "Setzer, Wandering Gambler",
+    "Shambling Ghast",
+    "Shiny Impetus",
+    "Sidequest: Hunt the Mark // Yiazmat, Ultimate Mark",
+    "Skullport Merchant",
+    "Smashing Success",
+    "Smaug",
+    "Smaug the Impenetrable",
+    "Smaug the Magnificent",
+    "Smaug, Wicked Worm",
+    "Smoke Blessing",
+    "Smoke Spirits' Aid",
+    "Smothering Tithe",
+    "Smuggler's Share",
+    "Song of Eärendil",
+    "Sonic the Hedgehog",
+    "Spectrox Mines",
+    "Spell Swindle",
+    "Spiked Pit Trap",
+    "Spiteful Banditry",
+    "Spiteful Repossession",
+    "Stark Industries Executive",
+    "Sticky Fingers",
+    "Stimulus Package",
+    "Storm the Vault // Vault of Catlacan",
+    "Storm-Kiln Artist",
+    "Strike It Rich",
+    "Sudden Breakthrough",
+    "Summon: Yojimbo",
+    "Surly Badgersaur",
+    "Swarming of Moria",
+    "Swashbuckler Extraordinaire",
+    "Sword of Wealth and Power",
+    "Tataru Taru",
+    "Tavern Scoundrel",
+    "Tempting Contract",
+    "Teval's Judgment",
+    "The Balrog of Moria",
+    "The Belligerent",
+    "The Ghoul, Gunslinger",
+    "The Gold Saucer",
+    "The Golden City of Orazca",
+    "The Matrix of Time",
+    "The Misty Mountains Cold",
+    "The Reaver Cleaver",
+    "The Sackville-Bagginses",
+    "The Third Doctor",
+    "The Western Cloud",
+    "There and Back Again",
+    "Thieves' Tools",
+    "Thorin, Company's Leader",
+    "Thorin, King of Durin's Folk",
+    "Ticket Tortoise",
+    "Tireless Provisioner",
+    "Tivit, Seller of Secrets",
+    "Tokka & Rahzar, Unsupervised",
+    "Treasure Chest",
+    "Treasure Dredger",
+    "Treasure Map // Treasure Cove",
+    "Treasure Vault",
+    "Trove of Temptation",
+    "Typhoid Mary, Fractured",
+    "Ultimate Green Goblin",
+    "Undercity // The Initiative",
+    "Undercity Dire Rat",
+    "Undercity Scrounger",
+    "Unexpected Windfall",
+    "Urabrask // The Great Work",
+    "Vaan, Street Thief",
+    "Vault 21: House Gambit",
+    "Vault Robber",
+    "Vazi, Keen Negotiator",
+    "Village Pillagers",
+    "Visions of Ruin",
+    "Volatile Fault",
+    "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
+    "Wanted Scoundrels",
+    "Warren Soultrader",
+    "Widespread Thieving",
+    "Wily Goblin",
+    "Wish Good Luck",
+    "Xorn",
+    "You Find a Cursed Idol",
+    "You've Been Caught Stealing",
+    "Young Red Dragon // Bathe in Gold",
+    "Zhentarim Bandit",
+    "Ziatora, the Incinerator",
+    "Zidane, Tantalus Thief",
+]
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "26"
+released_at = "2026-11-13"
+type_line = "Token Artifact — Treasure"
+rules_text = "{T}, Sacrifice this token: Add one mana of any color."
+
+[token.category.PredefinedArtifact]
+kind = "Treasure"
+
+[token.body]
+display_name = "Treasure"
+core_types = ["Artifact"]
+subtypes = ["Treasure"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Professional Face-Breaker"
+scryfall_oracle_id = "04152e7a-969c-4858-841b-0a569a9fc1bf"
+scryfall_id = "17d48e42-dbc7-4253-8279-0f7b85e0a688"
+
+[[token.source_card_refs]]
+card_name = "Professional Face-Breaker"
+scryfall_oracle_id = "04152e7a-969c-4858-841b-0a569a9fc1bf"
+scryfall_id = "0680ebe0-5878-4d54-b1e0-de5a5f4c23a8"
+
+[token.token_image_ref]
+scryfall_id = "b8e8c3b4-3b8d-48a4-b427-a2b8ac3e2f8b"
+scryfall_oracle_id = "3c549374-6c37-42e0-8d88-a8555d46732d"
+preset_id = "5f1b35ce-e8e2-5182-b449-e45716826816"
+
+[[token]]
 id = "5f2b9e0f-d62a-5a0d-b458-d812de9822b8"
 category = "Creature"
 fidelity = "Full"
@@ -87206,6 +88270,68 @@ scryfall_id = "04134be2-5e40-4732-832c-f616009eceff"
 scryfall_id = "09293ae7-0629-417b-9eda-9bd3f6d8e118"
 scryfall_oracle_id = "97af46cb-6209-4ae7-81cc-792894999937"
 preset_id = "625decf2-a1bc-53b6-b601-342906413033"
+
+[[token]]
+id = "6273f391-1a23-5c79-94b2-0789961a30f6"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Bestial Incursion",
+    "Garruk, Curse Breaker",
+    "Garruk, Veiled Butcher",
+    "Way of the Deathbringer",
+    "Way of the Wildspeaker",
+]
+set_code = "TRC"
+set_name = "Star Trek Commander"
+collector_number = "11"
+released_at = "2026-11-13"
+type_line = "Token Creature — Beast"
+rules_text = "Trample"
+
+[token.body]
+display_name = "Beast"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Beast"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Trample"]
+
+[token.token_image_ref]
+scryfall_id = "ca8e8a9a-d673-4644-9eec-f4f549307d9b"
+scryfall_oracle_id = "7ed8a016-a259-4fda-aae5-02f8df94f2de"
+preset_id = "6273f391-1a23-5c79-94b2-0789961a30f6"
+
+[[token]]
+id = "62c0e94b-ee2b-59e4-93e2-f903b294daa6"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "18"
+released_at = "2026-11-13"
+type_line = "Token Creature — Worm"
+rules_text = "This token can't block."
+
+[token.body]
+display_name = "Worm"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Worm"]
+supertypes = []
+colors = [
+    "Green",
+    "Red",
+]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "e7cde898-fc1f-4261-8f71-cfc4275bab54"
+scryfall_oracle_id = "cce40a23-b400-4b24-a1fb-10a4907e7017"
+preset_id = "62c0e94b-ee2b-59e4-93e2-f903b294daa6"
 
 [[token]]
 id = "62e0a789-7895-59d2-a239-6005380c576a"
@@ -90327,6 +91453,35 @@ scryfall_id = "28aa32ff-3ced-405c-8508-7dd35cd20f02"
 scryfall_id = "de29dd78-a059-4aad-8627-9c783f245a91"
 scryfall_oracle_id = "a4095286-d51b-4527-b6ce-23aa539fc23a"
 preset_id = "6694c9b2-2bb0-5d4e-abab-ced0cb58da77"
+
+[[token]]
+id = "66a98957-510c-56c7-963f-e23a37c5018f"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "5"
+released_at = "2026-11-13"
+type_line = "Token Creature — Klingon Warrior"
+rules_text = "Haste"
+
+[token.body]
+display_name = "Klingon Warrior"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Klingon",
+    "Warrior",
+]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[token.token_image_ref]
+scryfall_id = "b7897f31-509e-4099-b9b4-c6214b80f29d"
+scryfall_oracle_id = "ed94019b-7db2-41dd-9046-d41cc098a7be"
+preset_id = "66a98957-510c-56c7-963f-e23a37c5018f"
 
 [[token]]
 id = "66c1dec4-4e0e-50d3-852e-142972e48d52"
@@ -96038,6 +97193,31 @@ scryfall_oracle_id = "3c549374-6c37-42e0-8d88-a8555d46732d"
 preset_id = "6b23ba7a-3a1a-57fe-8492-a65c078a4d50"
 
 [[token]]
+id = "6b3c17f7-097d-54b1-946a-890f424e3950"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "2"
+released_at = "2026-11-13"
+type_line = "Token Creature — Romulan"
+
+[token.body]
+display_name = "Romulan"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Romulan"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "a507f7fc-1438-4680-af2f-e7131c4d7d0b"
+scryfall_oracle_id = "074d5472-3916-4661-9bee-0dcd1da509dd"
+preset_id = "6b3c17f7-097d-54b1-946a-890f424e3950"
+
+[[token]]
 id = "6b5a3b83-2057-5f85-9676-8bb0633405e9"
 category = "Creature"
 fidelity = "Full"
@@ -100501,6 +101681,34 @@ scryfall_id = "081d4375-1d86-4fb1-9ccc-198dfbfacf8e"
 scryfall_id = "b9e068ea-234a-4fba-8de8-9b7e1b94b361"
 scryfall_oracle_id = "09abac92-2bc9-4fac-84db-96f53d706a69"
 preset_id = "6febfde9-cc59-5664-8ad5-a58f8d72dfcc"
+
+[[token]]
+id = "7007d0fb-6e20-5c22-819f-89eb9570fb5a"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "20"
+released_at = "2026-11-13"
+type_line = "Token Artifact Creature — Borg"
+
+[token.body]
+display_name = "Borg"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Borg"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "662d060a-719c-42bf-8bee-cf602a045ff0"
+scryfall_oracle_id = "3e5f8b8d-b8e6-48a2-a596-ee45e7e56038"
+preset_id = "7007d0fb-6e20-5c22-819f-89eb9570fb5a"
 
 [[token]]
 id = "70231ceb-8114-5502-8272-aa843ca2f40f"
@@ -117004,6 +118212,31 @@ scryfall_id = "2de25ea4-284a-4c16-b823-048ff00c6a03"
 scryfall_id = "54a1c6a9-3531-4432-9157-e4400dbc89fd"
 scryfall_oracle_id = "3e8443aa-7c50-4776-8e8c-eea82c7da0f1"
 preset_id = "7fe69ac3-3746-5976-a53c-e4d06492050c"
+
+[[token]]
+id = "8013888a-7ea1-50fa-b817-9d9ceeb10c95"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "15"
+released_at = "2026-11-13"
+type_line = "Token Creature — Officer"
+
+[token.body]
+display_name = "Officer"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Officer"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "012b04de-d9a5-4b12-afc8-cdf54bc42fc9"
+scryfall_oracle_id = "e9452def-ea12-4262-9714-86e5cfffaadc"
+preset_id = "8013888a-7ea1-50fa-b817-9d9ceeb10c95"
 
 [[token]]
 id = "801b4da1-9973-5d92-b53e-3ca496f67f3d"
@@ -147788,6 +149021,31 @@ scryfall_oracle_id = "6bb61f34-5d57-4eaa-a02c-f5d08c1ee920"
 preset_id = "a20cb9dd-a528-51f0-8617-43bb9a70aabd"
 
 [[token]]
+id = "a23c8627-8904-51b0-9193-60f6d54baeda"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "17"
+released_at = "2026-11-13"
+type_line = "Token Legendary Creature — Dog"
+
+[token.body]
+display_name = "Porthos"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Dog"]
+supertypes = ["Legendary"]
+colors = ["Green"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "edd98ca8-9a23-4fb5-9719-27ac2795bfa3"
+scryfall_oracle_id = "b34257a7-12b6-46c4-8a5c-9a5e73cf7c1d"
+preset_id = "a23c8627-8904-51b0-9193-60f6d54baeda"
+
+[[token]]
 id = "a24467f9-396f-54df-a623-71736a701b84"
 category = "Creature"
 fidelity = "Full"
@@ -152437,6 +153695,31 @@ scryfall_oracle_id = "60fe4897-6760-4c5a-8074-c92bd64df52b"
 preset_id = "a8ae86dd-06bb-5c57-8e78-e86ede39d412"
 
 [[token]]
+id = "a8bfcc5a-fcfc-59e5-a892-1ae9840db628"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "7"
+released_at = "2026-11-13"
+type_line = "Token Creature — Officer"
+
+[token.body]
+display_name = "Officer"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Officer"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "a0547a22-fd86-492f-9143-af5dae0e69af"
+scryfall_oracle_id = "e9452def-ea12-4262-9714-86e5cfffaadc"
+preset_id = "a8bfcc5a-fcfc-59e5-a892-1ae9840db628"
+
+[[token]]
 id = "a8ca3d69-47b9-5c17-92bd-52dd3199cb3b"
 category = "Creature"
 fidelity = "Full"
@@ -156099,6 +157382,202 @@ scryfall_id = "f42beafb-2fba-482c-a86a-7d668fa7cb4b"
 scryfall_id = "4d33b752-c806-4932-ae0a-46f00ed937de"
 scryfall_oracle_id = "eabcfcf5-4f51-42c1-8eb8-38810d6ebd47"
 preset_id = "ac66aba2-a487-5025-8197-d9a268c36935"
+
+[[token]]
+id = "aca16281-4bce-51f2-aed3-9fa0e4fa6424"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Albiorix, Goose Tyrant // Wild Goose Chase",
+    "Ant-Man's Army",
+    "Apothecary White",
+    "Applejack",
+    "Astrid Peth",
+    "Bag End Banquet",
+    "Bake into a Pie",
+    "Bakersbane Duo",
+    "Bartered Cow",
+    "Bill the Pony",
+    "Boar",
+    "Bosco, Just a Bear",
+    "Brandywine Farmer",
+    "Bristlebud Farmer",
+    "Bumbleflower's Sharepot",
+    "Bumi's Feast Lecture",
+    "Butterbur, Bree Innkeeper",
+    "Cache Grab",
+    "Campsite Cuisine",
+    "Canyon Crawler",
+    "Cat Collector",
+    "Cirith Ungol Patrol",
+    "City Pigeon",
+    "Concession Stand",
+    "Courier of Comestibles",
+    "Creeping Crystal Coating",
+    "Crumb and Get It",
+    "Curious Pair // Treats to Share",
+    "Devouring Sugarmaw // Have for Dinner",
+    "Eager Trufflesnout",
+    "Eastfarthing Farmer",
+    "Elanor Gardner",
+    "Elephant-Mandrill",
+    "Experimental Confectioner",
+    "Fae Offering",
+    "Farmer Cotton",
+    "Feasting Troll King",
+    "Featherbrained Filcher",
+    "Feed the Cauldron",
+    "Fell the Pheasant",
+    "Field-Tested Frying Pan",
+    "Fierce Witchstalker",
+    "Food Coma",
+    "Foreboding Fruit",
+    "Fortifying Provisions",
+    "Galadriel, Gift-Giver",
+    "Generous Ent",
+    "Giant Opportunity",
+    "Giant's Skewer",
+    "Gift Shop",
+    "Gilded Goose",
+    "Gingerbread Cabin",
+    "Gingerbread Hunter // Puny Snack",
+    "Gluttonous Troll",
+    "Graham O'Brien",
+    "Greta, Sweettooth Scourge",
+    "Gumdrop Poisoner // Tempt with Treats",
+    "Gyome, Master Chef",
+    "Hazel's Brewmaster",
+    "Heroic Feast",
+    "Hollow Scavenger // Bakery Raid",
+    "Hot Dog Cart",
+    "Hurska Sweet-Tooth",
+    "Ignis Scientia",
+    "Insatiable Frugivore",
+    "Intrepid Trufflesnout // Go Hog Wild",
+    "Iroh, Tea Master",
+    "Jandor, Fortuned Traveler",
+    "Killer Service",
+    "Late to Dinner",
+    "Leaves from the Vine",
+    "Lita, Little Orphan Amphibian",
+    "Lucky the Pizza Dog",
+    "Madame Vastra",
+    "Many Partings",
+    "Meatsqueak, Hoard Lord",
+    "Meriadoc Brandybuck",
+    "Michelangelo, the Heart",
+    "Midnight Snack",
+    "Mintstrosity",
+    "Momo, Playful Pet",
+    "Night of the Sweets' Revenge",
+    "Ninja Pizza",
+    "Nocturnal Hunger",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Of Herbs and Stewed Rabbit",
+    "Oko, Thief of Crowns",
+    "Old Flitterfang",
+    "Orchard Strider",
+    "Overcooked",
+    "Overencumbered",
+    "Party Dude",
+    "Pawpatch Formation",
+    "Peregrin Took",
+    "Pippin, Warden of Isengard",
+    "Pizza Face, Gastromancer",
+    "Provisions Merchant",
+    "Questionable Cuisine",
+    "Rapacious Guest",
+    "Restless Cottage",
+    "Return from the Wilds",
+    "Revive the Shire",
+    "Rocco, Street Chef",
+    "Rosie Cotton of South Lane",
+    "Sam, Loyal Attendant",
+    "Samwise Gamgee",
+    "Savor",
+    "Savvy Hunter",
+    "Scavenger's Talent",
+    "Scream Puff",
+    "Second Breakfast",
+    "Shelob's Ambush",
+    "Sidequest: Catch a Fish // Cooking Campsite",
+    "Sierra, Nuka's Biggest Fan",
+    "Skybeast Tracker",
+    "Sophia, Dogged Detective",
+    "Sorin of House Markov // Sorin, Ravenous Neonate",
+    "Spectrox Mines",
+    "Spider Food",
+    "Spider-Ham, Peter Porker",
+    "Spot, Felis catus",
+    "Stardew Valley",
+    "Stew the Coneys",
+    "Survivor's Med Kit",
+    "Sweettooth Witch",
+    "Tainted Treats",
+    "Taste of Death",
+    "Tempting Witch",
+    "The Art of Tea",
+    "The Battle of Bywater",
+    "The Cabbage Merchant",
+    "The Dining Car",
+    "The Eleventh Hour",
+    "The Fourth Doctor",
+    "The Goose Mother",
+    "The Shire",
+    "The Third Doctor",
+    "The Underworld Cookbook",
+    "The Wilds",
+    "The Witch's Vanity",
+    "Tippy-Toe, Terrific Partner",
+    "Tireless Provisioner",
+    "Tough Cookie",
+    "Trail of Crumbs",
+    "Transmutation Font",
+    "Treebeard, Gracious Host",
+    "Turn into a Pumpkin",
+    "Unlucky Cabbage Merchant",
+    "Valley Rally",
+    "Vault 101: Birthday Party",
+    "Vinereap Mentor",
+    "Voracious Fell Beast",
+    "Welcome to Sweettooth",
+    "White Glove Gourmand",
+    "Wish Good Luck",
+    "Witch's Oven",
+]
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "23"
+released_at = "2026-11-13"
+type_line = "Token Artifact — Food"
+rules_text = "{2}, {T}, Sacrifice this token: You gain 3 life."
+
+[token.category.PredefinedArtifact]
+kind = "Food"
+
+[token.body]
+display_name = "Food"
+core_types = ["Artifact"]
+subtypes = ["Food"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Spot, Felis catus"
+scryfall_oracle_id = "25fe4df1-abf7-4f17-9e0d-57e414697400"
+scryfall_id = "fe5f0fe9-f063-4fb7-81c9-13f4e14d6ed1"
+
+[[token.source_card_refs]]
+card_name = "Spot, Felis catus"
+scryfall_oracle_id = "25fe4df1-abf7-4f17-9e0d-57e414697400"
+scryfall_id = "ccdc8c1a-68ba-4498-a336-13676d8de107"
+
+[token.token_image_ref]
+scryfall_id = "dd703147-f546-45af-8511-2d108afd0ad2"
+scryfall_oracle_id = "a468338f-635e-4206-89d6-72d723071d45"
+preset_id = "aca16281-4bce-51f2-aed3-9fa0e4fa6424"
 
 [[token]]
 id = "aca46592-54ab-50f2-90ae-7dabf972573e"
@@ -160606,6 +162085,34 @@ scryfall_oracle_id = "18ef473d-f958-4bff-8045-154f6adc6b04"
 preset_id = "b0c5db58-e1fd-5596-adc4-803cb422b276"
 
 [[token]]
+id = "b0d360da-e077-5c39-beda-e8fe902b81de"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "24"
+released_at = "2026-11-13"
+type_line = "Token Artifact Creature — Illusion"
+
+[token.body]
+display_name = "Illusion"
+power = 3
+toughness = 3
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Illusion"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "d760eee8-e49a-4662-8bfc-fcf8ed2ad2d8"
+scryfall_oracle_id = "9c29576c-a807-408f-b6d2-111c1f93f902"
+preset_id = "b0d360da-e077-5c39-beda-e8fe902b81de"
+
+[[token]]
 id = "b0e0f943-429b-5075-a61d-22338c7dfcf6"
 fidelity = "Full"
 source_card_names = [
@@ -162454,6 +163961,61 @@ scryfall_id = "8f279602-024a-44b6-9a36-465c16363cb5"
 scryfall_id = "e6e361f5-a662-495f-a8e5-e4a647833af5"
 scryfall_oracle_id = "814a8da6-6f44-41ee-906a-3e776e080b22"
 preset_id = "b1fd6327-0bbb-5042-9116-4f9f2b4a6699"
+
+[[token]]
+id = "b24a8479-39d2-580c-bc99-ea572ef1a00c"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Aatchik, Emerald Radian",
+    "Ant Queen",
+    "Ant-Man, Colony Commander",
+    "Beacon of Creation",
+    "Broodhatch Nantuko",
+    "Crawling Infestation",
+    "Crawling Sensation",
+    "Dragonlair Spider",
+    "Hiveheart Shaman",
+    "Infestation Expert // Infested Werewolf",
+    "Infested Roothold",
+    "Insect",
+    "Iridescent Hornbeetle",
+    "It of the Horrid Swarm",
+    "Living Hive",
+    "Old Rutstein",
+    "One Dozen Eyes",
+    "Saber Ants",
+    "Scute Swarm",
+    "Springheart Nantuko",
+    "Swarm Shambler",
+    "Symbiotic Beast",
+    "Symbiotic Elf",
+    "Symbiotic Wurm",
+    "The Astonishing Ant-Man",
+    "Vilespawn Spider",
+    "Vitality Charm",
+    "Wirewood Hivemaster",
+]
+set_code = "TRC"
+set_name = "Star Trek Commander"
+collector_number = "5"
+released_at = "2026-11-13"
+type_line = "Token Creature — Insect"
+
+[token.body]
+display_name = "Insect"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Insect"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "627d71a5-cacb-4dbb-a804-83a24be1dd9f"
+scryfall_oracle_id = "c39cd31f-c4a2-4ca8-b4f9-b2e6289743bc"
+preset_id = "b24a8479-39d2-580c-bc99-ea572ef1a00c"
 
 [[token]]
 id = "b25392e1-0377-5a67-857d-c6271b7ae245"
@@ -174272,6 +175834,31 @@ scryfall_id = "c997fe6c-cb57-4e0e-9267-42bd12cc3b03"
 scryfall_id = "de85f692-4c8b-45b5-af8b-05a4c2a6cebf"
 scryfall_oracle_id = "079c46cc-feb0-4998-8593-c8b739afdb82"
 preset_id = "c0dea9db-fb14-52e0-8304-5025d32f26f4"
+
+[[token]]
+id = "c0e753a2-3538-55ce-bf93-33e0bbd74514"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "10"
+released_at = "2026-11-13"
+type_line = "Token Creature — Officer"
+
+[token.body]
+display_name = "Officer"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Officer"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "b0ac658c-b34a-4794-9b36-91c63f903f65"
+scryfall_oracle_id = "e9452def-ea12-4262-9714-86e5cfffaadc"
+preset_id = "c0e753a2-3538-55ce-bf93-33e0bbd74514"
 
 [[token]]
 id = "c0edfb5e-e4bc-52df-aa04-92671cb93cd2"
@@ -188672,7 +190259,17 @@ keywords = []
 [[token.source_card_refs]]
 card_name = "Grand Crescendo"
 scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
+scryfall_id = "b41a1ff1-8e72-4269-825c-aaa12b3a4dca"
+
+[[token.source_card_refs]]
+card_name = "Grand Crescendo"
+scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
 scryfall_id = "a60834b0-38ab-40c9-9fd9-db3a23b13076"
+
+[[token.source_card_refs]]
+card_name = "Grand Crescendo"
+scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
+scryfall_id = "a149748e-f192-4ec6-bae3-5a18ffcec140"
 
 [token.token_image_ref]
 scryfall_id = "b7171de9-476d-4bfa-8cc0-b4fbc168cf4d"
@@ -192004,6 +193601,35 @@ scryfall_id = "b47698a3-f7eb-42e4-8246-b657f487a5df"
 scryfall_id = "8c4b0257-2ca5-4015-9d63-d7cf6e87ab9d"
 scryfall_oracle_id = "eac25f12-6459-438c-a09e-93e23d2cf80d"
 preset_id = "d3eecb4c-1ec3-5770-893f-3e89c455ebe9"
+
+[[token]]
+id = "d4044cd7-dfdd-5581-be33-f1e4e31a9756"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "16"
+released_at = "2026-11-13"
+type_line = "Token Legendary Creature — Ooze Slug"
+rules_text = "Indestructible"
+
+[token.body]
+display_name = "Murf"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Ooze",
+    "Slug",
+]
+supertypes = ["Legendary"]
+colors = ["Green"]
+keywords = ["Indestructible"]
+
+[token.token_image_ref]
+scryfall_id = "d1b52f55-6147-4da6-983c-6ca3e1867723"
+scryfall_oracle_id = "cfdba6a5-6e15-4dac-8c88-b755bf618ded"
+preset_id = "d4044cd7-dfdd-5581-be33-f1e4e31a9756"
 
 [[token]]
 id = "d43a8a70-5a2c-5c27-b20f-c0c8d0766750"
@@ -196701,6 +198327,35 @@ keywords = []
 scryfall_id = "46a2c363-c879-4c36-b08a-dd57e3da19ae"
 scryfall_oracle_id = "3c549374-6c37-42e0-8d88-a8555d46732d"
 preset_id = "d7e8ec2d-f7a8-5356-9a08-eb7d3ab43fa9"
+
+[[token]]
+id = "d7e9b52a-d040-54b7-8831-c0b71635750b"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "4"
+released_at = "2026-11-13"
+type_line = "Token Creature — Klingon Warrior"
+rules_text = "Haste"
+
+[token.body]
+display_name = "Klingon Warrior"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Klingon",
+    "Warrior",
+]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[token.token_image_ref]
+scryfall_id = "060f77cd-2779-4f28-83b3-a7e11f64140b"
+scryfall_oracle_id = "ed94019b-7db2-41dd-9046-d41cc098a7be"
+preset_id = "d7e9b52a-d040-54b7-8831-c0b71635750b"
 
 [[token]]
 id = "d8325e25-9412-589b-a884-ca3b1cb62825"
@@ -203330,6 +204985,35 @@ scryfall_oracle_id = "ddc8c973-c31e-463f-be45-f3fa7d632362"
 preset_id = "de8ef114-3765-577d-a6d9-a28ace0fa70d"
 
 [[token]]
+id = "de9b69a5-ab82-5146-9e5c-d24ec4a2a83b"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "3"
+released_at = "2026-11-13"
+type_line = "Token Creature — Klingon Warrior"
+rules_text = "Haste"
+
+[token.body]
+display_name = "Klingon Warrior"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Klingon",
+    "Warrior",
+]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[token.token_image_ref]
+scryfall_id = "9c2ae742-7ebf-4e26-b423-598e4f3d176d"
+scryfall_oracle_id = "ed94019b-7db2-41dd-9046-d41cc098a7be"
+preset_id = "de9b69a5-ab82-5146-9e5c-d24ec4a2a83b"
+
+[[token]]
 id = "dea574c9-6edd-54a5-a094-7a84dccbacf7"
 category = "Creature"
 fidelity = "Full"
@@ -203945,6 +205629,31 @@ scryfall_id = "96b496a2-11f4-4655-b9e5-0c8c37b2bb9e"
 scryfall_id = "fe0ea880-0158-4faa-8018-f6626f25dd02"
 scryfall_oracle_id = "079c46cc-feb0-4998-8593-c8b739afdb82"
 preset_id = "df8502df-5d33-55e9-a756-f8fa94ef5b32"
+
+[[token]]
+id = "df85d029-1713-5b9e-97bb-2b4cee58e960"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "13"
+released_at = "2026-11-13"
+type_line = "Token Creature — Officer"
+
+[token.body]
+display_name = "Officer"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Officer"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "5a8d4b2c-ec98-46e2-bf8d-da441d9c9cdf"
+scryfall_oracle_id = "e9452def-ea12-4262-9714-86e5cfffaadc"
+preset_id = "df85d029-1713-5b9e-97bb-2b4cee58e960"
 
 [[token]]
 id = "dfd98280-5bf8-5d7d-a4ed-a90b91be8734"
@@ -204942,6 +206651,32 @@ scryfall_id = "f5a0bb3e-8119-4739-8684-e61d1d607dcb"
 scryfall_id = "5868190d-18f6-43b6-af83-9e0ef585687d"
 scryfall_oracle_id = "78ef9d88-f629-4db4-95dd-f8ab7985dade"
 preset_id = "e111ef12-32a1-5790-8106-8fbfa4572824"
+
+[[token]]
+id = "e1175472-e486-53d1-824d-92686cf23374"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+set_code = "TRC"
+set_name = "Star Trek Commander"
+collector_number = "2"
+released_at = "2026-11-13"
+type_line = "Token Creature — Tribble"
+rules_text = "This token can't block."
+
+[token.body]
+display_name = "Tribble"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Tribble"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "ee3b1218-7ab3-461b-b1b2-818fb61f33ce"
+scryfall_oracle_id = "461aad0b-9e8c-4e80-8d13-8789da191aed"
+preset_id = "e1175472-e486-53d1-824d-92686cf23374"
 
 [[token]]
 id = "e1298968-b8ac-529f-b963-afef12011187"
@@ -207152,6 +208887,209 @@ scryfall_id = "279e551d-3ac3-48d5-9822-1d05159c8905"
 scryfall_id = "74506297-41ad-40e5-bb05-175650ff4907"
 scryfall_oracle_id = "93f6e39e-60e0-4ab8-8bfe-d84aea51d123"
 preset_id = "e34f0600-7c7d-53c2-9a84-79b7cba4b62c"
+
+[[token]]
+id = "e3668138-b14f-5df9-830e-250484fa4b36"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Agent 13, Sharon Carter",
+    "Air Nomad Legacy",
+    "Alquist Proft, Master Sleuth",
+    "Angelic Sleuth",
+    "Antarctic Research Base",
+    "April O'Neil, Live on the Scene",
+    "Armed with Proof",
+    "Auspicious Arrival",
+    "Azula, On the Hunt",
+    "Ballroom",
+    "Billiard Room",
+    "Blink",
+    "Blu, Mansion Prince",
+    "Briarbridge Patrol",
+    "Briarbridge Tracker",
+    "Bygone Bishop",
+    "Byway Courier",
+    "Callous Inspector",
+    "Carnage Interpreter",
+    "Case of the Filched Falcon",
+    "Case of the Pilfered Proof",
+    "Chalk Outline",
+    "Cold Case Cracker",
+    "Confirm Suspicions",
+    "Confront the Unknown",
+    "Conservatory",
+    "Cunning Maneuver",
+    "Curious Inquiry",
+    "Daring Sleuth // Bearer of Overwhelming Truths",
+    "Declaration in Stone",
+    "Deduce",
+    "Dennick, Pious Apprentice // Dennick, Pious Apparition",
+    "Detective's Satchel",
+    "Dining Room",
+    "Disorder in the Court",
+    "Drag the Canal",
+    "Drownyard Explorers",
+    "Duggan, Private Detective",
+    "Eliminate the Impossible",
+    "Elmar, Ulvenwald Informant",
+    "Eloise, Nephalia Sleuth",
+    "Erdwal Illuminator",
+    "Ethereal Investigator",
+    "Evidence Examiner",
+    "Expose Evil",
+    "Ezrim, Agency Chief",
+    "Fae Offering",
+    "Fateful Absence",
+    "Fire Nation Raider",
+    "Fire Nation Warship",
+    "Fleeting Memories",
+    "Flitwing, Lyev Detective",
+    "Floodhound",
+    "Flotsam // Jetsam",
+    "Follow the Bodies",
+    "Foreboding Steamboat",
+    "Forecasting Fortune Teller",
+    "Forensic Gadgeteer",
+    "Foul Play",
+    "Fugitive of the Judoon",
+    "Funnel-Web Recluse",
+    "Gleaming Geardrake",
+    "Gone Missing",
+    "Hall",
+    "Hard Evidence",
+    "Havengul Laboratory // Havengul Mystery",
+    "Heaven Sent",
+    "Hold for Questioning",
+    "Homicide Investigator",
+    "Hostile Investigator",
+    "Hotshot Investigators",
+    "Humble the Brute",
+    "Innocent Bystander",
+    "Innocuous Researcher",
+    "Inquisitor Eisenhorn",
+    "Inquisitor Greyfax",
+    "Jace's Scrutiny",
+    "James, Wandering Dad // Follow Him",
+    "Jet's Brainwashing",
+    "June, Bounty Hunter",
+    "Kellan, Inquisitive Prodigy // Tail the Suspect",
+    "Kitchen",
+    "Knowledge Seeker",
+    "Lavinia, Foil to Conspiracy",
+    "Lazav, Wearer of Faces",
+    "Library",
+    "Lonis, Cryptozoologist",
+    "Lonis, Genetics Expert",
+    "Lord Jyscal Guado",
+    "Lost Days",
+    "Lounge",
+    "Loxodon Eavesdropper",
+    "Madame Vastra",
+    "Magnifying Glass",
+    "Malcolm, the Eyes",
+    "Martha Jones",
+    "Meddling Youths",
+    "Merchant of Truth",
+    "Messenger Hawk",
+    "Mistway Spy",
+    "Morska, Undersea Sleuth",
+    "Nick Valentine, Private Eye",
+    "No Witnesses",
+    "Novice Inspector",
+    "Nyla, Shirshu Sleuth",
+    "Obsessive Pursuit",
+    "Officious Interrogation",
+    "On the Job",
+    "Ongoing Investigation",
+    "Osgood, Operation Double",
+    "Out Cold",
+    "Overencumbered",
+    "Panther Pounce",
+    "Persuasive Interrogators",
+    "Piper Wright, Publick Reporter",
+    "Press for Answers",
+    "Raven Eagle",
+    "Resonance Technician",
+    "Root Out",
+    "Rory Williams",
+    "Sally Sparrow",
+    "Sarah Jane Smith",
+    "Search the Premises",
+    "Secret Passage",
+    "Secrets of the Key",
+    "Serene Sleuth",
+    "Sharp-Eyed Rookie",
+    "Sokka's Sword Training",
+    "Sold Out",
+    "Sophia, Dogged Detective",
+    "Sophina, Spearsage Deserter",
+    "Study",
+    "Survive the Night",
+    "Syndicate Heavy",
+    "Tamiyo Meets the Story Circle",
+    "Tamiyo's Journal",
+    "Tamiyo, Inquisitive Student // Tamiyo, Seasoned Scholar",
+    "Teysa, Opulent Oligarch",
+    "The Chase Is On",
+    "The Fugitive Doctor",
+    "The Mechanist, Aerial Artisan",
+    "The Rani",
+    "The Seventh Doctor",
+    "The Third Doctor",
+    "They Went This Way",
+    "Thijarian Witness",
+    "Thorough Investigation",
+    "Thraben Inspector",
+    "Tireless Tracker",
+    "Tivit, Seller of Secrets",
+    "Tolls of War",
+    "Torch the Witness",
+    "Toxin Analysis",
+    "Trail of Evidence",
+    "Transmutation Font",
+    "True Ancestry",
+    "Ulvenwald Mysteries",
+    "Undercover Crocodelf",
+    "Unshakable Tail",
+    "Wavesifter",
+    "Weirding Wood",
+    "Wernog, Rider's Chaplain",
+    "Wojek Investigator",
+    "Zuko's Exile",
+]
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "22"
+released_at = "2026-11-13"
+type_line = "Token Artifact — Clue"
+rules_text = "{2}, Sacrifice this token: Draw a card."
+
+[token.category.PredefinedArtifact]
+kind = "Clue"
+
+[token.body]
+display_name = "Clue"
+core_types = ["Artifact"]
+subtypes = ["Clue"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Tireless Tracker"
+scryfall_oracle_id = "e6555cca-e608-4c87-b835-9cd47fd1f543"
+scryfall_id = "e7f622c5-b7e3-4f18-a3a9-b6c855237cdc"
+
+[[token.source_card_refs]]
+card_name = "Tireless Tracker"
+scryfall_oracle_id = "e6555cca-e608-4c87-b835-9cd47fd1f543"
+scryfall_id = "b0da1ea2-6a42-4551-a6ae-5a7ddb70b56b"
+
+[token.token_image_ref]
+scryfall_id = "24c80ef6-747d-47b7-8e1f-148f5dfacc32"
+scryfall_oracle_id = "496e1083-c792-40a4-adf4-fec1d559cd5e"
+preset_id = "e3668138-b14f-5df9-830e-250484fa4b36"
 
 [[token]]
 id = "e38d4e10-cb79-537a-9abc-7cbde8878f74"
@@ -218508,6 +220446,37 @@ scryfall_oracle_id = "c8790543-9399-4312-9b15-aa8a45c8fec7"
 preset_id = "f1a101af-6b87-576d-b9a1-e62aa9729e9e"
 
 [[token]]
+id = "f1a4c23e-3433-5f96-bd82-ec2a3f1c81a1"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Citizen",
+    "Icatian Crier",
+    "Icatian Town",
+    "Sarpadian Empires, Vol. VII",
+]
+set_code = "TRC"
+set_name = "Star Trek Commander"
+collector_number = "6"
+released_at = "2026-11-13"
+type_line = "Token Creature — Citizen"
+
+[token.body]
+display_name = "Citizen"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Citizen"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "bb355701-39e2-428e-a62b-feac0bdada72"
+scryfall_oracle_id = "e31c15d7-f89e-480b-a22f-5823343342bb"
+preset_id = "f1a4c23e-3433-5f96-bd82-ec2a3f1c81a1"
+
+[[token]]
 id = "f1a551ec-bdba-5acc-a5ac-60b5b5f283e8"
 category = "Creature"
 fidelity = "Full"
@@ -223106,6 +225075,31 @@ keywords = []
 scryfall_id = "9bc273b8-05bb-4c8f-92b1-c178d4bbadb0"
 scryfall_oracle_id = "4e244965-1ba9-4692-a2fa-c2aa9cfe5175"
 preset_id = "f632859f-fb8c-5d4b-a02e-14c7ce32d46c"
+
+[[token]]
+id = "f637d813-4c14-5680-b08e-aaf6c844bb60"
+category = "Creature"
+fidelity = "Full"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "12"
+released_at = "2026-11-13"
+type_line = "Token Creature — Officer"
+
+[token.body]
+display_name = "Officer"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Officer"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "d88565c6-a8e9-4726-94af-c56ffd96d33e"
+scryfall_oracle_id = "e9452def-ea12-4262-9714-86e5cfffaadc"
+preset_id = "f637d813-4c14-5680-b08e-aaf6c844bb60"
 
 [[token]]
 id = "f65c845c-0a79-5dfa-b514-cc127d26251d"
@@ -227814,6 +229808,11 @@ subtypes = ["Beast"]
 supertypes = []
 colors = ["Green"]
 keywords = []
+
+[[token.source_card_refs]]
+card_name = "Beast Within"
+scryfall_oracle_id = "7735eeba-693b-47e2-bd51-414379cf1016"
+scryfall_id = "1929cf4b-0d18-4f7d-a631-621a378ff015"
 
 [[token.source_card_refs]]
 card_name = "Fresh Meat"
@@ -232747,6 +234746,32 @@ scryfall_id = "099b1265-11a5-48e2-9529-24fa3ea46377"
 scryfall_id = "e54486a4-f432-4e50-8639-799e036d0657"
 scryfall_oracle_id = "8653c69b-99a9-4881-a14c-68ba928c34d5"
 preset_id = "fe05bec2-d5f9-50f6-b439-2eedd5a51e57"
+
+[[token]]
+id = "fe3857ff-016b-5516-81b2-291e00b871bd"
+category = "Equipment"
+fidelity = "PartialMissingAbilities"
+set_code = "TRK"
+set_name = "Star Trek"
+collector_number = "25"
+released_at = "2026-11-13"
+type_line = "Token Artifact — Equipment"
+rules_text = """
+Equipped creature gets +1/+1.
+Equip {2}"""
+
+[token.body]
+display_name = "Neuroflux Heirloom"
+core_types = ["Artifact"]
+subtypes = ["Equipment"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "d811c3c3-6b5b-4b42-be4f-0a455313ccd3"
+scryfall_oracle_id = "6fada0dc-3783-4f45-a321-a44c7071adc5"
+preset_id = "fe3857ff-016b-5516-81b2-291e00b871bd"
 
 [[token]]
 id = "fe3dc071-a8eb-558f-8f1a-2cf95935cc5b"
