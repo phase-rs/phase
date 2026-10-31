@@ -72,6 +72,9 @@
 //! upkeep keeps the draw step's card on top of its seven, and in the main phase discards it. So
 //! is anything else sized by the hand, and a discard the hand can't pay.
 //!
+//! A continuation is a whole line, so such an activation also ends the lend of every other hold
+//! at its root (`root_held_line`): a held Wellwisher's line can go on to crack Flooded Strand.
+//!
 //! An activation whose own restriction lapses before the main phase stands down, because waiting
 //! gives it up (CR 602.5): a cap on the hand, which the draw lifts it out of (Library of
 //! Alexandria), and a phase with no main phase in it (Dwarven Armory).
@@ -86,7 +89,11 @@
 //! classification does not read inside an inline branch carrier (a die roll's results) or a node
 //! the parser left `Unimplemented`. And a surcharge on the activation is not read: Loreseeker's
 //! Stone keeps its hand count in `cost_reduction`, which neither walker reads. Its upkeep line
-//! costs {1} less than main's. It stays held and lent.
+//! costs {1} less than main's. It stays held and lent. And `root_held_line` reads only the
+//! activations the root offers against the draw, so a lent line can still go through what it
+//! doesn't read: an activation that line alone puts on offer, a spell cast before the draw, or
+//! an activation that stands down for another reason (an upkeep-only one, or one spending
+//! floating mana).
 //!
 //! The classification errs toward standing down, so it also releases activations that could
 //! have waited: a card put on the bottom changes this draw only on an empty library
@@ -119,7 +126,7 @@
 //! ping. On the search branch, where other policies' payoffs are scaled by the
 //! root `tactical_weight`, a payoff beats the hold only above the penalty
 //! divided by that weight. A hold on a search or a hand clear has the penalty only: nothing is
-//! lent for it (see "What a hold rests on").
+//! lent for it, or for any hold beside it (see "What a hold rests on").
 //!
 //! ## The escape hatches
 //!
@@ -152,6 +159,7 @@
 //! AI's own turn with an empty stack, so nothing is targeting the source and no
 //! opponent attacks before the main phase.
 
+use engine::ai_support::CandidateAction;
 use engine::game::{attractions, mana_abilities};
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityTag, ActivationRestriction, Comparator,
@@ -187,13 +195,15 @@ const PATIENCE_PENALTY_BASE: f64 = 1.2;
 
 pub struct ActivationPatiencePolicy;
 
-/// Whether activating later reproduces a held line, so that passing keeps it.
+/// Whether activating later reproduces a line, so that passing keeps it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeldLine {
-    /// Nothing before the main phase can depend on the activation: PassPriority may inherit
-    /// the line's continuation (`search::lend_deferral_witness`).
+    /// Nothing before the main phase can depend on the activation. For a hold, this also takes
+    /// every other activation the root offers ([`root_held_line`]): a continuation is a whole
+    /// line, and only then may PassPriority inherit it (`search::lend_deferral_witness`).
     Reproducible,
-    /// The line is one passing can't reach. It keeps its own continuation.
+    /// The line is one passing can't reach, or at a hold's root, may go through one. It keeps
+    /// its own continuation.
     Irreproducible,
 }
 
@@ -347,8 +357,49 @@ fn upkeep_draw_setup(
         .min()
 }
 
-/// Whether passing keeps the line of the activation ActivationPatience holds. Called only for
-/// a held candidate.
+/// Whether passing keeps the lines of the activations ActivationPatience holds at this root:
+/// [`HeldLine::Reproducible`] only when [`held_line`] says so of every candidate.
+///
+/// A continuation is a whole line, not its root action. A reproducible donor's line can go on to
+/// an activation passing can't reach: Wellwisher, then Flooded Strand, on a board where passing
+/// draws the Island. Nothing here says which actions a line took, so one irreproducible
+/// activation on offer ends the lend of every hold at the root, and:
+///
+/// - It counts held or not. An arrangement stands down and passing can't reach it either
+///   (Crystal Ball).
+/// - It needs no continuation of its own: none above Pass's, none open, none at all. Its line
+///   from the root bounds nothing about the line through it, which starts after the donor and
+///   ranks its beams apart. A sibling off the beam has no line, and one that wins takes the root
+///   regardless.
+/// - `candidates` must be the engine-issued list, before the tactical gate, validation and
+///   `max_branching`. An interior node ranks the engine's list on its own, with no gate, so a
+///   sibling the root's beam dropped can be in a donor's line.
+///
+/// This reads what the root offers, so it can't see an activation only the donor's line puts on
+/// offer (one that untaps the sibling's source). It reads activations against the draw, so it
+/// can't see a spell cast before it, or a stand-down of another kind. The module doc lists these.
+///
+/// It also bars what doesn't need barring: at rung 0 a donor's continuation is its quiesced
+/// resolution, which takes no sibling, and a deeper line may not take it either. Pass then keeps
+/// its own continuation, and the holds their penalties.
+pub(crate) fn root_held_line(
+    state: &GameState,
+    ai_player: PlayerId,
+    candidates: &[CandidateAction],
+) -> HeldLine {
+    if candidates
+        .iter()
+        .any(|candidate| held_line(state, ai_player, &candidate.action) == HeldLine::Irreproducible)
+    {
+        HeldLine::Irreproducible
+    } else {
+        HeldLine::Reproducible
+    }
+}
+
+/// Whether passing keeps the line of this one activation, held or not: an activation that
+/// stands down over the draw is irreproducible too. Anything else a root offers is
+/// [`HeldLine::Reproducible`] here.
 pub(crate) fn held_line(state: &GameState, ai_player: PlayerId, action: &GameAction) -> HeldLine {
     let GameAction::ActivateAbility {
         source_id,

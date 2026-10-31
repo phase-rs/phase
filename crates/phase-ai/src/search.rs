@@ -4191,6 +4191,10 @@ fn open_continuation(line: &RootLine) -> Option<f64> {
 /// hands the opponents priority (CR 117.3d) before it recurs — and a pass whose own line loses
 /// never reaches the window the activation was held for. The lent value is exactly a
 /// sibling's own continuation; every non-Pass score is untouched.
+///
+/// A hold's line is its root's answer, so a rung's holds are all lent from or none are: filtering
+/// donors by their own action can't work, because a donor's line can contain the sibling passing
+/// can't reach. `activation_patience::root_held_line` gives the shape of that bar and its limits.
 fn lend_deferral_witness(rung: &mut [RootRungScore]) {
     let Some(best) = rung
         .iter()
@@ -21085,6 +21089,17 @@ one on the bottom of your library.";
                 "(xiii) an irreproducible holder above Pass",
                 vec![pass(searched(1.0)), unlent_holder(10, searched(4.0))],
             ),
+            // A hold's line is its root's (`root_held_line`), so a rung's holds agree. The
+            // searched rows at `own_upkeep_root_lends_nothing_beside_an_irreproducible_activation`
+            // pin a reproducible activation reading this way beside an irreproducible one.
+            (
+                "(xiv) every hold at the root irreproducible",
+                vec![
+                    pass(searched(1.0)),
+                    unlent_holder(10, searched(3.0)),
+                    unlent_holder(11, searched(9.0)),
+                ],
+            ),
         ];
         for (label, rung) in unchanged {
             let before = unlent_bits(&rung);
@@ -21114,15 +21129,6 @@ one on the bottom of your library.";
                     holder(11, searched(5.0)),
                 ],
                 5.0,
-            ),
-            (
-                "(xiv) a reproducible holder beside a better irreproducible one: the reproducible",
-                vec![
-                    pass(searched(1.0)),
-                    holder(10, searched(3.0)),
-                    unlent_holder(11, searched(9.0)),
-                ],
-                3.0,
             ),
         ];
         for (label, rung, lent) in lifted {
@@ -22465,9 +22471,16 @@ one on the bottom of your library.";
     /// four Grizzly Bears. Returns the scenario, Strand, the Island and one Bears. P0's library
     /// gets no filler, so the Island is the library's only Plains or Island card.
     fn strand_scenario(phase: Phase) -> (GameScenario, ObjectId, ObjectId, ObjectId) {
-        let db = shared_integration_card_db();
         let mut scenario = GameScenario::new();
         scenario.at_phase(phase);
+        strand_scenario_on(scenario)
+    }
+
+    /// [`strand_scenario`] onto `scenario`, whose earlier objects order first at the root.
+    fn strand_scenario_on(
+        mut scenario: GameScenario,
+    ) -> (GameScenario, ObjectId, ObjectId, ObjectId) {
+        let db = shared_integration_card_db();
         let strand = scenario
             .add_land_from_oracle(P0, "Flooded Strand", FLOODED_STRAND)
             .id();
@@ -22513,7 +22526,14 @@ one on the bottom of your library.";
     /// main phase. Every other library card being a Bears makes every shuffle's draw the same
     /// known card, so nothing here fixes the RNG.
     fn strand_board(phase: Phase) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
-        let (mut scenario, strand, island, _) = strand_scenario(phase);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(phase);
+        strand_board_on(scenario)
+    }
+
+    /// [`strand_board`] onto `scenario`.
+    fn strand_board_on(scenario: GameScenario) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+        let (mut scenario, strand, island, _) = strand_scenario_on(scenario);
         let kudzu = scenario
             .add_creature_from_oracle(P0, "Vinelasher Kudzu", 1, 1, VINELASHER_KUDZU)
             .id();
@@ -22824,6 +22844,312 @@ one on the bottom of your library.";
             "control: the fetch carries a deferral in the root beam, got {:?}",
             row.control_deferral
         );
+    }
+
+    /// Magus of the Wheel, verbatim.
+    const MAGUS_OF_THE_WHEEL: &str = "{1}{R}, {T}, Sacrifice this creature: Each player discards their hand, then draws seven cards.";
+
+    /// How far a deeper rung moves Pass with no lend: the policy reaches Pass's own line too.
+    /// The barred rows below measure 0.03, and [`strand_board`] 0.02 with no donor on it at all.
+    const DEEPER_RUNG_DRIFT: f64 = 0.1;
+
+    /// Medium's searched root, as the suite plays it, with nothing sampled.
+    fn medium_searched_config() -> AiConfig {
+        let mut config = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(7);
+        config.search.determinization_samples = 0;
+        assert!(
+            config.search.enabled && config.search.planner_mode == PlannerMode::BeamPlusRollout,
+            "reach-guard: Medium searches past rung 0"
+        );
+        config
+    }
+
+    /// Adds a ready Wellwisher, the only Elf on the board.
+    fn add_wellwisher(scenario: &mut GameScenario) -> ObjectId {
+        let mut wellwisher = scenario.add_creature_from_oracle(P0, "Wellwisher", 1, 1, WELLWISHER);
+        wellwisher.with_subtypes(vec!["Elf"]);
+        wellwisher.id()
+    }
+
+    /// [`strand_board`] in the Upkeep with a ready Wellwisher. Returns the runner, Wellwisher,
+    /// Strand and the Island. Wellwisher is made first, so of the two equal holds it's the one
+    /// a narrow beam keeps.
+    fn wellwisher_strand_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let wellwisher = add_wellwisher(&mut scenario);
+        let (runner, strand, island, _) = strand_board_on(scenario);
+        (runner, wellwisher, strand, island)
+    }
+
+    /// The holds in the root beam for `state`, with each one's line.
+    fn beam_lines(state: &GameState, config: &AiConfig) -> Vec<(GameAction, HeldLine)> {
+        use crate::policies::activation_patience::ActivationPatiencePolicy;
+        let registry = PolicyRegistry::for_tests(vec![Box::new(ActivationPatiencePolicy)]);
+        let mut lines: Vec<_> =
+            build_root_beam(state, &PlannerServices::new_default(P0, config, &registry))
+                .into_iter()
+                .filter_map(|ranked| Some((ranked.candidate.action, ranked.deferral?.line)))
+                .collect();
+        lines.sort_by(|(left, _), (right, _)| left.cmp_stable(right));
+        lines
+    }
+
+    /// The best-scored action of a root scoring.
+    fn top_action(scored: &[(GameAction, f64)]) -> &GameAction {
+        scored
+            .iter()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(action, _)| action)
+            .expect("the root scored at least one action")
+    }
+
+    /// Prints a sibling row's observables, before any assertion on them.
+    fn print_sibling_row(label: &str, roots: &PatienceRoots, donor: &GameAction) {
+        let pass = GameAction::PassPriority;
+        eprintln!("{label} (tw {}):", roots.tw);
+        eprintln!("  s0 = {:?}", roots.s0);
+        eprintln!("  s1 = {:?}", roots.s1);
+        eprintln!(
+            "  cont(donor) = {}, cont(pass) = {}, s1(pass) = {}, lift {}, top of s1 = {:?}",
+            roots.cont(donor),
+            roots.cont(&pass),
+            score_of(&roots.s1, &pass),
+            score_of(&roots.s1, &pass) - score_of(&roots.s0, &pass),
+            top_action(&roots.s1),
+        );
+    }
+
+    /// A continuation is a whole line, so a reproducible donor can lend what it went on to do. On
+    /// [`strand_board`]'s known top a ready Wellwisher's line goes on to crack Flooded Strand: its
+    /// continuation sits with the fetch's, and falls by the fetch's value with Strand tapped.
+    /// Passing draws the Island, and a main-phase fetch finds nothing, so Pass can't reach that
+    /// value (CR 121.1, CR 701.23a, CR 701.24a). Nothing is lent from this root, and it takes the
+    /// fetch's line.
+    ///
+    /// The tapped row is the control: the same Wellwisher, with no such line on offer, lends
+    /// (CR 117.1b).
+    ///
+    /// Medium is the tier whose beam carries the fetch in Wellwisher's line. The Hard rows are
+    /// printed only: theirs don't on this board, and the bar doesn't depend on the line a beam
+    /// takes. Every observable is printed before the first assertion; regenerate them with
+    /// `cargo test -p phase-ai own_upkeep_root_lends_nothing_beside -- --nocapture`.
+    #[test]
+    fn own_upkeep_root_lends_nothing_beside_an_irreproducible_activation() {
+        use crate::policies::registry::NUDGE_MAX;
+
+        let cfg = medium_searched_config();
+        let pass = GameAction::PassPriority;
+
+        let (runner, wellwisher, strand, island) = wellwisher_strand_board();
+        let state = runner.state().clone();
+        let (donor, fetch) = (activate(wellwisher, 0), activate(strand, 0));
+        let roots = PatienceRoots::score(&state, &cfg);
+        print_sibling_row("Wellwisher beside Strand, Medium", &roots, &donor);
+        eprintln!(
+            "  cont(strand) = {}, s1(strand) = {}, holds = {:?}",
+            roots.cont(&fetch),
+            score_of(&roots.s1, &fetch),
+            beam_lines(&state, &cfg)
+        );
+
+        let mut tapped = state.clone();
+        tapped.objects.get_mut(&strand).unwrap().tapped = true;
+        let control = PatienceRoots::score(&tapped, &cfg);
+        print_sibling_row("Same, Strand tapped, Medium", &control, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&tapped, &cfg));
+
+        let mut hard = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        hard.search.determinization_samples = 0;
+        for (label, config) in [
+            ("Beside Strand, Hard rung 0", hard_rung0_config()),
+            ("Beside Strand, Hard", hard),
+        ] {
+            print_sibling_row(label, &PatienceRoots::score(&state, &config), &donor);
+        }
+
+        // Reach: both are held, and the donor's line carries the fetch past Pass's own.
+        roots.assert_scored("beside Strand", &[&donor, &fetch, &pass]);
+        assert!(
+            roots.ap(&donor) < -NUDGE_MAX && roots.ap(&fetch) < -NUDGE_MAX,
+            "reach: patience holds both, got {} and {}",
+            roots.ap(&donor),
+            roots.ap(&fetch)
+        );
+        assert_eq!(
+            p0_player(&state).library[0],
+            island,
+            "premise: the Island is on top"
+        );
+        assert_eq!(p0_strand_matches(&state), 1, "premise: the only match");
+        assert!(
+            roots.cont(&donor) > control.cont(&donor) + 1.0,
+            "reach: Wellwisher's line {} carries the fetch, above {} with Strand tapped",
+            roots.cont(&donor),
+            control.cont(&donor)
+        );
+        assert!(
+            roots.cont(&donor) > roots.cont(&pass) + 1.0,
+            "reach: the donor's line {} is above Pass's {}, so a lend would move Pass",
+            roots.cont(&donor),
+            roots.cont(&pass)
+        );
+
+        // Nothing is lent, and the root takes the fetch.
+        let lift = score_of(&roots.s1, &pass) - score_of(&roots.s0, &pass);
+        assert!(
+            lift.abs() < DEEPER_RUNG_DRIFT,
+            "Pass is not lent the line through the fetch: lift {lift}"
+        );
+        // Wellwisher ties it, its line being the fetch's.
+        assert_eq!(
+            score_of(&roots.s1, &fetch),
+            score_of(&roots.s1, top_action(&roots.s1)),
+            "the root takes the fetch, got {:?}",
+            roots.s1
+        );
+
+        // The control: with no such line on offer, Wellwisher lends.
+        control.assert_scored("Strand tapped", &[&donor, &pass]);
+        assert!(
+            !control.s1.iter().any(|(action, _)| *action == fetch),
+            "reach: a tapped Strand is not on offer"
+        );
+        assert!(
+            control.cont(&donor) > control.cont(&pass),
+            "reach: the donor's line {} is above Pass's {}",
+            control.cont(&donor),
+            control.cont(&pass)
+        );
+        let lent = control.cont(&donor) + score_of(&control.h0, &pass) * control.tw;
+        assert!(
+            (score_of(&control.s1, &pass) - lent).abs() < DEEPER_RUNG_DRIFT,
+            "Pass inherits Wellwisher's continuation: {} vs {lent}",
+            score_of(&control.s1, &pass)
+        );
+    }
+
+    /// The root's holds read its offer, not its beam. An interior node ranks the engine's list on
+    /// its own, so with the beam cut to two, Strand is off the root's beam (held equal to
+    /// Wellwisher, and made after it) and still in Wellwisher's line. A lend would put Pass above
+    /// the one hold left, and it's only the no-policy run's beam that keeps Strand, so the row
+    /// reads the policy's run alone.
+    #[test]
+    fn own_upkeep_root_reads_the_offer_past_its_beam() {
+        let mut cfg = medium_searched_config();
+        cfg.search.max_branching = 2;
+        let (runner, wellwisher, strand, _) = wellwisher_strand_board();
+        let state = runner.state().clone();
+        let (donor, fetch) = (activate(wellwisher, 0), activate(strand, 0));
+        let roots = PatienceRoots::score(&state, &cfg);
+        let mut tapped = state.clone();
+        tapped.objects.get_mut(&strand).unwrap().tapped = true;
+        let control = PatienceRoots::score(&tapped, &cfg);
+        eprintln!("Wellwisher, Strand off the beam, Medium:");
+        eprintln!("  s0 = {:?}", roots.s0);
+        eprintln!("  s1 = {:?}", roots.s1);
+        eprintln!("  holds = {:?}", beam_lines(&state, &cfg));
+        eprintln!("Same, Strand tapped: s1 = {:?}", control.s1);
+
+        assert!(
+            !roots.s1.iter().any(|(action, _)| *action == fetch),
+            "reach: the beam dropped Strand, got {:?}",
+            roots.s1
+        );
+        let (held, control_held) = (score_of(&roots.s1, &donor), score_of(&control.s1, &donor));
+        assert!(
+            held > control_held + 1.0,
+            "reach: Wellwisher's line {held} still carries the fetch, above {control_held} with \
+             Strand tapped"
+        );
+        assert_eq!(
+            top_action(&roots.s1),
+            &donor,
+            "Pass is not lent the line through the fetch, got {:?}",
+            roots.s1
+        );
+    }
+
+    /// The other two kinds of sibling, with Wellwisher held beside each. Magus of the Wheel
+    /// clears the hand, so it's held and not lent. Crystal Ball arranges the top, so it isn't
+    /// held at all, and passing can't reach it all the same. With the sibling tapped neither is
+    /// on offer, and Wellwisher's hold lends again.
+    #[test]
+    fn own_upkeep_root_lends_nothing_beside_a_hand_clear_or_an_arrangement() {
+        use crate::policies::registry::NUDGE_MAX;
+
+        let cfg = medium_searched_config();
+        let pass = GameAction::PassPriority;
+        for (label, sibling_held) in [("Magus of the Wheel", true), ("Crystal Ball", false)] {
+            let db = shared_integration_card_db();
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::Upkeep);
+            let wellwisher = add_wellwisher(&mut scenario);
+            let sibling = if sibling_held {
+                scenario
+                    .add_creature_from_oracle(P0, label, 1, 1, MAGUS_OF_THE_WHEEL)
+                    .id()
+            } else {
+                scenario
+                    .add_artifact_from_oracle(P0, label, CRYSTAL_BALL)
+                    .id()
+            };
+            for _ in 0..2 {
+                scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+            }
+            for _ in 0..2 {
+                scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
+            }
+            let mut runner = scenario.build();
+            rehydrate_game_from_card_db(runner.state_mut(), db);
+            add_libraries(runner.state_mut(), 10);
+            let state = runner.state().clone();
+            let (donor, sibling_action) = (activate(wellwisher, 0), activate(sibling, 0));
+
+            let roots = PatienceRoots::score(&state, &cfg);
+            print_sibling_row(label, &roots, &donor);
+            eprintln!(
+                "  cont(sibling) = {}, holds = {:?}",
+                roots.cont(&sibling_action),
+                beam_lines(&state, &cfg)
+            );
+            let mut tapped = state.clone();
+            tapped.objects.get_mut(&sibling).unwrap().tapped = true;
+            let control = PatienceRoots::score(&tapped, &cfg);
+            print_sibling_row(&format!("{label} tapped"), &control, &donor);
+            eprintln!("  holds = {:?}", beam_lines(&tapped, &cfg));
+
+            roots.assert_scored(label, &[&donor, &sibling_action, &pass]);
+            assert!(
+                roots.ap(&donor) < -NUDGE_MAX,
+                "{label}: reach: patience holds Wellwisher, got {}",
+                roots.ap(&donor)
+            );
+            assert_eq!(
+                roots.ap(&sibling_action) < -NUDGE_MAX,
+                sibling_held,
+                "{label}: premise: whether the sibling is held, got {}",
+                roots.ap(&sibling_action)
+            );
+            let lines = beam_lines(&state, &cfg);
+            assert!(
+                lines.iter().any(|(action, _)| *action == donor)
+                    && lines
+                        .iter()
+                        .all(|(_, line)| *line == HeldLine::Irreproducible),
+                "{label}: nothing lends, got {lines:?}"
+            );
+            let lift = score_of(&roots.s1, &pass) - score_of(&roots.s0, &pass);
+            assert!(
+                lift.abs() < DEEPER_RUNG_DRIFT,
+                "{label}: Pass is not lent the line through the sibling: lift {lift}"
+            );
+            assert_eq!(
+                beam_lines(&tapped, &cfg),
+                [(donor.clone(), HeldLine::Reproducible)],
+                "{label}: tapped, the sibling isn't on offer, and the hold lends"
+            );
+        }
     }
 
     /// D1 at the root (the mtg-bot Coordinated Assault regression): in the AI's own Draw step

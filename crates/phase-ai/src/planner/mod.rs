@@ -22,13 +22,13 @@ use crate::config::{AiConfig, OpponentModel};
 use crate::eval::{
     evaluate_for_planner, evaluate_state, strategic_intent, threat_level, StrategicIntent,
 };
-use crate::policies::activation_patience::{held_line, HeldLine};
+use crate::policies::activation_patience::{root_held_line, HeldLine};
 use crate::policies::context::{PolicyContext, PriorsEnv, SearchDepth};
 use crate::policies::registry::PolicyScore;
 use crate::policies::{PolicyId, PolicyRegistry};
 
 /// The policy whose root verdict the search root applies unweighted. Its hold on an activation
-/// also says whether PassPriority may inherit the line (`activation_patience::held_line`,
+/// also says whether PassPriority may inherit the line (`activation_patience::root_held_line`,
 /// `search::lend_deferral_witness`).
 pub(crate) const DEFERRAL_POLICY: PolicyId = PolicyId::ActivationPatience;
 
@@ -46,7 +46,8 @@ pub(crate) struct RootTacticalScore {
 pub(crate) struct Deferral {
     /// The verdict's delta, added at the root at full strength beside the weighted tactical term.
     pub penalty: f64,
-    /// Whether PassPriority may inherit the held line.
+    /// Whether PassPriority may inherit the held line: the root's answer, so every hold at a
+    /// root carries the same one.
     pub line: HeldLine,
 }
 
@@ -1764,7 +1765,7 @@ impl<'a> PlannerServices<'a> {
             weighted,
             deferral: (held != 0.0).then(|| Deferral {
                 penalty: held,
-                line: held_line(state, scoring_player, &candidate.action),
+                line: root_held_line(state, scoring_player, &ctx.candidates),
             }),
         }
     }
