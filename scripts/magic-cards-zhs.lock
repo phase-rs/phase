@@ -1,0 +1,17 @@
+# Pinned source artifact for the Simplified-Chinese card-text sidecar.
+#
+# Every download is verified against `sha256` before its bytes are used, so the
+# pipeline can only ever build from the artifact that was reviewed. The digest is
+# independently corroborated: GitHub publishes a per-asset `digest` on its
+# Releases API and it matches this value —
+#
+#   curl -s https://api.github.com/repos/HeliumOctahelide/magic-cards-zhs/releases?per_page=1 \
+#     | jq -r '.[0].assets[0].digest'
+#
+# See docs/CHINESE-CARD-SOURCES.md for provenance, licence, and why the Chinese
+# corpus has to come from a community source at all.
+#
+# To refresh: bump release + sha256 together, and update the asset name, which is
+# derived from the tag (`magic-cards-zhs-<tag>.tar.gz`).
+release=data-2026-10-11
+sha256=ccb0badbd43a583d54eff740f8f828e50e8a92737c992f13cd630ae801ca590d
