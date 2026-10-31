@@ -271,6 +271,9 @@ function StatusDot({ connecting }: { connecting: boolean }) {
   );
 }
 
+/** Sends of one unchanged publication's AI promotion: the first plus one retry after a rejection. */
+const MAX_PROMOTION_ATTEMPTS = 2;
+
 export function HostControlTile() {
   const [collapsed, setCollapsed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -287,6 +290,7 @@ export function HostControlTile() {
   const hostSession = useMultiplayerStore((s) => s.hostSession);
   const promotedPublication = useRef<{
     room: typeof hostSession; code: typeof hostGameCode; slots: typeof playerSlots;
+    attempts: number; outcome: "pending" | "rejected";
   } | null>(null);
   const seatMutate = useMultiplayerStore((s) => s.seatMutate);
   const seatMutateAsync = useMultiplayerStore((s) => s.seatMutateAsync);
@@ -374,7 +378,7 @@ export function HostControlTile() {
 
   // Preparation is fenced once against the published room. The transport's
   // subsequent mutation sequence retains its existing non-atomic semantics.
-  const assignAi = (assignments: AiAssignment[], start = false) => {
+  const assignAi = (assignments: AiAssignment[], start = false, onRejected?: () => void) => {
     if (busyRef.current || !canEditSeats || assignments.length === 0) return;
     busyRef.current = true;
     setBusy(true);
@@ -414,6 +418,7 @@ export function HostControlTile() {
         for (const mutation of prepared) await seatMutateAsync(mutation);
         if (start) await seatMutateAsync({ type: "Start" });
       } catch (err) {
+        onRejected?.();
         if (mounted.current) showToast(err instanceof Error ? err.message : String(err));
       } finally {
         busyRef.current = false;
@@ -428,10 +433,14 @@ export function HostControlTile() {
 
   useEffect(() => {
     if (!canEditSeats || !haveAnyDeck || busyRef.current) return;
-    // Latch release wakes skipped publications, but must not resubmit the
-    // same publication while transport has yet to publish its concrete decks.
+    // Latch release wakes skipped publications. A sent promotion is not
+    // resubmitted while transport has yet to publish its concrete decks; a
+    // rejected one publishes nothing, so it is retried once with a fresh pick
+    // and then waits for the next publication.
     const previous = promotedPublication.current;
-    if (previous?.room === hostSession && previous.code === hostGameCode && previous.slots === playerSlots) return;
+    const attempts = previous?.room === hostSession && previous.code === hostGameCode
+      && previous.slots === playerSlots ? previous.attempts : 0;
+    if (attempts > 0 && (previous?.outcome === "pending" || attempts >= MAX_PROMOTION_ATTEMPTS)) return;
     const assignments: AiAssignment[] = [];
     for (const slot of playerSlots) {
       if (slot.kind.type !== "Ai" || slot.kind.data.deck.type === "DeckList") continue;
@@ -439,8 +448,11 @@ export function HostControlTile() {
       if (option) assignments.push({ slot, option, difficulty: slot.kind.data.difficulty });
     }
     if (assignments.length === 0) return;
-    promotedPublication.current = { room: hostSession, code: hostGameCode, slots: playerSlots };
-    assignAi(assignments);
+    const record: NonNullable<typeof promotedPublication.current> = {
+      room: hostSession, code: hostGameCode, slots: playerSlots, attempts: attempts + 1, outcome: "pending",
+    };
+    promotedPublication.current = record;
+    assignAi(assignments, false, () => { record.outcome = "rejected"; });
     // `pickRandomAiDeck` is intentionally omitted from deps — it closes over
     // `deckChoices` which is already a dep (via `haveAnyDeck`), and including
     // the function would cause an effect storm on every render.

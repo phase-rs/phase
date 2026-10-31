@@ -14,6 +14,10 @@ import type * as WasmAdapter from "../../../adapter/wasm-adapter";
 import type { AiDeckCandidate } from "../../../services/aiDeckCatalog";
 import type { SeatMutation } from "../../../stores/multiplayerStore";
 
+/** `join-link copy` replaces the store's `showToast` action and never restores
+ *  it; keep the real action so toast assertions observe what the tile shows. */
+const realShowToast = useMultiplayerStore.getState().showToast;
+
 const art = vi.hoisted(() => ({ face: vi.fn(), printings: vi.fn(), bounds: vi.fn() }));
 vi.mock("../../../adapter/wasm-adapter", async (importOriginal) => ({
   ...await importOriginal<typeof WasmAdapter>(),
@@ -610,6 +614,62 @@ describe("HostControlTile", () => {
       if (kind === "fill") expect(dispatch).toHaveBeenLastCalledWith({ type: "Start" });
       else expect(dispatch.mock.calls[0][0]).toMatchObject({ type: "SetKind", data: { seatIndex: 1 } });
     });
+
+    const aiRandom: PlayerSlot = {
+      ...waiting, name: "AI",
+      kind: { type: "Ai", data: { difficulty: "Medium", deck: { type: "Random" } } },
+    };
+
+    it("retries a rejected AI promotion of the unchanged publication once and sends the concrete deck", async () => {
+      useMultiplayerStore.setState({ toasts: new Map(), showToast: realShowToast }); // earlier tests leave toasts and a mock behind
+      vi.spyOn(Math, "random").mockReturnValue(0); // pick A → printings printedA
+      const held = heldMetadata();
+      art.face.mockImplementationOnce(async () => { await held.promise; return { scryfall_oracle_id: "Forest" }; });
+      const { dispatch } = mount([host, aiRandom]);
+      await waitFor(() => expect(art.face).toHaveBeenCalledOnce());
+      expect(dispatch).not.toHaveBeenCalled(); // the promotion is held before its send
+      const error = new Error("promotion rejected");
+      dispatch.mockRejectedValueOnce(error);
+      await act(async () => { held.resolve(); });
+      await waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Start Game" })).toBeEnabled());
+      expect(Array.from(useMultiplayerStore.getState().toasts.values(), ({ message }) => message)).toContain("promotion rejected");
+      for (const [mutation] of dispatch.mock.calls) {
+        expect(mutation).toMatchObject({ type: "SetKind", data: { seatIndex: 1, kind: { type: "Ai", data: {
+          difficulty: "Medium", deck: { type: "DeckList", data: { printings: printedA } } } } } });
+      }
+      await act(async () => {}); // flush pending effects
+      expect(art.face).toHaveBeenCalledTimes(2); // the retry ran a fresh preparation; no third
+      expect(dispatch).toHaveBeenCalledTimes(2); // the successful retry is not resubmitted (no echo)
+    });
+
+    it("stops after the retry is also rejected and promotes again when transport republishes the table", async () => {
+      useMultiplayerStore.setState({ toasts: new Map() });
+      vi.spyOn(Math, "random").mockReturnValue(0);
+      const held = heldMetadata();
+      art.face.mockImplementationOnce(async () => { await held.promise; return { scryfall_oracle_id: "Forest" }; });
+      const { dispatch } = mount([host, aiRandom]);
+      await waitFor(() => expect(art.face).toHaveBeenCalledOnce());
+      expect(dispatch).not.toHaveBeenCalled();
+      const error = new Error("promotion rejected");
+      dispatch.mockRejectedValueOnce(error).mockRejectedValueOnce(error);
+      await act(async () => { held.resolve(); });
+      await waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Start Game" })).toBeEnabled());
+      await act(async () => {}); // flush pending effects
+      expect(art.face).toHaveBeenCalledTimes(2); // bounded: no third preparation of the same publication
+      expect(dispatch).toHaveBeenCalledTimes(2); // bounded: no third send
+      await act(async () => {
+        useMultiplayerStore.setState({ playerSlots: JSON.parse(JSON.stringify(useMultiplayerStore.getState().playerSlots)) });
+      });
+      await waitFor(() => expect(dispatch).toHaveBeenCalledTimes(3));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Start Game" })).toBeEnabled());
+      await act(async () => {}); // flush pending effects
+      expect(art.face).toHaveBeenCalledTimes(3);
+      expect(dispatch).toHaveBeenCalledTimes(3); // the republished promotion succeeded once and is not resubmitted
+      expect(dispatch.mock.calls[2][0]).toMatchObject({ type: "SetKind", data: { seatIndex: 1 } });
+    });
+
     it("keeps local keys invariant only under printing changes", () => {
       const names = expandParsedDeck(A.deck);
       const key = deckChoiceKey({ type: "DeckList", data: names });
