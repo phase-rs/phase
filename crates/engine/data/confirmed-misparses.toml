@@ -1,0 +1,7 @@
+# These rows are the final 'broken' verdicts from a two-pass model census, not human review. Of 3,208 final-broken faces, 3,160 were judged broken in both passes, 47 changed from unsure to broken, and one had a failed first pass followed by a broken verdict (census-summary.json).
+# Source-evidence limitations: approximately 82.6% confirmation in the associated
+# check and approximately 6% undercount; not a claim of present-day engine accuracy.
+# Clauses contain census-cited clause text, not necessarily current Oracle sentences.
+# Keep exact export-face keys lexicographically sorted, including hidden-key suffixes.
+# When an implementation fixes the cited behavior, delete that face’s row in the same change and regenerate card data and the committed test fixture. Removing this marker does not remove other unsupported gaps.
+face = []

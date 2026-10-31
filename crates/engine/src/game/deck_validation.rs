@@ -5067,6 +5067,58 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_misparse_scheme_rejects_marked_real_scheme() {
+        let mut db = archenemy_test_db();
+        let witness = crate::test_support::shared_card_db()
+            .get_face_by_name("I Call for Slaughter")
+            .expect("real Scheme witness is in the committed fixture")
+            .clone();
+        db.face_index
+            .insert("i call for slaughter".to_string(), witness);
+        use crate::types::confirmed_misparse::ConfirmedMisparses;
+        ConfirmedMisparses::empty().stamp_all(
+            db.face_index
+                .iter_mut()
+                .map(|(key, face)| (key.as_str(), face)),
+        );
+        let mut names = scheme_names(19);
+        names.push("I Call for Slaughter".to_string());
+        for name in &names {
+            assert!(
+                crate::game::coverage::card_face_gaps(db.get_face_by_name(name).unwrap())
+                    .is_empty(),
+                "{name} must be a gap-free control"
+            );
+        }
+        let request = archenemy_request(names);
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(
+            result.selected_format_compatible,
+            Some(true),
+            "{:?}",
+            result.selected_format_reasons
+        );
+
+        let list = ConfirmedMisparses::parse(
+            r#"face = [{ key = "i call for slaughter", class = "missing_effect", clauses = ["census-cited clause"] }]"#,
+        )
+        .unwrap();
+        let stamped = list.stamp_all(
+            db.face_index
+                .iter_mut()
+                .map(|(key, face)| (key.as_str(), face)),
+        );
+        assert_eq!(stamped.marked, 1);
+        assert!(stamped.unmatched_keys.is_empty());
+        let marked = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(marked.selected_format_compatible, Some(false));
+        assert_eq!(
+            marked.selected_format_reasons,
+            ["Unsupported scheme cards: I Call for Slaughter"]
+        );
+    }
+
+    #[test]
     fn archenemy_accepts_valid_twenty_card_scheme_deck() {
         let db = archenemy_test_db();
         let request = archenemy_request(scheme_names(20));
