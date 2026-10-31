@@ -538,7 +538,7 @@ fn paid_record(ability: &ResolvedAbility, object_id: ObjectId) -> &CostPaidObjec
 ///
 /// The paused/resumed payment path inherits this identically: every one of
 /// `commit_random_discard_cost_picks`'s five call sites — the completed and the
-/// paused arms of `pay_deferred_random_discard_cost`, the resumed paused pick,
+/// paused arms of `pay_deferred_hand_discard_cost`, the resumed paused pick,
 /// and the completed and re-paused arms of `resume_random_discard_cost_payment`
 /// — classifies through this one function, and the driver above answers any
 /// `ReplacementChoice` prompt rather than bypassing it, so whichever of the two

@@ -1191,9 +1191,12 @@ impl AbilityCostPayability for AbilityCost {
                     .filter(|pending| pending.ability.controller == player)
                     .and_then(|pending| {
                         pending
-                            .deferred_random_discard_cost
+                            .deferred_hand_discard_cost
                             .as_ref()
-                            .map(|cost| (pending.object_id, cost.count))
+                            .and_then(|cost| {
+                                cost.reserved_count()
+                                    .map(|count| (pending.object_id, count))
+                            })
                     });
                 if reserved.is_none() {
                     return self.is_payable_in(
@@ -1415,6 +1418,8 @@ impl AbilityCostLegPayability for AbilityCost {
                     };
                     comparator.evaluate(total_positive_power, *value)
                 }
+                // CR 601.2g + CR 601.2h: membership and each member's permission are read when the cost is paid, after mana abilities may change them.
+                crate::types::ability::SacrificeRequirement::All => true,
             },
             // CR 119.4 + CR 119.8 + CR 903.4: Life cost is payable iff life >= amount
             // and "can't lose life" locks do not apply. `amount` is a QuantityExpr

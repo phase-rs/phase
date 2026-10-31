@@ -1488,6 +1488,9 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
             } => {
                 format!("Sacrifice creatures with total power {value} ({comparator:?} constraint)")
             }
+            crate::types::ability::SacrificeRequirement::All => {
+                "Sacrifice all permanents".to_string()
+            }
         },
         AbilityCost::Discard { .. } => "Discard a card".to_string(),
         AbilityCost::Exile {

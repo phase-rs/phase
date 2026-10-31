@@ -1439,6 +1439,8 @@ pub(super) fn handle_unless_payment(
                         return Ok(action_result(events, state.waiting_for.clone()));
                     }
                 }
+                // No unless-cost producer emits "sacrifice all"; fail closed.
+                SacrificeRequirement::All => payment_failed = true,
             },
             // CR 702.24a + CR 701.13: Thought Lash-style cumulative upkeep
             // pays by exiling the top N cards of the payer's library. This is

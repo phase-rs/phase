@@ -30,8 +30,9 @@ use super::oracle_util::TextPair;
 use crate::types::ability::{
     AbilityCost, AggregateFunction, AttachmentReferent, BeholdCostAction, ChoiceType, Comparator,
     ControllerRef, CostReduction, CounterCostSelection, FilterProp, ObjectProperty, PlayerScope,
-    QuantityExpr, QuantityRef, SacrificeCost, TapCreaturesRequirement, TargetFilter, TypedFilter,
-    EXILE_COST_X, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
+    QuantityExpr, QuantityRef, SacrificeCost, SacrificeRequirement, TapCreaturesRequirement,
+    TargetFilter, TypedFilter, EXILE_COST_X, REMOVE_COUNTER_COST_ALL,
+    REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
 use crate::types::zones::Zone;
@@ -56,10 +57,37 @@ pub fn parse_oracle_cost(text: &str) -> AbilityCost {
 /// consumption. Typed-leaf validation prevents noun filters containing "or"
 /// from becoming payment branches.
 fn parse_binary_cost_alternatives_nom(text: &str) -> Option<AbilityCost> {
+    let (left, right) = split_binary_cost_legs(text, " or ")?;
+    let costs = vec![
+        parse_oracle_cost_no_or(left),
+        parse_oracle_cost_no_or(right),
+    ];
+    costs
+        .iter()
+        .all(is_concrete_cost_leg)
+        .then_some(AbilityCost::OneOf { costs })
+}
+
+/// CR 601.2f + CR 601.2h: two " and "-joined costs are both part of the total cost and both paid.
+pub(crate) fn parse_binary_cost_conjunction_nom(text: &str) -> Option<AbilityCost> {
+    let (left, right) = split_binary_cost_legs(text, " and ")?;
+    let costs = vec![parse_single_cost(left), parse_single_cost(right)];
+    costs
+        .iter()
+        .all(is_concrete_cost_leg)
+        .then_some(AbilityCost::Composite { costs })
+}
+
+/// Splits `text` into exactly two non-empty legs at the first `delimiter`; a
+/// leg ending in ',' belongs to a longer list, so the split declines.
+fn split_binary_cost_legs<'a>(
+    text: &'a str,
+    delimiter: &'static str,
+) -> Option<(&'a str, &'a str)> {
     type E<'a> = super::oracle_nom::error::OracleError<'a>;
     let (_, (left, right)) = all_consuming(separated_pair(
-        take_until::<_, _, E<'_>>(" or "),
-        tag(" or "),
+        take_until::<_, _, E<'_>>(delimiter),
+        tag(delimiter),
         rest,
     ))
     .parse(text)
@@ -71,14 +99,7 @@ fn parse_binary_cost_alternatives_nom(text: &str) -> Option<AbilityCost> {
     {
         return None;
     }
-    let costs = vec![
-        parse_oracle_cost_no_or(left),
-        parse_oracle_cost_no_or(right),
-    ];
-    costs
-        .iter()
-        .all(is_disjunctive_alt_cost)
-        .then_some(AbilityCost::OneOf { costs })
+    Some((left, right))
 }
 
 /// CR 118.12: parse the exact three-mana Oxford/non-Oxford alternative grammar
@@ -179,9 +200,8 @@ fn deconjugate_gerund_component(part: &str) -> Option<String> {
     .map(|(stem, rest)| format!("{stem} {rest}"))
 }
 
-/// True when a top-level ` or ` branch parsed to a concrete activation cost
-/// rather than falling through to `Unimplemented` / `EffectCost`.
-fn is_disjunctive_alt_cost(cost: &AbilityCost) -> bool {
+/// True when a cost leg parsed to a typed cost rather than falling back to `Unimplemented` / `EffectCost`.
+fn is_concrete_cost_leg(cost: &AbilityCost) -> bool {
     !matches!(
         cost,
         AbilityCost::Unimplemented { .. } | AbilityCost::EffectCost { .. }
@@ -868,6 +888,17 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             if remainder.trim().is_empty() {
                 return AbilityCost::Sacrifice(SacrificeCost::count(filter, u32::MAX));
             }
+        }
+        // CR 701.21a: only permanents the payer controls can be sacrificed, so "all <filter>" names every such permanent; no count is chosen.
+        if nom_on_lower(rest, &rest_lower, |i| value((), tag("all ")).parse(i)).is_some() {
+            return match parse_sacrifice_cost_filter(rest) {
+                Some(filter) => {
+                    AbilityCost::Sacrifice(SacrificeCost::new(filter, SacrificeRequirement::All))
+                }
+                None => AbilityCost::Unimplemented {
+                    description: text.to_string(),
+                },
+            };
         }
         // Try to extract a numeric count: "sacrifice two creatures", "sacrifice three lands"
         // CR 107.3a: `X` in an activation or additional cost is chosen as part
@@ -2081,12 +2112,6 @@ fn parse_sacrifice_cost_filter(filter_text: &str) -> Option<TargetFilter> {
 /// card" (Dusk Mangler) and "sacrifice all permanents you control and discard
 /// your hand" (Kaervek's Spite) are a second COST, not a narrower object; a
 /// leading "or" is an alternative whose loss is a narrowing, which fails safe.
-/// This exemption is load-bearing, not cosmetic: `parse_additional_cost_line`
-/// answers `None` — NO ADDITIONAL COST AT ALL — as soon as a fragment is
-/// `Unimplemented`, so declining these makes the spell castable for FREE.
-/// Under-paying a second cost is a real defect, but it lives in the cost
-/// COMPOSITION seam, not in this filter, and the honest repair there is a
-/// `Required(Unimplemented)` at that call site.
 fn sacrifice_filter_lost_a_restriction(filter: &TargetFilter, tail: &str) -> bool {
     let tail = tail.trim();
     if tail.is_empty() {
@@ -2741,9 +2766,7 @@ mod tests {
     ///   * a `TypedFilter::default()` filter — the grammar built NOTHING, so
     ///     nothing was lost FROM a filter (Radiant Lotus, Baba Lysaga).
     ///   * a tail that opens a new clause — a second COST, not a narrower object
-    ///     (Dusk Mangler, Kaervek's Spite). `parse_additional_cost_line` answers
-    ///     `None` — no additional cost at all — the moment a fragment is
-    ///     `Unimplemented`, so declining these makes the spell FREE.
+    ///     (Dusk Mangler, Kaervek's Spite).
     ///
     /// Revert-failing: drop the `sacrifice_filter_lost_a_restriction` call and
     /// Transmutation Font's case folds back to a bare `Typed{[Artifact], [Token]}`
@@ -2805,12 +2828,7 @@ mod tests {
         }
 
         // EXEMPTION 2 — the tail opens a NEW CLAUSE, so it is a second cost and
-        // not a narrower object. `parse_additional_cost_line` hands
-        // `parse_single_cost` (NOT `parse_oracle_cost`, which would split the
-        // comma itself) exactly these two fragments — Dusk Mangler's "or"-split
-        // left leg and Kaervek's Spite's whole body — and drops the WHOLE
-        // additional cost the moment one comes back `Unimplemented`, which would
-        // make each spell castable for FREE.
+        // not a narrower object.
         for (fragment, expected_type) in [
             ("sacrifice a creature, discard a card", TypeFilter::Creature),
             (
@@ -3945,6 +3963,51 @@ mod tests {
     }
 
     #[test]
+    fn cost_sacrifice_all_is_a_determined_set() {
+        assert_eq!(
+            parse_single_cost("Sacrifice all creatures you control"),
+            AbilityCost::Sacrifice(SacrificeCost::new(
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                SacrificeRequirement::All,
+            ))
+        );
+        assert_eq!(
+            parse_oracle_cost("{2}{B}{B}, {T}, Sacrifice all lands you control"),
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic: 2,
+                            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                        },
+                    },
+                    AbilityCost::Tap,
+                    AbilityCost::Sacrifice(SacrificeCost::new(
+                        TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+                        SacrificeRequirement::All,
+                    )),
+                ],
+            }
+        );
+        let requirement = |text| match parse_single_cost(text) {
+            AbilityCost::Sacrifice(cost) => cost.requirement,
+            other => panic!("Expected Sacrifice for {text:?}, got {other:?}"),
+        };
+        assert_eq!(
+            requirement("Sacrifice a creature"),
+            SacrificeRequirement::Count { count: 1 }
+        );
+        assert_eq!(
+            requirement("Sacrifice any number of creatures"),
+            SacrificeRequirement::Count { count: u32::MAX }
+        );
+        assert!(matches!(
+            parse_single_cost("Sacrifice all creatures you control that are quantically entangled"),
+            AbilityCost::Unimplemented { .. }
+        ));
+    }
+
+    #[test]
     fn cost_sacrifice_x_squirrels() {
         match parse_oracle_cost("Sacrifice X Squirrels") {
             AbilityCost::Sacrifice(cost) => {
@@ -4120,6 +4183,31 @@ mod tests {
                 "malformed alternative list must fail closed: {malformed}"
             );
         }
+    }
+
+    /// The conjunction composes only when BOTH legs are typed costs.
+    #[test]
+    fn binary_cost_conjunction_declines_a_non_concrete_leg() {
+        assert!(
+            parse_binary_cost_conjunction_nom("discard a card and sacrifice a creature").is_some(),
+            "reach guard: two typed legs compose"
+        );
+        assert_eq!(
+            parse_binary_cost_conjunction_nom(
+                "discard a card and put the cards on the bottom of your booster pile in a random order"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_binary_cost_conjunction_nom("choose a number between 0 and 5"),
+            None
+        );
+        assert_eq!(
+            parse_binary_cost_conjunction_nom(
+                "exile five instant and/or sorcery cards you own with the same artist and different names from outside the game"
+            ),
+            None
+        );
     }
 
     #[test]

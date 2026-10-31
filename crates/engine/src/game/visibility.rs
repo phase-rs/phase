@@ -4135,12 +4135,13 @@ fn ability_payment_names_hidden_source(
 }
 
 /// A paused cast keeps its spell ability; blank only its hidden-source payment entries and
-/// hidden linked-exile members' mana values.
+/// hidden linked-exile members' mana values. Its commit finalization is server authority.
 fn redact_pending_cast_payment(
     pending: &mut crate::types::game_state::PendingCast,
     hidden_ids: &HashSet<ObjectId>,
 ) {
     redact_ability_payment(&mut pending.ability, hidden_ids);
+    pending.prepaid_finalization = None;
 }
 
 /// A paused mana ability keeps the ability it pays for in its resume cursors. Its
@@ -7817,7 +7818,8 @@ mod tests {
             cost_reduction_election: None,
             activation_cost_snapshot: None,
             activation_cost: None,
-            deferred_random_discard_cost: None,
+            deferred_hand_discard_cost: None,
+            prepaid_finalization: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
