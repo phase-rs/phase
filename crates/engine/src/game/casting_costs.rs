@@ -19473,7 +19473,11 @@ mod tests {
 
     #[test]
     fn target_dependent_payment_prompt_is_deferred_but_fixed_target_payment_is_checked() {
-        for (strive, expected_verdict, offered) in [(true, None, true), (false, Some(false), false)]
+        // Strive defers the verdict (None). A fixed-target cost is checked
+        // (Some(false): the Auto payer alone can't pay), and the offer then
+        // consults the bounded reducer witness, which completes the cast with
+        // the choice-bearing source (#9812), so both are offered.
+        for (strive, expected_verdict, offered) in [(true, None, true), (false, Some(false), true)]
         {
             let (scenario, spell) = target_payment_stability_scenario(strive);
             let mut runner = scenario.build();

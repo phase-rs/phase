@@ -1008,6 +1008,8 @@ const DEFAULT_MAX_GAMES: usize = 100;
 struct Limits {
     max_connections: u32,
     max_games: usize,
+    /// Largest application frame a socket's encoder writes.
+    max_frame_bytes: usize,
 }
 
 impl Default for Limits {
@@ -1015,6 +1017,7 @@ impl Default for Limits {
         Self {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_games: DEFAULT_MAX_GAMES,
+            max_frame_bytes: server_core::game_state_snapshot_wire_guard::MAX_SERVER_FRAME_BYTES,
         }
     }
 }
@@ -3024,6 +3027,7 @@ async fn serve() {
         limits: Limits {
             max_connections: cli.max_connections,
             max_games: cli.max_games,
+            ..Limits::default()
         },
         replica_ordinal: cli.replica_ordinal,
         metrics: Arc::new(metrics::ServerMetrics::default()),
@@ -3885,10 +3889,11 @@ mod lifecycle_tests {
             generation: 1,
         };
         let readout_for = |player| match {
-            let source = crate::game_executor::StateUpdateSource::from_result(&result, 1);
-            source
-                .guard()
-                .map(|()| build_state_update_message(&source, &full_key, player, Vec::new(), &[]))
+            crate::game_executor::StateUpdateSource::from_result(&result, 1)
+                .guarded("GAME01")
+                .map(|source| {
+                    build_state_update_message(&source, &full_key, player, Vec::new(), &[])
+                })
         }
         .expect("the snapshot guard admits this small board")
         {
@@ -5096,6 +5101,7 @@ async fn handle_socket(
             replies: tx.clone(),
             metrics: context.metrics.clone(),
             executor: context.game_executor.clone(),
+            max_frame_bytes: context.limits.max_frame_bytes,
             #[cfg(test)]
             hooks: context.socket_hooks.clone(),
         },
@@ -8801,12 +8807,21 @@ async fn handle_full_concession(
         rewinds,
     )
     .await;
+    let code = game_code.clone();
     publisher = context
         .game_executor
         .run(move || {
             let source = game_executor::StateUpdateSource::from_result(&result, revision);
-            if source.guard().is_ok() {
-                publisher.publish(&source);
+            match source.guarded(&code) {
+                Ok(source) => publisher.publish(&source),
+                Err(reason) => {
+                    warn!(
+                        game = %code,
+                        revision,
+                        %reason,
+                        "concession snapshot exceeds broadcast bounds; not published"
+                    );
+                }
             }
             if matches!(scope, ConcessionScope::Game) {
                 publisher.notify_players(ServerMessage::Conceded { player });
@@ -8908,6 +8923,7 @@ async fn handle_full_game_submission(
     let card_db = db.clone();
     let persistence = game_db.clone();
     let persistence_executor = executor.clone();
+    let code = game_code.clone();
     // The owned game guard spans admission waits, AI continuations and all
     // publication. Other games can use the CPU between these work units.
     let (session, applied) = executor
@@ -8936,8 +8952,17 @@ async fn handle_full_game_submission(
                 // A short human-only transition and its projection share one CPU
                 // unit; an unrelated AI sequence cannot queue between them.
                 persist_full_session_async(&persistence_executor, &persistence, session);
-                let source = game_executor::StateUpdateSource::from_result(&result, revision);
-                source.guard().map_err(SessionActionError::Operational)?;
+                let source = game_executor::StateUpdateSource::from_result(&result, revision)
+                    .guarded(&code)
+                    .map_err(|reason| {
+                        warn!(
+                            game = %code,
+                            revision,
+                            %reason,
+                            "action snapshot exceeds broadcast bounds"
+                        );
+                        SessionActionError::Operational(reason)
+                    })?;
                 publisher.set_batch_metadata(
                     session.state.eliminated_players.clone(),
                     session.rewind_options(),
@@ -8992,6 +9017,7 @@ async fn handle_full_game_submission(
         std::ops::ControlFlow::Continue(cursor) => executor.continue_ai(session, cursor).await,
     };
     let ai_actions = ai.transitions.len();
+    let has_followup = !ai.transitions.is_empty();
     let persistence = game_db.clone();
     let persistence_executor = executor.clone();
     let code = game_code.clone();
@@ -9014,8 +9040,13 @@ async fn handle_full_game_submission(
                 session.state.eliminated_players.clone(),
                 session.rewind_options(),
             );
-            let guarded =
-                game_executor::StateUpdateSource::from_result(&human_result, revision).guard();
+            let source = game_executor::StateUpdateSource::from_result(&human_result, revision);
+            let guarded = if has_followup {
+                source.without_decision()
+            } else {
+                source
+            }
+            .admissible();
             Ok::<_, String>((publisher, human_result, winner, terminal, guarded))
         })
         .await;
@@ -9042,9 +9073,9 @@ async fn handle_full_game_submission(
         None => Vec::new(),
     };
     let terminal_prepared = !deliveries.is_empty();
-    let has_followup = !ai.transitions.is_empty();
     #[cfg(test)]
     executor.before_historical_publication().await;
+    let code = game_code.clone();
     publisher = executor
         .run(move || {
             let source = game_executor::StateUpdateSource::from_result(&human_result, revision);
@@ -9053,7 +9084,17 @@ async fn handle_full_game_submission(
             } else {
                 source
             };
-            publisher.publish(&source);
+            match source.guarded(&code) {
+                Ok(source) => publisher.publish(&source),
+                Err(reason) => {
+                    warn!(
+                        game = %code,
+                        revision,
+                        %reason,
+                        "action snapshot exceeds broadcast bounds; not published"
+                    );
+                }
+            }
             publisher
         })
         .await;
@@ -9719,7 +9760,7 @@ fn build_resync_state_message(
                 log_entries: &[],
                 decision: decision.as_ref().map(Into::into),
             };
-            source.guard()?;
+            source.admissible()?;
             Ok(build_state_update_message(
                 &source,
                 key,
@@ -10633,16 +10674,24 @@ async fn handle_client_message(
                                     &result,
                                     state_revision,
                                 );
-                                if source.guard().is_ok() {
-                                    for (pid, sender) in ai_recipients {
-                                        let _ = sender.send(build_state_update_message(
-                                            &source,
-                                            &key,
-                                            pid,
-                                            rewind_targets.clone(),
-                                            &result.0.eliminated_players,
-                                        ));
+                                match source.guarded(&key.game_code) {
+                                    Ok(source) => {
+                                        for (pid, sender) in ai_recipients {
+                                            let _ = sender.send(build_state_update_message(
+                                                &source,
+                                                &key,
+                                                pid,
+                                                rewind_targets.clone(),
+                                                &result.0.eliminated_players,
+                                            ));
+                                        }
                                     }
+                                    Err(reason) => warn!(
+                                        game = %key.game_code,
+                                        revision = state_revision,
+                                        %reason,
+                                        "reconnect AI snapshot exceeds broadcast bounds; not published"
+                                    ),
                                 }
                             })
                             .await;
@@ -13035,10 +13084,11 @@ mod state_transport_derived_tests {
             generation: 1,
         };
         match {
-            let source = game_executor::StateUpdateSource::from_result(result, 1);
-            source
-                .guard()
-                .map(|()| build_state_update_message(&source, &full_key, viewer, Vec::new(), &[]))
+            game_executor::StateUpdateSource::from_result(result, 1)
+                .guarded("ABC123")
+                .map(|source| {
+                    build_state_update_message(&source, &full_key, viewer, Vec::new(), &[])
+                })
         }
         .expect("fixture state update")
         {
@@ -13113,10 +13163,11 @@ mod state_transport_derived_tests {
             generation: 1,
         };
         match {
-            let source = game_executor::StateUpdateSource::from_result(result, 1);
-            source
-                .guard()
-                .map(|()| build_state_update_message(&source, &full_key, viewer, Vec::new(), &[]))
+            game_executor::StateUpdateSource::from_result(result, 1)
+                .guarded("ABC123")
+                .map(|source| {
+                    build_state_update_message(&source, &full_key, viewer, Vec::new(), &[])
+                })
         }
         .expect("fixture state update")
         {
@@ -19418,7 +19469,15 @@ mod game_submission_tests {
     pub(super) async fn connect_and_hello(
         url: String,
     ) -> WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>> {
-        let (mut socket, _) = tokio_tungstenite::connect_async(url)
+        connect_and_hello_with(url, None).await
+    }
+
+    /// [`connect_and_hello`] with the client socket's own limits.
+    pub(super) async fn connect_and_hello_with(
+        url: String,
+        config: Option<tokio_tungstenite::tungstenite::protocol::WebSocketConfig>,
+    ) -> WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>> {
+        let (mut socket, _) = tokio_tungstenite::connect_async_with_config(url, config, false)
             .await
             .expect("connect");
 

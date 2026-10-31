@@ -794,6 +794,9 @@ export type P2PMessage = P2PAuthorityWire & (
    * branch of `state_update` — where it reports the newer revision the guest
    * already holds, not the stale one it discarded. */
   | { type: "state_ack"; revision: number }
+  /** Host → guest: the host applied this revision for the recipient but could
+   * not send it; it answers a pending action as applied. */
+  | { type: "state_withheld"; revision: number }
   | { type: "action_rejected"; rejection: ActionRejection }
   | { type: "action_failed"; message: string }
   | { type: "action_noop" }
@@ -880,6 +883,7 @@ const VALID_TYPES = new Set([
   "preview_interaction",
   "state_update",
   "state_ack",
+  "state_withheld",
   "action_rejected",
   "action_failed",
   "action_noop",

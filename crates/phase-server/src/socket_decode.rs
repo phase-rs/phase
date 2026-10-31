@@ -16,7 +16,9 @@ use server_core::protocol::{ClientMessage, ServerMessage, ServerMode};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
+use crate::socket_ingress::Pool;
 use crate::socket_io::{HeartbeatInspection, NegotiatedSocket, Received};
+use crate::socket_mailbox::RefusalReason;
 use crate::{
     classify_hello_gate, hello_acceptance, reject_if_disabled, wire, ClientHelloInfo,
     HelloGateOutcome, SharedLobby, SysEnv, MAX_WS_MESSAGE_BYTES,
@@ -29,7 +31,7 @@ enum DecoderWake {
 
 enum RateCharge {
     Applied,
-    RefusalInspection,
+    RefusalInspection(RefusalReason),
 }
 
 // Per frozen window: <=30 ordinary parses, <=30 nonrefunded recovery scans,
@@ -111,24 +113,36 @@ pub(crate) async fn run(
         if !matches!(&frame, Message::Text(_) | Message::Binary(_)) {
             continue;
         }
-        let charge = if limiter.allow() {
-            RateCharge::Applied
-        } else {
-            #[cfg(test)]
-            if let Some(work) = &parser_work {
-                work.rate_limited();
-            }
-            // CommandIdV1 submissions are sequential. Even a large action just
-            // after a legitimate click burst gets an owned refusal: recovery
-            // skips payload structures and never dispatches an engine command.
-            // Only traffic past BOTH work windows is discarded unparsed.
-            if refusal_inspection.check() {
-                RateCharge::RefusalInspection
-            } else {
-                if !discard_quota_frame(&socket, &mut discards) {
-                    break;
+        let charge = match admission.pool() {
+            // Over-capacity frames are only ever refused or discarded.
+            Pool::RefusalTransit => {
+                if refusal_inspection.check() {
+                    RateCharge::RefusalInspection(RefusalReason::GameBusy)
+                } else {
+                    if !discard_quota_frame(&socket, &mut discards) {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
+            }
+            Pool::Retained if limiter.allow() => RateCharge::Applied,
+            Pool::Retained => {
+                #[cfg(test)]
+                if let Some(work) = &parser_work {
+                    work.rate_limited();
+                }
+                // CommandIdV1 submissions are sequential. Even a large action just
+                // after a legitimate click burst gets an owned refusal: recovery
+                // skips payload structures and never dispatches an engine command.
+                // Only traffic past BOTH work windows is discarded unparsed.
+                if refusal_inspection.check() {
+                    RateCharge::RefusalInspection(RefusalReason::RateQuota)
+                } else {
+                    if !discard_quota_frame(&socket, &mut discards) {
+                        break;
+                    }
+                    continue;
+                }
             }
         };
         let text = match frame {
@@ -146,27 +160,45 @@ pub(crate) async fn run(
                 continue
             }
         };
-        if let Err(limit) = admission.resize(text.len()) {
-            warn!(
-                ?limit,
-                "decoded WebSocket ingress payload capacity exceeded"
-            );
-            socket.ingress_overflow();
-            break;
-        }
-        if matches!(charge, RateCharge::RefusalInspection) {
+        let charge = match admission.resize(text.len()) {
+            Ok(()) => charge,
+            Err(limit) => {
+                warn!(
+                    ?limit,
+                    "decoded WebSocket ingress payload capacity exceeded"
+                );
+                match charge {
+                    RateCharge::Applied if refusal_inspection.check() => {
+                        RateCharge::RefusalInspection(RefusalReason::GameBusy)
+                    }
+                    RateCharge::Applied => {
+                        if !discard_quota_frame(&socket, &mut discards) {
+                            break;
+                        }
+                        continue;
+                    }
+                    RateCharge::RefusalInspection(_) => {
+                        RateCharge::RefusalInspection(RefusalReason::GameBusy)
+                    }
+                }
+            }
+        };
+        if let RateCharge::RefusalInspection(reason) = charge {
             #[cfg(test)]
             if let Some(work) = &parser_work {
                 work.metadata_recovery();
             }
             match crate::socket_mailbox::ClientEnvelope::quota_recovery(&text) {
+                // Only a frame whose retained charge holds may be dispatched.
                 Some(crate::socket_mailbox::QuotaRecovery::ContestClick)
-                    if text.len() <= MAX_RECOVERY_CLICK_BYTES && recovered_clicks.check() =>
+                    if reason == RefusalReason::RateQuota
+                        && text.len() <= MAX_RECOVERY_CLICK_BYTES
+                        && recovered_clicks.check() =>
                 {
                     refusal_inspection.refund();
                 }
                 Some(crate::socket_mailbox::QuotaRecovery::Correlated(Some(id))) => {
-                    if socket.enqueue_quota_refusal(Some(id)).is_err() {
+                    if socket.enqueue_refusal(reason, Some(id)).is_err() {
                         break;
                     }
                     continue;
@@ -192,7 +224,7 @@ pub(crate) async fn run(
         {
             Ok(message) => message,
             Err(error) => {
-                if matches!(charge, RateCharge::RefusalInspection) {
+                if matches!(charge, RateCharge::RefusalInspection(_)) {
                     if !discard_quota_frame(&socket, &mut discards) {
                         break;
                     }
@@ -344,9 +376,22 @@ pub(crate) async fn run(
                 heartbeat: HeartbeatInspection::Complete,
             }) {
                 Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    socket.ingress_overflow();
-                    break;
+                Err(mpsc::error::TrySendError::Full(rejected)) => {
+                    match rejected.message.command_id() {
+                        Some(id) => {
+                            if socket
+                                .enqueue_refusal(RefusalReason::GameBusy, Some(id))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        None => {
+                            if !discard_quota_frame(&socket, &mut discards) {
+                                break;
+                            }
+                        }
+                    }
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => break,
             }

@@ -73,10 +73,11 @@ pub use filter::{
 };
 pub use payment_continuation::{
     classify_payment_continuation, witness_payment_continuation, witness_payment_continuations,
-    AcceptedPaymentSuccessor, PaymentContinuationBatch, PaymentContinuationBatchStatus,
-    PaymentContinuationIndeterminate, PaymentContinuationRoot, PaymentContinuationState,
-    PaymentContinuationUnsupported, PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
-    PAYMENT_CONTINUATION_MAX_ROOTS,
+    witness_targeted_cast_offer, AcceptedPaymentSuccessor, PaymentContinuationBatch,
+    PaymentContinuationBatchStatus, PaymentContinuationIndeterminate, PaymentContinuationRoot,
+    PaymentContinuationState, PaymentContinuationUnsupported, TargetedCastVerdict,
+    TargetedCastWitness, PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS, PAYMENT_CONTINUATION_MAX_ROOTS,
+    TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS,
 };
 #[cfg(feature = "test-support")]
 pub use payment_continuation::{
@@ -7392,13 +7393,21 @@ mod tests {
             .expect("generation baseline must contain the first cast")
             .clone();
         crate::game::perf_counters::reset();
+        crate::game::perf_counters::reset_targeted_offer_witness_counters();
         assert!(
-            !super::FilterPipeline::default_pipeline().accepts_with_probe(
+            super::FilterPipeline::default_pipeline().accepts_with_probe(
                 &state,
                 &strict_candidate,
                 Some(&probe),
             ),
-            "the isolated strict candidate must still fail at the post-origin Auto payer"
+            "#9812: the isolated strict candidate fails at the post-origin Auto payer, \
+             and the bounded reducer witness completes it through the choice-bearing source"
+        );
+        let strict_witness = crate::game::perf_counters::targeted_offer_witness_snapshot();
+        assert_eq!(
+            (strict_witness.calls, strict_witness.completed),
+            (1, 1),
+            "reach: the strict candidate is accepted by the witness, not by a deferral"
         );
         let strict_baseline = crate::game::perf_counters::snapshot();
         assert_eq!(
@@ -7475,8 +7484,10 @@ mod tests {
 
         let before = serde_json::to_value(&state).expect("fixture must serialize");
         crate::game::perf_counters::reset();
+        crate::game::perf_counters::reset_targeted_offer_witness_counters();
         let (actions, _, grouped_actions) = legal_actions_full(&state);
         let counters = crate::game::perf_counters::snapshot();
+        let witness = crate::game::perf_counters::targeted_offer_witness_snapshot();
         let s_w = counters.strict_fast_path_auto_payment_wrapper_calls;
         let s = N * strict_clones_per_cast;
 
@@ -7515,7 +7526,13 @@ mod tests {
             counters.auto_payment_borrowed_wrapper_calls,
             counters.auto_payment_owned_state_clones
         );
-        assert_eq!(counters.auto_payment_borrowed_wrapper_calls, g_w + s_w);
+        // #9812: each witness run drives the real reducer, which consults the
+        // Auto-payment probe itself (measured: twice per run on this board).
+        assert_eq!(witness.auto_payment_wrapper_calls, 2 * N);
+        assert_eq!(
+            counters.auto_payment_borrowed_wrapper_calls,
+            g_w + s_w + witness.auto_payment_wrapper_calls
+        );
         assert_eq!(counters.post_apply_auto_payment_core_calls, N);
         assert_eq!(counters.post_apply_auto_payment_core_state_clones, 0);
         assert_eq!(counters.post_apply_uncached_source_collections, N);
@@ -7533,7 +7550,16 @@ mod tests {
             total,
             g + s + expected_raw_validation_clones + r + expected_priority_probe_state_clones
         );
-        assert!(spell_ids.iter().all(|spell| !actions.iter().any(|action| {
+        assert_eq!(
+            (witness.calls, witness.completed),
+            (N, N),
+            "#9812: each strict cast is certified by its own bounded witness run"
+        );
+        assert!(
+            witness.reducer_attempts
+                <= N * super::payment_continuation::TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS as u64
+        );
+        assert!(spell_ids.iter().all(|spell| actions.iter().any(|action| {
             matches!(action, GameAction::CastSpell { object_id, .. } if object_id == spell)
         })));
         assert!(actions.contains(&GameAction::PassPriority));

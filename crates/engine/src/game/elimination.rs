@@ -1629,6 +1629,7 @@ fn do_eliminate(
         state.pending_replacement = None;
         state.replacement_may_cost_paused = false;
         super::replacement::abandon_post_replacement_continuation(state);
+        super::turns::abandon_phase_begin_choice(state);
     }
 
     // A leaving player gains no life: they are no longer a player in the game, so

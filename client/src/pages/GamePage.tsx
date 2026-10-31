@@ -1048,6 +1048,7 @@ function GamePageContent({
     (s) => s.toggleDebugClickModeButtonVisible,
   );
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
+  const stateWithheld = useMultiplayerStore((s) => s.stateWithheld);
   const adapter = useGameStore((s) => s.adapter);
   const aiDecisionCaptureEnabled = useUiStore((s) => s.aiDecisionCaptureEnabled);
   const setAiDecisionCaptureEnabled = useUiStore((s) => s.setAiDecisionCaptureEnabled);
@@ -1517,6 +1518,17 @@ function GamePageContent({
           aria-label={t("gamePage.sandbox.bannerAria")}
         >
           {t("gamePage.sandbox.banner")}
+        </div>
+      )}
+
+      {/* Adapter-supplied reason, shown raw; non-interactive so the menu stays reachable. */}
+      {stateWithheld && (
+        <div
+          className="pointer-events-none fixed left-0 right-0 top-0 z-30 select-none bg-amber-600 px-4 py-1 text-center text-xs font-bold text-white shadow-md"
+          role="status"
+          data-testid="state-withheld-banner"
+        >
+          {stateWithheld.reason}
         </div>
       )}
 

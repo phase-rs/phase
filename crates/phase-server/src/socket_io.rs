@@ -37,17 +37,19 @@ use std::time::{Duration, Instant};
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use engine::types::player::PlayerId;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
+use server_core::game_state_snapshot_wire_guard::guard_frame_bytes;
 use server_core::protocol::{ServerMessage, StateCodec, WireFormat};
 use server_core::FullSessionKey;
 use state_codec::WireState;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::metrics::{ServerMetrics, WsFrameType};
 use crate::socket_control::{CloseOrigin, Control, ControlLane, Encoding, Liveness};
 use crate::socket_disconnect::{Cause, Death, Disconnect};
-use crate::socket_ingress::{Admission, IngressBudget, MAX_COMMANDS};
+use crate::socket_ingress::{Admission, IngressBudget, MAX_COMMANDS, MAX_INGRESS_FRAMES};
+use crate::socket_mailbox::OverBound;
 use crate::wire;
 
 const PING_INTERVAL: Duration = Duration::from_secs(10);
@@ -128,14 +130,8 @@ impl PendingWrite {
         // Final framed payload length is measured once, shared by backlog
         // occupancy and successful-operation accounting; Drop only drains backlog.
         let payload_bytes = match &operation {
-            WriteOperation::Frame(Message::Text(text)) => text.len(),
-            WriteOperation::Frame(
-                Message::Binary(bytes) | Message::Ping(bytes) | Message::Pong(bytes),
-            ) => bytes.len(),
-            WriteOperation::Frame(Message::Close(close))
-            | WriteOperation::FinishPeerClose(close) => {
-                close.as_ref().map_or(0, |close| 2 + close.reason.len())
-            }
+            WriteOperation::Frame(frame) => payload_len(frame),
+            WriteOperation::FinishPeerClose(close) => close_len(close),
         };
         metrics.frames.fetch_add(1, Ordering::Relaxed);
         metrics
@@ -151,6 +147,18 @@ impl PendingWrite {
             flush_gate: None,
         }
     }
+}
+
+fn payload_len(frame: &Message) -> usize {
+    match frame {
+        Message::Text(text) => text.len(),
+        Message::Binary(bytes) | Message::Ping(bytes) | Message::Pong(bytes) => bytes.len(),
+        Message::Close(close) => close_len(close),
+    }
+}
+
+fn close_len(close: &Option<CloseFrame>) -> usize {
+    close.as_ref().map_or(0, |close| 2 + close.reason.len())
 }
 
 impl Drop for PendingWrite {
@@ -195,13 +203,14 @@ impl NegotiatedSocket {
         self.messages.send_completion(message, command_id)
     }
 
-    pub(crate) fn enqueue_quota_refusal(
+    pub(crate) fn enqueue_refusal(
         &self,
+        reason: crate::socket_mailbox::RefusalReason,
         command_id: Option<server_core::protocol::CommandId>,
     ) -> Result<(), crate::socket_mailbox::RefusalError> {
         let result = self.messages.send_refusal(
             ServerMessage::ActionFailed {
-                message: "Command rate quota exceeded".to_string(),
+                message: reason.message().to_string(),
             },
             command_id,
         );
@@ -268,10 +277,6 @@ impl NegotiatedSocket {
     #[cfg(test)]
     pub(crate) fn observe_probe_work(&self, work: Arc<crate::socket_test_hooks::ParserWork>) {
         self.control.observe_probe_work(work);
-    }
-
-    pub(crate) fn ingress_overflow(&self) {
-        self.close_for_ingress(Cause::IngressOverflow);
     }
 
     pub(crate) fn quota_discard_overflow(&self) {
@@ -347,6 +352,7 @@ pub(crate) struct SocketConfig {
     pub(crate) replies: crate::socket_mailbox::Sender,
     pub(crate) metrics: Arc<crate::metrics::ServerMetrics>,
     pub(crate) executor: crate::game_executor::GameExecutor,
+    pub(crate) max_frame_bytes: usize,
     #[cfg(test)]
     pub(crate) hooks: crate::socket_test_hooks::Hooks,
 }
@@ -363,6 +369,7 @@ pub(crate) fn start(
     #[cfg(test)]
     let hooks = config.hooks;
     let executor = config.executor;
+    let max_frame_bytes = config.max_frame_bytes;
     let connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
     let (sink, stream) = socket.split();
     let sent_metrics = config.metrics.clone();
@@ -371,7 +378,7 @@ pub(crate) fn start(
     let metrics = Arc::new(PendingMetrics::default());
     let (application, application_rx) = mpsc::channel::<PendingWrite>(1);
     let control = ControlLane::default();
-    let (incoming, incoming_rx) = mpsc::channel(MAX_COMMANDS);
+    let (incoming, incoming_rx) = mpsc::channel(MAX_INGRESS_FRAMES);
     let facade = NegotiatedSocket {
         messages: config.replies,
         control: control.clone(),
@@ -441,8 +448,13 @@ pub(crate) fn start(
                 {
                     connection_encoder = ConnectionEncoder::codec();
                 }
-                let encoding =
-                    encode_application(&executor, connection_encoder, message, control.encoding());
+                let encoding = encode_application(
+                    &executor,
+                    connection_encoder,
+                    message,
+                    control.encoding(),
+                    max_frame_bytes,
+                );
                 tokio::pin!(encoding);
                 let outcome = loop {
                     tokio::select! {
@@ -465,8 +477,13 @@ pub(crate) fn start(
                     frame,
                     frame_type,
                     candidate,
+                    replaced,
                 } = match outcome.prepared {
                     Ok(prepared) => prepared,
+                    Err(EncodingFailure::OverBound(reason)) => {
+                        error!(connection, %reason, "WebSocket application frame over the bound cannot shrink; skipped");
+                        continue;
+                    }
                     Err(EncodingFailure::Serialization(error)) => {
                         // Preserve the old mailbox's serialization-error policy:
                         // skip that application frame, not the whole connection.
@@ -479,6 +496,9 @@ pub(crate) fn start(
                         break;
                     }
                 };
+                if let Some(reason) = replaced {
+                    warn!(connection, %reason, "WebSocket application frame over the bound; sent its replacement");
+                }
                 let (flushed, mut completion) = oneshot::channel();
                 let pending = PendingWrite::new(frame, frame_type, Some(flushed), &metrics);
                 #[cfg(test)]
@@ -742,8 +762,9 @@ async fn read_socket<S>(
                     Message::Binary(bytes) => bytes.len(),
                     Message::Ping(_) | Message::Pong(_) | Message::Close(_) => unreachable!(),
                 };
-                let admission = match budget.admit(bytes) {
+                let admission = match budget.admit(bytes).or_else(|_| budget.admit_for_refusal()) {
                     Ok(admission) => admission,
+                    // The decoder is `MAX_REFUSAL_TRANSIT` refusals behind.
                     Err(limit) => {
                         warn!(connection, ?limit, usage = ?budget.usage(), "WebSocket ingress capacity exceeded");
                         control.close(
@@ -850,6 +871,8 @@ struct PreparedApplication {
     frame: Message,
     frame_type: WsFrameType,
     candidate: Option<Baseline>,
+    /// The first over-bound reason, when the frame sent replaced the envelope.
+    replaced: Option<String>,
 }
 
 struct EncodingOutcome {
@@ -862,17 +885,54 @@ impl ConnectionEncoder {
         Self::Codec(DeliveredState { baseline: None })
     }
 
-    fn prepare(
+    /// Prepares the frame to send, replacing the envelope while the codec frame
+    /// actually produced (Full or Delta, after gzip framing) exceeds
+    /// `max_frame_bytes`; the first over-bound reason rides on the result.
+    ///
+    /// Each attempt derives its own baseline candidate from the envelope it
+    /// encodes: a stripped `StateUpdate` yields the stripped projection the
+    /// client receives, a `StateWithheld` carries no projection and so yields
+    /// none, leaving the delivered baseline at the last board the client got.
+    /// The envelope, and the resync permit it owns, live until this blocking
+    /// preparation completes, fails or is skipped.
+    fn prepare_bounded(
         &self,
         mut envelope: crate::socket_mailbox::Envelope,
         encoding: Encoding,
+        max_frame_bytes: usize,
     ) -> Result<PreparedApplication, EncodingFailure> {
-        // Move ownership out of the serde-skipped policy, retaining it until
-        // this blocking preparation (including framing) completes or fails.
-        let resync = match std::mem::take(&mut envelope.state_encoding) {
-            crate::socket_mailbox::StateEncoding::Automatic => None,
-            crate::socket_mailbox::StateEncoding::Resync(permit) => Some(permit),
-        };
+        let mut replaced = None;
+        loop {
+            let mut prepared = self.prepare_ref(&envelope, encoding)?;
+            let Err(reason) = guard_frame_bytes(payload_len(&prepared.frame), max_frame_bytes)
+            else {
+                prepared.replaced = replaced;
+                return Ok(prepared);
+            };
+            replaced.get_or_insert_with(|| reason.clone());
+            match envelope.over_bound(reason) {
+                OverBound::Retry(next) => envelope = *next,
+                OverBound::Skip(reason) => return Err(EncodingFailure::OverBound(reason)),
+            }
+        }
+    }
+
+    /// One unbounded preparation that consumes the envelope and its resync permit.
+    fn prepare(
+        &self,
+        envelope: crate::socket_mailbox::Envelope,
+        encoding: Encoding,
+    ) -> Result<PreparedApplication, EncodingFailure> {
+        self.prepare_ref(&envelope, encoding)
+    }
+
+    fn prepare_ref(
+        &self,
+        envelope: &crate::socket_mailbox::Envelope,
+        encoding: Encoding,
+    ) -> Result<PreparedApplication, EncodingFailure> {
+        // A mailbox-local resync response forces FULL.
+        let resync = envelope.state_encoding.resync();
         let is_server_hello = matches!(&envelope.message, ServerMessage::ServerHello { .. });
         let legacy_frame_type = match &envelope.message {
             ServerMessage::GameStarted { .. } => WsFrameType::GameStarted,
@@ -907,7 +967,7 @@ impl ConnectionEncoder {
                 _ => None,
             },
         };
-        let json = serde_json::to_string(&envelope).map_err(|error| {
+        let json = serde_json::to_string(envelope).map_err(|error| {
             if projected.is_some() {
                 EncodingFailure::Transport(error.to_string())
             } else {
@@ -947,7 +1007,6 @@ impl ConnectionEncoder {
             encoding == Encoding::GzipEnvelope && !is_server_hello,
         )
         .map_err(EncodingFailure::Transport)?;
-        drop(resync);
         Ok(PreparedApplication {
             frame,
             frame_type,
@@ -956,6 +1015,7 @@ impl ConnectionEncoder {
                 viewer,
                 state,
             }),
+            replaced: None,
         })
     }
 
@@ -976,13 +1036,17 @@ impl ConnectionEncoder {
 enum EncodingFailure {
     Serialization(serde_json::Error),
     Transport(String),
+    OverBound(String),
 }
 
+/// Encodes one envelope, replacing it while its frame exceeds `max_frame_bytes`;
+/// the first over-bound reason comes back with the frame actually sent.
 async fn encode_application(
     executor: &crate::game_executor::GameExecutor,
     encoder: ConnectionEncoder,
     message: crate::socket_mailbox::Envelope,
     encoding: Encoding,
+    max_frame_bytes: usize,
 ) -> Result<EncodingOutcome, tokio::task::JoinError> {
     let state_bearing = matches!(
         &message.message,
@@ -991,7 +1055,7 @@ async fn encode_application(
             | ServerMessage::AuthoritativeStateExport { .. }
     );
     let encode = move || {
-        let prepared = encoder.prepare(message, encoding);
+        let prepared = encoder.prepare_bounded(message, encoding, max_frame_bytes);
         EncodingOutcome { encoder, prepared }
     };
     // Each connection still encodes exactly one FIFO frame at a time. Metadata
@@ -1097,8 +1161,8 @@ mod codec_tests {
             by_object,
         );
         let source = StateUpdateSource::from_result(&result, revision);
-        source
-            .guard()
+        let source = source
+            .guarded("CODEC1")
             .expect("typed transport fixture is publishable");
         if viewer == crate::SPECTATOR_PLAYER_ID {
             crate::build_spectator_state_update_message(&key(), state, &result.1, &[], revision)
@@ -1235,6 +1299,7 @@ mod codec_tests {
             owner,
             envelope,
             encoding,
+            server_core::game_state_snapshot_wire_guard::MAX_SERVER_FRAME_BYTES,
         )
         .await
         .unwrap();
@@ -1624,6 +1689,7 @@ mod codec_tests {
                     encoder,
                     invalid,
                     Encoding::Plain,
+                    server_core::game_state_snapshot_wire_guard::MAX_SERVER_FRAME_BYTES,
                 )
                 .await
                 .unwrap();
@@ -1736,6 +1802,7 @@ mod codec_tests {
             ConnectionEncoder::codec(),
             invalid,
             Encoding::Plain,
+            server_core::game_state_snapshot_wire_guard::MAX_SERVER_FRAME_BYTES,
         )
         .await
         .unwrap();
@@ -1783,6 +1850,7 @@ mod codec_tests {
                     encoder,
                     envelope(message, Some(CommandId(9))),
                     encoding,
+                    server_core::game_state_snapshot_wire_guard::MAX_SERVER_FRAME_BYTES,
                 )
                 .await
                 .unwrap();
@@ -2887,6 +2955,8 @@ mod socket_tests {
                         replies,
                         metrics: sent.clone(),
                         executor: crate::game_executor::GameExecutor::new(NonZeroUsize::MIN),
+                        max_frame_bytes:
+                            server_core::game_state_snapshot_wire_guard::MAX_SERVER_FRAME_BYTES,
                         hooks: crate::socket_test_hooks::Hooks::default(),
                     },
                 );
@@ -2997,6 +3067,8 @@ mod socket_tests {
                         replies,
                         metrics: sent.clone(),
                         executor: crate::game_executor::GameExecutor::new(NonZeroUsize::MIN),
+                        max_frame_bytes:
+                            server_core::game_state_snapshot_wire_guard::MAX_SERVER_FRAME_BYTES,
                         hooks: crate::socket_test_hooks::Hooks::default(),
                     },
                 );
@@ -3413,102 +3485,159 @@ mod transport_fixup_tests {
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
     #[tokio::test]
-    async fn blocked_handler_ingress_overflow_closes_explicitly_with_1013() {
+    async fn blocked_handler_over_capacity_frames_are_refused_not_closed() {
+        use crate::socket_mailbox::RefusalReason;
         let (url, server, _directory, app) = spawn_full_mode_server().await;
-        let metrics_url = format!(
-            "http://{}/metrics",
-            url.strip_prefix("ws://")
-                .and_then(|address| address.strip_suffix("/ws"))
-                .expect("test WebSocket URL")
-        );
-        let result = tokio::time::timeout(Duration::from_secs(5), async {
-            let mut socket = connect_and_hello(url).await;
+        let metrics = app.context.metrics.clone();
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let padded_subscribe = || {
+                serde_json::json!({
+                    "type": "SubscribeLobby",
+                    "padding": "x".repeat(60 * 1024),
+                })
+                .to_string()
+            };
+            let correlated = |command_id: u64| {
+                let mut frame = serde_json::to_value(ClientMessage::Action {
+                    action: engine::types::actions::GameAction::PassPriority,
+                })
+                .unwrap();
+                frame["command_id"] = serde_json::json!(command_id);
+                frame["padding"] = serde_json::json!("x".repeat(60 * 1024));
+                frame.to_string()
+            };
+            let retained = MAX_PAYLOAD_BYTES / padded_subscribe().len();
+            assert!(MAX_PAYLOAD_BYTES - retained * padded_subscribe().len() < correlated(1).len());
+
+            let mut socket = connect_and_hello(url.clone()).await;
             let held = app.lobby.lock().await;
-            // Unknown additive fields are valid at the serde boundary. Charge
-            // their raw bytes even when the decoded unit command is smaller.
-            let frame = serde_json::json!({
-                "type": "SubscribeLobby",
-                "padding": "x".repeat(60 * 1024),
-            })
-            .to_string();
-            // Stop at the first frame that exceeds the retained-byte limit so
-            // later writes cannot race the explicit overflow close.
-            let overflow_frames = MAX_PAYLOAD_BYTES / frame.len() + 1;
-            for _ in 0..overflow_frames {
-                if socket
-                    .send(WsMessage::Text(frame.clone().into()))
+            // One more than the retained budget holds: it is discarded, not closed.
+            for _ in 0..=retained {
+                socket
+                    .send(WsMessage::Text(padded_subscribe().into()))
+                    .await
+                    .unwrap();
+            }
+            for command_id in 41..44 {
+                socket
+                    .send(WsMessage::Text(correlated(command_id).into()))
+                    .await
+                    .unwrap();
+                loop {
+                    match socket.next().await {
+                        Some(Ok(WsMessage::Text(text))) => {
+                            let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                            if frame["type"] == "ActionFailed" {
+                                assert_eq!(frame["command_id"], command_id);
+                                assert_eq!(
+                                    frame["data"]["message"],
+                                    RefusalReason::GameBusy.message()
+                                );
+                                break;
+                            }
+                        }
+                        Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => {}
+                        other => panic!("an over-capacity frame closed its socket: {other:?}"),
+                    }
+                }
+            }
+            send_test_message(&mut socket, &ClientMessage::Ping { timestamp: 7 }, false).await;
+            while !matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::Pong { timestamp: 7 }
+            ) {}
+            assert!(metrics.ws_quota_discard_count() >= 1);
+            drop(held);
+            while !matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::LobbyUpdate { .. }
+            ) {}
+            assert_eq!(metrics.ws_disconnect_count(Cause::IngressOverflow), 0);
+
+            // Sustained over-capacity traffic is still bounded by a close.
+            let mut hostile = connect_and_hello(url).await;
+            let held = app.lobby.lock().await;
+            for _ in 0..retained + 2 * crate::socket_decode::MAX_QUOTA_DISCARDS_PER_WINDOW as usize
+            {
+                if hostile
+                    .send(WsMessage::Text(padded_subscribe().into()))
                     .await
                     .is_err()
                 {
-                    // Overflow can close concurrently with a pipelined send;
-                    // only receiving the policy Close proves graceful teardown.
                     break;
                 }
             }
             loop {
-                match socket.next().await {
+                match hostile.next().await {
                     Some(Ok(WsMessage::Close(Some(close)))) => {
                         assert_eq!(u16::from(close.code), 1013);
-                        let _ = socket.close(None).await;
+                        let _ = hostile.close(None).await;
                         break;
                     }
                     Some(Ok(_)) => {}
-                    other => panic!("overflow must be an explicit retryable close: {other:?}"),
+                    other => panic!("abuse must end in an explicit retryable close: {other:?}"),
                 }
             }
-            // Transport death must be observable even while the application
-            // handler is still waiting for its broker lock.
-            let body = reqwest::get(&metrics_url)
-                .await
-                .unwrap()
-                .error_for_status()
-                .unwrap()
-                .text()
-                .await
-                .unwrap();
-            assert!(
-                body.contains("phase_ws_disconnects_total{cause=\"ingress_overflow\"} 1\n"),
-                "scrape lost the first transport failure: {body}"
+            assert_eq!(
+                metrics.ws_disconnect_count(Cause::QuotaDiscardOverflow)
+                    + metrics.ws_disconnect_count(Cause::IngressOverflow),
+                1
             );
             drop(held);
         })
         .await;
         server.abort();
-        result.expect("a blocked handler retained an unbounded ingress backlog");
+        result.expect("a blocked handler closed or stalled an over-capacity connection");
     }
 
     #[tokio::test]
     async fn local_capacity_close_drains_peer_ack_with_bounded_bytes() {
-        for (text, expected_reads) in [
-            (r#"{"type":"SubscribeLobby"}"#.to_string(), MAX_COMMANDS + 2),
+        use crate::socket_ingress::{Usage, MAX_REFUSAL_TRANSIT};
+        for (text, expected_reads, retained) in [
+            (
+                r#"{"type":"SubscribeLobby"}"#.to_string(),
+                MAX_INGRESS_FRAMES + 2,
+                Usage {
+                    commands: MAX_COMMANDS,
+                    payload_bytes: MAX_COMMANDS * r#"{"type":"SubscribeLobby"}"#.len(),
+                    refusal_transit: MAX_REFUSAL_TRANSIT,
+                },
+            ),
             (
                 "x".repeat(crate::MAX_WS_MESSAGE_BYTES),
-                2 * crate::socket_ingress::MAX_PAYLOAD_BYTES / crate::MAX_WS_MESSAGE_BYTES + 1,
+                2 * MAX_PAYLOAD_BYTES / crate::MAX_WS_MESSAGE_BYTES + 1 + MAX_REFUSAL_TRANSIT,
+                Usage {
+                    commands: MAX_PAYLOAD_BYTES / crate::MAX_WS_MESSAGE_BYTES,
+                    payload_bytes: MAX_PAYLOAD_BYTES,
+                    refusal_transit: MAX_REFUSAL_TRANSIT,
+                },
             ),
         ] {
             let reads = Arc::new(AtomicUsize::new(0));
             let observed = reads.clone();
             let frames =
                 std::iter::repeat_with(|| Ok::<_, axum::Error>(Message::text(text.clone())))
-                    .take(MAX_COMMANDS + 1)
+                    .take(MAX_INGRESS_FRAMES + 1)
                     .chain([Ok(Message::Close(None))]);
             let stream = futures_util::stream::iter(frames).inspect(move |_| {
                 observed.fetch_add(1, Ordering::SeqCst);
             });
             let control = ControlLane::default();
             let death = Death::new(Arc::default(), 1);
-            let (incoming, _commands) = mpsc::channel(MAX_COMMANDS);
+            let budget = IngressBudget::default();
+            let (incoming, _commands) = mpsc::channel(MAX_INGRESS_FRAMES);
             read_socket(
                 stream,
                 control.clone(),
                 incoming,
                 death.clone(),
                 Liveness::default(),
-                IngressBudget::default(),
+                budget.clone(),
                 1,
             )
             .await;
             assert_eq!(death.event().unwrap().cause, Cause::IngressOverflow);
+            assert_eq!(budget.usage(), retained);
             assert_eq!(
                 reads.load(Ordering::SeqCst),
                 expected_reads,
@@ -4131,8 +4260,8 @@ mod transport_fixup_tests {
             control.accept_wire_format(format);
             let death = Death::new(Arc::default(), 0);
             let budget = IngressBudget::default();
-            let (incoming, mut commands) = mpsc::channel(MAX_COMMANDS);
-            let count = crate::socket_heartbeat::FAST_PATH_BURST as usize + MAX_COMMANDS + 1;
+            let (incoming, mut commands) = mpsc::channel(MAX_INGRESS_FRAMES);
+            let count = crate::socket_heartbeat::FAST_PATH_BURST as usize + MAX_INGRESS_FRAMES + 1;
             let stream = futures_util::stream::iter((0..count).map(|timestamp| {
                 let json = serde_json::to_string(&ClientMessage::Ping {
                     timestamp: timestamp as u64,
@@ -4164,6 +4293,10 @@ mod transport_fixup_tests {
                     if frame.code == 1013
             ));
             assert_eq!(budget.usage().commands, MAX_COMMANDS);
+            assert_eq!(
+                budget.usage().refusal_transit,
+                crate::socket_ingress::MAX_REFUSAL_TRANSIT
+            );
             assert!(matches!(
                 commands.try_recv().unwrap().message,
                 Message::Text(_) | Message::Binary(_)
@@ -4437,6 +4570,7 @@ pub(crate) mod resource_probe {
                 frame,
                 frame_type,
                 candidate,
+                replaced: _,
             } = prepared.0;
             let (ack, completion) = oneshot::channel();
             let pending = PendingWrite::new(frame, frame_type, Some(ack), &self.backlog);
