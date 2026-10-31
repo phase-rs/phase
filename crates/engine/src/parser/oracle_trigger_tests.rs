@@ -41630,6 +41630,85 @@ fn untyped_event_window_declines_the_head() {
     assert_eq!(plain.condition, None);
 }
 
+/// CR 509.1g: "each creature blocking it" scopes the pump to the creatures
+/// blocking the source (Plague Wight), not every creature.
+#[test]
+fn trigger_becomes_blocked_pumps_only_creatures_blocking_it() {
+    let def = parse_trigger_line(
+        "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.",
+        "Plague Wight",
+    );
+    assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+    let execute = def.execute.as_ref().expect("trigger should have effect");
+    assert_eq!(execute.duration, Some(Duration::UntilEndOfTurn));
+    match execute.effect.as_ref() {
+        Effect::PumpAll { target, .. } => assert_eq!(
+            target,
+            &TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::BlockingSource])
+            )
+        ),
+        other => panic!("expected PumpAll, got {other:?}"),
+    }
+}
+
+/// CR 509.1g + CR 603.10a: "a creature blocking this creature dies" watches the
+/// source's blockers (Baneclaw Marauder); the snapshot arm of `BlockingSource`
+/// answers it from the departure's recorded pairings.
+#[test]
+fn trigger_creature_blocking_source_dies_watches_blocking_source() {
+    let def = parse_trigger_line(
+        "Whenever a creature blocking this creature dies, that creature's controller loses 1 life.",
+        "Baneclaw Marauder",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::BlockingSource])
+        ))
+    );
+}
+
+/// CR 608.2c + CR 608.2k: an equipped creature's blockers are not the source's,
+/// and `BlockingSource` cannot express them, so Bob the Claymore fails closed
+/// instead of shrinking every creature.
+#[test]
+fn trigger_becomes_blocked_blockers_of_equipped_creature_stay_unbound() {
+    let def = parse_trigger_line(
+        "Whenever equipped creature becomes blocked, each creature blocking it gets -5/-5 until end of turn.",
+        "Bob the Claymore",
+    );
+    assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+    let execute = def.execute.as_ref().expect("trigger should have effect");
+    match execute.effect.as_ref() {
+        Effect::Unimplemented { name, .. } => assert_eq!(name, "unbound_subject"),
+        other => panic!("expected the unbound-subject gap, got {other:?}"),
+    }
+}
+
+/// CR 608.2k: a referent an earlier clause selected outranks the source, so
+/// "it" must not bind the source's blockers even under a `SelfRef` trigger.
+#[test]
+fn trigger_blocking_it_keeps_nearer_chain_referent() {
+    let def = parse_trigger_line(
+        "Whenever this creature becomes blocked, tap target creature. Each creature blocking it gets -1/-1 until end of turn.",
+        "Test Creature",
+    );
+    let execute = def.execute.as_ref().expect("trigger should have effect");
+    assert!(!matches!(
+        execute.effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+    let sub = execute.sub_ability.as_ref().expect("second sentence");
+    match sub.effect.as_ref() {
+        Effect::Unimplemented { name, .. } => assert_eq!(name, "unbound_subject"),
+        other => panic!("expected the unbound-subject gap, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CR 603.2h cast indicated actions: the lowering guard admits only a single-card
 // cast made during this resolution (CR 601.2i + CR 608.2g), the one shape whose
