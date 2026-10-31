@@ -996,50 +996,54 @@ fn has_activate_as_instant_permission(
     let ability_tag = ability.ability_tag;
 
     crate::game::perf_counters::record_restriction_static_exact_scan();
-    crate::game::functioning_abilities::battlefield_active_statics(state).any(
-        |(static_source, def)| {
-            if static_source.controller != player {
-                return false;
-            }
-            let StaticMode::ActivateAsInstant {
-                cost_category: permitted_category,
-                keyword,
-            } = &def.mode
-            else {
-                return false;
-            };
-            // CR 702.6a class-narrowing: when the static names an ability tag
-            // (Leonin Shikari's "equip abilities"), match the activating
-            // ability's `AbilityTag` directly instead of its cost category.
-            // The tagged class isn't defined by cost shape — an Equip ability
-            // with a non-mana cost (e.g. a sacrifice cost) still carries
-            // `AbilityTag::Equip` and must still gain the permission — so
-            // `cost_category` is only consulted when there's no tag to match.
-            match keyword {
-                Some(keyword) => {
-                    if ability_tag != Some(*keyword) {
-                        return false;
-                    }
+    // CR 114.4: emblem abilities function in the command zone, so the
+    // permission scan is game-scoped (battlefield + command zone), not
+    // battlefield-only — Teferi's Talent / Temporal Archmage emblems grant
+    // instant loyalty timing from the command zone. This aligns the exact
+    // scan with its presence gate, which already folds command-zone statics
+    // (the layers refresh builds it from `game_functioning_statics`).
+    crate::game::functioning_abilities::game_active_statics(state).any(|(static_source, def)| {
+        if static_source.controller != player {
+            return false;
+        }
+        let StaticMode::ActivateAsInstant {
+            cost_category: permitted_category,
+            keyword,
+        } = &def.mode
+        else {
+            return false;
+        };
+        // CR 702.6a class-narrowing: when the static names an ability tag
+        // (Leonin Shikari's "equip abilities"), match the activating
+        // ability's `AbilityTag` directly instead of its cost category.
+        // The tagged class isn't defined by cost shape — an Equip ability
+        // with a non-mana cost (e.g. a sacrifice cost) still carries
+        // `AbilityTag::Equip` and must still gain the permission — so
+        // `cost_category` is only consulted when there's no tag to match.
+        match keyword {
+            Some(keyword) => {
+                if ability_tag != Some(*keyword) {
+                    return false;
                 }
-                None => {
-                    if !cost_categories.contains(permitted_category) {
-                        return false;
-                    }
+            }
+            None => {
+                if !cost_categories.contains(permitted_category) {
+                    return false;
                 }
             }
-            def.affected.as_ref().is_some_and(|filter| {
-                super::filter::matches_target_filter(
-                    state,
-                    source_id,
-                    filter,
-                    &super::filter::FilterContext::from_source_with_controller(
-                        static_source.id,
-                        static_source.controller,
-                    ),
-                )
-            })
-        },
-    )
+        }
+        def.affected.as_ref().is_some_and(|filter| {
+            super::filter::matches_target_filter(
+                state,
+                source_id,
+                filter,
+                &super::filter::FilterContext::from_source_with_controller(
+                    static_source.id,
+                    static_source.controller,
+                ),
+            )
+        })
+    })
 }
 
 fn activation_restriction_applies(

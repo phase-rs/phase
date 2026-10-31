@@ -47,6 +47,42 @@ fn teferi_master_of_time_minus_ten_preserves_two_extra_turns() {
     ));
 }
 
+/// CR 606.3 + CR 304.5: Teferi, Master of Time's full verbatim Oracle text
+/// (Scryfall-verified) routes line 1 through the static fallback to the shared
+/// `ActivateAsInstant { PaysLoyalty, None }` timing permission, self-scoped —
+/// not to the effect gap the export pipeline reports today.
+#[test]
+fn teferi_master_of_time_timing_permission_types_as_static() {
+    let oracle = "You may activate loyalty abilities of Teferi on any player's turn any time you could cast an instant.\n\
+[+1]: Draw a card, then discard a card.\n\
+[\u{2212}3]: Target creature you don't control phases out. (Treat it and anything attached to it as though they don't exist until its controller's next turn.)\n\
+[\u{2212}10]: Take two extra turns after this one.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Teferi, Master of Time",
+        &[],
+        &["Planeswalker".into()],
+        &["Teferi".into()],
+    );
+    let permission = parsed
+        .statics
+        .iter()
+        .find(|def| {
+            matches!(
+                def.mode,
+                crate::types::statics::StaticMode::ActivateAsInstant {
+                    cost_category: crate::types::ability::CostCategory::PaysLoyalty,
+                    keyword: None,
+                }
+            )
+        })
+        .expect("Teferi's line 1 must lower to the loyalty timing permission static");
+    assert_eq!(
+        permission.affected,
+        Some(crate::types::ability::TargetFilter::SelfRef)
+    );
+}
+
 /// CR 607.2d + CR 614.1c: only an as-enters replacement whose separate static
 /// reads `IsChosenCardType` is promoted from its locally-labeled list.
 #[test]
