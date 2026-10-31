@@ -3,7 +3,7 @@
 # check and approximately 6% undercount; not a claim of present-day engine accuracy.
 # Clauses contain census-cited clause text, not necessarily current Oracle sentences.
 # Keep exact export-face keys lexicographically sorted, including hidden-key suffixes.
-# When an implementation fixes the cited behavior, delete that face’s row in the same change and regenerate card data and the committed test fixture. Removing this marker does not remove other unsupported gaps.
+# When an implementation fixes the cited behavior, delete that face’s row in the same change and regenerate card data (and the committed test fixture when it carries that face). Removing this marker does not remove other unsupported gaps.
 face = [
   { key = "\"rumors of my death . . .\"", class = "dropped_qualifier", clauses = ["{3}{B}, Exile a permanent you control with a League of Dastardly Doom watermark:", "Return a permanent card with a League of Dastardly Doom watermark from your graveyard to the battlefield."] },
   { key = "a girl and her dogs", class = "missing_effect", clauses = ["When A Girl and Her Dogs enters the battlefield and at the beginning of your upkeep, create a 1/1 white legendary Dog creature token and name it."] },

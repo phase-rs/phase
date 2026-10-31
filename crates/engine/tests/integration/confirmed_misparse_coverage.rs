@@ -349,6 +349,59 @@ fn confirmed_misparse_full_compatibility_counts_unique_cards_without_changing_le
     assert_eq!(after.unsupported_cards[1].gaps, ["Misparse:wrong_count"]);
 }
 
+/// CR 904.3: A scheme deck contains at least 20 Scheme cards. A scheme the
+/// coverage authority holds unsupported is rejected by the same rule that
+/// rejects any other unsupported scheme, so a marker must reach the deck gate.
+#[test]
+fn confirmed_misparse_scheme_rejects_marked_real_scheme() {
+    const WITNESS: &str = "i call for slaughter";
+    let witness = fixture()[WITNESS].clone();
+    let mut raw: Map<String, Value> = Map::new();
+    raw.insert("plains".to_string(), fixture()["plains"].clone());
+    raw.insert(WITNESS.to_string(), witness.clone());
+    // Control schemes share the witness's real face data under distinct names.
+    for index in 1..=19 {
+        let name = format!("Scheme {index}");
+        let mut control = witness.clone();
+        control["name"] = Value::String(name.clone());
+        raw.insert(name.to_lowercase(), control);
+    }
+    let baseline = database(&stamped_export(&raw, &ConfirmedMisparses::empty()));
+    let mut scheme_deck: Vec<String> = (1..=19).map(|index| format!("Scheme {index}")).collect();
+    scheme_deck.push("I Call for Slaughter".to_string());
+    for name in &scheme_deck {
+        assert!(
+            card_face_gaps(baseline.get_face_by_name(name).unwrap()).is_empty(),
+            "{name} must be a gap-free control"
+        );
+    }
+    let request = DeckCompatibilityRequest {
+        main_deck: vec!["Plains".to_string(); 60],
+        scheme_deck,
+        selected_format: Some(SelectedFormat::Tag(GameFormat::Archenemy)),
+        player_count: 4,
+        ..Default::default()
+    };
+    let before = evaluate_deck_compatibility(&baseline, &request);
+    assert_eq!(
+        before.selected_format_compatible,
+        Some(true),
+        "{:?}",
+        before.selected_format_reasons
+    );
+
+    let marked = database(&stamped_export(
+        &raw,
+        &one_row(WITNESS, MisparseClass::MissingEffect),
+    ));
+    let after = evaluate_deck_compatibility(&marked, &request);
+    assert_eq!(after.selected_format_compatible, Some(false));
+    assert_eq!(
+        after.selected_format_reasons,
+        ["Unsupported scheme cards: I Call for Slaughter"]
+    );
+}
+
 #[test]
 fn confirmed_misparse_hidden_key_is_not_a_printed_name_lookup() {
     let face = fixture()["lightning bolt"].clone();

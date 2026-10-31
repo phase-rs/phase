@@ -12,9 +12,10 @@ use crate::types::ability::{
     PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
     SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
+use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::keywords::{Keyword, WardCost};
-use crate::types::mana::ManaCost;
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 use crate::types::zones::Zone;
 
@@ -41519,4 +41520,50 @@ fn static_gaeas_liege_full_oracle_dispatch() {
         "{:?}",
         parsed.parse_warnings
     );
+}
+
+// CR 205.1a + CR 205.1b: a type-replacing Aura with a retention clause keeps
+// the retained card type (Corrupted Zendikon: "It's still a land.") in both
+// the standalone-sentence and relative-clause spellings.
+#[test]
+fn enchanted_land_creature_retention_clause_keeps_land_type() {
+    for line in [
+        "Enchanted land is a 3/3 black Ooze creature. It's still a land.",
+        "Enchanted land is a 3/3 black Ooze creature that's still a land.",
+    ] {
+        let defs = parse_static_line_multi(line);
+        assert_eq!(defs.len(), 1, "{line}");
+        let mods = &defs[0].modifications;
+        // CR 205.1b: retention is additive, so no SetCardTypes may wipe prior
+        // types (artifact lands stay artifacts).
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+            "{line}: {mods:?}"
+        );
+        // CR 205.1b: prior subtypes are retained too.
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+            "{line}: {mods:?}"
+        );
+        for core_type in [CoreType::Creature, CoreType::Land] {
+            assert!(
+                mods.contains(&ContinuousModification::AddType { core_type }),
+                "{line}: {mods:?}"
+            );
+        }
+        assert!(
+            mods.contains(&ContinuousModification::SetColor {
+                colors: vec![ManaColor::Black]
+            }),
+            "{line}: {mods:?}"
+        );
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Ooze".to_string()
+        }));
+    }
 }

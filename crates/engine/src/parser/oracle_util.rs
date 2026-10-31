@@ -1592,7 +1592,7 @@ pub(crate) fn is_supertype_word(candidate_lower: &str) -> bool {
 /// types (e.g. "Time Lord") match before shorter prefixes.
 static CREATURE_ONLY_SUBTYPES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
     let mut creature: Vec<String> =
-        serde_json::from_str(include_str!("../../data/oracle-subtypes.json"))
+        serde_json::from_str(include_str!("../../../phase-ast/data/oracle-subtypes.json"))
             .expect("oracle-subtypes.json well-formed");
     creature.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     creature
