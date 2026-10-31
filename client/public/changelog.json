@@ -1,6 +1,21 @@
 {
   "entries": [
     {
+      "id": 222,
+      "date": "2026-10-27",
+      "title": "Toggo's Rocks sacrifice themselves",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Displacer Kitten and Blazing Firesinger's repeating mana loop can be shortcut\n• Reveal X colored cards to pay costs on the Martyr cycle; Wizard's Rockets lets you announce X for its mana ability\n• OpenRouter is available as an AI opponent provider\n\n🛠️ Cards That Now Work Right\n• Toggo's Rock sacrifices the Rock, leaving the equipped creature on the battlefield\n• Hideaway lands, Djinn of Wishes, Chaos Wand, and graveyard-casting abilities let you play eligible cards during resolution\n• Sadistic Sacrament searches the targeted player's library, with its kicked search replacing the ordinary one; Gifts Given lets the targeted opponent choose\n• Elixir of Immortality shuffles your whole graveyard; Plow Under and Rebuking Ceremony put cards on top of their owners' libraries\n• Civilized Scholar transforms after discarding a creature; Piper Wright investigates the printed number of times; Zndrsplt keeps won-flip triggers through Krark's Thumb choices\n• Brain Pry enforces the named discard; Horobi ignores cards targeted in graveyards; Aven Redeemer asks for its prevention target\n• Shadowspear removes hexproof from specific qualities too; Curse of Misfortunes and Yenna apply their different-name restrictions correctly\n• Chatterfang and Academy Manufactor apply token replacements to the complete event; cast-triggered entry counters follow the actual spell (Runadi, Communal Brewing)\n• Coin and die results no longer affect a source that left and returned (Frenetic Efreet, Volatile Rig); cloned planeswalkers enter with their printed loyalty\n• Creatures blocked by a source this combat or turn are tracked correctly, and attack-step delayed returns happen at the named step\n\n⚔️ Combat & Gameplay\n• A player's departing permanents can trigger leaves-the-battlefield abilities when they leave a multiplayer game\n• Creature and permanent removal can include the objects attached to them (Hubris, Strip Bare, Soul Nova)\n• Library searches reject duplicate selections; named cards appear in the game log\n• Sandbox life changes now use normal life-gain and life-loss events\n• Counterbalance and Hisoka counter spells only when they match the relevant card's mana value\n\n🖥️ Interface\n• iOS games can start again; single-object choices such as Comet's damage recipient can be made by clicking the board\n• Metagame deck feeds have been refreshed\n\n🌐 Multiplayer\n• Peer-to-peer games reconcile uncertain concession outcomes\n\n🤖 AI\n• AI opponents make decisions faster by avoiding repeated work and skipping rejected options",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1564691727925907529"
+    },
+    {
       "id": 221,
       "date": "2026-10-23",
       "title": "Unbound Flourishing doubles down on X",
