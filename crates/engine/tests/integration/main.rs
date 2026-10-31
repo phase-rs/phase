@@ -218,6 +218,7 @@ mod commander_draft_filler;
 mod commander_team_formats;
 mod companion_special_action;
 mod composite_cost_shared_resources;
+mod confirmed_misparse_coverage;
 mod consume_spirit_legal_targets;
 mod consuming_vapors_life_gain_5925;
 mod consuming_vapors_rebound;

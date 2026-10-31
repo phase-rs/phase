@@ -3,6 +3,7 @@ pub mod ability_visit;
 pub mod attack_target;
 pub mod card;
 pub mod card_type;
+pub mod confirmed_misparse;
 pub mod contest;
 pub mod counter;
 pub mod definitions;
