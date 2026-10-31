@@ -23,6 +23,7 @@ pub(crate) mod oracle_special;
 pub mod oracle_static;
 pub(crate) mod oracle_target;
 pub mod oracle_trigger;
+pub(crate) mod oracle_un;
 pub mod oracle_util;
 pub(crate) mod oracle_vote;
 pub(crate) mod swallow_check;

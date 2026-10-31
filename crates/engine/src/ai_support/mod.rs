@@ -1512,6 +1512,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
         | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::UnAction { .. }
         | GameAction::SetTriggerOrderTemplate { .. }
         | GameAction::AssignCombatDamage { .. }
         | GameAction::AssignBlockerDamage { .. }

@@ -463,6 +463,17 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
             }
         }
 
+        // Un-card actions: the only client-supplied free-form text is the spoken
+        // word or number of a gesture.
+        GameAction::UnAction { action } => {
+            if let engine::types::un_actions::UnAction::PerformTell {
+                tell: engine::types::un_actions::UnTell::Said { text },
+            } = action
+            {
+                bound_string("UnAction.PerformTell.text", text)?;
+            }
+        }
+
         GameAction::CastSpell { targets, .. } => {
             bound_list("CastSpell.targets", targets.len())?;
         }
@@ -548,7 +559,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
             // here so its wire bound is a conscious decision, not a silent gap.
             match count {
                 IterationCount::Fixed(n) => bound_batch_count("DeclareShortcut.count", *n)?,
-                IterationCount::UntilLethal => {}
+                IterationCount::UntilLethal | IterationCount::WithoutEnd => {}
             }
             if let Some(template) = template {
                 bound_list("DeclareShortcut.template.decisions", template.decisions.len())?;

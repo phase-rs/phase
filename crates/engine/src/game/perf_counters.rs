@@ -183,6 +183,18 @@ pub struct TriggerIndexCounters {
     pub full_rebuilds: u64,
 }
 
+/// Test-only count of `stack_reach::stack_entry_node_reach` calls for an entry with
+/// an ability: the calls that reach `resolution_board`, which copies the board
+/// unless it refuses the entry first. Kept out of [`PerfCounterSnapshot`] for the
+/// same reason as the counter sets above: that struct's serialized field set
+/// powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StackReachCounters {
+    /// Calls to `stack_entry_node_reach` past its no-ability return.
+    pub entry_reaches: u64,
+}
+
 /// Test-only counters for the CR 508.1d attack-declaration solver
 /// (`combat::selectable_targets_by_attacker` and the strict validator it
 /// drives). Kept out of [`PerfCounterSnapshot`] for the same reason the two
@@ -283,6 +295,8 @@ pub struct PlayTraceCounters {
     pub legality_read_copies: u64,
     pub confirm_asks: u64,
     pub confirm_drives: u64,
+    /// Replays `mandatory_period_holds` ran.
+    pub mandatory_replays: u64,
     /// Entries appended to carried spans.
     pub carry_appends: u64,
     /// Old-window nodes looked up in the carrying index at a step's end.
@@ -314,6 +328,7 @@ impl PlayTraceCounters {
             legality_read_copies: self.legality_read_copies - earlier.legality_read_copies,
             confirm_asks: self.confirm_asks - earlier.confirm_asks,
             confirm_drives: self.confirm_drives - earlier.confirm_drives,
+            mandatory_replays: self.mandatory_replays - earlier.mandatory_replays,
             carry_appends: self.carry_appends - earlier.carry_appends,
             step_end_lookups: self.step_end_lookups - earlier.step_end_lookups,
             engine_b_rebuilds: self.engine_b_rebuilds - earlier.engine_b_rebuilds,
@@ -562,6 +577,7 @@ thread_local! {
             legality_read_copies: 0,
             confirm_asks: 0,
             confirm_drives: 0,
+            mandatory_replays: 0,
             carry_appends: 0,
             step_end_lookups: 0,
             engine_b_rebuilds: 0,
@@ -584,6 +600,10 @@ thread_local! {
     #[cfg(feature = "test-support")]
     static TRIGGER_INDEX_COUNTERS: Cell<TriggerIndexCounters> = const {
         Cell::new(TriggerIndexCounters { full_rebuilds: 0 })
+    };
+    #[cfg(feature = "test-support")]
+    static STACK_REACH_COUNTERS: Cell<StackReachCounters> = const {
+        Cell::new(StackReachCounters { entry_reaches: 0 })
     };
     #[cfg(feature = "test-support")]
     static CAST_UNDO_RECORD_COUNTERS: Cell<CastUndoRecordCounters> = const {
@@ -1271,6 +1291,8 @@ pub fn reset() {
     #[cfg(feature = "test-support")]
     TRIGGER_INDEX_COUNTERS.with(|counters| counters.set(TriggerIndexCounters::default()));
     #[cfg(feature = "test-support")]
+    STACK_REACH_COUNTERS.with(|counters| counters.set(StackReachCounters::default()));
+    #[cfg(feature = "test-support")]
     CAST_UNDO_RECORD_COUNTERS.with(|counters| counters.set(CastUndoRecordCounters::default()));
 }
 
@@ -1312,6 +1334,21 @@ pub fn record_trigger_index_rebuild() {
 #[cfg(feature = "test-support")]
 pub fn trigger_index_snapshot() -> TriggerIndexCounters {
     TRIGGER_INDEX_COUNTERS.with(Cell::get)
+}
+
+/// One `stack_reach::stack_entry_node_reach` call for an entry with an ability.
+#[cfg(feature = "test-support")]
+pub fn record_stack_entry_reach() {
+    STACK_REACH_COUNTERS.with(|cell| {
+        let mut c = cell.get();
+        c.entry_reaches += 1;
+        cell.set(c);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn stack_reach_snapshot() -> StackReachCounters {
+    STACK_REACH_COUNTERS.with(Cell::get)
 }
 
 #[cfg(feature = "test-support")]
