@@ -1076,7 +1076,7 @@ fn loaded_cards_obey_projection_and_creation_only_concealment() {
         Some(PlayerId(255)),
         None,
     ] {
-        // Earlier-incarnation public LKI legitimately retains its printing.
+        // An earlier-incarnation trigger-source context may legitimately retain its printing.
         // The current incarnation must not recover it after turn-up/hydration.
         let filtered = viewer.map_or_else(
             || filter_state_for_unseated_viewer(&state),

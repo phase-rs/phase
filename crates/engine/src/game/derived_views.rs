@@ -2909,24 +2909,17 @@ fn stack_row_source(state: &GameState, entry: &StackEntry) -> StackRowSource {
                         live_art(object)
                     }
                     TriggerSourceRead::Latched(context) if context.lki.name == *source_name => {
-                        (context.lki.printing.clone(), context.printed_ref.as_ref())
+                        (context.printing.clone(), context.printed_ref.as_ref())
                     }
                     TriggerSourceRead::ExactLive(_) | TriggerSourceRead::Latched(_) => {
                         (DisplayOnly::default(), None)
                     }
                 },
-                // Legacy/synthetic rows retain the live-or-absent-LKI route, but
-                // the LKI cache has no printed identity to authorize owner art.
+                // Legacy/synthetic rows read the live source; a departed source without a context has no latched
+                // printing or printed identity, so the row discloses neither.
                 None => match live {
                     Some(object) => live_art(object),
-                    None => (
-                        state
-                            .lki_cache
-                            .get(&entry.source_id)
-                            .map(|lki| lki.printing.clone())
-                            .unwrap_or_default(),
-                        None,
-                    ),
+                    None => (DisplayOnly::default(), None),
                 },
             };
             (source_name.clone(), printing, printed_ref)
@@ -3371,7 +3364,7 @@ mod tests {
                 let mut retained = context.clone();
                 match absent {
                     "name" => retained.lki.name = "Changed".into(),
-                    "printing" => retained.lki.printing = DisplayOnly::default(),
+                    "printing" => retained.printing = DisplayOnly::default(),
                     "identity" => retained.printed_ref = None,
                     _ => unreachable!(),
                 }
@@ -3412,7 +3405,10 @@ mod tests {
             .insert(id, state.objects[&id].snapshot_public_characteristics());
         state.objects.remove(&id);
         let cached = stack_entry_detail(&state, &emblem_trigger_row(id, "Twin", None));
-        assert_eq!(cached.printing.get(), &Some(emblem_printing("B")));
+        assert!(
+            cached.printing.get().is_none(),
+            "a context-free departed row carries no printing"
+        );
         assert!(
             cached.printed_ref.is_none(),
             "LKI-only rows cannot synthesize identity"
@@ -3708,16 +3704,13 @@ mod tests {
                 stack_entry_detail(&ordinary, &entry).printing.get(),
                 &Some(emblem_printing("B"))
             );
-            ordinary
-                .lki_cache
-                .insert(id, ordinary.objects[&id].snapshot_public_characteristics());
             ordinary.objects.get_mut(&id).unwrap().printing = DisplayOnly::default();
             assert!(
                 stack_entry_detail(&ordinary, &entry)
                     .printing
                     .get()
                     .is_none(),
-                "live absence overrides cached B"
+                "live absence discloses no printing"
             );
             ordinary.objects.remove(&id);
             let row = stack_entry_detail(&ordinary, &entry);

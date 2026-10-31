@@ -26,7 +26,7 @@ function setPrompt(options: {
   const count = options.count ?? 2;
   const ability = {
     targets: [],
-    trigger_source: { lki: { power: 2, printing: { set_code: options.printing ?? "SAAA", collector_number: "1" } } },
+    trigger_source: { lki: { power: 2 }, printing: { set_code: options.printing ?? "SAAA", collector_number: "1" } },
   };
   const waitingFor: WaitingFor = {
     type: "PayCost",

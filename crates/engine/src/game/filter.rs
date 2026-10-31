@@ -9313,7 +9313,6 @@ fn source_context_from_filter<'a>(
                 .or_else(|| state.lki_cache.get(&source_id).cloned())
                 .unwrap_or_else(|| LKISnapshot {
                     name: String::new(),
-                    printing: crate::types::display_only::DisplayOnly::default(),
                     token_image_ref: None,
                     power: None,
                     toughness: None,
@@ -12030,7 +12029,6 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
         .or_else(|| context.state.lki_cache.get(&context.source_id).cloned())
         .unwrap_or_else(|| LKISnapshot {
             name: String::new(),
-            printing: crate::types::display_only::DisplayOnly::default(),
             token_image_ref: None,
             power: None,
             toughness: None,
@@ -15331,7 +15329,6 @@ mod tests {
             card,
             LKISnapshot {
                 name: "Forest".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: None,
                 toughness: None,
@@ -22508,7 +22505,6 @@ mod tests {
         );
         let lki = crate::types::game_state::LKISnapshot {
             name: "Returned Creature".into(),
-            printing: Default::default(),
             token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
@@ -22559,7 +22555,6 @@ mod tests {
         );
         let lki = crate::types::game_state::LKISnapshot {
             name: "Original Entrant".into(),
-            printing: Default::default(),
             token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
@@ -22700,7 +22695,6 @@ mod tests {
         );
         let mut lki = crate::types::game_state::LKISnapshot {
             name: "Destroyed Land".into(),
-            printing: Default::default(),
             token_image_ref: None,
             power: None,
             toughness: None,
@@ -22849,7 +22843,6 @@ mod tests {
 
         let lki = |tapped: bool| LKISnapshot {
             name: "Tap Probe".to_string(),
-            printing: Default::default(),
             token_image_ref: None,
             power: None,
             toughness: None,
@@ -23843,7 +23836,6 @@ mod tests {
 
         let creature_lki = LKISnapshot {
             name: "Test Creature".to_string(),
-            printing: Default::default(),
             token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
@@ -23867,7 +23859,6 @@ mod tests {
         };
         let land_lki = LKISnapshot {
             name: "Test Land".to_string(),
-            printing: Default::default(),
             token_image_ref: None,
             power: None,
             toughness: None,
@@ -23986,7 +23977,6 @@ mod tests {
     fn same_name_as_parent_target_reads_only_a_current_matching_move_snapshot() {
         let copied_lki = LKISnapshot {
             name: "Grizzly Bears".to_string(),
-            printing: Default::default(),
             token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
@@ -24130,7 +24120,6 @@ mod tests {
             stolen,
             LKISnapshot {
                 name: "Stolen Bear".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
@@ -24206,7 +24195,6 @@ mod tests {
             spell,
             LKISnapshot {
                 name: "Cast From Exile".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: None,
                 toughness: None,
@@ -27550,7 +27538,6 @@ mod attached_set_host_filter_tests {
             colors: Vec::new(),
             chosen_attributes: Vec::new(),
             counters: Default::default(),
-            printing: Default::default(),
             tapped: false,
             is_suspected: false,
             was_prepared: false,
@@ -27644,7 +27631,6 @@ mod attached_set_host_filter_tests {
                 colors: vec![],
                 chosen_attributes: Vec::new(),
                 counters: Default::default(),
-                printing: Default::default(),
                 tapped: false,
                 is_suspected: false,
                 was_prepared: false,

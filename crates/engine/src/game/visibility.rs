@@ -4023,7 +4023,6 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `effect_context_object`/`amassed_army_object`), a different payload
 /// (`CostPaidObjectSnapshot`) and writer set; event carriers outside the loops above;
 /// raw-event transport; stable-id tracking and `proposer_hidden_view` (#9377 section 1).
-/// Its printing stays beside its name (the exposure rule follows the name).
 ///
 /// The payment wire census covers only the `mana_spent_source_snapshots` key;
 /// `assert_linked_exile_census` in the 9377 integration file covers `linked_exile_snapshot`.
@@ -4712,7 +4711,6 @@ fn redact_damage_record_source(record: &mut crate::types::game_state::DamageReco
 fn redact_lki_snapshot(snapshot: &mut crate::types::game_state::LKISnapshot) {
     let crate::types::game_state::LKISnapshot {
         name,
-        printing,
         token_image_ref,
         power,
         toughness,
@@ -4735,8 +4733,6 @@ fn redact_lki_snapshot(snapshot: &mut crate::types::game_state::LKISnapshot) {
         intensity,
     } = snapshot;
     *name = HIDDEN_CARD_NAME.to_string();
-    // CR 400.2: the printing leaves with the name it was captured beside.
-    *printing = DisplayOnly::default();
     *intensity = 0;
     *token_image_ref = None;
     *power = None;

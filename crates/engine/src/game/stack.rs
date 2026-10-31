@@ -11791,11 +11791,10 @@ mod tests {
                         .trigger_source_context
                         .as_ref()
                         .expect("a real record carries its source context")
-                        .lki
                         .printing
                         .get(),
                     printing.get(),
-                    "reach: the printing is on the look-back the event carries"
+                    "reach: the printing is on the source context the event carries"
                 );
                 GameEvent::ZoneChanged {
                     object_id: id,

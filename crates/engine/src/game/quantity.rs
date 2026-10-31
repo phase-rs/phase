@@ -11097,7 +11097,6 @@ mod tests {
 
         let creature_lki = |name: &str, controller: PlayerId| LKISnapshot {
             name: name.to_string(),
-            printing: Default::default(),
             token_image_ref: None,
             power: Some(2),
             toughness: Some(2),
@@ -21335,7 +21334,6 @@ mod tests {
             was_prepared: false,
             attachments: Vec::new(),
             intensity: 0,
-            printing: Default::default(),
         };
         state
             .lki_by_incarnation
@@ -24004,7 +24002,6 @@ mod tests {
             dead_id,
             LKISnapshot {
                 name: String::new(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(6),
                 toughness: Some(5),
@@ -24073,7 +24070,6 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Regal Force".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(5),
                 toughness: Some(5),
@@ -24227,7 +24223,6 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Sacrificed Hulk".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(99),
                 toughness: Some(99),
@@ -24312,7 +24307,6 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Effect-Sacrificed Creature".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(5),
                 toughness: Some(5),
@@ -24395,7 +24389,6 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: "Sacrificed Creature".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),
@@ -24464,7 +24457,6 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
@@ -24530,7 +24522,6 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: "Revealed Card".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(0),
                 toughness: Some(0),
@@ -24589,7 +24580,6 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
@@ -24671,7 +24661,6 @@ mod tests {
             object_id: ObjectId(50),
             lki: LKISnapshot {
                 name: name.to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(power),
                 toughness: Some(toughness),
@@ -25383,7 +25372,6 @@ mod tests {
             ObjectId(1),
             LKISnapshot {
                 name: String::new(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(3),
                 toughness: Some(3),
@@ -26209,7 +26197,6 @@ mod tests {
                 exiled,
                 crate::types::game_state::LKISnapshot {
                     name: format!("Exiled {card_id}"),
-                    printing: Default::default(),
                     token_image_ref: None,
                     power: Some(power),
                     toughness: Some(toughness),

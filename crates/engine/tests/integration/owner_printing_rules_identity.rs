@@ -13,8 +13,8 @@
 //!
 //! Where typed equality and serialized identity disagree. Typed-equal but serialized apart:
 //! the always-equal `LifeTotalReading` in `LifeChanged`, and every `DisplayOnly` printing
-//! carrier reachable from a `GameEvent` (the look-back snapshot in `ZoneChangeRecord` and
-//! `AbilityActivated`, `LibrarySearchCardView`). Serialized-equal but typed apart:
+//! carrier reachable from a `GameEvent` (the trigger-source context in `ZoneChangeRecord` and
+//! `SagaChapterAbilityResolved`, and `LibrarySearchCardView`). Serialized-equal but typed apart:
 //! `CounterType::Loyalty` against `CounterType::Generic("loyalty")` in `CounterAdded`.
 //! `ResolvedAbility` equality compares the aligned target pins (it does not ignore
 //! `target_pins`); its separate divergence is the plural `cost_paid_objects`, compared by
@@ -71,14 +71,15 @@ use engine::game::stack::resolve_next_with_limit;
 use engine::game::triggers::ConsumedTriggerEventScope;
 use engine::types::ability::{AbilityCost, QuantityExpr, StaticDefinition};
 use engine::types::actions::{AlternativeCastDecision, GameAction};
+use engine::types::card::PrintedCardRef;
 use engine::types::card_printing::{CardPrinting, SharedPrinting};
 use engine::types::display_only::{rules_projection, DisplayOnly};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
     AutoPassRequest, CastPaymentMode, GameState, PersistedGameState, StackEntryKind,
     StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
-    StackResolutionPolicy, StackResolutionSession, TrustedGameStateEnvelope, WaitingFor,
-    ZoneChangeRecord,
+    StackResolutionPolicy, StackResolutionSession, TriggerSourceRead, TrustedGameStateEnvelope,
+    WaitingFor, ZoneChangeRecord,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
@@ -787,7 +788,7 @@ fn cancelling_a_discard_paid_cast_returns_the_printed_card_exactly() {
     assert_eq!(
         sentinels(&records, "STAA"),
         1,
-        "reach: its look-back snapshot carries the printing"
+        "reach: its source context carries the printing"
     );
 
     // Twins that differ only in the discarded card's printing are one state.
@@ -1020,6 +1021,16 @@ type Fields = serde_json::Map<String, Value>;
 /// reducer, and the game is left at priority with the bear's dies trigger as the only stack
 /// entry, the trigger carrying the bear's ledger record as its `trigger_event`.
 fn dies_trigger_board(stamp_code: Option<&str>) -> (GameState, ObjectId) {
+    dies_trigger_board_with_identity(stamp_code, None)
+}
+
+/// `dies_trigger_board`, with the bear also carrying a printed card identity (`printed_ref` and
+/// `base_printed_ref`, the pair a stamped card holds) when `identity` is given. Both are set so a
+/// layer re-derivation before the death cannot clear the identity.
+fn dies_trigger_board_with_identity(
+    stamp_code: Option<&str>,
+    identity: Option<PrintedCardRef>,
+) -> (GameState, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Forest"]);
@@ -1034,6 +1045,15 @@ fn dies_trigger_board(stamp_code: Option<&str>) -> (GameState, ObjectId) {
     let mut runner = scenario.build();
     if let Some(code) = stamp_code {
         stamp(runner.state_mut(), bear, code);
+    }
+    if let Some(identity) = identity {
+        let object = runner
+            .state_mut()
+            .objects
+            .get_mut(&bear)
+            .expect("the bear exists");
+        object.printed_ref = Some(identity.clone());
+        object.base_printed_ref = Some(identity);
     }
     drop(runner.cast(murder).target_object(bear).commit());
     for _ in 0..8 {
@@ -1062,11 +1082,84 @@ fn dies_trigger_board(stamp_code: Option<&str>) -> (GameState, ObjectId) {
         "reach: the trigger carries the bear"
     );
     assert_eq!(
-        lki_set_code(record).as_deref(),
+        context_set_code(record).as_deref(),
         stamp_code,
-        "reach: the look-back snapshot holds the stamped printing"
+        "reach: the source context holds the stamped printing"
     );
     (state, bear)
+}
+
+/// CR 400.7 + CR 603.10a + CR 203.1 + CR 206.1: a dies trigger whose source has left the
+/// battlefield keeps the owner's art on its stack row. The context latched at the observation
+/// holds the printing and the printed identity together, and the row reads both from it (the
+/// source object in the graveyard is a new object and is not consulted). A printing without an
+/// identity is not rendered by the client, so the row must carry both or neither.
+#[test]
+fn departed_dies_trigger_row_keeps_its_latched_owner_art() {
+    let identity = PrintedCardRef {
+        oracle_id: "oracle-doomed-bear".to_string(),
+        face_name: "Doomed Bear".to_string(),
+    };
+    let (state, bear) = dies_trigger_board_with_identity(Some("SPAA"), Some(identity.clone()));
+
+    // Reach: the source left the battlefield, and the row reads the trigger's latched context.
+    assert_eq!(state.objects[&bear].zone, Zone::Graveyard);
+    let entry = state
+        .stack
+        .iter()
+        .find(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+        .expect("the dies trigger waits on the stack");
+    let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+        unreachable!("filtered to a triggered ability");
+    };
+    let context = ability
+        .trigger_source
+        .as_ref()
+        .expect("the trigger carries its source context");
+    assert!(
+        matches!(context.source_read(&state), TriggerSourceRead::Latched(_)),
+        "reach: the departed source is read from its latched context"
+    );
+    assert_eq!(context.lki.name, "Doomed Bear");
+    assert_eq!(
+        context.printing.get().as_ref().map(|p| p.set_code.as_str()),
+        Some("SPAA")
+    );
+    assert_eq!(context.printed_ref, Some(identity.clone()));
+    assert!(
+        serde_json::to_value(&context.lki)
+            .unwrap()
+            .get("printing")
+            .is_none(),
+        "last-known information carries no printing"
+    );
+
+    for viewer in [Some(P0), Some(P1), None] {
+        let envelope = client_envelope(&state, viewer);
+        let row = &envelope["derived"]["stack_entry_details"][entry.id.0.to_string()];
+        assert_eq!(row["source_name"], "Doomed Bear", "{viewer:?}: {row}");
+        assert_eq!(row["printing"]["set_code"], "SPAA", "{viewer:?}: {row}");
+        assert_eq!(
+            row["printed_ref"],
+            serde_json::to_value(&identity).unwrap(),
+            "{viewer:?}: {row}"
+        );
+    }
+
+    // Sibling: an identity without a printing is dropped, so neither key is on the row.
+    let (state, _) = dies_trigger_board_with_identity(None, Some(identity));
+    let entry = state
+        .stack
+        .iter()
+        .find(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+        .expect("the dies trigger waits on the stack");
+    for viewer in [Some(P0), Some(P1), None] {
+        let envelope = client_envelope(&state, viewer);
+        let row = &envelope["derived"]["stack_entry_details"][entry.id.0.to_string()];
+        assert_eq!(row["source_name"], "Doomed Bear", "{viewer:?}: {row}");
+        assert!(row.get("printing").is_none(), "{viewer:?}: {row}");
+        assert!(row.get("printed_ref").is_none(), "{viewer:?}: {row}");
+    }
 }
 
 /// The dies trigger's `trigger_event` record, through the typed stack entry.
@@ -1084,11 +1177,10 @@ fn trigger_record(state: &GameState) -> &ZoneChangeRecord {
         .expect("a triggered ability carries a zone-change event")
 }
 
-/// The printing inside a record's look-back snapshot (the inner value).
-fn lki_set_code(record: &ZoneChangeRecord) -> Option<String> {
+/// The printing inside a record's source context (the inner value).
+fn context_set_code(record: &ZoneChangeRecord) -> Option<String> {
     record.trigger_source_context.as_ref().and_then(|context| {
         context
-            .lki
             .printing
             .get()
             .as_ref()
@@ -1253,22 +1345,21 @@ fn set_stamps(record: &mut Fields, turn: u32, index: usize) {
     record.insert("turn_zone_change_index".to_string(), Value::from(index));
 }
 
-/// Fixture construction only: write or remove the printing in a record's look-back snapshot.
-fn set_lki_printing(record: &mut Fields, code: Option<&str>) {
-    let lki = record
+/// Fixture construction only: write or remove the printing in a record's source context.
+fn set_context_printing(record: &mut Fields, code: Option<&str>) {
+    let context = record
         .get_mut("trigger_source_context")
-        .and_then(|context| context.get_mut("lki"))
         .and_then(Value::as_object_mut)
-        .expect("the record carries a look-back snapshot");
+        .expect("the record carries a source context");
     match code {
         Some(code) => {
-            lki.insert(
+            context.insert(
                 "printing".to_string(),
                 serde_json::json!({"set_code": code, "collector_number": "1"}),
             );
         }
         None => {
-            lki.remove("printing");
+            context.remove("printing");
         }
     }
 }
@@ -1374,7 +1465,7 @@ fn a_printing_only_difference_keeps_the_record_on_its_occurrence() {
 
             let mut edited = form.clone();
             edit_live(state_payload_mut(&mut edited), bear, |record| {
-                set_lki_printing(record, live_printing);
+                set_context_printing(record, live_printing);
                 if erase {
                     erase_stamps(record);
                 }
@@ -1391,12 +1482,12 @@ fn a_printing_only_difference_keeps_the_record_on_its_occurrence() {
                 .unwrap_or_else(|error| panic!("{context}: the load must succeed: {error}"));
             assert_bound(&reloaded, turn, row, &context);
             assert_eq!(
-                lki_set_code(trigger_record(&reloaded)).as_deref(),
+                context_set_code(trigger_record(&reloaded)).as_deref(),
                 live_printing,
                 "{context}: the loaded record keeps its own printing"
             );
             assert_eq!(
-                lki_set_code(&reloaded.zone_changes_this_turn[row]).as_deref(),
+                context_set_code(&reloaded.zone_changes_this_turn[row]).as_deref(),
                 board_stamp,
                 "{context}: the ledger row keeps its own printing"
             );
@@ -1417,7 +1508,7 @@ fn a_rules_difference_still_separates_occurrences() {
             // Reach: a printing-only edit on the same board binds.
             let printing_only = reload_edited(&form, |payload| {
                 edit_live(payload, bear, |record| {
-                    set_lki_printing(record, Some("SQQQ"));
+                    set_context_printing(record, Some("SQQQ"));
                     erase_stamps(record);
                 });
             })
@@ -1459,7 +1550,7 @@ fn a_printing_never_chooses_between_rules_identical_occurrences() {
     for (label, form) in forms {
         let with_printing_twin = |payload: &mut Value| {
             let twin = append_ledger_twin(payload, row, |record| {
-                set_lki_printing(record, Some("SQQQ"));
+                set_context_printing(record, Some("SQQQ"));
             });
             assert_eq!(twin, twin_index, "reach: the twin is appended last");
         };
@@ -1488,18 +1579,18 @@ fn a_printing_never_chooses_between_rules_identical_occurrences() {
         let kept = reload_edited(&form, |payload| {
             with_printing_twin(payload);
             edit_live(payload, bear, |record| {
-                set_lki_printing(record, Some("SQQQ"));
+                set_context_printing(record, Some("SQQQ"));
             });
         })
         .expect("a coherent stamped record loads");
         assert_bound(&kept, turn, row, &format!("{label} (ii)"));
         assert_eq!(
-            lki_set_code(trigger_record(&kept)).as_deref(),
+            context_set_code(trigger_record(&kept)).as_deref(),
             Some("SQQQ"),
             "{label} (ii): the record keeps its printing"
         );
         assert_eq!(
-            lki_set_code(&kept.zone_changes_this_turn[twin_index]).as_deref(),
+            context_set_code(&kept.zone_changes_this_turn[twin_index]).as_deref(),
             Some("SQQQ"),
             "{label} (ii): the twin is present with its printing"
         );
@@ -1511,7 +1602,7 @@ fn a_printing_never_chooses_between_rules_identical_occurrences() {
             let (original, copy) = duplicate_live_record_into_deferred_entry_events(payload, bear);
             set_stamps(record_at_mut(payload, &original), turn, twin_index);
             let copy = record_at_mut(payload, &copy);
-            set_lki_printing(copy, Some("SQQQ"));
+            set_context_printing(copy, Some("SQQQ"));
             set_stamps(copy, turn, row);
         })
         .expect("two coherent stamped carriers load");
@@ -1542,7 +1633,7 @@ fn a_display_bearing_candidate_disables_the_raw_fallback() {
         assert_load_error(
             reload_edited(&form, |payload| {
                 append_ledger_twin(payload, row, |record| {
-                    set_lki_printing(record, Some("SQQQ"));
+                    set_context_printing(record, Some("SQQQ"));
                 });
                 edit_live(payload, bear, erase_stamps);
             }),
@@ -1715,7 +1806,7 @@ fn fast_paths_keep_their_structure() {
     for (label, form) in forms {
         let prior = reload_edited(&form, |payload| {
             edit_live(payload, bear, |record| {
-                set_lki_printing(record, Some("SQQQ"));
+                set_context_printing(record, Some("SQQQ"));
                 set_stamps(record, turn - 1, 7);
             });
         })
@@ -1726,7 +1817,7 @@ fn fast_paths_keep_their_structure() {
             "{label}: prior turn"
         );
         assert_eq!(
-            lki_set_code(trigger_record(&prior)).as_deref(),
+            context_set_code(trigger_record(&prior)).as_deref(),
             Some("SQQQ")
         );
 
@@ -1735,7 +1826,7 @@ fn fast_paths_keep_their_structure() {
             let (original, copy) = duplicate_live_record_into_deferred_entry_events(payload, bear);
             set_stamps(record_at_mut(payload, &original), turn, row);
             let copy = record_at_mut(payload, &copy);
-            set_lki_printing(copy, Some("SQQQ"));
+            set_context_printing(copy, Some("SQQQ"));
             set_stamps(copy, turn, row);
         })
         .expect("printing-only carriers of one key agree");
@@ -1744,7 +1835,7 @@ fn fast_paths_keep_their_structure() {
             panic!("{label}: the copy is a zone-change event");
         };
         assert_eq!(stamps(record), (turn, row));
-        assert_eq!(lki_set_code(record).as_deref(), Some("SQQQ"));
+        assert_eq!(context_set_code(record).as_deref(), Some("SQQQ"));
     }
 
     // Two display-free carriers of one key that differ in a legacy alias conflict.

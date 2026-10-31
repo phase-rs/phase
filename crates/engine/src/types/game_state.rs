@@ -535,14 +535,9 @@ pub struct CombatPhaseSkipState {
 
 /// CR 400.7: Snapshot of an object's characteristics at the time it left a public zone.
 /// Used for event-context resolution when the object is no longer in its original zone.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LKISnapshot {
     pub name: String,
-    /// The printing captured beside `name` as the object last existed in the public zone.
-    /// Display-only: CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules or
-    /// AI path reads it. Absent from the wire when empty.
-    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
-    pub printing: DisplayOnly<Option<SharedPrinting>>,
     /// Display-only token catalog ref as it last existed in the public zone.
     /// Preserved so stack entries from dead token sources can render the exact
     /// token image without falling back to name-based lookup.
@@ -644,62 +639,6 @@ pub struct LKISnapshot {
     pub intensity: u32,
 }
 
-/// `printing` is omitted unconditionally (CR 203.1 + CR 206.1: display-only), so the text is
-/// the same with or without a printing and every Debug-keyed reading of a value that embeds a
-/// snapshot (`TriggerSourceContext`, `ZoneChangeRecord`, `GameEvent`) is unchanged. The
-/// exhaustive destructure makes a new field a compile error here until it is added to the text.
-impl std::fmt::Debug for LKISnapshot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self {
-            name,
-            printing: _,
-            token_image_ref,
-            power,
-            toughness,
-            base_power,
-            base_toughness,
-            mana_value,
-            controller,
-            owner,
-            card_types,
-            subtypes,
-            supertypes,
-            keywords,
-            colors,
-            chosen_attributes,
-            counters,
-            tapped,
-            is_suspected,
-            was_prepared,
-            attachments,
-            intensity,
-        } = self;
-        f.debug_struct("LKISnapshot")
-            .field("name", name)
-            .field("token_image_ref", token_image_ref)
-            .field("power", power)
-            .field("toughness", toughness)
-            .field("base_power", base_power)
-            .field("base_toughness", base_toughness)
-            .field("mana_value", mana_value)
-            .field("controller", controller)
-            .field("owner", owner)
-            .field("card_types", card_types)
-            .field("subtypes", subtypes)
-            .field("supertypes", supertypes)
-            .field("keywords", keywords)
-            .field("colors", colors)
-            .field("chosen_attributes", chosen_attributes)
-            .field("counters", counters)
-            .field("tapped", tapped)
-            .field("is_suspected", is_suspected)
-            .field("was_prepared", was_prepared)
-            .field("attachments", attachments)
-            .field("intensity", intensity)
-            .finish()
-    }
-}
-
 /// Complete event-time authority for a triggered ability's source.
 ///
 /// This is deliberately a projection rather than a `GameObject`: it preserves
@@ -718,6 +657,16 @@ pub struct TriggerSourceContext {
     pub card_id: CardId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed_ref: Option<PrintedCardRef>,
+    /// The observed object's printing, latched beside `lki` and `printed_ref` at the same observation
+    /// (`GameObject::snapshot_for_zone_change`). Display-only: CR 203.1 + CR 206.1, a printing has no
+    /// effect on game play, so no rules or AI path reads it. A departed source's stack row discloses it
+    /// only while it discloses `lki.name` (`derived_views::stack_row_source`). It is exposed exactly as
+    /// the former `lki.printing` was: captured from the same `self.printing` at the same observation,
+    /// never cleared in place, and dropped with the whole context
+    /// (`visibility::redact_zone_change_record`). Left out of the `Debug` impl below. Absent from the
+    /// wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
     #[serde(default)]
     pub is_token: bool,
     #[serde(default)]
@@ -41042,7 +40991,7 @@ mod tests {
     type PersistedRecord = serde_json::Map<String, serde_json::Value>;
 
     /// The serialized zone-change record of a battlefield-to-graveyard object, optionally
-    /// carrying a printing in its look-back snapshot. Every call builds the same object, so
+    /// carrying a printing in its trigger-source context. Every call builds the same object, so
     /// two records differ only in what the caller edits.
     fn printed_zone_change_record(printing: Option<&str>) -> PersistedRecord {
         let mut state = GameState::new_two_player(42);
@@ -46620,7 +46569,6 @@ mod tests {
         fn snapshot(power: i32) -> LKISnapshot {
             LKISnapshot {
                 name: "Loop Entrant".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(power),
                 toughness: Some(2),
@@ -46743,7 +46691,6 @@ mod tests {
         fn snapshot(power: i32) -> LKISnapshot {
             LKISnapshot {
                 name: "Loop Entrant".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(power),
                 toughness: Some(2),
@@ -47036,7 +46983,6 @@ mod tests {
         fn snapshot(controller: PlayerId) -> LKISnapshot {
             LKISnapshot {
                 name: "Prodigal Pyromancer".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
@@ -47140,7 +47086,6 @@ mod tests {
         fn snapshot(controller: PlayerId) -> LKISnapshot {
             LKISnapshot {
                 name: "Prodigal Pyromancer".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
@@ -47444,7 +47389,6 @@ mod tests {
         let pyromancer = ObjectId(50);
         let snapshot = LKISnapshot {
             name: "Prodigal Pyromancer".to_string(),
-            printing: Default::default(),
             token_image_ref: None,
             power: Some(1),
             toughness: Some(1),

@@ -20,7 +20,7 @@ pub struct CardPrinting {
     pub collector_number: String,
 }
 
-/// The printing an object-level display carrier holds (`GameObject`, `LKISnapshot`,
+/// The printing an object-level display carrier holds (`GameObject`, `TriggerSourceContext`,
 /// `CompanionInfo`, and the event and view rows copied from them). A shared pointer
 /// rather than an inline `CardPrinting`: the inline pair of `String`s is 48 bytes in every
 /// carrier, and the effect resolver's debug-build stack frame (it recurses once per

@@ -20,7 +20,8 @@
 //! resolver/loader seam is exercised separately in owner_printing_stamping.
 //!
 //! Recorded observations that these rows pin as parity, not as fixes: a face-down-redacted id's
-//! cached earlier-incarnation last-known information keeps its name and printing together; the
+//! cached earlier-incarnation last-known information keeps its name (last-known information
+//! carries no printing); the
 //! `back_face` of a face-up survivor over a buried face-down component and the turn-scoped
 //! journal record of a card played face down still carry a name the opponent should not see,
 //! but no printing joins either.
@@ -330,6 +331,12 @@ fn assert_printing_follows_name(
                             .filter_map(|face| map.get(*face))
                             .filter_map(|face| face.get("name").and_then(Value::as_str)),
                     )
+                    // A trigger-source context discloses its name in its own `lki`.
+                    .chain(
+                        map.get("lki")
+                            .and_then(|lki| lki.get("name"))
+                            .and_then(Value::as_str),
+                    )
                     .any(|name| name == expected);
                 assert!(
                     exposed,
@@ -392,9 +399,9 @@ fn projected_object(state_form: &Value, id: ObjectId) -> &Value {
 // captures read the live printing
 // ---------------------------------------------------------------------------
 
-/// Every capture route copies the live object's printing: the public-characteristics
-/// snapshot family, the zone-exit last-known information, the emblem source and the library
-/// search view. The same routes give nothing for the card once it is face down.
+/// The capture routes that copy the live object's printing are the trigger-source context, the
+/// emblem source and the library search view; last-known information carries no printing. The
+/// same routes give nothing for the card once it is face down.
 #[test]
 fn captures_take_the_live_printing() {
     let mut s = scenario();
@@ -411,21 +418,26 @@ fn captures_take_the_live_printing() {
     board.stamp(searched, "SRCH");
     board.stamp(morph, "MRPH");
 
-    // The snapshot family reads the live field.
+    // The snapshot family carries no printing; the source context reads the live field.
     let object = &board.state().objects[&bear];
     let expected = Some(sentinel("BEAR"));
-    assert_eq!(
-        object.snapshot_public_characteristics().printing.get(),
-        &expected
+    assert!(
+        json(&object.snapshot_public_characteristics())
+            .get("printing")
+            .is_none(),
+        "public characteristics: no printing in last-known information"
     );
-    assert_eq!(object.snapshot_for_mana_spent().printing.get(), &expected);
-    assert_eq!(
-        object
-            .snapshot_for_attack_declaration(bear)
-            .lki
-            .printing
-            .get(),
-        &expected
+    assert!(
+        json(&object.snapshot_for_mana_spent())
+            .get("printing")
+            .is_none(),
+        "mana-spent snapshot: no printing in last-known information"
+    );
+    assert!(
+        json(&object.snapshot_for_attack_declaration(bear).lki)
+            .get("printing")
+            .is_none(),
+        "attack declaration: no printing in last-known information"
     );
     let record = object.snapshot_for_zone_change(bear, Some(Zone::Battlefield), Zone::Graveyard);
     assert_eq!(
@@ -433,7 +445,6 @@ fn captures_take_the_live_printing() {
             .trigger_source_context
             .as_ref()
             .expect("a real record carries its source context")
-            .lki
             .printing
             .get(),
         &expected
@@ -442,9 +453,15 @@ fn captures_take_the_live_printing() {
     // The zone-exit last-known information of a real departure.
     board.move_to(bear, Zone::Graveyard);
     assert_eq!(
-        board.state().lki_cache[&bear].printing.get(),
-        &expected,
-        "the zone-exit snapshot takes the live printing"
+        board.state().lki_cache[&bear].name,
+        "Public Bear",
+        "reach: the zone-exit snapshot is cached"
+    );
+    assert!(
+        json(&board.state().lki_cache[&bear])
+            .get("printing")
+            .is_none(),
+        "zone-exit snapshot: no printing in last-known information"
     );
 
     // The emblem source of a face-up planeswalker.
@@ -521,17 +538,18 @@ fn captures_take_the_live_printing() {
     );
     assert_eq!(object.name, "");
     assert!(object
-        .snapshot_public_characteristics()
+        .snapshot_for_zone_change(morph, Some(Zone::Battlefield), Zone::Graveyard)
+        .trigger_source_context
+        .unwrap()
         .printing
         .get()
         .is_none());
-    assert!(object.snapshot_for_mana_spent().printing.get().is_none());
     let departed_from = board.state().objects[&morph].zone;
     assert_eq!(departed_from, Zone::Battlefield);
     board.move_to(morph, Zone::Graveyard);
     let lki = &board.state().lki_cache[&morph];
     assert_eq!(lki.name, "", "the face-down permanent departs nameless");
-    assert!(lki.printing.get().is_none());
+    assert!(json(lki).get("printing").is_none());
     // CR 708.9: the graveyard object is face up with its real name and no printing.
     assert_eq!(board.state().objects[&morph].name, "Hand Secret");
     assert!(live_set_code(board.state(), morph).is_none());
@@ -718,9 +736,9 @@ fn records_of<'a>(state_form: &'a Value, key: &str, id: ObjectId) -> Vec<&'a Val
         .unwrap_or_default()
 }
 
-/// A payment snapshot, an attack declaration and a zone-change record of a card that is later
-/// hidden lose the printing with the name for the viewer who cannot see the card, and keep
-/// both for the viewer who can; a still-public source keeps both for everyone.
+/// Payment snapshots and attack declarations carry no printing; a departure record's source
+/// context keeps its printing exactly as long as the viewer keeps the context (the viewer who
+/// cannot see the card loses the context, and with it the name and the printing).
 #[test]
 fn lki_and_side_tables_follow_the_name() {
     let mut s = GameScenario::new();
@@ -771,11 +789,30 @@ fn lki_and_side_tables_follow_the_name() {
     let authoritative = json(board.state());
     let declared = records_of(&authoritative, "attacker_declarations_this_turn", attacker);
     assert_eq!(declared.len(), 1, "reach: the attack was recorded");
-    assert_eq!(declared[0]["lki"]["printing"]["set_code"], "SATKR");
+    assert!(declared[0]["lki"].get("printing").is_none());
     assert_eq!(
         authoritative["objects"][paid.0.to_string()]["mana_spent_source_snapshots"][0]["lki"]
-            ["printing"]["set_code"],
-        "SROCK"
+            ["name"],
+        "Mana Rock",
+        "reach: the payment snapshot is recorded with its name"
+    );
+    assert!(
+        authoritative["objects"][paid.0.to_string()]["mana_spent_source_snapshots"][0]["lki"]
+            .get("printing")
+            .is_none()
+    );
+    let leaver_records = records_of(&authoritative, "zone_changes_this_turn", leaver);
+    assert!(
+        !leaver_records.is_empty(),
+        "reach: the leaver's departure is journaled"
+    );
+    assert_eq!(
+        leaver_records[0]["trigger_source_context"]["printing"]["set_code"],
+        "SLEAV"
+    );
+    assert_eq!(
+        leaver_records[0]["trigger_source_context"]["lki"]["name"],
+        "Leaver"
     );
 
     // P1 cannot see the cards now in P0's hand.
@@ -785,7 +822,7 @@ fn lki_and_side_tables_follow_the_name() {
     assert_eq!(paid_snapshots[0]["lki"]["name"], HIDDEN);
     assert!(paid_snapshots[0]["lki"].get("printing").is_none());
     assert_eq!(paid_snapshots[1]["lki"]["name"], "Public Forest");
-    assert_eq!(paid_snapshots[1]["lki"]["printing"]["set_code"], "SFRST");
+    assert!(paid_snapshots[1]["lki"].get("printing").is_none());
     let declared = records_of(state_form, "attacker_declarations_this_turn", attacker);
     assert_eq!(declared.len(), 1);
     assert_eq!(declared[0]["lki"]["name"], HIDDEN);
@@ -822,10 +859,20 @@ fn lki_and_side_tables_follow_the_name() {
     let state_form = &p0[0].1;
     let paid_snapshots = &state_form["objects"][paid.0.to_string()]["mana_spent_source_snapshots"];
     assert_eq!(paid_snapshots[0]["lki"]["name"], "Mana Rock");
-    assert_eq!(paid_snapshots[0]["lki"]["printing"]["set_code"], "SROCK");
+    assert!(paid_snapshots[0]["lki"].get("printing").is_none());
     let declared = records_of(state_form, "attacker_declarations_this_turn", attacker);
     assert_eq!(declared[0]["lki"]["name"], "Hidden Attacker");
-    assert_eq!(declared[0]["lki"]["printing"]["set_code"], "SATKR");
+    assert!(declared[0]["lki"].get("printing").is_none());
+    // The leaver's own hand is visible to P0: the departure record keeps its context, and the
+    // context keeps its printing beside the name it discloses.
+    let changes = records_of(state_form, "zone_changes_this_turn", leaver);
+    assert!(
+        changes.iter().any(|record| {
+            record["trigger_source_context"]["printing"]["set_code"] == "SLEAV"
+                && record["trigger_source_context"]["lki"]["name"] == "Leaver"
+        }),
+        "P0 keeps the departure record's context and its printing: {changes:?}"
+    );
 
     board.assert_exposure_rule("side tables");
 }
@@ -927,8 +974,8 @@ fn stack_row_of_a_public_spell_carries_its_printing() {
 }
 
 /// A face-down cast shows the controller its real name and nobody a printing; the
-/// card's earlier face-up incarnation is still cached (the trap), and a row that fell back to
-/// that last-known information over the present, redacted object would show it.
+/// card's earlier face-up incarnation is still cached (holding its name only), and a row that
+/// fell back to that last-known information over the present, redacted object would show it.
 #[test]
 fn stack_row_of_a_face_down_cast_has_no_printing_and_ignores_cached_lki() {
     let mut s = scenario();
@@ -940,10 +987,13 @@ fn stack_row_of_a_face_down_cast_has_no_printing_and_ignores_cached_lki() {
     board.move_to(trap, Zone::Battlefield);
     board.move_to(trap, Zone::Hand);
     assert_eq!(
-        board.state().lki_cache[&trap].printing.get(),
-        &Some(sentinel("TRAP")),
-        "reach: the earlier incarnation's cached last-known information holds the printing"
+        board.state().lki_cache[&trap].name,
+        "Trap Beast",
+        "reach: the earlier incarnation's last-known information is cached"
     );
+    assert!(json(&board.state().lki_cache[&trap])
+        .get("printing")
+        .is_none());
     fund(&mut board, P0, 6);
     cast_face_down(&mut board, trap);
     let object = &board.state().objects[&trap];
@@ -969,10 +1019,10 @@ fn stack_row_of_a_face_down_cast_has_no_printing_and_ignores_cached_lki() {
             "{viewer:?}: no printing from the cached earlier incarnation: {row}"
         );
     }
-    // The trap is armed: the opponent's filtered cache still holds the earlier incarnation's
-    // name and printing together (parity), which a LKI fallback would have surfaced.
+    // The opponent's filtered cache still holds the earlier incarnation's name (parity); it
+    // carries no printing.
     let p1 = filter_state_for_viewer(board.state(), P1);
-    assert_eq!(p1.lki_cache[&trap].printing.get(), &Some(sentinel("TRAP")));
+    assert!(json(&p1.lki_cache[&trap]).get("printing").is_none());
     assert_eq!(p1.lki_cache[&trap].name, "Trap Beast");
     board.assert_exposure_rule("face-down cast row");
 }
@@ -1064,7 +1114,7 @@ fn triggered_stack_rows_follow_their_latched_authority() {
         let context_printing = ability
             .trigger_source
             .as_ref()
-            .and_then(|context| context.lki.printing.get().clone())
+            .and_then(|context| context.printing.get().clone())
             .map(|printing| printing.set_code.clone());
         assert_eq!(
             row_set_code(&stack_row(&board, viewer, ObjectId(900))),
@@ -1121,7 +1171,7 @@ fn fire_delayed_ability_of_host(merge_first: bool) -> (Board, ObjectId) {
         .expect("the delayed ability carries its creation-time source context");
     assert_eq!(stored_context.lki.name, "Delayed Host");
     assert_eq!(
-        stored_context.lki.printing.get(),
+        stored_context.printing.get(),
         &Some(sentinel("HOST")),
         "reach: the stored context holds the source's printing"
     );
@@ -1206,7 +1256,7 @@ fn stack_row_of_an_activated_ability_carries_the_live_printing() {
 }
 
 /// An ability entry whose source no longer exists names "Unknown" and carries no printing,
-/// even when the filtered last-known information holds one (hand-built board: the source
+/// even though the source object's cached snapshot remains (hand-built board: the source
 /// object is removed and its cached snapshot kept, the state a ceased copy leaves behind).
 #[test]
 fn stack_row_of_an_absent_source_discloses_no_printing() {
@@ -1236,14 +1286,15 @@ fn stack_row_of_an_absent_source_discloses_no_printing() {
         assert_eq!(row["source_name"], "Unknown", "{viewer:?}");
         assert_eq!(row_set_code(&row), None, "{viewer:?}: {row}");
     }
-    // Reach: the cached snapshot still holds the sentinel in every viewer's filtered state.
+    // Reach: the cached snapshot is still in every viewer's filtered state, with its name only.
     for viewer in VIEWERS {
         let state_form = &board.forms(viewer)[0].1;
+        let cached = &state_form["lki_cache"][source.0.to_string()];
         assert_eq!(
-            state_form["lki_cache"][source.0.to_string()]["printing"]["set_code"],
-            "SCEAS",
-            "{viewer:?}: the trap is armed"
+            cached["name"], "Ceased Copy",
+            "{viewer:?}: the cache is present"
         );
+        assert!(cached.get("printing").is_none(), "{viewer:?}");
     }
 }
 
@@ -1344,12 +1395,13 @@ fn stack_row_of_a_ceased_spell_copy_token_discloses_no_printing() {
         let row = stack_row(&board, viewer, entry);
         assert_eq!(row["source_name"], "Unknown", "{viewer:?}");
         assert_eq!(row_set_code(&row), None, "{viewer:?}: {row}");
-        // The trap is armed: the viewer's filtered cache still holds the token's printing.
+        // Reach: the viewer's filtered cache still holds the token's name, with no printing.
+        let cached = &board.forms(viewer)[0].1["lki_cache"][token.0.to_string()];
         assert_eq!(
-            board.forms(viewer)[0].1["lki_cache"][token.0.to_string()]["printing"]["set_code"],
-            "SCPYB",
-            "{viewer:?}: the cached last-known information holds the inherited printing"
+            cached["name"], "Copied Beast",
+            "{viewer:?}: the cache is present"
         );
+        assert!(cached.get("printing").is_none(), "{viewer:?}");
     }
 }
 
@@ -1601,7 +1653,7 @@ fn raw_event_channel_forwards_printing_only_beside_its_name() {
         .as_ref()
         .expect("a real record carries its source context");
     assert!(context.face_down);
-    assert!(context.lki.printing.get().is_none());
+    assert!(context.printing.get().is_none());
     let entry_events = |events: &[GameEvent]| {
         events
             .iter()
@@ -1620,8 +1672,9 @@ fn raw_event_channel_forwards_printing_only_beside_its_name() {
     assert_eq!(entry_events(&events_for(&board, P1)), 0);
     assert_eq!(entry_events(&events_for(&board, SPECTATOR)), 0);
 
-    // A face-up and a face-down attacker declared together: the face-down attacker's record
-    // carries no printing for anyone, the face-up one carries its own for everyone.
+    // A face-up and a face-down attacker declared together: an attack declaration is last-known
+    // information and carries no printing for either attacker, for anyone. The face-up
+    // attacker's record is still in the channel by name (the reach guard).
     board.play_face_down(P0, morph_attacker);
     board
         .state_mut()
@@ -1640,13 +1693,18 @@ fn raw_event_channel_forwards_printing_only_beside_its_name() {
     for viewer in [P0, P1, SPECTATOR] {
         let text = events_text(&events_for(&board, viewer));
         assert!(
-            count_set_code(&text, "SFUAT") > 0,
-            "{viewer:?}: the face-up attacker's record carries its printing"
+            text.to_string().contains("Face Up Attacker"),
+            "{viewer:?}: reach: the face-up attacker's declaration is in the channel by name"
+        );
+        assert_eq!(
+            count_set_code(&text, "SFUAT"),
+            0,
+            "{viewer:?}: the face-up attacker's declaration carries no printing"
         );
         assert_eq!(
             count_set_code(&text, "SFDAT"),
             0,
-            "{viewer:?}: the face-down attacker's record carries none"
+            "{viewer:?}: the face-down attacker's declaration carries none"
         );
     }
 

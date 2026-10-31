@@ -463,11 +463,11 @@ type FenceFields = { waiting_for_identity?: string; state_revision?: number };
 const ENGINE_FENCE: FenceFields = { waiting_for_identity: "prompt-x", state_revision: 5 };
 
 function paymentState(fields: FenceFields, printing = "SAAA", actor = 1): GameState {
-  // Real wire carrier: PayCost.resume.Spell.ability.trigger_source.lki.printing.
+  // Real wire carrier: PayCost.resume.Spell.ability.trigger_source.printing.
   // ResolvedAbility's client interface intentionally only models fields its UI reads.
   const ability = {
     targets: [],
-    trigger_source: { lki: { power: 2, printing: { set_code: printing, collector_number: "1" } } },
+    trigger_source: { lki: { power: 2 }, printing: { set_code: printing, collector_number: "1" } },
   };
   const waitingFor: WaitingFor = {
     type: "PayCost",

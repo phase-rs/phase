@@ -121,11 +121,6 @@ fn emblem_stack_owner_printing_narset_trigger_preserves_captured_pair() {
     // Synthetic creator removal cannot displace the already captured emblem authority.
     let mut departed = commit.state().clone();
     departed.objects.remove(&narset);
-    departed.lki_cache.get_mut(&narset).unwrap().printing =
-        DisplayOnly::new(Some(SharedPrinting::new(CardPrinting {
-            set_code: "conflicting".into(),
-            collector_number: "B".into(),
-        })));
     assert_projected_printing(&departed, emblem, entry.id, Some(printing()));
 
     // Restore authority, never a viewer projection, before deriving the row again.

@@ -2841,6 +2841,7 @@ impl GameObject {
                 lki: self.snapshot_public_characteristics(),
                 card_id: self.card_id,
                 printed_ref: self.printed_ref.clone(),
+                printing: self.printing.clone(),
                 is_token: self.is_token,
                 face_down: self.face_down,
                 mana_cost: self.mana_cost.clone(),
@@ -3238,7 +3239,6 @@ impl GameObject {
     pub fn snapshot_public_characteristics(&self) -> LKISnapshot {
         LKISnapshot {
             name: self.name.clone(),
-            printing: self.printing.clone(),
             token_image_ref: self.token_image_ref.clone(),
             power: self.power,
             toughness: self.toughness,

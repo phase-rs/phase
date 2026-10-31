@@ -376,7 +376,6 @@ mod tests {
             object_id: ObjectId(404),
             lki: crate::types::game_state::LKISnapshot {
                 name: "Exiled Creature".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),

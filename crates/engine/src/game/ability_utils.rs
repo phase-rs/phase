@@ -24861,7 +24861,6 @@ mod tests {
             object_id: gone_id,
             lki: LKISnapshot {
                 name: "Exiled Creature".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),

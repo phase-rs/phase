@@ -26312,7 +26312,6 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
-                printing: Default::default(),
             }
         }
 
@@ -26403,7 +26402,6 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
-                printing: Default::default(),
             }
         }
 
@@ -26550,7 +26548,6 @@ mod tests {
             incarnation,
             LKISnapshot {
                 name: "Loop Entrant".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),

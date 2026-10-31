@@ -6140,7 +6140,7 @@ pub(crate) mod tests {
                 .trigger_source_context
                 .as_mut()
                 .expect("a real record carries its source context");
-            context.lki.printing = DisplayOnly::new(printing.clone());
+            context.printing = DisplayOnly::new(printing.clone());
             context.lki.power = Some(power);
             record
         };

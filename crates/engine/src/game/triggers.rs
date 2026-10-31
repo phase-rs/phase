@@ -25868,7 +25868,6 @@ pub mod tests {
             dead,
             crate::types::game_state::LKISnapshot {
                 name: "Countered Dead".to_string(),
-                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),

@@ -1,5 +1,5 @@
-//! The printing carriers: the display-only `printing` fields on the live object, every
-//! last-known-information snapshot, the stack row, the library-search view, the emblem
+//! The printing carriers: the display-only `printing` fields on the live object, the
+//! trigger-source context, the stack row, the library-search view, the emblem
 //! source and the debug library row.
 //!
 //! CR 203.1 + CR 206.1: a card's illustration and expansion symbol have no effect on game
@@ -19,7 +19,7 @@ use engine::types::card_printing::{CardPrinting, SharedPrinting};
 use engine::types::display_only::{rules_projection, DisplayOnly};
 use engine::types::events::{GameEvent, LibrarySearchCardFaceView, LibrarySearchCardView};
 use engine::types::game_state::{
-    GameState, LKISnapshot, PersistedGameState, StackEntry, StackEntryKind, TriggerSourceContext,
+    GameState, PersistedGameState, StackEntry, StackEntryKind, TriggerSourceContext,
     ZoneChangeRecord,
 };
 use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
@@ -78,13 +78,6 @@ fn object_with(printing: &Option<SharedPrinting>) -> GameObject {
     object
 }
 
-fn lki_with(printing: &Option<SharedPrinting>) -> LKISnapshot {
-    let (state, id) = base_state();
-    let mut lki = object_in(&state, id).snapshot_public_characteristics();
-    lki.printing = carried(printing);
-    lki
-}
-
 /// A real zone-change record whose source context carries `printing`.
 fn record_with(
     state: &GameState,
@@ -97,7 +90,7 @@ fn record_with(
         .trigger_source_context
         .as_mut()
         .expect("a real record carries its source context");
-    context.lki.printing = carried(printing);
+    context.printing = carried(printing);
     record
 }
 
@@ -234,7 +227,14 @@ fn assert_transparent<T: PartialEq + Debug + Serialize>(
 
 #[test]
 fn carriers_are_equality_transparent() {
-    assert_transparent("LKISnapshot", lki_with, |lki| lki.name = "Elf".to_string());
+    assert_transparent(
+        "TriggerSourceContext",
+        |printing| {
+            let (state, id) = base_state();
+            context_with(&state, id, printing, 2)
+        },
+        |context| context.lki.name = "Elf".to_string(),
+    );
     assert_transparent("EmblemSource", emblem_with, |emblem| {
         emblem.name = "Other Walker".to_string()
     });
@@ -306,10 +306,9 @@ fn carrier_debug_text_is_printing_independent() {
         })
     }
 
-    // The snapshot omits its printing from the text unconditionally, so every Debug-keyed
+    // The context's Debug lists its fields and leaves its printing out, so every Debug-keyed
     // reading of a value embedding one is what it was before the field existed.
-    let omitting: [(&str, [(String, String); 3]); 3] = [
-        ("LKISnapshot", texts(lki_with)),
+    let omitting: [(&str, [(String, String); 3]); 2] = [
         (
             "TriggerSourceContext",
             texts(|printing| {
@@ -332,7 +331,11 @@ fn carrier_debug_text_is_printing_independent() {
         }
     }
     // Reach: the value really held a printing while its text did not show it.
-    assert_eq!(lki_with(&Some(s1())).printing.get(), &Some(s1()));
+    let (state, id) = base_state();
+    assert_eq!(
+        context_with(&state, id, &Some(s1()), 2).printing.get(),
+        &Some(s1())
+    );
 
     // The other carriers print the wrapper's constant text.
     let constant: [(&str, [(String, String); 3]); 5] = [
@@ -432,10 +435,13 @@ fn carrier_wire_shape_is_absent_when_empty_and_transparent_when_present() {
         &["printing", "base_printing"],
     );
     assert_wire_contract(
-        "LKISnapshot",
-        lki_with,
-        |lki| lki.name = "Elf".to_string(),
-        |lki| vec![lki.printing.get().clone()],
+        "TriggerSourceContext",
+        |printing| {
+            let (state, id) = base_state();
+            context_with(&state, id, printing, 2)
+        },
+        |context| context.lki.name = "Elf".to_string(),
+        |context| vec![context.printing.get().clone()],
         &["printing"],
     );
     assert_wire_contract(
@@ -482,10 +488,6 @@ fn persisted_state_keeps_every_printing() {
         Zone::Battlefield,
     );
 
-    let mut lki = object_in(&state, id).snapshot_public_characteristics();
-    lki.printing = carried(&Some(s2()));
-    state.lki_cache.insert(id, lki);
-
     let emblem = create_object(
         &mut state,
         CardId(3),
@@ -524,19 +526,56 @@ fn persisted_state_keeps_every_printing() {
     let object = object_in(&restored, id);
     assert_eq!(object.printing.get(), &Some(s1()));
     assert_eq!(object.base_printing.get(), &Some(s1()));
-    assert_eq!(
-        restored.lki_cache.get(&id).unwrap().printing.get(),
-        &Some(s2())
-    );
     let emblem_source = object_in(&restored, emblem).emblem_source.as_ref().unwrap();
     assert_eq!(emblem_source.printing.get(), &Some(s1()));
     let StackEntryKind::ActivatedAbility { ability, .. } = &restored.stack[0].kind else {
         panic!("the stack entry is the fixture ability");
     };
     let restored_context = ability.trigger_source.as_ref().unwrap();
-    assert_eq!(restored_context.lki.printing.get(), &Some(s2()));
+    assert_eq!(restored_context.printing.get(), &Some(s2()));
 
     // Sibling: an object that never had a printing restores without one.
     let plain = object_in(&restored, plain);
     assert!(plain.printing.get().is_none() && plain.base_printing.get().is_none());
+}
+
+/// CR 203.1 + CR 206.1: last-known information carries no printing on any production capture
+/// route; the trigger-source context is the one carrier that latches it.
+#[test]
+fn last_known_information_carries_no_printing() {
+    let object = object_with(&Some(s1()));
+    // Reach: the object really holds the sentinel, so a clean snapshot below is not vacuous.
+    assert!(serde_json::to_string(&object).unwrap().contains("SNTA"));
+
+    let snapshots = [
+        (
+            "snapshot_public_characteristics",
+            serde_json::to_value(object.snapshot_public_characteristics()).unwrap(),
+        ),
+        (
+            "snapshot_for_mana_spent",
+            serde_json::to_value(object.snapshot_for_mana_spent()).unwrap(),
+        ),
+        (
+            "snapshot_for_attack_declaration",
+            serde_json::to_value(object.snapshot_for_attack_declaration(object.id).lki).unwrap(),
+        ),
+    ];
+    for (route, value) in snapshots {
+        assert!(
+            value.get("printing").is_none(),
+            "{route}: no printing key in last-known information"
+        );
+        assert!(
+            !value.to_string().contains("SNTA"),
+            "{route}: no sentinel in last-known information"
+        );
+    }
+
+    // Positive control: the trigger-source context latched from the same object holds it.
+    let context = object
+        .snapshot_for_zone_change(object.id, Some(Zone::Battlefield), Zone::Graveyard)
+        .trigger_source_context
+        .expect("a real record carries its source context");
+    assert_eq!(context.printing.get(), &Some(s1()));
 }
