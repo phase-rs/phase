@@ -2818,6 +2818,157 @@ fn an_upkeep_only_ability_is_not_deferrable() {
     assert_eq!(delta, 0.0);
 }
 
+/// An instant in the AI's hand, parsed from `text`, as the engine would offer it.
+fn add_instant(state: &mut GameState, id: u64, name: &str, text: &str) -> GameAction {
+    let card_id = CardId(id);
+    let object_id = create_object(state, card_id, AI, name.to_string(), Zone::Hand);
+    let abilities = parse_oracle_text(text, name, &[], &["Instant".to_string()], &[]).abilities;
+    let object = state.objects.get_mut(&object_id).unwrap();
+    object.card_types.core_types.push(CoreType::Instant);
+    *Arc::make_mut(&mut object.abilities) = abilities;
+    GameAction::CastSpell {
+        object_id,
+        card_id,
+        targets: vec![],
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+    }
+}
+
+/// `root_held_line` reads a spell on offer by its own resolution, through the walk an
+/// activation's goes through. Each row's Oracle text is verbatim. Its reach is the spell abilities
+/// `cast_facts_for_action` finds: with none, every row would read as `Reproducible`.
+#[test]
+fn held_line_reads_a_spells_resolution_against_the_draw() {
+    use HeldLine::{Irreproducible, Reproducible};
+    const NATURAL_CONNECTION: &str =
+        "Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.";
+    const FAITHLESS_SALVAGING: &str = "Discard a card, then draw a card.\nRebound (If you cast this spell from your hand, exile it as it resolves. At the beginning of your next upkeep, you may cast this card from exile without paying its mana cost.)";
+    #[rustfmt::skip]
+    let rows = [
+        // A search, an arrangement, a card put back, a mill that can name the AI, in any branch.
+        ("Natural Connection", NATURAL_CONNECTION, Phase::Upkeep, 0, Irreproducible),
+        ("Opt", "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\nDraw a card.", Phase::Upkeep, 0, Irreproducible),
+        ("Brainstorm", "Draw three cards, then put two cards from your hand on top of your library in any order.", Phase::Upkeep, 0, Irreproducible),
+        ("Thought Scour", "Target player mills two cards.\nDraw a card.", Phase::Upkeep, 0, Irreproducible),
+        ("Jeskai Charm", "Choose one —\n• Put target creature on top of its owner's library.\n• Jeskai Charm deals 4 damage to target opponent or planeswalker.\n• Creatures you control get +1/+1 and gain lifelink until end of turn.", Phase::Upkeep, 0, Irreproducible),
+        // CR 504.2: from the draw step the draw is behind.
+        ("Natural Connection", NATURAL_CONNECTION, Phase::Draw, 0, Reproducible),
+        // A draw commutes with the draw (CR 121.1), and these leave it alone.
+        ("Think Twice", "Draw a card.\nFlashback {2}{U} (You may cast this card from your graveyard for its flashback cost. Then exile it.)", Phase::Upkeep, 0, Reproducible),
+        ("Shock", "Shock deals 2 damage to any target.", Phase::Upkeep, 0, Reproducible),
+        ("Giant Growth", "Target creature gets +3/+3 until end of turn.", Phase::Upkeep, 0, Reproducible),
+        // CR 601.2a + CR 609.3: the spell has left the hand, so it can't pay its own discard.
+        ("Faithless Salvaging", FAITHLESS_SALVAGING, Phase::Upkeep, 0, Irreproducible),
+        ("Faithless Salvaging", FAITHLESS_SALVAGING, Phase::Upkeep, 1, Reproducible),
+    ];
+    for (name, text, phase, others_in_hand, expected) in rows {
+        let mut board = build_board(phase, 20, 20);
+        let cast = add_instant(&mut board.state, 9_500, name, text);
+        for index in 0..others_in_hand {
+            add_instant(&mut board.state, 9_510 + index, "Filler", "Draw a card.");
+        }
+        let facts = crate::cast_facts::cast_facts_for_action(&board.state, &cast, AI);
+        assert!(
+            facts.is_some_and(|facts| !facts.primary_effects.is_empty()),
+            "{name}: reach: the spell has a resolution to read"
+        );
+        assert_eq!(
+            held_line(&board.state, AI, &cast),
+            expected,
+            "{name}, {phase:?}"
+        );
+    }
+    // Reach for the arm itself: only a cast reads a spell.
+    let board = build_board(Phase::Upkeep, 20, 20);
+    assert_eq!(
+        held_line(&board.state, AI, &GameAction::PassPriority),
+        Reproducible
+    );
+}
+
+/// `root_held_line` reads what the main phase loses from an activation that isn't held, whatever
+/// it does to the draw: a restriction that leaves the main phase out (CR 602.5), and mana that
+/// empties first (CR 500.5), in the draw step too. A mana ability isn't read for that mana.
+#[test]
+fn held_line_reads_what_the_main_phase_loses() {
+    use engine::types::mana::{ManaExpiry, ManaRestriction, ManaType, ManaUnit};
+    use HeldLine::{Irreproducible, Reproducible};
+
+    let activate = |source_id, ability_index| GameAction::ActivateAbility {
+        source_id,
+        ability_index,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+    };
+
+    // Rock Hydra's upkeep line, and Dwarven Armory's upkeep step: neither is a hold.
+    for (name, text) in [
+        (
+            "Rock Hydra",
+            "{R}{R}{R}: Put a +1/+1 counter on this creature. Activate only during your upkeep.",
+        ),
+        (
+            "Dwarven Armory",
+            "{2}, Sacrifice a land: Put a +2/+2 counter on target creature. Activate only during any upkeep step.",
+        ),
+    ] {
+        let mut board = build_board(Phase::Upkeep, 20, 20);
+        let id = creature(&mut board.state, &mut Ids(9_600), AI, name, 1, 1, Some(text));
+        board.pinger = id;
+        let (delta, reason) = score_and_reason(&verdict_for(&board));
+        assert_eq!(
+            (delta, reason),
+            (0.0, "activation_patience_na"),
+            "{name}: reach: not held"
+        );
+        assert_eq!(
+            held_line(&board.state, AI, &activate(id, 0)),
+            Irreproducible,
+            "{name}"
+        );
+    }
+
+    let float = |expiry| {
+        let mut unit = ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(9_900),
+            false,
+            vec![ManaRestriction::OnlyForActivation],
+        );
+        unit.expiry = expiry;
+        unit
+    };
+    for (phase, expiry, expected) in [
+        (Phase::Upkeep, None, Irreproducible),
+        (Phase::Draw, None, Irreproducible),
+        // Retained through the main phase, the mana is still there.
+        (Phase::Upkeep, Some(ManaExpiry::EndOfTurn), Reproducible),
+    ] {
+        let mut board = build_board(phase, 20, 20);
+        let mana_rock = creature(
+            &mut board.state,
+            &mut Ids(9_700),
+            AI,
+            "Mana Rock",
+            0,
+            1,
+            Some("{T}: Add {C}."),
+        );
+        board.state.players[AI.0 as usize]
+            .mana_pool
+            .add(float(expiry));
+        assert_eq!(
+            held_line(&board.state, AI, &activate(board.pinger, 0)),
+            expected,
+            "{phase:?}, {expiry:?}"
+        );
+        assert_eq!(
+            held_line(&board.state, AI, &activate(mana_rock, 0)),
+            Reproducible,
+            "a mana ability isn't read for floating mana"
+        );
+    }
+}
+
 /// An opponent's draw step is a live response window for the AI, not a wait.
 #[test]
 fn a_deferrable_ping_is_not_held_during_the_opponents_draw_step() {

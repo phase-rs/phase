@@ -72,8 +72,9 @@
 //! upkeep keeps the draw step's card on top of its seven, and in the main phase discards it. So
 //! is anything else sized by the hand, and a discard the hand can't pay.
 //!
-//! A continuation is a whole line, so such an activation also ends the lend of every other hold
-//! at its root (`root_held_line`): a held Wellwisher's line can go on to crack Flooded Strand.
+//! A continuation is a whole line, so such an activation, or one that stands down over the draw
+//! (Crystal Ball), ends the lend of every other hold at its root (`root_held_line`): a held
+//! Wellwisher's line can go on to crack Flooded Strand.
 //!
 //! An activation whose own restriction lapses before the main phase stands down, because waiting
 //! gives it up (CR 602.5): a cap on the hand, which the draw lifts it out of (Library of
@@ -89,11 +90,10 @@
 //! classification does not read inside an inline branch carrier (a die roll's results) or a node
 //! the parser left `Unimplemented`. And a surcharge on the activation is not read: Loreseeker's
 //! Stone keeps its hand count in `cost_reduction`, which neither walker reads. Its upkeep line
-//! costs {1} less than main's. It stays held and lent. And `root_held_line` reads only the
-//! activations the root offers against the draw, so a lent line can still go through what it
-//! doesn't read: an activation that line alone puts on offer, a spell cast before the draw, or
-//! an activation that stands down for another reason (an upkeep-only one, or one spending
-//! floating mana).
+//! costs {1} less than main's. It stays held and lent. And `root_held_line` reads each action the
+//! root offers, by its own definition, so a lent line can still go through what that doesn't
+//! show: an activation that line alone puts on offer, a cast beyond its spell's resolution, or
+//! an activation that stands down for another reason (one whose own `condition` is met now).
 //!
 //! The classification errs toward standing down, so it also releases activations that could
 //! have waited: a card put on the bottom changes this draw only on an empty library
@@ -125,8 +125,9 @@
 //! branch the penalty is sized to lose to a real payoff and win against an idle
 //! ping. On the search branch, where other policies' payoffs are scaled by the
 //! root `tactical_weight`, a payoff beats the hold only above the penalty
-//! divided by that weight. A hold on a search or a hand clear has the penalty only: nothing is
-//! lent for it, or for any hold beside it (see "What a hold rests on").
+//! divided by that weight. At a root offering an activation passing can't reach, every hold has
+//! the penalty only: nothing is lent there (see "What a hold rests on"), so an activation whose
+//! line beats Pass's by more than the penalty fires in the upkeep.
 //!
 //! ## The escape hatches
 //!
@@ -179,6 +180,7 @@ use super::context::PolicyContext;
 use super::effect_classify::ability_is_temporary_combat_modifier;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use crate::ability_chain::{collect_scoped_nodes, AbilityScope};
+use crate::cast_facts::cast_facts_for_action;
 use crate::features::lifegain::filter_is_opponent_scoped;
 use crate::features::DeckFeatures;
 use engine::game::players;
@@ -199,8 +201,8 @@ pub struct ActivationPatiencePolicy;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeldLine {
     /// Nothing before the main phase can depend on the activation. For a hold, this also takes
-    /// every other activation the root offers ([`root_held_line`]): a continuation is a whole
-    /// line, and only then may PassPriority inherit it (`search::lend_deferral_witness`).
+    /// every other action the root offers ([`root_held_line`]): a continuation is a whole line,
+    /// and only then may PassPriority inherit it (`search::lend_deferral_witness`).
     Reproducible,
     /// The line is one passing can't reach, or at a hold's root, may go through one. It keeps
     /// its own continuation.
@@ -350,6 +352,35 @@ fn upkeep_draw_setup(
     {
         return Some(DrawSetup::HandBound);
     }
+    ability_draw_setup(state, ai_player, source_id, ability)
+}
+
+/// [`upkeep_draw_setup`] for a cast: what the spell's own resolution does to that draw, read
+/// from its spell abilities as `spell_resolution_effects` reads them (CR 113.3a + CR 608.2).
+/// Nothing but a cast has one.
+fn upkeep_spell_draw_setup(
+    state: &GameState,
+    ai_player: PlayerId,
+    action: &GameAction,
+) -> Option<DrawSetup> {
+    if state.phase != Phase::Upkeep {
+        return None;
+    }
+    let facts = cast_facts_for_action(state, action, ai_player)?;
+    facts
+        .primary_effects
+        .iter()
+        .filter_map(|ability| ability_draw_setup(state, ai_player, facts.object.id, ability))
+        .min()
+}
+
+/// The least [`draw_setup`] of any node of `ability`, whose source is `source_id`.
+fn ability_draw_setup(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> Option<DrawSetup> {
     let chain = collect_scoped_nodes(ability, AbilityScope::Potential);
     chain
         .iter()
@@ -361,9 +392,9 @@ fn upkeep_draw_setup(
 /// [`HeldLine::Reproducible`] only when [`held_line`] says so of every candidate.
 ///
 /// A continuation is a whole line, not its root action. A reproducible donor's line can go on to
-/// an activation passing can't reach: Wellwisher, then Flooded Strand, on a board where passing
-/// draws the Island. Nothing here says which actions a line took, so one irreproducible
-/// activation on offer ends the lend of every hold at the root, and:
+/// an action passing can't reach: Wellwisher, then Flooded Strand, on a board where passing
+/// draws the Island. Nothing here says which actions a line took, so one irreproducible action
+/// on offer ends the lend of every hold at the root, and:
 ///
 /// - It counts held or not. An arrangement stands down and passing can't reach it either
 ///   (Crystal Ball).
@@ -375,13 +406,36 @@ fn upkeep_draw_setup(
 ///   `max_branching`. An interior node ranks the engine's list on its own, with no gate, so a
 ///   sibling the root's beam dropped can be in a donor's line.
 ///
-/// This reads what the root offers, so it can't see an activation only the donor's line puts on
-/// offer (one that untaps the sibling's source). It reads activations against the draw, so it
-/// can't see a spell cast before it, or a stand-down of another kind. The module doc lists these.
+/// The rule: an action on offer bars when its own definition shows the main phase can't repeat
+/// it. Three things end before then: the priority it's legal in, the mana in the pool, and the
+/// draw being ahead. So [`held_line`] reads every candidate that way:
+///
+/// - An activation: a restriction that leaves the main phase out (CR 602.5), mana it may spend
+///   that empties first (CR 500.5), and its every branch against the draw (`draw_setup`).
+/// - A cast: its spell's every branch against the draw, by the same reading. This is any spell
+///   the engine offers here, so an instant or a flash spell (CR 117.1a, CR 702.8a), and a scry
+///   cantrip bars like an arrangement: passing draws what it would have set aside. A spell that
+///   leaves the draw alone doesn't (Shock, Giant Growth).
+/// - Anything else: no bar. A special action leaves all three alone.
+///
+/// Any other stand-down bars only by showing one of these: passing reaches a mana ability, a
+/// combat modifier or a cycling ability, and no lethal line is lent (`open_continuation`).
+///
+/// The rule reads definitions at the root, so these stay out of it, and a line can go through
+/// them:
+///
+/// - What isn't on offer at the root: an activation only the donor's line puts there (one that
+///   untaps the sibling's source).
+/// - What the board decides, not the definition: an activation whose own `condition` is met now
+///   and not after the draw (escape hatch 4).
+/// - What a cast does beyond its spell's resolution: its additional cost, the floating mana that
+///   pays it, and a flash permanent's enters trigger, which is the permanent's and not the
+///   spell's (CR 608.3a + CR 603.6a).
 ///
 /// It also bars what doesn't need barring: at rung 0 a donor's continuation is its quiesced
 /// resolution, which takes no sibling, and a deeper line may not take it either. Pass then keeps
-/// its own continuation, and the holds their penalties.
+/// its own continuation, and the holds their penalties, so a hold whose line beats Pass's by more
+/// than the penalty fires in the upkeep: Wellwisher and five Elves beside Fabled Passage.
 pub(crate) fn root_held_line(
     state: &GameState,
     ai_player: PlayerId,
@@ -397,9 +451,9 @@ pub(crate) fn root_held_line(
     }
 }
 
-/// Whether passing keeps the line of this one activation, held or not: an activation that
-/// stands down over the draw is irreproducible too. Anything else a root offers is
-/// [`HeldLine::Reproducible`] here.
+/// Whether passing keeps the line of this one action, held or not: [`root_held_line`] gives the
+/// rule. An activation that stands down over the draw is irreproducible, and so is one the main
+/// phase loses, and a spell that changes the draw.
 pub(crate) fn held_line(state: &GameState, ai_player: PlayerId, action: &GameAction) -> HeldLine {
     let GameAction::ActivateAbility {
         source_id,
@@ -407,9 +461,46 @@ pub(crate) fn held_line(state: &GameState, ai_player: PlayerId, action: &GameAct
         ..
     } = action
     else {
-        return HeldLine::Reproducible;
+        return line_past_draw(upkeep_spell_draw_setup(state, ai_player, action));
     };
-    match upkeep_draw_setup(state, ai_player, *source_id, *ability_index) {
+    if activation_lapses_before_main(state, ai_player, *source_id, *ability_index) {
+        return HeldLine::Irreproducible;
+    }
+    line_past_draw(upkeep_draw_setup(
+        state,
+        ai_player,
+        *source_id,
+        *ability_index,
+    ))
+}
+
+/// Does waiting for the main phase lose this activation as it stands, whatever it does?
+/// CR 602.5: a restriction can leave the main phase out. CR 500.5: mana it may spend empties as
+/// the step ends, read as escape hatch 1 reads it: of a deferrable activation.
+fn activation_lapses_before_main(
+    state: &GameState,
+    ai_player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    printed_ability(state, source_id, ability_index).is_some_and(|ability| {
+        ability
+            .activation_restrictions
+            .iter()
+            .any(restriction_excludes_main)
+    }) || (activation_is_deferrable(state, source_id, ability_index)
+        && engine::game::casting::pool_has_expiring_mana_for_activation(
+            state,
+            ai_player,
+            source_id,
+            ability_index,
+        ))
+}
+
+/// Whether a line keeps past the draw, given what it does to that draw. Every kind of setup
+/// answers here, held or not.
+fn line_past_draw(setup: Option<DrawSetup>) -> HeldLine {
+    match setup {
         None => HeldLine::Reproducible,
         Some(
             DrawSetup::HandBound
@@ -421,8 +512,8 @@ pub(crate) fn held_line(state: &GameState, ai_player: PlayerId, action: &GameAct
     }
 }
 
-/// What `node`, of an ability `ai_player` activates from `source_id`, does to the draw step's
-/// coming draw. `chain` is every node of that ability.
+/// What `node`, of an ability `ai_player` activates from `source_id` or of the spell it casts as
+/// `source_id`, does to the draw step's coming draw. `chain` is every node of that ability.
 ///
 /// The question is whether the node commutes with that draw: does activating before it leave
 /// the game activating after it would? Fail-closed: anything the engine's wildcard-free library
@@ -550,8 +641,10 @@ fn cost_reads_a_hand(cost: &AbilityCost) -> bool {
 
 /// CR 609.3 + CR 701.9a: can this fixed discard take more than the hand holds when it resolves?
 /// It then does only as much as possible, and a line before the draw keeps the card that draw
-/// takes (Bazaar of Baghdad on an empty hand). The hand is today's plus the fixed draws before
-/// this node that can be the AI's. A dynamic draw counts as 0, which errs toward not lending.
+/// takes (Bazaar of Baghdad on an empty hand). The hand is today's without the source, which has
+/// left it by then if it's a spell (CR 601.2a: Faithless Salvaging, the last card in hand), plus
+/// the fixed draws before this node that can be the AI's. A dynamic draw counts as 0, which errs
+/// toward not lending, as does a source that stays in hand.
 fn discard_outruns_hand(
     state: &GameState,
     ai_player: PlayerId,
@@ -567,7 +660,9 @@ fn discard_outruns_hand(
         .players
         .iter()
         .find(|player| player.id == ai_player)
-        .map_or(0, |player| player.hand.len()) as i32;
+        .map_or(0, |player| {
+            player.hand.iter().filter(|id| **id != source_id).count()
+        }) as i32;
     let drawn: i32 = chain
         .iter()
         .take_while(|earlier| !std::ptr::eq(**earlier, node))

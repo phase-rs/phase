@@ -23152,6 +23152,300 @@ one on the bottom of your library.";
         }
     }
 
+    /// Natural Connection, verbatim.
+    const NATURAL_CONNECTION: &str =
+        "Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.";
+    /// Rock Hydra's upkeep line, verbatim. The rest of the card plays no part here.
+    const ROCK_HYDRA_UPKEEP_LINE: &str =
+        "{R}{R}{R}: Put a +1/+1 counter on this creature. Activate only during your upkeep.";
+
+    /// The cast of `object_id` the engine offers at `state`'s root, read off its own list: the
+    /// tactical gate can drop one before scoring (Giant Growth out of combat), and
+    /// `activation_patience::root_held_line` reads the list before the gate.
+    fn offered_cast(state: &GameState, object_id: ObjectId) -> GameAction {
+        build_decision_context(state)
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(action, GameAction::CastSpell { object_id: id, .. } if *id == object_id)
+            })
+            .unwrap_or_else(|| panic!("reach: {object_id:?} is on offer at the root"))
+    }
+
+    /// [`strand_board`] in the Upkeep with Strand tapped, so no activation bars, a ready
+    /// Wellwisher and a third Forest, and Natural Connection in hand if `with_spell`. Returns the
+    /// state, Wellwisher and the spell.
+    fn natural_connection_board(with_spell: bool) -> (GameState, ObjectId, Option<ObjectId>) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let wellwisher = add_wellwisher(&mut scenario);
+        scenario.add_basic_land(P0, ManaColor::Green);
+        let spell = with_spell.then(|| {
+            let mut spell = scenario.add_spell_to_hand_from_oracle(
+                P0,
+                "Natural Connection",
+                true,
+                NATURAL_CONNECTION,
+            );
+            spell.with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 2,
+            });
+            spell.id()
+        });
+        let (runner, strand, _, _) = strand_board_on(scenario);
+        let mut state = runner.state().clone();
+        state.objects.get_mut(&strand).unwrap().tapped = true;
+        (state, wellwisher, spell)
+    }
+
+    /// The fetch's board with an instant in its place: on [`strand_board`]'s known top a
+    /// Wellwisher's line goes on to cast Natural Connection. Passing draws the Island, and a
+    /// main-phase cast finds nothing, so Pass can't reach that value (CR 121.1, CR 701.23a,
+    /// CR 701.24a). The hold on Wellwisher lends nothing, as beside Flooded Strand.
+    ///
+    /// The control has no spell, and lends. Every observable is printed before the first
+    /// assertion; regenerate them with
+    /// `cargo test -p phase-ai own_upkeep_root_lends_nothing_beside_a -- --nocapture`.
+    #[test]
+    fn own_upkeep_root_lends_nothing_beside_a_spell_over_the_draw() {
+        use crate::policies::registry::NUDGE_MAX;
+
+        let cfg = medium_searched_config();
+        let pass = GameAction::PassPriority;
+        let (state, wellwisher, spell) = natural_connection_board(true);
+        let (control_state, _, _) = natural_connection_board(false);
+        let (donor, cast) = (
+            activate(wellwisher, 0),
+            offered_cast(&state, spell.unwrap()),
+        );
+        let roots = PatienceRoots::score(&state, &cfg);
+        print_sibling_row("Wellwisher beside Natural Connection", &roots, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&state, &cfg));
+        let control = PatienceRoots::score(&control_state, &cfg);
+        print_sibling_row("Same, no spell", &control, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&control_state, &cfg));
+
+        roots.assert_scored("beside the spell", &[&donor, &cast, &pass]);
+        assert!(
+            roots.ap(&donor) < -NUDGE_MAX,
+            "reach: patience holds Wellwisher, got {}",
+            roots.ap(&donor)
+        );
+        assert!(
+            roots.cont(&donor) > control.cont(&donor) + 1.0,
+            "reach: Wellwisher's line {} carries the spell, above {} with none",
+            roots.cont(&donor),
+            control.cont(&donor)
+        );
+        assert!(
+            roots.cont(&donor) > roots.cont(&pass) + 1.0,
+            "reach: the donor's line {} is above Pass's {}, so a lend would move Pass",
+            roots.cont(&donor),
+            roots.cont(&pass)
+        );
+        let lift = score_of(&roots.s1, &pass) - score_of(&roots.s0, &pass);
+        assert!(
+            lift.abs() < DEEPER_RUNG_DRIFT,
+            "Pass is not lent the line through the spell: lift {lift}"
+        );
+        assert_eq!(
+            beam_lines(&control_state, &cfg),
+            [(donor.clone(), HeldLine::Reproducible)],
+            "with no spell on offer, the hold lends"
+        );
+    }
+
+    /// An upkeep-only activation needs no known top: passing can't reach it at all (CR 602.5).
+    /// Wellwisher's line goes on to Rock Hydra's upkeep line with {R}{R}{R} up, so the hold on
+    /// Wellwisher lends nothing. It isn't a hold itself, and the bar reads it all the same.
+    ///
+    /// The control has the Mountains tapped, so the line isn't on offer, and it lends. The Hard
+    /// row is printed only.
+    #[test]
+    fn own_upkeep_root_lends_nothing_beside_an_upkeep_only_activation() {
+        use crate::policies::registry::NUDGE_MAX;
+
+        let cfg = medium_searched_config();
+        let pass = GameAction::PassPriority;
+        let db = shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let wellwisher = add_wellwisher(&mut scenario);
+        let hydra = scenario
+            .add_creature_from_oracle(P0, "Rock Hydra", 2, 2, ROCK_HYDRA_UPKEEP_LINE)
+            .id();
+        let mountains: Vec<_> = (0..3)
+            .map(|_| scenario.add_basic_land(P0, ManaColor::Red))
+            .collect();
+        for _ in 0..2 {
+            scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
+        }
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), db);
+        add_libraries(runner.state_mut(), 10);
+        let state = runner.state().clone();
+        let mut unpayable = state.clone();
+        for mountain in &mountains {
+            unpayable.objects.get_mut(mountain).unwrap().tapped = true;
+        }
+
+        let (donor, hydra_action) = (activate(wellwisher, 0), activate(hydra, 0));
+        let roots = PatienceRoots::score(&state, &cfg);
+        print_sibling_row("Wellwisher beside Rock Hydra", &roots, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&state, &cfg));
+        let control = PatienceRoots::score(&unpayable, &cfg);
+        print_sibling_row("Same, Mountains tapped", &control, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&unpayable, &cfg));
+        let mut hard = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        hard.search.determinization_samples = 0;
+        print_sibling_row(
+            "Beside Rock Hydra, Hard",
+            &PatienceRoots::score(&state, &hard),
+            &donor,
+        );
+
+        roots.assert_scored("beside Rock Hydra", &[&donor, &hydra_action, &pass]);
+        assert!(
+            roots.ap(&donor) < -NUDGE_MAX,
+            "reach: patience holds Wellwisher, got {}",
+            roots.ap(&donor)
+        );
+        assert_eq!(
+            roots.ap(&hydra_action),
+            0.0,
+            "premise: an upkeep-only activation isn't held"
+        );
+        assert!(
+            roots.cont(&donor) > control.cont(&donor) + 1.0,
+            "reach: Wellwisher's line {} carries the counter, above {} with no mana for it",
+            roots.cont(&donor),
+            control.cont(&donor)
+        );
+        let lift = score_of(&roots.s1, &pass) - score_of(&roots.s0, &pass);
+        assert!(
+            lift.abs() < DEEPER_RUNG_DRIFT,
+            "Pass is not lent the line through the upkeep-only activation: lift {lift}"
+        );
+        assert_eq!(
+            beam_lines(&unpayable, &cfg),
+            [(donor.clone(), HeldLine::Reproducible)],
+            "with the Mountains tapped, the line isn't on offer, and the hold lends"
+        );
+    }
+
+    /// What a spell on offer bars. The spell's own resolution decides, not its being a spell: a
+    /// scry cantrip changes what the draw takes, so nothing is lent beside it, and a plain instant
+    /// doesn't, so the hold lends with it on offer.
+    #[test]
+    fn own_upkeep_root_reads_a_spell_for_what_it_does_to_the_draw() {
+        use crate::policies::registry::NUDGE_MAX;
+
+        let cfg = medium_searched_config();
+        let db = shared_integration_card_db();
+        for (label, text, expected) in [
+            (
+                "Opt",
+                "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\nDraw a card.",
+                HeldLine::Irreproducible,
+            ),
+            (
+                "Giant Growth",
+                "Target creature gets +3/+3 until end of turn.",
+                HeldLine::Reproducible,
+            ),
+            (
+                "Shock",
+                "Shock deals 2 damage to any target.",
+                HeldLine::Reproducible,
+            ),
+        ] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::Upkeep);
+            let wellwisher = add_wellwisher(&mut scenario);
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(P0, label, true, text)
+                .id();
+            for color in [ManaColor::Blue, ManaColor::Green, ManaColor::Red] {
+                scenario.add_basic_land(P0, color);
+            }
+            let mut runner = scenario.build();
+            rehydrate_game_from_card_db(runner.state_mut(), db);
+            add_libraries(runner.state_mut(), 10);
+            let state = runner.state().clone();
+            let donor = activate(wellwisher, 0);
+            let cast = offered_cast(&state, spell);
+            let roots = PatienceRoots::score(&state, &cfg);
+            print_sibling_row(label, &roots, &donor);
+            eprintln!("  cast = {cast:?}, holds = {:?}", beam_lines(&state, &cfg));
+
+            assert!(
+                roots.ap(&donor) < -NUDGE_MAX,
+                "{label}: reach: patience holds Wellwisher, got {}",
+                roots.ap(&donor)
+            );
+            assert_eq!(
+                beam_lines(&state, &cfg),
+                [(donor.clone(), expected)],
+                "{label}: the spell's resolution decides the hold's line"
+            );
+        }
+    }
+
+    /// Mana only an artifact's ability may spend is gone by the main phase (CR 500.5), so a line
+    /// through Rod of Ruin on it isn't one passing keeps. Wellwisher can't spend that mana, so
+    /// it's still a hold, and it lends nothing. With the pool empty both are held and both lend.
+    #[test]
+    fn own_upkeep_root_lends_nothing_beside_an_activation_on_floating_mana() {
+        use engine::types::mana::{AbilityActivationScope, ManaRestriction};
+
+        let cfg = medium_searched_config();
+        let db = shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let wellwisher = add_wellwisher(&mut scenario);
+        let rod = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Rod of Ruin",
+                "{3}, {T}: This artifact deals 1 damage to any target.",
+            )
+            .id();
+        for _ in 0..3 {
+            scenario.add_basic_land(P0, ManaColor::Red);
+        }
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), db);
+        add_libraries(runner.state_mut(), 10);
+        let empty_pool = runner.state().clone();
+        let mut floating = empty_pool.clone();
+        floating.players[P0.0 as usize].mana_pool.add(ManaUnit::new(
+            ManaType::Colorless,
+            rod,
+            false,
+            vec![ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                spell_type: "Artifact".to_string(),
+                ability: AbilityActivationScope::OfSpellType,
+            }],
+        ));
+
+        let (donor, rod_action) = (activate(wellwisher, 0), activate(rod, 0));
+        assert_eq!(
+            beam_lines(&floating, &cfg),
+            [(donor.clone(), HeldLine::Irreproducible)],
+            "the floating mana stands Rod of Ruin down, and it bars the hold beside it"
+        );
+        assert_eq!(
+            beam_lines(&empty_pool, &cfg),
+            [
+                (donor, HeldLine::Reproducible),
+                (rod_action, HeldLine::Reproducible)
+            ],
+            "with the pool empty, both are held and both lend"
+        );
+    }
+
     /// D1 at the root (the mtg-bot Coordinated Assault regression): in the AI's own Draw step
     /// EffectTiming prices Coordinated Assault's until-end-of-turn `GenericEffect` pump as a
     /// combat trick (CR 611.2a + CR 514.2), and the searched root carries that verdict at the
