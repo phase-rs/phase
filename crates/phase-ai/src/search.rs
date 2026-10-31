@@ -45,9 +45,11 @@ use crate::eval;
 use crate::features::DeckFeatures;
 use crate::plan::{PlanSnapshot, PlanState};
 use crate::planner::{
-    prepare_payment_candidates, BeamContinuationPlanner, PlannerServices, PreparedCandidate,
-    PromptAnswerValidation, RankedCandidate, RootTacticalScore, RungStat, SearchBudget,
+    prepare_payment_candidates, BeamContinuationPlanner, Deferral, PlannerServices,
+    PreparedCandidate, PromptAnswerValidation, RankedCandidate, RootTacticalScore, RungStat,
+    SearchBudget,
 };
+use crate::policies::activation_patience::HeldLine;
 use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::copy_value::score_legend_rule_keep;
 use crate::policies::effect_classify::{
@@ -4151,8 +4153,8 @@ struct RootRungScore {
     line: RootLine,
     /// `RankedCandidate::root_tactical` at the rung's tactical weight.
     tactical: f64,
-    /// `RankedCandidate::deferral`: present when ActivationPatience holds this activation.
-    deferral: Option<f64>,
+    /// `RankedCandidate::deferral`.
+    deferral: Option<Deferral>,
 }
 
 impl RootRungScore {
@@ -4178,8 +4180,9 @@ fn open_continuation(line: &RootLine) -> Option<f64> {
 
 /// CR 117.1b: an activated ability can be activated whenever its controller has priority, and
 /// CR 117.3a gives the active player priority again as the main phase begins. So when
-/// ActivationPatience holds an activation for a later window, passing now keeps that
-/// activation on offer: PassPriority's continuation is at least the best continuation among
+/// ActivationPatience holds an activation whose line a later activation reproduces
+/// (`HeldLine::Reproducible`), passing now keeps that activation on offer:
+/// PassPriority's continuation is at least the best continuation among
 /// the held siblings in the same rung. That holds only between unfinished lines. CR 104.1: a
 /// game ends immediately when a player wins, so a held line that wins does not wait — passing
 /// hands the opponents priority (CR 117.3d) before it recurs — and a pass whose own line loses
@@ -4188,7 +4191,11 @@ fn open_continuation(line: &RootLine) -> Option<f64> {
 fn lend_deferral_witness(rung: &mut [RootRungScore]) {
     let Some(best) = rung
         .iter()
-        .filter(|entry| entry.deferral.is_some())
+        .filter(|entry| {
+            entry
+                .deferral
+                .is_some_and(|deferral| deferral.line == HeldLine::Reproducible)
+        })
         .filter_map(|entry| open_continuation(&entry.line))
         .reduce(f64::max)
     else {
@@ -4227,7 +4234,7 @@ struct FailedAdmittedAnswer(Box<GameAction>);
 /// and it records every rung it runs in `rung_stats` (the rung witness, D3).
 /// Each rung that completes lends a held activation's continuation to
 /// PassPriority before it is scored (the deferral witness,
-/// [`lend_deferral_witness`]), a no-op when no candidate carries a `deferral`.
+/// [`lend_deferral_witness`]), a no-op when no candidate carries a reproducible hold.
 ///
 /// `state` becomes one tracked search root for the whole call, shared by every
 /// rung, so a rung reuses the root successors and the positions below them
@@ -15840,7 +15847,11 @@ mod tests {
             action: activate(missing_source, 0),
             metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Ability),
         };
-        let (score, deferral) = (0.5, -1.5);
+        let (score, penalty) = (0.5, -1.5);
+        let deferral = Deferral {
+            penalty,
+            line: HeldLine::Reproducible,
+        };
 
         let mut services =
             PlannerServices::new_default(PlayerId(0), &config, PolicyRegistry::shared());
@@ -15851,7 +15862,7 @@ mod tests {
             services.memo_witness.successor_simulations > 0,
             "reach: the held candidate requests its successor simulation"
         );
-        assert_eq!(out, vec![(held.action, score + deferral - 1000.0)]);
+        assert_eq!(out, vec![(held.action, score + penalty - 1000.0)]);
     }
 
     /// Under `PromptAnswerValidation::AtSubmission`, rung 0 stops at the first
@@ -20918,7 +20929,10 @@ one on the bottom of your library.";
             assert_eq!(left.candidate.action, right.candidate.action);
             assert_eq!(left.score.to_bits(), right.score.to_bits());
             assert_eq!(left.deferral, None);
-            let expected = (left.candidate.action == held).then_some(-ROOT_TIMING_STUB_DELTA);
+            let expected = (left.candidate.action == held).then_some(Deferral {
+                penalty: -ROOT_TIMING_STUB_DELTA,
+                line: HeldLine::Reproducible,
+            });
             assert_eq!(right.deferral, expected, "{:?}", right.candidate.action);
         }
         let tactical = |action: &GameAction| {
@@ -20968,7 +20982,7 @@ one on the bottom of your library.";
         action: GameAction,
         line: RootLine,
         tactical: f64,
-        deferral: Option<f64>,
+        deferral: Option<Deferral>,
     ) -> RootRungScore {
         RootRungScore {
             action,
@@ -20988,13 +21002,22 @@ one on the bottom of your library.";
         rung.iter().map(|entry| entry.score().to_bits()).collect()
     }
 
-    /// `lend_deferral_witness` lends Pass the best continuation among held lines, and only
-    /// between open lines: finite, searched, and not a finished game (`eval::terminal_outcome`).
+    /// `lend_deferral_witness` lends Pass the best continuation among reproducible holds, and
+    /// only between open lines: finite, searched, and not a finished game
+    /// (`eval::terminal_outcome`). An irreproducible hold donates nothing, whatever its line.
     #[test]
     fn lend_deferral_witness_lends_only_between_open_lines() {
         use RootLine::{Searched, Unsearched};
         let pass = |line| line_entry(GameAction::PassPriority, line, 0.2, None);
-        let holder = |id, line| line_entry(activate(ObjectId(id), 0), line, 0.5, Some(-1.0));
+        let held_as = |held_line, id, line| {
+            let deferral = Deferral {
+                penalty: -1.0,
+                line: held_line,
+            };
+            line_entry(activate(ObjectId(id), 0), line, 0.5, Some(deferral))
+        };
+        let holder = |id, line| held_as(HeldLine::Reproducible, id, line);
+        let unlent_holder = |id, line| held_as(HeldLine::Irreproducible, id, line);
         let plain = |line| line_entry(activate(ObjectId(30), 0), line, 0.5, None);
         let searched = |continuation| Searched { continuation };
 
@@ -21055,6 +21078,10 @@ one on the bottom of your library.";
                 "(ix') only a won holder",
                 vec![pass(searched(1.0)), holder(10, searched(eval::WIN_SCORE))],
             ),
+            (
+                "(xiii) an irreproducible holder above Pass",
+                vec![pass(searched(1.0)), unlent_holder(10, searched(4.0))],
+            ),
         ];
         for (label, rung) in unchanged {
             let before = unlent_bits(&rung);
@@ -21084,6 +21111,15 @@ one on the bottom of your library.";
                     holder(11, searched(5.0)),
                 ],
                 5.0,
+            ),
+            (
+                "(xiv) a reproducible holder beside a better irreproducible one: the reproducible",
+                vec![
+                    pass(searched(1.0)),
+                    holder(10, searched(3.0)),
+                    unlent_holder(11, searched(9.0)),
+                ],
+                3.0,
             ),
         ];
         for (label, rung, lent) in lifted {
@@ -21584,7 +21620,7 @@ one on the bottom of your library.";
     /// board, at rung 0 or at rung 1: the root does not see the extra card. So on this board a
     /// lend would not move Pass, and the "Pass is not lent" rows are observables, not the pin.
     /// The pin is the Key's `deferral == None` in both beams: `lend_deferral_witness` takes its
-    /// donors from exactly the entries with a deferral (as
+    /// donors from exactly the entries with a reproducible hold (as
     /// `lend_deferral_witness_lends_only_between_open_lines` pins), so with none there is no
     /// donor.
     ///
@@ -21940,7 +21976,7 @@ one on the bottom of your library.";
         let beam = build_root_beam(state, &PlannerServices::new_default(P0, config, &registry));
         beam.iter()
             .find(|ranked| ranked.candidate.action == *donor)
-            .map(|ranked| ranked.deferral)
+            .map(|ranked| ranked.deferral.map(|deferral| deferral.penalty))
     }
 
     /// One own-library donor at the root: its Upkeep board, and the same board in the Draw step,
@@ -22413,6 +22449,377 @@ one on the bottom of your library.";
         assert!(
             v_r > v_p,
             "the main-phase position the Ruins line reaches is one passing can't: {v_r} vs {v_p}"
+        );
+    }
+
+    /// Flooded Strand, verbatim. Absent from the integration fixture.
+    const FLOODED_STRAND: &str = "{T}, Pay 1 life, Sacrifice this land: Search your library for a Plains or Island card, put it onto the battlefield, then shuffle.";
+    /// Vinelasher Kudzu, verbatim.
+    const VINELASHER_KUDZU: &str =
+        "Landfall — Whenever a land you control enters, put a +1/+1 counter on this creature.";
+
+    /// P0's `phase`, empty stack: Flooded Strand, two Forests, and a library of one Island and
+    /// four Grizzly Bears. Returns the scenario, Strand, the Island and one Bears. P0's library
+    /// gets no filler, so the Island is the library's only Plains or Island card.
+    fn strand_scenario(phase: Phase) -> (GameScenario, ObjectId, ObjectId, ObjectId) {
+        let db = shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(phase);
+        let strand = scenario
+            .add_land_from_oracle(P0, "Flooded Strand", FLOODED_STRAND)
+            .id();
+        for _ in 0..2 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let island = scenario.add_real_card(P0, "Island", Zone::Library, db);
+        let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Library, db);
+        for _ in 0..3 {
+            scenario.add_real_card(P0, "Grizzly Bears", Zone::Library, db);
+        }
+        (scenario, strand, island, bears)
+    }
+
+    /// Builds `scenario` with `top` on top of P0's library and `next` beneath it. Only P1's
+    /// library gets filler.
+    fn build_strand_scenario(
+        scenario: GameScenario,
+        top: ObjectId,
+        next: Option<ObjectId>,
+    ) -> GameRunner {
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), shared_integration_card_db());
+        let state = runner.state_mut();
+        for _ in 0..5 {
+            create_object(
+                state,
+                CardId(state.next_object_id),
+                P1,
+                "Library Card".to_string(),
+                Zone::Library,
+            );
+        }
+        stack_p0_library(state, top, next);
+        runner
+    }
+
+    /// The known-top board: [`strand_scenario`] with Vinelasher Kudzu on the battlefield, a
+    /// Mountain in hand, and the Island on top. Returns the runner, Strand, the Island and Kudzu.
+    ///
+    /// Kudzu gives the Draw-step fetch a gap for a lend to move: without it that fetch sits about
+    /// 1 life below Pass. The Mountain gives both lines a land drop and stops the quiesce at the
+    /// main phase. Every other library card being a Bears makes every shuffle's draw the same
+    /// known card, so nothing here fixes the RNG.
+    fn strand_board(phase: Phase) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+        let (mut scenario, strand, island, _) = strand_scenario(phase);
+        let kudzu = scenario
+            .add_creature_from_oracle(P0, "Vinelasher Kudzu", 1, 1, VINELASHER_KUDZU)
+            .id();
+        scenario.add_real_card(P0, "Mountain", Zone::Hand, shared_integration_card_db());
+        (
+            build_strand_scenario(scenario, island, None),
+            strand,
+            island,
+            kudzu,
+        )
+    }
+
+    /// Passes priority until P0's search prompt opens, then selects `card`.
+    fn answer_search(runner: &mut GameRunner, card: ObjectId) {
+        for _ in 0..8 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::SearchChoice { player, cards, .. } => {
+                    assert_eq!(player, P0, "the search is P0's");
+                    assert!(cards.contains(&card), "{card:?} is on offer, got {cards:?}");
+                    runner
+                        .act(GameAction::SelectCards { cards: vec![card] })
+                        .expect("the selection is accepted");
+                    return;
+                }
+                WaitingFor::Priority { .. } => {
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("priority passes");
+                }
+                other => panic!("unexpected prompt before the search: {other:?}"),
+            }
+        }
+        panic!("the search prompt never opened");
+    }
+
+    /// Plays the land named `name` from P0's hand.
+    fn play_p0_land(runner: &mut GameRunner, name: &str) {
+        let state = runner.state();
+        let land = *p0_player(state)
+            .hand
+            .iter()
+            .find(|id| state.objects[*id].name == name)
+            .unwrap_or_else(|| panic!("{name} is in P0's hand"));
+        let card_id = state.objects[&land].card_id;
+        runner
+            .act(GameAction::PlayLand {
+                object_id: land,
+                card_id,
+            })
+            .expect("the land drop is accepted");
+    }
+
+    /// The cards among P0's library that a Flooded Strand can find.
+    fn p0_strand_matches(state: &GameState) -> usize {
+        p0_player(state)
+            .library
+            .iter()
+            .filter(|id| {
+                let subtypes = &state.objects[*id].card_types.subtypes;
+                subtypes.iter().any(|s| s == "Plains" || s == "Island")
+            })
+            .count()
+    }
+
+    /// Maintainer review 5: a search of the AI's own library in its own Upkeep does not commute
+    /// with the draw step's draw (CR 121.1, CR 701.23a, CR 701.24a). With an Island on top as the
+    /// library's only match, Flooded Strand in the Upkeep ends with the Island in play and a
+    /// different card drawn. Passing draws the Island, and a main-phase fetch finds nothing. So
+    /// the hold stays, at full strength, and Pass does not inherit the fetch's continuation.
+    ///
+    /// In the Draw step the draw is behind (CR 504.2): a main-phase fetch reaches the line, with
+    /// only the shuffle's order differing, and Pass inherits it.
+    ///
+    /// Three limits on what these values show. Most of the lift is the forward quiesce: the
+    /// donor's line sees a drawn card, and Pass's static eval doesn't. Only `v_x > v_p` shows a
+    /// position Pass can't reach, and the printed `q_x` is the donor's quiesced line beside it.
+    /// The search reads the real library, so nothing here distinguishes a known top from an
+    /// unknown one: the fix is structural, every search that can reach the AI's library stands
+    /// out of lending. And the Draw control shows a lend on a line that reproduces, with only the
+    /// shuffle's order differing.
+    ///
+    /// Why `v_x > v_p` is built this way: `zone_eval::is_intrinsic_mana_source` counts Strand as
+    /// a source, so with no land in hand line P's drawn Island would be a land drop ahead of X.
+    /// The Mountain equalises sources at 4, and X's lead is then a Bears on board and a second
+    /// counter, less P's extra card and X's 1 life. P's other lines don't beat `v_p`: playing the
+    /// Island instead of the Mountain is equal on the eval, and cracking Strand finds nothing.
+    ///
+    /// Every observable is printed before the first assertion; regenerate them with
+    /// `cargo test -p phase-ai own_upkeep_root_does_not_lend_a_search -- --nocapture`.
+    #[test]
+    fn own_upkeep_root_does_not_lend_a_search_and_the_draw_differs() {
+        use crate::policies::registry::NUDGE_MAX;
+
+        let cfg = hard_rung0_config();
+        let pass = GameAction::PassPriority;
+        let empty = PolicyRegistry::for_tests(vec![]);
+
+        let (upkeep_runner, strand, island, kudzu) = strand_board(Phase::Upkeep);
+        let state = upkeep_runner.state().clone();
+        let (draw_runner, strand_c, _, _) = strand_board(Phase::Draw);
+        let row = UpkeepDonorRow::score(
+            "Flooded Strand",
+            (&state, activate(strand, 0)),
+            (draw_runner.state(), activate(strand_c, 0)),
+            &cfg,
+        );
+        let donor = &row.donor;
+        let control_donor = &row.control_donor;
+        let control = &row.control;
+        eprintln!(
+            "Flooded Strand draw-step control: cont(donor) = {}, cont(pass) = {}, s1(pass) = {}, \
+             h0(pass) = {}, tw = {}",
+            control.cont(control_donor),
+            control.cont(&pass),
+            score_of(&control.s1, &pass),
+            score_of(&control.h0, &pass),
+            control.tw
+        );
+
+        // Line X (CR 701.23a): fetch the Island in the Upkeep, so the draw takes a Bears.
+        let (mut line_x, strand_x, island_x, kudzu_x) = strand_board(Phase::Upkeep);
+        line_x
+            .act(activate(strand_x, 0))
+            .expect("Strand's activation is accepted");
+        let q_x =
+            PlannerServices::new_default(P0, &cfg, &empty).evaluate_state_quiesced(line_x.state());
+        answer_search(&mut line_x, island_x);
+        pass_to_priority_in(&mut line_x, Phase::Draw);
+        let x_on_battlefield = line_x.state().battlefield.contains(&island_x);
+        let x_strand_gone = p0_player(line_x.state()).graveyard.contains(&strand_x);
+        let x_life = p0_player(line_x.state()).life;
+        let x_drew_bears = p0_hand_holds(line_x.state(), "Grizzly Bears");
+        let x_matches = p0_strand_matches(line_x.state());
+        let x_counters = line_x.state().objects[&kudzu_x]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied();
+        eprintln!(
+            "line X in the draw step: Island on the battlefield {x_on_battlefield}, Strand in \
+             the graveyard {x_strand_gone}, life {x_life}, a Bears drawn {x_drew_bears}, matches \
+             left {x_matches}, Kudzu counters {x_counters:?}"
+        );
+        pass_to_priority_in(&mut line_x, Phase::PreCombatMain);
+        play_p0_land(&mut line_x, "Mountain");
+        pass_to_priority_in(&mut line_x, Phase::PreCombatMain);
+        let bears_x = *p0_player(line_x.state())
+            .hand
+            .iter()
+            .find(|id| line_x.state().objects[*id].name == "Grizzly Bears")
+            .expect("line X: a Bears is in hand");
+        line_x.cast(bears_x).resolve();
+        pass_to_priority_in(&mut line_x, Phase::PreCombatMain);
+
+        // Line P: pass, so the draw takes the Island, and no match is left for a main-phase fetch.
+        let (mut line_p, _, island_p, _) = strand_board(Phase::Upkeep);
+        pass_to_priority_in(&mut line_p, Phase::Draw);
+        let p_drew_island = p0_player(line_p.state()).hand.contains(&island_p);
+        let p_matches = p0_strand_matches(line_p.state());
+        eprintln!("line P in the draw step: the Island drawn {p_drew_island}, matches {p_matches}");
+        pass_to_priority_in(&mut line_p, Phase::PreCombatMain);
+        play_p0_land(&mut line_p, "Mountain");
+        pass_to_priority_in(&mut line_p, Phase::PreCombatMain);
+
+        // Each on its own services instance: the eval cache is keyed by state hash.
+        let v_x =
+            PlannerServices::new_default(P0, &cfg, &empty).evaluate_state_cached(line_x.state());
+        let v_p =
+            PlannerServices::new_default(P0, &cfg, &empty).evaluate_state_cached(line_p.state());
+        eprintln!(
+            "Flooded Strand lines: v_x = {v_x}, q_x = {q_x}, v_p = {v_p}, cont(donor) = {}, \
+             cont(pass) = {}",
+            row.roots.cont(donor),
+            row.roots.cont(&pass)
+        );
+
+        // A quiet board: nothing else is legal on either side, so the quiesce resolves the fetch.
+        // These gaps are printed only. The registry here holds one policy, so the gap is the one
+        // production number; the PR's margin is computed from it with real tacticals.
+        let medium = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(7);
+        let mut medium_rung0 = medium.clone();
+        medium_rung0.search.planner_mode = PlannerMode::BeamOnly;
+        let mut hard = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        hard.search.determinization_samples = 0;
+        for (label, config) in [
+            ("Hard rung 0", &cfg),
+            ("Medium rung 0", &medium_rung0),
+            ("Medium", &medium),
+            ("Hard searched", &hard),
+        ] {
+            let (scenario, strand_q, island_q, bears_q) = strand_scenario(Phase::Upkeep);
+            let quiet = build_strand_scenario(scenario, bears_q, Some(island_q));
+            let roots = PatienceRoots::score(quiet.state(), config);
+            let quiet_donor = activate(strand_q, 0);
+            eprintln!(
+                "plain row, {label} ({:?}, max_depth {}, samples {}): cont(donor) - cont(pass) = \
+                 {}",
+                config.search.planner_mode,
+                config.search.max_depth,
+                config.search.determinization_samples,
+                roots.cont(&quiet_donor) - roots.cont(&pass)
+            );
+        }
+
+        // Premises.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+                && state.active_player == P0
+                && state.phase == Phase::Upkeep
+                && state.stack.is_empty(),
+            "premise: P0 holds priority in its own Upkeep on an empty stack"
+        );
+        let chain =
+            crate::ability_chain::collect_chain_effects(&state.objects[&strand].abilities[0]);
+        assert!(
+            matches!(
+                chain.as_slice(),
+                [
+                    Effect::SearchLibrary { .. },
+                    Effect::ChangeZone {
+                        origin: Some(Zone::Library),
+                        ..
+                    },
+                    Effect::Shuffle { .. }
+                ]
+            ),
+            "premise: Strand searches, moves the card and shuffles, got {chain:?}"
+        );
+        assert_eq!(
+            state.objects[&kudzu]
+                .trigger_definitions
+                .iter_unchecked()
+                .count(),
+            1,
+            "premise: Kudzu's landfall parsed"
+        );
+        assert_eq!(p0_strand_matches(&state), 1, "premise: the only match");
+        assert_eq!(
+            p0_player(&state).library[0],
+            island,
+            "premise: the Island is on top"
+        );
+
+        // The Upkeep root: held at full strength, and not lent.
+        let roots = &row.roots;
+        roots.assert_scored("Flooded Strand", &[donor, &pass]);
+        assert!(
+            roots.cont(donor) > roots.cont(&pass),
+            "reach: the donor's continuation {} is above Pass's {}, so a lend would move Pass",
+            roots.cont(donor),
+            roots.cont(&pass)
+        );
+        let held = roots.ap(donor);
+        assert!(held < -NUDGE_MAX, "the Upkeep holds the fetch, got {held}");
+        assert_eq!(roots.ap(&pass), 0.0, "Pass carries no hold");
+        assert!(
+            (score_of(&roots.s1, donor) - score_of(&roots.s0, donor) - held).abs() < 1e-9,
+            "the fetch moves by the full hold {held}"
+        );
+        assert!(
+            matches!(row.deferral, Some(Some(penalty)) if (penalty - held).abs() < 1e-9),
+            "the beam carries the hold {held}, got {:?}",
+            row.deferral
+        );
+        assert_eq!(
+            score_of(&roots.s1, &pass),
+            score_of(&roots.s0, &pass),
+            "Pass is not lent the fetch's continuation"
+        );
+
+        // The draws differ, and X's position is one passing can't reach.
+        assert!(
+            x_on_battlefield && x_strand_gone,
+            "line X: the Island is on the battlefield, Strand in the graveyard"
+        );
+        assert_eq!(x_life, 19, "line X: Strand's 1 life is paid");
+        assert!(x_drew_bears, "line X: the draw takes a Bears");
+        assert_eq!(x_matches, 0, "line X: the library holds no Island");
+        assert_eq!(x_counters, Some(1), "line X: Kudzu's landfall fired");
+        assert!(p_drew_island, "line P: the draw takes the Island");
+        assert_eq!(p_matches, 0, "line P: a main-phase fetch finds nothing");
+        assert!(
+            v_x > v_p,
+            "the main-phase position the fetch reaches is one passing can't: {v_x} vs {v_p}"
+        );
+
+        // The Draw control: the draw is behind, so the fetch stays lent.
+        control.assert_scored("Flooded Strand control", &[control_donor, &pass]);
+        let control_ap = control.ap(control_donor);
+        assert!(
+            control_ap < -NUDGE_MAX,
+            "control: the draw step holds the fetch, got {control_ap}"
+        );
+        assert!(
+            control.cont(control_donor) > control.cont(&pass),
+            "control reach: the donor's continuation {} is above Pass's {}",
+            control.cont(control_donor),
+            control.cont(&pass)
+        );
+        assert!(
+            (score_of(&control.s1, &pass)
+                - (control.cont(control_donor) + score_of(&control.h0, &pass) * control.tw))
+                .abs()
+                < 1e-9,
+            "control: Pass inherits the fetch's continuation"
+        );
+        assert!(
+            matches!(row.control_deferral, Some(Some(_))),
+            "control: the fetch carries a deferral in the root beam, got {:?}",
+            row.control_deferral
         );
     }
 

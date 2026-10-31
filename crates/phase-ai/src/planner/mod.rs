@@ -22,13 +22,14 @@ use crate::config::{AiConfig, OpponentModel};
 use crate::eval::{
     evaluate_for_planner, evaluate_state, strategic_intent, threat_level, StrategicIntent,
 };
+use crate::policies::activation_patience::{held_line, HeldLine};
 use crate::policies::context::{PolicyContext, PriorsEnv, SearchDepth};
 use crate::policies::registry::PolicyScore;
 use crate::policies::{PolicyId, PolicyRegistry};
 
-/// The policy whose root verdict the search root applies unweighted, and whose non-neutral
-/// verdict marks an activation whose continuation PassPriority may inherit
-/// (`search::lend_deferral_witness`).
+/// The policy whose root verdict the search root applies unweighted. Its hold on an activation
+/// also says whether PassPriority may inherit the line (`activation_patience::held_line`,
+/// `search::lend_deferral_witness`).
 pub(crate) const DEFERRAL_POLICY: PolicyId = PolicyId::ActivationPatience;
 
 /// A root candidate's tactical score, split around [`DEFERRAL_POLICY`].
@@ -36,8 +37,17 @@ pub(crate) const DEFERRAL_POLICY: PolicyId = PolicyId::ActivationPatience;
 pub(crate) struct RootTacticalScore {
     /// Every other term: the hint, the other policies and the class adjustment.
     pub weighted: f64,
-    /// [`DEFERRAL_POLICY`]'s delta, when it is non-zero.
-    pub deferral: Option<f64>,
+    /// [`DEFERRAL_POLICY`]'s hold, when its delta is non-zero.
+    pub deferral: Option<Deferral>,
+}
+
+/// ActivationPatience's hold on a root candidate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Deferral {
+    /// The verdict's delta, added at the root at full strength beside the weighted tactical term.
+    pub penalty: f64,
+    /// Whether PassPriority may inherit the held line.
+    pub line: HeldLine,
 }
 
 #[derive(Debug, Clone)]
@@ -49,12 +59,11 @@ pub struct RankedCandidate {
     /// ordinary one-action root simulation. It is an alternative continuation
     /// witness, not a tactical policy score.
     pub(crate) continuation_witness: Option<f64>,
-    /// ActivationPatience's root verdict when it holds this activation for a later window (its
-    /// only non-neutral verdict). The root adds it at full strength beside
-    /// `score * tactical_weight`, because the beam cannot see past the window the hold is
-    /// about, and it marks the activation as one PassPriority may inherit the continuation of
-    /// (`search::lend_deferral_witness`).
-    pub(crate) deferral: Option<f64>,
+    /// ActivationPatience's hold on this activation (its only non-neutral verdict). The root
+    /// adds the penalty at full strength beside `score * tactical_weight`, because the beam
+    /// cannot see past the window the hold is about. Its `line` says whether PassPriority may
+    /// inherit the continuation (`search::lend_deferral_witness`).
+    pub(crate) deferral: Option<Deferral>,
 }
 
 impl RankedCandidate {
@@ -87,20 +96,20 @@ impl RankedCandidate {
         self
     }
 
-    pub(crate) fn with_deferral(mut self, deferral: Option<f64>) -> Self {
+    pub(crate) fn with_deferral(mut self, deferral: Option<Deferral>) -> Self {
         self.deferral = deferral;
         self
     }
 
     /// The tactical score with the deferral added unweighted.
     pub(crate) fn tactical_total(&self) -> f64 {
-        self.deferral.map_or(self.score, |d| self.score + d)
+        self.deferral.map_or(self.score, |d| self.score + d.penalty)
     }
 
     /// The root's tactical term: `score * tactical_weight`, plus the deferral at full strength.
     pub(crate) fn root_tactical(&self, tactical_weight: f64) -> f64 {
         let weighted = self.score * tactical_weight;
-        self.deferral.map_or(weighted, |d| weighted + d)
+        self.deferral.map_or(weighted, |d| weighted + d.penalty)
     }
 
     /// Preserve any proven continuation through the existing tactical-score
@@ -1753,7 +1762,10 @@ impl<'a> PlannerServices<'a> {
         );
         RootTacticalScore {
             weighted,
-            deferral: (held != 0.0).then_some(held),
+            deferral: (held != 0.0).then(|| Deferral {
+                penalty: held,
+                line: held_line(state, scoring_player, &candidate.action),
+            }),
         }
     }
 
@@ -6296,7 +6308,11 @@ pub(crate) mod tests {
     fn root_tactical_applies_deferral_at_full_strength() {
         let tw = 0.35;
         let score = 2.0;
-        let deferral = -1.5;
+        let penalty = -1.5;
+        let deferral = Deferral {
+            penalty,
+            line: HeldLine::Reproducible,
+        };
 
         let plain = ranked_candidate(GameAction::PassPriority, score);
         assert_eq!(plain.root_score(tw), score * tw);
@@ -6304,10 +6320,10 @@ pub(crate) mod tests {
         assert_eq!(plain.root_tactical(tw), score * tw);
 
         let held = ranked_candidate(GameAction::PassPriority, score).with_deferral(Some(deferral));
-        assert_eq!(held.root_tactical(tw), score * tw + deferral);
-        assert_eq!(held.root_score(tw), score * tw + deferral);
-        assert_eq!(held.tactical_total(), score + deferral);
-        assert_eq!(held.beam_priority(), score + deferral);
+        assert_eq!(held.root_tactical(tw), score * tw + penalty);
+        assert_eq!(held.root_score(tw), score * tw + penalty);
+        assert_eq!(held.tactical_total(), score + penalty);
+        assert_eq!(held.beam_priority(), score + penalty);
 
         for witness in [-5.0, 0.0, 5.0] {
             let witnessed = ranked_candidate(GameAction::PassPriority, score)
@@ -6315,12 +6331,12 @@ pub(crate) mod tests {
                 .with_continuation_witness(witness);
             assert_eq!(
                 witnessed.root_score(tw),
-                (score * tw + deferral).max(witness),
+                (score * tw + penalty).max(witness),
                 "witness {witness}"
             );
             assert_eq!(
                 witnessed.beam_priority(),
-                (score + deferral).max(witness),
+                (score + penalty).max(witness),
                 "witness {witness}"
             );
         }

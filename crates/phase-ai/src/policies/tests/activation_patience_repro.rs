@@ -46,9 +46,10 @@
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, ControllerRef,
-    DelayedTriggerCondition, Effect, LibraryPosition, PlayerFilter, ResolvedAbility, TargetFilter,
-    TriggerConstraint, TriggerDefinition,
+    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, Comparator,
+    ControllerRef, DelayedTriggerCondition, Effect, LibraryPosition, ParsedCondition, PlayerFilter,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TriggerConstraint, TriggerDefinition,
+    ZoneRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -61,10 +62,10 @@ use std::sync::Arc;
 
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 
-use crate::ability_chain::collect_chain_effects;
+use crate::ability_chain::{collect_chain_effects, collect_scoped_nodes, AbilityScope};
 use crate::config::AiConfig;
 use crate::context::AiContext;
-use crate::policies::activation_patience::ActivationPatiencePolicy;
+use crate::policies::activation_patience::{held_line, ActivationPatiencePolicy, HeldLine};
 use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::registry::{PolicyVerdict, TacticalPolicy};
 use crate::session::AiSession;
@@ -1476,10 +1477,11 @@ const EXCAVATED_WALL: &str =
 /// shape that stays held, built from its verbatim Oracle text; each asserts its parse premise,
 /// and each hold row's reason is its positive reach.
 ///
-/// Held: a draw (both draws take the same two cards), a search with its own instructions, a
-/// look whose card nothing then acts on, and a change that can only reach an opponent's library
-/// (a scope or slot that can't name the AI). Held in the draw step whatever the shape: CR 504.2
-/// puts the draw behind that priority, so the main phase reproduces the activation.
+/// Held: a draw (both draws take the same two cards), a look whose card nothing then acts on,
+/// and a change that can only reach an opponent's library (a scope or slot that can't name the
+/// AI). A search and a hand clear are held apart; see the test below. Held in the draw step
+/// whatever the shape: CR 504.2 puts the draw behind that priority, so the main phase reproduces
+/// the activation.
 ///
 /// Reito Lantern pins an accepted over-reach: bottom placement changes this draw only on an
 /// empty library (CR 704.5b), and a card slot names no player, so it fails closed.
@@ -1545,19 +1547,6 @@ fn an_upkeep_own_library_change_is_not_held_while_the_draw_is_ahead() {
                     Some(AbilityCondition::RevealedHasCardType { .. })
                 )
             })
-    };
-    let searches = |ability: &AbilityDefinition| {
-        matches!(
-            collect_chain_effects(ability).as_slice(),
-            [
-                Effect::SearchLibrary { .. },
-                Effect::ChangeZone {
-                    origin: Some(Zone::Library),
-                    ..
-                },
-                Effect::Shuffle { .. }
-            ]
-        )
     };
     let rows = [
         // Top placement.
@@ -1957,23 +1946,6 @@ fn an_upkeep_own_library_change_is_not_held_while_the_draw_is_ahead() {
             },
             HOLD,
         ),
-        // Held: a search and its own instructions.
-        row(
-            "Flooded Strand (a search and its shuffle)",
-            "Flooded Strand",
-            "{T}, Pay 1 life, Sacrifice this land: Search your library for a Plains or Island card, put it onto the battlefield, then shuffle.",
-            0,
-            searches,
-            HOLD,
-        ),
-        row(
-            "Expedition Map (a search and its shuffle)",
-            "Expedition Map",
-            "{2}, {T}, Sacrifice this artifact: Search your library for a land card, reveal it, put it into your hand, then shuffle.",
-            0,
-            searches,
-            HOLD,
-        ),
         // Held: a look whose card nothing then acts on.
         row(
             "Orcish Spy (a look alone)",
@@ -2058,8 +2030,776 @@ fn an_upkeep_own_library_change_is_not_held_while_the_draw_is_ahead() {
     }
 }
 
+const FLOODED_STRAND: &str = "{T}, Pay 1 life, Sacrifice this land: Search your library for a Plains or Island card, put it onto the battlefield, then shuffle.";
+const EXPEDITION_MAP: &str = "{2}, {T}, Sacrifice this artifact: Search your library for a land card, reveal it, put it into your hand, then shuffle.";
+const BOSEIJU: &str = "{T}: Add {G}.\nChannel — {1}{G}, Discard this card: Destroy target artifact, enchantment, or nonbasic land an opponent controls. That player may search their library for a land card with a basic land type, put it onto the battlefield, then shuffle. This ability costs {1} less to activate for each legendary creature you control.";
+const MAGUS_OF_THE_WHEEL: &str =
+    "{1}{R}, {T}, Sacrifice this creature: Each player discards their hand, then draws seven cards.";
+const SLATE_OF_ANCESTRY: &str =
+    "{4}, {T}, Discard your hand: Draw a card for each creature you control.";
+const MEMORY_JAR: &str = "{T}, Sacrifice this artifact: Each player exiles all cards from their hand face down and draws seven cards. At the beginning of the next end step, each player discards their hand and returns to their hand each card they exiled this way.";
+const MERFOLK_LOOTER: &str = "{T}: Draw a card, then discard a card.";
+const MYOJIN_OF_NIGHTS_REACH: &str = "Myojin of Night's Reach enters with a divinity counter on it if you cast it from your hand.\nMyojin of Night's Reach has indestructible as long as it has a divinity counter on it.\nRemove a divinity counter from Myojin of Night's Reach: Each opponent discards their hand.";
+const BAZAAR_OF_BAGHDAD: &str = "{T}: Draw two cards, then discard three cards.";
+const RING_OF_RENEWAL: &str = "{5}, {T}: Discard a card at random, then draw two cards.";
+const LIBRARY_OF_ALEXANDRIA: &str =
+    "{T}: Add {C}.\n{T}: Draw a card. Activate only if you have exactly seven cards in hand.";
+const SEA_GATE_WRECKAGE: &str = "{T}: Add {C}. ({C} represents colorless mana.)\n{2}{C}, {T}: Draw a card. Activate only if you have no cards in hand.";
+
+/// A chain of exactly a search, its move out of the library and its shuffle.
+fn searches(ability: &AbilityDefinition) -> bool {
+    matches!(
+        collect_chain_effects(ability).as_slice(),
+        [
+            Effect::SearchLibrary { .. },
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                ..
+            },
+            Effect::Shuffle { .. }
+        ]
+    )
+}
+
+/// Each search in the chain, read as (`target_player`, `player_scope`).
+fn search_slots(ability: &AbilityDefinition) -> Vec<(Option<TargetFilter>, Option<PlayerFilter>)> {
+    collect_scoped_nodes(ability, AbilityScope::Potential)
+        .into_iter()
+        .filter_map(|node| match &*node.effect {
+            Effect::SearchLibrary { target_player, .. } => {
+                Some((target_player.clone(), node.player_scope.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A root `Destroy` of a target an opponent must control, then one search by that target's
+/// controller.
+fn destroys_an_opponents_then_that_player_searches(ability: &AbilityDefinition) -> bool {
+    fn opponent_controls(filter: &TargetFilter) -> bool {
+        matches!(filter, TargetFilter::Typed(typed)
+            if typed.controller == Some(ControllerRef::Opponent))
+    }
+    let destroys = match &*ability.effect {
+        Effect::Destroy {
+            target: TargetFilter::Or { filters },
+            ..
+        } => filters.iter().all(opponent_controls),
+        Effect::Destroy { target, .. } => opponent_controls(target),
+        _ => false,
+    };
+    destroys && search_slots(ability) == [(Some(TargetFilter::ParentTargetController), None)]
+}
+
+fn counts_a_hand(expr: &QuantityExpr) -> bool {
+    matches!(
+        expr,
+        QuantityExpr::Ref {
+            qty: QuantityRef::HandSize { .. }
+        }
+    )
+}
+
+/// `Discard { HandSize }` at the root, under `scope`.
+fn discards_the_hand_under(ability: &AbilityDefinition, scope: PlayerFilter) -> bool {
+    matches!(&*ability.effect, Effect::Discard { count, .. } if counts_a_hand(count))
+        && ability.player_scope == Some(scope)
+}
+
+/// A composite activation cost holding `Discard { HandSize }`.
+fn cost_discards_the_hand(ability: &AbilityDefinition) -> bool {
+    matches!(
+        &ability.cost,
+        Some(AbilityCost::Composite { costs }) if costs.iter().any(|cost| matches!(
+            cost,
+            AbilityCost::Discard { count, .. } if counts_a_hand(count)
+        ))
+    )
+}
+
+/// The single parsed `RequiresCondition`, if that is the ability's only restriction.
+fn only_condition(ability: &AbilityDefinition) -> Option<&ParsedCondition> {
+    match ability.activation_restrictions.as_slice() {
+        [ActivationRestriction::RequiresCondition {
+            condition: Some(condition),
+        }] => Some(condition),
+        _ => None,
+    }
+}
+
+/// `HandSize` on the left of `comparator`, as a restriction.
+fn restricts_hand(ability: &AbilityDefinition, comparator: Comparator) -> bool {
+    matches!(
+        only_condition(ability),
+        Some(ParsedCondition::QuantityComparison { lhs, comparator: parsed, .. })
+            if counts_a_hand(lhs) && *parsed == comparator
+    )
+}
+
+/// One card's activation at `phase`, with `hand` cards in the AI's hand.
+struct HeldRow {
+    label: &'static str,
+    name: &'static str,
+    oracle_text: &'static str,
+    ability_index: usize,
+    premise: fn(&AbilityDefinition) -> bool,
+    phase: Phase,
+    after_trigger: bool,
+    hand: usize,
+}
+
+impl HeldRow {
+    fn board(&self) -> (Board, ObjectId) {
+        let mut board = build_board(self.phase, 20, 20);
+        if self.after_trigger {
+            add_upkeep_trigger_source(&mut board.state);
+        }
+        let mut ids = Ids(8_900);
+        for _ in 0..self.hand {
+            create_object(
+                &mut board.state,
+                ids.next(),
+                AI,
+                "Hand Card".to_string(),
+                Zone::Hand,
+            );
+        }
+        let id = set_arranger(&mut board, self.name, self.oracle_text);
+        let ability = &board.state.objects[&id].abilities[self.ability_index];
+        assert!(
+            (self.premise)(ability),
+            "{}: premise: the parse shape, got {ability:?}",
+            self.label
+        );
+        (board, id)
+    }
+}
+
+/// CR 121.1 + CR 504.1: a line in the upkeep whose draw is still ahead can be one no later
+/// activation reproduces. Each row is a shape of that class, or a neighbour that isn't, built
+/// from its verbatim Oracle text; each asserts its parse premise, and the reason is its reach.
+///
+/// Held and not lent: a search that can reach the AI's library (CR 701.23a, CR 701.24a), a line
+/// sized by the AI's hand (CR 701.9a), and a discard the hand can't pay (CR 609.3). Stood down,
+/// because waiting gives the activation up (CR 602.5): a restriction the draw lifts the hand out
+/// of, and a phase with no main phase in it. Held and lent: a line that doesn't touch the AI's
+/// library or hand, a fixed discard the hand pays, and a floor on the hand. In the draw step
+/// that draw is behind (CR 504.2), so the main phase reproduces every one of them.
+///
+/// `held_line_answers_each_class` pins the consumer's reading of these reasons.
+#[test]
+fn an_upkeep_line_waiting_cannot_reproduce_is_held_but_not_lent() {
+    const UNLENT: &str = "activation_patience_hold_unlent";
+    const HOLD: &str = "activation_patience_hold";
+    const HOLD_FOR_MAIN: &str = "activation_patience_hold_for_main";
+    const HAND_BOUND: &str = "activation_patience_hand_bound";
+    const TOP: &str = "activation_patience_library_top";
+    const NA: &str = "activation_patience_na";
+
+    let row = |label,
+               name,
+               oracle_text,
+               ability_index,
+               premise: fn(&AbilityDefinition) -> bool,
+               expected| {
+        (
+            HeldRow {
+                label,
+                name,
+                oracle_text,
+                ability_index,
+                premise,
+                phase: Phase::Upkeep,
+                after_trigger: false,
+                hand: 0,
+            },
+            expected,
+        )
+    };
+    let in_draw = |(row, expected): (HeldRow, &'static str)| {
+        (
+            HeldRow {
+                phase: Phase::Draw,
+                ..row
+            },
+            expected,
+        )
+    };
+    let holding =
+        |hand, (row, expected): (HeldRow, &'static str)| (HeldRow { hand, ..row }, expected);
+
+    let strand = |expected| {
+        row(
+            "Flooded Strand (a search and its shuffle)",
+            "Flooded Strand",
+            FLOODED_STRAND,
+            0,
+            searches,
+            expected,
+        )
+    };
+    let wheel = |expected| {
+        row(
+            "Magus of the Wheel (a clear, then a draw)",
+            "Magus of the Wheel",
+            MAGUS_OF_THE_WHEEL,
+            0,
+            |ability| {
+                discards_the_hand_under(ability, PlayerFilter::All)
+                    && matches!(
+                        collect_chain_effects(ability).as_slice(),
+                        [Effect::Discard { .. }, Effect::Draw { .. }]
+                    )
+            },
+            expected,
+        )
+    };
+    let bazaar = |expected| {
+        row(
+            "Bazaar of Baghdad (a draw, then a fixed discard)",
+            "Bazaar of Baghdad",
+            BAZAAR_OF_BAGHDAD,
+            0,
+            |ability| {
+                matches!(
+                    collect_chain_effects(ability).as_slice(),
+                    [
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 2 },
+                            ..
+                        },
+                        Effect::Discard {
+                            count: QuantityExpr::Fixed { value: 3 },
+                            ..
+                        }
+                    ]
+                )
+            },
+            expected,
+        )
+    };
+    let ring = |expected| {
+        row(
+            "Ring of Renewal (a discard, then a draw)",
+            "Ring of Renewal",
+            RING_OF_RENEWAL,
+            0,
+            |ability| {
+                matches!(
+                    collect_chain_effects(ability).as_slice(),
+                    [
+                        Effect::Discard {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            ..
+                        },
+                        Effect::Draw { .. }
+                    ]
+                )
+            },
+            expected,
+        )
+    };
+    let library = |expected| {
+        row(
+            "Library of Alexandria ability 1 (exactly seven)",
+            "Library of Alexandria",
+            LIBRARY_OF_ALEXANDRIA,
+            1,
+            |ability| {
+                matches!(
+                    only_condition(ability),
+                    Some(ParsedCondition::QuantityComparison {
+                        comparator: Comparator::EQ,
+                        rhs: QuantityExpr::Fixed { value: 7 },
+                        ..
+                    })
+                ) && restricts_hand(ability, Comparator::EQ)
+            },
+            expected,
+        )
+    };
+    let wreckage = |expected| {
+        row(
+            "Sea Gate Wreckage ability 1 (no cards in hand)",
+            "Sea Gate Wreckage",
+            SEA_GATE_WRECKAGE,
+            1,
+            |ability| restricts_hand(ability, Comparator::EQ),
+            expected,
+        )
+    };
+
+    let rows = [
+        // A search that can reach the AI's library.
+        strand(UNLENT),
+        (
+            HeldRow {
+                label: "Flooded Strand, upkeep after a trigger",
+                after_trigger: true,
+                ..strand(UNLENT).0
+            },
+            UNLENT,
+        ),
+        in_draw(strand(HOLD_FOR_MAIN)),
+        row(
+            "Expedition Map (a search and its shuffle)",
+            "Expedition Map",
+            EXPEDITION_MAP,
+            0,
+            searches,
+            UNLENT,
+        ),
+        row(
+            "Gate to Seatower (a seek)",
+            "Gate to Seatower",
+            "({T}: Add {U}.)\nGate to Seatower enters the battlefield tapped.\n{3}{U}, {T}: Seek a nonland card. Activate only once.",
+            0,
+            |ability| matches!(*ability.effect, Effect::Seek { .. }),
+            UNLENT,
+        ),
+        row(
+            "Fertilid (target player searches)",
+            "Fertilid",
+            "This creature enters with two +1/+1 counters on it.\n{1}{G}, Remove a +1/+1 counter from this creature: Target player searches their library for a basic land card, puts it onto the battlefield tapped, then shuffles.",
+            0,
+            |ability| search_slots(ability) == [(Some(TargetFilter::Player), None)],
+            UNLENT,
+        ),
+        row(
+            "Field of Ruin ability 1 (each player searches)",
+            "Field of Ruin",
+            "{T}: Add {C}.\n{2}, {T}, Sacrifice this land: Destroy target nonbasic land an opponent controls. Each player searches their library for a basic land card, puts it onto the battlefield, then shuffles.",
+            1,
+            |ability| search_slots(ability) == [(None, Some(PlayerFilter::All))],
+            UNLENT,
+        ),
+        row(
+            "Ghost Quarter ability 1 (the target can be the AI's land)",
+            "Ghost Quarter",
+            "{T}: Add {C}.\n{T}, Sacrifice this land: Destroy target land. Its controller may search their library for a basic land card, put it onto the battlefield, then shuffle.",
+            1,
+            |ability| {
+                search_slots(ability) == [(Some(TargetFilter::ParentTargetController), None)]
+            },
+            UNLENT,
+        ),
+        row(
+            "Demolition Field ability 1 (its second search is the AI's)",
+            "Demolition Field",
+            "{T}: Add {C}.\n{2}, {T}, Sacrifice this land: Destroy target nonbasic land an opponent controls. That land's controller may search their library for a basic land card, put it onto the battlefield, then shuffle. You may search your library for a basic land card, put it onto the battlefield, then shuffle.",
+            1,
+            |ability| {
+                search_slots(ability)
+                    == [
+                        (Some(TargetFilter::ParentTargetController), None),
+                        (None, None),
+                    ]
+            },
+            UNLENT,
+        ),
+        // A search that can only reach an opponent's library.
+        row(
+            "Boseiju, Who Endures ability 1 (that player is an opponent)",
+            "Boseiju, Who Endures",
+            BOSEIJU,
+            1,
+            destroys_an_opponents_then_that_player_searches,
+            HOLD,
+        ),
+        row(
+            "Volatile Fault ability 1 (that player is an opponent)",
+            "Volatile Fault",
+            "{T}: Add {C}.\n{1}, {T}, Sacrifice this land: Destroy target nonbasic land an opponent controls. That player may search their library for a basic land card, put it onto the battlefield, then shuffle. You create a Treasure token.",
+            1,
+            destroys_an_opponents_then_that_player_searches,
+            HOLD,
+        ),
+        row(
+            "Grinning Totem (target opponent's library)",
+            "Grinning Totem",
+            "{2}, {T}, Sacrifice this artifact: Search target opponent's library for a card and exile it. Then that player shuffles. Until the beginning of your next upkeep, you may play that card. At the beginning of your next upkeep, if you haven't played it, put it into its owner's graveyard.",
+            0,
+            |ability| {
+                matches!(
+                    search_slots(ability).as_slice(),
+                    [(Some(slot), None)] if names_an_opponent(slot)
+                )
+            },
+            HOLD,
+        ),
+        // A line sized by the AI's hand.
+        wheel(UNLENT),
+        in_draw(wheel(HOLD_FOR_MAIN)),
+        row(
+            "Slate of Ancestry (the clear is a cost)",
+            "Slate of Ancestry",
+            SLATE_OF_ANCESTRY,
+            0,
+            cost_discards_the_hand,
+            UNLENT,
+        ),
+        row(
+            // Index 1: the harness parses with no keyword list, so "Haste" takes index 0.
+            "Bomat Courier ability 1 (a clear with no draw)",
+            "Bomat Courier",
+            "Haste\nWhenever this creature attacks, exile the top card of your library face down. (You can't look at it.)\n{R}, Discard your hand, Sacrifice this creature: Put all cards exiled with this creature into their owners' hands.",
+            1,
+            cost_discards_the_hand,
+            UNLENT,
+        ),
+        row(
+            "Memory Jar (the hand exiled)",
+            "Memory Jar",
+            MEMORY_JAR,
+            0,
+            |ability| {
+                matches!(
+                    *ability.effect,
+                    Effect::ChangeZoneAll {
+                        origin: Some(Zone::Hand),
+                        ..
+                    }
+                )
+            },
+            UNLENT,
+        ),
+        row(
+            "Magus of the Balance (a discard down to a count)",
+            "Magus of the Balance",
+            "{4}{W}, {T}, Sacrifice this creature: Each player chooses a number of lands they control equal to the number of lands controlled by the player who controls the fewest, then sacrifices the rest. Players discard cards and sacrifice creatures the same way.",
+            0,
+            |ability| {
+                collect_chain_effects(ability).iter().any(|effect| {
+                    matches!(
+                        effect,
+                        Effect::Discard {
+                            count: QuantityExpr::Difference { .. },
+                            ..
+                        }
+                    )
+                })
+            },
+            UNLENT,
+        ),
+        row(
+            "Castle Locthwain ability 1 (a loss sized by the hand)",
+            "Castle Locthwain",
+            "This land enters tapped unless you control a Swamp.\n{T}: Add {B}.\n{1}{B}{B}, {T}: Draw a card, then you lose life equal to the number of cards in your hand.",
+            1,
+            |ability| {
+                matches!(
+                    collect_chain_effects(ability).as_slice(),
+                    [Effect::Draw { .. }, Effect::LoseLife { amount, .. }]
+                        if counts_a_hand(amount)
+                )
+            },
+            UNLENT,
+        ),
+        row(
+            "The Darkhold ability 0 (`ZoneCardCount`)",
+            "The Darkhold",
+            "{T}: Put a sin counter on The Darkhold. Draw a card for each sin counter on it, then you lose 1 life for each card in your hand.\n{6}{B}{B}, {T}: Each player's life total becomes the lowest life total among all players. Activate only as a sorcery.",
+            0,
+            |ability| {
+                matches!(
+                    collect_chain_effects(ability).last(),
+                    Some(Effect::LoseLife {
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::ZoneCardCount {
+                                zone: ZoneRef::Hand,
+                                ..
+                            }
+                        },
+                        ..
+                    })
+                )
+            },
+            UNLENT,
+        ),
+        row(
+            "Folio of Fancies ability 1 (each opponent's hand)",
+            "Folio of Fancies",
+            "Players have no maximum hand size.\n{X}{X}, {T}: Each player draws X cards.\n{2}{U}, {T}: Each opponent mills cards equal to the number of cards in their hand.",
+            1,
+            |ability| {
+                matches!(&*ability.effect, Effect::Mill { count, .. } if counts_a_hand(count))
+                    && ability.player_scope == Some(PlayerFilter::Opponent)
+            },
+            HOLD,
+        ),
+        row(
+            "Merfolk Looter (a fixed discard)",
+            "Merfolk Looter",
+            MERFOLK_LOOTER,
+            0,
+            |ability| {
+                matches!(
+                    collect_chain_effects(ability).as_slice(),
+                    [Effect::Draw { .. }, Effect::Discard { .. }]
+                )
+            },
+            HOLD,
+        ),
+        row(
+            "Myojin of Night's Reach (each opponent's hand)",
+            "Myojin of Night's Reach",
+            MYOJIN_OF_NIGHTS_REACH,
+            0,
+            |ability| discards_the_hand_under(ability, PlayerFilter::Opponent),
+            HOLD,
+        ),
+        row(
+            "Whirlpool Warrior (the hand goes to the library)",
+            "Whirlpool Warrior",
+            "When this creature enters, shuffle the cards from your hand into your library, then draw that many cards.\n{R}, Sacrifice this creature: Each player shuffles the cards from their hand into their library, then draws that many cards.",
+            0,
+            |ability| {
+                matches!(
+                    *ability.effect,
+                    Effect::ChangeZoneAll {
+                        origin: Some(Zone::Hand),
+                        destination: Zone::Library,
+                        ..
+                    }
+                )
+            },
+            TOP,
+        ),
+        // A fixed discard the hand can't pay.
+        bazaar(UNLENT),
+        holding(1, bazaar(HOLD)),
+        in_draw(bazaar(HOLD_FOR_MAIN)),
+        ring(UNLENT),
+        holding(1, ring(HOLD)),
+        holding(
+            2,
+            row(
+                "Greater Good, two cards in hand (a dynamic draw counts as 0)",
+                "Greater Good",
+                "Sacrifice a creature: Draw cards equal to the sacrificed creature's power, then discard three cards.",
+                0,
+                |ability| {
+                    matches!(
+                        collect_chain_effects(ability).as_slice(),
+                        [
+                            Effect::Draw {
+                                count: QuantityExpr::Ref { .. },
+                                ..
+                            },
+                            Effect::Discard {
+                                count: QuantityExpr::Fixed { value: 3 },
+                                ..
+                            }
+                        ]
+                    )
+                },
+                UNLENT,
+            ),
+        ),
+        row(
+            "Geier Reach Sanitarium ability 1, empty hand (a scoped draw pays the discard)",
+            "Geier Reach Sanitarium",
+            "{T}: Add {C}.\n{2}, {T}: Each player draws a card, then discards a card.",
+            1,
+            |ability| {
+                ability.player_scope == Some(PlayerFilter::All)
+                    && matches!(
+                        collect_chain_effects(ability).as_slice(),
+                        [Effect::Draw { .. }, Effect::Discard { .. }]
+                    )
+            },
+            HOLD,
+        ),
+        // A restriction that lapses before the main phase.
+        library(HAND_BOUND),
+        in_draw(library(HOLD_FOR_MAIN)),
+        wreckage(HAND_BOUND),
+        in_draw(wreckage(HOLD_FOR_MAIN)),
+        row(
+            "The Biblioplex ability 1 (`Or`, and it beats `LibraryTop`)",
+            "The Biblioplex",
+            "{T}: Add {C}.\n{2}, {T}: Look at the top card of your library. If it's an instant or sorcery card, you may reveal it and put it into your hand. If you don't put the card into your hand, you may put it into your graveyard. Activate only if you have exactly zero or seven cards in hand.",
+            1,
+            |ability| matches!(only_condition(ability), Some(ParsedCondition::Or { .. })),
+            HAND_BOUND,
+        ),
+        row(
+            "Resonating Lute ability 0 (a floor)",
+            "Resonating Lute",
+            "Lands you control have \"{T}: Add two mana of any one color. Spend this mana only to cast instant and sorcery spells.\"\n{T}: Draw a card. Activate only if you have seven or more cards in your hand.",
+            0,
+            |ability| restricts_hand(ability, Comparator::GE),
+            HOLD,
+        ),
+        row(
+            "Kitsune Bonesetter (more cards than each opponent)",
+            "Kitsune Bonesetter",
+            "{T}: Prevent the next 3 damage that would be dealt to target creature this turn. Activate only if you have more cards in hand than each opponent.",
+            0,
+            |ability| restricts_hand(ability, Comparator::GT),
+            HOLD,
+        ),
+        row(
+            "Dwarven Armory (only during any upkeep step)",
+            "Dwarven Armory",
+            "{2}, Sacrifice a land: Put a +2/+2 counter on target creature. Activate only during any upkeep step.",
+            0,
+            |ability| {
+                matches!(
+                    only_condition(ability),
+                    Some(ParsedCondition::CurrentPhaseIs { phases }) if phases == &[Phase::Upkeep]
+                )
+            },
+            NA,
+        ),
+    ];
+
+    // Every row is read before the assertion, so one failure names all of them.
+    let mut wrong = Vec::new();
+    for (row, expected) in rows {
+        let (board, _) = row.board();
+        let (delta, reason) = score_and_reason(&verdict_for_ability(&board, row.ability_index));
+        let right_delta = if matches!(expected, UNLENT | HOLD | HOLD_FOR_MAIN) {
+            delta < 0.0
+        } else {
+            delta == 0.0
+        };
+        if reason != expected || !right_delta {
+            wrong.push(format!(
+                "{} in {:?}, hand {}: expected {expected}, got {reason} at {delta}",
+                row.label, row.phase, row.hand
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// `held_line` computes its answer apart from the verdict's reason, so each class is pinned
+/// through it: the answer `planner::RankedCandidate::deferral` carries to
+/// `search::lend_deferral_witness`. Every row is held, so each answer is one that consumer reads.
+#[test]
+fn held_line_answers_each_class() {
+    let row = |label, name, oracle_text, ability_index, phase, hand, expected| {
+        (
+            HeldRow {
+                label,
+                name,
+                oracle_text,
+                ability_index,
+                premise: |_| true,
+                phase,
+                after_trigger: false,
+                hand,
+            },
+            expected,
+        )
+    };
+    use HeldLine::{Irreproducible, Reproducible};
+    let rows = [
+        row(
+            "Boseiju, upkeep",
+            "Boseiju, Who Endures",
+            BOSEIJU,
+            1,
+            Phase::Upkeep,
+            0,
+            Reproducible,
+        ),
+        row(
+            "Merfolk Looter, upkeep",
+            "Merfolk Looter",
+            MERFOLK_LOOTER,
+            0,
+            Phase::Upkeep,
+            0,
+            Reproducible,
+        ),
+        row(
+            "Myojin, upkeep",
+            "Myojin of Night's Reach",
+            MYOJIN_OF_NIGHTS_REACH,
+            0,
+            Phase::Upkeep,
+            0,
+            Reproducible,
+        ),
+        row(
+            "Flooded Strand, draw step",
+            "Flooded Strand",
+            FLOODED_STRAND,
+            0,
+            Phase::Draw,
+            0,
+            Reproducible,
+        ),
+        row(
+            "Flooded Strand, upkeep",
+            "Flooded Strand",
+            FLOODED_STRAND,
+            0,
+            Phase::Upkeep,
+            0,
+            Irreproducible,
+        ),
+        row(
+            "Magus of the Wheel, upkeep",
+            "Magus of the Wheel",
+            MAGUS_OF_THE_WHEEL,
+            0,
+            Phase::Upkeep,
+            0,
+            Irreproducible,
+        ),
+        row(
+            "Slate of Ancestry, upkeep",
+            "Slate of Ancestry",
+            SLATE_OF_ANCESTRY,
+            0,
+            Phase::Upkeep,
+            0,
+            Irreproducible,
+        ),
+        row(
+            "Memory Jar, upkeep",
+            "Memory Jar",
+            MEMORY_JAR,
+            0,
+            Phase::Upkeep,
+            0,
+            Irreproducible,
+        ),
+        row(
+            "Bazaar of Baghdad, empty hand, upkeep",
+            "Bazaar of Baghdad",
+            BAZAAR_OF_BAGHDAD,
+            0,
+            Phase::Upkeep,
+            0,
+            Irreproducible,
+        ),
+    ];
+    for (row, expected) in rows {
+        let (board, id) = row.board();
+        let (delta, _) = score_and_reason(&verdict_for_ability(&board, row.ability_index));
+        assert!(delta < 0.0, "{}: reach: held, got {delta}", row.label);
+        let action = GameAction::ActivateAbility {
+            source_id: id,
+            ability_index: row.ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        };
+        assert_eq!(
+            held_line(&board.state, AI, &action),
+            expected,
+            "{}",
+            row.label
+        );
+    }
+}
+
 /// CR 602.5: an ability restricted to the upkeep can't be activated in the main
-/// phase, so it is not deferrable and patience stays silent.
+/// phase, so it is not deferrable and patience stays silent. So is one restricted to "only during
+/// any upkeep step" (Dwarven Armory, in the table above).
 #[test]
 fn an_upkeep_only_ability_is_not_deferrable() {
     let mut board = build_board(Phase::Upkeep, 20, 20);
