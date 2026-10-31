@@ -31,24 +31,21 @@ use crate::types::{
 /// and applied by id during lowering. Closed set.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum DocumentRelationIr {
-    /// CR 607.1 + CR 607.2a + CR 406.6 + CR 610.3: A two-trigger exile/return
-    /// design. An ETB "exile ..." trigger (`etb_exile`) pairs with an LTB "return
-    /// the exiled card(s)" trigger (`ltb_return`); because the ETB exile has no
-    /// printed duration, the exiled card(s) would never return. Covers both the
-    /// single-target class (Journey to Nowhere, Oblivion Ring) and the mass-exile
-    /// class (Worldgorger Dragon's "exile all other permanents you control").
+    /// CR 607.1 + CR 607.2a + CR 406.6: A two-trigger exile/return design. An
+    /// ETB "exile ..." trigger (`etb_exile`) is linked to an LTB "return the
+    /// exiled card(s)" trigger (`ltb_return`). Covers both the single-target
+    /// class (Journey to Nowhere, Oblivion Ring) and the mass-exile class
+    /// (Worldgorger Dragon's "exile all other permanents you control").
     ///
     /// `outcome` records how the pair is applied. An unmodified LTB return is
-    /// `DurationStamped`: applying it stamps `Duration::UntilHostLeavesPlay` on
-    /// the ETB exile so the existing `ExileLink::UntilSourceLeaves` mechanism
-    /// returns the cards. A return carrying an entry rider (Realm Razer's "return
-    /// the exiled cards to the battlefield TAPPED") is `ModifierUnsupported`: the
-    /// automatic return path performs a plain zone move and can't apply that
-    /// rider, so instead of silently dropping it the LTB return is marked
-    /// unsupported through `Effect::unimplemented` so coverage reports the gap
-    /// rather than the card showing as falsely supported. See
-    /// `trigger_is_ltb_return_shape` and `change_zone_return_has_no_entry_modifiers`
-    /// in `parser/oracle.rs`.
+    /// `ReturnsExiledBySource`: applying it rewrites the LTB into a return of
+    /// the cards exiled by this source (CR 607.2a, CR 607.3) and leaves the ETB
+    /// unchanged. A return carrying an entry rider (Realm Razer's "return the
+    /// exiled cards to the battlefield TAPPED") is `ModifierUnsupported`: the
+    /// emitted return carries no entry rider, so the LTB return is marked
+    /// unsupported through `Effect::unimplemented` and coverage reports the gap.
+    /// See `trigger_is_ltb_return_shape` and
+    /// `change_zone_return_has_no_entry_modifiers` in `parser/oracle.rs`.
     EtbExileLtbReturn {
         etb_exile: OracleItemId,
         ltb_return: OracleItemId,
@@ -88,22 +85,20 @@ pub(crate) enum DocumentRelationIr {
     LinkedChoice(LinkedChoiceKind),
 }
 
-/// CR 610.3: How a detected ETB-exile / LTB-return pair is applied during
+/// CR 607.1: How a detected ETB-exile / LTB-return pair is applied during
 /// lowering. Parameterizes `EtbExileLtbReturn` rather than adding a sibling
 /// relation variant (see the module doc): both outcomes describe the same
-/// linked-ability pair, differing only in whether the generic return path can
-/// carry the printed return.
+/// linked-ability pair, differing only in whether the emitted return can carry
+/// the printed return.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum LinkedReturnOutcome {
-    /// The LTB return is unmodified. Applying the relation stamps
-    /// `Duration::UntilHostLeavesPlay` on the ETB exile so the automatic
-    /// `ExileLink::UntilSourceLeaves` path returns the exiled card(s).
-    DurationStamped,
-    /// CR 610.3: The LTB return carries an entry modifier the automatic return
-    /// path cannot apply (Realm Razer's "return the exiled cards to the
-    /// battlefield tapped"). Applying the relation attaches an
-    /// `Effect::unimplemented` marker to the LTB return trigger so the
-    /// unsupported semantic is visible to coverage instead of silently dropped.
+    /// CR 607.2a + CR 607.3: The LTB return is unmodified. Applying the relation
+    /// rewrites the LTB into a return of every card exiled by this source.
+    ReturnsExiledBySource,
+    /// The LTB return carries an entry modifier (Realm Razer's "return the
+    /// exiled cards to the battlefield tapped") the emitted return carries no
+    /// rider for. Applying the relation attaches an `Effect::unimplemented`
+    /// marker to the LTB return trigger so coverage reports the gap.
     /// `fragment` is the verbatim LTB return text, captured at detection time
     /// because the relation applier no longer has access to the item list.
     ModifierUnsupported { fragment: String },

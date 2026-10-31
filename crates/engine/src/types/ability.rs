@@ -4600,6 +4600,25 @@ impl ResolvedAbility {
         }
     }
 
+    /// Yields each `MayTriggerOrigin::Definition` in this ability tree, so loop
+    /// normalization can rank its identities with the other carriers (CR 400.7).
+    pub(crate) fn for_each_may_trigger_origin_mut(
+        &mut self,
+        f: &mut impl FnMut(&mut TriggerDefinitionRef),
+    ) {
+        if let Some(MayTriggerOrigin::Definition { definition_ref }) =
+            self.may_trigger_origin.as_mut()
+        {
+            f(definition_ref);
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.for_each_may_trigger_origin_mut(f);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.for_each_may_trigger_origin_mut(f);
+        }
+    }
+
     /// Clears provenance that distinguishes otherwise identical triggered
     /// abilities for structural comparison. This deliberately clears the
     /// complete owned authorities together; retaining either a source context

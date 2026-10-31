@@ -10,7 +10,7 @@
 //! The third line is an EXISTENTIAL-there state trigger ("there are N counters
 //! on ~") — a surface form the parser previously did not recognize, so the whole
 //! trigger degraded to Unimplemented and never fired. This test drives the real
-//! state-trigger pipeline (`check_state_triggers` → stack resolution) and asserts
+//! state-trigger pipeline (a priority pass → stack resolution) and asserts
 //! the threshold behavior:
 //!   - at 4 page counters the trigger fires: the Tome is exiled and its
 //!     controller gains 4 life;
@@ -27,6 +27,7 @@
 //!   - CR 122.1: a counter is a marker placed on an object.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
@@ -97,10 +98,11 @@ fn run_with_pages(pages: u32) -> (GameRunner, ObjectId, i32) {
     let life_before = life(&runner, P0);
 
     // CR 603.8 + CR 117.1: state triggers are checked whenever a player would
-    // receive priority. Run the engine's state-trigger scan (the same call the
-    // priority pipeline makes) and drain the stack.
+    // receive priority, so P0's pass runs the check; then drain the stack.
     runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
-    engine::game::triggers::check_state_triggers(runner.state_mut());
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority");
     runner.advance_until_stack_empty();
     (runner, tome, life_before)
 }

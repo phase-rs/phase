@@ -481,6 +481,20 @@ fn accepts_within_bound_declare_shortcut_template() {
 }
 
 #[test]
+fn accepts_declare_shortcut_without_end() {
+    assert!(guard_game_action_payload(&GameAction::DeclareShortcut {
+        count: IterationCount::WithoutEnd,
+        template: None,
+    })
+    .is_ok());
+    assert!(guard_game_action_payload(&GameAction::DeclareShortcut {
+        count: IterationCount::WithoutEnd,
+        template: Some(shortcut_template(MAX_ACTION_LIST_LEN + 1)),
+    })
+    .is_err());
+}
+
+#[test]
 fn rejects_over_cap_fixed_shortcut_count() {
     // T3a (CR 732.2a): `Fixed(u32::MAX)` is the real Vector-1 count; the WS belt must reject
     // it. Revert-probe: restore the `..` that discarded `count` ⇒ guard returns Ok ⇒ FAIL.

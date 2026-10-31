@@ -76,7 +76,7 @@ fn talion_runtime_triggers_only_for_matching_spell_quality() {
 
 /// CR 603.8: Endangered Armodon's state trigger fires at runtime when its
 /// controller controls a creature with toughness 2 or less, sacrificing
-/// Endangered Armodon. Drives the real `check_state_triggers` →
+/// Endangered Armodon. Drives a priority pass's state-trigger check →
 /// `GameRunner` resolution path (not just the parsed AST): the
 /// `ControlsType` condition is evaluated against the live battlefield and
 /// the `Sacrifice` effect resolves. Discriminates against reverting the new
@@ -85,7 +85,6 @@ fn talion_runtime_triggers_only_for_matching_spell_quality() {
 #[test]
 fn endangered_armodon_state_trigger_fires_and_sacrifices_self() {
     use engine::game::scenario::GameRunner;
-    use engine::game::triggers::check_state_triggers;
     use engine::game::zones::create_object;
     use engine::parser::oracle::parse_oracle_text;
     use engine::types::card_type::CoreType;
@@ -161,16 +160,21 @@ fn endangered_armodon_state_trigger_fires_and_sacrifices_self() {
         obj.base_card_types.core_types.push(CoreType::Creature);
     }
 
-    // CR 603.8: the state trigger detects the small creature and enqueues the
-    // sacrifice.
-    check_state_triggers(&mut state);
+    // CR 603.8 + CR 117.1: a priority pass checks state triggers, so the small
+    // creature puts the sacrifice on the stack.
+    state.waiting_for = engine::types::game_state::WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    let mut runner = GameRunner::from_state(state);
+    runner
+        .act(engine::types::actions::GameAction::PassPriority)
+        .expect("P0 passes priority");
     assert!(
-        state.pending_trigger.is_some() || !state.stack.is_empty(),
-        "state trigger must be pending or on the stack after check_state_triggers",
+        !runner.state().stack.is_empty(),
+        "state trigger must be on the stack after a priority pass",
     );
 
     // Resolve the sacrifice and confirm Endangered Armodon left the battlefield.
-    let mut runner = GameRunner::from_state(state);
     runner.advance_until_stack_empty();
     let state = runner.state();
     assert!(
@@ -191,7 +195,6 @@ fn endangered_armodon_state_trigger_fires_and_sacrifices_self() {
 #[test]
 fn darksteel_reactor_state_trigger_fires_and_wins_game_at_twenty_counters() {
     use engine::game::scenario::GameRunner;
-    use engine::game::triggers::check_state_triggers;
     use engine::game::zones::create_object;
     use engine::parser::oracle::parse_oracle_text;
     use engine::types::game_state::WaitingFor;
@@ -248,17 +251,21 @@ fn darksteel_reactor_state_trigger_fires_and_wins_game_at_twenty_counters() {
             .insert(CounterType::Generic("charge".to_string()), 20);
     }
 
-    // CR 603.8: call check_state_triggers, which sees the reactor has 20 charge
-    // counters and enqueues the WinTheGame trigger.
-    check_state_triggers(&mut state);
-
+    // CR 603.8 + CR 117.1: a priority pass checks state triggers, so the reactor's
+    // 20 charge counters put the WinTheGame trigger on the stack.
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    let mut runner = GameRunner::from_state(state);
+    runner
+        .act(engine::types::actions::GameAction::PassPriority)
+        .expect("P0 passes priority");
     assert!(
-        state.pending_trigger.is_some() || !state.stack.is_empty(),
-        "state trigger must be pending or on the stack after check_state_triggers",
+        !runner.state().stack.is_empty(),
+        "state trigger must be on the stack after a priority pass",
     );
 
     // Drain the stack: the WinTheGame effect resolves, eliminating all opponents.
-    let mut runner = GameRunner::from_state(state);
     runner.advance_until_stack_empty();
     let state = runner.state();
 

@@ -1152,6 +1152,7 @@
     "respondTitle": "有人提议循环捷径",
     "shorten": "缩短循环",
     "untilLethal": "重复直到游戏结束。",
+    "withoutEnd": "无限重复。若所有玩家都接受，本局游戏为平局。",
     "winKind": {
       "Advantage": "此循环能产生无限的优势。",
       "Decking": "此循环让一名对手抓空牌库。",

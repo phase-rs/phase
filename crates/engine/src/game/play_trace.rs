@@ -19,8 +19,8 @@ use crate::types::ability::{
 use crate::types::actions::GameAction;
 use crate::types::card::PrintedCardRef;
 use crate::types::game_state::{
-    printed_trigger_origin, ActionDisposition, GameState, PayCostKind, ReplacementChoiceKind,
-    RetargetScope, StackEntry, StackEntryKind, WaitingFor,
+    printed_trigger_origin, ActionDisposition, GameState, PayCostKind, PriorityOut,
+    ReplacementChoiceKind, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
@@ -349,6 +349,8 @@ pub enum EntryKind {
         asked_by: Option<usize>,
         /// Set when the answer chose the objects an object-moving cost moves.
         cost_move: Option<CostMove>,
+        /// The decision point the answered prompt is, which the every-option proof enumerates.
+        point: Option<crate::analysis::decision_template::ChoicePoint>,
     },
 }
 
@@ -375,6 +377,9 @@ pub enum NamingCause {
     Restored,
     /// No play was consumed and this one is legal now.
     LegalNow,
+    /// CR 104.4b + CR 732.4: a triggered node is about to resolve again with no optional answer
+    /// or play since its previous instance resolved. Read on demand, never named.
+    MandatoryRecurrence,
 }
 
 /// A candidate period: the entries `start..end` of its source as they stood when it was named.
@@ -477,6 +482,11 @@ pub(crate) struct PlayTrace {
     carried_named: im::Vector<CarriedSpan>,
     /// Each seat's carrying index, kept across windows.
     carrying: im::HashMap<PlayerId, CarryingIndex>,
+    /// The mandatory-recurrence verdict kept for the span starting at this entry, one slot per out
+    /// verdict.
+    witnessed: [Option<(usize, Witnessed)>; 2],
+    /// The every-option proof kept for the mandatory span starting at this entry.
+    ordered: Option<(usize, crate::game::period_confirm::OptionProof)>,
 }
 
 impl PlayTrace {
@@ -503,6 +513,8 @@ impl PlayTrace {
             carried: im::Vector::new(),
             carried_named: im::Vector::new(),
             carrying: im::HashMap::new(),
+            witnessed: [None; 2],
+            ordered: None,
         }
     }
 
@@ -1216,6 +1228,23 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
     }
 }
 
+/// CR 104.4b: the loop decision `action` answers at `prompt`; `None` for a play, a pass, a
+/// setting, or a prompt with a single forced option (CR 732.4).
+pub(crate) fn answered_choice(
+    action: &GameAction,
+    prompt: &WaitingFor,
+) -> Option<AnswerOptionality> {
+    match classify(action, prompt) {
+        Choice::Answer(Answer::Take) if !prompt.is_forced_one_option_choice() => {
+            Some(answer_optionality(prompt, Answer::Take))
+        }
+        Choice::Answer(Answer::Take | Answer::Pass)
+        | Choice::Play(_)
+        | Choice::Reverse(_)
+        | Choice::Setting => None,
+    }
+}
+
 /// The node and legality locus of a play, read from the state before the play is made.
 fn play_node(state: &GameState, play: &Play, at: usize) -> (NodeKey, PlayLocus) {
     let printed = |id: ObjectId| state.objects.get(&id).and_then(|o| o.printed_ref.clone());
@@ -1364,6 +1393,7 @@ pub(crate) fn begin_action(
             }
             Choice::Answer(answer) => {
                 let optional = answer_optionality(&state.waiting_for, answer);
+                let point = state.waiting_for.option_point();
                 let asking = state
                     .resolving_stack_entry
                     .as_ref()
@@ -1378,6 +1408,7 @@ pub(crate) fn begin_action(
                         optional,
                         asked_by,
                         cost_move: None,
+                        point,
                     },
                     depth,
                     prompt,
@@ -1705,6 +1736,98 @@ fn read_legality(state: &GameState, holder: PlayerId, locus: &PlayLocus) -> Opti
             crate::game::perf_counters::take_cost_snapshot().state_copies - copies_before,
     );
     Some(legal)
+}
+
+/// CR 104.4b + CR 732.4: the span back to the last instance of the triggered node on top of the
+/// stack, when nothing optional was asked or played since; `None` outside a recording boundary.
+pub(crate) fn mandatory_recurrence(state: &GameState) -> Option<NamedSpan> {
+    if !recording(state) {
+        return None;
+    }
+    mandatory_recurrence_span(state)
+}
+
+/// [`mandatory_recurrence`] without its recording gate.
+pub(crate) fn mandatory_recurrence_span(state: &GameState) -> Option<NamedSpan> {
+    let trace = current(state)?;
+    let end = trace.entries.len();
+    let node = trigger_node(state, state.stack.back()?, end).and_then(|key| trace.find(&key))?;
+    let start = *trace.last.get(&node)?;
+    let mandatory = !trace.optional_triggers.contains(&node)
+        && !trace
+            .last_optional
+            .is_some_and(|optional| optional >= start)
+        && !trace.last_play.is_some_and(|play| play >= start);
+    mandatory.then(|| NamedSpan::in_window(start, end, NamingCause::MandatoryRecurrence))
+}
+
+/// CR 104.4b + CR 732.2a: what a mandatory-recurrence span was read as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Witnessed {
+    Declared,
+    /// Offered, with the counted take the replay that read it minted.
+    Offered(crate::analysis::loop_check::CountedTake),
+    Refused,
+}
+
+fn out_slot(out: PriorityOut) -> usize {
+    match out {
+        PriorityOut::Absent => 0,
+        PriorityOut::Held => 1,
+    }
+}
+
+/// The verdict kept for the mandatory-recurrence span of the current window starting at `start`,
+/// computed under `out`.
+pub(crate) fn witnessed(state: &GameState, start: usize, out: PriorityOut) -> Option<Witnessed> {
+    current(state)?.witnessed[out_slot(out)]
+        .filter(|&(at, _)| at == start)
+        .map(|(_, verdict)| verdict)
+}
+
+/// Keeps `verdict` for the mandatory-recurrence span of the current window starting at `start`,
+/// computed under `out`.
+pub(crate) fn note_witnessed(
+    state: &mut GameState,
+    start: usize,
+    out: PriorityOut,
+    verdict: Witnessed,
+) {
+    let window = WindowKey::of(state);
+    if let Some(trace) = state
+        .play_trace
+        .as_deref_mut()
+        .filter(|trace| trace.window == window)
+    {
+        trace.witnessed[out_slot(out)] = Some((start, verdict));
+    }
+}
+
+/// The every-option proof kept for the mandatory span of the current window starting at `start`.
+pub(crate) fn order_proof(
+    state: &GameState,
+    start: usize,
+) -> Option<crate::game::period_confirm::OptionProof> {
+    current(state)?
+        .ordered
+        .filter(|&(at, _)| at == start)
+        .map(|(_, proof)| proof)
+}
+
+/// Keeps `proof` for the mandatory span of the current window starting at `start`.
+pub(crate) fn note_order_proof(
+    state: &mut GameState,
+    start: usize,
+    proof: crate::game::period_confirm::OptionProof,
+) {
+    let window = WindowKey::of(state);
+    if let Some(trace) = state
+        .play_trace
+        .as_deref_mut()
+        .filter(|trace| trace.window == window)
+    {
+        trace.ordered = Some((start, proof));
+    }
 }
 
 /// The window's naming, at the base's priority window: a play the period made is named once it
@@ -2138,6 +2261,23 @@ mod tests {
     }
 
     #[test]
+    fn a_kept_witness_verdict_is_read_only_under_the_out_verdict_it_was_computed_under() {
+        use PriorityOut::{Absent, Held};
+        let mut state = GameState::new_two_player(1);
+        state.play_trace = Some(Box::new(PlayTrace::new(WindowKey::of(&state))));
+        note_witnessed(&mut state, 3, Absent, Witnessed::Refused);
+        assert_eq!(witnessed(&state, 3, Absent), Some(Witnessed::Refused));
+        assert_eq!(witnessed(&state, 3, Held), None);
+        let offered = Witnessed::Offered(crate::analysis::loop_check::CountedTake::Unperformable(
+            crate::analysis::loop_check::UnperformableCause::UndelimitedCover,
+        ));
+        note_witnessed(&mut state, 3, Held, offered);
+        assert_eq!(witnessed(&state, 3, Held), Some(offered));
+        assert_eq!(witnessed(&state, 3, Absent), Some(Witnessed::Refused));
+        assert_eq!(witnessed(&state, 4, Absent), None);
+    }
+
+    #[test]
     fn answer_optionality_is_whether_the_answer_could_be_declined() {
         use AnswerOptionality::{Mandatory, Optional};
         let (player, source) = (PlayerId(0), ObjectId(1));
@@ -2260,5 +2400,78 @@ mod tests {
             .map(|(label, ..)| label)
             .collect();
         assert_eq!(misclassified, Vec::<&str>::new());
+    }
+
+    /// CR 104.4b + CR 732.4: a loop decision is an answer with more than one option; a pass
+    /// and a single forced option are none.
+    #[test]
+    fn answered_choice_is_an_answer_with_more_than_one_option() {
+        use AnswerOptionality::{Mandatory, Optional};
+        let (player, source) = (PlayerId(0), ObjectId(1));
+        let reveal = |cards: Vec<ObjectId>| WaitingFor::RevealChoice {
+            player,
+            cards,
+            filter: TargetFilter::Any,
+            optional: false,
+            decline_runs_continuation: false,
+        };
+        let may = WaitingFor::OptionalEffectChoice {
+            player,
+            decision_subject_id: None,
+            source_id: source,
+            description: None,
+            may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
+        };
+        let order = WaitingFor::OrderTriggers {
+            player,
+            triggers: vec![],
+        };
+        let priority = WaitingFor::Priority { player };
+        let select = |cards: Vec<ObjectId>| GameAction::SelectCards { cards };
+        let rows = [
+            (
+                "declined may",
+                &may,
+                GameAction::DecideOptionalEffect { accept: false },
+                Some(Optional),
+            ),
+            (
+                "accepted may",
+                &may,
+                GameAction::DecideOptionalEffect { accept: true },
+                Some(Optional),
+            ),
+            (
+                "trigger order",
+                &order,
+                GameAction::OrderTriggers { order: vec![1, 0] },
+                Some(Mandatory),
+            ),
+            ("pass", &priority, GameAction::PassPriority, None),
+        ];
+        let one_card = reveal(vec![source]);
+        let two_cards = reveal(vec![source, ObjectId(2)]);
+        let reveals = [
+            (
+                "one-card forced reveal",
+                &one_card,
+                select(vec![source]),
+                None,
+            ),
+            (
+                "two-card reveal",
+                &two_cards,
+                select(vec![source]),
+                Some(Mandatory),
+            ),
+        ];
+        let misread: Vec<&str> = rows
+            .iter()
+            .chain(reveals.iter())
+            .filter(|(_, prompt, action, expected)| answered_choice(action, prompt) != *expected)
+            .map(|(label, ..)| *label)
+            .collect();
+        assert_eq!(misread, Vec::<&str>::new());
     }
 }
