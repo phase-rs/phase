@@ -3,7 +3,7 @@
 # check and approximately 6% undercount; not a claim of present-day engine accuracy.
 # Clauses contain census-cited clause text, not necessarily current Oracle sentences.
 # Keep exact export-face keys lexicographically sorted, including hidden-key suffixes.
-# When an implementation fixes the cited behavior, delete that face’s row in the same change and regenerate card data (and the committed test fixture when it carries that face). Removing this marker does not remove other unsupported gaps.
+# When an implementation fixes the cited behavior, delete that face’s row in the same change and regenerate card data (and the committed test fixture only when its copy of that face carries the `confirmed_misparse` marker). Removing this marker does not remove other unsupported gaps.
 face = [
   { key = "\"rumors of my death . . .\"", class = "dropped_qualifier", clauses = ["{3}{B}, Exile a permanent you control with a League of Dastardly Doom watermark:", "Return a permanent card with a League of Dastardly Doom watermark from your graveyard to the battlefield."] },
   { key = "a girl and her dogs", class = "missing_effect", clauses = ["When A Girl and Her Dogs enters the battlefield and at the beginning of your upkeep, create a 1/1 white legendary Dog creature token and name it."] },
@@ -201,7 +201,6 @@ face = [
   { key = "barreling attack", class = "trigger_wrong", clauses = ["When that creature becomes blocked this turn, it gets +1/+1 until end of turn for each creature blocking it."] },
   { key = "barroom brawl", class = "target_wrong", clauses = ["Target creature you control fights target creature the opponent to your left controls.", "Then that player may copy this spell and may choose new targets for the copy."] },
   { key = "bartel runeaxe", class = "dropped_qualifier", clauses = ["Bartel Runeaxe can't be the target of Aura spells."] },
-  { key = "basalt golem", class = "wrong_object", clauses = ["Whenever this creature becomes blocked by a creature, that creature's controller sacrifices it at end of combat.", "If the player does, they create a 0/2 colorless Wall artifact creature token with defender."] },
   { key = "basri's aegis", class = "condition_wrong", clauses = ["If you search your library this way, shuffle."] },
   { key = "bathe in light", class = "missing_effect", clauses = ["Target creature and each other creature that shares a color with it gain protection from the chosen color until end of turn."] },
   { key = "battle myrsphere", class = "wrong_count", clauses = ["Put it onto the battlefield, and the rest on the bottom of your library in a random order.", "Whenever Battle Myrsphere attacks, you may tap X untapped battles you control", "and deals X damage to the player or permanent."] },
@@ -474,7 +473,6 @@ face = [
   { key = "corpseweaver prodigy", class = "wrong_object", clauses = ["If a creature an opponent controls would die, exile it instead."] },
   { key = "corpseweft", class = "cost_wrong", clauses = ["{1}{B}, Exile one or more creature cards from your graveyard:"] },
   { key = "corrosion", class = "wrong_object", clauses = ["Then destroy each artifact with mana value less than or equal to the number of rust counters on it."] },
-  { key = "corrupted zendikon", class = "wrong_object", clauses = ["It's still a land."] },
   { key = "corrupting licid", class = "missing_effect", clauses = ["{B}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature."] },
   { key = "corruption of towashi", class = "dropped_qualifier", clauses = ["Whenever a permanent you control transforms or a permanent you control enters transformed, you may draw a card."] },
   { key = "cosima, god of the voyage", class = "missing_effect", clauses = ["If you don't, return Cosima to the battlefield with X +1/+1 counters on it"] },
@@ -1546,7 +1544,6 @@ face = [
   { key = "lithomancer's focus", class = "wrong_object", clauses = ["Prevent all damage that would be dealt to that creature this turn by colorless sources."] },
   { key = "living lectern", class = "target_wrong", clauses = ["Create a Sorcerer Role token attached to up to one other target creature you control."] },
   { key = "living library", class = "wrong_object", clauses = ["Its owner shuffles it into their library."] },
-  { key = "living terrain", class = "wrong_object", clauses = ["Enchanted land is a 5/6 green Treefolk creature that's still a land."] },
   { key = "livio, oathsworn sentinel", class = "wrong_player", clauses = ["{1}{W}: Choose another target creature. Its controller may exile it with an aegis counter on it.", "{2}{W}, {T}: Return all exiled cards with aegis counters on them to the battlefield under their owners' control."] },
   { key = "lizard, connors's curse", class = "missing_effect", clauses = ["Lizard Formula — When Lizard, Connors's Curse enters, up to one other target creature loses all abilities and becomes a green Lizard creature with base power and toughness 4/4."] },
   { key = "lizardfolk librarians", class = "extra_effect", clauses = ["Double team"] },
@@ -2925,7 +2922,6 @@ face = [
   { key = "varchild, betrayer of kjeldor", class = "wrong_object", clauses = ["Survivors your opponents control can't block", "and they can't attack you or planeswalkers you control."] },
   { key = "vassal's duty", class = "target_wrong", clauses = ["{1}: The next 1 damage that would be dealt to target legendary creature you control this turn is dealt to you instead."] },
   { key = "vastwood animist", class = "extra_effect", clauses = ["It's still a land."] },
-  { key = "vastwood zendikon", class = "wrong_object", clauses = ["Enchanted land is a 6/4 green Elemental creature. It's still a land."] },
   { key = "vault 101: birthday party", class = "wrong_zone", clauses = ["II, III — You may put an Aura or Equipment card from your hand or graveyard onto the battlefield."] },
   { key = "vault 21: house gambit", class = "dropped_qualifier", clauses = ["III — Reveal up to five nonland cards from your hand.", "For each of those cards that has the same mana value as another card revealed this way, create a Treasure token."] },
   { key = "vectis gloves", class = "missing_effect", clauses = ["and has artifact landwalk."] },
