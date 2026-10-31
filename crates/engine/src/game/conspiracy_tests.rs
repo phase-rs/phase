@@ -9,8 +9,8 @@
 //! face-up conspiracy's command-zone continuous statics gather like an emblem's.
 
 use super::conspiracy::{
-    conspiracies_in_command_zone, functions_from_command_zone, is_conspiracy,
-    start_with_conspiracy, turn_hidden_agenda_face_up,
+    card_has_hidden_agenda, conspiracies_in_command_zone, functions_from_command_zone,
+    is_conspiracy, start_with_conspiracy, turn_hidden_agenda_face_up,
 };
 use super::functioning_abilities::{
     active_static_definitions, active_trigger_definitions, game_functioning_statics,
@@ -352,4 +352,54 @@ fn face_down_conspiracy_is_not_indexed_as_command_source() {
         !state.static_source_index.command_sources.contains(&id),
         "CR 905.4a: a face-down hidden-agenda conspiracy does not yet function"
     );
+}
+
+#[test]
+fn card_has_hidden_agenda_detects_agenda_text() {
+    let mut face = CardFace::default();
+    face.card_type.core_types.push(CoreType::Conspiracy);
+    face.oracle_text =
+        Some("Hidden agenda (Start the game with this conspiracy face down...)".to_string());
+    assert!(card_has_hidden_agenda(&face));
+
+    face.oracle_text =
+        Some("Double agenda (Start the game with this conspiracy face down...)".to_string());
+    assert!(card_has_hidden_agenda(&face));
+
+    face.oracle_text = Some("At the beginning of your upkeep, draw a card.".to_string());
+    assert!(!card_has_hidden_agenda(&face));
+
+    // Non-conspiracy with "hidden agenda" in text is not a hidden agenda conspiracy
+    let mut creature_face = CardFace::default();
+    creature_face.card_type.core_types.push(CoreType::Creature);
+    creature_face.oracle_text = Some("Hidden agenda".to_string());
+    assert!(!card_has_hidden_agenda(&creature_face));
+}
+
+#[test]
+fn face_down_conspiracy_visibility_redacted_for_opponent_revealed_for_controller() {
+    let mut state = GameState::new_two_player(7);
+    let face = synthesized_conspiracy_face(vec![], vec![]);
+    let id = create_conspiracy_object(&mut state, "Brago's Favor", &face, P0);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.back_face = Some(crate::game::printed_cards::snapshot_object_face(obj));
+    start_with_conspiracy(&mut state, id, true);
+
+    // Controller projection sees the face-down conspiracy revealed
+    let p0_view = crate::game::visibility::filter_state_for_viewer(&state, P0);
+    let p0_card = p0_view.objects.get(&id).unwrap();
+    assert_eq!(p0_card.name, "Brago's Favor");
+
+    // Opponent projection has identity redacted
+    let p1_view = crate::game::visibility::filter_state_for_viewer(&state, P1);
+    let p1_card = p1_view.objects.get(&id).unwrap();
+    assert_eq!(p1_card.name, crate::game::visibility::HIDDEN_CARD_NAME);
+
+    // Turn face up
+    assert!(turn_hidden_agenda_face_up(&mut state, id, P0));
+
+    // Now opponent also sees the card
+    let p1_view_after = crate::game::visibility::filter_state_for_viewer(&state, P1);
+    let p1_card_after = p1_view_after.objects.get(&id).unwrap();
+    assert_eq!(p1_card_after.name, "Brago's Favor");
 }

@@ -1120,7 +1120,13 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
     }
 
     // command_zone: Locked — CR 408.1. No default.
-    if config.command_zone != rules.command_zone {
+    // In Limited formats, the command zone is optional (e.g. for Conspiracy Draft per CR 905.4).
+    let command_zone_valid = if config.format == GameFormat::Limited {
+        true
+    } else {
+        config.command_zone == rules.command_zone
+    };
+    if !command_zone_valid {
         return Err(format!(
             "FormatConfig.command_zone is {}, but {} requires exactly {} — a built-in format's \
              command-zone usage is fixed by the Comprehensive Rules",
@@ -3550,6 +3556,14 @@ impl FormatConfig {
             allow_debug_actions: false,
             custom_rules: None,
         }
+    }
+
+    /// Limited format with an enabled command zone (CR 905: Conspiracy Draft).
+    /// Command zone cards exist separately from the normal 40-card deck.
+    pub fn limited_with_command_zone() -> Self {
+        let mut config = Self::limited();
+        config.command_zone = true;
+        config
     }
 
     /// Momir's Madness: 60 snow basic lands (12 each of Snow-Covered Plains/

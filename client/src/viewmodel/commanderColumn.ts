@@ -24,7 +24,9 @@ export function commandZoneLeaders(gameState: GameState, playerId: PlayerId): Ga
     .filter(
       (obj): obj is GameObject =>
         obj != null &&
-        (obj.is_commander === true || obj.signature_spell != null) &&
+        (obj.is_commander === true ||
+          obj.signature_spell != null ||
+          Boolean(obj.card_types?.core_types?.includes("Conspiracy"))) &&
         obj.owner === playerId &&
         obj.zone === "Command",
     );

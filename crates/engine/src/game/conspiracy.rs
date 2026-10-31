@@ -30,6 +30,7 @@
 //! draft engine.
 
 use crate::game::game_object::GameObject;
+use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -39,6 +40,17 @@ use crate::types::zones::Zone;
 /// CR 905: True when the object is a conspiracy card.
 pub fn is_conspiracy(obj: &GameObject) -> bool {
     obj.card_types.core_types.contains(&CoreType::Conspiracy)
+}
+
+/// CR 905.4a / CR 702.106a / CR 702.106f: Returns true if the card has hidden agenda or double agenda.
+pub fn card_has_hidden_agenda(face: &CardFace) -> bool {
+    if !face.card_type.core_types.contains(&CoreType::Conspiracy) {
+        return false;
+    }
+    face.oracle_text.as_ref().is_some_and(|text| {
+        let lower = text.to_lowercase();
+        lower.contains("hidden agenda") || lower.contains("double agenda")
+    })
 }
 
 /// CR 905.4 + CR 113.6b: True when this object is a conspiracy that is currently
@@ -126,10 +138,17 @@ pub fn turn_hidden_agenda_face_up(state: &mut GameState, id: ObjectId, player: P
     let Some(obj) = state.objects.get_mut(&id) else {
         return false;
     };
-    if !(obj.zone == Zone::Command && obj.face_down && obj.owner == player && is_conspiracy(obj)) {
+    if !(obj.zone == Zone::Command
+        && obj.face_down
+        && (obj.owner == player || obj.controller == player)
+        && is_conspiracy(obj))
+    {
         return false;
     }
     obj.face_down = false;
+    if let Some(back_face) = obj.back_face.take() {
+        crate::game::printed_cards::apply_back_face_to_object(obj, back_face);
+    }
     crate::game::layers::mark_layers_full(state);
     true
 }

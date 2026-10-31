@@ -661,6 +661,32 @@ pub fn create_commander_from_card_face(
     obj_id
 }
 
+/// Create a non-commander command zone GameObject from a CardFace (e.g. Conspiracy in limited formats per CR 905).
+/// Conspiracies with hidden agenda enter face down (CR 905.4a / CR 702.106); others enter face up (CR 905.4).
+pub fn create_command_zone_card_from_card_face(
+    state: &mut GameState,
+    card_face: &CardFace,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let obj_id = create_object(state, card_id, owner, card_face.name.clone(), Zone::Command);
+
+    let obj = state.objects.get_mut(&obj_id).expect("just created");
+    apply_card_face_to_object(obj, card_face);
+    obj.is_commander = false;
+    obj.controller = owner;
+
+    if crate::game::conspiracy::is_conspiracy(obj) {
+        let hidden_agenda = crate::game::conspiracy::card_has_hidden_agenda(card_face);
+        if hidden_agenda {
+            obj.back_face = Some(crate::game::printed_cards::snapshot_object_face(obj));
+        }
+        crate::game::conspiracy::start_with_conspiracy(state, obj_id, hidden_agenda);
+    }
+
+    obj_id
+}
+
 /// CR 717.2: Create an Attraction in the supplementary deck (command zone).
 pub fn create_attraction_deck_card(
     state: &mut GameState,
@@ -1086,27 +1112,51 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     // `commander` slot must neither place a command-zone object nor net the
     // slot out of the library, or a populated-but-inert `commander` slot would
     // add a 61st card to a constructed game.
-    let commander_decks: Vec<(PlayerId, &[DeckEntry])> = if !place_commanders {
-        Vec::new()
-    } else {
-        std::iter::once((PlayerId(0), payload.player.commander.as_slice()))
-            .chain(std::iter::once((
-                PlayerId(1),
-                payload.opponent.commander.as_slice(),
-            )))
-            .chain(
-                payload
-                    .ai_decks
-                    .iter()
-                    .enumerate()
-                    .map(|(i, d)| (PlayerId((2 + i) as u8), d.commander.as_slice())),
-            )
-            .collect()
-    };
-    for (owner, entries) in commander_decks {
-        for entry in entries {
-            for _ in 0..entry.count {
-                create_commander_from_card_face(state, &entry.card, owner);
+    if place_commanders {
+        let commander_decks: Vec<(PlayerId, &[DeckEntry])> =
+            std::iter::once((PlayerId(0), payload.player.commander.as_slice()))
+                .chain(std::iter::once((
+                    PlayerId(1),
+                    payload.opponent.commander.as_slice(),
+                )))
+                .chain(
+                    payload
+                        .ai_decks
+                        .iter()
+                        .enumerate()
+                        .map(|(i, d)| (PlayerId((2 + i) as u8), d.commander.as_slice())),
+                )
+                .collect();
+        for (owner, entries) in commander_decks {
+            for entry in entries {
+                for _ in 0..entry.count {
+                    create_commander_from_card_face(state, &entry.card, owner);
+                }
+            }
+        }
+    } else if state.format_config.command_zone {
+        // Optional command zone for limited / non-commander formats (e.g. Conspiracy Draft CR 905).
+        // Command zone cards exist separately from the normal deck (not netted against main deck,
+        // and not marked as commanders).
+        let command_decks: Vec<(PlayerId, &[DeckEntry])> =
+            std::iter::once((PlayerId(0), payload.player.commander.as_slice()))
+                .chain(std::iter::once((
+                    PlayerId(1),
+                    payload.opponent.commander.as_slice(),
+                )))
+                .chain(
+                    payload
+                        .ai_decks
+                        .iter()
+                        .enumerate()
+                        .map(|(i, d)| (PlayerId((2 + i) as u8), d.commander.as_slice())),
+                )
+                .collect();
+        for (owner, entries) in command_decks {
+            for entry in entries {
+                for _ in 0..entry.count {
+                    create_command_zone_card_from_card_face(state, &entry.card, owner);
+                }
             }
         }
     }

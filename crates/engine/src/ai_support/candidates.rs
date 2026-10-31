@@ -5003,6 +5003,26 @@ pub(crate) fn priority_actions_with_probe(
         }
     }
 
+    // CR 702.106c / CR 116.2k: turning a face-down hidden agenda conspiracy in
+    // the command zone face up is a special action available any time its
+    // controller has priority.
+    for &object_id in &state.command_zone {
+        let Some(object) = state.objects.get(&object_id) else {
+            continue;
+        };
+        if !object.face_down
+            || (object.controller != player && object.owner != player)
+            || !crate::game::conspiracy::is_conspiracy(object)
+        {
+            continue;
+        }
+        actions.push(candidate(
+            GameAction::TurnFaceUp { object_id, x: 0 },
+            TacticalClass::Ability,
+            Some(player),
+        ));
+    }
+
     // CR 702.143a-b: Foretell is a priority-time special action from hand
     // during the player's own turn. It does not use the stack; the runtime
     // handler pays {2}, exiles the card, marks it foretold, and grants the

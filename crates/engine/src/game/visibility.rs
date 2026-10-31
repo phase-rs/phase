@@ -15,7 +15,7 @@ use crate::types::zones::{ExileCostSourceZone, Zone};
 use super::players;
 use super::turn_control;
 
-const HIDDEN_CARD_NAME: &str = "Hidden Card";
+pub const HIDDEN_CARD_NAME: &str = "Hidden Card";
 
 /// Resolution-only look-result provenance is never part of a viewer snapshot.
 /// The engine retains it for the active loop, while clients need only the
@@ -1059,6 +1059,7 @@ pub(crate) fn identity_projection_for_viewer(
         .battlefield
         .iter()
         .copied()
+        .chain(state.command_zone.iter().copied())
         .chain(
             state
                 .battlefield
@@ -1156,6 +1157,7 @@ pub(crate) fn identity_projection_for_unseated_viewer(
     for object_id in state
         .battlefield
         .iter()
+        .chain(state.command_zone.iter())
         .chain(state.stack.iter().map(|entry| &entry.id))
     {
         if state
