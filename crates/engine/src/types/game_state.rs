@@ -28041,7 +28041,7 @@ pub(crate) struct IngressLifeWindow {
 /// unrepresentable-player-resource-change authority. A public action boundary
 /// rejects and restores; the ordinary fallback outside one skips the change for
 /// compatibility. A life replacement quantity is never recorded: it lands on
-/// `u32::MAX` (CR 119.3), which the life settle carries exactly while the life
+/// `u32::MAX` (an engine limit, not a rule), which the life settle carries exactly while the life
 /// total saturates at its `i32` limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReplacementQuantityOverflow {

@@ -6689,8 +6689,9 @@ enum TakeRoute {
 /// the mark would refill restricted mana without its restriction (CR 106.6), it batches none of
 /// the damage a period marks (CR 120.3e), its mint makes bare tapped copies under the proposer,
 /// without a keyword, delayed trigger, other controller or certified departure the cover admitted
-/// as growth, its batched collapse must not miss what the board observes, and a signed proposal's
-/// departures are seen only as its repetitions cross them (CR 704.3).
+/// as growth, its batched collapse must not miss what the board observes, its batched life gain
+/// must fit under `i32::MAX` (an engine limit, not a rule) from the take's board, and a signed
+/// proposal's departures are seen only as its repetitions cross them (CR 704.3).
 fn take_route(
     state: &GameState,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
@@ -6713,7 +6714,7 @@ fn take_route(
         return TakeRoute::Replay;
     }
     let growth = PeriodGrowth::derive(frames.as_ref(), proposal.proposer);
-    if growth.collapse_is_replay(state, proposal) {
+    if growth.collapse_is_replay(state, proposal, n) {
         TakeRoute::Replay
     } else {
         TakeRoute::Mark(Box::new(growth))
@@ -6764,11 +6765,13 @@ impl PeriodGrowth {
     }
 
     /// CR 732.2c: whether the batched collapse would land a state other than performing the
-    /// period does, so the take performs it instead. Read off the items it would register.
+    /// period `n` times does, so the take performs it instead. Read off the items it would
+    /// register.
     fn collapse_is_replay(
         &self,
         state: &GameState,
         proposal: &crate::analysis::loop_check::ShortcutProposal,
+        n: u32,
     ) -> bool {
         use crate::analysis::resource as res;
         use crate::types::game_state::PersistentAxisMaterialization as Item;
@@ -6794,6 +6797,11 @@ impl PeriodGrowth {
         // once per cycle.
         let counter_observed = counters && res::counter_growth_is_observed(state);
         let life_observed = life && res::life_growth_is_observed(state);
+        // CR 732.2c + CR 119.3: the take leaves the game as if its cycles were performed now. A
+        // batched life gain the engine's `i32::MAX` limit would hold back from this board would
+        // instead saturate against the board the step ends on, so a life change in between would
+        // not commute with it; performing the cycles keeps every later change exact.
+        let life_passes_the_cap = life && self.life_lump_passes_the_cap(state, n);
         // CR 603.6a: the minted tokens' entries would re-earn the batched life.
         let life_etb_sourced =
             life && token_profile.is_some() && res::board_has_functioning_etb_trigger(state);
@@ -6808,9 +6816,38 @@ impl PeriodGrowth {
             || (!self.batched.is_empty()
                 && (counter_observed
                     || life_observed
+                    || life_passes_the_cap
                     || life_etb_sourced
                     || cast_sourced
                     || token_growth_needs_replay))
+    }
+
+    /// CR 119.3 + CR 810.9: whether the life the batched items gain over `n` cycles is more
+    /// than a total they adjust can take from `state` under `i32::MAX`. Each item counts against
+    /// the total its player's life changes adjust (`players::life_change_total`); in Two-Headed
+    /// Giant both teammates' items count against their one shared total (CR 810.9a), keyed as
+    /// `players::aggregate_over_teams` keys a team. The edit authority's own saturation
+    /// (`arithmetic::saturating_life_total`) answers whether that total moves by the whole sum.
+    /// The sums saturate in `i64`, and a saturated sum passes any cap.
+    fn life_lump_passes_the_cap(&self, state: &GameState, n: u32) -> bool {
+        use crate::game::{arithmetic, players, topology};
+        use crate::types::game_state::PersistentAxisMaterialization as Item;
+        let mut lumps: BTreeMap<topology::TeamId, (i64, i64)> = BTreeMap::new();
+        for (player, per_cycle_delta) in self.batched.iter().filter_map(|item| match item {
+            Item::Life {
+                player,
+                per_cycle_delta,
+            } => Some((*player, *per_cycle_delta)),
+            Item::Tokens(_) | Item::Counters(_) => None,
+        }) {
+            let (_, lump) = lumps
+                .entry(topology::shared_resource_dedup_key(state, player))
+                .or_insert_with(|| (players::life_change_total(state, player), 0));
+            *lump = lump.saturating_add(i64::from(per_cycle_delta).saturating_mul(i64::from(n)));
+        }
+        lumps
+            .values()
+            .any(|&(total, lump)| arithmetic::saturating_life_total(total, lump) - total != lump)
     }
 }
 
@@ -8010,7 +8047,9 @@ fn current_period_counter_growth(
 /// `i32::MAX`, the larger of that gain and the rules amount the period carried (the stored
 /// gain alone when a per-turn counter fell or ends at `u32::MAX`). The
 /// batched-collapse δ source for the life axis. Empty when no player gains across the period; a
-/// total held at `i32::MAX` throughout gains the rules amount its counters read (CR 732.2c).
+/// total held at `i32::MAX` throughout gains the rules amount its counters read (CR 732.2c). A
+/// gain that cannot fit under `i32::MAX` from the take's board over the take's count is not
+/// batched: the take performs the period instead (`PeriodGrowth::collapse_is_replay`).
 /// Only reached in the UNOBSERVED batched route (the firewall gates it).
 fn current_period_life_growth(before: &GameState, after: &GameState) -> Vec<(PlayerId, u32)> {
     crate::analysis::resource::grown_life_deltas(before, after)
@@ -30704,5 +30743,128 @@ mod legacy_copy_announcement_tests {
             r.act(GameAction::PassPriority).expect("resolve");
         }
         assert_eq!(elementals(&r), 1, "no Elemental for the abandoned copy");
+    }
+}
+
+#[cfg(test)]
+mod period_growth_life_cap_tests {
+    use super::PeriodGrowth;
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::{GameState, PersistentAxisMaterialization};
+    use crate::types::player::PlayerId;
+
+    /// A period growth that batches only these `(seat, per-cycle gain)` life items.
+    fn life_growth(items: &[(u8, u32)]) -> PeriodGrowth {
+        PeriodGrowth {
+            fodder: None,
+            batched: items
+                .iter()
+                .map(
+                    |&(seat, per_cycle_delta)| PersistentAxisMaterialization::Life {
+                        player: PlayerId(seat),
+                        per_cycle_delta,
+                    },
+                )
+                .collect(),
+        }
+    }
+
+    /// CR 119.3 + CR 810.9a: a batched life lump passes the cap exactly where the total it
+    /// adjusts cannot take all of it under `i32::MAX`: the item's own player's total, and in
+    /// Two-Headed Giant the team's shared total, against which both members' items count
+    /// together.
+    #[test]
+    fn a_life_lump_passes_the_cap_exactly_where_its_total_cannot_take_it() {
+        // (name, life fields, items, cycles, passes)
+        type Row = (&'static str, Vec<i32>, Vec<(u8, u32)>, u32, bool);
+        let max = i32::MAX;
+        let duel: [Row; 7] = [
+            (
+                "reaches the cap exactly",
+                vec![max - 6, 20],
+                vec![(0, 2)],
+                3,
+                false,
+            ),
+            ("one past the cap", vec![max - 5, 20], vec![(0, 2)], 3, true),
+            ("held at the cap", vec![max, 20], vec![(0, 5)], 1, true),
+            ("below the cap", vec![20, 20], vec![(0, 2)], 1000, false),
+            (
+                "an amount past i64",
+                vec![20, 20],
+                vec![(0, u32::MAX)],
+                u32::MAX,
+                true,
+            ),
+            ("no life item", vec![max, 20], vec![], 1000, false),
+            (
+                "another seat's item",
+                vec![max, 20],
+                vec![(1, 2)],
+                1000,
+                false,
+            ),
+        ];
+        let team: [Row; 6] = [
+            (
+                "both members' items fit",
+                vec![max - 1, -20, 15, 15],
+                vec![(0, 1), (1, 1)],
+                10,
+                false,
+            ),
+            (
+                "both members' items pass together",
+                vec![max - 1, -20, 15, 15],
+                vec![(0, 1), (1, 1)],
+                11,
+                true,
+            ),
+            (
+                "one member's item fits",
+                vec![max - 1, -20, 15, 15],
+                vec![(0, 1)],
+                11,
+                false,
+            ),
+            (
+                "the other team's item does not count",
+                vec![max - 1, -20, 15, 15],
+                vec![(0, 1), (2, 15)],
+                11,
+                false,
+            ),
+            (
+                "own field at the cap, the team has room",
+                vec![max, -100, 15, 15],
+                vec![(0, 5)],
+                3,
+                false,
+            ),
+            (
+                "the team's total already past i32",
+                vec![max, 10, 15, 15],
+                vec![(0, 1)],
+                1,
+                true,
+            ),
+        ];
+        let rows = duel
+            .into_iter()
+            .map(|row| (GameState::new_two_player(7), row))
+            .chain(
+                team.into_iter()
+                    .map(|row| (GameState::new(FormatConfig::two_headed_giant(), 4, 7), row)),
+            );
+        for (mut state, (name, fields, items, cycles, passes)) in rows {
+            for (player, life) in state.players.iter_mut().zip(fields) {
+                player.life = life;
+            }
+            assert_eq!(
+                life_growth(&items).life_lump_passes_the_cap(&state, cycles),
+                passes,
+                "{name}"
+            );
+        }
     }
 }

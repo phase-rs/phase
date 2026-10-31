@@ -4548,7 +4548,7 @@ enum ScaledQuantity {
     Prevented,
     /// Engine numeric capacity: a `Times` / `Plus` result past `u32`. The
     /// player-counter and energy applier records it for the settle step instead
-    /// of clamping it; a life applier lands it on `u32::MAX` (CR 119.3). Not a
+    /// of clamping it; a life applier lands it on `u32::MAX` (an engine limit, not a rule). Not a
     /// CR 101.3 impossibility.
     Unrepresentable,
 }
@@ -17404,7 +17404,7 @@ mod tests {
         );
     }
 
-    /// CR 119.3: a `Times` / `Plus` or computed life gain past `u32` lands on
+    /// Engine limit, not a rule: a `Times` / `Plus` or computed life gain past `u32` lands on
     /// `u32::MAX` and records nothing (a player-counter or energy count still
     /// records: `add_counter_applier_player_and_energy_overflow_is_recorded_not_clamped`).
     /// Results within `u32` are exact.

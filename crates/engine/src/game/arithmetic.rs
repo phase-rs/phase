@@ -114,8 +114,10 @@ pub enum LifeDirection {
 /// the player's own life, or in Two-Headed Giant the team's exact shared total,
 /// which a state this function never wrote may hold outside `i32`. To refuse at
 /// a limit instead of saturating, return `None` past it (`Option<i64>`) and
-/// have the Life arm, its only caller, map `None` to `ResourceOverflow`; the
-/// settle's retained refusal routing turns that into the refusal.
+/// have the Life arm, the one caller that stores a total, map `None` to
+/// `ResourceOverflow`; the settle's retained refusal routing turns that into
+/// the refusal, and each caller that only asks how far a change moves a total
+/// must then answer for `None` too.
 #[inline]
 pub fn saturating_life_total(current: i64, delta: i64) -> i64 {
     let moved = current.saturating_add(delta);

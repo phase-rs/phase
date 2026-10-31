@@ -6197,11 +6197,13 @@ pub(crate) fn grown_beneficial_counter_deltas(
 /// player's life total at `i32::MAX` (the team's shared total in a shared-life format,
 /// CR 810.4 + CR 810.9a). There the cap holds the stored gain below what the period gained —
 /// to 0 when the total starts the period at the cap too — so δ is the rules amount the period
-/// carried, read from the player's per-turn counters ([`life_counter_change`]). A taken
-/// shortcut leaves the game as if every elided cycle were performed, so where the period only
-/// gains life the lump gain then moves the gained counter and reports `LifeChanged` as
-/// performing the cycles would (`game::arithmetic::reported_life_magnitude`); a period that
-/// also loses life is batched at its net, gained minus lost. A counter that fell or ends at
+/// carried, read from the player's per-turn counters ([`life_counter_change`]); a period that
+/// also loses life reads its net, gained minus lost. A taken shortcut leaves the game as if
+/// every elided cycle were performed at the take, and a lump the cap would hold back from the
+/// take's board would saturate against the board the step ends on instead, so such a take
+/// performs its cycles rather than batching them (`game::engine`'s
+/// `PeriodGrowth::collapse_is_replay`): at the cap δ decides that route, and the counters and
+/// `LifeChanged` then move as performing moves them. A counter that fell or ends at
 /// `u32::MAX` gives no reading, so δ is the stored gain, which stays the floor: the lump must
 /// still take the total where performing the cycles would. A player whose δ is not positive is
 /// not returned, and below the cap every δ is the stored gain, exactly. δ is read per player,

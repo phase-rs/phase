@@ -7,10 +7,10 @@
 //! team's shared total (CR 810.4 + CR 810.9). A life replacement quantity past
 //! `u32` lands on `u32::MAX`. A mandatory life-gain loop at the cap is drawn
 //! (CR 104.4b + CR 732.4), as is a mandatory loop that drains a seat held at
-//! `i32::MIN`; an optional one is never drawn or offered a shortcut; a
-//! shortcut's lump gain past `i32::MAX` saturates; and a shortcut whose period
-//! crosses the cap or is held at it collapses at the rules amount, as performing
-//! its cycles would (CR 732.2c).
+//! `i32::MIN`; an optional one is never drawn or offered a shortcut; and a
+//! shortcut whose gain cannot fit under `i32::MAX` from the board it is taken on
+//! is taken by performing its cycles, so its counters, events and total end as
+//! performing them leaves them, even after a later life change (CR 732.2c).
 
 use engine::analysis::decision_template::IterationCount;
 use engine::analysis::loop_check::ShortcutResponse;
@@ -1486,8 +1486,9 @@ fn cycle_to_the_shortcut_offer(
 }
 
 /// Answers each `RespondToShortcut` with `Accept`, asserting that the
-/// responders are exactly `expected`, in order.
-fn accept_for_every_responder(runner: &mut GameRunner, expected: &[PlayerId]) {
+/// responders are exactly `expected`, in order; returns every answer's events.
+fn accept_for_every_responder(runner: &mut GameRunner, expected: &[PlayerId]) -> Vec<GameEvent> {
+    let mut events = Vec::new();
     for &responder in expected {
         let WaitingFor::RespondToShortcut { player, .. } = &runner.state().waiting_for else {
             panic!(
@@ -1496,11 +1497,14 @@ fn accept_for_every_responder(runner: &mut GameRunner, expected: &[PlayerId]) {
             );
         };
         assert_eq!(*player, responder);
-        runner
-            .act(GameAction::RespondToShortcut {
-                response: ShortcutResponse::Accept,
-            })
-            .expect("accepting the shortcut is accepted");
+        events.extend(
+            runner
+                .act(GameAction::RespondToShortcut {
+                    response: ShortcutResponse::Accept,
+                })
+                .expect("accepting the shortcut is accepted")
+                .events,
+        );
     }
     assert!(
         !matches!(
@@ -1508,6 +1512,20 @@ fn accept_for_every_responder(runner: &mut GameRunner, expected: &[PlayerId]) {
             WaitingFor::RespondToShortcut { .. }
         ),
         "no further responder: {:?}",
+        runner.state().waiting_for
+    );
+    events
+}
+
+/// Passes to the step boundary and asserts that it asks no collapse amount.
+fn pass_to_a_boundary_without_a_collapse(runner: &mut GameRunner) {
+    pass_to_next_boundary(runner);
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayAmountChoice { .. }
+        ),
+        "the boundary asks no collapse amount, got {:?}",
         runner.state().waiting_for
     );
 }
@@ -1920,12 +1938,13 @@ fn a_mandatory_drain_loop_against_a_seat_held_at_i32_min_is_drawn() {
     assert_eq!(runner.state().players[0].life_gained_this_turn, 2);
 }
 
-/// CR 119.3 + CR 732.1b: a shortcut of 1,000 Lifedynamo cycles at 3,000,000
-/// life each gains 3,000,000,000 in one lump at the step boundary: the total
-/// stops at `i32::MAX`, the gained counter counts the whole lump, and the event
-/// reports the rules amount clamped to its field.
+/// CR 119.3 + CR 732.2c: a shortcut of 1,000 Lifedynamo cycles at 3,000,000
+/// life each gains 3,000,000,000, more than the total can take under
+/// `i32::MAX`, so the take performs the cycles: nothing is stashed, the step
+/// boundary asks no collapse amount, the total stops at `i32::MAX`, the gained
+/// counter counts every cycle, and each cycle reports its 3,000,000.
 #[test]
-fn a_life_shortcut_lump_gain_past_i32_max_saturates() {
+fn a_life_shortcut_gaining_past_i32_max_is_performed_at_the_take() {
     let (mut runner, dynamo, indices) = lifedynamo_board(two_player(), &[(P0, 20)], 3_000_000, 0);
     cycle_to_the_shortcut_offer(
         &mut runner,
@@ -1942,37 +1961,37 @@ fn a_life_shortcut_lump_gain_past_i32_max_saturates() {
             template: None,
         })
         .expect("the shortcut declaration is accepted");
-    accept_for_every_responder(&mut runner, &[P1]);
-    assert_eq!(
-        stash(&runner),
-        Some(&vec![PersistentAxisMaterialization::Life {
-            player: P0,
-            per_cycle_delta: 3_000_000,
-        }])
-    );
+    let events = accept_for_every_responder(&mut runner, &[P1]);
 
-    let events = collapse(&mut runner, 1000);
-
+    assert_eq!(stash(&runner), None, "nothing is stashed");
     assert_eq!(runner.life(P0), i32::MAX);
     assert_eq!(
         runner.state().players[0].life_gained_this_turn,
         3_003_000_000
     );
-    assert_eq!(life_changes(&events), vec![(P0, i32::MAX, Some(i32::MAX))]);
+    let changes = life_changes(&events);
+    assert_eq!(changes.len(), 1000, "one LifeChanged per cycle");
+    assert!(changes
+        .iter()
+        .all(|&(player, amount, _)| player == P0 && amount == 3_000_000));
+    assert_eq!(changes.first(), Some(&(P0, 3_000_000, Some(6_000_020))));
+    assert_eq!(changes.last(), Some(&(P0, 3_000_000, Some(i32::MAX))));
     assert!(is_priority(runner.state()));
+    pass_to_a_boundary_without_a_collapse(&mut runner);
+    assert_eq!(runner.life(P0), i32::MAX);
 }
 
 /// CR 104.4b + CR 732.2a + CR 732.2c: at `i32::MAX` a Lifedynamo cycle's gain
 /// cannot grow the stored total, so the shortcut offer carries no life axis.
-/// Accepting it still stashes the cycle's rules amount, and the boundary
-/// collapse gains 3,000,000,000 in one lump: the total stays at `i32::MAX`, the
-/// gained counter ends where performing the 1,000 cycles leaves it, and the one
-/// event reports the lump clamped to its field. Residual: with the gained
-/// counter pinned at `u32::MAX` the period carries no reading, so nothing is
-/// stashed and the boundary asks no collapse amount.
+/// The cycles' 3,000,000,000 cannot fit under the cap, so accepting performs
+/// the 1,000 cycles at the take: nothing is stashed, the total stays at
+/// `i32::MAX`, the gained counter counts every cycle, and each cycle reports
+/// its 3,000,000. Residual: with the gained counter pinned at `u32::MAX` the
+/// period carries no reading, so nothing is stashed and the boundary asks no
+/// collapse amount.
 #[test]
 fn a_life_shortcut_offer_at_the_cap_carries_no_life_axis() {
-    // Row A: the cycle's rules amount is stashed and collapses in one lump.
+    // Row A: the take performs the cycles.
     let (mut runner, dynamo, indices) =
         lifedynamo_board(two_player(), &[(P0, i32::MAX)], 3_000_000, 0);
     cycle_to_the_shortcut_offer(
@@ -1987,26 +2006,21 @@ fn a_life_shortcut_offer_at_the_cap_carries_no_life_axis() {
             template: None,
         })
         .expect("the shortcut declaration is accepted");
-    accept_for_every_responder(&mut runner, &[P1]);
-    assert_eq!(
-        stash(&runner),
-        Some(&vec![PersistentAxisMaterialization::Life {
-            player: P0,
-            per_cycle_delta: 3_000_000,
-        }]),
-        "the cycle's rules amount is stashed"
-    );
+    let events = accept_for_every_responder(&mut runner, &[P1]);
 
-    let events = collapse(&mut runner, 1000);
-
+    assert_eq!(stash(&runner), None, "nothing is stashed");
     assert_eq!(runner.life(P0), i32::MAX);
     assert_eq!(
         runner.state().players[0].life_gained_this_turn,
         3_003_000_000
     );
-    assert_eq!(life_changes(&events), vec![(P0, i32::MAX, Some(i32::MAX))]);
+    assert_eq!(
+        life_changes(&events),
+        vec![(P0, 3_000_000, Some(i32::MAX)); 1000],
+        "one LifeChanged per cycle"
+    );
     assert!(is_priority(runner.state()));
-    assert_eq!(stash(&runner), None, "the stash is cleared");
+    pass_to_a_boundary_without_a_collapse(&mut runner);
 
     // Row B, residual: the gained counter is pinned at `u32::MAX`.
     let (mut runner, dynamo, indices) =
@@ -2044,16 +2058,16 @@ fn a_life_shortcut_offer_at_the_cap_carries_no_life_axis() {
     assert_eq!(runner.state().players[0].life_gained_this_turn, u32::MAX);
 }
 
-/// CR 119.3 + CR 732.1b: each of the 1000 elided cycles gains 2 life, so the
-/// collapse gains 2000 and reports 2000 even though the stored total stops at
-/// `i32::MAX`. The period is measured from one below the cap, where the cap
-/// holds the stored gain to 1; in Two-Headed Giant the cap is the team's shared
-/// total (CR 810.4). Control: from 22 the stored gain is the rules amount.
-/// Residual: with the gained counter pinned at `u32::MAX` the period carries
-/// no reading, so the collapse falls back to the stored gain of 1 per cycle
-/// while the total still lands on `i32::MAX`.
+/// CR 119.3 + CR 732.2c: each of 1000 cycles gains 2 life. From one below the
+/// cap their 2,000 cannot fit under `i32::MAX`, so the take performs the
+/// cycles: nothing is stashed, the boundary asks no collapse amount, the total
+/// stops at the cap, the gained counter grows by 2,000 and each cycle reports 2.
+/// In Two-Headed Giant the cap is the team's shared total (CR 810.4 +
+/// CR 810.9a). With the gained counter pinned at `u32::MAX` the counter stays
+/// pinned and each performed cycle still reports 2. Control: from 22 the gain
+/// fits, so it is stashed and collapses in one lump of 2,000 at the boundary.
 #[test]
-fn a_life_shortcut_period_crossing_the_cap_collapses_at_the_rules_amount() {
+fn a_life_shortcut_period_crossing_the_cap_gains_the_rules_amount() {
     struct Row {
         name: &'static str,
         two_headed_giant: bool,
@@ -2062,10 +2076,11 @@ fn a_life_shortcut_period_crossing_the_cap_collapses_at_the_rules_amount() {
         unbounded: Vec<ResourceAxis>,
         p0_life_at_offer: i32,
         responders: Vec<PlayerId>,
-        per_cycle_delta: u32,
+        /// The per-cycle gain stashed at the accept, or `None` where the take
+        /// performs the cycles.
+        stashed: Option<u32>,
         p0_life_after: i32,
         gained_after: u32,
-        amount: i32,
     }
     let mana = ResourceAxis::Mana(ManaType::Colorless);
     let rows = [
@@ -2077,10 +2092,9 @@ fn a_life_shortcut_period_crossing_the_cap_collapses_at_the_rules_amount() {
             unbounded: vec![mana],
             p0_life_at_offer: i32::MAX - 1,
             responders: vec![P1],
-            per_cycle_delta: 2,
+            stashed: None,
             p0_life_after: i32::MAX,
             gained_after: 2002,
-            amount: 2000,
         },
         Row {
             name: "Two-Headed Giant team crossing the cap",
@@ -2090,10 +2104,9 @@ fn a_life_shortcut_period_crossing_the_cap_collapses_at_the_rules_amount() {
             unbounded: vec![mana],
             p0_life_at_offer: i32::MAX - 6,
             responders: vec![P1, P2, PlayerId(3)],
-            per_cycle_delta: 2,
+            stashed: None,
             p0_life_after: i32::MAX - 5,
             gained_after: 2002,
-            amount: 2000,
         },
         Row {
             name: "control below the cap",
@@ -2103,10 +2116,9 @@ fn a_life_shortcut_period_crossing_the_cap_collapses_at_the_rules_amount() {
             unbounded: vec![mana, ResourceAxis::Life(P0)],
             p0_life_at_offer: 22,
             responders: vec![P1],
-            per_cycle_delta: 2,
+            stashed: Some(2),
             p0_life_after: 2022,
             gained_after: 2002,
-            amount: 2000,
         },
         Row {
             name: "gained counter pinned at u32::MAX",
@@ -2116,10 +2128,9 @@ fn a_life_shortcut_period_crossing_the_cap_collapses_at_the_rules_amount() {
             unbounded: vec![mana],
             p0_life_at_offer: i32::MAX - 1,
             responders: vec![P1],
-            per_cycle_delta: 1,
+            stashed: None,
             p0_life_after: i32::MAX,
             gained_after: u32::MAX,
-            amount: 1000,
         },
     ];
     for row in rows {
@@ -2138,19 +2149,50 @@ fn a_life_shortcut_period_crossing_the_cap_collapses_at_the_rules_amount() {
                 template: None,
             })
             .expect("the shortcut declaration is accepted");
-        accept_for_every_responder(&mut runner, &row.responders);
-        assert_eq!(
-            stash(&runner),
-            Some(&vec![PersistentAxisMaterialization::Life {
-                player: P0,
-                per_cycle_delta: row.per_cycle_delta,
-            }]),
-            "{name}"
-        );
+        let events = accept_for_every_responder(&mut runner, &row.responders);
 
-        let events = collapse(&mut runner, 1000);
+        let changes = match row.stashed {
+            Some(per_cycle_delta) => {
+                assert_eq!(
+                    stash(&runner),
+                    Some(&vec![PersistentAxisMaterialization::Life {
+                        player: P0,
+                        per_cycle_delta,
+                    }]),
+                    "{name}"
+                );
+                let changes = life_changes(&collapse(&mut runner, 1000));
+                assert_eq!(
+                    changes,
+                    vec![(P0, 2000, Some(row.p0_life_after))],
+                    "{name}: one lump"
+                );
+                assert!(is_priority(runner.state()), "{name}");
+                assert_eq!(stash(&runner), None, "{name}: the stash is cleared");
+                changes
+            }
+            None => {
+                assert_eq!(stash(&runner), None, "{name}: nothing is stashed");
+                let changes = life_changes(&events);
+                assert_eq!(changes.len(), 1000, "{name}: one LifeChanged per cycle");
+                assert!(
+                    changes
+                        .iter()
+                        .all(|&(player, amount, _)| player == P0 && amount == 2),
+                    "{name}: each cycle reports 2"
+                );
+                assert!(is_priority(runner.state()), "{name}");
+                pass_to_a_boundary_without_a_collapse(&mut runner);
+                changes
+            }
+        };
 
         assert_eq!(runner.life(P0), row.p0_life_after, "{name}");
+        assert_eq!(
+            changes.last().and_then(|&(_, _, new_total)| new_total),
+            Some(row.p0_life_after),
+            "{name}"
+        );
         if row.two_headed_giant {
             assert_eq!(team_a_fields(runner.state()), (i32::MAX - 5, 5), "{name}");
             assert_eq!(
@@ -2164,120 +2206,263 @@ fn a_life_shortcut_period_crossing_the_cap_collapses_at_the_rules_amount() {
             row.gained_after,
             "{name}"
         );
-        assert_eq!(
-            life_changes(&events),
-            vec![(P0, row.amount, Some(row.p0_life_after))],
-            "{name}"
-        );
-        assert!(is_priority(runner.state()), "{name}");
-        assert_eq!(stash(&runner), None, "{name}: the stash is cleared");
     }
 }
 
-/// CR 732.2c + CR 119.3: a taken shortcut leaves the game as if every elided
-/// cycle were performed, so where the driven period holds P0's total at
-/// `i32::MAX` the collapse gains each elided cycle's rules amount: P0's gained
-/// counter, both stored life fields, the shared total and the sum of P0's
-/// `LifeChanged` amounts end where declining the shortcut and performing the
-/// cycles leaves them. Rows: a two-player total held at the cap; a Two-Headed
-/// Giant team whose shared total is at the cap while P0's own field has room
-/// (CR 810.4 + CR 810.9a), where P1 is credited nothing; and the crossing and
-/// below-the-cap controls. The collapse reports the lump in one `LifeChanged`
-/// event where performing reports one per cycle; the sums are equal, and a
-/// board with a `LifeChanged` observer takes the shortcut by performing its
-/// cycles instead.
+/// P0's `{0}` ability that loses 4 life, activated between a shortcut's accept
+/// and the step boundary.
+const LOSE_FOUR: &str = "{0}: You lose 4 life.";
+
+/// P0's `{0}` ability that gains 98 life, activated between a shortcut's accept
+/// and the step boundary.
+const GAIN_NINETY_EIGHT: &str = "{0}: You gain 98 life.";
+
+/// CR 732.2c + CR 119.3: a taken shortcut leaves the game as if its cycles were
+/// performed at the take, so P0's gained counter, both stored life fields, the
+/// shared total and the sum of P0's `LifeChanged` amounts end where declining
+/// the shortcut and performing the cycles leaves them, also when P0 loses or
+/// gains life after the accept and before the step boundary. Where the cycles'
+/// gain cannot fit under `i32::MAX` from the board the shortcut is taken on —
+/// a two-player total held at the cap, a Two-Headed Giant team whose shared
+/// total is at the cap while P0's own field has room (CR 810.4 + CR 810.9a),
+/// a period crossing the cap, one cycle's worth past it, and a team whose two
+/// fields both grow, summed against their one total — the take performs the
+/// cycles and stashes nothing, so a later loss stands. Where it fits — reaching
+/// the cap exactly and below it — the gain is stashed and collapses at the
+/// boundary, and a later loss or gain moves the total as it would after
+/// performing. Residual: a later change that the cap holds back after
+/// performing (a gain into the cap followed by a loss) still differs from a
+/// stashed gain that fits.
 #[test]
 fn a_life_shortcut_held_at_the_cap_matches_performing_the_cycles() {
-    const CYCLES: u32 = 3;
-    // (name, Two-Headed Giant, life fields, gain per cycle, offer's unbounded
-    // axes, responders)
-    type Row = (
-        &'static str,
-        bool,
-        Vec<(PlayerId, i32)>,
-        u32,
-        Vec<ResourceAxis>,
-        Vec<PlayerId>,
-    );
+    struct Row {
+        name: &'static str,
+        two_headed_giant: bool,
+        fields: Vec<(PlayerId, i32)>,
+        gain: u32,
+        cycles: u32,
+        unbounded: Vec<ResourceAxis>,
+        responders: Vec<PlayerId>,
+        /// P0's `{0}` abilities activated after the accept, in order.
+        between: Vec<&'static str>,
+        /// The per-cycle gain stashed at the accept, or `None` where the take
+        /// performs the cycles.
+        stashed: Option<u32>,
+        gained: u32,
+    }
     let mana = ResourceAxis::Mana(ManaType::Colorless);
-    let rows: [Row; 4] = [
-        (
-            "held at the cap",
-            false,
-            vec![(P0, i32::MAX)],
-            5,
-            vec![mana],
-            vec![P1],
-        ),
-        (
-            "Two-Headed Giant team held at the cap",
-            true,
-            vec![(P0, i32::MAX - 5), (P1, 5), (P2, 20), (PlayerId(3), 20)],
-            2,
-            vec![mana],
-            vec![P1, P2, PlayerId(3)],
-        ),
-        (
-            "crossing the cap",
-            false,
-            vec![(P0, i32::MAX - 3)],
-            2,
-            vec![mana],
-            vec![P1],
-        ),
-        (
-            "below the cap",
-            false,
-            vec![(P0, 20)],
-            2,
-            vec![mana, ResourceAxis::Life(P0)],
-            vec![P1],
-        ),
+    let life = ResourceAxis::Life(P0);
+    let team = |p0: i32, p1: i32| vec![(P0, p0), (P1, p1), (P2, 20), (PlayerId(3), 20)];
+    let rows = [
+        Row {
+            name: "held at the cap",
+            two_headed_giant: false,
+            fields: vec![(P0, i32::MAX)],
+            gain: 5,
+            cycles: 3,
+            unbounded: vec![mana],
+            responders: vec![P1],
+            between: vec![],
+            stashed: None,
+            gained: 20,
+        },
+        Row {
+            name: "held at the cap, then P0 loses 4",
+            two_headed_giant: false,
+            fields: vec![(P0, i32::MAX)],
+            gain: 5,
+            cycles: 3,
+            unbounded: vec![mana],
+            responders: vec![P1],
+            between: vec![LOSE_FOUR],
+            stashed: None,
+            gained: 20,
+        },
+        Row {
+            name: "Two-Headed Giant team held at the cap",
+            two_headed_giant: true,
+            fields: team(i32::MAX - 5, 5),
+            gain: 2,
+            cycles: 3,
+            unbounded: vec![mana],
+            responders: vec![P1, P2, PlayerId(3)],
+            between: vec![],
+            stashed: None,
+            gained: 8,
+        },
+        Row {
+            name: "Two-Headed Giant team held at the cap, then P0 loses 4",
+            two_headed_giant: true,
+            fields: team(i32::MAX - 5, 5),
+            gain: 2,
+            cycles: 3,
+            unbounded: vec![mana],
+            responders: vec![P1, P2, PlayerId(3)],
+            between: vec![LOSE_FOUR],
+            stashed: None,
+            gained: 8,
+        },
+        Row {
+            name: "crossing the cap",
+            two_headed_giant: false,
+            fields: vec![(P0, i32::MAX - 3)],
+            gain: 2,
+            cycles: 3,
+            unbounded: vec![mana],
+            responders: vec![P1],
+            between: vec![],
+            stashed: None,
+            gained: 8,
+        },
+        Row {
+            name: "crossing the cap, then P0 loses 4",
+            two_headed_giant: false,
+            fields: vec![(P0, i32::MAX - 3)],
+            gain: 2,
+            cycles: 3,
+            unbounded: vec![mana],
+            responders: vec![P1],
+            between: vec![LOSE_FOUR],
+            stashed: None,
+            gained: 8,
+        },
+        Row {
+            name: "one past the cap, then P0 loses 4",
+            two_headed_giant: false,
+            fields: vec![(P0, i32::MAX - 7)],
+            gain: 2,
+            cycles: 3,
+            unbounded: vec![mana, life],
+            responders: vec![P1],
+            between: vec![LOSE_FOUR],
+            stashed: None,
+            gained: 8,
+        },
+        Row {
+            name: "Two-Headed Giant, both fields grow, then P0 loses 4",
+            two_headed_giant: true,
+            fields: team(i32::MAX - 3, -20),
+            gain: 2,
+            cycles: 15,
+            unbounded: vec![mana, ResourceAxis::Life(P1)],
+            responders: vec![P1, P2, PlayerId(3)],
+            between: vec![LOSE_FOUR],
+            stashed: None,
+            gained: 32,
+        },
+        Row {
+            name: "reaching the cap exactly, then P0 loses 4",
+            two_headed_giant: false,
+            fields: vec![(P0, i32::MAX - 8)],
+            gain: 2,
+            cycles: 3,
+            unbounded: vec![mana, life],
+            responders: vec![P1],
+            between: vec![LOSE_FOUR],
+            stashed: Some(2),
+            gained: 8,
+        },
+        Row {
+            name: "below the cap",
+            two_headed_giant: false,
+            fields: vec![(P0, 20)],
+            gain: 2,
+            cycles: 3,
+            unbounded: vec![mana, life],
+            responders: vec![P1],
+            between: vec![],
+            stashed: Some(2),
+            gained: 8,
+        },
+        Row {
+            name: "below the cap, then P0 loses 4",
+            two_headed_giant: false,
+            fields: vec![(P0, 20)],
+            gain: 2,
+            cycles: 3,
+            unbounded: vec![mana, life],
+            responders: vec![P1],
+            between: vec![LOSE_FOUR],
+            stashed: Some(2),
+            gained: 8,
+        },
+        Row {
+            name: "stashed below the cap, then a gain carries the total to it",
+            two_headed_giant: false,
+            fields: vec![(P0, i32::MAX - 102)],
+            gain: 2,
+            cycles: 3,
+            unbounded: vec![mana, life],
+            responders: vec![P1],
+            between: vec![GAIN_NINETY_EIGHT],
+            stashed: Some(2),
+            gained: 106,
+        },
     ];
-    for (name, is_two_headed_giant, fields, gain, unbounded, responders) in rows {
+    for row in rows {
+        let name = row.name;
         let board = || {
-            let scenario = if is_two_headed_giant {
+            let mut scenario = if row.two_headed_giant {
                 two_headed_giant()
             } else {
                 two_player()
             };
-            lifedynamo_board(scenario, &fields, gain, 0)
+            let between: Vec<ObjectId> = row
+                .between
+                .iter()
+                .map(|text| {
+                    scenario
+                        .add_creature_from_oracle(P0, "Test Lifeshifter", 1, 1, text)
+                        .id()
+                })
+                .collect();
+            let (runner, dynamo, indices) = lifedynamo_board(scenario, &row.fields, row.gain, 0);
+            (runner, dynamo, indices, between)
         };
 
-        // The shortcut: accept `Fixed(CYCLES)` and collapse at the boundary.
-        let (mut runner, dynamo, indices) = board();
-        cycle_to_the_shortcut_offer(&mut runner, dynamo, indices, &unbounded);
+        // The shortcut: accept `Fixed(cycles)`, activate `between`, then reach
+        // the boundary, collapsing what was stashed.
+        let (mut runner, dynamo, indices, between) = board();
+        cycle_to_the_shortcut_offer(&mut runner, dynamo, indices, &row.unbounded);
         runner
             .act(GameAction::DeclareShortcut {
-                count: IterationCount::Fixed(CYCLES),
+                count: IterationCount::Fixed(row.cycles),
                 template: None,
             })
             .expect("the shortcut declaration is accepted");
-        accept_for_every_responder(&mut runner, &responders);
+        let mut events = accept_for_every_responder(&mut runner, &row.responders);
         assert_eq!(
             stash(&runner),
-            Some(&vec![PersistentAxisMaterialization::Life {
-                player: P0,
-                per_cycle_delta: gain,
-            }]),
-            "{name}: the cycle's rules amount is stashed"
+            row.stashed
+                .map(|per_cycle_delta| vec![PersistentAxisMaterialization::Life {
+                    player: P0,
+                    per_cycle_delta,
+                }])
+                .as_ref(),
+            "{name}: the stash"
         );
-        let events = collapse(&mut runner, CYCLES);
+        for &id in &between {
+            events.extend(activate_and_settle(&mut runner, id, 0));
+        }
+        match row.stashed {
+            Some(_) => events.extend(collapse(&mut runner, row.cycles)),
+            None => pass_to_a_boundary_without_a_collapse(&mut runner),
+        }
         let shortcut = LifeOutcome::read(&runner, &events);
 
-        // The reference: decline and perform the same cycles.
-        let (mut runner, dynamo, indices) = board();
-        cycle_to_the_shortcut_offer(&mut runner, dynamo, indices, &unbounded);
-        let events = decline_and_perform(&mut runner, dynamo, indices, CYCLES);
+        // The reference: decline, perform the same cycles, activate `between`,
+        // then reach the boundary.
+        let (mut runner, dynamo, indices, between) = board();
+        cycle_to_the_shortcut_offer(&mut runner, dynamo, indices, &row.unbounded);
+        let mut events = decline_and_perform(&mut runner, dynamo, indices, row.cycles);
+        for &id in &between {
+            events.extend(activate_and_settle(&mut runner, id, 0));
+        }
+        pass_to_a_boundary_without_a_collapse(&mut runner);
         let performed = LifeOutcome::read(&runner, &events);
 
         assert_eq!(shortcut, performed, "{name}");
-        assert_eq!(shortcut.gained, gain * (CYCLES + 1), "{name}");
-        assert_eq!(
-            shortcut.life_changed_total,
-            i64::from(gain * CYCLES),
-            "{name}"
-        );
+        assert_eq!(shortcut.gained, row.gained, "{name}: the gained counter");
     }
 }
 
