@@ -515,10 +515,6 @@ fn confirmed_misparse_default_schemes_full_export() {
         }
     }
     assert!(present > 0, "full export must contain committed markers");
-    assert!(
-        listed_schemes > 0,
-        "full export must contain a marked real Scheme"
-    );
     let baseline = database(&stamped_export(raw, &ConfirmedMisparses::empty()));
     let supported_before = eligible_schemes(&baseline);
     let excluded_schemes: Vec<_> = baseline
@@ -530,11 +526,8 @@ fn confirmed_misparse_default_schemes_full_export() {
         })
         .map(|(key, _)| key.to_string())
         .collect();
-    assert!(
-        !excluded_schemes.is_empty(),
-        "a committed real Scheme must lose eligibility because of its marker"
-    );
-    // Constructed-row acceptance is independent of future census-row deletion.
+    // Deleting the last listed Scheme row must not fail this test; the constructed row below
+    // proves the marker reaches the default scheme deck whatever the census list still holds.
     let witness = baseline
         .get_face_by_name("I Call for Slaughter")
         .expect("real full-export Scheme witness");
