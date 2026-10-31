@@ -14991,7 +14991,7 @@ fn compound_run_unperformed(ability: &ResolvedAbility) -> bool {
         && !ability.context.optional_effect_performed
 }
 
-fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> bool {
+pub(crate) fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> bool {
     match effect {
         // CR 123.3: only an actual placement satisfies a placement rider.
         Effect::PutSticker { .. } | Effect::ApplySticker { .. } => events
