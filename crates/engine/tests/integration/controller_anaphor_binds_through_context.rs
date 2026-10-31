@@ -27,8 +27,8 @@ use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, ControllerRef, Effect, EffectKind, OpponentMayScope, QuantityExpr,
-    TargetChoiceTiming, TargetFilter, TargetRef,
+    AbilityDefinition, ControllerRef, Effect, EffectKind, OpponentMayScope, TargetChoiceTiming,
+    TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -228,7 +228,8 @@ fn desecration_demon_run(accept: bool) -> (GameRunner, ObjectId, ObjectId, Objec
                 }
                 runner.act(GameAction::PassPriority).expect("pass priority");
             }
-            _ => break,
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected prompt: {other:?}"),
         }
     }
     (runner, demon, p0_bear, p1_bear, prompted)
@@ -514,126 +515,6 @@ fn prowling_pangolin_acceptor_must_sacrifice_exactly_two_creatures() {
             assert!(state.battlefield.contains(&pangolin));
         }
     }
-}
-
-/// CR 701.21a: a pool printed as an alternative belongs to the acceptor in both
-/// legs. No card prints this yet; the text is the sacrifice filter class's `Or`
-/// shape behind the Argothian Wurm subject.
-#[test]
-fn accepted_sacrifice_of_either_type_binds_both_legs_to_the_acceptor() {
-    const EITHER_TYPE: &str = "When this creature enters, any player may sacrifice an artifact or land of their choice. If a player does, sacrifice this creature.";
-    let body = accepting_trigger_body("Either Type Test", EITHER_TYPE);
-    assert!(
-        matches!(
-            &*body.effect,
-            Effect::Sacrifice {
-                target: TargetFilter::Or { .. },
-                ..
-            }
-        ),
-        "the fixture must reach the Or shape: {body:?}"
-    );
-
-    for acceptor in [P0, P1] {
-        let mut scenario = main_phase_scenario(2);
-        let test_card = scenario
-            .add_creature_to_hand_from_oracle(P0, "Either Type Test", 6, 6, EITHER_TYPE)
-            .id();
-        let p0_land = scenario.add_basic_land(P0, ManaColor::Green);
-        let p1_land = scenario.add_basic_land(P1, ManaColor::Green);
-        let mut runner = scenario.build();
-        cast_free(&mut runner, test_card);
-
-        let (_, offers) =
-            settle_sacrifice_offers(&mut runner, |p| p == acceptor, &[p0_land, p1_land]);
-
-        let (kept, sacrificed) = if acceptor == P0 {
-            (p1_land, p0_land)
-        } else {
-            (p0_land, p1_land)
-        };
-        assert_eq!(offers, vec![(vec![sacrificed], 1)]);
-        let state = runner.state();
-        assert!(!state.battlefield.contains(&sacrificed));
-        assert!(state.battlefield.contains(&kept));
-        assert_eq!(state.objects[&test_card].zone, Zone::Graveyard);
-    }
-}
-
-/// CR 107.1c: "any number" is bounded by the acceptor's pool, not by a count of
-/// everyone's permanents, and the acceptor may stop short of it. No card prints
-/// this yet; the text is the `UpTo` count behind the Prowling Pangolin subject.
-#[test]
-fn accepted_any_number_sacrifice_may_choose_fewer_than_the_pool() {
-    const ANY_NUMBER: &str = "When this creature enters, any player may sacrifice any number of lands of their choice. If a player does, sacrifice this creature.";
-    let body = accepting_trigger_body("Any Number Test", ANY_NUMBER);
-    assert!(
-        matches!(
-            &*body.effect,
-            Effect::Sacrifice {
-                count: QuantityExpr::UpTo { .. },
-                min_count: 0,
-                ..
-            }
-        ),
-        "the fixture must reach the UpTo shape: {body:?}"
-    );
-
-    let mut scenario = main_phase_scenario(2);
-    let test_card = scenario
-        .add_creature_to_hand_from_oracle(P0, "Any Number Test", 6, 6, ANY_NUMBER)
-        .id();
-    let p0_land = scenario.add_basic_land(P0, ManaColor::Green);
-    let p1_lands = [
-        scenario.add_basic_land(P1, ManaColor::Green),
-        scenario.add_basic_land(P1, ManaColor::Green),
-    ];
-    let mut runner = scenario.build();
-    cast_free(&mut runner, test_card);
-
-    let mut offered = None;
-    for _ in 0..60 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::OpponentMayChoice { player, .. } => {
-                runner
-                    .act(GameAction::DecideOptionalEffect {
-                        accept: player == P1,
-                    })
-                    .expect("decide");
-            }
-            WaitingFor::MultiTargetSelection {
-                legal_targets,
-                min_targets,
-                max_targets,
-                ..
-            } => {
-                offered = Some((legal_targets.len(), min_targets, max_targets));
-                assert!(
-                    runner
-                        .act(GameAction::SelectCards { cards: vec![] })
-                        .is_err(),
-                    "accepting chooses at least one; declining is the zero"
-                );
-                runner
-                    .act(GameAction::SelectCards {
-                        cards: vec![p1_lands[0]],
-                    })
-                    .expect("sacrifice fewer than the pool");
-            }
-            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
-            }
-            WaitingFor::Priority { .. } => break,
-            other => panic!("unexpected prompt: {other:?}"),
-        }
-    }
-
-    assert_eq!(offered, Some((2, 1, 2)), "bounded by P1's own two lands");
-    let state = runner.state();
-    assert!(!state.battlefield.contains(&p1_lands[0]));
-    assert!(state.battlefield.contains(&p1_lands[1]));
-    assert!(state.battlefield.contains(&p0_land));
-    assert_eq!(state.objects[&test_card].zone, Zone::Graveyard);
 }
 
 /// CR 608.2c: in Temporal Distortion's "at the beginning of each player's

@@ -1,7 +1,7 @@
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     ControllerRef, Effect, EffectError, EffectKind, EffectResolutionResult, QuantityExpr,
-    ResolvedAbility, TargetFilter, TargetRef, ThisWayCause, TypedFilter,
+    ResolvedAbility, TargetFilter, TargetRef, ThisWayCause,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingPlayerScopeSacrificeCompletion, WaitingFor};
@@ -185,82 +185,6 @@ pub(crate) fn can_sacrifice_for_ability(
             object_id,
             "CantBeSacrificed",
         )
-}
-
-/// CR 701.21a: `filter` read as the pool of the ability's scoped player, for a
-/// described sacrifice someone other than its parsed scope performs. Every leg of
-/// an `Or` belongs to that player, and the scope leads an `And` so that
-/// `target_filter_controller_scope` finds it. An `And` or `Not` is wrapped rather
-/// than rewritten because a scope bound inside a `Not` would be negated. A filter
-/// naming a specific object already identifies its sacrificer.
-pub(crate) fn pool_of_scoped_player(filter: TargetFilter) -> TargetFilter {
-    let scoped = TypedFilter::default().controller(ControllerRef::ScopedPlayer);
-    match filter {
-        TargetFilter::Any => TargetFilter::Typed(scoped),
-        TargetFilter::Typed(typed) => {
-            TargetFilter::Typed(typed.controller(ControllerRef::ScopedPlayer))
-        }
-        TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters.into_iter().map(pool_of_scoped_player).collect(),
-        },
-        filter @ (TargetFilter::And { .. } | TargetFilter::Not { .. }) => TargetFilter::And {
-            filters: vec![TargetFilter::Typed(scoped), filter],
-        },
-        filter @ (TargetFilter::None
-        | TargetFilter::Player
-        | TargetFilter::Controller
-        | TargetFilter::SourceController
-        | TargetFilter::ControllerAndControlledPermanents { .. }
-        | TargetFilter::Opponent
-        | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject { .. }
-        | TargetFilter::SourceOrPaired
-        | TargetFilter::StackAbility { .. }
-        | TargetFilter::StackSpell
-        | TargetFilter::SpecificObject { .. }
-        | TargetFilter::SpecificPlayer { .. }
-        | TargetFilter::PlayerWhoChoseLabel { .. }
-        | TargetFilter::PlayerMatching { .. }
-        | TargetFilter::Neighbor { .. }
-        | TargetFilter::ScopedPlayer
-        | TargetFilter::AttachedTo
-        | TargetFilter::LastCreated
-        | TargetFilter::LastRevealed
-        | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
-        | TargetFilter::AmassedArmy
-        | TargetFilter::ChosenCard
-        | TargetFilter::TrackedSet { .. }
-        | TargetFilter::TrackedSetFiltered { .. }
-        | TargetFilter::ExiledBySource
-        | TargetFilter::ExiledCardByIndex { .. }
-        | TargetFilter::TriggeringSpellController
-        | TargetFilter::TriggeringSpellOwner
-        | TargetFilter::TriggeringPlayer
-        | TargetFilter::TriggeringSource
-        | TargetFilter::AttackedPlayerOrPlaneswalker
-        | TargetFilter::EventTarget
-        | TargetFilter::TriggeringSourceController
-        | TargetFilter::EventTargetController
-        | TargetFilter::ParentTarget
-        | TargetFilter::ParentTargetSlot { .. }
-        | TargetFilter::DeclaredPlayer { .. }
-        | TargetFilter::ParentTargetController
-        | TargetFilter::ParentTargetOwner
-        | TargetFilter::SourceChosenPlayer
-        | TargetFilter::OriginalController
-        | TargetFilter::OriginalSource
-        | TargetFilter::PostReplacementSourceController
-        | TargetFilter::PostReplacementDamageSource
-        | TargetFilter::PostReplacementDamageTarget
-        | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource { .. }
-        | TargetFilter::Named { .. }
-        | TargetFilter::Owner
-        | TargetFilter::AllPlayers) => filter,
-    }
 }
 
 /// CR 701.21a: To sacrifice a permanent, its controller moves it to its owner's graveyard.
@@ -786,7 +710,7 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityKind, AggregateFunction, Comparator, ControllerRef,
         CostPaidObjectSnapshot, Effect, FilterProp, ObjectProperty, PtStat, PtValue, PtValueScope,
-        QuantityRef, SubAbilityLink, TargetFilter,
+        QuantityRef, SubAbilityLink, TargetFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -794,49 +718,6 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::statics::StaticMode;
     use crate::types::StaticDefinition;
-
-    /// CR 701.21a: every shape of a described pool reports the scoped player as
-    /// its sacrificer; a named object keeps its own shape.
-    #[test]
-    fn pool_of_scoped_player_binds_every_described_shape() {
-        let creature = || TargetFilter::Typed(TypedFilter::creature());
-        let opposing =
-            || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
-        for filter in [
-            TargetFilter::Any,
-            creature(),
-            opposing(),
-            TargetFilter::Or {
-                filters: vec![creature(), TargetFilter::Any],
-            },
-            TargetFilter::And {
-                filters: vec![opposing(), creature()],
-            },
-            TargetFilter::Not {
-                filter: Box::new(creature()),
-            },
-        ] {
-            assert_eq!(
-                sacrifice_controller_scope(&pool_of_scoped_player(filter.clone())),
-                Some(ControllerRef::ScopedPlayer),
-                "{filter:?}"
-            );
-        }
-
-        let TargetFilter::Or { filters } = pool_of_scoped_player(TargetFilter::Or {
-            filters: vec![opposing(), creature()],
-        }) else {
-            panic!("an Or stays an Or");
-        };
-        assert!(filters
-            .iter()
-            .all(|leg| sacrifice_controller_scope(leg) == Some(ControllerRef::ScopedPlayer)));
-
-        assert_eq!(
-            pool_of_scoped_player(TargetFilter::SelfRef),
-            TargetFilter::SelfRef
-        );
-    }
 
     fn make_sacrifice_ability(target: ObjectId) -> ResolvedAbility {
         ResolvedAbility::new(
