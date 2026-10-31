@@ -380,7 +380,7 @@ fn stamps(
             );
             (
                 object.name.clone(),
-                object.printing.get().as_ref().map(|p| p.set_code.clone()),
+                object.printing.get().as_deref().map(|p| p.set_code.clone()),
             )
         })
         .collect();
@@ -709,8 +709,8 @@ fn exact_objects(state: &GameState) -> Vec<ObjectReading> {
                 o.printed_ref.as_ref().expect("printed").oracle_id.clone(),
                 o.name.clone(),
                 o.owner.0,
-                o.printing.get().clone(),
-                o.base_printing.get().clone(),
+                o.printing.get().as_deref().cloned(),
+                o.base_printing.get().as_deref().cloned(),
             )
         })
         .collect();
@@ -1288,9 +1288,9 @@ fn engine_qualified_only_printing_is_a_loaded_normalization_fixed_point() {
                     object.printed_ref.as_ref().unwrap().oracle_id,
                     "engine-qualified"
                 );
-                assert_eq!(object.printing.get().as_ref(), Some(&expected.printing));
+                assert_eq!(object.printing.get().as_deref(), Some(&expected.printing));
                 assert_eq!(
-                    object.base_printing.get().as_ref(),
+                    object.base_printing.get().as_deref(),
                     Some(&expected.printing)
                 );
             }
@@ -1385,8 +1385,8 @@ fn loaded_typed_shared_piles_hide_printings_until_their_reveal_transition() {
                     &format!("p10-shared-{}-{index}", owner.0),
                 )
                 .printing;
-                assert_eq!(object.printing.get().as_ref(), Some(&printing));
-                assert_eq!(object.base_printing.get().as_ref(), Some(&printing));
+                assert_eq!(object.printing.get().as_deref(), Some(&printing));
+                assert_eq!(object.base_printing.get().as_deref(), Some(&printing));
                 (*id, printing)
             })
             .collect();
@@ -1460,8 +1460,8 @@ fn loaded_typed_shared_piles_hide_printings_until_their_reveal_transition() {
             let object = &state.objects[id];
             assert_eq!(object.face_down, *id != revealed);
             assert!(object.card_types.core_types.contains(&kind));
-            assert_eq!(object.printing.get().as_ref(), Some(printing));
-            assert_eq!(object.base_printing.get().as_ref(), Some(printing));
+            assert_eq!(object.printing.get().as_deref(), Some(printing));
+            assert_eq!(object.base_printing.get().as_deref(), Some(printing));
         }
         assert_exposure(&state, Some(revealed));
     }
@@ -1625,7 +1625,7 @@ mod post_load_creators {
         (db, key)
     }
 
-    fn tag(printing: &Option<engine::types::card_printing::CardPrinting>) -> Option<&str> {
+    fn tag(printing: &Option<engine::types::card_printing::SharedPrinting>) -> Option<&str> {
         printing.as_ref().map(|printing| printing.set_code.as_str())
     }
 

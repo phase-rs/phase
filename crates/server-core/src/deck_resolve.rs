@@ -789,7 +789,7 @@ mod tests {
                 objects
                     .iter()
                     .filter(
-                        |o| o.printing.get() == &Some(source.printings[0].printing.clone())
+                        |o| o.printing.get().as_deref() == Some(&source.printings[0].printing)
                             && o.base_printing.get() == o.printing.get()
                     )
                     .count(),
@@ -945,7 +945,10 @@ mod tests {
                                 for object in objects {
                                     assert_eq!(object.printing.get(), object.base_printing.get());
                                     if let Some(printing) = object.printing.get() {
-                                        assert_eq!(printing, &source.printings[0].printing);
+                                        assert_eq!(
+                                            printing.as_ref(),
+                                            &source.printings[0].printing
+                                        );
                                     }
                                 }
                             }
@@ -1016,8 +1019,8 @@ mod tests {
                         assert_eq!(objects.len(), count);
                         for object in objects {
                             assert_eq!(object.name, "Twin");
-                            assert_eq!(object.printing.get().as_ref(), Some(printing));
-                            assert_eq!(object.base_printing.get().as_ref(), Some(printing));
+                            assert_eq!(object.printing.get().as_deref(), Some(printing));
+                            assert_eq!(object.base_printing.get().as_deref(), Some(printing));
                         }
                     }
                 }

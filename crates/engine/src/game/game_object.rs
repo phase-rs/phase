@@ -16,7 +16,7 @@ use crate::types::ability::{
 use crate::types::card::{
     LayoutKind, PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef,
 };
-use crate::types::card_printing::CardPrinting;
+use crate::types::card_printing::SharedPrinting;
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
@@ -395,7 +395,7 @@ pub struct EmblemSource {
     /// CR 206.1, a printing has no effect on game play, so no rules or AI path reads it.
     /// Absent from the wire when empty.
     #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
-    pub printing: DisplayOnly<Option<CardPrinting>>,
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
 }
 
 /// CR 607.1d + CR 607.5 + CR 400.7: an emblem's pairing identity — the exact
@@ -851,7 +851,7 @@ pub struct GameObject {
     /// Display-only: CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules or
     /// AI path reads it. Absent from the wire when empty.
     #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
-    pub printing: DisplayOnly<Option<CardPrinting>>,
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
     /// Exact token-art lookup metadata, populated only when the engine can
     /// identify one printed token catalog entry without guessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1003,7 +1003,7 @@ pub struct GameObject {
     /// never carry one. Display-only: CR 203.1 + CR 206.1, a printing has no effect on game
     /// play, so no rules or AI path reads it. Absent from the wire when empty.
     #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
-    pub base_printing: DisplayOnly<Option<CardPrinting>>,
+    pub base_printing: DisplayOnly<Option<SharedPrinting>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub base_characteristics_initialized: bool,
 

@@ -1864,17 +1864,17 @@ mod tests {
 
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::card_printing::CardPrinting;
+    use crate::types::card_printing::{CardPrinting, SharedPrinting};
     use crate::types::display_only::DisplayOnly;
     use crate::types::game_state::{SpellCastReversal, SpellCastUndo, ZoneChangeRecord};
     use crate::types::identifiers::CardId;
     use crate::types::object_map::sweep_test_support::state_with_objects;
 
-    fn printing(tag: &str) -> CardPrinting {
-        CardPrinting {
+    fn printing(tag: &str) -> SharedPrinting {
+        SharedPrinting::new(CardPrinting {
             set_code: tag.into(),
             collector_number: "1".into(),
-        }
+        })
     }
 
     fn stamp(state: &mut GameState, id: ObjectId, tag: &str) {

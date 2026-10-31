@@ -11740,19 +11740,19 @@ mod tests {
         /// pair that is serialized-equal but typed-unequal does too.
         #[test]
         fn carrier_printing_pairs_number_and_consume_like_their_consumers() {
-            use crate::types::card_printing::CardPrinting;
+            use crate::types::card_printing::{CardPrinting, SharedPrinting};
             use crate::types::display_only::DisplayOnly;
             use triggers::TriggerCollectionRequester::Ordinary;
 
-            fn printing(set_code: &str) -> DisplayOnly<Option<CardPrinting>> {
-                DisplayOnly::new(Some(CardPrinting {
+            fn printing(set_code: &str) -> DisplayOnly<Option<SharedPrinting>> {
+                DisplayOnly::new(Some(SharedPrinting::new(CardPrinting {
                     set_code: set_code.to_string(),
                     collector_number: "1".to_string(),
-                }))
+                })))
             }
 
             /// A battlefield object carrying `printing`, and its public look-back.
-            fn object_with(printing: DisplayOnly<Option<CardPrinting>>) -> (GameState, ObjectId) {
+            fn object_with(printing: DisplayOnly<Option<SharedPrinting>>) -> (GameState, ObjectId) {
                 let mut state = setup();
                 let id = create_object(
                     &mut state,
@@ -11765,7 +11765,7 @@ mod tests {
                 (state, id)
             }
 
-            let zone_changed = |printing: DisplayOnly<Option<CardPrinting>>| {
+            let zone_changed = |printing: DisplayOnly<Option<SharedPrinting>>| {
                 let (state, id) = object_with(printing.clone());
                 let record = state.objects[&id].snapshot_for_zone_change(
                     id,
@@ -11790,7 +11790,7 @@ mod tests {
                     record: Box::new(record),
                 }
             };
-            let search_viewed = |printing: DisplayOnly<Option<CardPrinting>>| {
+            let search_viewed = |printing: DisplayOnly<Option<SharedPrinting>>| {
                 let (state, id) = object_with(printing.clone());
                 let view =
                     crate::game::visibility::capture_library_search_card_view(&state.objects[&id]);

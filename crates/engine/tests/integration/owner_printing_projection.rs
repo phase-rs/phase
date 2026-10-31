@@ -50,7 +50,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::card::LayoutKind;
-use engine::types::card_printing::CardPrinting;
+use engine::types::card_printing::{CardPrinting, SharedPrinting};
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::display_only::DisplayOnly;
 use engine::types::events::GameEvent;
@@ -91,14 +91,14 @@ const VIEWERS: [Viewer; 4] = [
     Viewer::Unseated,
 ];
 
-fn sentinel(tag: &str) -> CardPrinting {
-    CardPrinting {
+fn sentinel(tag: &str) -> SharedPrinting {
+    SharedPrinting::new(CardPrinting {
         set_code: format!("S{tag}"),
         collector_number: "1".to_string(),
-    }
+    })
 }
 
-fn carried(tag: &str) -> DisplayOnly<Option<CardPrinting>> {
+fn carried(tag: &str) -> DisplayOnly<Option<SharedPrinting>> {
     DisplayOnly::new(Some(sentinel(tag)))
 }
 
@@ -139,7 +139,7 @@ impl Board {
         object.printing = carried(tag);
         object.base_printing = carried(tag);
         let name = object.name.clone();
-        self.names.insert(sentinel(tag).set_code, name);
+        self.names.insert(sentinel(tag).set_code.clone(), name);
     }
 
     /// Submit an engine action and keep its events.
@@ -257,7 +257,7 @@ impl Board {
 
     /// Nodes holding `tag` in each form, labelled.
     fn census(&self, tag: &str) -> HashMap<String, usize> {
-        let set_code = sentinel(tag).set_code;
+        let set_code = sentinel(tag).set_code.clone();
         self.all_forms()
             .into_iter()
             .map(|(label, form)| (label, count_set_code(&form, &set_code)))
@@ -1065,7 +1065,7 @@ fn triggered_stack_rows_follow_their_latched_authority() {
             .trigger_source
             .as_ref()
             .and_then(|context| context.lki.printing.get().clone())
-            .map(|printing| printing.set_code);
+            .map(|printing| printing.set_code.clone());
         assert_eq!(
             row_set_code(&stack_row(&board, viewer, ObjectId(900))),
             context_printing,
@@ -2343,7 +2343,7 @@ fn assert_every_component_concealed(
 /// A sentinel occurs in no state or wire form, authoritative state included (the event
 /// forms are left out: the card's public history may carry it beside its name).
 fn assert_absent_from_state_forms(board: &Board, tag: &str, step: &str) {
-    let set_code = sentinel(tag).set_code;
+    let set_code = sentinel(tag).set_code.clone();
     for (label, form) in board.all_forms() {
         if label.ends_with("events") {
             continue;
@@ -2648,7 +2648,7 @@ fn transform_cannot_write_a_concealed_printing_back() {
     );
     board
         .names
-        .insert(sentinel("DFCC").set_code, "Night Face".to_string());
+        .insert(sentinel("DFCC").set_code.clone(), "Night Face".to_string());
     for viewer in VIEWERS {
         assert!(
             count_set_code(&board.forms(viewer)[0].1, "SDFCC") > 0,
@@ -2724,9 +2724,10 @@ fn become_copy_then_flip_cannot_write_a_concealed_printing_back() {
         h.board.state().objects[&flip_card].flipped,
         "reach: the control flipped"
     );
-    h.board
-        .names
-        .insert(sentinel("FLIP").set_code, "Flipped Face".to_string());
+    h.board.names.insert(
+        sentinel("FLIP").set_code.clone(),
+        "Flipped Face".to_string(),
+    );
     h.assert_hidden_cards_stay_hidden("after become_copy and flip");
     // Control: the never-hidden flip card keeps its printing for every viewer.
     // (The pile has departed by now; the flip card is still on the battlefield.)

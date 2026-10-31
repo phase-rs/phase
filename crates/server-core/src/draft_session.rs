@@ -1523,7 +1523,7 @@ mod tests {
                                 object
                                     .printing
                                     .get()
-                                    .as_ref()
+                                    .as_deref()
                                     .map(|printing| (object.name.clone(), printing.clone()))
                             })
                             .collect();

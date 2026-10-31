@@ -279,7 +279,7 @@ pub(crate) fn put_sideboard_entry_into_game(
                 card_face.name
             ))
         })?;
-    deck_loading::stamp_created_card(state, object_id, printing.as_ref());
+    deck_loading::stamp_created_card_shared(state, object_id, printing);
     Ok(object_id)
 }
 

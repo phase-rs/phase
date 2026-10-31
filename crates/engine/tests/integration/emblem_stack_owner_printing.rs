@@ -13,7 +13,7 @@ use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility,
     TargetFilter,
 };
-use engine::types::card_printing::CardPrinting;
+use engine::types::card_printing::{CardPrinting, SharedPrinting};
 use engine::types::display_only::DisplayOnly;
 use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -23,18 +23,18 @@ use engine::types::zones::Zone;
 
 const NARSET: &str = "[+1]: You gain 2 life. Add {U}, {R}, or {W}. Spend this mana only to cast a noncreature spell.\n[−2]: Draw a card, then you may discard a card. When you discard a nonland card this way, Narset deals damage equal to that card's mana value to target creature or planeswalker.\n[−6]: You get an emblem with \"Whenever you cast a noncreature spell, this emblem deals 2 damage to any target.\"";
 
-fn printing() -> CardPrinting {
-    CardPrinting {
+fn printing() -> SharedPrinting {
+    SharedPrinting::new(CardPrinting {
         set_code: "iko".into(),
         collector_number: "195".into(),
-    }
+    })
 }
 
 fn assert_projected_printing(
     state: &GameState,
     emblem: ObjectId,
     entry: ObjectId,
-    expected: Option<CardPrinting>,
+    expected: Option<SharedPrinting>,
 ) {
     for viewer in [Some(P0), Some(P1), Some(PlayerId(u8::MAX)), None] {
         let filtered = match viewer {
@@ -121,10 +121,11 @@ fn emblem_stack_owner_printing_narset_trigger_preserves_captured_pair() {
     // Synthetic creator removal cannot displace the already captured emblem authority.
     let mut departed = commit.state().clone();
     departed.objects.remove(&narset);
-    departed.lki_cache.get_mut(&narset).unwrap().printing = DisplayOnly::new(Some(CardPrinting {
-        set_code: "conflicting".into(),
-        collector_number: "B".into(),
-    }));
+    departed.lki_cache.get_mut(&narset).unwrap().printing =
+        DisplayOnly::new(Some(SharedPrinting::new(CardPrinting {
+            set_code: "conflicting".into(),
+            collector_number: "B".into(),
+        })));
     assert_projected_printing(&departed, emblem, entry.id, Some(printing()));
 
     // Restore authority, never a viewer projection, before deriving the row again.
@@ -354,10 +355,10 @@ fn emblem_stack_owner_printing_capture_disclosure_boundary() {
 #[test]
 fn emblem_stack_owner_printing_engine_group_ignores_captured_pair() {
     for second in [
-        Some(CardPrinting {
+        Some(SharedPrinting::new(CardPrinting {
             set_code: "cmm".into(),
             collector_number: "930".into(),
-        }),
+        })),
         Some(printing()),
         None,
     ] {

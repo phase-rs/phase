@@ -71,7 +71,7 @@ use engine::game::stack::resolve_next_with_limit;
 use engine::game::triggers::ConsumedTriggerEventScope;
 use engine::types::ability::{AbilityCost, QuantityExpr, StaticDefinition};
 use engine::types::actions::{AlternativeCastDecision, GameAction};
-use engine::types::card_printing::CardPrinting;
+use engine::types::card_printing::{CardPrinting, SharedPrinting};
 use engine::types::display_only::{rules_projection, DisplayOnly};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
@@ -226,11 +226,11 @@ fn bogwater_life_gain_batch_claims_every_gain_at_its_consumer_occurrence() {
 
 const BITTER_TRIUMPH_ORACLE: &str = "As an additional cost to cast this spell, discard a card or pay 3 life.\nDestroy target creature or planeswalker.";
 
-fn printing(set_code: &str) -> DisplayOnly<Option<CardPrinting>> {
-    DisplayOnly::new(Some(CardPrinting {
+fn printing(set_code: &str) -> DisplayOnly<Option<SharedPrinting>> {
+    DisplayOnly::new(Some(SharedPrinting::new(CardPrinting {
         set_code: set_code.to_string(),
         collector_number: "1".to_string(),
-    }))
+    })))
 }
 
 fn stamp(state: &mut GameState, id: ObjectId, set_code: &str) {

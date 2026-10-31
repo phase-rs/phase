@@ -3,7 +3,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::card_printing::CardPrinting;
+use super::card_printing::SharedPrinting;
 use super::display_only::DisplayOnly;
 use super::event_kinds::BendingType;
 use super::identifiers::ObjectId;
@@ -83,7 +83,7 @@ pub struct CompanionInfo {
     /// CR 702.139a + CR 203.1 + CR 206.1: the owner's printing of the revealed companion,
     /// captured at the reveal from the source it was revealed from (display-only).
     #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
-    pub printing: DisplayOnly<Option<CardPrinting>>,
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
 }
 
 #[derive(

@@ -15,7 +15,7 @@ use engine::game::derived_views::{derive_views, DebugLibraryCardView, StackEntry
 use engine::game::game_object::{EmblemSource, GameObject, ObjectIncarnationRefExt};
 use engine::game::zones::create_object;
 use engine::types::ability::{Effect, ResolvedAbility};
-use engine::types::card_printing::CardPrinting;
+use engine::types::card_printing::{CardPrinting, SharedPrinting};
 use engine::types::display_only::{rules_projection, DisplayOnly};
 use engine::types::events::{GameEvent, LibrarySearchCardFaceView, LibrarySearchCardView};
 use engine::types::game_state::{
@@ -29,26 +29,26 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-fn s1() -> CardPrinting {
-    CardPrinting {
+fn s1() -> SharedPrinting {
+    SharedPrinting::new(CardPrinting {
         set_code: "SNTA".to_string(),
         collector_number: "1".to_string(),
-    }
+    })
 }
 
-fn s2() -> CardPrinting {
-    CardPrinting {
+fn s2() -> SharedPrinting {
+    SharedPrinting::new(CardPrinting {
         set_code: "SNTB".to_string(),
         collector_number: "2".to_string(),
-    }
+    })
 }
 
 /// The three printing states every contract is checked across: none, S1, S2.
-fn variants() -> [Option<CardPrinting>; 3] {
+fn variants() -> [Option<SharedPrinting>; 3] {
     [None, Some(s1()), Some(s2())]
 }
 
-fn carried(printing: &Option<CardPrinting>) -> DisplayOnly<Option<CardPrinting>> {
+fn carried(printing: &Option<SharedPrinting>) -> DisplayOnly<Option<SharedPrinting>> {
     DisplayOnly::new(printing.clone())
 }
 
@@ -70,7 +70,7 @@ fn object_in(state: &GameState, id: ObjectId) -> &GameObject {
 }
 
 /// The live object with both of its printing fields set.
-fn object_with(printing: &Option<CardPrinting>) -> GameObject {
+fn object_with(printing: &Option<SharedPrinting>) -> GameObject {
     let (state, id) = base_state();
     let mut object = object_in(&state, id).clone();
     object.printing = carried(printing);
@@ -78,7 +78,7 @@ fn object_with(printing: &Option<CardPrinting>) -> GameObject {
     object
 }
 
-fn lki_with(printing: &Option<CardPrinting>) -> LKISnapshot {
+fn lki_with(printing: &Option<SharedPrinting>) -> LKISnapshot {
     let (state, id) = base_state();
     let mut lki = object_in(&state, id).snapshot_public_characteristics();
     lki.printing = carried(printing);
@@ -89,7 +89,7 @@ fn lki_with(printing: &Option<CardPrinting>) -> LKISnapshot {
 fn record_with(
     state: &GameState,
     id: ObjectId,
-    printing: &Option<CardPrinting>,
+    printing: &Option<SharedPrinting>,
 ) -> ZoneChangeRecord {
     let mut record =
         object_in(state, id).snapshot_for_zone_change(id, Some(Zone::Battlefield), Zone::Graveyard);
@@ -104,7 +104,7 @@ fn record_with(
 fn context_with(
     state: &GameState,
     id: ObjectId,
-    printing: &Option<CardPrinting>,
+    printing: &Option<SharedPrinting>,
     power: i32,
 ) -> TriggerSourceContext {
     let mut context = record_with(state, id, printing)
@@ -114,7 +114,7 @@ fn context_with(
     context
 }
 
-fn zone_changed_with(printing: &Option<CardPrinting>) -> GameEvent {
+fn zone_changed_with(printing: &Option<SharedPrinting>) -> GameEvent {
     let (state, id) = base_state();
     GameEvent::ZoneChanged {
         object_id: id,
@@ -124,7 +124,7 @@ fn zone_changed_with(printing: &Option<CardPrinting>) -> GameEvent {
     }
 }
 
-fn emblem_with(printing: &Option<CardPrinting>) -> EmblemSource {
+fn emblem_with(printing: &Option<SharedPrinting>) -> EmblemSource {
     EmblemSource {
         name: "Source Walker".to_string(),
         printed_ref: None,
@@ -132,7 +132,7 @@ fn emblem_with(printing: &Option<CardPrinting>) -> EmblemSource {
     }
 }
 
-fn search_view_with(printing: &Option<CardPrinting>) -> LibrarySearchCardView {
+fn search_view_with(printing: &Option<SharedPrinting>) -> LibrarySearchCardView {
     let (state, id) = base_state();
     let object = object_in(&state, id);
     let face = LibrarySearchCardFaceView {
@@ -159,7 +159,7 @@ fn search_view_with(printing: &Option<CardPrinting>) -> LibrarySearchCardView {
     }
 }
 
-fn debug_row_with(printing: &Option<CardPrinting>) -> DebugLibraryCardView {
+fn debug_row_with(printing: &Option<SharedPrinting>) -> DebugLibraryCardView {
     DebugLibraryCardView {
         object_id: ObjectId(9),
         name: "Library Card".to_string(),
@@ -191,7 +191,7 @@ fn triggered_entry(source: ObjectId, context: TriggerSourceContext) -> StackEntr
 }
 
 /// A state with one stack trigger whose context carries `printing` and `power`.
-fn state_with_stack_trigger(printing: &Option<CardPrinting>, power: i32) -> GameState {
+fn state_with_stack_trigger(printing: &Option<SharedPrinting>, power: i32) -> GameState {
     let (mut state, id) = base_state();
     let context = context_with(&state, id, printing, power);
     state.stack.push_back(triggered_entry(id, context));
@@ -199,7 +199,7 @@ fn state_with_stack_trigger(printing: &Option<CardPrinting>, power: i32) -> Game
 }
 
 /// The real derived stack row for the fixture trigger, with `printing` set on it.
-fn stack_row_with(printing: &Option<CardPrinting>) -> StackEntryDisplay {
+fn stack_row_with(printing: &Option<SharedPrinting>) -> StackEntryDisplay {
     let state = state_with_stack_trigger(&None, 2);
     let mut row = derive_views(&state, None)
         .stack_entry_details
@@ -214,7 +214,7 @@ fn stack_row_with(printing: &Option<CardPrinting>) -> StackEntryDisplay {
 /// is really on the value (the wire text carries it).
 fn assert_transparent<T: PartialEq + Debug + Serialize>(
     label: &str,
-    make: impl Fn(&Option<CardPrinting>) -> T,
+    make: impl Fn(&Option<SharedPrinting>) -> T,
     rename: impl Fn(&mut T),
 ) {
     let [none, first, second] = variants().map(|printing| make(&printing));
@@ -299,7 +299,7 @@ fn carriers_are_equality_transparent() {
 
 #[test]
 fn carrier_debug_text_is_printing_independent() {
-    fn texts<T: Debug>(make: impl Fn(&Option<CardPrinting>) -> T) -> [(String, String); 3] {
+    fn texts<T: Debug>(make: impl Fn(&Option<SharedPrinting>) -> T) -> [(String, String); 3] {
         variants().map(|printing| {
             let value = make(&printing);
             (format!("{value:?}"), format!("{value:#?}"))
@@ -360,9 +360,9 @@ fn carrier_debug_text_is_printing_independent() {
 /// omits the field.
 fn assert_wire_contract<T: Serialize + DeserializeOwned>(
     label: &str,
-    make: impl Fn(&Option<CardPrinting>) -> T,
+    make: impl Fn(&Option<SharedPrinting>) -> T,
     rename: impl Fn(&mut T),
-    printings_of: impl Fn(&T) -> Vec<Option<CardPrinting>>,
+    printings_of: impl Fn(&T) -> Vec<Option<SharedPrinting>>,
     keys: &[&str],
 ) {
     let empty = make(&None);

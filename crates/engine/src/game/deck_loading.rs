@@ -12,7 +12,7 @@ use crate::starter_decks::DeckData;
 use crate::types::card::CardFace;
 use crate::types::card_printing::{
     deck_face_identity, CardPrinting, DeckFaceLookupName, DeckPrinting, DeckPrintingRecord,
-    DeckSection,
+    DeckSection, SharedPrinting,
 };
 use crate::types::card_type::CoreType;
 use crate::types::display_only::DisplayOnly;
@@ -1718,7 +1718,7 @@ pub(crate) fn outside_game_copy_printing(
     brought_in: &[OutsideGameCardUse],
     section: DeckSection,
     face: &CardFace,
-) -> Option<CardPrinting> {
+) -> Option<SharedPrinting> {
     let record = pool.printings.get().as_deref()?;
     // Only the sideboard has an outside-the-game effect that brings copies in mid-game.
     let (registered, current, brought_in) = match section {
@@ -1759,7 +1759,10 @@ pub(crate) fn outside_game_copy_printing(
         .map(|used| used.count)
         .sum();
     let taken = copies(registered).saturating_sub(copies(current)) + brought;
-    record.printing_of(section, face, taken).cloned()
+    record
+        .printing_of(section, face, taken)
+        .cloned()
+        .map(SharedPrinting::new)
 }
 
 /// Validate correspondence before any object, pool or RNG mutation.
@@ -1868,10 +1871,25 @@ pub(crate) fn stamp_created_card(
     id: crate::types::identifiers::ObjectId,
     printing: Option<&CardPrinting>,
 ) {
+    stamp_created_card_shared(
+        state,
+        id,
+        printing.map(|printing| SharedPrinting::new(printing.clone())),
+    );
+}
+
+/// `stamp_created_card` for a printing already held behind a `SharedPrinting` (a companion's
+/// captured one, an outside-the-game copy's): the object shares that allocation.
+pub(crate) fn stamp_created_card_shared(
+    state: &mut GameState,
+    id: crate::types::identifiers::ObjectId,
+    printing: Option<SharedPrinting>,
+) {
     if let Some(printing) = printing {
         let object = state.objects.get_mut(&id).expect("just created");
+        // One allocation shared by the live and the base printing: both start as the same one.
         object.printing = crate::types::display_only::DisplayOnly::new(Some(printing.clone()));
-        object.base_printing = crate::types::display_only::DisplayOnly::new(Some(printing.clone()));
+        object.base_printing = crate::types::display_only::DisplayOnly::new(Some(printing));
     }
 }
 

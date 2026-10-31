@@ -602,7 +602,7 @@ pub(crate) fn finish_paid_companion_to_hand(
     if let Some(obj) = state.objects.get_mut(&obj_id) {
         super::printed_cards::apply_card_face_to_object(obj, &card_face);
     }
-    deck_loading::stamp_created_card(state, obj_id, printing.as_ref());
+    deck_loading::stamp_created_card_shared(state, obj_id, printing);
 
     events.push(GameEvent::CompanionMovedToHand { player, card_name });
     state.lands_tapped_for_mana.remove(&player);

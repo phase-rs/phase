@@ -36,7 +36,7 @@ use super::ability::{
 use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
-use super::card_printing::{CardPrinting, DeckPrintingRecord};
+use super::card_printing::{DeckPrintingRecord, SharedPrinting};
 use super::card_type::{CoreType, Supertype};
 use super::counter::{counter_map_serde, CounterMatch, CounterType};
 use super::display_only::{
@@ -458,7 +458,7 @@ pub struct LKISnapshot {
     /// Display-only: CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules or
     /// AI path reads it. Absent from the wire when empty.
     #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
-    pub printing: DisplayOnly<Option<CardPrinting>>,
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
     /// Display-only token catalog ref as it last existed in the public zone.
     /// Preserved so stack entries from dead token sources can render the exact
     /// token image without falling back to name-based lookup.
@@ -37325,6 +37325,7 @@ mod tests {
         TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef, TriggerEntry,
         TriggerGrantInstanceRef,
     };
+    use crate::types::card_printing::CardPrinting;
     use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
@@ -40711,9 +40712,11 @@ mod tests {
             .objects
             .get_mut(&id)
             .expect("fixture object exists")
-            .printing = DisplayOnly::new(printing.map(|tag| CardPrinting {
-            set_code: tag.to_string(),
-            collector_number: "7".to_string(),
+            .printing = DisplayOnly::new(printing.map(|tag| {
+            SharedPrinting::new(CardPrinting {
+                set_code: tag.to_string(),
+                collector_number: "7".to_string(),
+            })
         }));
         let record = state.objects[&id].snapshot_for_zone_change(
             id,

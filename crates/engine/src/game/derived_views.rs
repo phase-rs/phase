@@ -31,7 +31,7 @@ use crate::types::ability::{
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card::{PrintedCardRef, TokenImageRef};
-use crate::types::card_printing::CardPrinting;
+use crate::types::card_printing::SharedPrinting;
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_entries, CounterType};
 use crate::types::display_only::{CanonicalDigest, DisplayOnly};
@@ -100,7 +100,7 @@ pub struct StackEntryDisplay {
     /// Display-only: CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules
     /// or AI path reads it. Absent from the wire when empty.
     #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
-    pub printing: DisplayOnly<Option<CardPrinting>>,
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
     /// Oracle and face authority for row owner art, from the printing's selected read.
     /// Display-only; no rules or AI path reads it. Absent when the row has no printing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -514,7 +514,7 @@ pub struct DebugLibraryCardView {
     /// CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules or AI path
     /// reads it. Absent from the wire when empty.
     #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
-    pub printing: DisplayOnly<Option<CardPrinting>>,
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
 }
 
 /// Engine-authored identity for a candidate in a legend-rule choice.
@@ -2858,14 +2858,14 @@ fn stack_source_token_image_ref(state: &GameState, entry: &StackEntry) -> Option
 /// the creator provenance already delivered in that emblem's `emblem_source`.
 struct StackRowSource {
     name: String,
-    printing: DisplayOnly<Option<CardPrinting>>,
+    printing: DisplayOnly<Option<SharedPrinting>>,
     printed_ref: Option<PrintedCardRef>,
 }
 
 /// Mirrors image identity precedence without looking up the creator. Emblems without their
 /// own printed identity use captured provenance, including authoritative absence. Ordinary
 /// nameless sources (face-down objects and uncast Rooms) disclose no printing.
-fn live_source_printing(object: &GameObject) -> DisplayOnly<Option<CardPrinting>> {
+fn live_source_printing(object: &GameObject) -> DisplayOnly<Option<SharedPrinting>> {
     if object.name.is_empty() {
         DisplayOnly::default()
     } else if object.printed_ref.is_none() && object.is_emblem {
@@ -3241,6 +3241,7 @@ mod tests {
         DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect, EffectKind, ModalChoice,
         ResolvedAbility, RestrictionExpiry, StaticCondition, TargetFilter, TargetRef,
     };
+    use crate::types::card_printing::CardPrinting;
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
@@ -3257,11 +3258,11 @@ mod tests {
     use crate::types::zones::Zone;
     use std::collections::HashMap;
 
-    fn emblem_printing(collector: &str) -> CardPrinting {
-        CardPrinting {
+    fn emblem_printing(collector: &str) -> SharedPrinting {
+        SharedPrinting::new(CardPrinting {
             set_code: "owner".into(),
             collector_number: collector.into(),
-        }
+        })
     }
 
     fn emblem_row_fixture() -> (GameState, ObjectId) {

@@ -6116,7 +6116,7 @@ pub(crate) mod tests {
     /// optional-effect event, a stack trigger's source context and a waiting-state event.
     /// `powers` is the rules fact each position carries beside the printing.
     fn printing_carrier_fixture(
-        printing: Option<engine::types::card_printing::CardPrinting>,
+        printing: Option<engine::types::card_printing::SharedPrinting>,
         powers: [i32; 3],
     ) -> GameState {
         use engine::types::events::GameEvent;
@@ -6204,16 +6204,16 @@ pub(crate) mod tests {
 
     #[test]
     fn planner_keys_ignore_printing_in_real_carriers() {
-        use engine::types::card_printing::CardPrinting;
+        use engine::types::card_printing::{CardPrinting, SharedPrinting};
 
-        let s1 = CardPrinting {
+        let s1 = SharedPrinting::new(CardPrinting {
             set_code: "SNTA".to_string(),
             collector_number: "1".to_string(),
-        };
-        let s2 = CardPrinting {
+        });
+        let s2 = SharedPrinting::new(CardPrinting {
             set_code: "SNTB".to_string(),
             collector_number: "2".to_string(),
-        };
+        });
         let powers = [2, 2, 2];
         let none = printing_carrier_fixture(None, powers);
         let first = printing_carrier_fixture(Some(s1.clone()), powers);

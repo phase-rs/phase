@@ -5,6 +5,7 @@
 
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use serde::de::{DeserializeOwned, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -18,6 +19,15 @@ pub struct CardPrinting {
     pub set_code: String,
     pub collector_number: String,
 }
+
+/// The printing an object-level display carrier holds (`GameObject`, `LKISnapshot`,
+/// `CompanionInfo`, and the event and view rows copied from them). A shared pointer
+/// rather than an inline `CardPrinting`: the inline pair of `String`s is 48 bytes in every
+/// carrier, and the effect resolver's debug-build stack frame (it recurses once per
+/// resolved sub-ability) copied it through many temporaries, growing that frame by 3.6%,
+/// enough to overflow the test-thread stack. A pointer is 8 bytes and a carrier copy is a
+/// reference-count increment. Serializes as the `CardPrinting` it points to.
+pub type SharedPrinting = Arc<CardPrinting>;
 
 /// The deck-list field a printing annotation names: one variant per card-section
 /// field of `DeckData` (sticker sheets are not cards), serialized as that field's name.
