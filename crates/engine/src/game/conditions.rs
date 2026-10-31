@@ -164,7 +164,7 @@ pub(crate) fn eval_recipient_attacking_owner_target(
         // Not produced by the block-evasion parser path. Kept explicit (no
         // wildcard) so future widening is compiler-flagged.
         AttackTargetFilter::Player
-        | AttackTargetFilter::Planeswalker
+        | AttackTargetFilter::Planeswalker { .. }
         | AttackTargetFilter::PlayerOrPlaneswalker
         | AttackTargetFilter::PlayerOrPermanents
         | AttackTargetFilter::Monarch
@@ -285,11 +285,76 @@ pub(crate) fn eval_source_attached_to_controlled_creature(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::combat::{AttackerInfo, CombatState};
     use crate::game::zones::create_object;
+    use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::game_state::GameState;
     use crate::types::player::PlayerId;
     use crate::types::CardId;
+
+    /// CR 506.2: the subtype-defended restriction scope never participates in
+    /// the "attacking its owner" block-evasion classifier — it is not
+    /// owner-related. Same attack, sibling contrast: `OwnerOrPlaneswalker`
+    /// answers true on the owner's own Jace, the subtype scope stays false.
+    #[test]
+    fn subtype_scope_never_meets_owner_evasion_exception() {
+        let mut state = GameState::new_two_player(42);
+        let attacker = create_object(
+            &mut state,
+            CardId(0x0E001),
+            PlayerId(1),
+            "Evasion Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        // A Jace the attacker owns (controller == owner == PlayerId(1)).
+        let own_jace = create_object(
+            &mut state,
+            CardId(0x0E002),
+            PlayerId(1),
+            "Own Jace".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [attacker, own_jace] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+        }
+        {
+            let obj = state.objects.get_mut(&own_jace).unwrap();
+            obj.card_types.core_types = vec![CoreType::Planeswalker];
+            obj.card_types.subtypes = vec!["Jace".to_string()];
+            obj.base_card_types = obj.card_types.clone();
+        }
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(own_jace),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+        // Reach-guard: the sibling owner scope DOES meet the exception here.
+        assert!(
+            eval_recipient_attacking_owner_target(
+                &state,
+                attacker,
+                &AttackTargetFilter::OwnerOrPlaneswalker
+            ),
+            "attacking your own planeswalker meets the owner exception"
+        );
+        // The subtype restriction scope never does — same attack, same target.
+        assert!(
+            !eval_recipient_attacking_owner_target(
+                &state,
+                attacker,
+                &AttackTargetFilter::Planeswalker {
+                    subtype: Some("Jace".to_string())
+                }
+            ),
+            "the subtype-defended scope is not an owner-evasion exception"
+        );
+    }
 
     #[test]
     fn eval_is_initiative_matches_designation_holder() {

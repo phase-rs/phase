@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "AttackTargetFilter::Planeswalker gains subtype: Option<String> (unit variant becomes a struct variant). The filter rides in GameRestriction::ProhibitActivity inside GameState.restrictions, which ships over the wire in StateUpdate. Older full-game and P2P peers cannot deserialize the new shape, so Full and P2P peers move in lockstep."
+}

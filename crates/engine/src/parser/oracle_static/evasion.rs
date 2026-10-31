@@ -2763,6 +2763,26 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
         // `CantAttack`/`CantBlock`/`CantAttackOrBlock`; see
         // `combat::combat_tax_mode_matches`), so the gate defers those to an
         // honest gap instead of a condition no player can ever satisfy.
+        // CR 508.1c + CR 118.12a: scope the combat-tax payload to the parsed
+        // defended scope. The generic trailing-`unless` route always builds
+        // `UnlessPay { defended: None }`, while this production's own predicate
+        // already parsed the defended scope into `def.attack_defended` via the
+        // shared combinator. Without this stamp the runtime tax
+        // (`compute_combat_tax`) reads only `UnlessPay.defended` and taxes every
+        // attack by the affected creatures — the parsed scope would live only on
+        // `attack_defended` and the U1 matcher arm would never fire on this path.
+        let unless_cond = match unless_cond {
+            StaticCondition::UnlessPay {
+                cost,
+                scaling,
+                defended: None,
+            } if def.attack_defended.is_some() => StaticCondition::UnlessPay {
+                cost,
+                scaling,
+                defended: def.attack_defended.clone(),
+            },
+            other => other,
+        };
         let gap_text = tp.split_around(" unless ").map_or_else(
             || trailing.to_string(),
             |(_, after)| after.original.trim().trim_end_matches('.').to_string(),
@@ -3069,7 +3089,7 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
             tag_no_case::<_, _, OracleError<'_>>(" you or planeswalkers you control"),
         ),
         value(
-            AttackTargetFilter::Planeswalker,
+            AttackTargetFilter::Planeswalker { subtype: None },
             tag_no_case::<_, _, OracleError<'_>>(" planeswalkers you control"),
         ),
         value(
@@ -3856,6 +3876,20 @@ mod structural_marker_tests {
                 "{tail:?}"
             );
         }
+    }
+
+    /// Row 9 route-A decline: the dedicated combat-tax body has no
+    /// subtype-defended arm, so subtype-defended tax text declines HERE and
+    /// dispatch falls through to the subject-led path — never a silent
+    /// `defended: None` acceptance. REVERT-FAIL (subtype arm added to the
+    /// hardcoded alt): the probe parses instead of declining.
+    #[test]
+    fn combat_tax_body_declines_subtype_defended_scope() {
+        let text = "Creatures can't attack Jaces you control unless their controller pays {2} for each creature they control that's attacking you.";
+        assert!(
+            parse_combat_tax_body(text).is_err(),
+            "subtype-defended tax text must decline the dedicated path"
+        );
     }
 
     /// The combat-tax body reads original-case text, so a capitalized controller

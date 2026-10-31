@@ -2474,8 +2474,20 @@ pub(crate) fn attack_target_matches_defended_scope(
         |id: ObjectId| -> Option<PlayerId> { state.objects.get(&id).map(|obj| obj.controller) };
     match (filter, target) {
         (AttackTargetFilter::Player, AttackTarget::Player(p)) => *p == source_controller,
-        (AttackTargetFilter::Planeswalker, AttackTarget::Planeswalker(pw_id)) => {
+        // CR 205.3j + CR 508.1c: `subtype: None` defends every planeswalker
+        // the protected player controls; `Some(_)` ("can't attack
+        // [Subtype]s you control") additionally requires the named subtype.
+        // Live controller comparison (not the `Owner*` exception): only a
+        // planeswalker the protected player currently controls is defended.
+        // Every other pairing (players, battles) is false.
+        (AttackTargetFilter::Planeswalker { subtype }, AttackTarget::Planeswalker(pw_id)) => {
             permanent_controller(*pw_id) == Some(source_controller)
+                && subtype.as_ref().is_none_or(|s| {
+                    state
+                        .objects
+                        .get(pw_id)
+                        .is_some_and(|obj| obj.card_types.subtypes.iter().any(|sub| sub == s))
+                })
         }
         (AttackTargetFilter::PlayerOrPlaneswalker, AttackTarget::Player(p)) => {
             *p == source_controller

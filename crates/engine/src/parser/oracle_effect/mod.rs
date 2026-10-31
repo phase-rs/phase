@@ -6774,6 +6774,79 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
     })
 }
 
+/// CR 508.1c: "creatures [they/that player] control(s) can't attack
+/// [defended-scope] this turn" — the controlled-creatures attack prohibition
+/// (Jace, Multiverse Architect: "creatures they control can't attack Jaces you
+/// control this turn"). Sibling of `try_parse_that_player_cant_attack_prohibition`'s
+/// Advokist bounded form, but with an anaphoric subject ("they"/"that player",
+/// bound by the enclosing phase trigger rather than a per-player iteration),
+/// the shared subtype-capable defended-scope combinator (required — `None`
+/// returns `None`), and the Willie/Sandswirl "this turn" duration (no
+/// `AbilityDefinition` duration override; the restriction's own `EndOfTurn`
+/// expiry owns cleanup, CR 514.2). Affected players ride `ScopedPlayer`, which
+/// the phase trigger stamps to the active player at fire time. The stamp is
+/// Phase-mode-only, and this recognizer cannot see the enclosing trigger mode
+/// — so `lower_trigger_ir` demotes its product under any other trigger to an
+/// honest gap unless the coordinated channel proves the binding
+/// (`demote_unbound_scoped_attack_restrictions`).
+fn try_parse_controlled_creatures_cant_attack_prohibition(
+    tp: TextPair<'_>,
+) -> Option<ParsedEffectClause> {
+    use crate::parser::oracle_static::parse_cant_attack_defended_scope_nom;
+
+    if let Some((defended, remaining)) = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) = (
+            tag("creatures "),
+            controller_phrase_among(&[
+                ControllerPhrase::THEY_CONTROL,
+                ControllerPhrase::THAT_PLAYER_CONTROLS,
+            ]),
+            tag(" "),
+        )
+            .parse(input)?;
+        let (input, _) =
+            preceded(alt((tag("can't"), tag("cannot"))), tag(" attack")).parse(input)?;
+        let (input, defended) = parse_cant_attack_defended_scope_nom(input)?;
+        let Some(defended) = defended else {
+            return Err(oracle_err(input));
+        };
+        let (input, _) = tag(" this turn").parse(input)?;
+        Ok((input, defended))
+    }) {
+        if !remaining
+            .chars()
+            .all(|character| character == '.' || character.is_whitespace())
+        {
+            return None;
+        }
+
+        return Some(ParsedEffectClause {
+            optional_targeting: false,
+            unlowered_guard: None,
+            effect: Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    source: ObjectId(0),
+                    affected_players: RestrictionPlayerScope::ScopedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::Attack {
+                        defended,
+                        protected_player: None,
+                    },
+                },
+            },
+            duration: None,
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+            entry_onset: ContinuousEffectOnset::WhenFollowed,
+        });
+    }
+    None
+}
+
 fn try_parse_self_name_exile(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
@@ -9579,6 +9652,15 @@ fn parse_effect_clause_with_damage_context(
         .trim();
     let prohibition_probe_lower = prohibition_probe.to_lowercase();
     if let Some(clause) = try_parse_that_player_cant_attack_prohibition(TextPair::new(
+        prohibition_probe,
+        &prohibition_probe_lower,
+    )) {
+        return attach_unless_slots(clause, unless_condition, unless_pay_deferred);
+    }
+    // CR 508.1c: the controlled-creatures sibling ("creatures they control
+    // can't attack [scope] this turn") shares this pre-peel probe — the clause
+    // shell would otherwise peel "this turn" before the recognizer runs.
+    if let Some(clause) = try_parse_controlled_creatures_cant_attack_prohibition(TextPair::new(
         prohibition_probe,
         &prohibition_probe_lower,
     )) {

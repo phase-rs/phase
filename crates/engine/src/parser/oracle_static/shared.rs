@@ -9,6 +9,9 @@ use nom::character::complete::anychar;
 use nom::combinator::{map_opt, not, success, value};
 use nom::multi::many1;
 
+use crate::parser::oracle_nom::error::oracle_err;
+use crate::types::card_type::PLANESWALKER_SUBTYPES;
+
 /// Whose spells and abilities a "can be the target of spells and abilities …
 /// as though it didn't have <quality>" clause opens its subject to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6871,6 +6874,29 @@ pub(crate) fn parse_rule_static_tail_predicates(
     }
 }
 
+/// CR 205.3j + CR 508.1c: " [<Subtype>]s you control" defended scope ("can't
+/// attack Jaces you control"). A manual arm, not `value()`: the subtype is
+/// dynamic. Calls the plain-`fn` `parse_subtype` (plural-aware, so "Jaces"
+/// yields `("Jace", 5)` whole and no extra `"s"` literal follows), then requires
+/// `" you control"`, and gates the candidate through `PLANESWALKER_SUBTYPES` —
+/// a non-planeswalker subtype fails closed, preserving honest-red coverage.
+fn parse_subtype_planeswalkers_you_control_nom(
+    input: &str,
+) -> OracleResult<'_, crate::types::triggers::AttackTargetFilter> {
+    let (input, _) = tag(" ").parse(input)?;
+    let (subtype, consumed) = parse_subtype(input).ok_or_else(|| oracle_err(input))?;
+    let (input, _) = tag(" you control").parse(&input[consumed..])?;
+    if !PLANESWALKER_SUBTYPES.contains(&subtype.as_str()) {
+        return Err(oracle_err(input));
+    }
+    Ok((
+        input,
+        crate::types::triggers::AttackTargetFilter::Planeswalker {
+            subtype: Some(subtype),
+        },
+    ))
+}
+
 /// Optional attack-target scope after "can't attack" (CR 508.1b + CR 508.1c).
 pub(crate) fn parse_cant_attack_defended_scope_nom(
     input: &str,
@@ -6889,9 +6915,13 @@ pub(crate) fn parse_cant_attack_defended_scope_nom(
             tag(" you or planeswalkers you control"),
         ),
         value(
-            AttackTargetFilter::Planeswalker,
+            AttackTargetFilter::Planeswalker { subtype: None },
             tag(" planeswalkers you control"),
         ),
+        // CR 205.3j: subtype-defended scope sits after the generic planeswalker
+        // arm and before bare " you" — longest-first, since nom `alt` is
+        // leftmost-match.
+        (|input| parse_subtype_planeswalkers_you_control_nom(input)),
         value(AttackTargetFilter::Player, tag(" you")),
     )))
     .parse(input)

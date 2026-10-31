@@ -544,7 +544,9 @@ struct BlinkedBridge {
 }
 
 /// Pass priority until `done` holds, hiding the first card each hideaway
-/// offers and accepting every optional play.
+/// offers, accepting every optional play, and aiming each cast at P1 (the
+/// DuringResolution Shock is always sent there, as in
+/// `activate_mosswort_second_ability`).
 fn resolve_until(runner: &mut GameRunner, done: impl Fn(&GameState) -> bool) {
     for _ in 0..64 {
         if done(runner.state()) {
@@ -558,6 +560,11 @@ fn resolve_until(runner: &mut GameRunner, done: impl Fn(&GameState) -> bool) {
             WaitingFor::OptionalEffectChoice { .. } => {
                 GameAction::DecideOptionalEffect { accept: true }
             }
+            // The hidden Shock, cast during the resolution (CR 608.2g), chooses
+            // its target; the shared `runner.act(action)` below submits it.
+            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1)),
+            },
             other => panic!("unexpected prompt {other:?}"),
         };
         runner.act(action).expect("prompt answer accepted");
@@ -645,18 +652,6 @@ fn blink_bridge_under_its_activation(rehide: bool) -> Option<BlinkedBridge> {
     })
 }
 
-fn has_free_play(state: &GameState, card: ObjectId) -> bool {
-    state.objects[&card]
-        .casting_permissions
-        .iter()
-        .any(|permission| {
-            matches!(
-                permission,
-                CastingPermission::ExileWithAltCost { cost, .. } if cost.is_without_paying_mana()
-            )
-        })
-}
-
 /// CR 113.7a + CR 607.2a + CR 400.7: Bridge's activation waits while Bridge is
 /// blinked, and the returned Bridge's hideaway hides a new card. The activation
 /// is the activating Bridge's, so "the exiled card" is the card that Bridge
@@ -688,16 +683,28 @@ fn old_bridge_activation_plays_its_own_card_not_the_new_one() {
         "the new card is the returned Bridge's look link"
     );
 
+    let life_before = blink.runner.state().players[1].life;
     resolve_until(&mut blink.runner, priority_with_stack(0));
     let state = blink.runner.state();
-    assert!(
-        has_free_play(state, blink.hidden),
-        "the activation plays the card the activating Bridge hid"
+    // CR 608.2g: the old Bridge's activation casts the card it hid during the
+    // resolution — the Shock, not the returned Bridge's Bolt.
+    assert_eq!(
+        state.objects[&blink.hidden].zone,
+        Zone::Graveyard,
+        "the activating Bridge's Shock was cast and resolved"
     );
-    assert!(
-        !has_free_play(state, rehidden),
-        "the returned Bridge's card is not the activating Bridge's exiled card"
+    assert_eq!(
+        state.players[1].life,
+        life_before - 2,
+        "the cast Shock dealt 2 damage to the targeted player"
     );
+    assert_eq!(
+        state.objects[&rehidden].zone,
+        Zone::Exile,
+        "the returned Bridge's Bolt stays exiled, unplayed"
+    );
+    assert_no_permissions(&blink.runner, blink.hidden);
+    assert_no_permissions(&blink.runner, rehidden);
 }
 
 /// CR 113.7a + CR 607.2a: as above, but the returned Bridge's hideaway finds
@@ -723,9 +730,20 @@ fn old_bridge_activation_after_an_empty_rehide_still_plays_its_card() {
         "the returned Bridge hid nothing; only the old look link remains"
     );
 
+    let life_before = blink.runner.state().players[1].life;
     resolve_until(&mut blink.runner, priority_with_stack(0));
-    assert!(
-        has_free_play(blink.runner.state(), blink.hidden),
-        "the activation plays the card the activating Bridge hid"
+    let state = blink.runner.state();
+    // CR 608.2g: as above, the activation casts its own hidden Shock during
+    // the resolution even though the rehide found nothing.
+    assert_eq!(
+        state.objects[&blink.hidden].zone,
+        Zone::Graveyard,
+        "the activating Bridge's Shock was cast and resolved"
     );
+    assert_eq!(
+        state.players[1].life,
+        life_before - 2,
+        "the cast Shock dealt 2 damage to the targeted player"
+    );
+    assert_no_permissions(&blink.runner, blink.hidden);
 }
