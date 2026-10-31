@@ -1344,6 +1344,7 @@ mod orzhov_advokist;
 mod other_than_attached_host_exclusion;
 mod overload_no_legal_target;
 mod oversimplify_per_player_fractal;
+mod owner_keyed_destination_triggers;
 mod owner_library_arrangement_simultaneity;
 mod owner_relative_each_other_player;
 mod owner_scoped_graveyard_activation_8506;
