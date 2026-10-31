@@ -2225,14 +2225,18 @@ const GAIN_NINETY_EIGHT: &str = "{0}: You gain 98 life.";
 /// gain cannot fit under `i32::MAX` from the board the shortcut is taken on —
 /// a two-player total held at the cap, a Two-Headed Giant team whose shared
 /// total is at the cap while P0's own field has room (CR 810.4 + CR 810.9a),
-/// a period crossing the cap, one cycle's worth past it, and a team whose two
-/// fields both grow, summed against their one total — the take performs the
-/// cycles and stashes nothing, so a later loss stands. Where it fits — reaching
-/// the cap exactly and below it — the gain is stashed and collapses at the
-/// boundary, and a later loss or gain moves the total as it would after
-/// performing. Residual: a later change that the cap holds back after
-/// performing (a gain into the cap followed by a loss) still differs from a
-/// stashed gain that fits.
+/// a period crossing the cap and one cycle's worth past it — the take performs
+/// the cycles and stashes nothing, so a later loss stands. It performs them too
+/// where P0's own field cannot hold the lump, and where a cycle stores P0's gain
+/// in P1's field (CR 810.9 + CR 810.9a), so P0's counter carries the gain, and
+/// the offer names P0's life axis, never P1's. Where it fits — reaching the cap
+/// exactly and below it — the gain is stashed and collapses at the boundary,
+/// and a later loss or gain moves the total as it would after performing.
+/// Residual: a lump that fits stays batched and is exact only while nothing
+/// before the step ends is held back by the cap; a later gain that no settling
+/// take makes, carrying the total to the cap and followed by a loss, still ends
+/// above where performing ends, because the stashed lump is applied after the
+/// loss.
 #[test]
 fn a_life_shortcut_held_at_the_cap_matches_performing_the_cycles() {
     struct Row {
@@ -2344,11 +2348,72 @@ fn a_life_shortcut_held_at_the_cap_matches_performing_the_cycles() {
             fields: team(i32::MAX - 3, -20),
             gain: 2,
             cycles: 15,
-            unbounded: vec![mana, ResourceAxis::Life(P1)],
+            unbounded: vec![mana, life],
             responders: vec![P1, P2, PlayerId(3)],
             between: vec![LOSE_FOUR],
             stashed: None,
             gained: 32,
+        },
+        Row {
+            name: "Two-Headed Giant, P0's field one below the cap, the team has room",
+            two_headed_giant: true,
+            fields: team(i32::MAX - 3, -20),
+            gain: 2,
+            cycles: 5,
+            unbounded: vec![mana, life],
+            responders: vec![P1, P2, PlayerId(3)],
+            between: vec![],
+            stashed: None,
+            gained: 12,
+        },
+        Row {
+            name: "Two-Headed Giant, P0's field one below the cap, the team has room, then P0 \
+                   loses 4",
+            two_headed_giant: true,
+            fields: team(i32::MAX - 3, -20),
+            gain: 2,
+            cycles: 5,
+            unbounded: vec![mana, life],
+            responders: vec![P1, P2, PlayerId(3)],
+            between: vec![LOSE_FOUR],
+            stashed: None,
+            gained: 12,
+        },
+        Row {
+            name: "Two-Headed Giant, P0's field at the cap, the team has room",
+            two_headed_giant: true,
+            fields: team(i32::MAX, -100),
+            gain: 2,
+            cycles: 5,
+            unbounded: vec![mana, life],
+            responders: vec![P1, P2, PlayerId(3)],
+            between: vec![],
+            stashed: None,
+            gained: 12,
+        },
+        Row {
+            name: "Two-Headed Giant, the lump would spill at the boundary, then P0 loses 4",
+            two_headed_giant: true,
+            fields: team(i32::MAX - 6, -20),
+            gain: 2,
+            cycles: 5,
+            unbounded: vec![mana, life],
+            responders: vec![P1, P2, PlayerId(3)],
+            between: vec![LOSE_FOUR],
+            stashed: None,
+            gained: 12,
+        },
+        Row {
+            name: "Two-Headed Giant below the cap, then P0 loses 4",
+            two_headed_giant: true,
+            fields: team(20, 20),
+            gain: 2,
+            cycles: 5,
+            unbounded: vec![mana, life],
+            responders: vec![P1, P2, PlayerId(3)],
+            between: vec![LOSE_FOUR],
+            stashed: Some(2),
+            gained: 12,
         },
         Row {
             name: "reaching the cap exactly, then P0 loses 4",
@@ -2463,6 +2528,104 @@ fn a_life_shortcut_held_at_the_cap_matches_performing_the_cycles() {
 
         assert_eq!(shortcut, performed, "{name}");
         assert_eq!(shortcut.gained, row.gained, "{name}: the gained counter");
+    }
+}
+
+/// CR 732.2c + CR 119.3: two life shortcuts taken in one step leave the game as
+/// if their cycles were performed at each take. P0 performs one Lifedynamo cycle
+/// (gain 2), accepts `Fixed(4)`, performs one more cycle, accepts `Fixed(4)`
+/// again, then loses 4, and the step ends; the reference declines and performs
+/// the same ten cycles, then loses 4. From `i32::MAX - 12` the second take's
+/// gain together with the first's pending one cannot fit under the cap, so the
+/// second take applies the pending gain at its accepted count, performs its own
+/// cycles held at the cap and stashes nothing, and the loss then stands: P0 ends
+/// at `i32::MAX - 4` having gained 20, and the boundary asks nothing. From 20
+/// both gains fit and stay stashed under one bound of 4, and the boundary
+/// collapse lands P0 at 36, as performing does.
+#[test]
+fn two_life_shortcuts_in_one_step_match_performing_the_cycles() {
+    let mana = ResourceAxis::Mana(ManaType::Colorless);
+    let life = ResourceAxis::Life(P0);
+    // (name, P0's starting life, whether the second take stashes)
+    for (name, start, stashed) in [
+        ("past the cap", i32::MAX - 12, false),
+        ("below the cap", 20, true),
+    ] {
+        let board = || {
+            let mut scenario = two_player();
+            let loser = scenario
+                .add_creature_from_oracle(P0, "Test Lifeshifter", 1, 1, LOSE_FOUR)
+                .id();
+            let (runner, dynamo, indices) = lifedynamo_board(scenario, &[(P0, start)], 2, 0);
+            (runner, dynamo, indices, loser)
+        };
+        let accept = |runner: &mut GameRunner| {
+            runner
+                .act(GameAction::DeclareShortcut {
+                    count: IterationCount::Fixed(4),
+                    template: None,
+                })
+                .expect("the shortcut declaration is accepted");
+            accept_for_every_responder(runner, &[P1])
+        };
+
+        // The shortcut: one cycle, accept 4; one more cycle, accept 4; lose 4.
+        let (mut runner, dynamo, indices, loser) = board();
+        cycle_to_the_shortcut_offer(&mut runner, dynamo, indices, &[mana, life]);
+        let mut events = accept(&mut runner);
+        for index in indices {
+            events.extend(activate_and_settle(&mut runner, dynamo, index));
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
+            "{name}: REACH-GUARD: the second cycle offers the shortcut again, got {:?}",
+            runner.state().waiting_for
+        );
+        events.extend(accept(&mut runner));
+        if stashed {
+            assert_eq!(
+                stash(&runner),
+                Some(&vec![
+                    PersistentAxisMaterialization::Life {
+                        player: P0,
+                        per_cycle_delta: 2,
+                    };
+                    2
+                ]),
+                "{name}: both takes stash their gain"
+            );
+            assert_eq!(
+                runner.state().pending_materialization_count.get(&P0),
+                Some(&4),
+                "{name}: the stash's bound"
+            );
+        } else {
+            assert_eq!(stash(&runner), None, "{name}: nothing is left stashed");
+            assert_eq!(
+                runner.state().pending_materialization_count.get(&P0),
+                None,
+                "{name}: no bound is left"
+            );
+            assert_eq!(runner.life(P0), i32::MAX, "{name}: P0 after the take");
+        }
+        events.extend(activate_and_settle(&mut runner, loser, 0));
+        if stashed {
+            events.extend(collapse(&mut runner, 4));
+        } else {
+            pass_to_a_boundary_without_a_collapse(&mut runner);
+        }
+        let shortcut = LifeOutcome::read(&runner, &events);
+
+        // The reference: decline, perform nine more cycles, lose 4.
+        let (mut runner, dynamo, indices, loser) = board();
+        cycle_to_the_shortcut_offer(&mut runner, dynamo, indices, &[mana, life]);
+        let mut events = decline_and_perform(&mut runner, dynamo, indices, 9);
+        events.extend(activate_and_settle(&mut runner, loser, 0));
+        pass_to_a_boundary_without_a_collapse(&mut runner);
+        let performed = LifeOutcome::read(&runner, &events);
+
+        assert_eq!(shortcut, performed, "{name}");
+        assert_eq!(shortcut.gained, 20, "{name}: the gained counter");
     }
 }
 

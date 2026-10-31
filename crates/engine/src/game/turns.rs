@@ -1015,12 +1015,9 @@ pub(super) fn drain_pending_phase_transition_progress(
                     // `materialize_fixed_shortcut` writes the bound in lockstep with the
                     // registration that creates the stash, so on current code the only
                     // bound-less stash is one deserialized from a save written before the
-                    // bound was tracked.
-                    max: state
-                        .pending_materialization_count
-                        .get(&controller)
-                        .copied()
-                        .unwrap_or(crate::game::engine::MAX_SHORTCUT_CYCLES),
+                    // bound was tracked. Read through `engine::pending_collapse_bound`, the
+                    // one reading the take's life cap gate and settle share.
+                    max: crate::game::engine::pending_collapse_bound(state, controller),
                     accumulated: 0,
                     source_id: ObjectId(0),
                     pending_mana_ability: None,

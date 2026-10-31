@@ -2122,6 +2122,36 @@ pub(crate) fn boundary_declines(
     }
 }
 
+/// CR 119.3: apply one stashed `PersistentAxisMaterialization::Life` item at `amount` cycles:
+/// `player` gains `per_cycle_delta × amount` life. Shared by the boundary's `LoopCollapse` arm
+/// and `game::engine`'s `settle_pending_life`, which applies a pending item at a later take.
+pub(crate) fn apply_stashed_life(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    per_cycle_delta: u32,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    // CR 119.3 single life authority; SOUND only because the firewall rejected any life-gain
+    // replacement/observer (`apply_life_gain` re-runs the replacement pipeline, so a lump gain
+    // would fire an observer ONCE not N×). The shortcut is an action-ingress edit: the lump gain
+    // (up to `u32::MAX`) is carried exactly and the life total saturates at `i32::MAX`, so the
+    // gain itself is always representable; the `Unrepresentable` arm stays as the shared ingress
+    // routing and would reject the action through its rollback. A deferral stays ignored — the
+    // firewall excludes life replacements, so none can be pending here.
+    if let Err(effects::life::LifeChangeError::Unrepresentable(unrepresentable)) =
+        crate::game::effects::life::try_apply_life_gain(
+            state,
+            player,
+            per_cycle_delta.saturating_mul(amount),
+            events,
+        )
+    {
+        return Err(unrepresentable.into());
+    }
+    Ok(())
+}
+
 pub(super) fn handle_resolution_choice(
     state: &mut GameState,
     waiting_for: WaitingFor,
@@ -3777,27 +3807,7 @@ pub(super) fn handle_resolution_choice(
                                 player: p,
                                 per_cycle_delta,
                             } => {
-                                // CR 119.3 single life authority; SOUND only because the
-                                // firewall rejected any life-gain replacement/observer
-                                // (`apply_life_gain` re-runs the replacement pipeline, so a
-                                // lump gain would fire an observer ONCE not N×).
-                                // The shortcut is an action-ingress edit: the lump gain (up to
-                                // `u32::MAX`) is carried exactly and the life total saturates at
-                                // `i32::MAX`, so the gain itself is always representable; the
-                                // `Unrepresentable` arm stays as the shared ingress routing and
-                                // would reject the action through the boundary rollback.
-                                // A deferral stays ignored — the firewall excludes life
-                                // replacements, so none can be pending here.
-                                if let Err(effects::life::LifeChangeError::Unrepresentable(
-                                    unrepresentable,
-                                )) = crate::game::effects::life::try_apply_life_gain(
-                                    state,
-                                    *p,
-                                    per_cycle_delta.saturating_mul(amount),
-                                    events,
-                                ) {
-                                    return Err(unrepresentable.into());
-                                }
+                                apply_stashed_life(state, *p, *per_cycle_delta, amount, events)?;
                             }
                         }
                         // Reaching here means the growth applied.

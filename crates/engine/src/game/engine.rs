@@ -5843,7 +5843,7 @@ fn apply_until_lethal_shortcut(
                 }
             }
         }
-        TakeRoute::Replay | TakeRoute::Ring => {
+        TakeRoute::Replay { .. } | TakeRoute::Ring => {
             // Drain loop (targeted Vito class, non-targeted Cleric class, ω-covering cascade).
             // Drive `period` whole cycles, injecting the pinned answers (CR 603.3b ordering / CR
             // 608.2b targets) at each mid-cycle prompt. A cross-lethal mid-drive already applies
@@ -6675,8 +6675,11 @@ fn departure_verdict(
 
 /// Which drive takes an accepted proposal (CR 732.2c).
 enum TakeRoute {
-    /// The confirmed period, performed now.
-    Replay,
+    /// The confirmed period, performed now, after the life earlier accepts left pending for the
+    /// players in `settle` (`settle_pending_life`): every member of a shared total past the cap,
+    /// and each player whose own field is past (`PeriodGrowth::life_past_the_cap`). `settle` is
+    /// empty where nothing is past the cap.
+    Replay { settle: BTreeSet<PlayerId> },
     /// CR 732.1b: the ∞ mark, whose count its controller names when the step ends.
     Mark(Box<PeriodGrowth>),
     /// The ring drain.
@@ -6689,9 +6692,12 @@ enum TakeRoute {
 /// the mark would refill restricted mana without its restriction (CR 106.6), it batches none of
 /// the damage a period marks (CR 120.3e), its mint makes bare tapped copies under the proposer,
 /// without a keyword, delayed trigger, other controller or certified departure the cover admitted
-/// as growth, its batched collapse must not miss what the board observes, its batched life gain
-/// must fit under `i32::MAX` (an engine limit, not a rule) from the take's board, and a signed
-/// proposal's departures are seen only as its repetitions cross them (CR 704.3).
+/// as growth, its batched collapse must not miss what the board observes, its cycle must store
+/// every life change on the field of the player it happens to (CR 810.9), its batched life gain
+/// must fit, with any life earlier accepts left pending for the same total, under the total's
+/// `i32::MAX` and on the gaining player's own field, from the take's board (an engine limit, not
+/// a rule), and a signed proposal's departures are seen only as its repetitions cross them
+/// (CR 704.3).
 fn take_route(
     state: &GameState,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
@@ -6706,16 +6712,23 @@ fn take_route(
         || proposal.period.growth() == crate::analysis::resource::CoveredGrowth::PerformedOnly
         || proposal.per_cycle.is_some()
     {
-        return TakeRoute::Replay;
+        return TakeRoute::Replay {
+            settle: BTreeSet::new(),
+        };
     }
     // Every accept-time derivation below reads this one driven cycle.
     let frames = drive_one_period_frames(state, &proposal.period, proposal.proposer);
     if adds_restricted_mana(frames.as_ref(), proposal.proposer) || marks_damage(frames.as_ref()) {
-        return TakeRoute::Replay;
+        return TakeRoute::Replay {
+            settle: BTreeSet::new(),
+        };
     }
     let growth = PeriodGrowth::derive(frames.as_ref(), proposal.proposer);
-    if growth.collapse_is_replay(state, proposal, n) {
-        TakeRoute::Replay
+    let past_the_cap = growth.life_past_the_cap(state, n);
+    if growth.collapse_is_replay(state, proposal, &past_the_cap) {
+        TakeRoute::Replay {
+            settle: past_the_cap,
+        }
     } else {
         TakeRoute::Mark(Box::new(growth))
     }
@@ -6726,6 +6739,11 @@ fn take_route(
 struct PeriodGrowth {
     fodder: Option<PeriodFodder>,
     batched: Vec<crate::types::game_state::PersistentAxisMaterialization>,
+    /// CR 810.9a: the members whose life change the driven cycle stored in another member's
+    /// field, as their per-turn counters attribute it
+    /// (`analysis::resource::life_stored_off_its_player`). Empty where a member's counter is
+    /// unreadable, and on every growth the Mark route keeps.
+    life_stored_off: BTreeSet<PlayerId>,
 }
 
 impl PeriodGrowth {
@@ -6735,6 +6753,7 @@ impl PeriodGrowth {
             return Self {
                 fodder: None,
                 batched: Vec::new(),
+                life_stored_off: BTreeSet::new(),
             };
         };
         let fodder = current_period_fodder(before, after, controller);
@@ -6761,17 +6780,22 @@ impl PeriodGrowth {
                 per_cycle_delta,
             },
         ));
-        Self { fodder, batched }
+        Self {
+            fodder,
+            batched,
+            life_stored_off: crate::analysis::resource::life_stored_off_its_player(before, after),
+        }
     }
 
     /// CR 732.2c: whether the batched collapse would land a state other than performing the
-    /// period `n` times does, so the take performs it instead. Read off the items it would
-    /// register.
+    /// period does, so the take performs it instead. Read off the items it would register, and
+    /// off the life changes its driven cycle stored off their players. `past_the_cap` is
+    /// [`Self::life_past_the_cap`]'s answer for this take's count.
     fn collapse_is_replay(
         &self,
         state: &GameState,
         proposal: &crate::analysis::loop_check::ShortcutProposal,
-        n: u32,
+        past_the_cap: &BTreeSet<PlayerId>,
     ) -> bool {
         use crate::analysis::resource as res;
         use crate::types::game_state::PersistentAxisMaterialization as Item;
@@ -6793,15 +6817,32 @@ impl PeriodGrowth {
             axis.unbounded_mark_kind() == res::UnboundedMarkKind::DeferredAccrual
                 && crate::types::game_state::LoopCollapseAxis::from_resource_axis(*axis).is_none()
         });
+        // CR 732.2c + CR 810.9 + CR 810.9a: the spread stored a life change in a field other
+        // than the field of the player it happened to, because a member's own field was at an
+        // `i32` limit. A δ read off the fields would credit that change to the teammate whose
+        // field stored it, or batch the net of a loss and a gain, so the collapse would land
+        // other counters, events or totals than performing. Performing the cycles stores and
+        // counts each change as it happens.
+        let life_stored_off = !self.life_stored_off.is_empty();
         // CR 122.1 / CR 119.3: a lump counter or life application fires an observer once, not
         // once per cycle.
         let counter_observed = counters && res::counter_growth_is_observed(state);
         let life_observed = life && res::life_growth_is_observed(state);
-        // CR 732.2c + CR 119.3: the take leaves the game as if its cycles were performed now. A
-        // batched life gain the engine's `i32::MAX` limit would hold back from this board would
-        // instead saturate against the board the step ends on, so a life change in between would
-        // not commute with it; performing the cycles keeps every later change exact.
-        let life_passes_the_cap = life && self.life_lump_passes_the_cap(state, n);
+        // CR 732.2c + CR 119.3 + CR 810.9: the take leaves the game as if its cycles were
+        // performed now. A batched life gain is performed instead of stashed when it cannot be
+        // stored as performing stores it: counted with the life earlier accepts left pending for
+        // the same total, under the total's `i32::MAX` and on the gaining player's own field,
+        // from this board. The take then first settles the pending life of the players in its
+        // settle scope (every member of a total past the cap, and each player whose own field is
+        // past; `settle_pending_life`). A lump that fits stays batched, and is exact only while
+        // nothing before the step ends is held back by the cap. A later take whose growth
+        // `take_route` derives settles it; a later gain that no such take makes (made by hand,
+        // by a ring-road take, or by a take `take_route` performs before deriving its growth: a
+        // zero or shortened count, a period on the stack, a performed-only period, a published
+        // per-cycle signature, restricted mana or marked damage), carrying the total to the cap
+        // and followed by a loss, still ends above where performing ends, because the stashed
+        // lump is applied after the loss.
+        let life_passes_the_cap = !past_the_cap.is_empty();
         // CR 603.6a: the minted tokens' entries would re-earn the batched life.
         let life_etb_sourced =
             life && token_profile.is_some() && res::board_has_functioning_etb_trigger(state);
@@ -6813,6 +6854,7 @@ impl PeriodGrowth {
             .is_some_and(|growth| growth.per_cycle_delta > 1)
             && res::token_growth_is_observed(state);
         unbatchable_deferred
+            || life_stored_off
             || (!self.batched.is_empty()
                 && (counter_observed
                     || life_observed
@@ -6822,32 +6864,103 @@ impl PeriodGrowth {
                     || token_growth_needs_replay))
     }
 
-    /// CR 119.3 + CR 810.9: whether the life the batched items gain over `n` cycles is more
-    /// than a total they adjust can take from `state` under `i32::MAX`. Each item counts against
-    /// the total its player's life changes adjust (`players::life_change_total`); in Two-Headed
-    /// Giant both teammates' items count against their one shared total (CR 810.9a), keyed as
-    /// `players::aggregate_over_teams` keys a team. The edit authority's own saturation
-    /// (`arithmetic::saturating_life_total`) answers whether that total moves by the whole sum.
-    /// The sums saturate in `i64`, and a saturated sum passes any cap.
-    fn life_lump_passes_the_cap(&self, state: &GameState, n: u32) -> bool {
+    /// CR 119.3 + CR 810.9 + CR 810.9a + CR 732.2c: the players whose pending life must land
+    /// before this take's `n` cycles: empty unless the life the batched items gain over `n`
+    /// cycles, counted with the life earlier accepts left pending for the same totals, cannot be
+    /// stored from `state` as performing stores it.
+    ///
+    /// Each of this take's `Life` items counts `δ·n`, and each `Life` item in any controller's
+    /// pending stash whose player's total this take touches counts `δ` times that stash's bound
+    /// (`pending_collapse_bound`, the most its boundary prompt could name). The parts are summed
+    /// against the total each player's life changes adjust (`players::life_change_total`; in
+    /// Two-Headed Giant both teammates' parts count against their one shared total, CR 810.9a,
+    /// keyed as `players::aggregate_over_teams` keys a team) and against each player's own
+    /// field, which the spread (`players::spread_life_change`) fills first. The edit
+    /// authority's own saturation (`arithmetic::saturating_life_total`) answers whether a total
+    /// or a field moves by its whole sum; the sums saturate in `i64`, and a saturated sum passes
+    /// any cap.
+    ///
+    /// Returned, the settle scope: every member of a shared total that is past, and each player
+    /// whose own field is past. A teammate is left out where only another member's own field
+    /// is past (CR 810.9 + CR 810.9a): the spread stores the teammate's gain on its own field
+    /// first, and with the total and the teammate's own field both fitting, that field stays
+    /// below `i32::MAX`, so the teammate's pending life lands the same total, fields and
+    /// counters whether it is performed before this take's cycles or applied at the boundary
+    /// after them, unless a change in between meets a limit of the teammate's own field or of
+    /// the total, which every fitting stash already risks. A total past the cap orders every
+    /// member's pending life against this take's (the cap holds back whatever comes last), and
+    /// a player's own field past its limit orders that player's.
+    ///
+    /// A lump that fits stays batched and is exact only while nothing before the step ends is
+    /// held back by the cap: a later gain that no settling take makes (made by hand, by a
+    /// ring-road take, or by a take `take_route` performs before deriving its growth), carrying
+    /// the total to the cap and followed by a loss, still ends above where performing ends,
+    /// because the stashed lump is applied after the loss.
+    fn life_past_the_cap(&self, state: &GameState, n: u32) -> BTreeSet<PlayerId> {
         use crate::game::{arithmetic, players, topology};
         use crate::types::game_state::PersistentAxisMaterialization as Item;
-        let mut lumps: BTreeMap<topology::TeamId, (i64, i64)> = BTreeMap::new();
-        for (player, per_cycle_delta) in self.batched.iter().filter_map(|item| match item {
+        let life_item = |item: &Item| match item {
             Item::Life {
                 player,
                 per_cycle_delta,
             } => Some((*player, *per_cycle_delta)),
             Item::Tokens(_) | Item::Counters(_) => None,
-        }) {
-            let (_, lump) = lumps
-                .entry(topology::shared_resource_dedup_key(state, player))
-                .or_insert_with(|| (players::life_change_total(state, player), 0));
-            *lump = lump.saturating_add(i64::from(per_cycle_delta).saturating_mul(i64::from(n)));
+        };
+        let lump = |per_cycle_delta: u32, cycles: u32| {
+            i64::from(per_cycle_delta).saturating_mul(i64::from(cycles))
+        };
+        let total_of = |player: PlayerId| topology::shared_resource_dedup_key(state, player);
+        let mut parts: Vec<(PlayerId, i64)> = self
+            .batched
+            .iter()
+            .filter_map(life_item)
+            .map(|(player, per_cycle_delta)| (player, lump(per_cycle_delta, n)))
+            .collect();
+        let touched: BTreeSet<topology::TeamId> =
+            parts.iter().map(|&(player, _)| total_of(player)).collect();
+        for (&controller, items) in &state.pending_unbounded_materialization {
+            let bound = pending_collapse_bound(state, controller);
+            parts.extend(
+                items
+                    .iter()
+                    .filter_map(life_item)
+                    .filter(|&(player, _)| touched.contains(&total_of(player)))
+                    .map(|(player, per_cycle_delta)| (player, lump(per_cycle_delta, bound))),
+            );
         }
-        lumps
-            .values()
-            .any(|&(total, lump)| arithmetic::saturating_life_total(total, lump) - total != lump)
+        let mut totals: BTreeMap<topology::TeamId, (i64, i64)> = BTreeMap::new();
+        let mut fields: BTreeMap<PlayerId, (i64, i64)> = BTreeMap::new();
+        for (player, part) in parts {
+            let (_, sum) = totals
+                .entry(total_of(player))
+                .or_insert_with(|| (players::life_change_total(state, player), 0));
+            *sum = sum.saturating_add(part);
+            let (_, sum) = fields.entry(player).or_insert_with(|| {
+                let field = state.players.iter().find(|p| p.id == player);
+                (field.map_or(0, |p| i64::from(p.life)), 0)
+            });
+            *sum = sum.saturating_add(part);
+        }
+        let passes = |&(start, sum): &(i64, i64)| {
+            arithmetic::saturating_life_total(start, sum) - start != sum
+        };
+        let past_totals: BTreeSet<topology::TeamId> = totals
+            .iter()
+            .filter(|(_, reading)| passes(reading))
+            .map(|(&total, _)| total)
+            .collect();
+        state
+            .players
+            .iter()
+            .map(|p| p.id)
+            .filter(|&player| past_totals.contains(&total_of(player)))
+            .chain(
+                fields
+                    .iter()
+                    .filter(|(_, reading)| passes(reading))
+                    .map(|(&player, _)| player),
+            )
+            .collect()
     }
 }
 
@@ -6879,6 +6992,86 @@ fn marks_damage(frames: Option<&(GameState, GameState)>) -> bool {
             marked(after) > marked(before)
         })
     })
+}
+
+/// CR 732.2c + CR 119.3: apply, before a take performs its period, the pending `Life` items of
+/// the players in `scope` (the take's settle scope, `PeriodGrowth::life_past_the_cap`), each at
+/// the bound of the stash that holds it.
+///
+/// Performing put the earlier accept's cycles before this take's. A later take whose life with
+/// them is past the cap would otherwise let the boundary saturate them against a board that
+/// later changes have moved. They are applied at the bound every player accepted, the most the
+/// boundary prompt could name (prefix consent, L3 at `types::game_state`'s
+/// `scheduled_collapse_axes` doc), so nothing is over-delivered, and their ∞ `Life` axes end
+/// with them (`GameState::clear_collapsed_materializations`). A board that now observes life
+/// growth declines them, as the boundary would (`engine_resolution_choices::boundary_declines`).
+/// Every other item of the stash, a `Tokens` or `Counters` item or a `Life` item of a player
+/// outside the scope, is re-registered in order with the stash's bound and keeps the boundary
+/// prompt. Below the cap the scope is empty and nothing is settled, and a teammate whose life
+/// fits while only another member's own field is past keeps its pending life for the boundary.
+///
+/// Composes the stash authorities (`take_pending_materialization`,
+/// `register_pending_materialization`, `clear_collapsed_materializations`) and the boundary's
+/// own life application (`engine_resolution_choices::apply_stashed_life`); it writes no stash
+/// field directly but the restored bound.
+fn settle_pending_life(
+    state: &mut GameState,
+    scope: &BTreeSet<PlayerId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    use crate::types::game_state::PersistentAxisMaterialization as Item;
+    if scope.is_empty() {
+        return Ok(());
+    }
+    let observed = engine_resolution_choices::ObservedGrowth::at_boundary(state);
+    // The ONE settle decision: the item's player and per-cycle gain where it settles.
+    let settled_life = |item: &Item| match item {
+        Item::Life {
+            player,
+            per_cycle_delta,
+        } => (scope.contains(player)
+            && !engine_resolution_choices::boundary_declines(item, observed))
+        .then_some((*player, *per_cycle_delta)),
+        Item::Tokens(_) | Item::Counters(_) => None,
+    };
+    for controller in crate::game::players::apnap_order(state) {
+        if !state
+            .pending_unbounded_materialization
+            .get(&controller)
+            .is_some_and(|items| items.iter().any(|item| settled_life(item).is_some()))
+        {
+            continue;
+        }
+        let bound = pending_collapse_bound(state, controller);
+        let Some(items) = state.take_pending_materialization(controller) else {
+            continue;
+        };
+        let (settled, kept): (Vec<Item>, Vec<Item>) = items
+            .into_iter()
+            .partition(|item| settled_life(item).is_some());
+        for (player, per_cycle_delta) in settled.iter().filter_map(settled_life) {
+            engine_resolution_choices::apply_stashed_life(
+                state,
+                player,
+                per_cycle_delta,
+                bound,
+                events,
+            )?;
+        }
+        state.clear_collapsed_materializations(controller, &settled);
+        if !kept.is_empty() {
+            for item in kept {
+                state.register_pending_materialization(controller, item);
+            }
+            // CR 732.2c: the kept items were accepted at this bound. Restored only with a kept
+            // item, since a bound with no stash is unclearable (`materialize_fixed_shortcut`'s
+            // STASH-GATED comment).
+            state
+                .pending_materialization_count
+                .insert(controller, bound);
+        }
+    }
+    Ok(())
 }
 
 /// PR-7 Phase 4b: CR 732.2a finite materialization of a confirmed `Fixed(N)` loop
@@ -6938,7 +7131,12 @@ fn materialize_fixed_shortcut(
     // PARALLEL per-item bound VECTOR would be positionally unsyncable across that sort; that
     // is the shape being rejected here, not per-accept binding as such.)
     match take_route(state, proposal, n) {
-        TakeRoute::Replay => {
+        TakeRoute::Replay { settle } => {
+            // CR 732.2c: performing put the earlier accepts' cycles before this take's, so the
+            // life they left pending for this take's settle scope lands first. The drive's
+            // rollback snapshot is taken after it, so a handed-back drive keeps it: the earlier
+            // take's cycles were taken.
+            settle_pending_life(state, &settle, &mut result.events)?;
             let derivation = shortcut_consumption_bound(state, proposal, n);
             let delivered = drive_persistent_axis_collapse(
                 state,
@@ -8123,10 +8321,14 @@ fn try_offer_object_growth_shortcut(
         return Some((certificate, schema, confirmation.period, declaration));
     }
     let [s_n1, s_n2] = *confirmation.frames;
+    // CR 810.9 + CR 810.9a: the offer advertises a shared total's change on the member it
+    // happened to, not on the field the spread stored it in, and never a change the total does
+    // not make.
+    let delta = confirmation.delta.with_life_attributed(&s_n1, &s_n2);
     let certificate = build_cert(
         &s_n1,
         &s_n2,
-        &confirmation.delta,
+        &delta,
         caster,
         confirmation.departure.as_ref(),
     );
@@ -8148,7 +8350,9 @@ fn try_offer_object_growth_shortcut(
     // CR 704.5a / CR 704.5c: the `UntilLethal` arm is UNREACHABLE FROM THIS PRODUCER — `delta` is
     // a two-`snapshot` diff, and `ResourceVector::snapshot` writes neither `damage_dealt` nor
     // `extra_turns` and never keys a poison `counters` entry by `ObjectClass::Player`, while the
-    // sign check just above forces `life >= 0` and `poison <= 0` on every seat; together those
+    // sign check just above forces `life >= 0` and `poison <= 0` on every seat (and
+    // `with_life_attributed` keeps every life entry between 0 and its shared total's change, so
+    // this holds for `delta` too); together those
     // negate every non-`Advantage` branch of `classify_win_kind` but `Decking`. The forcing
     // function for THAT one is no longer the sign check, which now admits a certified departure
     // carrying a genuinely negative `library_delta`: it is `without_certified_departure`, which
@@ -10813,6 +11017,20 @@ fn advance_stack_resolution_session_after_priority_pass(
 // `pub(crate)`: also the CR 732.2a boundary-collapse `PayableResource::LoopCollapse`
 // prompt max (turns.rs), reusing the one existing loop-count safety bound.
 pub(crate) const MAX_SHORTCUT_CYCLES: u32 = 1_000;
+
+/// CR 732.2c: the count `controller`'s pending stash was accepted at
+/// (`GameState::pending_materialization_count`), the most its boundary collapse may name, or
+/// `MAX_SHORTCUT_CYCLES` for a stash with no recorded bound (one deserialized from a save written
+/// before the bound was tracked). The one reading of the bound: the boundary prompt's `max`
+/// (`turns::drain_pending_phase_transition_progress`), `PeriodGrowth::life_past_the_cap` and
+/// `settle_pending_life`.
+pub(crate) fn pending_collapse_bound(state: &GameState, controller: PlayerId) -> u32 {
+    state
+        .pending_materialization_count
+        .get(&controller)
+        .copied()
+        .unwrap_or(MAX_SHORTCUT_CYCLES)
+}
 
 fn auto_pass_loop_max_iterations(state: &GameState) -> usize {
     let living_players = state
@@ -30748,105 +30966,290 @@ mod legacy_copy_announcement_tests {
 
 #[cfg(test)]
 mod period_growth_life_cap_tests {
-    use super::PeriodGrowth;
+    use super::{settle_pending_life, PeriodGrowth};
+    use crate::analysis::resource::ResourceAxis;
+    use crate::game::scenario::GameScenario;
+    use crate::types::events::GameEvent;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{GameState, PersistentAxisMaterialization};
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
+    use crate::types::triggers::TriggerMode;
+    use std::collections::{BTreeMap, BTreeSet};
 
     /// A period growth that batches only these `(seat, per-cycle gain)` life items.
     fn life_growth(items: &[(u8, u32)]) -> PeriodGrowth {
         PeriodGrowth {
             fodder: None,
-            batched: items
-                .iter()
-                .map(
-                    |&(seat, per_cycle_delta)| PersistentAxisMaterialization::Life {
-                        player: PlayerId(seat),
-                        per_cycle_delta,
-                    },
-                )
-                .collect(),
+            batched: life_items(items),
+            life_stored_off: BTreeSet::new(),
         }
     }
 
-    /// CR 119.3 + CR 810.9a: a batched life lump passes the cap exactly where the total it
-    /// adjusts cannot take all of it under `i32::MAX`: the item's own player's total, and in
-    /// Two-Headed Giant the team's shared total, against which both members' items count
-    /// together.
+    /// `Life` items for these `(seat, per-cycle gain)` pairs, in order.
+    fn life_items(items: &[(u8, u32)]) -> Vec<PersistentAxisMaterialization> {
+        items
+            .iter()
+            .map(
+                |&(seat, per_cycle_delta)| PersistentAxisMaterialization::Life {
+                    player: PlayerId(seat),
+                    per_cycle_delta,
+                },
+            )
+            .collect()
+    }
+
+    /// The players these seats name.
+    fn seats(seats: &[u8]) -> BTreeSet<PlayerId> {
+        seats.iter().copied().map(PlayerId).collect()
+    }
+
+    /// CR 119.3 + CR 810.9 + CR 810.9a + CR 732.2c: a batched life lump, counted with the life
+    /// earlier accepts left pending for the same total at their stashes' bounds, is past the
+    /// cap exactly where the total it adjusts cannot take all of it under `i32::MAX` or the
+    /// gaining player's own field cannot hold its part. The answer names the players whose
+    /// pending life must land first: every member of a total that is past, and each player
+    /// whose own field is past. In Two-Headed Giant both members' items count against their one
+    /// shared total; an opponent's or the other team's pending life does not count, a pending
+    /// item counts against its own player's total at its stash's bound, a bound-less stash
+    /// counts at `MAX_SHORTCUT_CYCLES`, and a teammate whose pending life fits while only
+    /// another member's own field is past is left out.
     #[test]
-    fn a_life_lump_passes_the_cap_exactly_where_its_total_cannot_take_it() {
-        // (name, life fields, items, cycles, passes)
-        type Row = (&'static str, Vec<i32>, Vec<(u8, u32)>, u32, bool);
+    fn life_past_the_cap_names_the_players_a_batched_collapse_cannot_store_as_performing_does() {
+        /// A controller's pending stash: (controller, its `(player, per-cycle gain)` life
+        /// items, its bound).
+        type Pending = (u8, Vec<(u8, u32)>, Option<u32>);
+        /// (name, life fields, this take's items, cycles, pending stashes, the players past)
+        type Row = (
+            &'static str,
+            Vec<i32>,
+            Vec<(u8, u32)>,
+            u32,
+            Vec<Pending>,
+            Vec<u8>,
+        );
         let max = i32::MAX;
-        let duel: [Row; 7] = [
+        let duel: Vec<Row> = vec![
             (
                 "reaches the cap exactly",
                 vec![max - 6, 20],
                 vec![(0, 2)],
                 3,
-                false,
+                vec![],
+                vec![],
             ),
-            ("one past the cap", vec![max - 5, 20], vec![(0, 2)], 3, true),
-            ("held at the cap", vec![max, 20], vec![(0, 5)], 1, true),
-            ("below the cap", vec![20, 20], vec![(0, 2)], 1000, false),
+            (
+                "one past the cap",
+                vec![max - 5, 20],
+                vec![(0, 2)],
+                3,
+                vec![],
+                vec![0],
+            ),
+            (
+                "held at the cap",
+                vec![max, 20],
+                vec![(0, 5)],
+                1,
+                vec![],
+                vec![0],
+            ),
+            (
+                "below the cap",
+                vec![20, 20],
+                vec![(0, 2)],
+                1000,
+                vec![],
+                vec![],
+            ),
             (
                 "an amount past i64",
                 vec![20, 20],
                 vec![(0, u32::MAX)],
                 u32::MAX,
-                true,
+                vec![],
+                vec![0],
             ),
-            ("no life item", vec![max, 20], vec![], 1000, false),
+            ("no life item", vec![max, 20], vec![], 1000, vec![], vec![]),
             (
                 "another seat's item",
                 vec![max, 20],
                 vec![(1, 2)],
                 1000,
-                false,
+                vec![],
+                vec![],
+            ),
+            (
+                "duel, same total, fits exactly",
+                vec![max - 10, 20],
+                vec![(0, 2)],
+                1,
+                vec![(0, vec![(0, 2)], Some(4))],
+                vec![],
+            ),
+            (
+                "duel, same total, past",
+                vec![max - 10, 20],
+                vec![(0, 2)],
+                2,
+                vec![(0, vec![(0, 2)], Some(4))],
+                vec![0],
+            ),
+            (
+                "duel, opponent's pending",
+                vec![max - 2, 20],
+                vec![(0, 2)],
+                1,
+                vec![(1, vec![(1, 2)], Some(4))],
+                vec![],
+            ),
+            (
+                "duel, bound-less pending",
+                vec![max - 2000, 20],
+                vec![(0, 1)],
+                1,
+                vec![(0, vec![(0, 2)], None)],
+                vec![0],
+            ),
+            (
+                "duel, bound-less pending, one more below",
+                vec![max - 2001, 20],
+                vec![(0, 1)],
+                1,
+                vec![(0, vec![(0, 2)], None)],
+                vec![],
+            ),
+            (
+                "duel, an opponent's stash gains P0",
+                vec![max - 10, 20],
+                vec![(0, 2)],
+                2,
+                vec![(1, vec![(0, 2)], Some(4))],
+                vec![0],
+            ),
+            (
+                "duel, an opponent's stash gains P0, fits exactly",
+                vec![max - 10, 20],
+                vec![(0, 2)],
+                1,
+                vec![(1, vec![(0, 2)], Some(4))],
+                vec![],
             ),
         ];
-        let team: [Row; 6] = [
+        // Team A's fields give it `max - 10` with room on both members' own fields.
+        let room = || vec![1_000, max - 1_010, 15, 15];
+        let team: Vec<Row> = vec![
             (
                 "both members' items fit",
-                vec![max - 1, -20, 15, 15],
+                room(),
                 vec![(0, 1), (1, 1)],
-                10,
-                false,
+                5,
+                vec![],
+                vec![],
             ),
             (
                 "both members' items pass together",
-                vec![max - 1, -20, 15, 15],
+                room(),
                 vec![(0, 1), (1, 1)],
-                11,
-                true,
+                6,
+                vec![],
+                vec![0, 1],
             ),
             (
                 "one member's item fits",
-                vec![max - 1, -20, 15, 15],
+                room(),
                 vec![(0, 1)],
-                11,
-                false,
+                6,
+                vec![],
+                vec![],
             ),
             (
                 "the other team's item does not count",
-                vec![max - 1, -20, 15, 15],
+                room(),
                 vec![(0, 1), (2, 15)],
-                11,
-                false,
+                6,
+                vec![],
+                vec![],
             ),
             (
                 "own field at the cap, the team has room",
                 vec![max, -100, 15, 15],
                 vec![(0, 5)],
                 3,
-                false,
+                vec![],
+                vec![0],
+            ),
+            (
+                "own field one below the cap, the team has room",
+                vec![max - 1, -20, 15, 15],
+                vec![(0, 2)],
+                1,
+                vec![],
+                vec![0],
+            ),
+            (
+                "a member's own field has room while the teammate's is near the cap",
+                vec![-100, max - 1_000, 15, 15],
+                vec![(0, 5)],
+                10,
+                vec![],
+                vec![],
             ),
             (
                 "the team's total already past i32",
                 vec![max, 10, 15, 15],
                 vec![(0, 1)],
                 1,
-                true,
+                vec![],
+                vec![0, 1],
+            ),
+            (
+                "team, teammate's pending",
+                room(),
+                vec![(0, 1)],
+                5,
+                vec![(1, vec![(1, 1)], Some(6))],
+                vec![0, 1],
+            ),
+            (
+                "team, teammate's pending, fits",
+                room(),
+                vec![(0, 1)],
+                4,
+                vec![(1, vec![(1, 1)], Some(6))],
+                vec![],
+            ),
+            (
+                "team, other team's pending",
+                room(),
+                vec![(0, 1)],
+                5,
+                vec![(2, vec![(2, 100)], Some(4))],
+                vec![],
+            ),
+            (
+                "team, own pending fills the gaining player's own field",
+                vec![max - 10, -1_000, 15, 15],
+                vec![(0, 2)],
+                2,
+                vec![(0, vec![(0, 2)], Some(4))],
+                vec![0],
+            ),
+            (
+                "team, own pending, fits exactly",
+                vec![max - 10, -1_000, 15, 15],
+                vec![(0, 2)],
+                1,
+                vec![(0, vec![(0, 2)], Some(4))],
+                vec![],
+            ),
+            (
+                "team, a teammate's pending fits while the gaining player's own field is past",
+                vec![max - 1, -20, 15, 15],
+                vec![(0, 1), (1, 1)],
+                5,
+                vec![(1, vec![(1, 1)], Some(6))],
+                vec![0],
             ),
         ];
         let rows = duel
@@ -30856,13 +31259,287 @@ mod period_growth_life_cap_tests {
                 team.into_iter()
                     .map(|row| (GameState::new(FormatConfig::two_headed_giant(), 4, 7), row)),
             );
-        for (mut state, (name, fields, items, cycles, passes)) in rows {
+        for (mut state, (name, fields, items, cycles, pending, past)) in rows {
             for (player, life) in state.players.iter_mut().zip(fields) {
                 player.life = life;
             }
+            for (controller, stash, bound) in pending {
+                state
+                    .pending_unbounded_materialization
+                    .insert(PlayerId(controller), life_items(&stash));
+                if let Some(bound) = bound {
+                    state
+                        .pending_materialization_count
+                        .insert(PlayerId(controller), bound);
+                }
+            }
             assert_eq!(
-                life_growth(&items).life_lump_passes_the_cap(&state, cycles),
-                passes,
+                life_growth(&items).life_past_the_cap(&state, cycles),
+                seats(&past),
+                "{name}"
+            );
+        }
+    }
+
+    /// The `LifeChanged` events among `events`.
+    fn life_changed(events: &[GameEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::LifeChanged { .. }))
+            .count()
+    }
+
+    /// CR 732.2c + CR 119.3: a later take past the life cap first applies the life earlier
+    /// accepts left pending for the players in its settle scope, each item at its stash's
+    /// bound, and ends their ∞ life axes. Every other item of the stash (here P2's life, a
+    /// player outside the scope) is kept, in order, with the stash's bound, and a stash left
+    /// empty loses its bound. A board that observes life growth declines, as the boundary
+    /// would; an empty scope settles nothing; and a teammate outside the scope keeps its
+    /// pending life for the boundary.
+    #[test]
+    fn settle_pending_life_applies_the_pending_life_of_the_players_in_its_scope() {
+        let (p0, p1, p2) = (PlayerId(0), PlayerId(1), PlayerId(2));
+        let life = |player: PlayerId, per_cycle_delta: u32| PersistentAxisMaterialization::Life {
+            player,
+            per_cycle_delta,
+        };
+        // Two-Headed Giant, team A's fields (`i32::MAX - 8`, −100): P0's stash gains P0 2 and
+        // P2 3 per cycle at bound 4, P1's gains P1 1 at bound 6, each with its ∞ life marks.
+        let board = |observer: bool| -> GameState {
+            let mut scenario =
+                GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 7);
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_life(p0, i32::MAX - 8);
+            scenario.with_life(p1, -100);
+            if observer {
+                scenario
+                    .add_creature(p0, "Test Life Observer", 1, 1)
+                    .with_trigger(TriggerMode::LifeGained);
+            }
+            let mut state = scenario.build().state().clone();
+            state.register_pending_materialization(p0, life(p0, 2));
+            state.register_pending_materialization(p0, life(p2, 3));
+            state.pending_materialization_count.insert(p0, 4);
+            state.register_pending_materialization(p1, life(p1, 1));
+            state.pending_materialization_count.insert(p1, 6);
+            state.mark_unbounded_loop(p0, &[ResourceAxis::Life(p0), ResourceAxis::Life(p2)]);
+            state.mark_unbounded_loop(p1, &[ResourceAxis::Life(p1)]);
+            state
+        };
+        type Readings = (
+            Vec<(i32, u32)>,
+            BTreeMap<PlayerId, Vec<PersistentAxisMaterialization>>,
+            BTreeMap<PlayerId, u32>,
+            BTreeMap<PlayerId, BTreeSet<ResourceAxis>>,
+        );
+        // Each player's field and gained counter, the stashes, the bounds and the ∞ marks.
+        let readings = |state: &GameState| -> Readings {
+            (
+                state
+                    .players
+                    .iter()
+                    .map(|p| (p.life, p.life_gained_this_turn))
+                    .collect(),
+                state.pending_unbounded_materialization.clone(),
+                state.pending_materialization_count.clone(),
+                state.unbounded_resources.clone(),
+            )
+        };
+
+        // (a) The scope is team A: P0's and P1's pending life lands, P2's is kept.
+        let mut state = board(false);
+        let before = readings(&state);
+        let mut events = Vec::new();
+        settle_pending_life(&mut state, &seats(&[0, 1]), &mut events)
+            .expect("the settled gains are representable");
+        let (p0_gained, p1_gained) = (
+            state.players[0].life_gained_this_turn,
+            state.players[1].life_gained_this_turn,
+        );
+        assert_eq!(
+            (p0_gained - before.0[0].1, p1_gained - before.0[1].1),
+            (8, 6),
+            "(a): P0 gains 2 × 4 and P1 gains 1 × 6"
+        );
+        assert_eq!(
+            (state.players[0].life, state.players[1].life),
+            (i32::MAX, -94),
+            "(a): each gain is stored on its own player's field"
+        );
+        assert_eq!(
+            state.pending_unbounded_materialization,
+            BTreeMap::from([(p0, vec![life(p2, 3)])]),
+            "(a): only P2's item is kept, in P0's stash"
+        );
+        assert_eq!(
+            state.pending_materialization_count,
+            BTreeMap::from([(p0, 4)]),
+            "(a): the kept item keeps its bound and P1's empty stash has none"
+        );
+        assert_eq!(
+            state.unbounded_resources,
+            BTreeMap::from([(p0, BTreeSet::from([ResourceAxis::Life(p2)]))]),
+            "(a): the settled life axes end and P2's stays"
+        );
+        assert_eq!(life_changed(&events), 2, "(a): one life change per item");
+
+        // (b) A board that observes life growth declines, as the boundary would.
+        let mut state = board(true);
+        assert!(
+            crate::analysis::resource::life_growth_is_observed(&state),
+            "REACH-GUARD (b): the LifeGained trigger observes life growth"
+        );
+        let before = readings(&state);
+        let mut events = Vec::new();
+        settle_pending_life(&mut state, &seats(&[0, 1]), &mut events)
+            .expect("a declined settle changes nothing");
+        assert_eq!(readings(&state), before, "(b): nothing is settled");
+        assert!(events.is_empty(), "(b): no event");
+
+        // (c) An empty scope settles nothing.
+        let mut state = board(false);
+        let before = readings(&state);
+        let mut events = Vec::new();
+        settle_pending_life(&mut state, &BTreeSet::new(), &mut events)
+            .expect("an empty scope changes nothing");
+        assert_eq!(readings(&state), before, "(c): nothing is settled");
+        assert!(events.is_empty(), "(c): no event");
+
+        // (d) Team A at (`i32::MAX - 1`, −20) with P1's stash gaining P1 1 at bound 6: with
+        // only P0 in the scope, P1's pending life waits for the boundary.
+        let teammate_board = || {
+            let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 7);
+            for (player, life) in state.players.iter_mut().zip([i32::MAX - 1, -20, 15, 15]) {
+                player.life = life;
+            }
+            state.register_pending_materialization(p1, life(p1, 1));
+            state.pending_materialization_count.insert(p1, 6);
+            state.mark_unbounded_loop(p1, &[ResourceAxis::Life(p1)]);
+            state
+        };
+        let mut state = teammate_board();
+        let before = readings(&state);
+        let mut events = Vec::new();
+        settle_pending_life(&mut state, &seats(&[0]), &mut events)
+            .expect("a scope that names no pending item changes nothing");
+        assert_eq!(
+            readings(&state),
+            before,
+            "(d): P1's stash, bound, mark and field are unchanged"
+        );
+        assert_eq!(life_changed(&events), 0, "(d): no life change");
+
+        // REACH-GUARD (d): the same board with P1 in the scope settles P1's item.
+        let mut state = teammate_board();
+        let before = readings(&state);
+        let mut events = Vec::new();
+        settle_pending_life(&mut state, &seats(&[0, 1]), &mut events)
+            .expect("the settled gain is representable");
+        assert_eq!(
+            state.players[1].life_gained_this_turn - before.0[1].1,
+            6,
+            "REACH-GUARD (d): P1 gains 1 × 6"
+        );
+        assert_eq!(state.players[1].life, -14, "REACH-GUARD (d): P1's field");
+        assert!(
+            state.pending_unbounded_materialization.is_empty()
+                && state.pending_materialization_count.is_empty()
+                && state.unbounded_resources.is_empty(),
+            "REACH-GUARD (d): P1's stash, bound and mark are gone"
+        );
+        assert_eq!(life_changed(&events), 1, "REACH-GUARD (d)");
+    }
+
+    /// CR 732.2c + CR 810.9 + CR 810.9a: a take whose driven cycle stored a life change in a
+    /// field other than the field of the player it happened to is performed, whatever its
+    /// batched items, and a take whose changes all land on their own players' fields is not
+    /// routed by that. The frames are built by hand, as a Two-Headed Giant board that a
+    /// can't-lose effect keeps in the game (CR 810.8a) would leave them with team A's member P0
+    /// at `i32::MIN`: P0's loss is stored in P1's field.
+    #[test]
+    fn a_period_that_stores_a_life_change_off_its_player_is_performed() {
+        use crate::analysis::decision_template::IterationCount;
+        let p1 = PlayerId(1);
+        let proposal = crate::analysis::loop_check::ShortcutProposal {
+            proposer: p1,
+            predicted_winner: None,
+            count: IterationCount::Fixed(5),
+            unbounded: Vec::new(),
+            win_kind: None,
+            win_kind_at: None,
+            template: None,
+            per_cycle: None,
+            shortened_by: None,
+            published_declaration: None,
+            leading_aims: Vec::new(),
+            road: crate::analysis::loop_check::OfferRoad::RecordedPeriod,
+            period: Default::default(),
+        };
+        // (name, team A's fields before → after, P0's lost and P1's gained counters on
+        // `current`, members stored off, batched life items, performed)
+        type Row = (
+            &'static str,
+            ((i32, i32), (i32, i32)),
+            (u32, u32),
+            Vec<u8>,
+            Vec<(u8, u32)>,
+            bool,
+        );
+        let min = i32::MIN;
+        let rows: [Row; 3] = [
+            (
+                "a member's loss spilled at i32::MIN while the teammate gains as much on its \
+                 own field",
+                ((min, 20), (min, 20)),
+                (2, 2),
+                vec![0, 1],
+                vec![],
+                true,
+            ),
+            (
+                "the same loss while the teammate gains more",
+                ((min, 20), (min, 21)),
+                (2, 3),
+                vec![0, 1],
+                vec![(1, 1)],
+                true,
+            ),
+            (
+                "control: the loss lands on the member's own field",
+                ((min + 10, 20), (min + 8, 22)),
+                (2, 2),
+                vec![],
+                vec![(1, 2)],
+                false,
+            ),
+        ];
+        for (
+            name,
+            ((p0_before, p1_before), (p0_after, p1_after)),
+            (lost, gained),
+            stored_off,
+            items,
+            performed,
+        ) in rows
+        {
+            let mut prior = GameState::new(FormatConfig::two_headed_giant(), 4, 7);
+            for (player, life) in prior.players.iter_mut().zip([p0_before, p1_before, 15, 15]) {
+                player.life = life;
+            }
+            let mut current = prior.clone();
+            current.players[0].life = p0_after;
+            current.players[1].life = p1_after;
+            current.players[0].life_lost_this_turn = lost;
+            current.players[1].life_gained_this_turn = gained;
+
+            let growth = PeriodGrowth::derive(Some(&(prior.clone(), current)), p1);
+            let past = growth.life_past_the_cap(&prior, 5);
+            assert_eq!(growth.life_stored_off, seats(&stored_off), "{name}");
+            assert_eq!(growth.batched, life_items(&items), "{name}: batched");
+            assert!(past.is_empty(), "{name}: nothing is past the cap");
+            assert_eq!(
+                growth.collapse_is_replay(&prior, &proposal, &past),
+                performed,
                 "{name}"
             );
         }
