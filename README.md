@@ -472,6 +472,7 @@ If you believe content in this repository infringes your rights, please see
 - [MTGJSON](https://mtgjson.com/) — Card data (MIT licensed)
 - [Scryfall](https://scryfall.com/) — Card images and search API
 - [MTGGoldfish](https://www.mtggoldfish.com/) — Metagame deck data
+- [Tabler Icons](https://tabler.io/icons) — Turn-phase icon paths (MIT licensed)
 - [Wizards of the Coast](https://magic.wizards.com/) — Magic: The Gathering
 
 ## License
