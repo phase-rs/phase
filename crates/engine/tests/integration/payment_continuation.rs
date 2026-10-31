@@ -1,10 +1,11 @@
 //! Production-path regressions for the reducer-backed AI payment witness.
 
 use engine::ai_support::{
-    classify_payment_continuation, legal_actions, witness_payment_continuation,
-    witness_payment_continuations, witness_payment_continuations_with_counters,
-    PaymentContinuationBatchStatus, PaymentContinuationIndeterminate, PaymentContinuationRoot,
-    PaymentContinuationState, PaymentContinuationWitnessCounters,
+    activates_mana_ability, candidate_actions, classify_payment_continuation, legal_actions,
+    witness_payment_continuation, witness_payment_continuations,
+    witness_payment_continuations_with_counters, PaymentContinuationBatchStatus,
+    PaymentContinuationIndeterminate, PaymentContinuationRoot, PaymentContinuationState,
+    PaymentContinuationStep, PaymentContinuationWitnessCounters,
     PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
 };
 use engine::game::engine::apply_as_current_for_simulation;
@@ -216,6 +217,60 @@ fn cancellation_is_never_a_payment_witness() {
         witness_payment_continuation(&state, &GameAction::CancelCast).is_none(),
         "CancelCast remains reducer-legal but cannot certify root finalization"
     );
+}
+
+/// CR 601.2h: the pass pays the total cost from the pool and finalizes the
+/// root in its own step; an Island tap (CR 605.3a) leaves the same root still
+/// being paid, and is certified only through a later finalization.
+#[test]
+fn witness_reports_whether_an_edge_finalizes_the_root_itself() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Witnessed Draw", true, DRAW_ORACLE)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Colorless, spell, false, Vec::new()))
+            .collect(),
+    );
+    scenario.add_basic_land(P0, ManaColor::Blue);
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("manual cast must reach a live payment carrier");
+    let state = runner.state().clone();
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+
+    let tap = candidate_actions(&state)
+        .into_iter()
+        .map(|candidate| candidate.action)
+        .find(|action| matches!(action, GameAction::TapLandForMana { .. }))
+        .expect("reach: the Island's mana ability is offered while paying");
+    let batch = witness_payment_continuations(&state, &[GameAction::PassPriority, tap.clone()]);
+    assert_eq!(batch.status, PaymentContinuationBatchStatus::Complete);
+    let steps: Vec<_> = batch
+        .successors
+        .iter()
+        .map(|accepted| accepted.as_ref().map(|accepted| accepted.step))
+        .collect();
+    assert_eq!(
+        steps,
+        vec![
+            Some(PaymentContinuationStep::Finalizes),
+            Some(PaymentContinuationStep::Continues),
+        ]
+    );
+    assert!(activates_mana_ability(&state, &tap));
+    assert!(!activates_mana_ability(&state, &GameAction::PassPriority));
 }
 
 #[test]

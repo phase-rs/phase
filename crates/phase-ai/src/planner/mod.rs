@@ -4,8 +4,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use engine::ai_support::{
-    build_decision_context, classify_payment_continuation, witness_payment_continuations,
-    AiDecisionContext, CandidateAction, PaymentContinuationBatchStatus, PaymentContinuationState,
+    activates_mana_ability, build_decision_context, classify_payment_continuation,
+    witness_payment_continuations, AcceptedPaymentSuccessor, AiDecisionContext, CandidateAction,
+    PaymentContinuationBatchStatus, PaymentContinuationState, PaymentContinuationStep,
     TacticalClass,
 };
 use engine::game::engine::apply_as_current_for_simulation;
@@ -122,32 +123,12 @@ pub(crate) fn prepare_payment_candidates(
                 .collect();
             let batch = witness_payment_continuations(state, &actions);
             match batch.status {
-                PaymentContinuationBatchStatus::Complete => candidates
-                    .into_iter()
-                    .enumerate()
-                    .zip(batch.successors)
-                    .filter_map(|((source_index, candidate), accepted)| {
-                        accepted.map(|accepted| PreparedCandidate {
-                            source_index,
-                            candidate,
-                            payment_successor: Some(accepted.state),
-                        })
-                    })
-                    .collect(),
+                PaymentContinuationBatchStatus::Complete => {
+                    accepted_payment_candidates(state, candidates, batch.successors)
+                }
                 PaymentContinuationBatchStatus::Indeterminate(_) => {
                     if batch.successors.iter().any(Option::is_some) {
-                        candidates
-                            .into_iter()
-                            .enumerate()
-                            .zip(batch.successors)
-                            .filter_map(|((source_index, candidate), accepted)| {
-                                accepted.map(|accepted| PreparedCandidate {
-                                    source_index,
-                                    candidate,
-                                    payment_successor: Some(accepted.state),
-                                })
-                            })
-                            .collect()
+                        accepted_payment_candidates(state, candidates, batch.successors)
                     } else {
                         candidates
                             .into_iter()
@@ -169,6 +150,50 @@ pub(crate) fn prepare_payment_candidates(
             }
         }
     }
+}
+
+/// Keep the witnessed payment edges, minus the mana activations the payment
+/// does not need.
+///
+/// CR 601.2h + CR 118.3c: activating mana abilities is never mandatory. Once an
+/// edge that activates no mana ability pays the total cost and finalizes the
+/// root in its own step (at `ManaPayment`, the pass that lets the engine's
+/// payer finish), a mana activation that leaves the root still being paid only
+/// adds mana the payment won't spend (CR 106.4) and pays that ability's own
+/// cost — life, a card, a permanent, a tapped creature. Without this the
+/// search can prefer such an activation purely to keep the root parked one
+/// more ply, pushing the spell's resolution past its horizon (#10488).
+/// With no such finalizer every accepted edge is kept.
+fn accepted_payment_candidates(
+    state: &GameState,
+    candidates: Vec<CandidateAction>,
+    successors: Vec<Option<AcceptedPaymentSuccessor>>,
+) -> Vec<PreparedCandidate> {
+    let accepted: Vec<_> = candidates
+        .into_iter()
+        .enumerate()
+        .zip(successors)
+        .filter_map(|((source_index, candidate), accepted)| {
+            accepted.map(|accepted| (source_index, candidate, accepted))
+        })
+        .collect();
+    let finalizes_without_mana = accepted.iter().any(|(_, candidate, accepted)| {
+        accepted.step == PaymentContinuationStep::Finalizes
+            && !activates_mana_ability(state, &candidate.action)
+    });
+    accepted
+        .into_iter()
+        .filter(|(_, candidate, accepted)| {
+            !(finalizes_without_mana
+                && accepted.step == PaymentContinuationStep::Continues
+                && activates_mana_ability(state, &candidate.action))
+        })
+        .map(|(source_index, candidate, accepted)| PreparedCandidate {
+            source_index,
+            candidate,
+            payment_successor: Some(accepted.state),
+        })
+        .collect()
 }
 
 pub(crate) fn rank_prepared_candidates<F>(
