@@ -339,6 +339,11 @@ pub fn record_attackers_declared(
 
     // CR 508.6 + CR 508.5: record the defending players attacked this declaration.
     // `players_attacked_this_step` already holds this declaration's defenders.
+    // COLLAPSED read by construction (planeswalker/battle → defending
+    // player): serves defending-player and explicit-disjunct consumers only
+    // (e.g. Wanderglyph's "or a planeswalker you control"). Retrospective
+    // "attacked you" predicates without such a disjunct read the uncollapsed
+    // `attacked_players_directly_this_turn` ledger instead.
     let active = state.active_player;
     state
         .attacked_defenders_this_turn

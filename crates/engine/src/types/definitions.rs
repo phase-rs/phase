@@ -55,6 +55,19 @@ impl<T> Default for Definitions<T> {
     }
 }
 
+/// Registry-index projection for replacement-candidate identities.
+///
+/// The `*_by_rid` accessors take `impl ReplacementIdentity` rather than the
+/// state-layer identity item itself: `Definitions` is AST-reachable, so a
+/// signature naming that item would pull it into the AST closure
+/// (layer_boundary_census 5b). The single implementation lives beside the
+/// identity item in `types/proposed_event.rs`.
+pub trait ReplacementIdentity {
+    /// Contained projection to a registry ordinal, or `None` when the
+    /// identity carries no real ordinal (virtual-candidate payload, foreign).
+    fn registry_index(self) -> Option<usize>;
+}
+
 impl<T: Clone> Definitions<T> {
     /// Append a new definition. Public because mutation is a legitimate cross-
     /// crate operation (test fixtures, card construction, copy effects). The

@@ -1763,6 +1763,7 @@ pub fn static_definition_is_cast_stable_for_pre_cast(definition: &StaticDefiniti
         protection_does_not_remove: None,
         room_door: None,
         granting_object: None,
+        bound_actor: None,
     } = definition
     else {
         // This is intentionally a positive proof over every direct static
@@ -2501,6 +2502,8 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // Scalar designation payload: no quantity to resolve.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -2592,6 +2595,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
     }
@@ -9134,7 +9138,7 @@ fn resolve_object_mana_value(
 /// `PlayerId`, when one exists. Aggregate scopes (`Opponent`, `AllPlayers`)
 /// have no single-player interpretation and yield `None`. Used to resolve the
 /// `exclude` anchor of `PlayerScope::AllPlayers { exclude }`.
-fn resolve_single_player_scope(
+pub(crate) fn resolve_single_player_scope(
     state: &GameState,
     scope: &PlayerScope,
     controller: PlayerId,

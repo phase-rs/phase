@@ -3915,6 +3915,13 @@ fn pay_deferred_spell_sacrifices_at_commit(
             .map_err(|e| EngineError::InvalidAction(format!("{e}")))?
         {
             super::sacrifice::SacrificeOutcome::Complete => {}
+            // CR 601.2h: a mid-cast bar on the chosen victim fails the
+            // payment instead of recording an unsacrificed cost as paid.
+            super::sacrifice::SacrificeOutcome::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
             super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                 return Ok(pause_sacrifice_for_cost(
                     state,
@@ -4531,6 +4538,13 @@ pub(crate) fn resume_sacrifice_for_cost(
             .map_err(|error| EngineError::InvalidAction(error.to_string()))?
         {
             super::sacrifice::SacrificeOutcome::Complete => {}
+            // CR 601.2h + CR 602.2b: a mid-payment bar on the chosen victim
+            // fails the payment instead of recording an unsacrificed cost as paid.
+            super::sacrifice::SacrificeOutcome::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
             super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                 return Ok(pause_sacrifice_for_cost(
                     state,
@@ -4769,6 +4783,13 @@ pub(crate) fn handle_sacrifice_for_cost(
             .map_err(|error| EngineError::InvalidAction(error.to_string()))?
         {
             super::sacrifice::SacrificeOutcome::Complete => {}
+            // CR 601.2h + CR 602.2b: a mid-payment bar on the chosen victim
+            // fails the payment instead of recording an unsacrificed cost as paid.
+            super::sacrifice::SacrificeOutcome::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
             super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                 return Ok(pause_sacrifice_for_cost(
                     state,
@@ -4919,6 +4940,13 @@ pub(crate) fn handle_resolution_optional_sacrifice_for_cost(
             .map_err(|error| EngineError::InvalidAction(error.to_string()))?
         {
             super::sacrifice::SacrificeOutcome::Complete => {}
+            // CR 118.3: a mid-payment bar on the chosen victim fails the
+            // cost instead of recording an unsacrificed cost as paid.
+            super::sacrifice::SacrificeOutcome::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
             super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                 return Ok(pause_sacrifice_for_cost(
                     state,
@@ -10744,6 +10772,13 @@ fn pay_additional_cost_with_source(
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?
                 {
                     super::sacrifice::SacrificeOutcome::Complete => {}
+                    // CR 601.2h: a mid-cast bar on the chosen victim fails the
+                    // payment instead of recording an unsacrificed cost as paid.
+                    super::sacrifice::SacrificeOutcome::Prohibited => {
+                        return Err(EngineError::ActionNotAllowed(
+                            "Cannot sacrifice this permanent as a cost".to_string(),
+                        ));
+                    }
                     super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                         return Ok(pause_sacrifice_for_cost(
                             state,

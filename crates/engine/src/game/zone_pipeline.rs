@@ -1907,6 +1907,8 @@ mod paused_search_audience_tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            each_source_batch_owner: None,
+            combat_pause_slot: None,
             unrepresentable_life_change: Default::default(),
         });
 

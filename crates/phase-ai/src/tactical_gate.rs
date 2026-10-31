@@ -11384,12 +11384,33 @@ mod tests {
             let mut state = scenario.build().state().clone();
             activate_first_ability(&mut state, entity, P1, vec![TargetRef::Player(P0)]);
             let entry = state.stack.back().expect("Psionic Entity's ability");
-            assert!(
-                engine::game::effects::stack_reach::stack_entry_node_reach(&state, entry)
-                    .iter()
-                    .any(|reach| reach.acted_on == vec![TargetRef::Object(entity)]),
-                "reach guard: the 3-damage node acts on the Entity"
-            );
+            let reaches = engine::game::effects::stack_reach::stack_entry_node_reach(&state, entry);
+            if protected {
+                // CR 702.16e via the candidate authority (Matt R15): the
+                // Entity's own protection proposes into the replacement
+                // pipeline, so the stack_reach replacement query claims the
+                // 3-damage node and it acts on nothing — while the
+                // 2-to-player node still reaches P0.
+                assert!(
+                    reaches
+                        .iter()
+                        .any(|reach| reach.acted_on == vec![TargetRef::Player(P0)]),
+                    "protected: reach is intact for the 2-to-player node"
+                );
+                assert!(
+                    reaches
+                        .iter()
+                        .all(|reach| reach.acted_on != vec![TargetRef::Object(entity)]),
+                    "protected: the 3-damage node is claimed by protection"
+                );
+            } else {
+                assert!(
+                    reaches
+                        .iter()
+                        .any(|reach| reach.acted_on == vec![TargetRef::Object(entity)]),
+                    "reach guard: the 3-damage node acts on the Entity"
+                );
+            }
             assert_eq!(will_target_die_from_stack(&state, entity), !protected);
             assert_eq!(pump_can_save_from_hostile_stack(&state, P1, 2), !protected);
         }

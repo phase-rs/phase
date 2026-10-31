@@ -375,6 +375,7 @@ pub fn append_public_zone_pt_sticker_effects(
                 mode: crate::types::statics::StaticMode::Continuous,
                 characteristic_defining: false,
                 granter: None,
+                bound_actor: None,
             });
             bucket.push(ActiveContinuousEffect {
                 source_id: id,
@@ -392,6 +393,7 @@ pub fn append_public_zone_pt_sticker_effects(
                 mode: crate::types::statics::StaticMode::Continuous,
                 characteristic_defining: false,
                 granter: None,
+                bound_actor: None,
             });
         }
     }

@@ -5574,6 +5574,11 @@ fn attack_passes_temporary_prohibition(
                 crate::types::ability::ProhibitedActivity::Attack {
                     defended,
                     protected_player,
+                    // MECHANICAL: the scope-selection field is parser→resolver
+                    // metadata consumed solely by `add_restriction` at creation;
+                    // enforcement reads only the snapshotted player. No behavior
+                    // change.
+                    protected_scope: _,
                 },
             ..
         } = restriction
@@ -7052,6 +7057,30 @@ pub(super) fn commit_attack_declaration(
         .iter()
         .map(|a| a.defending_player)
         .collect();
+    // CR 508.6: Record DIRECT player attacks into the uncollapsed ledger —
+    // `AttackTarget::Player(p)` entries only, keyed by each creature's
+    // controller (the CR 508.6 "first player"). Planeswalker/battle targets
+    // record nothing here (no CR 508.5 collapse), so retrospective
+    // "attacked you" predicates read exactly what the Faramir ruling
+    // (2023-06-16) requires. Mirrors the collapsed sibling populated from
+    // `players_attacked_this_step` via `record_attackers_declared` below.
+    let direct_player_attacks: Vec<(PlayerId, PlayerId)> = attacks
+        .iter()
+        .filter_map(|(object_id, target)| match target {
+            AttackTarget::Player(defender) => state
+                .objects
+                .get(object_id)
+                .map(|obj| (obj.controller, *defender)),
+            _ => None,
+        })
+        .collect();
+    for (attacker, defender) in direct_player_attacks {
+        state
+            .attacked_players_directly_this_turn
+            .entry(attacker)
+            .or_default()
+            .insert(defender);
+    }
     // CR 508.1k + CR 506.4 + CR 613.1f: A chosen creature becomes attacking and
     // stays attacking until removed from combat or the combat phase ends. Marking
     // layers dirty forces Layer 6 ability-adding effects (CR 613.1f) with

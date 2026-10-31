@@ -2327,6 +2327,31 @@ fn finish_action_boundary_with_lifecycle(
     }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
+    // CR 615.13 + CR 616.1e: backstop for suspended prevention batches. The
+    // drain hook (ordered, mid-action) and the replacement-answer hook cover
+    // every known completion; this covers exotic no-drain completions through
+    // other answer handlers (lifelink/execute/downstream choices with empty
+    // remainders) so a batch can never strand unpublished on a settled
+    // action. Settled Priority with nothing queued implies the batch chain (if
+    // any) drained — a still-queued chain or any prompt defers. Pop-once
+    // makes overlap with the earlier hooks idempotent. Journal-order caveat:
+    // aggregate events here append after the action's other events (trigger
+    // SET always correct; order among same-priority triggers can differ from
+    // an unpaused batch in these exotic paths only).
+    if !state.pending_each_source_batches.is_empty()
+        && matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && state.active_ability_continuation().is_none()
+    {
+        // Matt C2: propagate a fresh rider-created choice onto the result —
+        // the cached Priority is stale once drainage pauses. The flush
+        // already synced `state.waiting_for`.
+        if let Some(fresh) = super::effects::deal_damage::flush_pending_each_source_batches(
+            state,
+            &mut result.events,
+        ) {
+            result.waiting_for = fresh;
+        }
+    }
     // A reversed activation (CR 602.2b + CR 601.2h) already had its pre-action
     // state restored by `apply_action_boundary_core`: nothing happened, so it
     // must not let a standing auto-pass consume the restored priority, resolve

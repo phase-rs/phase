@@ -6501,6 +6501,9 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // Reads source-object ledgers via layer-controller endpoints, never
+        // the ability holder: fail closed like its last-turn analog.
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
@@ -27272,14 +27275,19 @@ pub(crate) fn find_eligible_sacrifice_targets_for_scope(
             // only requires paying the morph cost, so a face-down permanent matching the
             // cost's filter may pay it with itself unless the cost says "another", which
             // the filter carries.
-            // CR 701.21a: A permanent with "can't be sacrificed" cannot be sacrificed
-            // for any cost regardless of payment scope (e.g. Assault Suit).
-            if super::static_abilities::object_has_static_other(state, id, "CantBeSacrificed") {
-                return false;
-            }
             if !is_turn_face_up
                 && super::static_abilities::player_cant_sacrifice_as_cost(state, player, id)
             {
+                return false;
+            }
+            // CR 109.5 + CR 701.21a: the only object-level bar check. An
+            // installer-bound bar (Call for Aid binds its caster) excludes the
+            // object for that actor alone; an unbound bar (printed or granted
+            // "can't be sacrificed", e.g. Assault Suit) excludes it for every
+            // actor. Same authority as execution
+            // (`object_cant_be_sacrificed_by`); no actor-blind check may run
+            // before it or later controllers stay barred.
+            if super::static_abilities::object_cant_be_sacrificed_by(state, player, id) {
                 return false;
             }
             // CR 109.5 + CR 113.8: An activated cost's “you” refers to its activator.

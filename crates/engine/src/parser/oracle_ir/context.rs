@@ -408,6 +408,17 @@ pub struct ParseContext {
     /// card text or a DELAYED trigger created from a resolving effect chain. Gates
     /// delayed-only anaphoric subject resolution; see [`TriggerConditionScope`].
     pub trigger_condition_scope: TriggerConditionScope,
+    /// CR 603.7a + CR 109.4 (Matt R7-F5): while parsing a delayed-trigger
+    /// BODY whose temporal binding will stamp `ChosenPlayer { index }` as
+    /// the body's first player target at creation (delayed_trigger.rs), the
+    /// index the attack-endpoint bridge may resolve against that stamp.
+    /// `None` everywhere else — an immediate Choose→conditional has no
+    /// stamp, so bridging its `ChosenPlayer` endpoint to `PlayerScope::Target`
+    /// would consult no player or an unrelated declared target. Set with
+    /// save/set/restore at both temporal sites (prefix and suffix); inherited
+    /// — never reset — by [`ParseContext::clone_throwaway`], because every
+    /// probe taken under it parses the same stamped body.
+    pub stamped_delayed_chosen_player: Option<u8>,
     /// CR 608.2k + CR 601.2a: Event object that bare object pronouns in the
     /// current trigger body ("it", "them") should bind to. Spell-cast triggers
     /// set this to `TriggeringSource` so "Whenever you cast a spell, put it ..."

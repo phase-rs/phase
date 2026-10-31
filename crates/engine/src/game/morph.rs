@@ -745,6 +745,14 @@ fn pay_turn_face_up_cost_object(
                 super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                     Ok(Some(choice_player))
                 }
+                // CR 118.3: a mid-payment bar on the chosen victim fails the
+                // turn-face-up cost instead of recording an unsacrificed
+                // permanent as paid.
+                super::sacrifice::SacrificeOutcome::Prohibited => {
+                    Err(EngineError::ActionNotAllowed(
+                        "Cannot sacrifice this permanent as a cost".to_string(),
+                    ))
+                }
             }
         }
     }

@@ -646,9 +646,11 @@ fn awe_strike_prevents_both_trample_portions_and_gains_five_life_once() {
     assert!(damage_amounts(&events, attacker, TargetRef::Object(blocker)).is_empty());
     assert!(damage_amounts(&events, attacker, TargetRef::Player(P1)).is_empty());
 
-    // CR 615.13 + CR 615.5: retain per-recipient prevention provenance; only
-    // the runtime rider is aggregated. No sentinel-source aggregate event may
-    // be added to these two real prevented portions.
+    // CR 615.13 + CR 615.5: one `DamagePrevented` per (shield, recipient)
+    // through the shared `fire_batch_prevention_riders` contract — the two
+    // trample portions keep per-recipient amounts, while `source_id` names the
+    // preventing shield (the `ObjectId(0)` sentinel: Awe Strike's one-shot has
+    // no host permanent), not the damage source.
     let prevented: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
@@ -661,8 +663,9 @@ fn awe_strike_prevents_both_trample_portions_and_gains_five_life_once() {
         })
         .collect();
     assert_eq!(prevented.len(), 2);
-    assert!(prevented.contains(&(attacker, TargetRef::Object(blocker), 2)));
-    assert!(prevented.contains(&(attacker, TargetRef::Player(P1), 3)));
+    let shield = engine::types::identifiers::ObjectId(0);
+    assert!(prevented.contains(&(shield, TargetRef::Object(blocker), 2)));
+    assert!(prevented.contains(&(shield, TargetRef::Player(P1), 3)));
     let gains: Vec<_> = events
         .iter()
         .filter_map(|event| match event {

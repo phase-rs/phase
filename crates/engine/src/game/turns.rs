@@ -403,11 +403,24 @@ pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
     discard_scheduled_units(state);
     // CR 724.1d + CR 511.3: if the turn ends during combat, all creatures are
     // removed from combat and the combat phase is over. Clear any active
-    // additional-combat attacker restriction (Last Night Together / Bumi) — the
-    // normal cleanup path via Phase::EndCombat or end_combat_phase_to_postcombat
-    // is skipped, so we must expire the restriction here.
+    // additional-combat attacker restriction (Last Night Together / Bumi) --
+    // the normal cleanup path via Phase::EndCombat or
+    // end_combat_phase_to_postcombat is skipped, so we must expire the
+    // restriction here even when the turn ends outside combat.
     state.current_combat_attacker_restriction = None;
     state.current_combat_attacker_restriction_source = None;
+    // CR 724.1d + CR 511.2/511.3: if the turn ends during a combat phase, the
+    // combat phase is over even though it is skipped, not completed -- run the
+    // same end-of-combat teardown the normal EndCombat transition uses, so
+    // "until end of combat" effects, replacements, and game restrictions
+    // (Champions of Minas Tirith's decline ban) expire instead of leaking
+    // into a later combat. Guard on the PHASE, not on combat presence:
+    // EndTheTurn already cleared `state.combat` before calling here. The
+    // teardown re-clears the attacker restriction and marks layers dirty
+    // (CR 611.3a: live static conditions observe the removal).
+    if state.phase.is_combat() {
+        complete_end_combat_teardown(state);
+    }
     enter_phase(state, Phase::Cleanup, events, None);
 }
 
@@ -439,6 +452,21 @@ fn complete_end_combat_teardown(state: &mut GameState) {
     state
         .pending_damage_replacements
         .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+    // CR 511.2: "this combat" game restrictions expire with every other
+    // combat-scoped effect (unit 3b: Champions of Minas Tirith's decline
+    // restriction is the first producer). One line covers both end-of-combat
+    // callers (the EndCombat step arm and `end_combat_phase_to_postcombat`)
+    // through this single teardown authority.
+    state.restrictions.retain(|r| {
+        use crate::types::ability::{GameRestriction, RestrictionExpiry};
+        match r {
+            GameRestriction::DamagePreventionDisabled { expiry, .. }
+            | GameRestriction::ProhibitActivity { expiry, .. }
+            | GameRestriction::CantEnterBattlefieldFrom { expiry, .. } => {
+                !matches!(expiry, RestrictionExpiry::EndOfCombat)
+            }
+        }
+    });
 }
 
 /// Removes, from every object's live `replacement_definitions`, each definition
@@ -596,6 +624,9 @@ fn enter_phase(
     //     `resume_pending_combat_lifelink` BEFORE the skip. A `Some` observed at
     //     the line below can therefore no longer have come from that door.
     state.pending_combat_lifelink = None;
+    // CR 510.2 + CR 616.1: the pre-application damage record abandons under
+    // the same three-door analysis as its lifelink sibling above.
+    state.pending_combat_damage = None;
 
     // CR 500.1: captured BEFORE the assignment below, which is the only place
     // the outgoing phase still exists. A phase-group crossing is a property of
@@ -1786,6 +1817,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.players_attacked_this_turn.clear();
     state.attacking_creatures_this_turn.clear();
     state.attacked_defenders_this_turn.clear();
+    state.attacked_players_directly_this_turn.clear();
     state.creature_attacked_defenders_this_turn.clear();
     state.steps_started_this_turn.clear();
     // CR 614.10 + CR 614.10a + CR 500.11: A turn-scoped combat skip that was
@@ -3752,6 +3784,30 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
     // CR 800.4: If the active player has been eliminated, skip their
     // remaining phases and proceed to the next player's turn.
     if !super::players::is_alive(state, state.active_player) {
+        // CR 510.2 + CR 616.1 + CR 800.4j: a PRE-application damage batch
+        // parked on a CR 616.1 answer that died with the active player still
+        // OWES its simultaneity to every OTHER player. Settle the orphaned
+        // choice (stashing `None` iff the PAUSED choice died — never for a
+        // nested loss), then discharge through the batch's own authority.
+        // Damage before lifelink (the single-park invariant makes the order
+        // moot; the fixed order aids review). Same guards as the lifelink
+        // discharge below: the `Priority` sentinel falls through to the skip,
+        // and an unanswerable-seat wait is never surfaced.
+        super::combat_damage::settle_orphaned_combat_damage_choice(state);
+        if state.pending_combat_damage.is_some() {
+            let event_start = events.len();
+            if let Some(waiting_for) =
+                super::combat_damage::resume_pending_combat_damage(state, event_start, events)
+            {
+                let unanswerable = waiting_for
+                    .acting_player()
+                    .is_some_and(|player| !super::players::is_alive(state, player));
+                if !matches!(waiting_for, WaitingFor::Priority { .. }) && !unanswerable {
+                    state.waiting_for = waiting_for.clone();
+                    return AutoAdvanceStep::waiting(waiting_for);
+                }
+            }
+        }
         // CR 800.4j + CR 704.3 + CR 800.4d: the turn continues to its completion,
         // so a combat-damage batch parked on a CR 616.1 answer that died with the
         // active player still OWES its CR 603.3b triggers to every OTHER player.
@@ -4038,7 +4094,8 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // resolve_combat_damage returns — too late without this pre-flush.
             super::layers::flush_layers(state);
             // CR 510.1 / CR 510.2: Combat damage assigned and dealt as a turn-based action.
-            // resolve_combat_damage may pause for interactive assignment (2+ blockers).
+            // resolve_combat_damage may pause for interactive assignment (2+ blockers)
+            // or for a CR 616.1 replacement-ordering choice (parked batch).
             if let Some(waiting) = combat_damage::resolve_combat_damage(state, events) {
                 state.waiting_for = waiting.clone();
                 return AutoAdvanceStep::waiting(waiting);
@@ -13888,6 +13945,125 @@ card into your hand at the beginning of your next end step.";
                     if *object_id == stunned && *counter_type == CounterType::Stun
             )),
             "CounterRemoved event must fire for Seedborn baseline stun removal"
+        );
+    }
+
+    /// A single-entry pre-application damage batch, paused at 0, unstashed,
+    /// nothing remaining — the shape a chooser-loss settle completes empty.
+    fn parked_damage_fixture(
+        source: ObjectId,
+    ) -> Box<crate::types::game_state::PendingCombatDamageBatch> {
+        use crate::game::combat::{DamageAssignment, DamageTarget};
+        use crate::types::ability::DamageContextSnapshot;
+        use crate::types::game_state::{
+            CombatDamageSubStep, ParkedCombatDamageEntry, PendingCombatDamageBatch,
+        };
+        Box::new(PendingCombatDamageBatch {
+            entries: vec![ParkedCombatDamageEntry {
+                ctx: DamageContextSnapshot {
+                    source_id: source,
+                    source_incarnation: Some(1),
+                    controller: PlayerId(1),
+                    source_is_creature: true,
+                    has_deathtouch: false,
+                    has_lifelink: false,
+                    has_wither: false,
+                    has_infect: false,
+                    combat_damage_poison: 0,
+                    excess_recipient: None,
+                    lifelink_bonus: 0,
+                },
+                source_is_commander: false,
+                assignment: DamageAssignment {
+                    target: DamageTarget::Player(PlayerId(1)),
+                    amount: 3,
+                },
+                lifelink_controller: None,
+            }],
+            decided: Vec::new(),
+            paused_entry: 0,
+            paused_entry_pruned: false,
+            remaining: Vec::new(),
+            phase_a_tally: Vec::new(),
+            phase_b_tally: Vec::new(),
+            outer_tally: None,
+            one_shot_applications: Vec::new(),
+            batch_events: Vec::new(),
+            lives_before: vec![20, 20],
+            sub_step: CombatDamageSubStep::Regular,
+        })
+    }
+
+    /// CR 800.4 + CR 724.1d/724.2d: the pre-application damage record abandons
+    /// through the shared phase-entry funnel under the same three-door
+    /// analysis as its lifelink sibling — a stranded record never survives
+    /// into another step.
+    #[test]
+    fn f1_entering_another_phase_abandons_the_parked_damage_batch() {
+        let mut state = setup();
+        let card = CardId(state.next_object_id);
+        let source = create_object(
+            &mut state,
+            card,
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state.pending_combat_damage = Some(parked_damage_fixture(source));
+        assert!(
+            state.pending_combat_damage.is_some(),
+            "reach guard: a record is parked before the phase entry"
+        );
+
+        let mut events = Vec::new();
+        enter_phase(&mut state, Phase::Cleanup, &mut events, None);
+        assert!(
+            state.pending_combat_damage.is_none(),
+            "the stranded record abandons on the phase entry"
+        );
+    }
+
+    /// CR 800.4j: the eliminated active player's turn still owes its
+    /// simultaneity to the OTHER seats — the parked damage batch settles
+    /// (orphaned choice → `None`) and discharges through its own authority
+    /// BEFORE the skip, exactly like its lifelink sibling. Damage before
+    /// lifelink.
+    #[test]
+    fn f1_eliminated_active_turn_discharges_the_parked_damage_batch() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 1;
+        state.active_player = PlayerId(0);
+        let card = CardId(state.next_object_id);
+        let source = create_object(
+            &mut state,
+            card,
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let mut record = parked_damage_fixture(source);
+        record.lives_before = vec![20, 20, 20];
+        state.pending_combat_damage = Some(record);
+        // The chooser left with the seat: no authority, no prompt.
+        state.pending_replacement = None;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.players[0].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(0));
+
+        let mut events = Vec::new();
+        let _ = auto_advance_once(&mut state, &mut events);
+        assert!(
+            state.pending_combat_damage.is_none(),
+            "the batch discharges through the resume instead of stranding"
+        );
+        assert_eq!(
+            state.active_player,
+            PlayerId(1),
+            "the Priority sentinel falls through to the skip"
         );
     }
 }

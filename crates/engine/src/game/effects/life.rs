@@ -519,7 +519,10 @@ fn settle_life_gain(
         }
     }
     // CR 611.3a + CR 119: gate escalation on a live life-reading static.
-    crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::LifeTotal,
+    );
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: gain_amount as i32,
@@ -805,7 +808,10 @@ fn settle_life_loss(
     }
     // CR 611.3a + CR 119 + CR 120.3a: gate escalation on a live life-reading
     // static. Also the sink for non-infect player damage (deal_damage.rs).
-    crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::LifeTotal,
+    );
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: -(loss_amount as i32),

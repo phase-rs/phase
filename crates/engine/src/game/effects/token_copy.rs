@@ -2148,7 +2148,8 @@ fn apply_token_modifications(
                 }
             }
             // Other layered-only modifications (CopyValues, ChangeController,
-            // etc.) are intentionally skipped — their "stamp at copy time"
+            // ChangeControllerToDesignation, etc.) are intentionally skipped —
+            // their "stamp at copy time"
             // interpretation is ambiguous, and a future except body needing
             // them should route through the BecomeCopy layered path instead.
             _ => {}

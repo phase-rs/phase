@@ -190,7 +190,13 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::DamageReceived
         | TriggerMode::ExcessDamage
         | TriggerMode::ExcessDamageAll => push(TriggerEventKey::DealsDamage),
-        TriggerMode::DamagePreventedOnce => return (keys, true),
+        // CR 615.13: prevention triggers consult only the `DamagePrevented` bucket.
+        // The event side already pushes this key (see the `GameEvent::DamagePrevented`
+        // arm below), so the two halves now agree and the mode leaves the
+        // all-triggers fallback. Deliberately NOT folded into the `DealsDamage` arm
+        // above — prevention is a distinct event with its own key, and folding would
+        // re-widen the consult set.
+        TriggerMode::DamagePreventedOnce => push(TriggerEventKey::DamagePrevented),
 
         // --- Spells / abilities ---
         TriggerMode::SpellCast | TriggerMode::SpellCastOrCopy | TriggerMode::SpellCopy => {
@@ -1377,6 +1383,53 @@ mod tests {
         assert!(keys.contains(&TriggerEventKey::Sacrificed));
         assert!(keys.contains(&TriggerEventKey::LeaveBattlefield(Some(CoreType::Creature))));
         assert!(keys.contains(&TriggerEventKey::Dies(Some(CoreType::Creature))));
+    }
+
+    /// CR 615.13: `DamagePreventedOnce` is routed by the dedicated
+    /// `DamagePrevented` key, NOT by the all-triggers fallback.
+    ///
+    /// Revert-failing: restoring `=> return (keys, true)` makes `keys` empty and
+    /// `route` true, flipping both assertions. The paired `keys_from_event`
+    /// assertion proves the two halves of the index agree, so the key is live
+    /// rather than merely present on the definition side.
+    #[test]
+    fn damage_prevented_once_uses_keyed_lookup_not_fallback() {
+        let def = TriggerDefinition::new(TriggerMode::DamagePreventedOnce);
+        let (keys, route) = keys_from_trigger_def(&def);
+        assert!(
+            keys.contains(&TriggerEventKey::DamagePrevented),
+            "prevention triggers must register under the DamagePrevented key"
+        );
+        assert!(
+            !route,
+            "prevention triggers must leave the all-triggers fallback bucket"
+        );
+
+        // Paired reach-guard: the event side pushes the same key, so a
+        // `DamagePrevented` event actually consults this bucket.
+        let state = GameState::new_two_player(42);
+        let event_keys = keys_from_event(
+            &GameEvent::DamagePrevented {
+                source_id: ObjectId(1),
+                target: crate::types::ability::TargetRef::Player(PlayerId(0)),
+                amount: 4,
+            },
+            &state,
+        );
+        assert!(
+            event_keys.contains(&TriggerEventKey::DamagePrevented),
+            "the event side must push the key the definition side registers under"
+        );
+
+        // Negative: an unrelated event does not consult the prevention bucket.
+        let unrelated = keys_from_event(
+            &GameEvent::CardsDrawn {
+                player_id: PlayerId(0),
+                count: 1,
+            },
+            &state,
+        );
+        assert!(!unrelated.contains(&TriggerEventKey::DamagePrevented));
     }
 
     #[test]

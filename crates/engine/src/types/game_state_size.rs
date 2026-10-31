@@ -99,6 +99,16 @@
 //! nothing); `GameState` then measures 14,832 B, under the unchanged 14,848
 //! ceiling.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-04-19`) at
+//! 14,928 B at the PR-9867/upstream merge (80 B over the old ceiling). The
+//! union adds only small fields — two 48 B `HashMap`s (`combat_prevention_tally`,
+//! `attacked_players_directly_this_turn`), a 24 B batch `Vec`, id/owner stamps,
+//! and upstream's onset/ingress/policy markers — while the large paused-combat
+//! record rides boxed (`Option<Box<PendingCombatDamageBatch>>`, 8 B inline).
+//! `WaitingFor` grew 1,632 -> 1,672 B and `TriggerSourceContext` 1,496 ->
+//! 1,536 B. Nothing large went inline, so the ceiling moves to
+//! 14,928.next_multiple_of(256) + 256 = 15,360.
+//!
 //! `GameState` re-measured on x86_64-unknown-linux-gnu (`nightly-2026-04-19`) at
 //! 14,880 B when the loop shortcut's ∞ mark gained `unbounded_rising`, a 24 B map
 //! populated only while a mark stands — not a large rarely-populated field, and
