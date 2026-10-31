@@ -5006,6 +5006,13 @@ fn parse_strive_cost_body(effect_text: &str) -> Option<ManaCost> {
     Some(cost)
 }
 
+/// One retained diagnostic region; its end is the next start or final length.
+#[derive(Clone, Copy)]
+struct DiagnosticRun {
+    start: usize,
+    line: usize,
+}
+
 /// Single-authority source-order emission surface for the unit-4 cutover.
 ///
 /// Owns the `OracleDocBuilder` and the parse-local line→byte geometry so EVERY
@@ -5044,6 +5051,10 @@ struct DocEmitter<'a> {
     last_trigger: Option<TriggerDefinition>,
     last_static: Option<StaticDefinition>,
     observer: Option<&'a mut ParseObserver>,
+    /// Deferred attribution leaves equality-based diagnostic deduplication intact.
+    /// Empty documents allocate no diagnostic-run storage.
+    diagnostic_runs: Vec<DiagnosticRun>,
+    active_diagnostic_run: DiagnosticRun,
 }
 
 impl<'a> DocEmitter<'a> {
@@ -5061,7 +5072,53 @@ impl<'a> DocEmitter<'a> {
             last_trigger: None,
             last_static: None,
             observer,
+            diagnostic_runs: Vec::new(),
+            active_diagnostic_run: DiagnosticRun { start: 0, line: 0 },
         }
+    }
+
+    fn close_diagnostic_run(&mut self, end: usize) {
+        debug_assert!(end >= self.active_diagnostic_run.start);
+        if end > self.active_diagnostic_run.start {
+            self.diagnostic_runs.push(self.active_diagnostic_run);
+        }
+    }
+
+    /// Bind retained diagnostics to the dispatch/header line of this parse unit.
+    /// Level reparses use their returned physical line; joined bodies and modal
+    /// blocks (including as-enters anchors) use their initiating dispatch line.
+    fn begin_diagnostic_unit(&mut self, line: usize, diagnostic_count: usize) {
+        self.close_diagnostic_run(diagnostic_count);
+        self.active_diagnostic_run = DiagnosticRun {
+            start: diagnostic_count,
+            line,
+        };
+    }
+
+    /// Preserve the origins of a copied prefix, including copies of copies.
+    /// The parser's whole-vector extension, duplicates and diagnostic losses
+    /// remain unchanged; only the emitter's transient origin runs are extended.
+    fn record_inherited_diagnostics(
+        &mut self,
+        destination: std::ops::Range<usize>,
+        diagnostic_count: usize,
+    ) {
+        debug_assert!(destination.start <= destination.end);
+        debug_assert!(destination.end <= diagnostic_count);
+        debug_assert!(destination.len() <= destination.start);
+        self.close_diagnostic_run(destination.start);
+        let source_run_count = self.diagnostic_runs.len();
+        for index in 0..source_run_count {
+            let source = self.diagnostic_runs[index];
+            if source.start >= destination.len() {
+                break;
+            }
+            self.diagnostic_runs.push(DiagnosticRun {
+                start: destination.start + source.start,
+                line: source.line,
+            });
+        }
+        self.active_diagnostic_run.start = destination.end;
     }
 
     /// Exact byte range `[start, end)` of `line` in the normalized text.
@@ -5395,13 +5452,35 @@ impl<'a> DocEmitter<'a> {
         self.reemit_node(&source, node);
     }
 
-    /// Finish, producing items already in Oracle source order.
+    /// Seal parse-time provenance after all retention/deduplication decisions.
+    /// Cross-line dedup keeps the surviving earlier origin. Post-seal swallow
+    /// findings still receive line/span/item provenance via `stamp_provenance`.
     fn finish(
-        self,
+        mut self,
         oracle_text: &str,
         card_name: &str,
-        diagnostics: Vec<OracleDiagnostic>,
+        mut diagnostics: Vec<OracleDiagnostic>,
     ) -> OracleDocIr {
+        self.close_diagnostic_run(diagnostics.len());
+        debug_assert!(
+            diagnostics.is_empty()
+                || self
+                    .diagnostic_runs
+                    .first()
+                    .is_some_and(|run| run.start == 0)
+        );
+        for (index, run) in self.diagnostic_runs.iter().enumerate() {
+            let end = self
+                .diagnostic_runs
+                .get(index + 1)
+                .map_or(diagnostics.len(), |next| next.start);
+            debug_assert!(run.start < end && end <= diagnostics.len());
+            let start = run.start.min(diagnostics.len());
+            let end = end.min(diagnostics.len()).max(start);
+            for diagnostic in &mut diagnostics[start..end] {
+                diagnostic.stamp_line(run.line);
+            }
+        }
         self.builder.finish(oracle_text, card_name, diagnostics)
     }
 }
@@ -5711,6 +5790,7 @@ fn parse_normalized_oracle_ir(
     // CR 711.2a + CR 711.2b: Re-parse ability lines found within LEVEL blocks through
     // the normal trigger/activated/static pipeline, then attach the level counter condition.
     for (ability_text, level_condition, level_line) in &level_ability_lines {
+        emitter.begin_diagnostic_unit(*level_line, ctx.diagnostics.len());
         let (minimum, maximum) = match level_condition {
             StaticCondition::HasCounters {
                 minimum, maximum, ..
@@ -5914,6 +5994,7 @@ fn parse_normalized_oracle_ir(
     let mut i = 0;
 
     while i < lines.len() {
+        emitter.begin_diagnostic_unit(i, ctx.diagnostics.len());
         // CR 711: Skip lines already consumed by the leveler pre-parser.
         if level_consumed.contains(&i) {
             i += 1;
@@ -6069,7 +6150,12 @@ fn parse_normalized_oracle_ir(
                     }
                     emitter.modal_at(item_line, choice);
                 }
-                OracleBlockIr::Triggered(mut triggers) => {
+                OracleBlockIr::Triggered {
+                    mut triggers,
+                    inherited_diagnostics,
+                } => {
+                    emitter
+                        .record_inherited_diagnostics(inherited_diagnostics, ctx.diagnostics.len());
                     // CR 706.3b: a triggered modal consumes its bullet modes
                     // before this boundary, so table rows follow `next_i`, not
                     // the trigger header. Retain them on the trigger IR until
