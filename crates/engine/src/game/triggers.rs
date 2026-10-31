@@ -20011,6 +20011,16 @@ pub mod tests {
         );
     }
 
+    // Real cards: no printed card exhibits this shape (Oracle regexes: attack trigger + counter on
+    // it (Gleam of Battle), attack trigger + search/reveal/look + counter on it (explore cards
+    // Glowcap Lantern, Subterranean Schooner), mill trigger + counter on it (Grolnok, the Omnivore,
+    // which has an Unimplemented clause). None combines an empty producer with event seeding).
+    // Shape: A 'put a +1/+1 counter on it' instruction under a Milled or attackers-declared trigger
+    // is not seeded with the event object exactly when its parent binding is authoritatively empty
+    // (dig, search, reveal, exile-top, illegal announcement). Nearest printed card: Gleam of Battle
+    // ("Whenever a creature you control attacks, put a +1/+1 counter on it.") -- Gleam of Battle
+    // seeds 'it' from the attack event; it has no producer or announcement whose empty result could
+    // block that seeding.
     #[test]
     fn unavailable_announcements_block_only_their_own_event_and_attack_reseeding() {
         use crate::types::ability::{ParentTargetMissingReason, TargetReadOrigin};

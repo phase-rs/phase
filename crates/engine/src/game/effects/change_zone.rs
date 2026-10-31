@@ -3260,6 +3260,20 @@ fn owner_scoped_nonbattlefield_mass_filter(
 
 #[cfg(test)]
 mod tests {
+    // Real cards: no printed card exhibits this shape (All oracle_text for '(return|put) (this
+    // card|it) ...onto the battlefield attached to (target|that|it)': Arachnus Spinner, Bitterheart
+    // Witch, Curse of Misfortunes, Sovereigns of Lost Alara. None has an announced host that can be
+    // unavailable while the ability still resolves). Shape: A forward-result
+    // put-onto-the-battlefield whose sub attaches the moved card to 'that creature'; with a Milled
+    // trigger event present, an unavailable host announcement (own or parent) yields no host
+    // instead of the event object. Nearest printed card: Bitterheart Witch ("Deathtouch / When this
+    // creature dies, you may search your library for a Curse card, put it onto the battlefield
+    // attached to target player, then shuffle."); Sovereigns of Lost Alara ("Exalted (Whenever a
+    // creature you control attacks alone, that creature gets +1/+1 until end of turn.) / Whenever a
+    // creature you control attacks alone, you may search your library for an Aura card that could
+    // enchant that creature, put it onto the battlefield attached to that creature, then shuffle.")
+    // -- Bitterheart Witch: trigger with announced attach host, but its single target fizzles
+    // whole. Sovereigns: event-referent host, the unassigned fallback case.
     #[test]
     fn unavailable_attachment_host_does_not_use_an_unrelated_event_referent() {
         use crate::types::ability::{AttachSelection, ParentTargetMissingReason, TargetReadOrigin};

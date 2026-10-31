@@ -4406,6 +4406,14 @@ mod tests {
         );
     }
 
+    // Real cards: Devouring Tendrils ("Target creature you control deals damage equal to its power
+    // to target creature or planeswalker you don't control. When the permanent you don't control
+    // dies this turn, you gain 2 life.") exhibits part of this shape (Devouring Tendrils parses to
+    // exactly TargetOnly -> DealDamage -> CreateDelayedTrigger WhenDies{ParentTarget} -> GainLife;
+    // its second target can be illegal while the first keeps the spell resolving. It covers only
+    // the WhenDies arm; the test also sweeps leaves/enters/dies-or-exiled at unit level). Shape: A
+    // delayed 'when that creature dies/leaves/enters/dies-or-is-exiled, gain 3 life' keyed on the
+    // parent target is not created when that announcement is illegal, only when unassigned.
     #[test]
     fn zone_conditions_distinguish_unavailable_and_unassigned_parent_bindings() {
         use crate::types::ability::{ParentTargetMissingReason, TargetReadOrigin};

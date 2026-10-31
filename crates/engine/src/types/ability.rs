@@ -50633,6 +50633,18 @@ mod tests {
             ability
         }
 
+        // Real cards: no printed card exhibits this shape (Unit test of
+        // set_result_branch_source_identity_recursive on a GainLife outcome with no card. Coin-card
+        // list scanned for coin outcomes referring to their source ('this creature') in triggered
+        // vs activated abilities). Shape: Stamping a bound coin outcome with its carrier's source
+        // identity keeps a resolution-time trigger-source projection naming the same source
+        // incarnation and records that incarnation. Nearest printed card: Chaotic Goo ("This
+        // creature enters with three +1/+1 counters on it. / At the beginning of your upkeep, you
+        // may flip a coin. If you win the flip, put a +1/+1 counter on this creature. If you lose
+        // the flip, remove a +1/+1 counter from this creature."); Fickle Efreet ("Whenever this
+        // creature attacks or blocks, flip a coin at end of combat. If you lose the flip, an
+        // opponent gains control of this creature.") -- Triggered coin abilities whose outcomes
+        // refer to their own source; the test has no card and checks only the identity stamp.
         #[test]
         fn same_incarnation_projection_is_kept_and_identity_is_stamped() {
             let carrier = carrier_projection();
@@ -50645,6 +50657,18 @@ mod tests {
             assert_eq!(ability.source_incarnation, Some(INCARNATION));
         }
 
+        // Real cards: no printed card exhibits this shape (Unit test of
+        // set_result_branch_source_identity_recursive on a GainLife outcome with no card. Coin-card
+        // list scanned for coin outcomes referring to their source ('this creature') in triggered
+        // vs activated abilities). Shape: Stamping a bound coin outcome replaces a trigger-source
+        // projection naming an earlier incarnation of the same object with the carrier's projection
+        // (CR 400.7 new object). Nearest printed card: Chaotic Goo ("This creature enters with
+        // three +1/+1 counters on it. / At the beginning of your upkeep, you may flip a coin. If
+        // you win the flip, put a +1/+1 counter on this creature. If you lose the flip, remove a
+        // +1/+1 counter from this creature."); Fickle Efreet ("Whenever this creature attacks or
+        // blocks, flip a coin at end of combat. If you lose the flip, an opponent gains control of
+        // this creature.") -- Triggered coin abilities whose outcomes refer to their own source;
+        // neither isolates a stale-incarnation projection.
         #[test]
         fn other_incarnation_projection_is_replaced_by_the_carriers() {
             let carrier = carrier_projection();
@@ -50653,6 +50677,18 @@ mod tests {
             assert_eq!(ability.source_incarnation, Some(INCARNATION));
         }
 
+        // Real cards: no printed card exhibits this shape (Unit test of
+        // set_result_branch_source_identity_recursive on a GainLife outcome with no card. Coin-card
+        // list scanned for coin outcomes referring to their source ('this creature') in triggered
+        // vs activated abilities). Shape: Stamping a bound coin outcome replaces a trigger-source
+        // projection naming a different object with the carrier's projection. Nearest printed card:
+        // Chaotic Goo ("This creature enters with three +1/+1 counters on it. / At the beginning of
+        // your upkeep, you may flip a coin. If you win the flip, put a +1/+1 counter on this
+        // creature. If you lose the flip, remove a +1/+1 counter from this creature."); Fickle
+        // Efreet ("Whenever this creature attacks or blocks, flip a coin at end of combat. If you
+        // lose the flip, an opponent gains control of this creature.") -- Triggered coin abilities
+        // whose outcomes refer to their own source; neither isolates a projection naming another
+        // object.
         #[test]
         fn other_object_projection_is_replaced_by_the_carriers() {
             let carrier = carrier_projection();
@@ -50661,6 +50697,17 @@ mod tests {
             assert_eq!(ability.source_incarnation, Some(INCARNATION));
         }
 
+        // Real cards: no printed card exhibits this shape (Unit test of
+        // set_result_branch_source_identity_recursive on a GainLife outcome with no card. Coin-card
+        // list scanned for coin outcomes referring to their source ('this creature') in triggered
+        // vs activated abilities). Shape: Stamping a bound coin outcome that has no trigger-source
+        // projection installs the carrier's projection. Nearest printed card: Chaotic Goo ("This
+        // creature enters with three +1/+1 counters on it. / At the beginning of your upkeep, you
+        // may flip a coin. If you win the flip, put a +1/+1 counter on this creature. If you lose
+        // the flip, remove a +1/+1 counter from this creature."); Fickle Efreet ("Whenever this
+        // creature attacks or blocks, flip a coin at end of combat. If you lose the flip, an
+        // opponent gains control of this creature.") -- Triggered coin abilities whose outcomes
+        // refer to their own source; neither isolates an outcome lacking a projection.
         #[test]
         fn missing_projection_takes_the_carriers() {
             let carrier = carrier_projection();
@@ -50668,6 +50715,17 @@ mod tests {
             assert_eq!(ability.trigger_source.as_ref(), Some(&carrier));
         }
 
+        // Real cards: no printed card exhibits this shape (Unit test of
+        // set_result_branch_source_identity_recursive on a GainLife outcome with no card. Coin-card
+        // list scanned for coin outcomes referring to their source ('this creature') in triggered
+        // vs activated abilities). Shape: Stamping a bound coin outcome from an activated carrier
+        // (no carrier projection) keeps the outcome's own matching projection and records the
+        // incarnation. Nearest printed card: Goblin Archaeologist ("{R}, {T}: Flip a coin. If you
+        // win the flip, destroy target artifact and untap this creature. If you lose the flip,
+        // sacrifice this creature."); Goblin Bangchuckers ("{T}: Flip a coin. If you win the flip,
+        // this creature deals 2 damage to any target. If you lose the flip, this creature deals 2
+        // damage to itself.") -- Activated coin abilities whose outcomes refer to their own source
+        // ('this creature'); the test has no card, only the stamp.
         #[test]
         fn activated_carrier_without_projection_keeps_a_matching_one() {
             let ability = stamped(Some((SOURCE, INCARNATION, CardId(2))), None);

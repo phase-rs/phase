@@ -282,10 +282,11 @@ fn chaotic_strike_cannot_be_cast_without_a_legal_target() {
 // Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
 // the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
 // creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
-// the test isolates the announced branch targets. Shape: An artifact's activated ability with one
-// coin whose win branch destroys a declared target creature an opponent controls and whose lose
-// branch destroys a separately declared target creature you control.
+// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
+// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
+// test isolates the announced branch targets. Shape: An artifact's activated ability with one coin
+// whose win branch destroys a declared target creature an opponent controls and whose lose branch
+// destroys a separately declared target creature you control.
 fn two_branch_fixture(
     own_pool: bool,
     opponent_pool: bool,
@@ -347,8 +348,9 @@ fn two_branch_fixture(
 // Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
 // the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
 // creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
-// the test isolates the announced branch targets. Shape: Activating that two-branch coin ability
+// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
+// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
+// test isolates the announced branch targets. Shape: Activating that two-branch coin ability
 // prompts for two target slots (opponent creature, own creature) before cost payment and flipping,
 // then each chosen object becomes a target.
 #[test]
@@ -430,10 +432,11 @@ fn two_branch_activation_announces_both_targets_before_flipping() {
 // Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
 // the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
 // creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
-// the test isolates the announced branch targets. Shape: That two-branch coin activation is offered
-// and resolves with both creature pools present, but is refused before tapping or paying when
-// either branch's target pool is empty.
+// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
+// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
+// test isolates the announced branch targets. Shape: That two-branch coin activation is offered and
+// resolves with both creature pools present, but is refused before tapping or paying when either
+// branch's target pool is empty.
 fn refuses_missing_pool(own_pool: bool, opponent_pool: bool) {
     let (mut valid, source, own, opposing) = two_branch_fixture(true, true);
     assert!(
@@ -470,9 +473,10 @@ fn refuses_missing_pool(own_pool: bool, opponent_pool: bool) {
 // Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
 // the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
 // creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
-// the test isolates the announced branch targets. Shape: The two-branch coin activation is refused
-// when no creature you control exists for the lose branch's declared target.
+// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
+// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
+// test isolates the announced branch targets. Shape: The two-branch coin activation is refused when
+// no creature you control exists for the lose branch's declared target.
 #[test]
 fn two_branch_activation_requires_an_own_creature() {
     refuses_missing_pool(false, true);
@@ -481,9 +485,10 @@ fn two_branch_activation_requires_an_own_creature() {
 // Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
 // the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
 // creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
-// the test isolates the announced branch targets. Shape: The two-branch coin activation is refused
-// when no opponent's creature exists for the win branch's declared target.
+// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
+// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
+// test isolates the announced branch targets. Shape: The two-branch coin activation is refused when
+// no opponent's creature exists for the win branch's declared target.
 #[test]
 fn two_branch_activation_requires_an_opponents_creature() {
     refuses_missing_pool(true, false);
@@ -492,9 +497,10 @@ fn two_branch_activation_requires_an_opponents_creature() {
 // Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
 // the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
 // creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
-// the test isolates the announced branch targets. Shape: The two-branch coin activation is refused
-// when neither branch has any legal target creature.
+// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
+// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
+// test isolates the announced branch targets. Shape: The two-branch coin activation is refused when
+// neither branch has any legal target creature.
 #[test]
 fn two_branch_activation_requires_both_creature_pools() {
     refuses_missing_pool(false, false);
@@ -503,8 +509,9 @@ fn two_branch_activation_requires_both_creature_pools() {
 // Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
 // the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
 // creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
-// the test isolates the announced branch targets. Shape: A won flip of the two-branch coin destroys
+// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
+// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
+// test isolates the announced branch targets. Shape: A won flip of the two-branch coin destroys
 // only the announced opponent creature, leaving the lose branch's announced creature and
 // distractors untouched, with one coin terminal.
 #[test]
@@ -537,10 +544,11 @@ fn two_branch_win_destroys_only_the_announced_opponents_creature() {
 // Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
 // the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
 // creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
-// the test isolates the announced branch targets. Shape: The announced two-branch coin ability on
-// the stack serializes its branch bindings; restores missing them fail for every wire version, and
-// the intact restore destroys the win branch's target.
+// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
+// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
+// test isolates the announced branch targets. Shape: The announced two-branch coin ability on the
+// stack serializes its branch bindings; restores missing them fail for every wire version, and the
+// intact restore destroys the win branch's target.
 #[test]
 fn coin_branch_stack_persistence_is_strict_and_current_bindings_execute() {
     use engine::types::resolution::{ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION};
@@ -2333,10 +2341,11 @@ fn pass_to_coin_keep(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
 // Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
 // the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
 // creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause, which the engine parses as Unimplemented, so
-// the test isolates the announced branch targets. Shape: The two-branch Destroy coin activation
-// under Krark's Thumb: at the keep prompt each branch holds its pinned target, a restore with a
-// tampered pin is refused, and a stale incarnation is not destroyed.
+// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
+// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
+// test isolates the announced branch targets. Shape: The two-branch Destroy coin activation under
+// Krark's Thumb: at the keep prompt each branch holds its pinned target, a restore with a tampered
+// pin is refused, and a stale incarnation is not destroyed.
 #[test]
 fn thumb_restore_keeps_each_declared_branch_occurrence_and_refuses_pin_drift() {
     use engine::types::ability::{AbilityDefinition, AbilityKind};
@@ -2836,15 +2845,17 @@ fn independent_coin_declaration_owns_its_pins_even_when_incoming_id_is_reused() 
     }
 }
 
-// Real cards: Risky Move (supported) has the choose-creature-you-control, flip, lose-control
-// structure but is a trigger on gaining control of the enchantment from another player and lacks
-// the trailing independent instruction this test observes (+5 life). Shape: A resolution-time
-// choice of a creature you control, then a coin whose loss gives that chosen creature to an
-// opponent, then an independent life gain, under Krark's Thumb's keep choice with a possibly empty
-// choice. Printed neighbours: Risky Move ("At the beginning of each player's upkeep, that player
-// gains control of this enchantment. / When you gain control of this enchantment from another
-// player, choose a creature you control and an opponent. Flip a coin. If you lose the flip, that
-// opponent gains control of that creature.").
+// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape
+// (a chosen creature, a losing control change and an independent instruction after the coin). Risky
+// Move (supported) has the choose-creature-you-control, flip, lose-control structure but is a
+// trigger on gaining control of the enchantment from another player and lacks the trailing
+// independent instruction this test observes (+5 life). Shape: A resolution-time choice of a
+// creature you control, then a coin whose loss gives that chosen creature to an opponent, then an
+// independent life gain, under Krark's Thumb's keep choice with a possibly empty choice. Printed
+// neighbours: Risky Move ("At the beginning of each player's upkeep, that player gains control of
+// this enchantment. / When you gain control of this enchantment from another player, choose a
+// creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains
+// control of that creature.").
 #[test]
 fn thumb_completed_empty_choice_restores_and_runs_only_independent_instructions() {
     use engine::types::ability::{
@@ -3005,7 +3016,7 @@ fn coin_children_precede_a_targeted_successor_and_nested_children() {
                 root.sub_ability = Some(Box::new(
                     parse_oracle_text(
                         "Exile target artifact.",
-                        "Synthetic independent successor",
+                        "Shattering Blow",
                         &[],
                         &["Instant".into()],
                         &[],
@@ -3317,7 +3328,7 @@ fn restored_retarget_changes_only_the_addressed_coin_or_later_occurrence() {
                 definition.sub_ability = Some(Box::new(
                     parse_oracle_text(
                         "Exile target artifact.",
-                        "Synthetic artifact tail",
+                        "Shattering Blow",
                         &[],
                         &["Instant".into()],
                         &[],
@@ -4094,7 +4105,7 @@ fn optional_empty_coin_slot_does_not_steal_the_later_target() {
         definition.sub_ability = Some(Box::new(
             parse_oracle_text(
                 "Exile target artifact.",
-                "Synthetic optional tail",
+                "Shattering Blow",
                 &[],
                 &["Instant".into()],
                 &[],
@@ -4304,9 +4315,9 @@ fn copied_coin_child_re_elects_a_departed_announcer_without_rebinding_other_grou
     definition.sub_ability = Some(Box::new(
         parse_oracle_text(
             "Exile target land.",
-            "Synthetic caster-announced tail",
+            "Caustic Rain",
             &[],
-            &["Instant".into()],
+            &["Sorcery".into()],
             &[],
         )
         .abilities

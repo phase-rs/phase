@@ -31036,6 +31036,18 @@ mod tests {
             .is_empty());
         assert!(target_slot_specs(runner.state(), &deferred).is_empty());
     }
+    // Real cards: no printed card exhibits this shape (Pure CoinAntecedentScope table over AST
+    // paths, no card. Regex over all oracle_text: 'target...flip a coin...(win|lose) the flip,
+    // ...target' (1 hit: Invert Polarity) and branch target followed by it/that creature (1 hit:
+    // Orcish Captain)). Shape: A target declared under a coin's lose branch sub-ability reads back
+    // only to ancestor declarations on its path, skipping its own instance, dependent declarations,
+    // and absent ancestors; optional ancestors keep older ones visible. Nearest printed card:
+    // Orcish Captain ("{1}: Flip a coin. If you win the flip, target Orc creature gets +2/+0 until
+    // end of turn. If you lose the flip, it gets -0/-2 until end of turn."); Crooked Scales ("{4},
+    // {T}: Flip a coin. If you win the flip, destroy target creature an opponent controls. If you
+    // lose the flip, destroy target creature you control unless you pay {3} and repeat this
+    // process.") -- Orcish Captain's lose-branch 'it' reads the root target; Crooked Scales' branch
+    // declares its own target. Neither nests declarations three levels deep.
     #[test]
     fn coin_antecedent_authority_skips_same_instance_and_dependent_declarations() {
         use crate::types::ability::CoinFlipResult;

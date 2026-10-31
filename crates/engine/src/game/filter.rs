@@ -26959,6 +26959,18 @@ mod attached_set_host_filter_tests {
         ResolvedAbility::new(effect, targets, ObjectId(900), PlayerId(0))
     }
 
+    // Real cards: no printed card exhibits this shape (All oracle_text for '(all|each)
+    // (auras|equipment|permanents) ...attached to (that creature|it)' (40 hits): announced-host
+    // ones (Blastfire Bolt, Eaten by Spiders, Fires of Mount Doom, Hubris) have a single target;
+    // block-event ones (Corrosive Ooze) have none). Shape: A filter for permanents attached to
+    // 'that creature' under a blockers-declared trigger: unassigned it reads the event's blocked
+    // creature, but an unavailable announcement (own or parent) matches nothing attached to that
+    // host. Nearest printed card: Corrosive Ooze ("Whenever this creature blocks or becomes blocked
+    // by an equipped creature, destroy all Equipment attached to that creature at end of combat.");
+    // Blastfire Bolt ("Blastfire Bolt deals 5 damage to target creature. Destroy all Equipment
+    // attached to that creature.") -- Corrosive Ooze reads Equipment attached to the block-event
+    // creature (fallback case); Blastfire Bolt reads attachments of an announced target that
+    // fizzles whole.
     #[test]
     fn unavailable_parent_host_does_not_fall_back_to_the_firing_event() {
         use crate::types::ability::{ParentTargetMissingReason, TargetReadOrigin};
@@ -26996,6 +27008,17 @@ mod attached_set_host_filter_tests {
         }
     }
 
+    // Real cards: no printed card exhibits this shape (Same census as typed_parent_controller test:
+    // 12 parsed ParentTargetController creature filters, all on spells or ETB targets without an
+    // untap/event referent; 0 ParentTargetOwner). Shape: A creature filter 'that player
+    // controls/owns' keyed on the parent target's controller or owner: unassigned it falls back to
+    // the untap event's object, unavailable it matches nothing, populated it matches. Nearest
+    // printed card: Mutiny ("Target creature an opponent controls deals damage equal to its power
+    // to another target creature that player controls."); Declaration in Stone ("Exile target
+    // creature and all other creatures its controller controls with the same name as that creature.
+    // That player investigates for each nontoken creature exiled this way.") -- Both read 'that
+    // player' from the first target's controller; neither resolves under a trigger event that could
+    // supply a wrong fallback.
     #[test]
     fn unavailable_parent_possessor_matches_no_players_objects() {
         use crate::types::ability::{ControllerRef, ParentTargetMissingReason, TargetReadOrigin};

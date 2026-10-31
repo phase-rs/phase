@@ -7786,6 +7786,10 @@ mod tests {
         assert_eq!(empty, before, "failed paired installation is atomic");
     }
 
+    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: a Krark's
+    // Thumb keep-choice coin frame with no branches, written as v1 legacy pending_coin_flip without
+    // bindings, is refused; the current frame-stack wire restores it. The in-flight card state it
+    // persists: Krark's Thumb ("If you would flip a coin, instead flip two coins and ignore one.").
     #[test]
     fn resolution_state_wire_refuses_v1_coin_without_legacy_projection() {
         let mut state = GameState::new_two_player(42);
@@ -7933,6 +7937,9 @@ mod tests {
         }
     }
 
+    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: pins the
+    // resolution wire writer at v11 and every legacy reader version constant, and that an idle v1
+    // save still loads. It persists no card state.
     #[test]
     fn resolution_wire_contract_pins_v11_and_the_legacy_readers() {
         assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 11);
@@ -10076,6 +10083,11 @@ mod tests {
         );
     }
 
+    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: a
+    // Krark's-Thumb-parked coin frame with no branches restores at the current version but is
+    // refused at every legacy version 2..10 once bound_branches is stripped. The in-flight card
+    // state it persists: Krark's Thumb ("If you would flip a coin, instead flip two coins and
+    // ignore one.").
     /// Old parked frames are refused even when the flip has no branches.
     #[test]
     fn legacy_coin_flip_frames_are_refused_but_current_empty_payload_restores() {
@@ -10107,6 +10119,11 @@ mod tests {
         }
     }
 
+    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: an
+    // unversioned raw save is dated by its random-result frames (bindings = current, coin trigger
+    // scope = v10, branch_context = v9); unbound coin frames are refused, even beside a die frame.
+    // The in-flight card state it persists: Krark's Thumb ("If you would flip a coin, instead flip
+    // two coins and ignore one.").
     /// An unversioned raw payload is dated by what its random-result frames
     /// carry: bound branches only by the current writer, a coin trigger scope
     /// without bindings by version 10, and a coin `branch_context` alone by
@@ -10351,6 +10368,15 @@ mod tests {
         }
     }
 
+    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: a stack
+    // ability 'draw two, then flip a coin (win/lose: draw one)' round-trips; decode refuses missing
+    // coin_branches/won/lost, branches on a non-coin root, and misaligned branch pins. The
+    // in-flight card state it persists: Goblin Kaboomist ("At the beginning of your upkeep, create
+    // a colorless artifact token named Land Mine with "{R}, Sacrifice this token: This token deals
+    // 2 damage to target attacking creature without flying." Then flip a coin. If you lose the
+    // flip, this creature deals 2 damage to itself."); Goblin Artisans ("{T}: Flip a coin. If you
+    // win the flip, draw a card. If you lose the flip, counter target artifact spell you control
+    // that isn't the target of an ability from another creature named Goblin Artisans.").
     #[test]
     fn resolution_wire_coin_decode_checks_nested_correspondence_and_pins() {
         use crate::game::ability_utils::build_resolved_from_def;
@@ -10402,6 +10428,9 @@ mod tests {
         assert!(!error.contains("INVALID_COIN_BRANCH_BINDINGS:"), "{error}");
     }
 
+    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: a v9 save
+    // holding a dealer draw-sequence frame and a non-coin draw spell on the stack still loads
+    // unchanged, with no coin branches. It persists no card state.
     #[test]
     fn resolution_wire_v9_non_coin_saves_still_load() {
         let mut state = state_with_dealer_frame(true);
@@ -10433,6 +10462,10 @@ mod tests {
         assert!(restored.stack[0].ability().unwrap().coin_branches.is_none());
     }
 
+    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: the
+    // writer refuses to serialize a Krark's-Thumb-parked coin frame whose incoming parent-target
+    // object reference has no identity pin. The in-flight card state it persists: Krark's Thumb
+    // ("If you would flip a coin, instead flip two coins and ignore one.").
     #[test]
     fn parked_coin_writer_refuses_an_incoming_object_without_a_pin() {
         let mut state = state_with_parked_coin_flip(FlipBranchContext::default());
@@ -10454,6 +10487,10 @@ mod tests {
         );
     }
 
+    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: a
+    // current-version Krark's-Thumb-parked coin frame with bound_branches missing or null is
+    // refused as invalid bindings, not as a legacy restore. The in-flight card state it persists:
+    // Krark's Thumb ("If you would flip a coin, instead flip two coins and ignore one.").
     #[test]
     fn resolution_wire_current_parked_coin_requires_explicit_payload() {
         let wire = serde_json::to_value(ResolutionStateWire::from_game_state(
@@ -10544,7 +10581,7 @@ mod tests {
             .with_ability_definition(definition)
             .id();
         let response = scenario
-            .add_spell_to_hand_from_oracle(P0, "Exile response", true, "Exile target creature.")
+            .add_spell_to_hand_from_oracle(P0, "Final Death", true, "Exile target creature.")
             .with_mana_cost(ManaCost::zero())
             .id();
         scenario.add_artifact_from_oracle(
@@ -10662,6 +10699,13 @@ mod tests {
         }
     }
 
+    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: a spell
+    // with two nested target-then-coin layers paused at Krark's Thumb's inner keep prompt
+    // (optionally after an exile response) restores and finishes; saves stripped of announcement
+    // provenance are refused. The in-flight card state it persists: Krark's Thumb ("If you would
+    // flip a coin, instead flip two coins and ignore one."); Chaotic Strike ("Cast this spell only
+    // during combat after blockers are declared. / Flip a coin. If you win the flip, target
+    // creature gets +1/+1 until end of turn. / Draw a card.").
     #[test]
     fn legacy_coin_resolution_without_announcement_provenance_is_refused() {
         use crate::types::actions::GameAction;
@@ -10777,6 +10821,13 @@ mod tests {
             .expect("non-coin v10 remains compatible");
     }
 
+    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: the same
+    // nested-binding spell parked at Krark's Thumb's prompt decodes as an unversioned GameState
+    // transport and a viewer-filtered state without legacy refusal, then finishes. The in-flight
+    // card state it persists: Krark's Thumb ("If you would flip a coin, instead flip two coins and
+    // ignore one."); Chaotic Strike ("Cast this spell only during combat after blockers are
+    // declared. / Flip a coin. If you win the flip, target creature gets +1/+1 until end of turn. /
+    // Draw a card.").
     #[test]
     fn current_coin_transport_decodes_without_legacy_persistence_refusal() {
         for illegal in [false, true] {

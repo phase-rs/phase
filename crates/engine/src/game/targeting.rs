@@ -7996,6 +7996,17 @@ mod tests {
         assert_eq!(result, vec![TargetRef::Object(attacker)]);
     }
 
+    // Real cards: no printed card exhibits this shape (All oracle_text for 'whenever
+    // ...(blocks|becomes blocked)..., ...(that creature's|its) (controller|owner)' (34 hits): all
+    // name the event referent, none an announced target that can be unavailable while resolving).
+    // Shape: Player references to the parent target, its controller or its owner under a
+    // blockers-declared event resolve to no player when the announcement is unavailable, while the
+    // ability's controller and the triggering source's controller still resolve. Nearest printed
+    // card: Swords to Plowshares ("Exile target creature. Its controller gains life equal to its
+    // power."); Assembled Alphas ("Whenever this creature blocks or becomes blocked by a creature,
+    // this creature deals 3 damage to that creature and 3 damage to that creature's controller.")
+    // -- Swords to Plowshares names an announced target's controller (single target, fizzles
+    // whole); Assembled Alphas names the block-event creature's controller (the fallback case).
     #[test]
     fn unavailable_parent_player_does_not_fall_back_to_the_firing_event() {
         use crate::types::ability::{ParentTargetMissingReason, TargetReadOrigin};

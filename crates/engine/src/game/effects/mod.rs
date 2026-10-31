@@ -28719,6 +28719,14 @@ mod tests {
         assert!(*reduced.sub_ability.unwrap() == tail);
     }
 
+    // Real cards: Mutiny ("Target creature an opponent controls deals damage equal to its power to
+    // another target creature that player controls.") exhibits part of this shape (Mutiny's
+    // 'another target creature that player controls' parses to a Creature filter with controller
+    // ParentTargetController (the controller arm). No printed card parses to a ParentTargetOwner
+    // creature filter. The test is a predicate on a bare filter, with no game or card to replace).
+    // Shape: A creature filter whose controller is the parent target's controller or owner counts
+    // as a parent-target metadata dependency that does not require the parent object itself; a 'you
+    // control' filter does not.
     #[test]
     fn typed_parent_controller_and_owner_are_metadata_dependencies() {
         use crate::types::ability::filter_requires_parent_target_object;
@@ -63363,6 +63371,19 @@ mod untargeted_target_only_choice_tests {
         assert_eq!(stamped, Some(true));
     }
 
+    // Real cards: no printed card exhibits this shape (Parsed card-data census of Fight with
+    // subject ParentTarget (41 cards): forward-result producers (Back for More, Curse of the
+    // Werefox, Ezuri's Predation) have no sub after the fight; those with a following sibling
+    // (Fight for the Throne, Rhino's Rampage) take an announced subject). Shape: When the forwarded
+    // object is missing, an 'it fights target creature' instruction that declares its own target is
+    // pruned, while the following independent sequential sibling (gain 4 life) still resolves.
+    // Nearest printed card: Back for More ("Return target creature card from your graveyard to the
+    // battlefield. When you do, it fights up to one target creature you don't control. (Each deals
+    // damage equal to its power to the other.)"); Fight for the Throne ("Put a +1/+1 counter on
+    // target creature you control. Then it fights target creature an opponent controls. When the
+    // creature an opponent controls dies this turn, if you control your commander, you become the
+    // monarch.") -- Back for More forwards a returned creature into a fight declaring its own
+    // target, with no later payoff; Fight for the Throne's subject is announced.
     #[test]
     fn missing_forward_result_prunes_declaring_fight_but_keeps_independent_payoff() {
         use crate::types::ability::TypedFilter;
