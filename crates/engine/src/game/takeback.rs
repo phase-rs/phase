@@ -75,7 +75,8 @@ pub enum TakebackResolution {
     Approved,
     /// A voter declined.
     Declined,
-    /// The requester withdrew its own request, by cancelling or by conceding.
+    /// The requester withdrew its own request: by cancelling, or by a concession
+    /// that removed no one.
     Cancelled,
     /// A seat actually left the game while the vote was open.
     Withdrawn,

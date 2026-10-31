@@ -3727,8 +3727,11 @@ mod oversized_publication {
 
         /// Reads `socket` until the takeback withdrawal attributed to
         /// `conceding`, refusing a concession `StateUpdate` before it, then
-        /// reads the concession's `StateUpdate`.
-        async fn withdrawal_then_state(socket: &mut ClientSocket, conceding: PlayerId) {
+        /// reads and returns the concession's `StateUpdate`.
+        async fn withdrawal_then_state(
+            socket: &mut ClientSocket,
+            conceding: PlayerId,
+        ) -> serde_json::Value {
             loop {
                 let frame = receive_command_frame(socket).await;
                 match frame["type"].as_str() {
@@ -3751,6 +3754,7 @@ mod oversized_publication {
                 serde_json::json!([conceding.0]),
                 "{update}"
             );
+            update
         }
 
         async fn three_human_vote(table: &NativeTable) -> [ClientSocket; 3] {
@@ -4001,6 +4005,53 @@ mod oversized_publication {
                 .await;
                 table.server.abort();
                 outcome.expect("the AI seat never acted after the concession");
+            });
+        }
+
+        /// N7. A voter's `ClientMessage::Concede` that hands priority to an AI
+        /// seat: every human gets the withdrawal, then the concession's state,
+        /// then the AI's decision.
+        #[test]
+        fn a_voters_concede_message_that_passes_priority_to_an_ai_seat_follows_the_withdrawal() {
+            run_async_test(|| async {
+                let table = NativeTable::seated(
+                    GameExecutor::new(NonZeroUsize::MIN),
+                    3,
+                    FormatConfig::free_for_all(),
+                )
+                .await;
+                let mut scenario = GameScenario::new_n_player(3, 41);
+                scenario.at_phase(Phase::PreCombatMain);
+                install(&table, scenario.build().state().clone(), &[P2]).await;
+                let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+                    let mut p0 = table.connect(P0).await;
+                    let mut p1 = table.connect(P1).await;
+                    send_command_frame(&mut p0, &GameAction::PassPriority, 1).await;
+                    completion(&mut p0, 1).await;
+                    request_takeback(&mut p0).await;
+                    assert_requested(&mut p0, P0).await;
+                    assert_requested(&mut p1, P0).await;
+                    send_test_message(&mut p1, &ClientMessage::Concede, false).await;
+                    let ai_priority =
+                        serde_json::json!({ "type": "Priority", "data": { "player": 2 } });
+                    for socket in [&mut p1, &mut p0] {
+                        // CR 800.4a: P1 left while holding priority, so it passes to P2.
+                        let conceded = withdrawal_then_state(socket, P1).await;
+                        assert_eq!(
+                            conceded["data"]["state"]["waiting_for"], ai_priority,
+                            "{conceded}"
+                        );
+                        let acted = until_type(socket, "StateUpdate").await;
+                        assert_ne!(
+                            acted["data"]["state"]["waiting_for"], ai_priority,
+                            "{acted}"
+                        );
+                        assert_eq!(acted["data"]["eliminated_players"], serde_json::json!([1]));
+                    }
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("the withdrawal, the concession, or the AI decision never arrived");
             });
         }
     }
