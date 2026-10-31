@@ -25441,10 +25441,11 @@ fn trigger_self_put_into_exile_from_battlefield() {
     );
 }
 
-/// Plan4 C.3: third-person destination possessives with union origins remain
-/// unsupported (no printed consumer in census C1). The nearest printed union,
-/// Oglor, Devoted Assistant, has a representable owner-compatible "your" head.
-/// Keep its real head as a positive control for this synthetic fail-closed form.
+/// CR 400.3 + CR 608.2c (fail-closed): a third-person destination possessive
+/// with a union origin has no printed consumer, so the head stays unsupported
+/// rather than binding "that player" to the departure controller. The nearest
+/// printed union, Oglor, Devoted Assistant, has an owner-compatible "your" head;
+/// keep it as the positive control for this synthetic shape.
 #[test]
 fn trigger_put_into_opponent_graveyard_from_opponent_library_or_hand_union() {
     let accepted = parse_trigger_line(

@@ -1,4 +1,4 @@
-//! Preparatory real-card reference readings for owner-keyed destination triggers.
+//! Real-card runtime tests for owner-keyed destination-zone triggers (CR 400.3, CR 108.2b, CR 110.1).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{Effect, OriginConstraint, TargetFilter, TargetRef};

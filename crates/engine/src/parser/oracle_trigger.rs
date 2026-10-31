@@ -1614,7 +1614,7 @@ fn condition_names_destination_hand_owner(cond_lower: &str) -> bool {
 /// `TriggeringPlayer` while generic target-player triggers need `TargetPlayer`.
 ///
 /// A head naming a third-person graveyard possessive ("put into an opponent's / a
-/// player's graveyard") scopes "that player" to the card's owner
+/// player's graveyard", "returned to a player's hand") scopes "that player" to the card's owner
 /// (`ParentTargetOwner`, CR 400.3 + CR 608.2c); it is the last branch, so no
 /// condition that already earns a scope changes.
 pub(crate) fn relative_player_scope_for_condition(cond_lower: &str) -> Option<ControllerRef> {
@@ -1661,7 +1661,7 @@ pub(crate) fn relative_player_scope_for_condition(cond_lower: &str) -> Option<Co
         || condition_names_destination_hand_owner(cond_lower)
     {
         // CR 400.3 + CR 608.2c: "that player" after "put into an opponent's / a
-        // player's graveyard" is the graveyard's owner, i.e. the moving card's
+        // player's graveyard" or "returned to a player's hand" is that zone's owner, i.e. the moving card's
         // owner, read from the zone-change record (`ParentTargetOwner`). Checked
         // last so no head that already earns a scope can change it.
         Some(ControllerRef::ParentTargetOwner)
@@ -23046,8 +23046,9 @@ fn parse_graveyard_possessive(input: &str) -> OracleResult<'_, Option<PlayerRela
         // CR 400.3 + CR 608.2c: "their graveyard" refers to the opponent
         // named earlier in this clause (Undead Alchemist class).
         value(Some(PlayerRelation::Opponent), tag("their graveyard")),
-        // CR 400.3 + CR 608.2c: "a player's graveyard" names any player.
-        // player's graveyard: no owner restriction on the moving card.
+        // CR 400.3 + CR 608.2c: "a player's graveyard" names any player's
+        // graveyard, so it puts no owner restriction on the moving card
+        // (Bloodchief Ascension class).
         value(Some(PlayerRelation::All), tag("a player's graveyard")),
     ))
     .parse(input)
@@ -23111,7 +23112,7 @@ fn put_into_graveyard_head(
     Ok((tail, (possessive, Some(origin))))
 }
 
-/// CR 110.1 + CR 109.2a: a permanent (but not a permanent card) starts on
+/// CR 110.1 + CR 109.2: a permanent (but not a permanent card) starts on
 /// the battlefield unless the printed head explicitly supplies an origin.
 fn destination_graveyard_origin(
     subject: &TargetFilter,
