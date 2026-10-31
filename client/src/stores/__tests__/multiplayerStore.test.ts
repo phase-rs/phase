@@ -74,7 +74,6 @@ import {
   type ServerInfo,
 } from "../../adapter/ws-adapter";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
-import { P2PHostAdapter } from "../../adapter/p2p-adapter";
 import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import {
   clearWsSession,

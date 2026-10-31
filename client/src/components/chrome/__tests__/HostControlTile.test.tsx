@@ -6,7 +6,6 @@ import { deckChoiceKey, HostControlTile } from "../HostControlTile";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../../stores/multiplayerStore";
 import type { DeckChoice, PlayerSlot } from "../../../stores/multiplayerStore";
 import { emptySeatDeck } from "../../../services/pileSource";
-import { expandParsedDeck } from "../../../services/deckParser";
 import type { SeatKind } from "../../../multiplayer/seatTypes";
 import echoWire from "../../../test/fixtures/seat-deck-echo-wire.json";
 import { usePreferencesStore } from "../../../stores/preferencesStore";

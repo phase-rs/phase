@@ -2316,15 +2316,17 @@ export const useMultiplayerDraftStore = create<
       // PURE — sends nothing, and synthesizes every seat's deck exactly once.
       const decks = await hostAdapter.commanderSeatDecks(launchView, localSeat);
 
-      // Complete decks are available only after classification. Prepare one
-      // owner batch here; the inherited classification-to-send drift remains.
-      // Keep `decks` name-only for launch messages and persisted handoffs.
-      const [hostDeck, engineSeatDecks] = await Promise.all([
-        submitDeckList(decks.hostDeck, artSnapshot),
-        Promise.all(decks.engineSeatDecks.map(async ({ seat, deck }) => ({
-          seat, deck: await submitDeckList(deck, artSnapshot),
-        }))),
-      ]);
+      // The host deck is prepared here with the art snapshot taken at the press.
+      // Engine-seat decks are prepared inside the finalizer callback below with the
+      // same snapshot: the host adapter, not this function, decides which seats are
+      // engine-piloted once the room is open. `decks` stays name-only for launch
+      // messages and persisted handoffs.
+      const hostDeck = await submitDeckList(decks.hostDeck, artSnapshot);
+
+      // The host-only source accessor may yield. It must settle before the
+      // final abort check and synchronous constructor below, otherwise a cancel
+      // landing during this await could create an adapter no handle owns.
+      const boosterPackPool = await hostAdapter.boosterPackPoolForGame();
 
       // INVARIANT, not a hope: a non-null `handle.adapter` means
       // `cancelCommanderLaunch` can reach the adapter. Rechecking here is what
@@ -2441,11 +2443,12 @@ export const useMultiplayerDraftStore = create<
         commanderRoomCode,
         decks,
         async (seat, deck) => {
+          const preparedDeck = await submitDeckList(deck, artSnapshot);
           const kind: SeatKind = {
             type: "Ai",
             data: {
               difficulty: DRAFT_BOT_AI_SEAT.difficulty,
-              deck: { type: "DeckList", data: deck },
+              deck: { type: "DeckList", data: preparedDeck },
             },
           };
           const mutation: SeatMutation = { type: "SetKind", data: { seatIndex: seat, kind } };

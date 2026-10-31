@@ -20,7 +20,6 @@ import type {
   SubmitResult,
   ViewerSnapshot,
   WaitingFor,
-  DeckPrinting,
 } from "./types";
 import type {
   InteractionPreview,

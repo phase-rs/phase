@@ -7,7 +7,6 @@ import type { PlayerAvatarIdentity } from "../services/playerAvatars.ts";
 import type {
   BuiltInGameFormat,
   CustomGameFormat,
-  DeckPrinting,
   FormatConfig,
   GameFormat,
   LobbyGame,
