@@ -95,13 +95,13 @@
     "happy-dom": "^20.8.9",
     "i18next-parser": "^9.4.0",
     "jsdom": "^26.0.0",
-    "storybook": "10.6.0",
+    "storybook": "10.6.2",
     "typescript": "~5.7.0",
     "typescript-eslint": "^8.24.1",
-    "vite": "^6.4.3",
+    "vite": "^6.4.4",
     "vite-plugin-compression2": "^2.5.1",
     "vite-plugin-pwa": "^1.2.0",
-    "vitest": "^4.1.0",
+    "vitest": "^5.0.5",
     "workbox-window": "^7.4.0",
     "wrangler": "^4.113.0"
   }
