@@ -11555,6 +11555,187 @@ fn bounded_fixed_count_commits_exactly_n_periods() {
     }
 }
 
+/// Marauding Blight-Priest, verbatim (Scryfall).
+const MARAUDING_BLIGHT_PRIEST: &str = "Whenever you gain life, each opponent loses 1 life.";
+/// Exquisite Blood, verbatim (Scryfall).
+const EXQUISITE_BLOOD: &str = "Whenever an opponent loses life, you gain that much life.";
+/// Synthetic: a Blight-Priest that drains 2, so one repetition gains its controller 2 and a
+/// controller one life below `i32::MAX` crosses the cap inside a repetition.
+const DRAIN_TWO_PRIEST: &str = "Whenever you gain life, each opponent loses 2 life.";
+
+/// The 3-player untargeted drain of `multiplayer_pure_life_drain_offers_at_three_and_four_players`
+/// (`priest` + Exquisite Blood under P0, opponents at staggered life), with P0 at `p0_life`:
+/// casts and resolves the kick-off, then drives until the engine writes the bounded offer.
+fn bounded_drain_at_offer(priest: &str, p0_life: i32) -> GameRunner {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, p0_life);
+    for (i, seat) in (1..3u8).map(PlayerId).enumerate() {
+        // Staggered: pairwise-UNEQUAL absolute life, equal per-cycle delta.
+        scenario.with_life(seat, 1000 + 50 * i as i32);
+    }
+    scenario.add_creature_from_oracle(P0, "Test Blight Priest", 2, 2, priest);
+    scenario.add_creature_from_oracle(P0, "Test Exquisite Blood", 2, 2, EXQUISITE_BLOOD);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let _ = runner.cast(kickoff).resolve();
+    drive_scenario_to_bounded_offer(&mut runner, 200)
+        .expect("CR 732.2a: the untargeted every-opponent drain raises a bounded offer");
+    runner
+}
+
+/// CR 732.2c + CR 119.3: a bounded drain whose proposer gains into `i32::MAX` mid-take commits
+/// every agreed repetition. The offer is minted with P0 at `i32::MAX - 3` and publishes P0 +2,
+/// P1 −2, P2 −2 per repetition; performed as agreed, the second repetition crosses the cap
+/// (P0 stores +1) and every later one is held there (P0 stores 0), while each opponent still
+/// loses 2 and the gained counter still counts 2 per repetition. Accepting `Fixed(10)` takes
+/// each opponent down by exactly 20, leaves P0 at `i32::MAX` and moves P0's gained counter by
+/// 20. Before the drive's predicate saturated the published period from the board each
+/// repetition starts on, the crossing repetition read as a different period and the take
+/// handed back after one repetition (−2 each).
+///
+/// Ignored because it is slow, not because it is wrong: a bounded take with a seat near
+/// `i32::MAX` walks the elimination cascade across the seats' summed life totals
+/// (`cascade_horizon` × `first_life_crossing`, pre-existing), measured at about 93 s to mint
+/// the offer and about 380 s for the take in a debug build. The CI-run unit test of the
+/// predicate itself is
+/// `analysis::resource::tests::conforms_between_admits_what_a_life_limit_holds_back_and_still_refuses_a_divergence`.
+/// Run with
+/// `cargo nextest run -p phase-engine --run-ignored all -E 'test(/loop_shortcut::a_bounded_drain_.*(into_the_cap|life_cap)/)'`.
+#[test]
+#[ignore = "end-to-end evidence for conforms_between: a bounded take with a seat at i32::MAX walks the elimination cascade across the seats' summed life totals, about eight minutes in a debug build; see the doc comment"]
+fn a_bounded_drain_commits_every_agreed_repetition_while_its_proposer_gains_into_the_cap() {
+    const N: u32 = 10;
+    let lead = bounded_drain_at_offer(DRAIN_TWO_PRIEST, 20).life(P0) - 20;
+    let mut runner = bounded_drain_at_offer(DRAIN_TWO_PRIEST, i32::MAX - 3 - lead);
+    assert_eq!(
+        runner.life(P0),
+        i32::MAX - 3,
+        "REACH-GUARD: the offer is minted three below the cap (lead {lead}), so the second \
+         repetition crosses it and every later one is held there"
+    );
+    let state = runner.state_mut();
+    let (proposer, certificate, schema) = bounded_offer_parts(state);
+    assert_eq!(proposer, P0, "REACH-GUARD: P0 proposes the take");
+    let per_cycle = certificate
+        .per_cycle
+        .as_ref()
+        .and_then(PeriodSignature::every_repetition)
+        .expect("a bounded offer publishes its per-period signature");
+    assert_eq!(
+        per_cycle.delta.life,
+        std::collections::BTreeMap::from([(P0, 2), (P1, -2), (P2, -2)]),
+        "REACH-GUARD: the published period gains P0 2 and drains each opponent 2"
+    );
+    assert!(
+        schema.deliverable_capacity >= N,
+        "REACH-GUARD: the offer can deliver {N} repetitions; capacity {}",
+        schema.deliverable_capacity
+    );
+    let lives: Vec<i64> = state.players.iter().map(|p| i64::from(p.life)).collect();
+    let gained = state.players[0].life_gained_this_turn;
+
+    r6a_declare_and_accept_all(state, P0, N);
+
+    for seat in [P1, P2] {
+        assert_eq!(
+            i64::from(state.players[usize::from(seat.0)].life) - lives[usize::from(seat.0)],
+            -20,
+            "CR 732.2c: {seat:?} loses 2 in each of the {N} agreed repetitions"
+        );
+    }
+    assert_eq!(
+        state.players[0].life,
+        i32::MAX,
+        "P0's total stays at the cap"
+    );
+    assert_eq!(
+        state.players[0].life_gained_this_turn - gained,
+        20,
+        "CR 119.3: P0 gains 2 in each of the {N} agreed repetitions"
+    );
+    assert!(
+        state.players.iter().all(|p| !p.is_eliminated),
+        "no seat is eliminated inside the bound"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the completed take hands back to priority; got {:?}",
+        state.waiting_for
+    );
+}
+
+/// CR 732.2c + CR 119.3: a bounded drain offered while its proposer is already held at
+/// `i32::MAX` commits every agreed repetition. The published period has no P0 term (the cap
+/// holds the gain at 0) and drains each opponent 1 (Marauding Blight-Priest and Exquisite
+/// Blood, verbatim); accepting `Fixed(10)` takes each opponent down by exactly 10, leaves P0
+/// at `i32::MAX` and moves P0's gained counter by 10. This is the published-at-the-cap row of
+/// the predicate's unit test, end to end: a reading of the observed side that credited P0's
+/// counters would refuse the first repetition.
+///
+/// Ignored because it is slow, not because it is wrong: a bounded take with a seat at
+/// `i32::MAX` walks the elimination cascade across the seats' summed life totals
+/// (`cascade_horizon` × `first_life_crossing`, pre-existing), measured at about 93 s to mint
+/// the offer and about 380 s for the take in a debug build. The CI-run unit test of the
+/// predicate itself is
+/// `analysis::resource::tests::conforms_between_admits_what_a_life_limit_holds_back_and_still_refuses_a_divergence`.
+/// Run with
+/// `cargo nextest run -p phase-engine --run-ignored all -E 'test(/loop_shortcut::a_bounded_drain_.*(into_the_cap|life_cap)/)'`.
+#[test]
+#[ignore = "end-to-end evidence for conforms_between: a bounded take with a seat at i32::MAX walks the elimination cascade across the seats' summed life totals, about eight minutes in a debug build; see the doc comment"]
+fn a_bounded_drain_offered_at_its_proposers_life_cap_commits_every_agreed_repetition() {
+    const N: u32 = 10;
+    let mut runner = bounded_drain_at_offer(MARAUDING_BLIGHT_PRIEST, i32::MAX);
+    assert_eq!(
+        runner.life(P0),
+        i32::MAX,
+        "REACH-GUARD: P0 is at the cap when the offer is minted"
+    );
+    let state = runner.state_mut();
+    let (proposer, certificate, _) = bounded_offer_parts(state);
+    assert_eq!(proposer, P0, "REACH-GUARD: P0 proposes the take");
+    let per_cycle = certificate
+        .per_cycle
+        .as_ref()
+        .and_then(PeriodSignature::every_repetition)
+        .expect("a bounded offer publishes its per-period signature");
+    assert_eq!(
+        per_cycle.delta.life,
+        std::collections::BTreeMap::from([(P1, -1), (P2, -1)]),
+        "REACH-GUARD: the published period has no P0 term and drains each opponent 1"
+    );
+    let lives: Vec<i64> = state.players.iter().map(|p| i64::from(p.life)).collect();
+    let gained = state.players[0].life_gained_this_turn;
+
+    r6a_declare_and_accept_all(state, P0, N);
+
+    for seat in [P1, P2] {
+        assert_eq!(
+            i64::from(state.players[usize::from(seat.0)].life) - lives[usize::from(seat.0)],
+            -10,
+            "CR 732.2c: {seat:?} loses 1 in each of the {N} agreed repetitions"
+        );
+    }
+    assert_eq!(
+        state.players[0].life,
+        i32::MAX,
+        "P0's total stays at the cap"
+    );
+    assert_eq!(
+        state.players[0].life_gained_this_turn - gained,
+        10,
+        "CR 119.3: P0 gains 1 in each of the {N} agreed repetitions"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the completed take hands back to priority; got {:?}",
+        state.waiting_for
+    );
+}
+
 /// ITEM 2 (CR 732.2a) — the ACCEPT side: an opponent's play in the window's trace must not divert
 /// an accepted bounded grant away from the drain materializer.
 ///

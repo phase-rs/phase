@@ -97,8 +97,9 @@ pub struct ResolvedManaSpendCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolvedPlayerEdit {
     /// CR 119.2 + CR 119.3 + CR 119.4 + CR 119.5: A final gain/loss delta
-    /// applied after any replacement. `i64` so every rules amount (up to
-    /// `u32::MAX`) and every set/exchange difference is recorded exactly; the
+    /// applied after any replacement. `i64` so every settled amount (a
+    /// `u32`; a replacement quantity past `u32` lands on `u32::MAX` before it
+    /// settles) and every set/exchange difference is recorded exactly; the
     /// edit authority saturates the total it adjusts (CR 119.3 + CR 107.1b),
     /// in Two-Headed Giant the team's shared total (CR 810.9).
     Life { delta: i64 },

@@ -7085,15 +7085,18 @@ fn materialize_fixed_shortcut(
                         .filter(|p| !p.is_eliminated)
                         .map(|p| p.id)
                         .collect();
-                    if !pd.conforms_in(
-                        &crate::analysis::resource::ResourceVector::period_among(
-                            &committed,
-                            &s,
-                            |seat| still_in_game.contains(&seat),
-                        ),
-                        pins,
-                        &still_in_game,
-                    ) {
+                    // CR 732.2c + CR 119.3: a repetition performed as agreed moves each seat's
+                    // life total by the published amount, stopped at the `i32` limit it moves
+                    // toward (the edit authority's saturation, an engine limit). The cycle is
+                    // checked against the published period saturated from the board it starts
+                    // on, so a proposer whose gains reach `i32::MAX` mid-take still conforms for
+                    // every agreed repetition; where no total reaches a limit this is the
+                    // published period itself. A change a limit holds back never invalidates the
+                    // count the cascade derived (CR 704.5a): the cascade charges a seat only its
+                    // losses (`ResourceVector::seat_life_charges` credits no gain), so a gain the
+                    // cap holds back was never headroom it relied on, and a loss the floor holds
+                    // back is smaller than the one it charged.
+                    if !pd.conforms_between(&committed, &s, pins, &still_in_game) {
                         break 'cycles;
                     }
                 }
@@ -8006,8 +8009,9 @@ fn current_period_counter_growth(
 /// with the player's life total (the team's shared total in a shared-life format) at
 /// `i32::MAX`, the larger of that gain and the rules amount the period carried (the stored
 /// gain alone when a per-turn counter fell or ends at `u32::MAX`). The
-/// batched-collapse δ source for the life axis. Empty when no player's stored total grows
-/// across the period. Only reached in the UNOBSERVED batched route (the firewall gates it).
+/// batched-collapse δ source for the life axis. Empty when no player gains across the period; a
+/// total held at `i32::MAX` throughout gains the rules amount its counters read (CR 732.2c).
+/// Only reached in the UNOBSERVED batched route (the firewall gates it).
 fn current_period_life_growth(before: &GameState, after: &GameState) -> Vec<(PlayerId, u32)> {
     crate::analysis::resource::grown_life_deltas(before, after)
 }

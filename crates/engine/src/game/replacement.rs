@@ -4626,9 +4626,9 @@ fn gain_life_applier(
                 // but the variant composes here for symmetry — fully suppress
                 // the gain event.
                 ScaledQuantity::Prevented => return ApplyResult::Prevented,
-                // CR 119.3: a `Times` / `Plus` life amount past `u32` lands on
-                // `u32::MAX`; the settle carries it exactly and the life total
-                // saturates.
+                // Engine limit, not a rule: a `Times` / `Plus` life amount past
+                // `u32` lands on `u32::MAX`; the settle carries it and the life
+                // total saturates (CR 119.3 applies the amount that remains).
                 ScaledQuantity::Unrepresentable => u32::MAX,
             };
             return ApplyResult::Modified(ProposedEvent::LifeGain {
@@ -4780,9 +4780,9 @@ fn lose_life_applier(
         let new_amount = match scale_event_quantity(amount, &modification) {
             ScaledQuantity::Scaled(new_amount) => new_amount,
             ScaledQuantity::Prevented => return ApplyResult::Prevented,
-            // CR 119.3: a `Times` / `Plus` life amount past `u32` lands on
-            // `u32::MAX`; the settle carries it exactly and the life total
-            // saturates.
+            // Engine limit, not a rule: a `Times` / `Plus` life amount past
+            // `u32` lands on `u32::MAX`; the settle carries it and the life
+            // total saturates (CR 119.3 applies the amount that remains).
             ScaledQuantity::Unrepresentable => u32::MAX,
         };
         return ApplyResult::Modified(ProposedEvent::LifeLoss {

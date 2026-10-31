@@ -9,7 +9,8 @@
 //! (CR 104.4b + CR 732.4), as is a mandatory loop that drains a seat held at
 //! `i32::MIN`; an optional one is never drawn or offered a shortcut; a
 //! shortcut's lump gain past `i32::MAX` saturates; and a shortcut whose period
-//! crosses the cap collapses at the rules amount.
+//! crosses the cap or is held at it collapses at the rules amount, as performing
+//! its cycles would (CR 732.2c).
 
 use engine::analysis::decision_template::IterationCount;
 use engine::analysis::loop_check::ShortcutResponse;
@@ -1213,7 +1214,7 @@ fn doubling_a_life_total_at_i32_min_reports_the_saturated_loss() {
     assert!(is_priority(runner.state()));
 }
 
-/// The brief's self-feeding life-gain trigger (synthetic text, as in
+/// A self-feeding life-gain trigger (synthetic text, as in
 /// `loop_shortcut.rs`): with one copy every gain triggers another, so the loop
 /// is mandatory and never stops.
 const SELF_LIFE_ENGINE: &str = "Whenever you gain life, you gain 1 life.";
@@ -1256,29 +1257,122 @@ fn pass_beats(runner: &mut GameRunner, beats: usize) -> Vec<GameEvent> {
     events
 }
 
-/// Activates `source`'s ability `index`, then passes until the stack is empty
-/// at priority or a loop shortcut is offered.
-fn activate_and_settle(runner: &mut GameRunner, source: ObjectId, index: usize) {
-    runner
-        .act(GameAction::ActivateAbility {
-            source_id: source,
-            ability_index: index,
-            payment_mode: CastPaymentMode::Auto,
-        })
-        .expect("the activation is accepted");
+/// Passes until the stack is empty at priority or a loop shortcut is offered;
+/// returns every pass's events.
+fn settle(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let mut events = Vec::new();
     for _ in 0..16 {
         match &runner.state().waiting_for {
-            WaitingFor::LoopShortcut { .. } => return,
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::LoopShortcut { .. } => return events,
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return events,
             WaitingFor::Priority { .. } => {
-                runner
-                    .act(GameAction::PassPriority)
-                    .expect("passing priority is accepted");
+                events.extend(
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("passing priority is accepted")
+                        .events,
+                );
             }
             other => panic!("unexpected prompt while settling an activation: {other:?}"),
         }
     }
     panic!("the activation never settled");
+}
+
+/// Activates `source`'s ability `index`, then passes until the stack is empty
+/// at priority or a loop shortcut is offered; returns every event.
+fn activate_and_settle(runner: &mut GameRunner, source: ObjectId, index: usize) -> Vec<GameEvent> {
+    let mut events = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the activation is accepted")
+        .events;
+    events.extend(settle(runner));
+    events
+}
+
+/// Declines the shortcut offer and performs `cycles` more Lifedynamo cycles
+/// (the `indices` activations each), declining any offer that follows;
+/// returns every event.
+fn decline_and_perform(
+    runner: &mut GameRunner,
+    dynamo: ObjectId,
+    indices: [usize; 3],
+    cycles: u32,
+) -> Vec<GameEvent> {
+    /// Declines every loop shortcut offered (at most four in a row), settling
+    /// after each; returns every event.
+    fn decline_offers(runner: &mut GameRunner) -> Vec<GameEvent> {
+        let mut events = Vec::new();
+        for _ in 0..4 {
+            if !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }) {
+                return events;
+            }
+            events.extend(
+                runner
+                    .act(GameAction::DeclineShortcut)
+                    .expect("declining the shortcut is accepted")
+                    .events,
+            );
+            events.extend(settle(runner));
+        }
+        assert!(
+            !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
+            "a loop shortcut is still offered after four declines"
+        );
+        events
+    }
+
+    let mut events = decline_offers(runner);
+    for _ in 0..cycles {
+        for index in indices {
+            events.extend(activate_and_settle(runner, dynamo, index));
+            events.extend(decline_offers(runner));
+        }
+    }
+    assert!(
+        is_priority(runner.state()) && runner.state().stack.is_empty(),
+        "the performed cycles end at priority with an empty stack, got {:?}",
+        runner.state().waiting_for
+    );
+    events
+}
+
+/// The life state a shortcut or the performed cycles leave: P0's and P1's
+/// gained counters, team A's stored fields (`(P0, P1)`), P0's shared total, and
+/// the sum and last new total of P0's `LifeChanged` events.
+#[derive(Debug, PartialEq, Eq)]
+struct LifeOutcome {
+    gained: u32,
+    teammate_gained: u32,
+    fields: (i32, i32),
+    team: i64,
+    life_changed_total: i64,
+    last_new_total: Option<i32>,
+}
+
+impl LifeOutcome {
+    fn read(runner: &GameRunner, events: &[GameEvent]) -> Self {
+        let p0_changes: Vec<(i32, Option<i32>)> = life_changes(events)
+            .into_iter()
+            .filter(|(player, _, _)| *player == P0)
+            .map(|(_, amount, new_total)| (amount, new_total))
+            .collect();
+        LifeOutcome {
+            gained: runner.state().players[0].life_gained_this_turn,
+            teammate_gained: runner.state().players[1].life_gained_this_turn,
+            fields: team_a_fields(runner.state()),
+            team: team_life_sum(runner.state(), P0),
+            life_changed_total: p0_changes
+                .iter()
+                .map(|(amount, _)| i64::from(*amount))
+                .sum(),
+            last_new_total: p0_changes.last().and_then(|(_, new_total)| *new_total),
+        }
+    }
 }
 
 /// Passes priority until the current step ends and its boundary runs: returns
@@ -1301,7 +1395,7 @@ fn pass_to_next_boundary(runner: &mut GameRunner) {
     panic!("no phase boundary reached within 64 passes");
 }
 
-/// The brief's mandatory loop in Interactive loop detection: P0 controls one
+/// A mandatory life-gain loop in Interactive loop detection: P0 controls one
 /// `SELF_LIFE_ENGINE` creature and holds the `KICKOFF` spell, with the given
 /// stored life fields and P0's gained-this-turn counter preset to `gained`.
 fn mandatory_life_gain_loop(
@@ -1670,7 +1764,7 @@ fn an_optional_life_gain_loop_at_the_cap_is_never_drawn_or_offered() {
     }
 }
 
-/// CR 104.4b + CR 732.4: the brief's mandatory loop (one "Whenever you gain
+/// CR 104.4b + CR 732.4: a mandatory loop (one "Whenever you gain
 /// life, you gain 1 life." trigger after one kickoff gain) is a draw. At
 /// `i32::MAX` the stored total cannot move, but every gain still carries its
 /// rules amount, so the loop is drawn exactly as it is at 20, including from
@@ -1868,11 +1962,17 @@ fn a_life_shortcut_lump_gain_past_i32_max_saturates() {
     assert!(is_priority(runner.state()));
 }
 
-/// CR 104.4b + CR 732.2a: at `i32::MAX` a Lifedynamo cycle's gain cannot grow
-/// the stored total, so the shortcut offer carries no life axis and accepting
-/// it stashes no life growth to collapse.
+/// CR 104.4b + CR 732.2a + CR 732.2c: at `i32::MAX` a Lifedynamo cycle's gain
+/// cannot grow the stored total, so the shortcut offer carries no life axis.
+/// Accepting it still stashes the cycle's rules amount, and the boundary
+/// collapse gains 3,000,000,000 in one lump: the total stays at `i32::MAX`, the
+/// gained counter ends where performing the 1,000 cycles leaves it, and the one
+/// event reports the lump clamped to its field. Residual: with the gained
+/// counter pinned at `u32::MAX` the period carries no reading, so nothing is
+/// stashed and the boundary asks no collapse amount.
 #[test]
 fn a_life_shortcut_offer_at_the_cap_carries_no_life_axis() {
+    // Row A: the cycle's rules amount is stashed and collapses in one lump.
     let (mut runner, dynamo, indices) =
         lifedynamo_board(two_player(), &[(P0, i32::MAX)], 3_000_000, 0);
     cycle_to_the_shortcut_offer(
@@ -1888,11 +1988,47 @@ fn a_life_shortcut_offer_at_the_cap_carries_no_life_axis() {
         })
         .expect("the shortcut declaration is accepted");
     accept_for_every_responder(&mut runner, &[P1]);
+    assert_eq!(
+        stash(&runner),
+        Some(&vec![PersistentAxisMaterialization::Life {
+            player: P0,
+            per_cycle_delta: 3_000_000,
+        }]),
+        "the cycle's rules amount is stashed"
+    );
+
+    let events = collapse(&mut runner, 1000);
+
+    assert_eq!(runner.life(P0), i32::MAX);
+    assert_eq!(
+        runner.state().players[0].life_gained_this_turn,
+        3_003_000_000
+    );
+    assert_eq!(life_changes(&events), vec![(P0, i32::MAX, Some(i32::MAX))]);
+    assert!(is_priority(runner.state()));
+    assert_eq!(stash(&runner), None, "the stash is cleared");
+
+    // Row B, residual: the gained counter is pinned at `u32::MAX`.
+    let (mut runner, dynamo, indices) =
+        lifedynamo_board(two_player(), &[(P0, i32::MAX)], 5, u32::MAX);
+    cycle_to_the_shortcut_offer(
+        &mut runner,
+        dynamo,
+        indices,
+        &[ResourceAxis::Mana(ManaType::Colorless)],
+    );
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(3),
+            template: None,
+        })
+        .expect("the shortcut declaration is accepted");
+    accept_for_every_responder(&mut runner, &[P1]);
     assert!(
         !stash(&runner).is_some_and(|items| items
             .iter()
             .any(|item| matches!(item, PersistentAxisMaterialization::Life { .. }))),
-        "no life growth is stashed: {:?}",
+        "pinned: no life growth is stashed: {:?}",
         stash(&runner)
     );
     pass_to_next_boundary(&mut runner);
@@ -1901,10 +2037,11 @@ fn a_life_shortcut_offer_at_the_cap_carries_no_life_axis() {
             runner.state().waiting_for,
             WaitingFor::PayAmountChoice { .. }
         ),
-        "the boundary asks no collapse amount, got {:?}",
+        "pinned: the boundary asks no collapse amount, got {:?}",
         runner.state().waiting_for
     );
     assert_eq!(runner.life(P0), i32::MAX);
+    assert_eq!(runner.state().players[0].life_gained_this_turn, u32::MAX);
 }
 
 /// CR 119.3 + CR 732.1b: each of the 1000 elided cycles gains 2 life, so the
@@ -2034,5 +2171,208 @@ fn a_life_shortcut_period_crossing_the_cap_collapses_at_the_rules_amount() {
         );
         assert!(is_priority(runner.state()), "{name}");
         assert_eq!(stash(&runner), None, "{name}: the stash is cleared");
+    }
+}
+
+/// CR 732.2c + CR 119.3: a taken shortcut leaves the game as if every elided
+/// cycle were performed, so where the driven period holds P0's total at
+/// `i32::MAX` the collapse gains each elided cycle's rules amount: P0's gained
+/// counter, both stored life fields, the shared total and the sum of P0's
+/// `LifeChanged` amounts end where declining the shortcut and performing the
+/// cycles leaves them. Rows: a two-player total held at the cap; a Two-Headed
+/// Giant team whose shared total is at the cap while P0's own field has room
+/// (CR 810.4 + CR 810.9a), where P1 is credited nothing; and the crossing and
+/// below-the-cap controls. The collapse reports the lump in one `LifeChanged`
+/// event where performing reports one per cycle; the sums are equal, and a
+/// board with a `LifeChanged` observer takes the shortcut by performing its
+/// cycles instead.
+#[test]
+fn a_life_shortcut_held_at_the_cap_matches_performing_the_cycles() {
+    const CYCLES: u32 = 3;
+    // (name, Two-Headed Giant, life fields, gain per cycle, offer's unbounded
+    // axes, responders)
+    type Row = (
+        &'static str,
+        bool,
+        Vec<(PlayerId, i32)>,
+        u32,
+        Vec<ResourceAxis>,
+        Vec<PlayerId>,
+    );
+    let mana = ResourceAxis::Mana(ManaType::Colorless);
+    let rows: [Row; 4] = [
+        (
+            "held at the cap",
+            false,
+            vec![(P0, i32::MAX)],
+            5,
+            vec![mana],
+            vec![P1],
+        ),
+        (
+            "Two-Headed Giant team held at the cap",
+            true,
+            vec![(P0, i32::MAX - 5), (P1, 5), (P2, 20), (PlayerId(3), 20)],
+            2,
+            vec![mana],
+            vec![P1, P2, PlayerId(3)],
+        ),
+        (
+            "crossing the cap",
+            false,
+            vec![(P0, i32::MAX - 3)],
+            2,
+            vec![mana],
+            vec![P1],
+        ),
+        (
+            "below the cap",
+            false,
+            vec![(P0, 20)],
+            2,
+            vec![mana, ResourceAxis::Life(P0)],
+            vec![P1],
+        ),
+    ];
+    for (name, is_two_headed_giant, fields, gain, unbounded, responders) in rows {
+        let board = || {
+            let scenario = if is_two_headed_giant {
+                two_headed_giant()
+            } else {
+                two_player()
+            };
+            lifedynamo_board(scenario, &fields, gain, 0)
+        };
+
+        // The shortcut: accept `Fixed(CYCLES)` and collapse at the boundary.
+        let (mut runner, dynamo, indices) = board();
+        cycle_to_the_shortcut_offer(&mut runner, dynamo, indices, &unbounded);
+        runner
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(CYCLES),
+                template: None,
+            })
+            .expect("the shortcut declaration is accepted");
+        accept_for_every_responder(&mut runner, &responders);
+        assert_eq!(
+            stash(&runner),
+            Some(&vec![PersistentAxisMaterialization::Life {
+                player: P0,
+                per_cycle_delta: gain,
+            }]),
+            "{name}: the cycle's rules amount is stashed"
+        );
+        let events = collapse(&mut runner, CYCLES);
+        let shortcut = LifeOutcome::read(&runner, &events);
+
+        // The reference: decline and perform the same cycles.
+        let (mut runner, dynamo, indices) = board();
+        cycle_to_the_shortcut_offer(&mut runner, dynamo, indices, &unbounded);
+        let events = decline_and_perform(&mut runner, dynamo, indices, CYCLES);
+        let performed = LifeOutcome::read(&runner, &events);
+
+        assert_eq!(shortcut, performed, "{name}");
+        assert_eq!(shortcut.gained, gain * (CYCLES + 1), "{name}");
+        assert_eq!(
+            shortcut.life_changed_total,
+            i64::from(gain * CYCLES),
+            "{name}"
+        );
+    }
+}
+
+/// Angelic Accord's verbatim Oracle text (Scryfall).
+const ANGELIC_ACCORD: &str = "At the beginning of each end step, if you gained 4 or more life \
+                              this turn, create a 4/4 white Angel creature token with flying.";
+
+/// Passes P0's turn forward to the end step (declaring no attackers, and
+/// collapsing a stashed loop at its maximum where a boundary asks) until the end
+/// step holds priority with an empty stack, so its beginning-of-step trigger has
+/// resolved.
+fn settle_end_step(runner: &mut GameRunner) {
+    for _ in 0..200 {
+        if runner.state().phase == Phase::End
+            && is_priority(runner.state())
+            && runner.state().stack.is_empty()
+        {
+            return;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority is accepted");
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .declare_attackers(&[])
+                    .expect("declaring no attackers is accepted");
+            }
+            WaitingFor::PayAmountChoice {
+                resource: PayableResource::LoopCollapse { .. },
+                max,
+                ..
+            } => {
+                let amount = *max;
+                runner
+                    .act(GameAction::SubmitPayAmount { amount })
+                    .expect("the collapse amount is accepted");
+            }
+            other => panic!("unexpected prompt on the way to the end step: {other:?}"),
+        }
+    }
+    panic!("the end step was not reached within 200 beats");
+}
+
+/// CR 603.4 + CR 732.2c: Angelic Accord's intervening "if" reads the life P0
+/// gained this turn, and a taken shortcut gains what performing its cycles
+/// would even while P0's total is held at `i32::MAX`. One Lifedynamo cycle
+/// gaining 1 plus a `Fixed(3)` shortcut gains 4, so the end step makes one
+/// Angel, as declining and performing the three cycles does; `Fixed(2)` gains 3
+/// and makes none.
+#[test]
+fn angelic_accord_counts_the_life_a_shortcut_held_at_the_cap_gains() {
+    // (shortcut count, or `None` to decline and perform three cycles; gained;
+    // Angel tokens)
+    for (count, gained, angels) in [(Some(3), 4, 1), (None, 4, 1), (Some(2), 3, 0)] {
+        let mut scenario = two_player();
+        scenario.add_enchantment_from_oracle(P0, "Angelic Accord", ANGELIC_ACCORD);
+        let (mut runner, dynamo, indices) = lifedynamo_board(scenario, &[(P0, i32::MAX)], 1, 0);
+        cycle_to_the_shortcut_offer(
+            &mut runner,
+            dynamo,
+            indices,
+            &[ResourceAxis::Mana(ManaType::Colorless)],
+        );
+        match count {
+            Some(count) => {
+                runner
+                    .act(GameAction::DeclareShortcut {
+                        count: IterationCount::Fixed(count),
+                        template: None,
+                    })
+                    .expect("the shortcut declaration is accepted");
+                accept_for_every_responder(&mut runner, &[P1]);
+            }
+            None => {
+                decline_and_perform(&mut runner, dynamo, indices, 3);
+            }
+        }
+
+        settle_end_step(&mut runner);
+
+        let state = runner.state();
+        let angel_tokens = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|object| object.is_token && object.name == "Angel")
+            .count();
+        assert_eq!(
+            state.players[0].life_gained_this_turn, gained,
+            "{count:?}: life gained this turn"
+        );
+        assert_eq!(angel_tokens, angels, "{count:?}: Angel tokens");
+        assert_eq!(runner.life(P0), i32::MAX, "{count:?}");
     }
 }

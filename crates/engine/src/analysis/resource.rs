@@ -1197,6 +1197,30 @@ impl PeriodicDelta {
                 })
     }
 
+    /// CR 732.2a + CR 732.2c: whether the repetition the drive performed from `start` to `end`
+    /// conforms to this signature: [`PeriodicDelta::conforms_in`] of the period the two boards
+    /// measure over the seats `still_in_game` keeps ([`ResourceVector::period_among`]), against
+    /// this signature with its `life` axis saturated from `start`
+    /// ([`ResourceVector::with_saturated_life_from`]). Where no life total reaches an `i32`
+    /// limit, the expectation is this signature itself.
+    pub(crate) fn conforms_between(
+        &self,
+        start: &GameState,
+        end: &GameState,
+        pins: &[crate::analysis::decision_template::PinnedDecision],
+        still_in_game: &BTreeSet<PlayerId>,
+    ) -> bool {
+        let expected = PeriodicDelta {
+            delta: self.delta.with_saturated_life_from(start),
+            ..self.clone()
+        };
+        expected.conforms_in(
+            &ResourceVector::period_among(start, end, |seat| still_in_game.contains(&seat)),
+            pins,
+            still_in_game,
+        )
+    }
+
     /// CR 704.3 + CR 704.5a: the first repetition, at or before `horizon`, at which a stream of
     /// per-repetition charges takes a seat from `remaining_life` to 0 or less — or `None` when the
     /// seat survives every one of them.
@@ -2499,8 +2523,8 @@ impl ResourceVector {
     /// `self`.
     ///
     /// Read only by Path B (`game::engine::interactive_loop_bridge`'s CR 732.4
-    /// draw walk): an optional loop is never drawn (CR 104.4b), and a life axis
-    /// held at the cap offers no growth to shortcut.
+    /// draw walk): an optional loop is never drawn (CR 104.4b), and a taken
+    /// shortcut's collapse reads the cap through [`grown_life_deltas`].
     pub(crate) fn with_at_limit_life_reading(
         &self,
         prior: &GameState,
@@ -2530,6 +2554,35 @@ impl ResourceVector {
             }
         }
         read
+    }
+
+    /// CR 119.3 + CR 732.2c: this delta with each seat's `life` entry replaced by the change that
+    /// entry makes to the seat's life total on `start`: the total adjusted by the entry and stopped
+    /// at the `i32` limit it moves toward (`game::arithmetic::saturating_life_total`, the edit
+    /// authority's saturation — an engine limit, not a rule). In a shared-life format the total is
+    /// the team's shared total (CR 810.4 + CR 810.9a). An entry that moves nothing has no entry, as
+    /// in [`map_delta`]; every other axis is `self`'s, so where no entry reaches a limit the result
+    /// is `self`.
+    ///
+    /// It is the stored change a cycle carrying this amount makes for a seat whose changes in the
+    /// period all have one sign and land on its own field. A seat whose gains and losses interleave
+    /// across a limit, a change the spread (`game::players::spread_life_change`) stores in a
+    /// teammate's field, or two members of one shared total that both move, may store a different
+    /// amount, and such a cycle then reads as a different period.
+    fn with_saturated_life_from(&self, start: &GameState) -> ResourceVector {
+        let life = self
+            .life
+            .iter()
+            .filter_map(|(&seat, &change)| {
+                let total = crate::game::players::life_change_total(start, seat);
+                let moved = crate::game::arithmetic::saturating_life_total(total, change) - total;
+                (moved != 0).then_some((seat, moved))
+            })
+            .collect();
+        ResourceVector {
+            life,
+            ..self.clone()
+        }
     }
 
     /// Iterate every scalar component of this vector as a signed value, paired
@@ -6140,17 +6193,21 @@ pub(crate) fn grown_beneficial_counter_deltas(
 /// stays a loss/SBA axis (CR 704.5a) and is not returned. Mirrors the counter δ source:
 /// snapshot the per-cycle delta once, multiply by the controller-named N at the boundary.
 ///
-/// CR 119.3 + CR 732.1b: a player is returned only when their stored total grew across the
-/// period, and δ is that stored gain, except where the period ends with the player's life
-/// total at `i32::MAX` (the team's shared total in a shared-life format, CR 810.4 +
-/// CR 810.9a). There the cap can hold the stored gain below what the period gained, so δ is
-/// the rules amount the period carried, read from the player's per-turn counters
-/// ([`life_counter_change`]): each elided cycle's lump gain then reports what performing it
-/// would (`game::arithmetic::reported_life_magnitude`). A counter that fell or ends at
-/// `u32::MAX` gives no reading, so δ is the stored gain, which stays the floor: the lump
-/// must still take the total where performing the cycles would. A total held at the cap
-/// across the whole period grows no stored total, so it offers no growth to collapse; below
-/// the cap every δ is the stored gain, exactly.
+/// CR 119.3 + CR 732.2c: δ is the player's stored gain, except where the period ends with the
+/// player's life total at `i32::MAX` (the team's shared total in a shared-life format,
+/// CR 810.4 + CR 810.9a). There the cap holds the stored gain below what the period gained —
+/// to 0 when the total starts the period at the cap too — so δ is the rules amount the period
+/// carried, read from the player's per-turn counters ([`life_counter_change`]). A taken
+/// shortcut leaves the game as if every elided cycle were performed, so where the period only
+/// gains life the lump gain then moves the gained counter and reports `LifeChanged` as
+/// performing the cycles would (`game::arithmetic::reported_life_magnitude`); a period that
+/// also loses life is batched at its net, gained minus lost. A counter that fell or ends at
+/// `u32::MAX` gives no reading, so δ is the stored gain, which stays the floor: the lump must
+/// still take the total where performing the cycles would. A player whose δ is not positive is
+/// not returned, and below the cap every δ is the stored gain, exactly. δ is read per player,
+/// from the player's own field and counters: in a shared-life format a gain the spread
+/// (`game::players::spread_life_change`) stored in a teammate's field is that teammate's
+/// stored gain.
 pub(crate) fn grown_life_deltas(prior: &GameState, current: &GameState) -> Vec<(PlayerId, u32)> {
     let mut deltas = Vec::new();
     for after in &current.players {
@@ -6158,15 +6215,15 @@ pub(crate) fn grown_life_deltas(prior: &GameState, current: &GameState) -> Vec<(
         // CR 119.3: the gain between two `i32` totals can pass `i32::MAX`; exact in
         // `i64`, and it always fits `u32` (at most `u32::MAX`, `i32::MIN` → `i32::MAX`).
         let stored = i64::from(after.life) - i64::from(before.map_or(after.life, |p| p.life));
-        if stored <= 0 {
-            continue;
-        }
         let ends_at_cap =
             crate::game::players::life_change_total(current, after.id) == i64::from(i32::MAX);
         let rules = before
             .filter(|_| ends_at_cap)
             .and_then(|before| life_counter_change(before, after));
         let gained = rules.map_or(stored, |rules| rules.max(stored));
+        if gained <= 0 {
+            continue;
+        }
         deltas.push((
             after.id,
             crate::game::arithmetic::i64_to_u32_saturating(gained),
@@ -15780,14 +15837,15 @@ mod tests {
     /// `i32::MAX`, the batched-collapse δ is the rules amount the period carried (the
     /// per-turn counters, gained minus lost), never below the stored gain, which stays
     /// the floor for a counter that fell or is pinned at `u32::MAX`. Below the cap the
-    /// stored gain is kept even where the counters disagree, and a total held at the cap
-    /// across the whole period grows no stored total, so it has no δ.
+    /// stored gain is kept even where the counters disagree. A total held at the cap across
+    /// the whole period has the rules amount too (CR 732.2c), unless a counter fell or is
+    /// pinned, where its stored gain of 0 gives no δ.
     #[test]
     fn grown_life_delta_reads_the_rules_amount_where_the_period_ends_at_the_cap() {
         // (name, P0 life before/after, P0 gained before/after, expected δ)
         type Row = (&'static str, (i32, i32), (u32, u32), Vec<(PlayerId, u32)>);
         let p0 = PlayerId(0);
-        let rows: [Row; 6] = [
+        let rows: [Row; 8] = [
             (
                 "crossing the cap",
                 (i32::MAX - 1, i32::MAX),
@@ -15813,7 +15871,24 @@ mod tests {
                 (10, 2),
                 vec![(p0, 1)],
             ),
-            ("held at the cap", (i32::MAX, i32::MAX), (0, 3), vec![]),
+            (
+                "held at the cap",
+                (i32::MAX, i32::MAX),
+                (0, 3),
+                vec![(p0, 3)],
+            ),
+            (
+                "held at the cap with a pinned counter",
+                (i32::MAX, i32::MAX),
+                (u32::MAX, u32::MAX),
+                vec![],
+            ),
+            (
+                "held at the cap after a counter fell",
+                (i32::MAX, i32::MAX),
+                (10, 2),
+                vec![],
+            ),
         ];
         for (name, (life_before, life_after), (gained_before, gained_after), expected) in rows {
             let mut prior = GameState::new_two_player(42);
@@ -27420,6 +27495,188 @@ mod tests {
             "the population decides which SEATS are compared, never which seats the bound \
              reserved headroom for"
         );
+    }
+
+    /// A two-player board with each listed seat's life set; every unlisted seat keeps its
+    /// starting 20.
+    fn life_board(lives: &[(u8, i32)]) -> GameState {
+        let mut state = GameState::new_two_player(7);
+        for &(seat, life) in lives {
+            state.players[usize::from(seat)].life = life;
+        }
+        state
+    }
+
+    /// A Two-Headed Giant board (teams P0+P1 and P2+P3) with each listed seat's own field set.
+    /// An unlisted field keeps the format's starting 15, so every row lists all four.
+    fn two_headed_giant_board(lives: &[(u8, i32)]) -> GameState {
+        let mut state =
+            GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 7);
+        for &(seat, life) in lives {
+            state.players[usize::from(seat)].life = life;
+        }
+        state
+    }
+
+    /// CR 119.3 + CR 732.2c: a period's `life` entry, saturated from a start board, is the change
+    /// that entry makes to the seat's life total there — the entry itself away from the `i32`
+    /// limits, the part that fits where the total reaches one, and no entry where the total is
+    /// already at the limit the entry moves toward. In Two-Headed Giant the total is the team's
+    /// shared total (CR 810.9a), not the acting member's own field. Every other axis, and every
+    /// other seat's entry, is kept.
+    #[test]
+    fn a_saturated_period_reads_the_change_a_life_limit_allows() {
+        let (max, min) = (i32::MAX, i32::MIN);
+        for (total, entry, expected) in [
+            (20, 2, Some(2)),
+            (20, -3, Some(-3)),
+            (max - 1, 2, Some(1)),
+            (max, 2, None),
+            (min + 1, -3, Some(-1)),
+            (min, -3, None),
+        ] {
+            let mut period = victim_life(&[(0, entry), (1, -2)]);
+            period.tokens_created = 1;
+            let read = period.with_saturated_life_from(&life_board(&[(0, total)]));
+            assert_eq!(
+                read.life.get(&PlayerId(0)).copied(),
+                expected,
+                "P0 at {total}, entry {entry}"
+            );
+            assert_eq!(
+                read.life.get(&PlayerId(1)).copied(),
+                Some(-2),
+                "P0 at {total}, entry {entry}: P1's entry is kept"
+            );
+            assert_eq!(
+                read.tokens_created, 1,
+                "P0 at {total}, entry {entry}: every other axis is kept"
+            );
+        }
+
+        // Identity: where no total reaches a limit the result is the period itself.
+        let away = victim_life(&[(0, 2), (1, -2)]);
+        assert_eq!(away.with_saturated_life_from(&life_board(&[(0, 20)])), away);
+
+        // CR 810.9a: the team's shared total is at the cap, though P0's own field has room.
+        let team = two_headed_giant_board(&[(0, max - 5), (1, 5), (2, 20), (3, 20)]);
+        assert!(
+            i64::from(team.players[0].life) + 2 <= i64::from(max),
+            "REACH-GUARD: P0's own field has room for the gain; only the team's total is full"
+        );
+        assert!(
+            victim_life(&[(0, 2)])
+                .with_saturated_life_from(&team)
+                .life
+                .is_empty(),
+            "a gain to a team whose shared total is at the cap moves nothing"
+        );
+    }
+
+    /// CR 732.2a + CR 732.2c + CR 119.3: the drive's per-repetition predicate, on real board
+    /// pairs. A repetition performed as agreed moves each seat's life total by the published
+    /// amount, stopped at the `i32` limit it moves toward, so a proposer whose gain the cap holds
+    /// back — crossing the cap or held at it, alone or as a Two-Headed Giant team — still conforms,
+    /// while a victim's changed loss or a smaller gain below the cap is still refused.
+    ///
+    /// # Discrimination
+    ///
+    /// Each row also asserts the unsaturated comparison (`conforms_in` of the measured period) on
+    /// the same pair; that is the reach guard and the discriminator. The crossing, held and
+    /// Two-Headed Giant rows are red if the method compares the signature unsaturated; the
+    /// crossing row is red if it saturates from `end` instead of `start`.
+    ///
+    /// `living` is every player on `end`.
+    #[test]
+    fn conforms_between_admits_what_a_life_limit_holds_back_and_still_refuses_a_divergence() {
+        let max = i32::MAX;
+        let drain = charged_signature(victim_life(&[(0, 2), (1, -2)]), &[], SEATS);
+        let team_drain = charged_signature(victim_life(&[(0, 2), (2, -2)]), &[], SEATS);
+        let at_cap = charged_signature(victim_life(&[(1, -2)]), &[], SEATS);
+        // (name, published, start, end, conforms_between, unsaturated conforms_in)
+        type Row = (
+            &'static str,
+            PeriodicDelta,
+            GameState,
+            GameState,
+            bool,
+            bool,
+        );
+        let rows: [Row; 7] = [
+            (
+                "crossing",
+                drain.clone(),
+                life_board(&[(0, max - 1)]),
+                life_board(&[(0, max), (1, 18)]),
+                true,
+                false,
+            ),
+            (
+                "held",
+                drain.clone(),
+                life_board(&[(0, max)]),
+                life_board(&[(0, max), (1, 18)]),
+                true,
+                false,
+            ),
+            (
+                "control",
+                drain.clone(),
+                life_board(&[]),
+                life_board(&[(0, 22), (1, 18)]),
+                true,
+                true,
+            ),
+            (
+                "divergent victim loss",
+                drain.clone(),
+                life_board(&[(0, max - 1)]),
+                life_board(&[(0, max), (1, 19)]),
+                false,
+                false,
+            ),
+            (
+                "smaller gain below the cap",
+                drain,
+                life_board(&[]),
+                life_board(&[(0, 21), (1, 18)]),
+                false,
+                false,
+            ),
+            (
+                "2HG team at the cap",
+                team_drain,
+                two_headed_giant_board(&[(0, max - 5), (1, 5), (2, 20), (3, 20)]),
+                two_headed_giant_board(&[(0, max - 5), (1, 5), (2, 18), (3, 20)]),
+                true,
+                false,
+            ),
+            (
+                "published at the cap",
+                at_cap,
+                life_board(&[(0, max)]),
+                life_board(&[(0, max), (1, 18)]),
+                true,
+                true,
+            ),
+        ];
+        for (name, published, start, end, conforms, plain) in rows {
+            let living: BTreeSet<PlayerId> = end.players.iter().map(|p| p.id).collect();
+            assert_eq!(
+                published.conforms_between(&start, &end, &[], &living),
+                conforms,
+                "{name}"
+            );
+            assert_eq!(
+                published.conforms_in(
+                    &ResourceVector::period_among(&start, &end, |seat| living.contains(&seat)),
+                    &[],
+                    &living
+                ),
+                plain,
+                "{name}: the unsaturated comparison on the same pair"
+            );
+        }
     }
 
     /// CR 704.5a: a predicted departure names at least one seat and at least the first repetition.

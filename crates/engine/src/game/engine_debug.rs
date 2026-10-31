@@ -499,6 +499,19 @@ pub fn apply_debug_action(
                 .life;
             if current_life != life {
                 let delta = i64::from(life) - i64::from(current_life);
+                // CR 810.9: the difference is applied to the player's shared life total (its
+                // own outside a shared-life format), which the edit authority stops at the
+                // `i32` limit it moves toward (`arithmetic::saturating_life_total`, an engine
+                // limit, not a rule). The change is stored on the player's own field first
+                // (`players::spread_life_change`), so the field lands on the target exactly
+                // when that authority moves the total by the whole difference; otherwise
+                // refuse the edit and change nothing.
+                let shared = crate::game::players::life_change_total(state, player_id);
+                if crate::game::arithmetic::saturating_life_total(shared, delta) - shared != delta {
+                    return Err(EngineError::InvalidAction(format!(
+                        "SetLife {life} for {player_id:?}: its shared life total cannot move by {delta} within the i32 range"
+                    )));
+                }
                 state
                     .resolve_and_apply_player_edit(player_id, ResolvedPlayerEdit::Life { delta })
                     .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
@@ -4356,7 +4369,7 @@ mod tests {
         /// life, you gain twice that much life instead.") and two hand-built
         /// x1,000 multipliers take a requested 1,000,000 past `u32` in any order:
         /// the application that passes `u32` lands on `u32::MAX` and the later
-        /// ones keep it there (CR 119.3), the gain applies in full, the total
+        /// ones keep it there (an engine limit, not a rule), the gain applies in full, the total
         /// stops at `i32::MAX`, the gained counter at `u32::MAX`, and Ajani's
         /// Pridemate triggers once. The accepted control (2,000,000,000) applies
         /// in full.
@@ -4717,6 +4730,10 @@ mod tests {
         /// CR 119.5: debug `SetLife` gains or loses the exact difference, so it
         /// lands on the target across the whole `i32` range (from `i32::MIN` to
         /// `i32::MAX` is a gain of `u32::MAX`). In-range control: 20 to 25.
+        /// In Two-Headed Giant the difference moves the team's shared total
+        /// (CR 810.9): a target the edit authority moves that total to in full
+        /// lands exactly — also from a total already outside `i32` — and one it
+        /// holds at an `i32` limit is refused with nothing changed.
         #[test]
         fn debug_set_life_lands_exactly_from_i32_min_to_i32_max() {
             for (start, target, gained) in [(i32::MIN, i32::MAX, u32::MAX), (20, 25, 5)] {
@@ -4737,6 +4754,84 @@ mod tests {
                     "got {:?}",
                     runner.state().waiting_for
                 );
+            }
+
+            // Two-Headed Giant, P0 + P1 one team: ((P0, P1) fields, P0's target,
+            // Some(((P0, P1) fields after, P0 gained, P0 lost)) or None when refused).
+            type Row = ((i32, i32), i32, Option<((i32, i32), u32, u32)>);
+            let (max, min) = (i32::MAX, i32::MIN);
+            let rows: [Row; 8] = [
+                ((15, 15), 25, Some(((25, 15), 10, 0))),
+                // The team's total is exactly `i32::MAX`.
+                ((15, 15), max - 15, Some(((max - 15, 15), 2_147_483_617, 0))),
+                ((15, 15), max - 14, None),
+                ((15, 15), max, None),
+                // The team's total is exactly `i32::MIN`: the MIN-side pair of the next row.
+                (
+                    (200, -100),
+                    min + 100,
+                    Some(((min + 100, -100), 0, 2_147_483_748)),
+                ),
+                ((200, -100), min + 99, None),
+                // The team's total is outside `i32` (MAX + 10); the authority moves it by -5.
+                ((max, 10), max - 5, Some(((max - 5, 10), 0, 5))),
+                // The team's total is MAX + 9; the authority holds the gain at 0.
+                ((max - 1, 10), max, None),
+            ];
+            for ((p0, p1), target, expected) in rows {
+                let mut scenario = GameScenario::new_with_format(
+                    crate::types::format::FormatConfig::two_headed_giant(),
+                    4,
+                    7,
+                );
+                scenario.at_phase(Phase::PreCombatMain);
+                scenario.with_life(P0, p0);
+                scenario.with_life(P1, p1);
+                let mut runner = debug_runner(scenario);
+                let set_life = GameAction::Debug(DebugAction::SetLife {
+                    player_id: P0,
+                    life: target,
+                });
+                let fields = |runner: &GameRunner| {
+                    (
+                        runner.state().players[0].life,
+                        runner.state().players[1].life,
+                    )
+                };
+                let counters = |runner: &GameRunner| {
+                    (
+                        runner.state().players[0].life_gained_this_turn,
+                        runner.state().players[0].life_lost_this_turn,
+                    )
+                };
+                match expected {
+                    Some((after, gained, lost)) => {
+                        act_ok(&mut runner, set_life);
+                        assert_eq!(fields(&runner), after, "({p0}, {p1}) -> {target}");
+                        assert_eq!(
+                            counters(&runner),
+                            (gained, lost),
+                            "({p0}, {p1}) -> {target}"
+                        );
+                    }
+                    None => {
+                        let result = runner.act(set_life);
+                        assert!(
+                            matches!(result, Err(EngineError::InvalidAction(_))),
+                            "({p0}, {p1}) -> {target}: refused, got {result:?}"
+                        );
+                        assert_eq!(
+                            fields(&runner),
+                            (p0, p1),
+                            "({p0}, {p1}) -> {target}: nothing changed"
+                        );
+                        assert_eq!(
+                            counters(&runner),
+                            (0, 0),
+                            "({p0}, {p1}) -> {target}: nothing changed"
+                        );
+                    }
+                }
             }
         }
 
