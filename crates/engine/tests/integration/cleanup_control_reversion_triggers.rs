@@ -18,6 +18,7 @@
 //! lost control.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::DelayedTriggerCondition;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -49,6 +50,9 @@ const GUSTHAS_SCEPTER: &str = "{T}: Exile a card from your hand face down. You m
 /// Verbatim Oracle text (MTGJSON `AtomicCards.json`).
 const BONE_SAW: &str = "Equipped creature gets +1/+0.\nEquip {1} ({1}: Attach to target creature \
     you control. Equip only as a sorcery.)";
+/// Verbatim Oracle text (MTGJSON `AtomicCards.json`).
+const WAYLAY: &str = "Create three 2/2 white Knight creature tokens. Exile them at the beginning \
+    of the next cleanup step.";
 
 /// Both players' libraries, so a draw never decks anyone out (CR 704.5b).
 const LIBRARY: [&str; 12] = [
@@ -561,4 +565,119 @@ fn kharn_reversion_with_discard_stacks_once_after_the_discard() {
     assert_eq!((player, count), (P1, 2));
     assert_eq!(runner.state().phase, Phase::Cleanup);
     assert_eq!(runner.state().turn_number, turn_before);
+}
+
+/// T7 — CR 514.3a + CR 603.7: a delayed ability waiting to be put on the stack
+/// "at the beginning of the next cleanup step" is settled in that cleanup step
+/// even when the control reversion which reaches the settlement block triggers
+/// nothing itself. The delayed trigger's event is the step's own
+/// `PhaseChanged { Cleanup }`, which lies BEFORE the reversion's published
+/// events, so collecting only the reversion's range would leave it waiting past
+/// cleanup.
+#[test]
+fn pending_next_cleanup_delayed_trigger_stacks_when_a_reversion_triggers_nothing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PostCombatMain);
+    for player in [P0, P1] {
+        scenario.with_library_top(player, &LIBRARY);
+    }
+    // Vanilla creature: the reversion it triggers publishes an event, but no
+    // printed ability observes it.
+    let bear = scenario.add_creature(P0, "P0 Bear", 2, 2).id();
+    let waylay = add_zero_cost_spell(&mut scenario, P1, "Waylay", true, WAYLAY);
+    let steal = add_zero_cost_spell(&mut scenario, P1, "Act of Treason", false, ACT_OF_TREASON);
+    scenario.with_cards_in_hand(
+        P1,
+        &[
+            "P1 Filler 1",
+            "P1 Filler 2",
+            "P1 Filler 3",
+            "P1 Filler 4",
+            "P1 Filler 5",
+            "P1 Filler 6",
+            "P1 Filler 7",
+        ],
+    );
+    let mut runner = scenario.build();
+    give_priority(&mut runner, P1);
+
+    runner.cast(waylay).resolve();
+    runner.advance_until_stack_empty();
+    let tokens: Vec<ObjectId> = {
+        let state = runner.state();
+        state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|object| object.is_token && object.controller == P1)
+            .map(|object| object.id)
+            .collect()
+    };
+    assert_eq!(tokens.len(), 3, "REACH: Waylay created three tokens");
+    assert!(
+        runner
+            .state()
+            .delayed_triggers
+            .iter()
+            .any(|trigger| matches!(
+                trigger.condition,
+                DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::Cleanup
+                }
+            )),
+        "REACH: the next-cleanup delayed trigger is pending: {:?}",
+        runner.state().delayed_triggers
+    );
+
+    runner.cast(steal).target_object(bear).resolve();
+    runner.advance_until_stack_empty();
+    assert_eq!(controller(&runner, bear), P1, "REACH: P1 stole the Bear");
+    assert!(
+        tokens
+            .iter()
+            .all(|token| runner.state().battlefield.contains(token)),
+        "REACH: the tokens are still on the battlefield before cleanup"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "REACH: the delayed trigger has not fired before cleanup: {:?}",
+        runner.state().stack
+    );
+
+    let turn_before = pass_into_cleanup(&mut runner);
+    let state = runner.state();
+    assert_eq!(
+        state.phase,
+        Phase::Cleanup,
+        "CR 514.3a: the next-cleanup delayed trigger is stacked in this cleanup step"
+    );
+    assert_eq!(state.turn_number, turn_before, "still the same turn");
+    assert_eq!(state.active_player, P1);
+    assert_eq!(controller(&runner, bear), P0, "REACH: control reverted");
+    assert_eq!(
+        stack_sources(&runner),
+        vec![waylay],
+        "the pending delayed trigger is the only ability on the stack"
+    );
+    assert_eq!(state.waiting_for, WaitingFor::Priority { player: P1 });
+
+    runner.advance_until_stack_empty();
+    let state = runner.state();
+    assert_eq!(state.phase, Phase::Cleanup);
+    assert_eq!(state.turn_number, turn_before);
+    assert!(
+        state.delayed_triggers.iter().all(|trigger| !matches!(
+            trigger.condition,
+            DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::Cleanup
+            }
+        )),
+        "the delayed ability fired once and is spent"
+    );
+    assert!(
+        tokens
+            .iter()
+            .all(|token| !state.battlefield.contains(token)),
+        "the delayed trigger exiled the tokens in the cleanup step"
+    );
 }

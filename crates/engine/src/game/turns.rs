@@ -2792,7 +2792,8 @@ fn clear_cleanup_damage(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// CR 514.3a: a `Some` return also means that triggered abilities were put on
 /// the stack at the end of the step and the active player must receive priority
 /// before another cleanup step begins. Those abilities are the ones the control
-/// reversion triggered (collected as it is published) and any batch parked
+/// reversion triggered (collected as it is published), the delayed abilities
+/// waiting for this cleanup step (collected with them), and any batch parked
 /// before cleanup, settled together at the tail of this function.
 pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
     // Snapshot this turn's attacks so "attacked you during their last
@@ -2961,6 +2962,26 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
             reversion_start,
             None,
         );
+        // CR 603.7 + CR 514.3a: a delayed ability waiting to be put on the
+        // stack "at the beginning of the next cleanup step" triggers on THIS
+        // step's own `PhaseChanged { Cleanup }` event, which precedes the
+        // reversion's published events above. The reversion block is where a
+        // cleanup step without a pipeline settles these abilities, so scan the
+        // whole action buffer for delayed abilities here. CR 603.2c: each
+        // matched occurrence is claimed for every collector, so the pipeline's
+        // later scans cannot collect it a second time.
+        let consumed = state.consumed_before_priority_trigger_events.clone();
+        let unclaimed_delayed = super::triggers::unclaimed_trigger_events_from(
+            events,
+            0,
+            super::triggers::TriggerCollectionRequester::Delayed,
+            &consumed,
+        );
+        super::triggers::collect_unclaimed_delayed_triggers_into_deferred(
+            state,
+            events,
+            &unclaimed_delayed,
+        );
         // CR 603.2c: an ability triggers only once per occurrence. The
         // post-action pipeline scans this action's whole buffer, so claim
         // the collected occurrences from its ordinary collector (delayed
@@ -3095,12 +3116,13 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // separate question, deliberately not answered here.
     //
     // REACHABILITY — this is the live settlement for the abilities the control
-    // reversion above triggers (CR 514.2 + CR 603.2). They wait in
-    // `deferred_triggers` from the moment of the reversion until here. A batch
-    // parked before cleanup joins them, as CR 603.3b requires. When cleanup
-    // instead pauses for discard to maximum hand size, the resume runs
-    // `finish_cleanup_discard` and then the pipeline, which settles the same
-    // queue in this step.
+    // reversion above triggers (CR 514.2 + CR 603.2) and for the delayed
+    // abilities waiting for this cleanup step that the same block collects.
+    // They wait in `deferred_triggers` from the moment of the reversion until
+    // here. A batch parked before cleanup joins them, as CR 603.3b requires.
+    // When cleanup instead pauses for discard to maximum hand size, the resume
+    // runs `finish_cleanup_discard` and then the pipeline, which settles the
+    // same queue in this step.
     //
     // A parked `deferred_triggers` batch IS "a triggered ability waiting to be
     // put onto the stack", so it must settle HERE, during cleanup — not survive
