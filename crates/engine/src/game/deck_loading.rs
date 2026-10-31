@@ -1,4 +1,5 @@
 use crate::types::game_state::RandomDraw;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -115,7 +116,8 @@ pub struct PlayerDeckPayload {
     #[serde(default)]
     pub bracket_tier: CommanderBracketTier,
     /// Normalized owner choices, display-only (CR 203.1 + CR 206.1).
-    /// Resolvers bind these to original entries before database-free loading.
+    /// Resolvers, and between games `rebind_retained_printings`, bind these to the
+    /// payload's entries before database-free loading.
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -403,14 +405,84 @@ fn section_index(section: DeckSection) -> usize {
     }
 }
 
-/// Normalize annotation validity and bind surviving streams to resolved entries.
-/// Invalid choices silently disappear; they never change deck rules or counts.
-/// CR 203.1 + CR 206.1: illustration and expansion symbol have no game effect.
-pub fn normalize_deck_printings(db: &CardDatabase, payload: &mut PlayerDeckPayload) {
-    let submitted = std::mem::take(&mut payload.printings);
+/// Where the printing budget loop takes round-trip lookup names from. Deck ingress
+/// resolves them through the card database; the between-games rebind reads them from
+/// the seat's retained record, so it needs no database (CR 203.1 + CR 206.1:
+/// display-only, so a missing database never changes a deck).
+#[derive(Clone, Copy)]
+enum LookupNames<'a> {
+    Database(&'a CardDatabase),
+    Retained(&'a DeckPrintingRecord),
+}
+
+impl<'a> LookupNames<'a> {
+    /// `row` renamed to the round-trip name it binds under, or `None` when it names no card.
+    fn canonical_row(self, mut row: DeckPrinting) -> Option<DeckPrinting> {
+        match self {
+            Self::Database(db) => {
+                let face = db.get_face_by_name(&row.name)?;
+                row.name = round_trip_name(db, face);
+                Some(row)
+            }
+            // Retained rows already carry the round-trip name normalization wrote.
+            Self::Retained(_) => Some(row),
+        }
+    }
+
+    /// The round-trip name `section`'s rows use for `face`: borrowed from the record when
+    /// retained (no allocation), owned when `round_trip_name` builds it.
+    fn entry_name(self, section: DeckSection, face: &CardFace) -> Option<Cow<'a, str>> {
+        match self {
+            Self::Database(db) => Some(Cow::Owned(round_trip_name(db, face))),
+            Self::Retained(record) => record.lookup_name(section, face).map(Cow::Borrowed),
+        }
+    }
+}
+
+/// The copies a section's entries hold under one round-trip name.
+struct NameBudget {
+    remaining: u64,
+    /// Indices of the entries named so, ascending.
+    entries: Vec<usize>,
+    /// Whether this name's bindings have been emitted (at its first row).
+    bound: bool,
+}
+
+/// Every entry of `section` resolved to its lookup name once, grouped by name.
+fn section_budgets<'a>(
+    payload: &PlayerDeckPayload,
+    section: DeckSection,
+    names: LookupNames<'a>,
+) -> HashMap<Cow<'a, str>, NameBudget> {
+    let mut budgets: HashMap<Cow<'a, str>, NameBudget> = HashMap::new();
+    for (entry_index, entry) in section_entries(payload, section).iter().enumerate() {
+        if let Some(name) = names.entry_name(section, &entry.card) {
+            let budget = budgets.entry(name).or_insert_with(|| NameBudget {
+                remaining: 0,
+                entries: Vec::new(),
+                bound: false,
+            });
+            budget.remaining += u64::from(entry.count);
+            budget.entries.push(entry_index);
+        }
+    }
+    budgets
+}
+
+/// CR 203.1 + CR 206.1: replace `payload`'s rows and bindings with `rows` bound to its
+/// entries. Invalid rows disappear. Each (section, round-trip name) row stream is clamped,
+/// in row order, to the copies its entries hold. A row left with nothing to bind is
+/// dropped. Never changes deck rules or counts.
+fn bind_printing_rows<'a>(
+    payload: &mut PlayerDeckPayload,
+    rows: impl IntoIterator<Item = DeckPrinting>,
+    names: LookupNames<'a>,
+) {
+    payload.printings.clear();
     payload.printing_entry_names.clear();
-    let mut budgets: [HashMap<String, u64>; 10] = std::array::from_fn(|_| HashMap::new());
-    for mut row in submitted {
+    let mut budgets: [Option<HashMap<Cow<'a, str>, NameBudget>>; 10] =
+        std::array::from_fn(|_| None);
+    for row in rows {
         if row.section == DeckSection::Unknown
             || row.count == 0
             || [
@@ -423,38 +495,69 @@ pub fn normalize_deck_printings(db: &CardDatabase, payload: &mut PlayerDeckPaylo
         {
             continue;
         }
-        let Some(face) = db.get_face_by_name(&row.name) else {
+        let Some(mut row) = names.canonical_row(row) else {
             continue;
         };
-        let name = round_trip_name(db, face);
-        let budget = budgets[section_index(row.section)]
-            .entry(name.clone())
-            .or_insert_with(|| {
-                let mut total = 0u64;
-                let mut bindings = Vec::new();
-                for (entry_index, entry) in section_entries(payload, row.section).iter().enumerate()
-                {
-                    if round_trip_name(db, &entry.card) == name {
-                        total += u64::from(entry.count);
-                        bindings.push(DeckEntryLookupName {
-                            section: row.section,
-                            entry_index,
-                            name: name.clone(),
-                        });
-                    }
-                }
-                if total > 0 {
-                    payload.printing_entry_names.extend(bindings);
-                }
-                total
-            });
-        row.count = u64::from(row.count).min(*budget) as u32;
+        let section = budgets[section_index(row.section)]
+            .get_or_insert_with(|| section_budgets(payload, row.section, names));
+        let Some(budget) = section.get_mut(row.name.as_str()) else {
+            continue;
+        };
+        if !budget.bound {
+            budget.bound = true;
+            if budget.remaining > 0 {
+                payload
+                    .printing_entry_names
+                    .extend(
+                        budget
+                            .entries
+                            .iter()
+                            .map(|&entry_index| DeckEntryLookupName {
+                                section: row.section,
+                                entry_index,
+                                name: row.name.clone(),
+                            }),
+                    );
+            }
+        }
+        row.count = u64::from(row.count).min(budget.remaining) as u32;
         if row.count != 0 {
-            *budget -= u64::from(row.count);
-            row.name = name;
+            budget.remaining -= u64::from(row.count);
             payload.printings.push(row);
         }
     }
+}
+
+/// Normalize annotation validity and bind surviving streams to resolved entries.
+/// Invalid choices silently disappear; they never change deck rules or counts.
+/// CR 203.1 + CR 206.1: illustration and expansion symbol have no game effect.
+pub fn normalize_deck_printings(db: &CardDatabase, payload: &mut PlayerDeckPayload) {
+    let submitted = std::mem::take(&mut payload.printings);
+    bind_printing_rows(payload, submitted, LookupNames::Database(db));
+}
+
+/// CR 100.4 + CR 203.1 + CR 206.1: between games of a match, bind a seat's retained
+/// printing rows to the lists it plays the next game with. Entries are named through the
+/// record's face-identity correspondence, never by raw face name, so qualified-only cards
+/// and same-named cards keep their own rows, and no card database is needed. A card a
+/// sideboard swap moved into a section it has no row in gets no printing. The record
+/// itself is not changed (see `load_next_game_decks`).
+pub(crate) fn rebind_retained_printings(
+    pool: &PlayerDeckPool,
+    mut seat: PlayerDeckPayload,
+) -> PlayerDeckPayload {
+    match pool.printings.get().as_deref() {
+        Some(record) => bind_printing_rows(
+            &mut seat,
+            record.rows().iter().cloned(),
+            LookupNames::Retained(record),
+        ),
+        None => {
+            seat.printings.clear();
+            seat.printing_entry_names.clear();
+        }
+    }
+    seat
 }
 
 /// Resolve a single player's deck list (name-only) into a `PlayerDeckPayload`
@@ -1022,12 +1125,59 @@ pub fn create_signature_spell_from_card_face(
     obj_id
 }
 
+/// Where a loaded seat's display-only printing record comes from.
+#[derive(Clone, Copy)]
+enum PrintingRecordSource<'a> {
+    /// A new match: built from the payload's normalized rows.
+    Payload,
+    /// The next game of a match (CR 100.4): the seat's record from the previous game,
+    /// the same allocation, never rebuilt from the clamped rows its payload carries, so a
+    /// row a sideboard swap left unbound in one game binds again when the card returns.
+    Previous(&'a [PlayerDeckPool]),
+}
+
+impl PrintingRecordSource<'_> {
+    /// CR 203.1 + CR 206.1: the record `seat`'s pool starts the game with.
+    fn record_for(
+        self,
+        seat: PlayerId,
+        deck: &PlayerDeckPayload,
+    ) -> DisplayOnly<Option<Arc<DeckPrintingRecord>>> {
+        match self {
+            Self::Payload => retained_printing_record(deck),
+            Self::Previous(pools) => match pools.iter().find(|pool| pool.player == seat) {
+                Some(pool) => pool.printings.clone(),
+                // Every rebuilt seat's payload comes from its own pool, so this arm is not
+                // reached in practice; a seat without one starts from its payload.
+                None => retained_printing_record(deck),
+            },
+        }
+    }
+}
+
 /// Load deck data into a GameState, creating GameObjects in each player's library and shuffling.
 ///
 /// Panics before mutating state if printing streams lack consistent retained
 /// entry bindings. Raw/legacy annotated payloads require database normalization;
 /// printing-free legacy payloads need no bindings.
 pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
+    load_decks(state, payload, PrintingRecordSource::Payload);
+}
+
+/// CR 100.4 + CR 203.1 + CR 206.1: load the next game of a match. Each seat's pool
+/// keeps the previous game's printing record (the same allocation), and the payload's
+/// rebound rows stamp the new objects.
+pub(crate) fn load_next_game_decks(
+    state: &mut GameState,
+    payload: &DeckPayload,
+    previous: &[PlayerDeckPool],
+) {
+    load_decks(state, payload, PrintingRecordSource::Previous(previous));
+}
+
+/// The shared body of `load_deck_into_state` and `load_next_game_decks`: they differ only
+/// in where each seat's printing record comes from.
+fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRecordSource<'_>) {
     for deck in std::iter::once(&payload.player)
         .chain(std::iter::once(&payload.opponent))
         .chain(&payload.ai_decks)
@@ -1208,7 +1358,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             registered_scheme_deck: std::sync::Arc::clone(&p0_scheme),
             current_scheme_deck: p0_scheme,
             bracket_tier: payload.player.bracket_tier,
-            printings: retained_printing_record(&payload.player),
+            printings: records.record_for(PlayerId(0), &payload.player),
         });
     let p1_main = std::sync::Arc::new(main_deck_for(&payload.opponent));
     let p1_side = std::sync::Arc::new(sideboard_for(&payload.opponent.sideboard));
@@ -1234,7 +1384,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             registered_scheme_deck: std::sync::Arc::clone(&p1_scheme),
             current_scheme_deck: p1_scheme,
             bracket_tier: payload.opponent.bracket_tier,
-            printings: retained_printing_record(&payload.opponent),
+            printings: records.record_for(PlayerId(1), &payload.opponent),
         });
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
@@ -1262,7 +1412,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 registered_scheme_deck: std::sync::Arc::clone(&scheme),
                 current_scheme_deck: scheme,
                 bracket_tier: ai_deck.bracket_tier,
-                printings: retained_printing_record(ai_deck),
+                printings: records.record_for(player_id, ai_deck),
             });
     }
 
@@ -1865,6 +2015,7 @@ mod tests {
         StaticDefinition, TargetFilter,
     };
     use crate::types::card_type::CardType;
+    use crate::types::format::FormatConfig;
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 
@@ -3175,5 +3326,185 @@ mod tests {
         // Commander creature subtypes are collected for Changeling CDA
         assert!(state.all_creature_types.contains(&"Angel".to_string()));
         assert!(state.all_creature_types.contains(&"Cleric".to_string()));
+    }
+
+    fn twin_face_json(oracle_id: &str) -> serde_json::Value {
+        let mut face = single_face_card_json("Twin");
+        face["card_type"]["core_types"] = serde_json::json!(["Land"]);
+        face["scryfall_oracle_id"] = serde_json::json!(oracle_id);
+        face
+    }
+
+    /// Two distinct cards named "Twin": the bare key resolves to `winner`, so `loser` is
+    /// reachable only under its qualified key (`round_trip_name`).
+    fn twin_database() -> CardDatabase {
+        let mut cards = serde_json::Map::new();
+        cards.insert("twin".to_string(), twin_face_json("winner"));
+        cards.insert("twin [loser]".to_string(), twin_face_json("loser"));
+        CardDatabase::from_json_str(&serde_json::Value::Object(cards).to_string()).unwrap()
+    }
+
+    fn twin_row(name: &str, count: u32, tag: &str) -> DeckPrinting {
+        DeckPrinting {
+            section: DeckSection::MainDeck,
+            name: name.to_string(),
+            count,
+            printing: CardPrinting {
+                set_code: tag.to_string(),
+                collector_number: "1".to_string(),
+            },
+        }
+    }
+
+    /// `(section, entry_index, name)`: `DeckEntryLookupName` has no `PartialEq`.
+    fn binding_tuples(payload: &PlayerDeckPayload) -> Vec<(DeckSection, usize, String)> {
+        payload
+            .printing_entry_names
+            .iter()
+            .map(|binding| (binding.section, binding.entry_index, binding.name.clone()))
+            .collect()
+    }
+
+    /// CR 203.1 + CR 206.1: the budget loop is one building block over two name
+    /// authorities. Same-named entries in the main deck and sideboard do not reach a
+    /// game-two payload (sideboard submission is name-keyed); in the other sections they
+    /// do (the archenemy scheme deck, CR 904.3). This pins the budget for any size.
+    #[test]
+    fn retained_rebind_is_a_normalization_fixed_point_with_independent_homonym_budgets() {
+        let db = twin_database();
+        let winner = db.get_face_by_name("Twin").expect("bare Twin");
+        let loser = db.get_face_by_name("twin [loser]").expect("qualified Twin");
+        // Reach: the two faces are distinct cards and round-trip under distinct keys.
+        assert_eq!(round_trip_name(&db, winner), "Twin");
+        assert_eq!(round_trip_name(&db, loser), "twin [loser]");
+
+        // The composition the server resolver performs: one entry per submitted key.
+        let entry = |face: &CardFace, count| DeckEntry::from_resolved_face(&db, face, count);
+        let mut payload = PlayerDeckPayload {
+            main_deck: vec![entry(winner, 1), entry(loser, 3), entry(winner, 4)],
+            printings: vec![
+                twin_row("Twin", u32::MAX, "winner-art"),
+                twin_row("twin [loser]", u32::MAX, "loser-art"),
+            ],
+            ..Default::default()
+        };
+        normalize_deck_printings(&db, &mut payload);
+        assert_eq!(
+            payload.printings,
+            [
+                twin_row("Twin", 5, "winner-art"),
+                twin_row("twin [loser]", 3, "loser-art")
+            ],
+            "reach: each homonym's clamp is its own copies"
+        );
+        let pool = PlayerDeckPool {
+            printings: retained_printing_record(&payload),
+            ..Default::default()
+        };
+
+        // Fixed point: rebinding the same lists reproduces normalization's rows and bindings.
+        let mut bare = payload.clone();
+        bare.printings.clear();
+        bare.printing_entry_names.clear();
+        let rebound = rebind_retained_printings(&pool, bare);
+        assert_eq!(rebound.printings, payload.printings);
+        assert_eq!(binding_tuples(&rebound), binding_tuples(&payload));
+
+        // Shrink: each homonym clamps to its own smaller list.
+        let shrunk = rebind_retained_printings(
+            &pool,
+            PlayerDeckPayload {
+                main_deck: vec![entry(winner, 1), entry(loser, 1), entry(winner, 2)],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            shrunk.printings,
+            [
+                twin_row("Twin", 3, "winner-art"),
+                twin_row("twin [loser]", 1, "loser-art")
+            ]
+        );
+        validate_printing_bindings(&shrunk);
+
+        // No record: nothing is bound, and stale rows are cleared.
+        let stale = PlayerDeckPayload {
+            main_deck: vec![entry(winner, 1)],
+            printings: vec![twin_row("Twin", 1, "stale")],
+            printing_entry_names: vec![DeckEntryLookupName {
+                section: DeckSection::MainDeck,
+                entry_index: 0,
+                name: "Twin".to_string(),
+            }],
+            ..Default::default()
+        };
+        let none = rebind_retained_printings(&PlayerDeckPool::default(), stale);
+        assert!(none.printings.is_empty());
+        assert!(none.printing_entry_names.is_empty());
+    }
+
+    /// CR 100.4 + CR 203.1 + CR 206.1: a continuation load hands every seat, including a
+    /// seat of an `ai_decks` list, its own previous record (the same allocation); a new
+    /// match builds its own from the payload.
+    #[test]
+    fn next_game_load_takes_each_seat_record_and_a_new_load_builds_its_own() {
+        let seat_face = |seat: u8| CardFace {
+            name: format!("Seat {seat} Card"),
+            ..make_creature_face()
+        };
+        let seat_payload = |seat: u8| PlayerDeckPayload {
+            main_deck: vec![DeckEntry {
+                card: seat_face(seat),
+                count: 1,
+            }],
+            ..Default::default()
+        };
+        let payload = DeckPayload {
+            player: seat_payload(0),
+            opponent: seat_payload(1),
+            ai_decks: vec![seat_payload(2)],
+            ..Default::default()
+        };
+        let previous: Vec<PlayerDeckPool> = (0..3u8)
+            .map(|seat| {
+                let name = format!("Seat {seat} Card");
+                let lookup =
+                    DeckFaceLookupName::of(DeckSection::MainDeck, &seat_face(seat), name.clone());
+                PlayerDeckPool {
+                    player: PlayerId(seat),
+                    printings: DisplayOnly::new(Some(Arc::new(DeckPrintingRecord::new(
+                        vec![twin_row(&name, 1, &format!("seat-{seat}"))],
+                        vec![lookup],
+                    )))),
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        let mut next = GameState::new(FormatConfig::freeform(), 3, 4910);
+        load_next_game_decks(&mut next, &payload, &previous);
+        assert_eq!(next.deck_pools.len(), 3, "reach: one pool per seat");
+        for pool in &next.deck_pools {
+            let carried = pool.printings.get().as_ref().expect("a carried record");
+            let before = previous
+                .iter()
+                .find(|old| old.player == pool.player)
+                .and_then(|old| old.printings.get().as_ref())
+                .expect("the seat's previous record");
+            assert!(
+                Arc::ptr_eq(carried, before),
+                "{:?} takes its own previous record",
+                pool.player
+            );
+        }
+
+        // Control: a new match builds from the payload, whose rows are empty here.
+        let mut fresh = GameState::new(FormatConfig::freeform(), 3, 4910);
+        load_deck_into_state(&mut fresh, &payload);
+        assert_eq!(fresh.deck_pools.len(), 3);
+        assert!(fresh
+            .deck_pools
+            .iter()
+            .all(|pool| pool.printings.get().is_none()));
     }
 }

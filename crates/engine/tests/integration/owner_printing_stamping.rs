@@ -1220,18 +1220,26 @@ fn format_gate_keeps_valid_and_invalid_name_deck_verdicts() {
     }
 }
 
-#[test]
-fn engine_qualified_only_printing_is_a_loaded_normalization_fixed_point() {
-    let key = "shifty face [engine-qualified]";
-    let db = CardDatabase::from_json_str(&json!({
-        (key): {
+/// The key of the one card [`qualified_only_database`] holds: its bare name resolves to
+/// nothing, so only this qualified key reaches the face.
+const QUALIFIED_ONLY_KEY: &str = "shifty face [engine-qualified]";
+
+fn qualified_only_database() -> CardDatabase {
+    CardDatabase::from_json_str(&json!({
+        (QUALIFIED_ONLY_KEY): {
             "name": "Shifty Face",
             "mana_cost": {"type":"Cost", "shards":[], "generic":0},
             "card_type": {"supertypes":[], "core_types":["Land"], "subtypes":[]},
             "keywords":[], "abilities":[], "triggers":[], "static_abilities":[], "replacements":[],
             "color_identity":[], "scryfall_oracle_id": "engine-qualified"
         }
-    }).to_string()).unwrap();
+    }).to_string()).unwrap()
+}
+
+#[test]
+fn engine_qualified_only_printing_is_a_loaded_normalization_fixed_point() {
+    let key = QUALIFIED_ONLY_KEY;
+    let db = qualified_only_database();
     assert!(db.get_face_by_name("Shifty Face").is_none());
     assert_eq!(
         db.get_face_by_name(key)
@@ -1474,6 +1482,7 @@ mod post_load_creators {
     use engine::types::ability_visit::visit_ability_def;
     use engine::types::actions::{GameAction, MulliganChoice, OutsideGameSelection};
     use engine::types::card::CardFace;
+    use engine::types::card_printing::DeckPrintingRecord;
     use engine::types::display_only::{rules_projection, DisplayOnly};
     use engine::types::events::GameEvent;
     use engine::types::game_state::{
@@ -1482,10 +1491,12 @@ mod post_load_creators {
     };
     use engine::types::identifiers::ObjectId;
     use engine::types::mana::{ManaType, ManaUnit};
-    use engine::types::match_config::MatchType;
+    use engine::types::match_config::{DeckCardCount, MatchPhase, MatchType};
     use engine::types::phase::Phase;
     use engine::types::zones::Zone;
+    use std::collections::BTreeMap;
     use std::ops::ControlFlow;
+    use std::sync::Arc;
 
     const LURRUS: &str = "Lurrus of the Dream-Den";
     const LURRUS_ORACLE_ID: &str = "3bc757c1-3adb-4321-8832-8e1cc9e687f7";
@@ -2282,5 +2293,513 @@ mod post_load_creators {
             .unwrap()
             .get("printings")
             .is_none());
+    }
+
+    // ---- Between games (CR 100.4): the owner's printings survive the rebuild. ----
+
+    fn concede(runner: &mut GameRunner, seat: PlayerId) {
+        runner
+            .act(GameAction::Concede { player_id: seat })
+            .expect("the seat concedes (CR 104.3a)");
+    }
+
+    /// Submits `seat`'s between-games lists, asserting it is `seat`'s sideboard prompt.
+    fn submit(
+        runner: &mut GameRunner,
+        seat: PlayerId,
+        main: &[(&str, u32)],
+        sideboard: &[(&str, u32)],
+    ) {
+        assert!(
+            matches!(
+                &runner.state().waiting_for,
+                WaitingFor::BetweenGamesSideboard { player, .. } if *player == seat
+            ),
+            "expected the sideboard prompt for {seat:?}, got {:?}",
+            runner.state().waiting_for
+        );
+        let counts = |rows: &[(&str, u32)]| -> Vec<DeckCardCount> {
+            rows.iter()
+                .map(|(name, count)| DeckCardCount {
+                    name: (*name).to_string(),
+                    count: *count,
+                })
+                .collect()
+        };
+        runner
+            .act(GameAction::SubmitSideboard {
+                main: counts(main),
+                sideboard: counts(sideboard),
+            })
+            .expect("the submission is legal");
+    }
+
+    /// Chooses to play first as `chooser`, asserting it is `chooser`'s prompt.
+    fn choose_play(runner: &mut GameRunner, chooser: PlayerId) {
+        assert!(
+            matches!(
+                &runner.state().waiting_for,
+                WaitingFor::BetweenGamesChoosePlayDraw { player, .. } if *player == chooser
+            ),
+            "expected the play/draw prompt for {chooser:?}, got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::ChoosePlayDraw { play_first: true })
+            .expect("the chooser plays first");
+        assert!(runner.state().match_phase == MatchPhase::InGame);
+    }
+
+    fn tally(rows: &[(Option<&str>, usize)]) -> BTreeMap<Option<String>, usize> {
+        rows.iter()
+            .map(|(printing, count)| (printing.map(str::to_string), *count))
+            .collect()
+    }
+
+    /// The multiset of printing tags over `seat`'s objects, after asserting each object's
+    /// current printing is its base printing (nothing has copied or changed one).
+    fn printings_of(state: &GameState, seat: PlayerId) -> BTreeMap<Option<String>, usize> {
+        let mut tally = BTreeMap::new();
+        for object in state.objects.values().filter(|object| object.owner == seat) {
+            assert_eq!(
+                object.printing.get(),
+                object.base_printing.get(),
+                "{:?}",
+                object.id
+            );
+            *tally
+                .entry(tag(object.printing.get()).map(str::to_string))
+                .or_insert(0) += 1;
+        }
+        tally
+    }
+
+    fn record_of(state: &GameState, seat: PlayerId) -> Arc<DeckPrintingRecord> {
+        state
+            .deck_pools
+            .iter()
+            .find(|pool| pool.player == seat)
+            .expect("the seat has a pool")
+            .printings
+            .get()
+            .clone()
+            .expect("the seat retains a printing record")
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum DatabaseHandle {
+        Installed,
+        Absent,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum OwnerRows {
+        Chosen,
+        Omitted,
+    }
+
+    fn assert_handle(runner: &GameRunner, handle: DatabaseHandle) {
+        assert_eq!(
+            runner.state().card_db.is_some(),
+            handle == DatabaseHandle::Installed,
+            "the engine's card-database handle"
+        );
+    }
+
+    /// Plays game one of a Standard Bo3 (P0 reveals the qualified Lurrus as a sideboard
+    /// companion, P1 concedes), submits both seats' unchanged lists, and returns the runner
+    /// at the start of game two with P0's game-one record.
+    fn unchanged_deck_into_game_two(
+        handle: DatabaseHandle,
+        rows: OwnerRows,
+    ) -> (GameRunner, Option<Arc<DeckPrintingRecord>>) {
+        let (db, key) = lurrus_homonym_database(&["Plains"]);
+        let db = Arc::new(db);
+        let chosen = |printings: Vec<DeckPrinting>| match rows {
+            OwnerRows::Chosen => printings,
+            OwnerRows::Omitted => Vec::new(),
+        };
+        let list = DeckList {
+            player: PlayerDeckList {
+                main_deck: names(&[("Plains", 20)]),
+                sideboard: vec![key.clone(), key.clone()],
+                printings: chosen(vec![
+                    choice(DeckSection::MainDeck, "Plains", 15, "p-first"),
+                    choice(DeckSection::MainDeck, "Plains", 5, "p-second"),
+                    choice(DeckSection::Sideboard, &key, 1, "q-first"),
+                    choice(DeckSection::Sideboard, &key, 1, "q-second"),
+                ]),
+                ..Default::default()
+            },
+            opponent: PlayerDeckList {
+                main_deck: names(&[("Plains", 20)]),
+                printings: chosen(vec![choice(DeckSection::MainDeck, "Plains", 20, "p1-art")]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let payload = resolve_deck_list(&db, &list);
+        let mut state = GameState::new(FormatConfig::standard(), 2, 4910);
+        state.match_config.match_type = MatchType::Bo3;
+        if handle == DatabaseHandle::Installed {
+            engine::game::printed_cards::install_card_db(&mut state, Arc::clone(&db));
+        }
+        load_and_hydrate_decks(&mut state, &payload, Some(&db));
+        let mut runner = start_to_reveal(state);
+        assert_handle(&runner, handle);
+
+        assert_offer(
+            &runner,
+            P0,
+            &[offer(LURRUS, CompanionChoiceSource::Sideboard { index: 0 })],
+        );
+        reveal(
+            &mut runner,
+            offer(LURRUS, CompanionChoiceSource::Sideboard { index: 0 }),
+        );
+        let (expected_p0, expected_p1, expected_companion) = match rows {
+            OwnerRows::Chosen => (
+                tally(&[(Some("p-first"), 15), (Some("p-second"), 5)]),
+                tally(&[(Some("p1-art"), 20)]),
+                Some("q-first"),
+            ),
+            OwnerRows::Omitted => (tally(&[(None, 20)]), tally(&[(None, 20)]), None),
+        };
+        assert_eq!(companion_printing(&runner, P0), expected_companion);
+        assert_eq!(printings_of(runner.state(), P0), expected_p0);
+        assert_eq!(printings_of(runner.state(), P1), expected_p1);
+        let first_record = runner.state().deck_pools[0].printings.get().clone();
+        assert_eq!(first_record.is_some(), rows == OwnerRows::Chosen);
+
+        concede(&mut runner, P1);
+        // Reach: the concede restored the revealed copy, so the sideboard holds both again.
+        let pool = &runner.state().deck_pools[0];
+        assert_eq!(pool.current_sideboard.len(), 1);
+        assert_eq!(pool.current_sideboard[0].count, 2);
+        assert_eq!(
+            pool.current_sideboard[0].card.scryfall_oracle_id.as_deref(),
+            Some(LURRUS_ORACLE_ID)
+        );
+        assert_handle(&runner, handle);
+        submit(&mut runner, P0, &[("Plains", 20)], &[(LURRUS, 2)]);
+        submit(&mut runner, P1, &[("Plains", 20)], &[]);
+        choose_play(&mut runner, P1);
+        (runner, first_record)
+    }
+
+    fn unchanged_deck_across_games(handle: DatabaseHandle) {
+        let (mut runner, first_record) = unchanged_deck_into_game_two(handle, OwnerRows::Chosen);
+        let state = runner.state();
+        assert_eq!(state.game_number, 2);
+        assert_handle(&runner, handle);
+        // The reveal is per game (CR 103.2b + CR 702.139a): the game-one `CompanionInfo`
+        // is not carried.
+        assert!(state.players[0].companion.is_none());
+        assert_eq!(
+            printings_of(state, P0),
+            tally(&[(Some("p-first"), 15), (Some("p-second"), 5)])
+        );
+        assert_eq!(printings_of(state, P1), tally(&[(Some("p1-art"), 20)]));
+        assert!(
+            Arc::ptr_eq(
+                &record_of(state, P0),
+                first_record.as_ref().expect("game one's record")
+            ),
+            "the continuation pool keeps the same record allocation"
+        );
+
+        // Hidden information: the owner's record is on the unfiltered wire and absent for
+        // the opponent's view.
+        assert!(serde_json::to_value(&state.deck_pools[0])
+            .unwrap()
+            .get("printings")
+            .is_some());
+        let opponent_view = filter_state_for_viewer(state, P1);
+        let seen = opponent_view
+            .deck_pools
+            .iter()
+            .find(|pool| pool.player == P0)
+            .expect("P0's pool");
+        assert!(serde_json::to_value(seen)
+            .unwrap()
+            .get("printings")
+            .is_none());
+
+        // Rules isolation (CR 203.1 + CR 206.1): the same match without printings plays
+        // game two from an identical rules state; the wire differs (positive control).
+        let (twin, _) = unchanged_deck_into_game_two(handle, OwnerRows::Omitted);
+        assert_eq!(
+            rules_projection(state).unwrap(),
+            rules_projection(twin.state()).unwrap()
+        );
+        assert_ne!(
+            serde_json::to_value(state).unwrap(),
+            serde_json::to_value(twin.state()).unwrap()
+        );
+
+        // The game-two re-reveal prices copy 0 of the carried record again.
+        assert_offer(
+            &runner,
+            P0,
+            &[offer(LURRUS, CompanionChoiceSource::Sideboard { index: 0 })],
+        );
+        reveal(
+            &mut runner,
+            offer(LURRUS, CompanionChoiceSource::Sideboard { index: 0 }),
+        );
+        assert_eq!(companion_printing(&runner, P0), Some("q-first"));
+    }
+
+    #[test]
+    fn unchanged_deck_keeps_its_printings_into_game_two_with_an_installed_database() {
+        unchanged_deck_across_games(DatabaseHandle::Installed);
+    }
+
+    #[test]
+    fn unchanged_deck_keeps_its_printings_into_game_two_without_a_database_handle() {
+        unchanged_deck_across_games(DatabaseHandle::Absent);
+    }
+
+    #[test]
+    fn qualified_only_card_keeps_its_printing_into_game_two() {
+        let db = qualified_only_database();
+        // Reach: the bare name resolves to nothing; only the qualified key reaches the face.
+        assert!(db.get_face_by_name("Shifty Face").is_none());
+        assert!(db.get_face_by_name(QUALIFIED_ONLY_KEY).is_some());
+        let seat = PlayerDeckList {
+            main_deck: names(&[(QUALIFIED_ONLY_KEY, 20)]),
+            printings: vec![choice(
+                DeckSection::MainDeck,
+                QUALIFIED_ONLY_KEY,
+                20,
+                "qualified-art",
+            )],
+            ..Default::default()
+        };
+        let list = DeckList {
+            player: seat.clone(),
+            opponent: seat,
+            ..Default::default()
+        };
+        let mut state = GameState::new(FormatConfig::standard(), 2, 4910);
+        state.match_config.match_type = MatchType::Bo3;
+        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+        start(&mut state);
+        let mut runner = GameRunner::from_state(state);
+
+        let assert_all_qualified = |runner: &GameRunner| {
+            let state = runner.state();
+            assert_eq!(state.objects.len(), 40);
+            for object in state.objects.values() {
+                assert_eq!(object.name, "Shifty Face");
+                assert_eq!(
+                    object.printed_ref.as_ref().unwrap().oracle_id,
+                    "engine-qualified"
+                );
+                assert_eq!(tag(object.printing.get()), Some("qualified-art"));
+                assert_eq!(tag(object.base_printing.get()), Some("qualified-art"));
+            }
+        };
+        assert_all_qualified(&runner);
+
+        concede(&mut runner, P1);
+        submit(&mut runner, P0, &[("Shifty Face", 20)], &[]);
+        submit(&mut runner, P1, &[("Shifty Face", 20)], &[]);
+        choose_play(&mut runner, P1);
+        assert_eq!(runner.state().game_number, 2);
+        assert_all_qualified(&runner);
+    }
+
+    #[test]
+    fn sideboard_swaps_clamp_printings_in_game_two_and_restore_them_in_game_three() {
+        let db = database();
+        let list = DeckList {
+            player: PlayerDeckList {
+                main_deck: names(&[("Forest", 16), ("Island", 4)]),
+                sideboard: names(&[("Island", 4)]),
+                printings: vec![
+                    choice(DeckSection::MainDeck, "Forest", 10, "f-a"),
+                    choice(DeckSection::MainDeck, "Forest", 6, "f-b"),
+                    choice(DeckSection::MainDeck, "Island", 4, "i-main"),
+                    choice(DeckSection::Sideboard, "Island", 4, "i-side"),
+                ],
+                ..Default::default()
+            },
+            opponent: PlayerDeckList {
+                main_deck: names(&[("Forest", 20)]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut state = GameState::new(FormatConfig::standard(), 2, 4910);
+        state.match_config.match_type = MatchType::Bo3;
+        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+        start(&mut state);
+        let mut runner = GameRunner::from_state(state);
+
+        // Game one: the rows' own multiset; P1 has no rows and no record.
+        assert!(runner.state().deck_pools[1].printings.get().is_none());
+        assert_eq!(
+            printings_of(runner.state(), P0),
+            tally(&[(Some("f-a"), 10), (Some("f-b"), 6), (Some("i-main"), 4)])
+        );
+        assert_eq!(printings_of(runner.state(), P1), tally(&[(None, 20)]));
+        let first = record_of(runner.state(), P0);
+
+        // Game two: four Forests move to the sideboard and four Islands come in.
+        concede(&mut runner, P1);
+        submit(
+            &mut runner,
+            P0,
+            &[("Forest", 12), ("Island", 8)],
+            &[("Forest", 4)],
+        );
+        submit(&mut runner, P1, &[("Forest", 20)], &[]);
+        choose_play(&mut runner, P1);
+        assert_eq!(runner.state().game_number, 2);
+        // Main-deck Forest budget 12 clamps `f-b` to 2; main-deck Island budget 8 holds the
+        // 4 `i-main` and 4 unmarked; the sideboard Island row has no Island left to bind.
+        assert_eq!(
+            printings_of(runner.state(), P0),
+            tally(&[
+                (Some("f-a"), 10),
+                (Some("f-b"), 2),
+                (Some("i-main"), 4),
+                (None, 4)
+            ])
+        );
+        assert_eq!(printings_of(runner.state(), P1), tally(&[(None, 20)]));
+        assert!(Arc::ptr_eq(&record_of(runner.state(), P0), &first));
+
+        // Game three: the original lists return, and the carried record rebinds in full.
+        concede(&mut runner, P0);
+        submit(
+            &mut runner,
+            P0,
+            &[("Forest", 16), ("Island", 4)],
+            &[("Island", 4)],
+        );
+        submit(&mut runner, P1, &[("Forest", 20)], &[]);
+        choose_play(&mut runner, P0);
+        assert_eq!(runner.state().game_number, 3);
+        assert_eq!(
+            printings_of(runner.state(), P0),
+            tally(&[(Some("f-a"), 10), (Some("f-b"), 6), (Some("i-main"), 4)])
+        );
+        assert!(Arc::ptr_eq(&record_of(runner.state(), P0), &first));
+    }
+
+    /// Two distinct "Twin Scheme" cards (CR 904.3 allows two cards of one English name in a
+    /// scheme deck; a planar deck may not, CR 901.3): the bare key is the winner, the
+    /// loser is reachable only under its qualified key.
+    fn scheme_database() -> CardDatabase {
+        let face = |name: &str, kind: &str, oracle_id: &str| {
+            json!({
+                "name": name,
+                "mana_cost": {"type":"Cost", "shards":[], "generic":0},
+                "card_type": {"supertypes":[], "core_types":[kind], "subtypes":[]},
+                "keywords":[], "abilities":[], "triggers":[], "static_abilities":[],
+                "replacements":[], "color_identity":[], "scryfall_oracle_id": oracle_id
+            })
+        };
+        CardDatabase::from_json_str(
+            &json!({
+                "forest": face("Forest", "Land", "oracle-forest"),
+                "twin scheme": face("Twin Scheme", "Scheme", "scheme-winner"),
+                "twin scheme [scheme-loser]": face("Twin Scheme", "Scheme", "scheme-loser"),
+            })
+            .to_string(),
+        )
+        .expect("scheme fixture database")
+    }
+
+    /// The printing tag of each scheme-deck object, keyed by its oracle id.
+    fn scheme_printings(state: &GameState) -> BTreeMap<String, Option<String>> {
+        state
+            .scheme_deck
+            .iter()
+            .map(|id| {
+                let object = &state.objects[id];
+                (
+                    object.printed_ref.as_ref().unwrap().oracle_id.clone(),
+                    tag(object.printing.get()).map(str::to_string),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn archenemy_same_named_schemes_keep_their_own_printings_into_game_two() {
+        let db = scheme_database();
+        let winner = db
+            .get_face_by_name("Twin Scheme")
+            .expect("bare Twin Scheme");
+        let loser_key = "twin scheme [scheme-loser]";
+        let loser = db
+            .get_face_by_name(loser_key)
+            .expect("qualified Twin Scheme");
+        // Reach: the two cards are distinct and round-trip under distinct keys.
+        assert_eq!(round_trip_name(&db, winner), "Twin Scheme");
+        assert_eq!(round_trip_name(&db, loser), loser_key);
+
+        // The composition `server_core::deck_resolve::resolve_deck` performs: one entry per
+        // submitted key (the engine's own resolver would merge same-section homonyms).
+        let forest = db.get_face_by_name("Forest").expect("Forest");
+        let mut seat = PlayerDeckPayload {
+            main_deck: vec![DeckEntry::from_resolved_face(&db, forest, 20)],
+            scheme_deck: vec![
+                DeckEntry::from_resolved_face(&db, winner, 1),
+                DeckEntry::from_resolved_face(&db, loser, 1),
+            ],
+            printings: vec![
+                choice(DeckSection::SchemeDeck, loser_key, 1, "loser-art"),
+                choice(DeckSection::SchemeDeck, "Twin Scheme", 1, "winner-art"),
+            ],
+            ..Default::default()
+        };
+        normalize_deck_printings(&db, &mut seat);
+        assert_eq!(seat.printings.len(), 2, "both rows survive normalization");
+        let mut bindings: Vec<(usize, &str)> = seat
+            .printing_entry_names
+            .iter()
+            .map(|binding| (binding.entry_index, binding.name.as_str()))
+            .collect();
+        bindings.sort();
+        assert_eq!(bindings, [(0, "Twin Scheme"), (1, loser_key)]);
+
+        let payload = DeckPayload {
+            player: seat,
+            opponent: PlayerDeckPayload {
+                main_deck: vec![DeckEntry::from_resolved_face(&db, forest, 20)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut state = GameState::new(FormatConfig::archenemy(), 2, 4910);
+        state.match_config.match_type = MatchType::Bo3;
+        load_and_hydrate_decks(&mut state, &payload, Some(&db));
+        let _ = start_game_with_starting_player(&mut state, P0);
+        let mut runner = GameRunner::from_state(state);
+
+        let expected: BTreeMap<String, Option<String>> = BTreeMap::from([
+            ("scheme-winner".to_string(), Some("winner-art".to_string())),
+            ("scheme-loser".to_string(), Some("loser-art".to_string())),
+        ]);
+        assert_eq!(scheme_printings(runner.state()), expected);
+        let first = record_of(runner.state(), P0);
+
+        // The archenemy wins; the match restarts directly after the last submission, with
+        // no play/draw prompt.
+        concede(&mut runner, P1);
+        submit(&mut runner, P0, &[("Forest", 20)], &[]);
+        submit(&mut runner, P1, &[("Forest", 20)], &[]);
+        assert!(runner.state().match_phase == MatchPhase::InGame);
+        assert_eq!(runner.state().game_number, 2);
+        assert!(!matches!(
+            runner.state().waiting_for,
+            WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        ));
+        assert_eq!(scheme_printings(runner.state()), expected);
+        assert!(Arc::ptr_eq(&record_of(runner.state(), P0), &first));
     }
 }
