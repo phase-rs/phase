@@ -9,6 +9,13 @@ use super::mana::{ManaColor, ManaPool};
 
 use crate::game::deck_loading::DeckEntry;
 
+/// `skip_serializing_if` for zero-default turn-window counters: omitting them
+/// at rest keeps the StateUpdate wire shape identical to upstream (fixture +
+/// bandwidth budgets) while still transmitting live nonzero windows.
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
 /// Status of a player in the game. Mirrors `PhaseStatus` for permanents — a
 /// phased-out player is treated as though they don't exist for targeting,
 /// damage, attacking, and SBA loss-from-life purposes, but they remain in the
@@ -130,6 +137,19 @@ pub struct Player {
     pub descended_this_turn: bool,
     #[serde(default)]
     pub cards_drawn_this_turn: u32,
+    /// CR 121.1 + CR 603.4: Number of cards this player drew during the
+    /// previous turn, snapshotted at turn start. Used by "if you drew a card
+    /// last turn" intervening-if conditions (Mine Is the Only Truth).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub cards_drawn_last_turn: u32,
+    /// CR 601.2i + CR 603.4: Number of spells this player's opponents have
+    /// cast since this player's last turn ended. Bumped in
+    /// `ledger::apply_resolved_ledger_edit` on every finalized cast, reset
+    /// for the completed player in `turns.rs::start_next_turn`. Used by "if
+    /// no opponent cast a spell since your last turn ended" intervening-if
+    /// conditions (I Bask in Your Silent Awe).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub opponent_spells_cast_since_own_last_turn: u32,
     /// CR 121.1 + CR 504.1: Number of cards this player has drawn during the
     /// current step. Reset on every step transition (`turns.rs::advance_phase`)
     /// and at turn start (`start_next_turn`). Used by
@@ -242,6 +262,8 @@ impl Default for Player {
             life_lost_last_turn: 0,
             descended_this_turn: false,
             cards_drawn_this_turn: 0,
+            cards_drawn_last_turn: 0,
+            opponent_spells_cast_since_own_last_turn: 0,
             cards_drawn_this_step: 0,
             speed: None,
             speed_trigger_used_this_turn: false,
@@ -352,5 +374,34 @@ impl Player {
     /// attack/SBA per the player-phasing exclusion choke points).
     pub fn is_phased_out(&self) -> bool {
         self.status.is_phased_out()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The turn-window counters must not perturb the StateUpdate wire shape
+    /// at rest (production fixture + bandwidth budgets), while live nonzero
+    /// windows still transmit and omitted fields read back as zero.
+    #[test]
+    fn turn_window_counters_skip_zero_on_the_wire() {
+        let rest = Player::default();
+        let json = serde_json::to_value(&rest).expect("serialize");
+        let object = json.as_object().expect("object");
+        assert!(!object.contains_key("cards_drawn_last_turn"));
+        assert!(!object.contains_key("opponent_spells_cast_since_own_last_turn"));
+        let back: Player = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.cards_drawn_last_turn, 0);
+        assert_eq!(back.opponent_spells_cast_since_own_last_turn, 0);
+
+        let live = Player {
+            cards_drawn_last_turn: 3,
+            opponent_spells_cast_since_own_last_turn: 1,
+            ..Player::default()
+        };
+        let json = serde_json::to_value(&live).expect("serialize");
+        assert_eq!(json["cards_drawn_last_turn"], 3);
+        assert_eq!(json["opponent_spells_cast_since_own_last_turn"], 1);
     }
 }

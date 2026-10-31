@@ -227,6 +227,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         // CR 201.5a: the stamped granter is one fixed object.
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::AllPlayers => false,
@@ -492,6 +493,7 @@ pub(crate) fn affected_filter_requires_attachment_relation(filter: &TargetFilter
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         | TargetFilter::GrantingObject { .. }
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -644,6 +646,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::DefendingPlayer
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::AllPlayers => CharacteristicKinds::EMPTY,
     }
@@ -1047,6 +1050,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         // CR 201.5a: the stamped granter is one fixed object.
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::AllPlayers => false,
@@ -2865,6 +2869,7 @@ fn filter_contains_input(
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -3172,7 +3177,7 @@ fn player_filter_contains_input(
             false,
             None,
         ),
-        PlayerFilter::AllExcept { exclude } => player_filter_contains_input(
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_contains_input(
             exclude,
             predicate,
             raw_reference,
@@ -3480,6 +3485,8 @@ fn quantity_ref_contains_input(
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -4092,6 +4099,7 @@ pub(crate) fn rebind_declared_groups_in_condition(
         | AbilityCondition::DayNightIsNeither
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::SourceLacksKeyword { .. } => {}
     }
 }
@@ -4355,6 +4363,7 @@ fn absent_search_predicate_truth(filter: &TargetFilter) -> Option<bool> {
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => None,
     }
 }
@@ -7470,6 +7479,9 @@ fn filter_inner_for_object(
         // mirrors ParentTargetController for the player-axis side of CR 108.3 vs CR 109.4.
         TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — resolved per affected
+        // member by `force_attack::resolve`, never via object matching here.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::PostReplacementSourceController
         // CR 615.5: an object-typed resolution-time ref (the prevented event's
@@ -7980,7 +7992,8 @@ fn zone_change_filter_inner(
         | TargetFilter::StackSpell
         // CR 201.5a: record matching does not bind the granter, so it fails closed.
         | TargetFilter::GrantingObject { .. }
-        | TargetFilter::Owner => false,
+        | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner => false,
     }
 }
 
@@ -8319,7 +8332,8 @@ pub fn spell_record_matches_filter(
         | TargetFilter::ChosenDamageSource { .. }
         // CR 201.5a: record matching does not bind the granter, so it fails closed.
         | TargetFilter::GrantingObject { .. }
-        | TargetFilter::Owner => false,
+        | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner => false,
     }
 }
 
@@ -8645,7 +8659,8 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::Named { .. }
         // CR 201.5a: spell matching does not bind the granter, so it fails closed.
         | TargetFilter::GrantingObject { .. }
-        | TargetFilter::Owner => false,
+        | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner => false,
     }
 }
 
@@ -12579,6 +12594,7 @@ pub(crate) fn single_target_count(filter: &TargetFilter) -> Option<SingleTargetC
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => None,
     }
 }
@@ -13010,6 +13026,7 @@ mod tests {
             let wrapped = PlayerFilter::AnyOf {
                 filters: vec![PlayerFilter::AllExcept {
                     exclude: Box::new(player),
+                    relation: crate::types::ability::PlayerRelation::All,
                 }],
             };
             let visits = std::cell::Cell::new(0);
@@ -19847,6 +19864,7 @@ mod tests {
                 },
                 PlayerFilter::AllExcept {
                     exclude: Box::new(controls_count_of(count_of(anaphor), TargetFilter::Any)),
+                    relation: crate::types::ability::PlayerRelation::All,
                 },
             ]
         };
@@ -19927,6 +19945,7 @@ mod tests {
     #[test]
     fn player_filter_contains_descends_an_all_except_exclusion() {
         let exclude = |filter: TargetFilter| PlayerFilter::AllExcept {
+            relation: crate::types::ability::PlayerRelation::All,
             exclude: Box::new(PlayerFilter::ControlsCount {
                 relation: crate::types::ability::PlayerRelation::All,
                 filter,
@@ -20195,6 +20214,7 @@ mod tests {
                 TargetFilter::PlayerMatching {
                     player: Box::new(PlayerFilter::AllExcept {
                         exclude: Box::new(controls(owned())),
+                        relation: crate::types::ability::PlayerRelation::All,
                     }),
                 },
                 TargetFilter::Typed(
@@ -20486,6 +20506,7 @@ mod tests {
             TargetFilter::PlayerMatching {
                 player: Box::new(PlayerFilter::AllExcept {
                     exclude: Box::new(controls(chosen())),
+                    relation: crate::types::ability::PlayerRelation::All,
                 }),
             },
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
@@ -26349,6 +26370,7 @@ mod entry_projection_tests {
             AbilityKind::Spell,
             Effect::Choose {
                 choice_type: ChoiceType::CreatureType { options: vec![] },
+                chooser: ControllerRef::You,
                 persist,
                 selection,
             },
@@ -26383,6 +26405,7 @@ mod entry_projection_tests {
                 AbilityKind::Spell,
                 Effect::Choose {
                     choice_type: ChoiceType::CardName,
+                    chooser: ControllerRef::You,
                     persist: true,
                     selection: TargetSelectionMode::Chosen,
                 },
@@ -26806,6 +26829,7 @@ mod entry_projection_tests {
             AbilityKind::Spell,
             Effect::Choose {
                 choice_type: ChoiceType::BasicLandType,
+                chooser: ControllerRef::You,
                 persist: true,
                 selection: TargetSelectionMode::Chosen,
             },
