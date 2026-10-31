@@ -3836,9 +3836,6 @@ fn one_coin_occurrence_rejects_duplicate_targets_but_accepts_two_distinct_creatu
 // Return the Favor's first mode (printed text). No rules text is made up.
 #[test]
 fn cross_controller_activated_copy_rebinds_each_branch_without_mutating_original() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, CopyRetargetPermission, StackAbilityKind,
-    };
     use engine::types::player::PlayerId;
     for won in [false, true] {
         let p2 = PlayerId(2);
