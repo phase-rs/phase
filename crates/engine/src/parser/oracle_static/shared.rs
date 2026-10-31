@@ -4889,6 +4889,27 @@ pub(crate) fn parse_quantity_comparison(lower: &str) -> Option<StaticCondition> 
     })
 }
 
+/// Recognizes a continuous-predicate verb at the head of `input` — the same
+/// vocabulary `find_continuous_predicate_start` scans for (gets/get, gains/gain,
+/// has/have, loses/lose), in nom form so callers can split a subject from its
+/// predicate with `nom_primitives::scan_split_at_phrase`.
+pub(crate) fn parse_continuous_predicate_verb(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("gets "),
+            tag("get "),
+            tag("gains "),
+            tag("gain "),
+            tag("has "),
+            tag("have "),
+            tag("loses "),
+            tag("lose "),
+        )),
+    )
+    .parse(input)
+}
+
 pub(crate) fn find_continuous_predicate_start(lower: &str) -> Option<usize> {
     [
         " gets ", " get ", " gains ", " gain ", " has ", " have ", " loses ", " lose ",

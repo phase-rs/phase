@@ -12957,13 +12957,13 @@ fn replay_pending_replacement(
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
-    // CR 616.1: choosing an optional effect's turn is separate from its may
-    // decision. Discard ordering automation before looking up that saved decision.
-    if state
+    let optional = state
         .pending_replacement
         .as_ref()
-        .is_some_and(|pending| pending.is_optional)
-    {
+        .is_some_and(|pending| pending.is_optional);
+    // CR 616.1: choosing an optional effect's turn is separate from its may
+    // decision. Discard ordering automation before looking up that saved decision.
+    if optional {
         state.replacement_auto_choice_tail = None;
     }
     let had_tail = state.replacement_auto_choice_tail.is_some();
@@ -13035,6 +13035,13 @@ fn replay_pending_replacement(
         }
         return ReplacementResult::NeedsChoice(player);
     };
+    // CR 616.1e + CR 616.1: a replayed answer is still the affected player's choice —
+    // whether to apply an optional effect, or which effect applies next.
+    state.record_loop_decision(if optional {
+        crate::game::play_trace::AnswerOptionality::Optional
+    } else {
+        crate::game::play_trace::AnswerOptionality::Mandatory
+    });
     let result = continue_replacement_impl(state, index, events);
     if !matches!(result, ReplacementResult::Execute(_)) {
         state.replacement_auto_choice_tail = None;

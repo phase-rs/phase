@@ -3337,9 +3337,9 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // repeated step publishes no new reversion. Only a newly created
     // until-end-of-turn control effect starts another.
     //
-    // `drain_deferred_trigger_queue` (the restrictive member, gate
-    // `can_drain_deferred_triggers(state, /*allow_spell_on_stack=*/false)`) is
-    // the right authority: cleanup is reached only after the end step's stack
+    // `drain_deferred_trigger_queue` (gate
+    // `can_drain_deferred_triggers(state, AdmitsAnnouncedCasts)`) is the right
+    // authority: cleanup is reached only after the end step's stack
     // emptied (CR 500.2), so the guard passes on every normal entry, and a
     // refusal is inert — the stack does not grow, this returns `None`, and
     // cleanup advances exactly as it does today.
@@ -3801,20 +3801,11 @@ fn process_phase_triggers(
     // over drain sites, and no search performed here could bound them.)
     // Regression: `parked_queue_drains_at_first_upkeep_from_start_game`.
     //
-    // `drain_deferred_trigger_queue` (not the post-announcement variant) is
-    // deliberate: its gate is `can_drain_deferred_triggers(state, /*allow_
-    // spell_on_stack=*/false)`. CR 500.2 means a step in which players receive
-    // priority ends only with an empty stack, so on every normal step entry the
-    // guard passes; when it does not, refusing is the CR 601.2h + CR 602.2b
-    // conservative choice (issue #1793) and CANNOT re-wedge the game — a `None`
-    // prompt makes every calling arm fall through to `WaitingFor::Priority`,
-    // which is answerable and re-drains through the post-action pipeline.
-    // (Note: the entry gate is restrictive, but `dispatch_deferred_triggers_in_order`
-    // in `triggers.rs` ends in a tail call to
-    // `drain_deferred_triggers_after_trigger_construction`, whose `else` arm is
-    // permissive — identical to the deferred-drain branch of
-    // `engine_priority::run_post_action_pipeline_from`, and behaviourally the
-    // same here because the stack is empty at a step boundary.)
+    // `drain_deferred_trigger_queue`'s gate refuses only a resolution still
+    // under way. A refusal CANNOT re-wedge the game — a
+    // `None` prompt makes every calling arm fall through to
+    // `WaitingFor::Priority`, which is answerable and re-drains through the
+    // post-action pipeline.
     //
     // NOTE: unlike the post-action pipeline's deferred-drain branch, this drain
     // is not gated on `skip_deferred_trigger_drain` — and does not need to be.

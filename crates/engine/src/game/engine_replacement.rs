@@ -3299,14 +3299,12 @@ fn finish_copy_target_choice_entry_after_counters(
     // characteristics and any `GrantTrigger` continuous modifications (e.g.
     // Callidus Assassin's "destroy another creature with the same name")
     // into `trigger_definitions`. With the copy now resolved and layers
-    // re-evaluated, replay those events through the same trigger pipeline
-    // the pipeline would have run for them (`process_triggers` for CR 603.2
-    // event-based triggers + `check_delayed_triggers` for CR 603.7c delayed
-    // triggers) so granted ETBs and observer ETBs (Soul Warden) match
-    // against the realized copy. Replay is gated on the source still being
-    // on the battlefield — concede / error / chained-replacement paths can
-    // leave a stale event in the vec, and we discard rather than fire a
-    // phantom entry trigger.
+    // re-evaluated, replay those events so granted ETBs and observer ETBs
+    // (Soul Warden) match against the realized copy and join the next
+    // priority's batch. Replay is gated on the source still being on the
+    // battlefield — concede / error / chained-replacement paths can leave a
+    // stale event in the vec, and we discard rather than fire a phantom entry
+    // trigger.
     if replay_entry_events {
         let delivery_start = events.len();
         if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
@@ -3441,9 +3439,8 @@ fn finish_copy_target_choice_entry_after_counters(
 /// made, so that ETB observers (constellation, Soul Warden) and any granted
 /// ETB triggers (Callidus Assassin) match against the fully realized,
 /// post-choice object — not a half-entered one (CR 614.12a: the choice is made
-/// before the permanent enters). `process_triggers` (CR 603.2 event-based
-/// triggers) + `check_delayed_triggers` (CR 603.7c delayed triggers) collect
-/// against the realized object.
+/// before the permanent enters). [`collect_deferred_entry_replay`] queues what
+/// the entry triggered.
 ///
 /// Drained via `std::mem::take` so replay is idempotent — the event is fired
 /// exactly once and can never also reach a later `Priority`-result pipeline
@@ -3457,25 +3454,15 @@ pub(super) fn replay_deferred_entry_events(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
-    let deferred = std::mem::take(&mut state.deferred_entry_events);
-    let source_still_on_battlefield = state
-        .objects
-        .get(&source_id)
-        .is_some_and(|obj| obj.zone == Zone::Battlefield);
-    if !deferred.is_empty() && source_still_on_battlefield {
-        super::triggers::process_triggers(state, &deferred);
-        let delayed_events = super::triggers::check_delayed_triggers(state, &deferred);
-        events.extend(delayed_events);
-    }
+    collect_deferred_entry_replay(state, source_id);
     effects::drain_pending_continuation(state, events);
-    // CR 113.2c + CR 603.3b + CR 707.10: `process_triggers` above may have
-    // paused on an interactive replayed ETB trigger fired by the realized
-    // entry. When it pauses it sets `state.pending_trigger` for the active
-    // instance and stashes any simultaneously-fired siblings into
-    // `state.deferred_triggers`. This mirrors the priority-time
-    // `process_triggers` call site in `engine_priority`, so the resumption
-    // logic must mirror that site exactly (issue #429 — the same failure
-    // mode as #416 on the copy-replacement completion path):
+    // CR 113.2c + CR 603.3b + CR 707.10: `drain_pending_continuation` above may
+    // have paused on an interactive trigger. When it pauses it sets
+    // `state.pending_trigger` for the active instance and stashes any
+    // simultaneously-fired siblings into `state.deferred_triggers`, so the
+    // resumption logic mirrors the priority-time site in `engine_priority`
+    // (issue #429 — the same failure mode as #416 on the copy-replacement
+    // completion path):
     //
     //   1. A distribute-among pause sets `state.waiting_for` directly to
     //      `WaitingFor::DistributeAmong` (the trigger's targets are already
@@ -3493,11 +3480,7 @@ pub(super) fn replay_deferred_entry_events(
     if matches!(state.waiting_for, WaitingFor::DistributeAmong { .. }) {
         return Ok(Some(state.waiting_for.clone()));
     }
-    // CR 603.3b (#531): propagate OrderTriggers pause from process_triggers
-    // above. Without this, multiple simultaneously-fired ETB observers on one
-    // entry (e.g., two constellation triggers, or Wedding Announcement's token
-    // + Ocelot Pride's life-gain rider on a copy entry) would silently fall
-    // through to Priority.
+    // CR 603.3b (#531): propagate an OrderTriggers pause `drain_pending_continuation` raised.
     if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
         return Ok(Some(state.waiting_for.clone()));
     }
@@ -3505,6 +3488,22 @@ pub(super) fn replay_deferred_entry_events(
         return Ok(Some(waiting_for));
     }
     Ok(None)
+}
+
+/// CR 614.12a + CR 117.5 + CR 603.3b: the choice was made before the permanent
+/// entered, so what its entry triggered waits for the next priority with
+/// everything else that triggered since the last one.
+pub(super) fn collect_deferred_entry_replay(state: &mut GameState, source_id: ObjectId) {
+    let deferred = std::mem::take(&mut state.deferred_entry_events);
+    let source_still_on_battlefield = state
+        .objects
+        .get(&source_id)
+        .is_some_and(|obj| obj.zone == Zone::Battlefield);
+    if deferred.is_empty() || !source_still_on_battlefield {
+        return;
+    }
+    super::triggers::collect_triggers_into_deferred(state, &deferred);
+    super::triggers::collect_delayed_trigger_contexts_into_deferred(state, &deferred);
 }
 
 /// CR 305.1 + CR 603.2: The priority-settling counterpart to
@@ -4088,8 +4087,8 @@ fn is_enters_counter_choice(branches: &[AbilityDefinition]) -> bool {
 /// Valgavoth's Lair) — clone any battlefield-entry `ZoneChanged` events for the
 /// entering source into `state.deferred_entry_events`. The original `events`
 /// vec is preserved so the frontend animates the entry as soon as the spell /
-/// land-play resolves; the deferred copy is replayed through `process_triggers`
-/// / `check_delayed_triggers` once the choice resolves (in
+/// land-play resolves; the deferred copy is replayed through
+/// `collect_deferred_entry_replay` once the choice resolves (in
 /// `handle_copy_target_choice` for copies, in the `ChooseBranch` arm and the
 /// `NamedChoice` + `ChooseOption` arm of `engine_resolution_choices.rs` for the
 /// other two shapes), so every ETB observer (constellation like Doomwake Giant,

@@ -1190,14 +1190,17 @@ pub struct GameObject {
 
     /// CR 730.3c: When a merged permanent leaves the battlefield it "becomes"
     /// multiple new objects (CR 730.3 / CR 400.7). Each absorbed component records
-    /// the surviving object's id here, so that an effect which finds the object
-    /// the merged permanent became — a flicker/blink referencing "it" — returns
-    /// ALL of the components, not just the survivor (see
+    /// the incarnation the surviving object holds after its leave move (CR 400.7)
+    /// here, so that an effect which finds the object the merged permanent
+    /// became — a flicker/blink referencing "it" — returns ALL of the
+    /// components, not just the survivor (see
     /// `merge::expand_returned_merge_components`). Set when the component is split
     /// out on battlefield exit; cleared on any battlefield (re-)entry. `None` for
-    /// objects that were never split out of a merged permanent this way.
+    /// objects that were never split out of a merged permanent this way. A
+    /// survivor that changes zones again no longer matches, so the component is
+    /// not collected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub split_from_merge_survivor: Option<ObjectId>,
+    pub split_from_merge_survivor: Option<ObjectIncarnationRef>,
 
     /// CR 702.148a-b + CR 612: `Some(_)` while this object's cleave
     /// text-changing effect is live (the spell was cast for its cleave cost).
@@ -3917,6 +3920,16 @@ impl GameObject {
         self.zone == Zone::Battlefield && self.is_phased_out()
     }
 
+    /// CR 110.1 + CR 702.26b: Whether this object is a permanent that exists:
+    /// on the battlefield and phased in. Phasing does not move a permanent
+    /// (CR 702.26d), so on the battlefield this is exactly the negation of
+    /// [`Self::is_phased_out_permanent`], and in any other zone neither holds.
+    /// `pub` so `phase-ai` asks the engine which objects are phased-in
+    /// permanents instead of re-deriving it.
+    pub fn is_phased_in_permanent(&self) -> bool {
+        self.zone == Zone::Battlefield && self.is_phased_in()
+    }
+
     pub fn has_keyword_kind(&self, kind: KeywordKind) -> bool {
         super::keywords::has_keyword_kind(self, kind)
     }
@@ -5164,6 +5177,51 @@ mod tests {
 
         let deserialized: GameObject = serde_json::from_value(json).unwrap();
         assert!(deserialized.is_phased_out());
+    }
+
+    /// CR 110.1 + CR 702.26b + CR 702.26d: an object is a phased-in permanent
+    /// exactly when it is on the battlefield and phased in. On the battlefield
+    /// that is the negation of `is_phased_out_permanent`; in every other zone
+    /// neither holds.
+    #[test]
+    fn is_phased_in_permanent_is_a_phased_in_object_on_the_battlefield() {
+        let statuses = [
+            PhaseStatus::PhasedIn,
+            PhaseStatus::PhasedOut {
+                cause: PhaseOutCause::Directly,
+            },
+            PhaseStatus::PhasedOut {
+                cause: PhaseOutCause::Indirectly,
+            },
+        ];
+        let mut permanents = 0;
+        for zone in Zone::ALL {
+            for status in statuses {
+                let mut obj = GameObject::new(
+                    ObjectId(1),
+                    CardId(1),
+                    PlayerId(0),
+                    "Phaser".to_string(),
+                    zone,
+                );
+                obj.phase_status = status;
+                let answer = obj.is_phased_in_permanent();
+                if zone == Zone::Battlefield {
+                    assert_eq!(answer, status == PhaseStatus::PhasedIn, "{status:?}");
+                    assert_eq!(answer, !obj.is_phased_out_permanent(), "{status:?}");
+                } else {
+                    assert!(
+                        !answer && !obj.is_phased_out_permanent(),
+                        "{zone:?} {status:?}"
+                    );
+                }
+                permanents += usize::from(answer);
+            }
+        }
+        assert_eq!(
+            permanents, 1,
+            "reach guard: the phased-in battlefield object is one"
+        );
     }
 
     #[test]

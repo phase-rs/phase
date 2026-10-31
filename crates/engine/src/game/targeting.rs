@@ -1140,11 +1140,13 @@ pub(crate) fn resolve_event_referent_objects(
 /// affected as a permanent. An event referent (CR 608.2k) can have left the
 /// battlefield (CR 400.7: it is then a new object) or phased out before the
 /// trigger resolves; neither is a permanent that can be affected.
+/// The object's own test is `GameObject::is_phased_in_permanent`; a missing
+/// object is not a permanent.
 pub(crate) fn is_phased_in_battlefield_permanent(state: &GameState, id: ObjectId) -> bool {
     state
         .objects
         .get(&id)
-        .is_some_and(|obj| obj.zone == Zone::Battlefield && obj.is_phased_in())
+        .is_some_and(|obj| obj.is_phased_in_permanent())
 }
 
 /// CR 608.2k + CR 400.7 + CR 110.1 + CR 702.26b: the permanents a pure

@@ -118,7 +118,7 @@ fn narrow_core_type(filter: &Option<TargetFilter>) -> Option<CoreType> {
 /// dynamic emit a single `None` so the caller routes them to `unclassified`.
 /// `StateCondition` and `Unknown(_)` return an EMPTY result *and* the caller
 /// must NOT push such objects to `unclassified` — state triggers run through
-/// the dedicated `check_state_triggers` path, never event-driven dispatch.
+/// the dedicated `collect_state_triggers` path, never event-driven dispatch.
 ///
 /// Returns `(keys, route_to_unclassified)`:
 /// - non-empty keys → object goes into each bucket
@@ -467,7 +467,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::ElementalBend => push(TriggerEventKey::Bending),
 
         // CR 603.8: state triggers are processed by the dedicated
-        // `check_state_triggers` path, NOT by event-driven dispatch. The
+        // `collect_state_triggers` path, NOT by event-driven dispatch. The
         // matcher dispatch returns `None` for them. Skip entirely — neither
         // a key nor unclassified routing.
         TriggerMode::StateCondition => return (SmallVec::new(), false),

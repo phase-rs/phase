@@ -1111,6 +1111,7 @@ pub enum InteractionResponseSpec {
 pub enum InteractionShortcutCountSpec {
     Fixed { min: u32, max: u32, suggested: u32 },
     UntilLethal,
+    WithoutEnd,
 }
 
 /// The display family one shortcut-preview magnitude belongs to — the projection-layer code

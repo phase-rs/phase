@@ -2839,10 +2839,10 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             source_id,
             subject: None,
         });
-        // CR 603.2 + CR 603.3b: the resume settled the iteration. When the move
-        // landed us back at Priority (no further replacement choice), B1-drain the
-        // deferred observer triggers parked during earlier pause segments plus the
-        // ones this resume produced; otherwise leave them parked for the next drain.
+        // CR 603.2 + CR 603.3b: the resume settled the iteration. Park the
+        // observer triggers this resume produced beside those parked during
+        // earlier pause segments; the post-action pipeline places them with
+        // the boundary's one batch.
         //
         // CR 601.2h + CR 603.3: a live announcement takes custody of the span it
         // owns; only the rest is collected here.
@@ -2861,12 +2861,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             })
             .cloned()
             .collect();
-        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
-            crate::game::triggers::drain_deferred_trigger_queue(state, events);
-        } else {
-            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
-        }
+        crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
     }
 }
 
@@ -22998,12 +22993,9 @@ fn resolve_chain_body(
              `optional_for` ability before the up-front gate"
         );
         if let Some((payer, costs)) = resolution_optional_payment_options(state, ability) {
-            if may_trigger_key.as_ref().is_some_and(|key| {
-                matches!(
-                    state.may_trigger_auto_choice_for_live_prompt(key),
-                    Some(AutoMayChoice::Decline)
-                )
-            }) {
+            if costs.is_empty() {
+                // CR 608.2d: an impossible optional payment is declined without
+                // opening a choice window.
                 progress = resolve_optional_effect_decision_step(
                     state,
                     ability.clone(),
@@ -23013,9 +23005,14 @@ fn resolve_chain_body(
                 )?;
                 return Ok(progress);
             }
-            if costs.is_empty() {
-                // CR 608.2d: an impossible optional payment is declined without
-                // opening a choice window.
+            if may_trigger_key.as_ref().is_some_and(|key| {
+                matches!(
+                    state.may_trigger_auto_choice_for_live_prompt(key),
+                    Some(AutoMayChoice::Decline)
+                )
+            }) {
+                // CR 603.5: the remembered decline is the controller's optional choice.
+                state.record_loop_decision(crate::game::play_trace::AnswerOptionality::Optional);
                 progress = resolve_optional_effect_decision_step(
                     state,
                     ability.clone(),
@@ -23056,6 +23053,8 @@ fn resolve_chain_body(
             .is_some_and(|key| state.may_trigger_same_card_choice_available(key));
         if let Some(ref key) = may_trigger_key {
             if let Some(choice) = state.may_trigger_auto_choice_for_live_prompt(key) {
+                // CR 603.5: the remembered answer is the controller's optional choice.
+                state.record_loop_decision(crate::game::play_trace::AnswerOptionality::Optional);
                 progress = resolve_optional_effect_decision_step(
                     state,
                     ability_with_event_context_targets(state, ability),
@@ -28058,7 +28057,7 @@ pub(crate) fn evaluate_condition(
             }
             !evaluate_condition(condition, state, ability)
         }
-        // CR 730.2a: True when it's neither day nor night (no designation set yet).
+        // CR 731.1: True when it's neither day nor night (the game starts with neither designation).
         AbilityCondition::DayNightIsNeither => state.day_night.is_none(),
         // CR 731.1: True when the game has the requested day/night designation.
         AbilityCondition::DayNightIs {
@@ -37960,6 +37959,7 @@ mod tests {
 
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert_eq!(state.players[0].life, 23);
+        assert_eq!(state.loop_decision_tally.optional, 1);
     }
 
     #[test]
@@ -37980,6 +37980,88 @@ mod tests {
 
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.loop_decision_tally.optional, 1);
+    }
+
+    /// CR 603.5 + CR 608.2d: a remembered decline of an optional payment is recorded where it
+    /// applies; the unremembered prompt and an impossible payment record nothing.
+    #[test]
+    fn saved_decline_of_an_optional_payment_is_recorded_where_it_applies() {
+        let resolve = |stored: Option<AutoMayChoice>, fodder: bool| {
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_object(
+                &mut state,
+                CardId(100),
+                PlayerId(0),
+                "Payment Source".to_string(),
+                Zone::Battlefield,
+            );
+            if fodder {
+                create_object(
+                    &mut state,
+                    CardId(101),
+                    PlayerId(0),
+                    "Fodder".to_string(),
+                    Zone::Hand,
+                );
+            }
+            let origin = MayTriggerOrigin::Printed { trigger_index: 0 };
+            if let Some(choice) = stored {
+                state.set_may_trigger_auto_choice(
+                    MayTriggerAutoChoiceKey {
+                        player: PlayerId(0),
+                        source_id,
+                        origin: origin.clone(),
+                    },
+                    choice,
+                );
+            }
+            let mut ability = ResolvedAbility::new(
+                Effect::PayCost {
+                    cost: AbilityCost::OneOf {
+                        costs: vec![AbilityCost::Discard {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            filter: None,
+                            selection: crate::types::ability::CardSelectionMode::Chosen,
+                            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                        }],
+                    },
+                    scale: None,
+                    payer: TargetFilter::Controller,
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            );
+            ability.optional = true;
+            ability.set_may_trigger_origin_recursive(origin);
+            resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+            state
+        };
+
+        let declined = resolve(Some(AutoMayChoice::Decline), true);
+        assert!(
+            matches!(declined.waiting_for, WaitingFor::Priority { .. }),
+            "reach: the remembered decline opens no prompt"
+        );
+        assert_eq!(declined.loop_decision_tally.optional, 1);
+
+        let prompted = resolve(None, true);
+        assert!(
+            matches!(
+                prompted.waiting_for,
+                WaitingFor::ResolutionOptionalPaymentChoice { .. }
+            ),
+            "reach: without a remembered answer the payment prompt opens"
+        );
+        assert_eq!(prompted.loop_decision_tally.optional, 0);
+
+        let impossible = resolve(Some(AutoMayChoice::Decline), false);
+        assert!(
+            matches!(impossible.waiting_for, WaitingFor::Priority { .. }),
+            "reach: the impossible payment opens no prompt"
+        );
+        assert_eq!(impossible.loop_decision_tally.optional, 0);
     }
 
     #[test]

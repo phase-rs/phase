@@ -8,8 +8,7 @@
 //!
 //! A candidate is **unconfirmed by construction** — it ignores targeting legality, timing
 //! windows, "may" choices, and replacement interactions — so it is a
-//! [`CandidateCycle`], deliberately **never** a [`crate::analysis::LoopCertificate`]
-//! (whose soundness invariant requires a driven board-equality proof).
+//! [`CandidateCycle`], deliberately **never** a [`crate::analysis::LoopCertificate`].
 //!
 //! Theory reference (CS, not CR): Tarjan SCC for cycle finding.
 //!
@@ -1858,8 +1857,7 @@ where
 /// branch pays, turning a real loop into a false negative (the candidate that a
 /// payable branch closes would be suppressed).
 ///
-/// The envelope maximizes recall (Engine A is the sound confirmer that filters
-/// any false positive that survives here):
+/// The envelope maximizes recall:
 /// - `produces` / `unbounded_production` = UNION (any branch's production is choosable)
 /// - `requires` = INTERSECTION (only the requirements unavoidable in EVERY branch)
 /// - `net` = per-axis MAX with missing-component = 0 (the most loop-favorable branch per axis)
@@ -2255,9 +2253,8 @@ pub fn build_ability_graph(nodes: Vec<AbilityNode>) -> AbilityGraph {
 // Candidate output + SCC
 // ---------------------------------------------------------------------------
 
-/// A static, **unconfirmed** candidate cycle. Deliberately NOT a
-/// [`crate::analysis::LoopCertificate`] — it has no driven board-equality proof,
-/// so naming it a certificate would violate that type's soundness invariant.
+/// A static, **unconfirmed** candidate cycle: no board was driven for it, so it is
+/// deliberately NOT a [`crate::analysis::LoopCertificate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateCycle {
     /// The definitions whose nodes form the SCC.
