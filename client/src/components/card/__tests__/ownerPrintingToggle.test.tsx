@@ -1058,6 +1058,11 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
     },
   );
 
+  // The census parses the resolver-bearing files of the whole client tree. It takes
+  // about 1.3 s alone but several times that inside the parallel suite, so it carries
+  // its own limit instead of vitest's 5 s default (the work, not the limit, is the check).
+  const V15_CENSUS_TIMEOUT_MS = 30_000;
+
   it("V15 classifies every import-bound image resolver and intermediate carrier", () => {
     const src = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
     const objectHooks: Record<string, number> = {
@@ -1217,5 +1222,5 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
     expect(Object.keys(helpers)).toHaveLength(11);
     expect(exclusions).toEqual({ "components/modal/BoosterPackModal.tsx": 1, "pages/GamePage.tsx": 1 });
     expect(intermediates).toEqual({ HandCard: 1, ZoneFanCard: 2, DrawerCard: 1, CardTextboxPreview: 3 });
-  });
+  }, V15_CENSUS_TIMEOUT_MS);
 });
