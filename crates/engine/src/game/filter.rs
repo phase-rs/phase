@@ -5421,7 +5421,11 @@ pub fn matches_target_filter_in_owner_zone(
 /// grants) both route through it, so the two cannot drift on which zones are
 /// owner-scoped.
 pub fn is_owner_scoped_zone(zone: Zone) -> bool {
-    matches!(zone, Zone::Hand | Zone::Library | Zone::Graveyard)
+    // CR 400.1 + CR 400.3: the owner-scoped zones are exactly the per-player
+    // ones, so `Zone::is_per_player` holds the partition and this function
+    // names what it means here. The parser's zone-possessor grammar reads the
+    // same predicate, which is what keeps the two from drifting.
+    zone.is_per_player()
 }
 
 /// CR 400.3 + CR 109.5 + CR 108.4a: match `object_id` against `filter` using the

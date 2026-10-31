@@ -2186,3 +2186,5 @@ mod squall_attack_batch_chosen_number;
 mod strago_cast_this_way_rider;
 mod tifa_additional_combat;
 mod token_attack_destination;
+
+mod huskburster_swarm_zone_disjunction;

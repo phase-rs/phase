@@ -59,6 +59,33 @@ impl Zone {
         }
     }
 
+    /// CR 400.1: whether each player has their own copy of this zone — "Each
+    /// player has their own library, hand, and graveyard. The other zones are
+    /// shared by all players."
+    ///
+    /// Load-bearing in two places that must not drift apart, which is why the
+    /// partition lives on the type rather than in either caller:
+    ///
+    /// * At runtime it is the owner-keyed membership question —
+    ///   `filter::is_owner_scoped_zone` delegates here. A player-scoped query
+    ///   over a per-player zone reads the card's OWNER, because CR 400.3 sends a
+    ///   card to its owner's copy of such a zone.
+    /// * At parse time it is the possessor question. Only a per-player zone can
+    ///   be written with a possessor ("your graveyard"), so a SHARED zone's
+    ///   absent possessor ("in exile") carries no information about whose cards
+    ///   the phrase names and must not be read as a conflicting possessor when a
+    ///   zone list mixes the two ("in exile and in your graveyard").
+    ///
+    /// Exhaustive rather than a `matches!` so that adding a `Zone` variant is a
+    /// compile error forcing an explicit per-player/shared decision — that is a
+    /// rules question, not a formatting one.
+    pub fn is_per_player(self) -> bool {
+        match self {
+            Zone::Library | Zone::Hand | Zone::Graveyard => true,
+            Zone::Battlefield | Zone::Stack | Zone::Exile | Zone::Command => false,
+        }
+    }
+
     /// Whether moving an object from this zone into a library is a *pure
     /// relocation* — a CR 400.7 zone change that creates a new object, and
     /// nothing more.
@@ -264,6 +291,28 @@ mod tests {
             Zone::Command,
         ];
         assert_eq!(zones.len(), 7);
+    }
+
+    /// CR 400.1: "Each player has their own library, hand, and graveyard. The
+    /// other zones are shared by all players." Pinned against the rule text
+    /// because two unrelated readers depend on this exact partition: the runtime
+    /// owner-keyed membership test (`filter::is_owner_scoped_zone`) and the
+    /// parser's zone-possessor grammar, which treats a shared zone's absent
+    /// possessor as carrying no possessor information.
+    #[test]
+    fn per_player_zones_are_exactly_library_hand_and_graveyard() {
+        let per_player: Vec<Zone> = Zone::ALL
+            .into_iter()
+            .filter(|zone| zone.is_per_player())
+            .collect();
+        assert_eq!(
+            per_player,
+            vec![Zone::Library, Zone::Hand, Zone::Graveyard],
+            "CR 400.1 names exactly these three as per-player"
+        );
+        for zone in [Zone::Battlefield, Zone::Stack, Zone::Exile, Zone::Command] {
+            assert!(!zone.is_per_player(), "{zone:?} is shared by all players");
+        }
     }
 
     #[test]
