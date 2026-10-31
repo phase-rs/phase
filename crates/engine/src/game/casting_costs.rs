@@ -2514,6 +2514,21 @@ fn settled_public_discard_referent(
         .cloned()
 }
 
+/// CR 601.2h: a spell's discard paid at the payment commit (mana already spent) finishes
+/// through the prepaid finalizer, which keeps the spell's spent-mana record.
+fn continue_after_cost_discard(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if pending.activation_ability_index.is_none() && pending.prepaid_actual_mana_spent.is_some() {
+        state.pending_cast = Some(Box::new(pending));
+        return finalize_automatic_mana_payment(state, player, events);
+    }
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
 /// Complete the discard-for-cost flow: discard selected cards, then continue casting.
 pub(crate) fn handle_discard_for_cost(
     state: &mut GameState,
@@ -2641,9 +2656,9 @@ pub(crate) fn handle_discard_for_cost(
             .and_then(super::casting::remove_selected_discard_cost);
     }
 
-    let waiting_for = finish_pending_cost_or_cast(state, player, pending, events)?;
+    let waiting_for = continue_after_cost_discard(state, player, pending, events)?;
 
-    // CR 603.2 + CR 603.3b: When `finish_pending_cost_or_cast` lands on `Priority`
+    // CR 603.2 + CR 603.3b: When `continue_after_cost_discard` lands on `Priority`
     // the cast completed in THIS action, so `run_post_action_pipeline` will scan
     // `events` (including the cost-discard `ZoneChanged` records above) and
     // graveyard-entry observers fire normally.
@@ -2771,8 +2786,23 @@ fn pay_deferred_hand_discard_cost(
             }
             count
         }
-        // ponytail: WholeHand draws only the move order, but as an Outcome draw; a deterministic order needs a commit-continuing Chosen resume.
-        DeferredHandDiscardCost::WholeHand => eligible.len(),
+        // CR 404.3 + CR 701.9b: no random element, so the owner orders the hand through the selection.
+        DeferredHandDiscardCost::WholeHand => {
+            if eligible.is_empty() {
+                return Ok(None);
+            }
+            let count = eligible.len();
+            return Ok(Some(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::Discard,
+                choices: eligible,
+                count,
+                min_count: count,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending.clone()),
+                },
+            }));
+        }
     };
     if count == 0 {
         return Ok(None);
@@ -3605,7 +3635,7 @@ pub(crate) fn resume_interrupted_cost_payment(
             stamp_spell_cast_cost_paid_object(state, &pending, snapshot);
         }
         let cost_event_end = events.len();
-        let waiting_for = finish_pending_cost_or_cast(state, player, pending, events)?;
+        let waiting_for = continue_after_cost_discard(state, player, pending, events)?;
         park_cost_payment_triggers_if_paused(
             state,
             events,
@@ -3889,10 +3919,10 @@ fn pay_spell_mana_before_deferred_sacrifice(
         return Ok(None);
     }
 
-    validate_deferred_spell_sacrifices_at_commit(state, player, pending)?;
     auto_activate_spell_mana_abilities_before_deferred_sacrifice(
         state, player, pending, resume, events,
     )?;
+    validate_deferred_spell_sacrifices_at_commit(state, player, pending)?;
     stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
     let resume_at_resolution_depth = state.resolution_stack.len();
     let payment = super::casting::pay_mana_cost_from_pool_with_choices(
@@ -10923,21 +10953,7 @@ fn pay_additional_cost_with_source(
                             "Unsupported sacrifice cost requirement for spell payment".into(),
                         ));
                     }
-                    if super::casting::find_determined_sacrifice_set(
-                        state,
-                        player,
-                        pending.object_id,
-                        pending.ability.context.granting_object,
-                        target,
-                    )
-                    .is_none()
-                    {
-                        return Err(EngineError::SpellCastReversed {
-                            player,
-                            pending: Box::new(pending),
-                        });
-                    }
-                    // CR 601.2g + CR 601.2h: membership is read when the cost is paid, after mana abilities; partial payment is not allowed (CR 118.3).
+                    // CR 601.2g + CR 601.2h: membership and each member's permission are read when the cost is paid, after mana abilities; partial payment is not allowed (CR 118.3).
                     let mut pending = pending;
                     pending
                         .deferred_sacrificed_permanents

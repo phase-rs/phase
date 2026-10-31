@@ -165,7 +165,11 @@ fn kaerveks_spite_sacrifices_everything_and_discards_the_hand() {
     let theirs = scenario.add_vanilla(P1, 2, 2);
     let mut runner = scenario.build();
 
-    let outcome = runner.cast(spell).target_player(P1).resolve();
+    let outcome = runner
+        .cast(spell)
+        .target_player(P1)
+        .pay_cost_with(&hand)
+        .resolve();
 
     // CR 601.2g + CR 601.2h: the Swamps tapped for {B}{B}{B} are still
     // controlled when the cost is paid, so they are sacrificed too.
@@ -201,14 +205,15 @@ fn add_skirge_familiar(scenario: &mut GameScenario) -> ObjectId {
         .id()
 }
 
-fn cast_manually(runner: &mut GameRunner, spell: ObjectId) {
+/// Casts `spell` with `payment_mode`, answering every target prompt with P1.
+fn cast_at_p1(runner: &mut GameRunner, spell: ObjectId, payment_mode: CastPaymentMode) {
     let card_id = runner.state().objects[&spell].card_id;
     runner
         .act(GameAction::CastSpell {
             object_id: spell,
             card_id,
             targets: vec![],
-            payment_mode: CastPaymentMode::Manual,
+            payment_mode,
         })
         .expect("the cast is offered");
     while matches!(
@@ -221,6 +226,10 @@ fn cast_manually(runner: &mut GameRunner, spell: ObjectId) {
             })
             .expect("P1 is a legal target");
     }
+}
+
+fn cast_manually(runner: &mut GameRunner, spell: ObjectId) {
+    cast_at_p1(runner, spell, CastPaymentMode::Manual);
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
         "CR 601.2g: the mana window opens before the hand is discarded, got {:?}",
@@ -243,6 +252,28 @@ fn discard_to_familiar(runner: &mut GameRunner, familiar: ObjectId, card: Object
     runner
         .act(GameAction::SelectCards { cards: vec![card] })
         .expect("the card is discarded for {B}");
+}
+
+/// Answers the "discard your hand" prompt with `cards`, in the order given.
+fn discard_rest_of_hand(runner: &mut GameRunner, cards: &[ObjectId]) {
+    let WaitingFor::PayCost {
+        kind: PayCostKind::Discard,
+        choices,
+        count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "the hand is discarded at payment, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((choices.len(), *count), (cards.len(), cards.len()));
+    runner
+        .act(GameAction::SelectCards {
+            cards: cards.to_vec(),
+        })
+        .expect("the whole hand is discarded");
 }
 
 /// CR 601.2g + CR 601.2h: the hand is discarded when the cost is paid, after
@@ -273,7 +304,8 @@ fn kaerveks_spite_hand_funds_skirge_familiar_before_the_hand_is_discarded() {
     discard_to_familiar(&mut runner, familiar, hand[0]);
     runner
         .act(GameAction::PassPriority)
-        .expect("passing finishes the payment");
+        .expect("passing finishes the mana payment");
+    discard_rest_of_hand(&mut runner, &[hand[1], hand[2]]);
 
     let state = runner.state();
     assert_eq!(state.stack.back().map(|e| e.id), Some(spell));
@@ -488,6 +520,7 @@ fn kaerveks_spite_hand_discard_resumes_after_each_replacement_choice() {
             })
             .expect("P1 is a legal target");
     }
+    discard_rest_of_hand(&mut runner, &hand);
     assert!(
         runner.state().pending_discard_for_cost.is_some(),
         "reach guard: the hand discard parks on a cost resume, got {:?}",
@@ -509,8 +542,194 @@ fn kaerveks_spite_hand_discard_resumes_after_each_replacement_choice() {
     let state = runner.state();
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     assert_eq!(state.stack.back().map(|e| e.id), Some(spell));
+    assert_eq!(state.objects[&spell].mana_spent_to_cast_amount, 3);
+    assert_eq!(state.objects[&spell].colors_spent_to_cast.black, 3);
     assert!(state.players[0].hand.is_empty());
     for id in &hand {
         assert_eq!(state.objects[id].zone, Zone::Exile);
+    }
+}
+
+/// CR 404.3 + CR 701.9b: "discard your hand" has no random element, so the
+/// owner orders the discarded cards (CR 404.1: each lands on top) and no
+/// outcome draw is spent.
+#[test]
+fn kaerveks_spite_owner_orders_the_discarded_hand_without_an_outcome_draw() {
+    for owner_first in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = add_kaerveks_spite(&mut scenario);
+        let bears = scenario
+            .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+            .id();
+        let giant = scenario.add_creature_to_hand(P0, "Hill Giant", 3, 3).id();
+        let swamps: Vec<ObjectId> = (0..3)
+            .map(|_| scenario.add_basic_land(P0, ManaColor::Black))
+            .collect();
+        let mut runner = scenario.build();
+        let draws_before = runner.state().rng.outcome_draws();
+        let order = if owner_first {
+            [giant, bears]
+        } else {
+            [bears, giant]
+        };
+
+        cast_at_p1(&mut runner, spell, CastPaymentMode::Auto);
+        discard_rest_of_hand(&mut runner, &order);
+
+        let state = runner.state();
+        assert_eq!(state.stack.back().map(|e| e.id), Some(spell));
+        for id in &swamps {
+            assert_eq!(state.objects[id].zone, Zone::Graveyard);
+        }
+        let graveyard_order: Vec<ObjectId> = state.players[0]
+            .graveyard
+            .iter()
+            .copied()
+            .filter(|id| order.contains(id))
+            .collect();
+        assert_eq!(graveyard_order, order);
+        assert_eq!(state.rng.outcome_draws(), draws_before);
+    }
+}
+
+const LAVINIA: &str = "Each opponent can't cast noncreature spells with mana value greater than the number of lands that player controls.\nWhenever an opponent casts a spell, if no mana was spent to cast it, counter that spell.";
+
+/// CR 601.2h: discarding the hand at payment keeps the record of the {B}{B}{B}
+/// paid, so Lavinia's "if no mana was spent to cast it" doesn't counter the spell.
+#[test]
+fn kaerveks_spite_keeps_its_spent_mana_through_the_hand_discard() {
+    for mode in [CastPaymentMode::Auto, CastPaymentMode::Manual] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = add_kaerveks_spite(&mut scenario);
+        let hand = [
+            scenario.add_card_to_hand(P0, "H1"),
+            scenario.add_card_to_hand(P0, "H2"),
+        ];
+        let swamps: Vec<ObjectId> = (0..3)
+            .map(|_| scenario.add_basic_land(P0, ManaColor::Black))
+            .collect();
+        scenario.add_creature_from_oracle(P1, "Lavinia, Azorius Renegade", 2, 2, LAVINIA);
+        let mut runner = scenario.build();
+        let life_before = runner.life(P1);
+
+        if mode == CastPaymentMode::Manual {
+            cast_manually(&mut runner, spell);
+            for &swamp in &swamps {
+                activate(&mut runner, swamp);
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing finishes the mana payment");
+        } else {
+            cast_at_p1(&mut runner, spell, mode);
+        }
+        discard_rest_of_hand(&mut runner, &hand);
+
+        let cast = &runner.state().objects[&spell];
+        assert_eq!(cast.mana_spent_to_cast_amount, 3, "{mode:?}");
+        assert_eq!(cast.colors_spent_to_cast.black, 3, "{mode:?}");
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.life(P1), life_before - 5, "{mode:?}");
+    }
+}
+
+/// CR 733.1: cancelling at the hand-discard prompt reverses the whole cast,
+/// including the permanents already sacrificed for it.
+#[test]
+fn kaerveks_spite_cancelled_at_the_hand_discard_restores_board_and_hand() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = add_kaerveks_spite(&mut scenario);
+    let hand = [
+        scenario.add_card_to_hand(P0, "H1"),
+        scenario.add_card_to_hand(P0, "H2"),
+    ];
+    let swamps: Vec<ObjectId> = (0..3)
+        .map(|_| scenario.add_basic_land(P0, ManaColor::Black))
+        .collect();
+    let bear = scenario.add_vanilla(P0, 2, 2);
+    let mut runner = scenario.build();
+
+    cast_at_p1(&mut runner, spell, CastPaymentMode::Auto);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::Discard,
+                ..
+            }
+        ),
+        "reach guard: the hand discard prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Graveyard,
+        "reach guard: the sacrifice was committed before the prompt"
+    );
+    runner
+        .act(GameAction::CancelCast)
+        .expect("the cast can be cancelled at the prompt");
+
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+    assert_eq!(state.objects[&spell].zone, Zone::Hand);
+    for id in &hand {
+        assert_eq!(state.objects[id].zone, Zone::Hand);
+    }
+    for id in swamps.iter().chain([&bear]) {
+        assert_eq!(state.objects[id].zone, Zone::Battlefield);
+    }
+}
+
+const VEXING_BAUBLE: &str = "Whenever a player casts a spell, if no mana was spent to cast it, counter that spell.\n{1}, {T}, Sacrifice this artifact: Draw a card.";
+
+/// CR 601.2h: with nothing to sacrifice and {B}{B}{B} floating, the hand
+/// discard still keeps the spent-mana record, so Vexing Bauble doesn't counter.
+#[test]
+fn kaerveks_spite_paid_from_floating_mana_keeps_its_spent_mana_through_the_hand_discard() {
+    for mode in [CastPaymentMode::Auto, CastPaymentMode::Manual] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = add_kaerveks_spite(&mut scenario);
+        let hand = [
+            scenario.add_card_to_hand(P0, "H1"),
+            scenario.add_card_to_hand(P0, "H2"),
+        ];
+        scenario.add_artifact_from_oracle(P1, "Vexing Bauble", VEXING_BAUBLE);
+        scenario.with_mana_pool(
+            P0,
+            (0..3)
+                .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        let life_before = runner.life(P1);
+
+        if mode == CastPaymentMode::Manual {
+            cast_manually(&mut runner, spell);
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing pays from the pool");
+        } else {
+            cast_at_p1(&mut runner, spell, mode);
+        }
+        discard_rest_of_hand(&mut runner, &hand);
+
+        let state = runner.state();
+        assert_eq!(
+            state.objects[&spell].mana_spent_to_cast_amount, 3,
+            "{mode:?}"
+        );
+        assert_eq!(
+            state.objects[&spell].colors_spent_to_cast.black, 3,
+            "{mode:?}"
+        );
+        assert_eq!(state.stack.back().map(|e| e.id), Some(spell), "{mode:?}");
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.life(P1), life_before - 5, "{mode:?}");
     }
 }

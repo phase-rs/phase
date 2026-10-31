@@ -3,6 +3,7 @@
 //! selection prompt, on both the spell additional-cost and activation channels.
 
 use engine::game::engine::EngineError;
+use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{CostPaidObjectRecord, ResolvedAbility};
 use engine::types::actions::GameAction;
@@ -262,7 +263,10 @@ fn soulblast_over_a_member_that_cannot_be_sacrificed_is_unpayable() {
     let Err(EngineError::ActionNotAllowed(message)) = result else {
         panic!("the cast must be refused, got {result:?}");
     };
-    assert_eq!(message, "Cannot pay required additional cost");
+    assert_eq!(
+        message,
+        "A permanent in the determined sacrifice set can't be sacrificed"
+    );
     assert_eq!(zone(&runner, spell), Zone::Hand);
     assert_eq!(zone(&runner, vanilla), Zone::Battlefield);
 }
@@ -385,4 +389,141 @@ fn raths_edge_sacrificing_another_land_stays_tapped_on_the_battlefield() {
     assert!(runner.state().objects[&edge].tapped);
     runner.advance_until_stack_empty();
     assert_eq!(runner.state().players[1].life, life_before - 1);
+}
+
+const ASSAULT_SUIT: &str = "Equipped creature gets +2/+2, has haste, can't attack you or planeswalkers you control, and can't be sacrificed.\nAt the beginning of each opponent's upkeep, you may have that player gain control of equipped creature until end of turn. If you do, untap it.\nEquip {3}";
+const KRARK_CLAN_IRONWORKS: &str = "Sacrifice an artifact: Add {C}{C}.";
+
+fn equip(runner: &mut GameRunner, equipment: ObjectId, host: ObjectId) {
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&equipment)
+        .unwrap()
+        .attached_to = Some(AttachTarget::Object(host));
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&host)
+        .unwrap()
+        .attachments
+        .push(equipment);
+    runner.state_mut().layers_dirty.mark_full();
+}
+
+fn add_assault_suit(sc: &mut GameScenario) -> ObjectId {
+    sc.add_artifact_from_oracle(P0, "Assault Suit", ASSAULT_SUIT)
+        .with_subtypes(vec!["Equipment"])
+        .id()
+}
+
+/// CR 601.2g + CR 601.2h: whether a member can be sacrificed is read when the
+/// cost is paid, after the mana window. Sacrificing Assault Suit to Krark-Clan
+/// Ironworks there lets its creature be sacrificed; without that, the payment
+/// is refused and nothing is sacrificed.
+#[test]
+fn soulblast_pays_for_a_creature_freed_by_sacrificing_its_assault_suit_for_mana() {
+    for sacrifice_suit in [true, false] {
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        let suited = sc.add_vanilla(P0, 2, 2);
+        let other = sc.add_vanilla(P0, 3, 3);
+        let suit = add_assault_suit(&mut sc);
+        let ironworks = sc
+            .add_artifact_from_oracle(P0, "Krark-Clan Ironworks", KRARK_CLAN_IRONWORKS)
+            .id();
+        let mountains: Vec<_> = (0..6)
+            .map(|_| sc.add_basic_land(P0, ManaColor::Red))
+            .collect();
+        let spell = add_soulblast(&mut sc);
+        let mut runner = sc.build();
+        equip(&mut runner, suit, suited);
+
+        cast(&mut runner, spell, CastPaymentMode::Manual);
+        settle_targets(&mut runner);
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+            "CR 601.2g: the mana window opens, got {:?}",
+            runner.state().waiting_for
+        );
+        if sacrifice_suit {
+            activate_mana(&mut runner, ironworks);
+            runner
+                .act(GameAction::SelectCards { cards: vec![suit] })
+                .expect("Assault Suit is sacrificed for {C}{C}");
+        }
+        for &land in &mountains {
+            activate_mana(&mut runner, land);
+        }
+        let result = runner.act(GameAction::PassPriority);
+
+        if sacrifice_suit {
+            result.expect("the determined set is paid");
+            assert_spell_on_stack(&runner, spell);
+            assert_eq!(zone(&runner, suit), Zone::Graveyard);
+            assert_eq!(zone(&runner, suited), Zone::Graveyard);
+            assert_eq!(zone(&runner, other), Zone::Graveyard);
+        } else {
+            let Err(EngineError::ActionNotAllowed(message)) = result else {
+                panic!("the payment must be refused, got {result:?}");
+            };
+            assert_eq!(
+                message,
+                "A permanent in the determined sacrifice set can't be sacrificed"
+            );
+            assert_eq!(zone(&runner, suited), Zone::Battlefield);
+            assert_eq!(zone(&runner, other), Zone::Battlefield);
+        }
+    }
+}
+
+/// CR 602.2b + CR 601.2g: an activation's determined set is read at payment
+/// too. Dryad Arbor wearing Assault Suit can be sacrificed to Tomb of Urami
+/// once the Suit is sacrificed to Krark-Clan Ironworks in the mana window.
+#[test]
+fn tomb_of_urami_pays_for_a_land_freed_by_sacrificing_its_assault_suit_for_mana() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let tomb = sc
+        .add_land_from_oracle(P0, "Tomb of Urami", TOMB_OF_URAMI)
+        .id();
+    let swamps: Vec<_> = (0..4)
+        .map(|_| sc.add_basic_land(P0, ManaColor::Black))
+        .collect();
+    let arbor = sc
+        .add_creature(P0, "Dryad Arbor", 1, 1)
+        .as_land()
+        .as_creature()
+        .id();
+    let suit = add_assault_suit(&mut sc);
+    let ironworks = sc
+        .add_artifact_from_oracle(P0, "Krark-Clan Ironworks", KRARK_CLAN_IRONWORKS)
+        .id();
+    let mut runner = sc.build();
+    equip(&mut runner, suit, arbor);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: tomb,
+            ability_index: 1,
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the activation is offered");
+    activate_mana(&mut runner, ironworks);
+    runner
+        .act(GameAction::SelectCards { cards: vec![suit] })
+        .expect("Assault Suit is sacrificed for {C}{C}");
+    for &swamp in &swamps {
+        activate_mana(&mut runner, swamp);
+    }
+    runner.act(GameAction::PassPriority).unwrap();
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    for id in swamps.iter().chain([&tomb, &arbor]) {
+        assert_eq!(zone(&runner, *id), Zone::Graveyard);
+    }
 }
