@@ -441,46 +441,28 @@ fn handle_opponent_may_choice_inner(
                 // CR 701.21a (sacrifice) / CR 701.26a (tap): an optional
                 // sacrifice or single-target tap cost. Tap requires an untapped
                 // permanent (CR 701.26a); sacrifice has no such restriction.
-                Effect::Sacrifice { target, .. }
-                | Effect::SetTapState {
+                Effect::Sacrifice {
                     target,
-                    scope: EffectScope::Single,
-                    state: TapStateChange::Tap,
+                    count,
+                    min_count,
+                    ..
                 } => {
-                    let require_untapped = matches!(
-                        ability.effect,
-                        Effect::SetTapState {
-                            scope: EffectScope::Single,
-                            state: TapStateChange::Tap,
-                            ..
-                        }
-                    );
                     // CR 701.21a: the sacrifice pool is read in the ability's own
-                    // frame, exactly as the Sacrifice resolver reads it. Tap
-                    // keeps the acceptor's frame.
-                    let filter_ctx = if require_untapped {
-                        filter::FilterContext::from_source_with_controller(
-                            ability.source_id,
-                            promptee,
-                        )
-                    } else {
-                        filter::FilterContext::from_ability(&ability)
-                    };
+                    // frame, exactly as the Sacrifice resolver reads it.
+                    let filter_ctx = filter::FilterContext::from_ability(&ability);
                     let legal: Vec<ObjectId> = state
                         .objects
                         .iter()
                         .filter(|(_, obj)| {
                             obj.zone == Zone::Battlefield
                                 && obj.controller == promptee
-                                && (!require_untapped || !obj.tapped)
                                 && filter::matches_target_filter(state, obj.id, target, &filter_ctx)
                                 // CR 701.21a + CR 609.3: an option to sacrifice
                                 // is one a player can't take when the sacrifice
                                 // can't happen (Sigarda, Host of Herons).
-                                && (require_untapped
-                                    || effects::sacrifice::can_sacrifice_for_ability(
-                                        state, &ability, obj.id, promptee,
-                                    ))
+                                && effects::sacrifice::can_sacrifice_for_ability(
+                                    state, &ability, obj.id, promptee,
+                                )
                         })
                         .map(|(id, _)| *id)
                         .collect();
@@ -488,22 +470,15 @@ fn handle_opponent_may_choice_inner(
                     // creatures"), so a smaller pool can't perform the option.
                     // CR 107.1c: "any number" reaches as high as the pool, and
                     // its zero is the decline: accepting chooses at least one.
-                    let (min_targets, max_targets) = match &ability.effect {
-                        Effect::Sacrifice {
-                            count, min_count, ..
-                        } => {
-                            let (count, up_to) = count.peel_up_to();
-                            let printed = crate::game::quantity::resolve_quantity_with_targets(
-                                state, count, &ability,
-                            )
-                            .max(0) as usize;
-                            if up_to {
-                                ((*min_count).max(1), printed.min(legal.len()))
-                            } else {
-                                (printed.max(1), printed)
-                            }
-                        }
-                        _ => (1, 1),
+                    let (count, up_to) = count.peel_up_to();
+                    let printed = crate::game::quantity::resolve_quantity_with_targets(
+                        state, count, &ability,
+                    )
+                    .max(0) as usize;
+                    let (min_targets, max_targets) = if up_to {
+                        ((*min_count).max(1), printed.min(legal.len()))
+                    } else {
+                        (printed.max(1), printed)
                     };
                     Some((
                         if legal.len() < min_targets || max_targets < min_targets {
@@ -514,6 +489,30 @@ fn handle_opponent_may_choice_inner(
                         min_targets,
                         max_targets,
                     ))
+                }
+                // CR 701.26a: an optional single-target tap needs an untapped
+                // permanent; the acceptor's frame is kept.
+                Effect::SetTapState {
+                    target,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                } => {
+                    let filter_ctx = filter::FilterContext::from_source_with_controller(
+                        ability.source_id,
+                        promptee,
+                    );
+                    let legal: Vec<ObjectId> = state
+                        .objects
+                        .iter()
+                        .filter(|(_, obj)| {
+                            obj.zone == Zone::Battlefield
+                                && obj.controller == promptee
+                                && !obj.tapped
+                                && filter::matches_target_filter(state, obj.id, target, &filter_ctx)
+                        })
+                        .map(|(id, _)| *id)
+                        .collect();
+                    Some((legal, 1, 1))
                 }
                 _ => None,
             };
