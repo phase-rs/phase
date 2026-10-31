@@ -153,6 +153,28 @@ struct CastUndoFrame {
 thread_local! {
     static CAST_START_BOUNDARIES: std::cell::RefCell<Vec<CastUndoFrame>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    static CONFIRMED_TAKE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn in_confirmed_take() -> bool {
+    CONFIRMED_TAKE.with(|flag| flag.get())
+}
+
+/// CR 732.2a + CR 733.1: while a confirmed take replays its recorded choices, the take's own
+/// snapshot is the undo authority, so no cast installs a per-cast reversal.
+#[must_use]
+pub(crate) struct ConfirmedTakeGuard(bool);
+
+impl ConfirmedTakeGuard {
+    pub(crate) fn enter() -> Self {
+        Self(CONFIRMED_TAKE.with(|flag| flag.replace(true)))
+    }
+}
+
+impl Drop for ConfirmedTakeGuard {
+    fn drop(&mut self) {
+        CONFIRMED_TAKE.with(|flag| flag.set(self.0));
+    }
 }
 
 pub(super) struct CastUndoBoundaryGuard;
@@ -1490,6 +1512,7 @@ pub(super) fn handle_discard_for_cost(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_reveal_for_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -1497,6 +1520,7 @@ pub(super) fn handle_reveal_for_cost(
     count: usize,
     legal_cards: &[ObjectId],
     chosen: &[ObjectId],
+    shared_quality: Option<crate::types::ability::SharedQuality>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     casting::handle_reveal_for_cost(
@@ -1506,6 +1530,7 @@ pub(super) fn handle_reveal_for_cost(
         count,
         legal_cards,
         chosen,
+        shared_quality,
         events,
     )
 }

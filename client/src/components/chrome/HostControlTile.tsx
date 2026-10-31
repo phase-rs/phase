@@ -17,6 +17,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore";
 import { formatJoinShare } from "../../services/serverDetection";
 import { expandParsedDeck, type ParsedDeck } from "../../services/deckParser";
 import { captureSubmissionArtPreferences, submitParsedDeck } from "../../services/deckSubmission";
+import { deckListIdentityKey } from "../../multiplayer/deckListData";
 import { formatSuppliesDeck } from "../../data/formatRegistry";
 import { suppliedAiDeckChoice } from "../../services/pileSource";
 import { SelectField } from "../ui/SelectField";
@@ -26,7 +27,9 @@ const AI_DIFFICULTIES = ["Easy", "Medium", "Hard", "VeryHard"] as const;
 const RANDOM_DECK: DeckChoice = { type: "Random" };
 
 type DeckOption = { id: string; label: string; choice: DeckChoice; source?: ParsedDeck };
-type AiAssignment = { slot: PlayerSlot; option: DeckOption; difficulty: string };
+/** `expectedKind` is the seat kind the server must still find when the assignment lands (upstream #10448):
+ *  set for the host's Add AI and Fill With AI so a human who joined while the deck was prepared is kept. */
+type AiAssignment = { slot: PlayerSlot; option: DeckOption; difficulty: string; expectedKind?: SeatKind };
 
 /** Artwork is not selection identity; retain every other wire field and its order. */
 export function deckChoiceKey(choice: DeckChoice): string {
@@ -35,10 +38,8 @@ export function deckChoiceKey(choice: DeckChoice): string {
       return "Random";
     case "Named":
       return `Named:${choice.data}`;
-    case "DeckList": {
-      const { printings: _printings, ...names } = choice.data;
-      return JSON.stringify(names);
-    }
+    case "DeckList":
+      return deckListIdentityKey(choice.data);
   }
 }
 
@@ -130,7 +131,7 @@ function SeatRow({
                 onClick={() => {
                   if (busy) return;
                   const option = pickRandomAiDeck();
-                  if (option) assign([{ slot, option, difficulty: "Medium" }]);
+                  if (option) assign([{ slot, option, difficulty: "Medium", expectedKind: { type: "WaitingHuman" } }]);
                 }}
                 className="rounded border border-cyan-500/20 px-2 py-0.5 text-xs text-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -395,10 +396,11 @@ export function HostControlTile() {
     void (async () => {
       try {
         const snapshot = captureSubmissionArtPreferences();
-        const prepared = await Promise.all(assignments.map(async ({ slot, option, difficulty }) => ({
+        const prepared = await Promise.all(assignments.map(async ({ slot, option, difficulty, expectedKind }) => ({
           type: "SetKind" as const,
           data: {
             seatIndex: slot.playerId,
+            ...(expectedKind ? { expectedKind } : {}),
             kind: {
               type: "Ai" as const,
               data: {
@@ -476,7 +478,7 @@ export function HostControlTile() {
     for (const slot of waitingSeats) {
       const option = pickRandomAiDeck();
       if (!option) return;
-      assignments.push({ slot, option, difficulty: "Medium" });
+      assignments.push({ slot, option, difficulty: "Medium", expectedKind: { type: "WaitingHuman" } });
     }
     assignAi(assignments, true);
   };

@@ -108,7 +108,7 @@ struct ClusterSmell {
 /// `types::card::LayoutKind`, so the skill's `rg "<concept>" data/engine-inventory.json`
 /// existence check is unaffected. Unique keys additionally make the `BTreeMap` order — and so
 /// the emitted JSON — a function of the source tree alone.
-const TARGET_DIRS: &[&str] = &["crates/engine/src"];
+const TARGET_DIRS: &[&str] = &["crates/engine/src", "crates/phase-ast/src"];
 const OUTPUT: &str = "data/engine-inventory.json";
 
 fn main() -> Result<()> {

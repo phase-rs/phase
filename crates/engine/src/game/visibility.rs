@@ -1559,6 +1559,15 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // value can encode hidden-zone information (for example, hand sizes), so it
     // belongs with the private discard cursor rather than any viewer payload.
     filtered.clause_minimum_snapshot = None;
+    // CR 603.10d + CR 400.2: control-change observations are rules authority,
+    // not a viewer payload. Their latched watcher contexts and subject
+    // snapshots can describe hidden cards (a face-down card exiled with
+    // Duplicity or Gustha's Scepter: its id and mana value). Every event and
+    // ability carries only a key into these two tables, so dropping the tables
+    // is the whole projection, whatever carrier (prompt, pending trigger,
+    // stack entry, continuation) holds a key.
+    filtered.control_change_observations.clear();
+    filtered.control_change_captures.clear();
     // Deferred life-cost owners can embed a complete PendingCast, including
     // hidden card and target context. The projected WaitingFor is the only
     // viewer-facing interaction surface.
@@ -2906,7 +2915,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 // (e.g. which cards match a required color or type, and how many matching
                 // cards are in hand). Drop candidate IDs and candidate set cardinality entirely
                 // for viewers without private access, preserving public required count metadata.
-                PayCostKind::Reveal | PayCostKind::Discard => Some(vec![]),
+                PayCostKind::Reveal { .. } | PayCostKind::Discard => Some(vec![]),
                 // Hand-pitch exile cost (Force of Will family): hand is hidden,
                 // so opaque every choice. Graveyard exile is public — no redaction.
                 PayCostKind::ExileFromZone {
@@ -4304,10 +4313,18 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
                 redact_pending_mana_ability_payment(mana_ability, hidden_ids);
             }
             // The spell resumes are the `pending_cast_mut()` call above.
+            // `TeamTapPayment`'s creature ids are public board state (already
+            // surfaced as prompt `choices`) and its cost filter is card text
+            // (public, like an `UnlessPayment` cost) — but its carried
+            // resolving ability needs the same viewer-keyed redaction as
+            // every other carried ability.
             CostResume::Spell { .. }
             | CostResume::SpellCost { .. }
             | CostResume::Resolution
             | CostResume::TurnFaceUp { .. } => {}
+            CostResume::TeamTapPayment { ability, .. } => {
+                redact_ability_payment(ability, hidden_ids);
+            }
         },
         WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
             CollectEvidenceResume::Effect { pending_ability } => {

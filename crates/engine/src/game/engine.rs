@@ -1502,6 +1502,8 @@ fn apply_action_boundary_core(
     // immediately preceding action. Drop it before a new outer action starts;
     // the active search itself remains the sole authority during the prompt.
     state.clear_completed_hidden_search_audiences();
+    // Taken once per action, so every field a replayed cycle grows must be a structurally shared
+    // container.
     let boundary_snapshot = std::sync::Arc::new(state.clone());
     let cast_undo_boundary =
         super::engine_casting::CastUndoBoundaryGuard::enter(boundary_snapshot.clone());
@@ -2293,6 +2295,9 @@ fn finish_action_boundary_with_lifecycle(
     EngineError,
 > {
     state.consumed_before_priority_trigger_events.clear();
+    // CR 603.10d: this action's control-change events have been collected;
+    // keep only the observations a retained carrier still names.
+    state.release_unreferenced_control_change_observations();
     let RawActionApplication {
         mut result,
         journal_start,
@@ -8424,6 +8429,7 @@ pub(crate) fn drive_persistent_axis_collapse(
     events: &mut Vec<GameEvent>,
 ) -> Result<u32, EngineError> {
     let _guard = SimulationProbeGuard::enter(); // held across the whole drive
+    let _take = super::engine_casting::ConfirmedTakeGuard::enter();
     #[cfg(feature = "test-support")]
     let mut take_cost = crate::game::perf_counters::TakeCostRecorder::begin(n);
     // One rollback snapshot per take: every cycle drives `state` in place, and a failed cycle
@@ -12905,106 +12911,140 @@ fn apply_non_priority_pass_action(
             // visible face or its election flags. A forged receipt must leave
             // the prompt, object, permissions, triggers, journal, and events
             // byte-for-byte untouched.
-            if let Some(permission_index) = resolution_permission {
-                let cleanup = state
-                    .objects
-                    .get(object_id)
-                    .and_then(|object| object.casting_permissions.get(permission_index.0))
-                    .and_then(|permission| match permission {
-                        crate::types::ability::CastingPermission::ExileWithAltCost {
-                            granted_to: Some(grantee),
-                            resolution_cleanup: Some(cleanup),
-                            ..
-                        } if *grantee == *player => Some(cleanup.clone()),
-                        _ => None,
-                    })
-                    .ok_or_else(|| {
-                        EngineError::InvalidAction(
+            let resolution_cleanup = match resolution_permission {
+                None => None,
+                Some(permission_index) => {
+                    let cleanup = state
+                        .objects
+                        .get(object_id)
+                        .and_then(|object| object.casting_permissions.get(permission_index.0))
+                        .and_then(|permission| match permission {
+                            crate::types::ability::CastingPermission::ExileWithAltCost {
+                                granted_to: Some(grantee),
+                                resolution_cleanup: Some(cleanup),
+                                ..
+                            } if *grantee == *player => Some(cleanup.clone()),
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            EngineError::InvalidAction(
                             "Resolution face choice permission provenance is stale or mismatched"
                                 .to_string(),
                         )
-                    })?;
-                crate::game::engine_resolution_choices::validate_resolution_cast_cleanup_authority(
+                        })?;
+                    crate::game::engine_resolution_choices::validate_resolution_cast_cleanup_authority(
                     *player, &cleanup,
                 )?;
-                crate::game::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
+                    crate::game::engine_resolution_choices::validate_resolution_cast_delayed_trigger_receipts(
                     state, &cleanup,
                 )?;
-            }
-            // A resolution-owned election has not announced anything yet.  If
-            // the selected face later fails its exact permission policy, put
-            // the object (including the appended temporary permission) back
-            // exactly as the public prompt exposed it.
-            let resolution_object_before = resolution_permission
-                .as_ref()
-                .and_then(|_| state.objects.get(object_id).cloned());
-            if let Some(obj) = state.objects.get_mut(object_id) {
-                if back_face {
-                    // Swap to back face — the shared swap preserves the stored
-                    // slot's layout_kind (#7565).
-                    super::printed_cards::swap_object_faces(obj);
-                    // CR 712.8a (MDFC) / CR 709.3 (split): non-front face showing;
-                    // `apply_zone_exit_cleanup` reverts when leaving the stack.
-                    obj.modal_back_face = true;
+                    Some((permission_index, cleanup))
                 }
-                // CR 601.2b (#7565): remember that THIS cast's face choice is
-                // made so the handle_play_land / handle_cast_spell re-entry
-                // does not re-prompt. A transient flag, NOT
-                // `back_face.layout_kind = None`: that erasure was permanent,
-                // so a recast from hand (Rescue, bounce) silently auto-picked
-                // the front face and every other layout_kind consumer went
-                // blind. Cleared on any zone change off the stack and on
-                // cancel.
-                obj.cast_face_committed = true;
-            }
-            if let Some(permission_index) = resolution_permission {
-                let result = casting::continue_resolution_modal_face_choice(
-                    state,
-                    *player,
-                    *object_id,
-                    casting::ResolutionModalFaceChoice {
-                        permission_index,
-                        payment_mode: *payment_mode,
-                        additional_cost: resolution_additional_cost.clone(),
-                    },
-                    &mut events,
-                );
-                match result {
-                    // CR 608.2g: the elected face's cast continues through the
-                    // shared post-action seam below, which finishes the
-                    // still-resolving parent once the cast leaves priority.
-                    Ok(waiting_for) => waiting_for,
-                    Err(error) => {
-                        if let Some(object) = resolution_object_before {
-                            state.objects.insert(*object_id, object);
-                        }
-                        return Err(error);
-                    }
-                }
-            } else {
-                // CR 712.12 / CR 712.11b: Route the re-entry by the now-active face's
-                // type. A land face is put onto the battlefield via the play-land
-                // special action (CR 712.12); a spell face is cast (CR 712.11b — Esika
-                // // The Prismatic Bridge). After a swap
-                // the new back_face (from snapshot_object_face) has layout_kind: None,
-                // and a front-face choice clears it explicitly — so neither the
-                // both-faces-land intercept nor the spell-face intercept re-fires.
-                let active_is_land = state.objects.get(object_id).is_some_and(|obj| {
-                    obj.card_types
-                        .core_types
-                        .contains(&crate::types::card_type::CoreType::Land)
+            };
+            // CR 701.18b + CR 712.12: under a Play instruction the back face
+            // of a spell//land modal card is a land face. Electing it plays
+            // the land during resolution instead of casting, so no face
+            // mutation happens here; the land-face completion elects the face
+            // itself. A back face whose land play is not admissible falls
+            // through to the cast path below, which rejects it and restores
+            // the object exactly as today.
+            let land_face = back_face
+                && resolution_cleanup.as_ref().is_some_and(|(_, cleanup)| {
+                    casting::resolution_land_face_admission(
+                        state,
+                        *player,
+                        *object_id,
+                        &cleanup.face_policy,
+                    )
                 });
-                if active_is_land {
-                    handle_play_land(state, *player, *object_id, *card_id, &mut events)?
-                } else {
-                    casting::handle_cast_spell_with_payment_mode(
+            match resolution_cleanup {
+                Some((permission_index, _)) if land_face => {
+                    crate::game::engine_resolution_choices::complete_resolution_land_face_choice(
                         state,
                         *player,
                         *object_id,
                         *card_id,
-                        *payment_mode,
+                        permission_index,
                         &mut events,
                     )?
+                }
+                _ => {
+                    // A resolution-owned election has not announced anything yet.  If
+                    // the selected face later fails its exact permission policy, put
+                    // the object (including the appended temporary permission) back
+                    // exactly as the public prompt exposed it.
+                    let resolution_object_before = resolution_permission
+                        .as_ref()
+                        .and_then(|_| state.objects.get(object_id).cloned());
+                    if let Some(obj) = state.objects.get_mut(object_id) {
+                        if back_face {
+                            // Swap to back face — the shared swap preserves the stored
+                            // slot's layout_kind (#7565).
+                            super::printed_cards::swap_object_faces(obj);
+                            // CR 712.8a (MDFC) / CR 709.3 (split): non-front face showing;
+                            // `apply_zone_exit_cleanup` reverts when leaving the stack.
+                            obj.modal_back_face = true;
+                        }
+                        // CR 601.2b (#7565): remember that THIS cast's face choice is
+                        // made so the handle_play_land / handle_cast_spell re-entry
+                        // does not re-prompt. A transient flag, NOT
+                        // `back_face.layout_kind = None`: that erasure was permanent,
+                        // so a recast from hand (Rescue, bounce) silently auto-picked
+                        // the front face and every other layout_kind consumer went
+                        // blind. Cleared on any zone change off the stack and on
+                        // cancel.
+                        obj.cast_face_committed = true;
+                    }
+                    if let Some(permission_index) = resolution_permission {
+                        let result = casting::continue_resolution_modal_face_choice(
+                            state,
+                            *player,
+                            *object_id,
+                            casting::ResolutionModalFaceChoice {
+                                permission_index,
+                                payment_mode: *payment_mode,
+                                additional_cost: resolution_additional_cost.clone(),
+                            },
+                            &mut events,
+                        );
+                        match result {
+                            // CR 608.2g: the elected face's cast continues through the
+                            // shared post-action seam below, which finishes the
+                            // still-resolving parent once the cast leaves priority.
+                            Ok(waiting_for) => waiting_for,
+                            Err(error) => {
+                                if let Some(object) = resolution_object_before {
+                                    state.objects.insert(*object_id, object);
+                                }
+                                return Err(error);
+                            }
+                        }
+                    } else {
+                        // CR 712.12 / CR 712.11b: Route the re-entry by the now-active face's
+                        // type. A land face is put onto the battlefield via the play-land
+                        // special action (CR 712.12); a spell face is cast (CR 712.11b — Esika
+                        // // The Prismatic Bridge). After a swap
+                        // the new back_face (from snapshot_object_face) has layout_kind: None,
+                        // and a front-face choice clears it explicitly — so neither the
+                        // both-faces-land intercept nor the spell-face intercept re-fires.
+                        let active_is_land = state.objects.get(object_id).is_some_and(|obj| {
+                            obj.card_types
+                                .core_types
+                                .contains(&crate::types::card_type::CoreType::Land)
+                        });
+                        if active_is_land {
+                            handle_play_land(state, *player, *object_id, *card_id, &mut events)?
+                        } else {
+                            casting::handle_cast_spell_with_payment_mode(
+                                state,
+                                *player,
+                                *object_id,
+                                *card_id,
+                                *payment_mode,
+                                &mut events,
+                            )?
+                        }
+                    }
                 }
             }
         }
@@ -13513,7 +13553,9 @@ fn apply_non_priority_pass_action(
                     "Counter-cost distribution is not valid for mana abilities".to_string(),
                 ));
             }
-            CostResume::Resolution | CostResume::TurnFaceUp { .. } => {
+            CostResume::Resolution
+            | CostResume::TeamTapPayment { .. }
+            | CostResume::TurnFaceUp { .. } => {
                 return Err(EngineError::InvalidAction(
                     "Counter-cost distribution is not valid for this cost".to_string(),
                 ));
@@ -13556,15 +13598,18 @@ fn apply_non_priority_pass_action(
                         &chosen,
                         &mut events,
                     )?,
-                    PayCostKind::Reveal => engine_casting::handle_reveal_for_cost(
-                        state,
-                        *player,
-                        *pending_cast.clone(),
-                        *count,
-                        choices,
-                        &chosen,
-                        &mut events,
-                    )?,
+                    PayCostKind::Reveal { shared_quality } => {
+                        engine_casting::handle_reveal_for_cost(
+                            state,
+                            *player,
+                            *pending_cast.clone(),
+                            *count,
+                            choices,
+                            &chosen,
+                            shared_quality.clone(),
+                            &mut events,
+                        )?
+                    }
                     PayCostKind::Sacrifice => engine_casting::handle_sacrifice_for_cost(
                         state,
                         *player,
@@ -13779,7 +13824,7 @@ fn apply_non_priority_pass_action(
                 // add the corresponding mana-ability handler instead of
                 // routing it through the spell pipeline.
                 PayCostKind::ReturnToHand
-                | PayCostKind::Reveal
+                | PayCostKind::Reveal { shared_quality: _ }
                 | PayCostKind::ExileFromZone { .. }
                 | PayCostKind::ExileMaterials { .. }
                 | PayCostKind::ExilePermanent { .. }
@@ -13843,7 +13888,7 @@ fn apply_non_priority_pass_action(
                     state.waiting_for.clone()
                 }
                 PayCostKind::Discard
-                | PayCostKind::Reveal
+                | PayCostKind::Reveal { shared_quality: _ }
                 | PayCostKind::ReturnToHand
                 | PayCostKind::ExileFromZone { .. }
                 | PayCostKind::ExilePermanent { .. }
@@ -13858,6 +13903,30 @@ fn apply_non_priority_pass_action(
                     ));
                 }
             },
+            // CR 805.6: one hero's contribution to a collective tap-creatures
+            // payment. The cost authority accumulates it and either prompts
+            // the next hero or settles the session.
+            CostResume::TeamTapPayment {
+                aggregate,
+                eligible,
+                selected,
+                remaining,
+                filter,
+                ability,
+            } => super::costs::handle_team_tap_payment_selection(
+                state,
+                *player,
+                kind,
+                choices,
+                &chosen,
+                *aggregate,
+                eligible,
+                selected,
+                remaining,
+                filter,
+                ability,
+                &mut events,
+            )?,
             CostResume::TurnFaceUp {
                 source,
                 cost_source,
@@ -18636,6 +18705,82 @@ pub(crate) fn resolution_land_play_is_legal(
     is_players_turn && land_play_allowance_refusal(state, player, object_id).is_ok()
 }
 
+/// CR 712.12 + CR 712.8a: put a spell//land modal double-faced card's land
+/// back face up for a land play. The player chose to play the card as a land,
+/// so the land face is the one that enters. `modal_back_face` lets
+/// `apply_zone_exit_cleanup` revert to the front face when the land leaves the
+/// battlefield. `obj.transformed` stays unset: MDFC face selection is not
+/// transformation. The single face-election mutation shared by the special
+/// action (`handle_play_land`) and the resolution-time land-face play
+/// ([`play_land_face_during_resolution`]).
+fn elect_modal_land_back_face(obj: &mut crate::game::game_object::GameObject) {
+    super::printed_cards::swap_object_faces(obj);
+    obj.modal_back_face = true;
+}
+
+/// CR 712.12 + CR 305.2a + CR 305.2b + CR 305.3 + CR 101.2: whether `player` may play the
+/// land back face of the spell//land modal double-faced card `object_id` while
+/// an instructing ability resolves. The object's front face is not a land
+/// (CR 712.8a: outside the battlefield and stack it has only its front face's
+/// characteristics) and its back face is a modal land face. Legality is the
+/// resolution-time land-play authority ([`resolution_land_play_is_legal`]:
+/// turn, prohibitions, allowance) evaluated against the elected land face, on
+/// a projected clone so the real object is not mutated.
+pub(crate) fn resolution_back_land_face_play_is_legal(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if obj
+        .card_types
+        .core_types
+        .contains(&crate::types::card_type::CoreType::Land)
+        || !modal_land_face_election_available(obj)
+    {
+        return false;
+    }
+    let mut projected = state.clone();
+    let Some(projected_obj) = projected.objects.get_mut(&object_id) else {
+        return false;
+    };
+    elect_modal_land_back_face(projected_obj);
+    resolution_land_play_is_legal(&projected, player, object_id)
+}
+
+/// CR 701.18b + CR 712.12 + CR 305.2a + CR 116.2a: play the land back face of
+/// the spell//land modal double-faced card `object_id` while the instructing
+/// ability resolves. `None` is the CR 305.2b / CR 305.3 "ignore any part of an
+/// effect that instructs a player to do so": nothing is mutated or counted.
+/// Otherwise the land face is elected and the play commits through the same
+/// replacement-aware authority as every other land play ([`commit_land_play`]).
+pub(crate) fn play_land_face_during_resolution(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Option<LandPlayCommit> {
+    if !resolution_back_land_face_play_is_legal(state, player, object_id) {
+        return None;
+    }
+    let obj = state.objects.get_mut(&object_id)?;
+    elect_modal_land_back_face(obj);
+    // CR 116.2a: the land is put onto the battlefield from the zone it was in.
+    let origin_zone = obj.zone;
+    Some(commit_land_play(
+        state,
+        player,
+        object_id,
+        origin_zone,
+        None,
+        None,
+        None,
+        events,
+    ))
+}
+
 /// CR 701.18b + CR 305.2a + CR 116.2a: play `object_id` as a land while the
 /// instructing ability resolves, putting it onto the battlefield from the zone
 /// it is in under `player`'s control (CR 110.2a). `None` is the CR 305.2b /
@@ -18646,12 +18791,12 @@ pub(crate) fn resolution_land_play_is_legal(
 /// outside the graveyard never reaches here from a Play instruction —
 /// `cast_from_zone::resolution_play_route` keeps it on the lingering grant,
 /// whose PlayLand authority (its front face is a Land) opens `ModalFaceChoice`.
-/// A spell//land MDFC never reaches here either: it is cast by its front face
-/// (CR 712.8a). The `CastFromZone` graveyard route is excluded from that
-/// fallback because base takes the immediate graveyard route there and never
-/// lingers; a graveyard land//land plays its front face (no printed carrier;
-/// CR 712.12 election is the follow-up's). Resolution-owned face election,
-/// including the spell//land land face, is a tracked follow-up.
+/// A spell//land MDFC never reaches here either: it takes the resolution-owned
+/// face election (`ResolutionPlayRoute::ElectFace`), whose land face is played
+/// by [`play_land_face_during_resolution`]. The `CastFromZone` graveyard route
+/// is excluded from the land//land fallback because base takes the immediate
+/// graveyard route there and never lingers; a graveyard land//land plays its
+/// front face (no printed carrier; its CR 712.12 election is a follow-up).
 pub(crate) fn play_land_during_resolution(
     state: &mut GameState,
     player: PlayerId,
@@ -18886,12 +19031,7 @@ fn handle_play_land(
 
         if land_face_election && !front_is_land {
             // CR 712.12: Only back face is a land — auto-swap (player already chose "play as land")
-            let obj = state.objects.get_mut(&object_id).unwrap();
-            super::printed_cards::swap_object_faces(obj);
-            // CR 712.8a: Mark back-face so apply_zone_exit_cleanup reverts to front face
-            // when this land leaves the battlefield. Do NOT set obj.transformed — MDFC
-            // face selection is not transformation.
-            obj.modal_back_face = true;
+            elect_modal_land_back_face(state.objects.get_mut(&object_id).unwrap());
         }
     }
 

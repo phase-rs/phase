@@ -10604,9 +10604,7 @@ async fn handle_client_message(
                         ServerMessage::error(error)
                     })?;
                     if let Some(ref format) = format_config {
-                        if format.format == engine::types::format::GameFormat::Planechase
-                            && !ai_seats.is_empty()
-                        {
+                        if format.format.is_planechase_family() && !ai_seats.is_empty() {
                             return Err(Box::new(ServerMessage::error(
                                 "Planechase does not support AI seats yet".to_string(),
                             )));
@@ -16343,6 +16341,107 @@ mod issue_4548_full_create_tests {
         assert!(
             result.is_ok(),
             "full-mode create did not reject the invalid format deck"
+        );
+    }
+
+    fn hello_frame() -> ClientMessage {
+        ClientMessage::ClientHello {
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            build_commit: build_commit().to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            wire_formats: Vec::new(),
+        }
+    }
+
+    /// A settings-create frame carrying one AI seat (seat 1) under the
+    /// given format, over the empty host deck this harness uses (it runs
+    /// on an empty `CardDatabase`).
+    fn ai_create_frame(format_config: engine::types::format::FormatConfig) -> ClientMessage {
+        ClientMessage::CreateGameWithSettings {
+            deck: empty_deck(),
+            display_name: "Alice".to_string(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: Default::default(),
+            ai_seats: vec![ai_seat()],
+            format_config: Some(format_config),
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+            start_when_full: true,
+            ranked: false,
+            requested_code: None,
+            booster_pack_pool: None,
+        }
+    }
+
+    /// Connects to a fresh full-mode server, hellos, sends one AI-seat
+    /// settings-create frame under `format`, and returns the first reply.
+    async fn ai_create_first_reply(format: engine::types::format::FormatConfig) -> ServerMessage {
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::ServerHello { .. }
+            ));
+            send_test_message(&mut socket, &hello_frame(), false).await;
+            send_test_message(&mut socket, &ai_create_frame(format), false).await;
+            recv_server_message(&mut socket).await
+        })
+        .await;
+        server.abort();
+        result.expect("create reply must arrive before the timeout")
+    }
+
+    /// `Planechase` with AI seats is refused before deck validation runs.
+    #[tokio::test]
+    async fn full_create_refuses_ai_seats_for_planechase() {
+        let reply = ai_create_first_reply(engine::types::format::FormatConfig::planechase()).await;
+        let ServerMessage::Error { message, .. } = reply else {
+            panic!("planechase + AI seats must be refused, got {reply:?}");
+        };
+        assert!(
+            message.contains("does not support AI seats"),
+            "unexpected refusal: {message}"
+        );
+    }
+
+    /// `PlanechaseCommander` with AI seats is refused the same way: the
+    /// guard reads `GameFormat::is_planechase_family()`, so the composed
+    /// variant cannot slip AI seats through to `ai_seat_setups`.
+    #[tokio::test]
+    async fn full_create_refuses_ai_seats_for_planechase_commander() {
+        let reply =
+            ai_create_first_reply(engine::types::format::FormatConfig::planechase_commander())
+                .await;
+        let ServerMessage::Error { message, .. } = reply else {
+            panic!("planechase commander + AI seats must be refused, got {reply:?}");
+        };
+        assert!(
+            message.contains("does not support AI seats"),
+            "unexpected refusal: {message}"
+        );
+    }
+
+    /// Positive control: ordinary `Commander` with AI seats passes the AI
+    /// guard. The empty host deck then fails format deck validation, which
+    /// proves creation reached validation instead of the AI refusal.
+    #[tokio::test]
+    async fn full_create_commander_ai_seats_reach_deck_validation() {
+        let reply = ai_create_first_reply(engine::types::format::FormatConfig::commander()).await;
+        let ServerMessage::Error { message, code } = reply else {
+            panic!("empty commander deck must fail validation, got {reply:?}");
+        };
+        assert_eq!(code, Some(ServerErrorCode::DeckRejected));
+        assert!(
+            !message.contains("does not support AI seats"),
+            "commander must pass the AI guard: {message}"
         );
     }
 

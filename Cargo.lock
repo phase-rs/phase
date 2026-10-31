@@ -772,6 +772,7 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
+ "state-codec",
  "wasm-bindgen",
 ]
 
@@ -1952,6 +1953,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "phase-ast"
+version = "0.119.0"
+dependencies = [
+ "im",
+ "nom",
+ "serde",
+ "serde_ignored",
+ "serde_json",
+ "strum",
+ "thiserror 2.0.18",
+ "toml",
+]
+
+[[package]]
 name = "phase-engine"
 version = "0.119.0"
 dependencies = [
@@ -1963,6 +1978,7 @@ dependencies = [
  "libc",
  "nom",
  "petgraph",
+ "phase-ast",
  "phase-engine",
  "pretty_assertions",
  "proptest",
@@ -2022,6 +2038,7 @@ dependencies = [
  "serde_json",
  "server-core",
  "sha2",
+ "state-codec",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
@@ -3021,6 +3038,20 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "state-codec"
+version = "0.119.0"
+dependencies = [
+ "flate2",
+ "phase-ai",
+ "phase-engine",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "string_cache"

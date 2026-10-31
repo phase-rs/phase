@@ -159,6 +159,51 @@ run_gate
 expect_listed 'parser: a line planted in another types/ file is not listed' "  crates/engine/src/types/text_grammar.rs:
     $P_PLANTED"
 
+# The AST layer's crate (crates/phase-ast) holds the grammar module after the
+# move, and its path is in scope beside the old one: a whole-file rename, an A3
+# split and a function moved into it are moves, a line planted at the new path
+# is listed, and other phase-ast types/ files stay outside the gate's view.
+parser_fixture
+put crates/engine/src/types/text_grammar.rs 'use super::*;' "$P_FROZEN" 'fn other() {}'
+commit_base
+move crates/engine/src/types/text_grammar.rs crates/phase-ast/src/types/text_grammar.rs
+commit 'rename into phase-ast'
+run_gate
+expect_rc 'parser: whole-file rename of text_grammar.rs into phase-ast passes' 0
+expect_out 'parser: the phase-ast rename reaches Gate A PASS' 'Gate A PASS head='
+printf '%s\n' "$P_PLANTED" >> "$FIXTURE/crates/phase-ast/src/types/text_grammar.rs"
+commit planted
+run_gate
+expect_rc 'parser: a line planted in phase-ast text_grammar.rs fails' 1
+expect_listed 'parser: only the line planted in the phase-ast grammar module is listed' "  crates/phase-ast/src/types/text_grammar.rs:
+    $P_PLANTED"
+put crates/phase-ast/src/types/other.rs "$P_PLANTED"
+commit 'plant outside the phase-ast grammar module'
+run_gate
+expect_listed 'parser: a line planted in another phase-ast types/ file is not listed' "  crates/phase-ast/src/types/text_grammar.rs:
+    $P_PLANTED"
+
+parser_fixture
+put crates/engine/src/types/text_grammar.rs 'use super::*;' "$P_FROZEN" 'fn other() {}'
+commit_base
+put crates/engine/src/types/text_grammar.rs 'use super::*;' 'fn other() {}'
+put crates/phase-ast/src/types/text_grammar.rs 'use super::*;' "$P_FROZEN"
+commit 'split text_grammar.rs into phase-ast'
+run_gate
+expect_rc 'parser: an A3 split of text_grammar.rs into phase-ast passes' 0
+expect_out 'parser: both grammar module halves were scanned' 'Gate A: scanned 2 file(s)'
+
+parser_fixture
+put crates/engine/src/parser/clause.rs 'use super::*;' "$P_FROZEN" 'fn other() {}'
+put crates/phase-ast/src/types/text_grammar.rs 'fn existing() {}'
+commit_base
+put crates/engine/src/parser/clause.rs 'use super::*;' 'fn other() {}'
+put crates/phase-ast/src/types/text_grammar.rs 'fn existing() {}' "$P_FROZEN"
+commit 'move into the phase-ast grammar module'
+run_gate
+expect_rc 'parser: a line moved into phase-ast text_grammar.rs passes' 0
+expect_out 'parser: phase-ast text_grammar.rs was scanned' 'Gate A: scanned 2 file(s)'
+
 # --- check-engine-authorities.sh: family (A) -------------------------------
 # Sections (B0)-(D) are full-tree censuses of the real engine. Here they are
 # stubs that pass, so section (A), the diff-based one, decides the exit.
@@ -202,6 +247,42 @@ expect_rc 'authority: a line moved out of excluded game/keywords.rs fails' 1
 expect_listed 'authority: the line moved out of keywords.rs is listed' "  crates/engine/src/game/combat.rs:
     $A_FROZEN"
 
+# crates/phase-ast/src is in the gate's scope beside crates/engine/src: the AST
+# move's whole-file renames, A3 splits and function moves are moves, and a line
+# planted in phase-ast is listed.
+authority_fixture
+put crates/engine/src/types/ability.rs 'use super::*;' "$A_FROZEN" 'fn other() {}'
+commit_base
+move crates/engine/src/types/ability.rs crates/phase-ast/src/types/ability.rs
+commit 'rename into phase-ast'
+run_gate
+expect_rc 'authority: whole-file rename into phase-ast passes' 0
+printf '%s\n' "$A_PLANTED" >> "$FIXTURE/crates/phase-ast/src/types/ability.rs"
+commit planted
+run_gate
+expect_rc 'authority: a line planted in phase-ast fails' 1
+expect_listed 'authority: only the line planted in phase-ast is listed' "  crates/phase-ast/src/types/ability.rs:
+    $A_PLANTED"
+
+authority_fixture
+put crates/engine/src/types/ability.rs 'use super::*;' "$A_FROZEN" 'fn other() {}'
+commit_base
+put crates/engine/src/types/ability.rs 'use super::*;' 'fn other() {}'
+put crates/phase-ast/src/types/ability.rs 'use super::*;' "$A_FROZEN"
+commit 'split ability.rs into phase-ast'
+run_gate
+expect_rc 'authority: an A3 split into phase-ast passes' 0
+
+authority_fixture
+put crates/engine/src/game/combat.rs 'use super::*;' "$A_FROZEN"
+put crates/phase-ast/src/types/ability.rs 'fn existing() {}'
+commit_base
+put crates/engine/src/game/combat.rs 'use super::*;'
+put crates/phase-ast/src/types/ability.rs 'fn existing() {}' "$A_FROZEN"
+commit 'move into phase-ast'
+run_gate
+expect_rc 'authority: a line moved into an existing phase-ast file passes' 0
+
 # --- check-test-card-data-load.sh -------------------------------------------
 C_FROZEN='    let db = CardDatabase::from_export(Path::new("../../client/public/card-data.json"));'
 C_PLANTED='    let raw = std::fs::read_to_string("../../client/public/card-data.json");'
@@ -229,6 +310,41 @@ commit 'move out of support.rs'
 run_gate
 expect_rc 'card-data: a load moved out of excluded support.rs fails' 1
 expect_listed 'card-data: the load moved out of support.rs is listed' "  crates/engine/tests/integration/combat.rs:2:$C_FROZEN"
+
+# crates/phase-ast/src is in the gate's scope: the AST move's whole-file renames,
+# A3 splits and function moves are moves, and a load planted in phase-ast is
+# listed.
+new_fixture check-test-card-data-load.sh
+put crates/engine/src/types/ability.rs 'fn load() {' "$C_FROZEN" '}'
+commit_base
+move crates/engine/src/types/ability.rs crates/phase-ast/src/types/ability.rs
+commit 'rename into phase-ast'
+run_gate
+expect_rc 'card-data: whole-file rename into phase-ast passes' 0
+put crates/phase-ast/src/types/ability.rs 'fn load() {' "$C_FROZEN" '}' 'fn load_raw() {' "$C_PLANTED" '}'
+commit planted
+run_gate
+expect_rc 'card-data: a load planted in phase-ast fails' 1
+expect_listed 'card-data: only the load planted in phase-ast is listed, at its line' "  crates/phase-ast/src/types/ability.rs:5:$C_PLANTED"
+
+new_fixture check-test-card-data-load.sh
+put crates/engine/src/types/ability.rs 'fn load() {' "$C_FROZEN" '}' 'fn other() {}'
+commit_base
+put crates/engine/src/types/ability.rs 'fn other() {}'
+put crates/phase-ast/src/types/ability.rs 'fn load() {' "$C_FROZEN" '}'
+commit 'split ability.rs into phase-ast'
+run_gate
+expect_rc 'card-data: an A3 split into phase-ast passes' 0
+
+new_fixture check-test-card-data-load.sh
+put crates/engine/tests/integration/combat.rs 'fn load() {' "$C_FROZEN" '}' 'fn other() {}'
+put crates/phase-ast/src/types/ability.rs 'fn existing() {}'
+commit_base
+put crates/engine/tests/integration/combat.rs 'fn other() {}'
+put crates/phase-ast/src/types/ability.rs 'fn existing() {}' 'fn load() {' "$C_FROZEN" '}'
+commit 'move into phase-ast'
+run_gate
+expect_rc 'card-data: a load moved into an existing phase-ast file passes' 0
 
 # --- check-legacy-quantity-callsites.sh ---------------------------------------
 # Its embedded seam check reads five hardcoded seam files and requires each

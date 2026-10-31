@@ -1840,6 +1840,10 @@ fn subject_anchored_optional_actor(
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
+            // CR 108.3 + CR 508.1d: per-member owner anchor — names no single
+            // actor, so it cannot lift to a delayed trigger; refused like the
+            // other resolution-scoped bindings above.
+            | TargetFilter::AffectedObjectOwner
             | TargetFilter::AllPlayers => None,
         },
         // CR 608.2c + CR 608.2d: during THIS resolution every event-context and
@@ -1888,6 +1892,9 @@ fn subject_anchored_optional_actor(
             | TargetFilter::ControllerAndControlledPermanents { .. }
             | TargetFilter::Or { .. }
             | TargetFilter::And { .. }
+            // CR 108.3 + CR 508.1d: per-member owner anchor — resolved per
+            // affected member at install, never one announcer.
+            | TargetFilter::AffectedObjectOwner
             | TargetFilter::Not { .. } => None,
 
             // An already-resolved `PlayerId`, not a reference to one. CR 109.5
@@ -4534,6 +4541,12 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // same reason as the gate above: only here are the grant and its rider both
     // linked. See `refuse_cast_rider_on_lingering_grant`.
     super::lower::refuse_cast_rider_on_lingering_grant(&mut result);
+
+    // CR 614.1c + CR 613.1d: a "cast this way" rider after a granted graveyard
+    // cast permission describes the spell cast through it, so the permission
+    // carries it to that cast. Applied on the FINAL tree, where the grant and
+    // its rider are linked. See `fold_cast_rider_into_graveyard_grant`.
+    super::lower::fold_cast_rider_into_graveyard_grant(&mut result);
 
     // CR 608.2c + CR 107.1c: A trailing "repeat this process" directive sets a
     // chain-level loop predicate; apply it to the assembled root ability so the

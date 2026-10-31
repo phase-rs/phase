@@ -11,7 +11,7 @@ import type {
   MatchType,
 } from "../../adapter/types";
 import { AI_DIFFICULTIES, isAiDifficulty } from "../../constants/ai";
-import { FORMAT_REGISTRY, formatSuppliesDeck } from "../../data/formatRegistry";
+import { FORMAT_REGISTRY, formatSuppliesDeck, isPlanechaseFamilyFormat } from "../../data/formatRegistry";
 import {
   directoryLobbySources,
   FORMAT_DEFAULTS,
@@ -573,7 +573,7 @@ export function HostSetup({
   // No AI seats in a Discord game: its seats are promised to the Discord
   // players, and an all-AI table would never register the requested code.
   const aiSeatsSupported =
-    seed === undefined && !formatConfig.team_based && formatConfig.format !== "Planechase";
+    seed === undefined && !formatConfig.team_based && !isPlanechaseFamilyFormat(formatConfig.format);
   const effectiveAiSeats = aiSeatsSupported ? aiSeats : [];
   // A remembered config can carry a CEDH seat; the table is then cEDH and its
   // Random pool is restricted to bracket 5 (Commander formats only).

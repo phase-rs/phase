@@ -2,6 +2,43 @@
 /* eslint-disable */
 
 /**
+ * Immutable exact-JSON state owned by wasm-bindgen, not an authoritative restore.
+ *
+ * Optional baseline arguments consume their handles. Call `clone_handle` before
+ * transferring a baseline if the caller needs to retain it.
+ */
+export class StateCodecHandle {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Cheaply share immutable state before transferring a baseline handle.
+     */
+    clone_handle(): StateCodecHandle;
+    /**
+     * Return the full SHA-256 digest of the retained JSON bytes as lowercase hex.
+     */
+    hash(): string;
+    /**
+     * Return the exact retained JSON value as text, including internal whitespace.
+     */
+    json(): string;
+    /**
+     * Return the exact retained JSON bytes, without parsing through JavaScript.
+     */
+    json_bytes(): Uint8Array;
+    /**
+     * Return the publication revision, if supplied, as a JavaScript bigint.
+     */
+    revision(): bigint | undefined;
+    /**
+     * Share immutable JSON with publication metadata, without changing its bytes or hash.
+     * Revisions are supplied by the publisher, not inferred from JSON.
+     */
+    with_revision(revision: bigint): StateCodecHandle;
+}
+
+/**
  * Apply a seat mutation to a seat state, using the TLS card database for deck
  * resolution. Both arguments are JSON strings; returns `{ state, delta }` as
  * a JS object on success, or a JS error string on failure.
@@ -695,6 +732,40 @@ export function sideboardPolicyForFormat(format_config: any): any;
 export function signatureSpellSelectionPolicy(request: any): any;
 
 /**
+ * Decode frame bytes into exact JSON, never through the engine's state decoder.
+ *
+ * FULL ignores every baseline. Passing a baseline consumes that handle; call
+ * `clone_handle` before transfer to retain it. Malformed frames and DELTA
+ * revision/hash mismatches return errors without changing retained clones.
+ */
+export function state_codec_decode(bytes: Uint8Array, baseline?: StateCodecHandle | null): StateCodecHandle;
+
+/**
+ * Encode exact JSON as FULL or, with a compatible revisioned baseline, DELTA.
+ * Pass no baseline to force FULL for initial delivery or stream recovery.
+ *
+ * Passing a baseline consumes that handle; call `clone_handle` before transfer
+ * to retain it. The state argument is borrowed and remains usable.
+ */
+export function state_codec_encode(state: StateCodecHandle, baseline?: StateCodecHandle | null): Uint8Array;
+
+/**
+ * Serialize the current game's engine-filtered viewer state, without changing it.
+ *
+ * A seat selects that player's projection; 255 selects the server's spectator
+ * sentinel. An omitted viewer selects the engine's unseated public projection.
+ * Returns an error when no game is initialized. No derived-view envelope is added.
+ */
+export function state_codec_for_viewer(viewer?: number | null): StateCodecHandle;
+
+/**
+ * Validate raw JSON bytes and retain their exact value span, not outer whitespace.
+ *
+ * This does not deserialize or validate an authoritative engine state.
+ */
+export function state_codec_from_json(bytes: Uint8Array): StateCodecHandle;
+
+/**
  * Submit a game action on behalf of `actor` and return the ActionResult
  * (events + waiting_for).
  *
@@ -748,6 +819,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly __wbg_statecodechandle_free: (a: number, b: number) => void;
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly bestOfThreeCeilingForFormat: (a: any) => any;
     readonly buildLlmDecisionRequest: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
@@ -757,8 +829,10 @@ export interface InitOutput {
     readonly checkDeckPrintingsBounds: (a: any) => [number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
+    readonly clear_replay_playback: () => void;
     readonly commanderPartnerCandidates: (a: number, b: number, c: any, d: any) => [number, number, number];
     readonly companionCandidates: (a: any) => [number, number, number];
+    readonly create_initial_state: () => any;
     readonly customFormatFromLobbyConfig: (a: number, b: number, c: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
     readonly deckSupplyForFormat: (a: any) => any;
@@ -770,6 +844,7 @@ export interface InitOutput {
     readonly export_replay_log: () => [number, number, number, number];
     readonly formatConfigForCustomRules: (a: any) => [number, number, number];
     readonly getAiActionProposalFromLlmResponse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
+    readonly getFormatRegistry: () => any;
     readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
     readonly get_ai_action_proposal_from_scores_with_diagnostics: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
@@ -781,10 +856,14 @@ export interface InitOutput {
     readonly get_card_parse_details: (a: number, b: number) => any;
     readonly get_card_rulings: (a: number, b: number) => any;
     readonly get_filtered_game_state: (a: number) => any;
+    readonly get_game_state: () => any;
     readonly get_legal_actions_for_viewer_js: (a: number) => any;
+    readonly get_legal_actions_js: () => any;
+    readonly get_stack_pressure: () => any;
     readonly get_viewer_snapshot_js: (a: number) => any;
     readonly get_viewer_transition_snapshot_js: (a: number, b: any) => any;
     readonly has_replay_recording: () => number;
+    readonly init_panic_hook: () => void;
     readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly initialize_multiplayer_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly isCardCommanderEligibleForFormat: (a: number, b: number, c: any) => number;
@@ -792,6 +871,8 @@ export interface InitOutput {
     readonly is_multiplayer_mode: () => number;
     readonly legal_targets_for_castable_js: (a: number) => any;
     readonly legal_targets_for_castables_js: (a: any) => any;
+    readonly list_token_presets_js: () => any;
+    readonly llmProviderCatalog: () => any;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
     readonly maxDeckCopies: (a: number, b: number, c: any) => any;
@@ -800,6 +881,8 @@ export interface InitOutput {
     readonly preview_interaction_js: (a: number, b: any) => any;
     readonly preview_mana_payment_js: (a: number, b: any) => any;
     readonly project_seat_view: (a: number, b: number) => [number, number, number];
+    readonly replay_header_js: () => any;
+    readonly replay_length_js: () => number;
     readonly replay_seek_js: (a: number) => [number, number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number, number];
@@ -809,22 +892,21 @@ export interface InitOutput {
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
     readonly signatureSpellSelectionPolicy: (a: any) => [number, number, number];
+    readonly state_codec_decode: (a: number, b: number, c: number) => [number, number, number];
+    readonly state_codec_encode: (a: number, b: number) => [number, number, number, number];
+    readonly state_codec_for_viewer: (a: number) => [number, number, number];
+    readonly state_codec_from_json: (a: number, b: number) => [number, number, number];
+    readonly statecodechandle_clone_handle: (a: number) => number;
+    readonly statecodechandle_hash: (a: number) => [number, number];
+    readonly statecodechandle_json: (a: number) => [number, number];
+    readonly statecodechandle_json_bytes: (a: number) => [number, number];
+    readonly statecodechandle_revision: (a: number) => [number, bigint];
+    readonly statecodechandle_with_revision: (a: number, b: bigint) => number;
     readonly submit_action: (a: number, b: any) => any;
     readonly submit_ai_action_proposal: (a: number, b: number, c: number, d: any) => any;
     readonly submit_interaction_js: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
     readonly validateLlmProbeResponse: (a: number, b: number, c: number, d: number, e: number) => any;
-    readonly get_game_state: () => any;
-    readonly get_legal_actions_js: () => any;
-    readonly get_stack_pressure: () => any;
-    readonly init_panic_hook: () => void;
-    readonly replay_header_js: () => any;
-    readonly list_token_presets_js: () => any;
-    readonly llmProviderCatalog: () => any;
-    readonly create_initial_state: () => any;
-    readonly getFormatRegistry: () => any;
-    readonly clear_replay_playback: () => void;
-    readonly replay_length_js: () => number;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

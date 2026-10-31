@@ -12,9 +12,10 @@ use crate::types::ability::{
     PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
     SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
+use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::keywords::{Keyword, WardCost};
-use crate::types::mana::ManaCost;
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 use crate::types::zones::Zone;
 
@@ -13678,6 +13679,146 @@ fn triarch_stalker_choose_opponent_persists_for_last_chosen_player_static() {
 }
 
 #[test]
+fn static_bow_to_my_command_chosen_player_cant_attack() {
+    // CR 508.1c + CR 607.2d: Bow to My Command — "Creatures the chosen player
+    // controls can't attack you or planeswalkers you control." The subject
+    // composes the creature head noun with the shared "the chosen player
+    // controls" controller suffix (the source's persisted set-in-motion
+    // choice); the predicate is the Vow defended scope, not a blanket
+    // lockout.
+    let def = parse_static_line(
+        "Creatures the chosen player controls can't attack you or planeswalkers you control.",
+    )
+    .expect("Bow to My Command static leg must parse");
+    assert_eq!(def.mode, StaticMode::CantAttack);
+    assert_eq!(
+        def.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker),
+        "Bow leg must carry the Vow defended scope, got {:?}",
+        def.attack_defended
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::SourceChosenPlayer),
+        )),
+        "Bow leg must scope to the chosen player's creatures, got {:?}",
+        def.affected
+    );
+}
+
+#[test]
+fn static_imprison_chosen_player_cant_untap() {
+    // CR 502.3 + CR 607.2d: Imprison This Insolent Wretch — "Permanents the
+    // chosen player controls don't untap during their untap step." Same
+    // controller suffix as the Bow leg; the "their untap step" remainder
+    // needs no validation (the CantUntap predicate is prefix-matched).
+    let def = parse_static_line(
+        "Permanents the chosen player controls don't untap during their untap step.",
+    )
+    .expect("Imprison static leg must parse");
+    assert_eq!(def.mode, StaticMode::CantUntap);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::SourceChosenPlayer),
+        )),
+        "Imprison leg must scope to the chosen player's permanents, got {:?}",
+        def.affected
+    );
+}
+
+#[test]
+fn bow_to_my_command_choice_persists_for_chosen_player_static() {
+    // CR 607.2d + CR 613.1 + CR 608.2c: Bow to My Command's "As you set this
+    // scheme in motion, choose an opponent" must persist (as
+    // `ChosenAttribute::Player`) BECAUSE the CantAttack static reads it via
+    // `ControllerRef::SourceChosenPlayer`. Mirrors the Triarch Stalker pin.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ChoiceType;
+
+    let parsed = parse_oracle_text(
+        "(An ongoing scheme remains face up until it's abandoned.)\nAs you set this scheme in motion, choose an opponent.\nCreatures the chosen player controls can't attack you or planeswalkers you control.\nAt the beginning of your opponents' end step, they may tap any number of untapped creatures they control with total power 8 or greater. If they do, abandon this scheme.",
+        "Bow to My Command",
+        &[],
+        &["Scheme".to_string()],
+        &[],
+    );
+
+    assert!(
+        parsed.statics.iter().any(|s| matches!(
+            &s.affected,
+            Some(TargetFilter::Typed(tf)) if tf.controller == Some(ControllerRef::SourceChosenPlayer)
+        )),
+        "Bow static must scope by SourceChosenPlayer, got {:?}",
+        parsed.statics
+    );
+
+    let choose = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("expected a triggered choose ability");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                persist: true,
+                ..
+            }
+        ),
+        "As-you-set-in-motion choice must persist when a SourceChosenPlayer static reads it, got {:?}",
+        choose.effect
+    );
+}
+
+#[test]
+fn imprison_choice_persists_for_chosen_player_static() {
+    // CR 607.2d + CR 613.1 + CR 608.2c: Imprison This Insolent Wretch's
+    // "When you set this scheme in motion, choose an opponent" must persist
+    // BECAUSE the CantUntap static reads it via
+    // `ControllerRef::SourceChosenPlayer`. Same pin as Bow, When-framed.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ChoiceType;
+
+    let parsed = parse_oracle_text(
+        "(An ongoing scheme remains face up until it's abandoned.)\nWhen you set this scheme in motion, choose an opponent.\nPermanents the chosen player controls don't untap during their untap step.\nWhen the chosen player is attacked or becomes the target of a spell or ability, abandon this scheme.",
+        "Imprison This Insolent Wretch",
+        &[],
+        &["Scheme".to_string()],
+        &[],
+    );
+
+    assert!(
+        parsed.statics.iter().any(|s| matches!(
+            &s.affected,
+            Some(TargetFilter::Typed(tf)) if tf.controller == Some(ControllerRef::SourceChosenPlayer)
+        )),
+        "Imprison static must scope by SourceChosenPlayer, got {:?}",
+        parsed.statics
+    );
+
+    let choose = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("expected a triggered choose ability");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                persist: true,
+                ..
+            }
+        ),
+        "When-you-set-in-motion choice must persist when a SourceChosenPlayer static reads it, got {:?}",
+        choose.effect
+    );
+}
+
+#[test]
 fn granted_static_reader_persists_last_chosen_player() {
     // CR 607.2d + CR 613.1 + CR 608.2c: the document relation scan must see a
     // granted static that is emitted through `OracleNodeIr::Static`, otherwise
@@ -15732,6 +15873,9 @@ fn own_unlimited_cast_permission(
             enters_with_counter: None,
             required_cast_keyword: None,
             pool: GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
         },
         Some(TargetFilter::SelfRef),
         zones,
@@ -41376,4 +41520,50 @@ fn static_gaeas_liege_full_oracle_dispatch() {
         "{:?}",
         parsed.parse_warnings
     );
+}
+
+// CR 205.1a + CR 205.1b: a type-replacing Aura with a retention clause keeps
+// the retained card type (Corrupted Zendikon: "It's still a land.") in both
+// the standalone-sentence and relative-clause spellings.
+#[test]
+fn enchanted_land_creature_retention_clause_keeps_land_type() {
+    for line in [
+        "Enchanted land is a 3/3 black Ooze creature. It's still a land.",
+        "Enchanted land is a 3/3 black Ooze creature that's still a land.",
+    ] {
+        let defs = parse_static_line_multi(line);
+        assert_eq!(defs.len(), 1, "{line}");
+        let mods = &defs[0].modifications;
+        // CR 205.1b: retention is additive, so no SetCardTypes may wipe prior
+        // types (artifact lands stay artifacts).
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::SetCardTypes { .. })),
+            "{line}: {mods:?}"
+        );
+        // CR 205.1b: prior subtypes are retained too.
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+            "{line}: {mods:?}"
+        );
+        for core_type in [CoreType::Creature, CoreType::Land] {
+            assert!(
+                mods.contains(&ContinuousModification::AddType { core_type }),
+                "{line}: {mods:?}"
+            );
+        }
+        assert!(
+            mods.contains(&ContinuousModification::SetColor {
+                colors: vec![ManaColor::Black]
+            }),
+            "{line}: {mods:?}"
+        );
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Ooze".to_string()
+        }));
+    }
 }

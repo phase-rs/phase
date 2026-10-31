@@ -681,6 +681,138 @@ pub(crate) fn until_event_already_occurred(
         })
 }
 
+/// CR 400.7 + CR 603.2: the zone a move expects its object to be in — the
+/// effect's origin, or for an event referent the zone the trigger event put it
+/// in.
+fn expected_move_origin(
+    state: &GameState,
+    origin: Option<Zone>,
+    target_filter: &TargetFilter,
+) -> Option<Zone> {
+    if origin.is_some() || !matches!(target_filter, TargetFilter::TriggeringSource) {
+        return origin;
+    }
+    state
+        .current_trigger_event
+        .as_ref()
+        .and_then(|event| match event {
+            GameEvent::ZoneChanged { to, .. } => Some(*to),
+            // CR 701.17c: the milled card is in "the zone it moved to from
+            // the library", which is where a "…, then exile it" clause on a
+            // mill trigger must move it from.
+            GameEvent::Milled { to, .. } => Some(*to),
+            _ => None,
+        })
+}
+
+/// The objects a move acts on: the resolver's subject binding plus, for a
+/// returned merged permanent, its component cards.
+fn bound_move_members(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    // CR 608.2c + 603.10a: Resolve the subject across self-ref → event-context →
+    // chosen-targets, the unified 3-tier dispatch shared by zone-change-style
+    // effects whose subject can be the source itself, an event-context
+    // referent, or a pre-selected target. See `targeting::resolved_targets`.
+    // CR 608.2b: a `ParentTargetSlot` whose target was illegal as the ability
+    // resolved moves nothing (Goblin Welder's graveyard artifact card).
+    let targeted_objects =
+        crate::game::effects::resolved_effect_object_ids(state, ability, target_filter);
+    // CR 730.3c: when this effect references the object that just left the
+    // battlefield (a flicker/blink's "return it") and that object was a merged
+    // permanent's survivor, act on the component cards it split into as well, so
+    // the whole pile is moved — not just the survivor. A no-op for ordinary
+    // (freshly chosen) targets.
+    crate::game::merge::expand_returned_merge_components(state, targeted_objects, target_filter)
+}
+
+/// The single per-member test for "this object can no longer undergo the
+/// move": [`process_one_zone_move_with_terminal`] leaves such a member where it
+/// is, and the optional-move feasibility predicates below read the same test.
+fn zone_move_member_cannot_move(
+    state: &GameState,
+    obj_id: ObjectId,
+    expected_origin: Option<Zone>,
+) -> bool {
+    // CR 400.7 + CR 111.7: An object that has already left the game (a token
+    // that ceased to exist via CR 704.5d, or any other object removed from
+    // `state.objects` since this effect snapshotted it as a target) cannot
+    // undergo a further zone change — skip silently rather than falling
+    // through to `move_to_zone`, which assumes the object is live and panics
+    // otherwise. A delayed trigger that snapshots `TargetFilter::LastCreated`
+    // (e.g. Kari Zev, Skyship Raider's "exile that token at end of combat")
+    // is the common path here: the token dies in combat before the delayed
+    // trigger fires.
+    let Some(object) = state.objects.get(&obj_id) else {
+        return true;
+    };
+    // CR 114.5: Emblems cannot be moved between zones.
+    // CR 400.7 + CR 603.7c: If an origin zone is specified and the object is
+    // no longer in that zone, the zone change is impossible — skip silently.
+    object.is_emblem || expected_origin.is_some_and(|zone| object.zone != zone)
+}
+
+/// The bound members of an untargeted context-referent move and the zone each
+/// is expected to be in, read through the resolver's own binding
+/// ([`expected_move_origin`] + [`bound_move_members`]).
+fn referent_move_members(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    origin: Option<Zone>,
+    target_filter: &TargetFilter,
+) -> (Vec<ObjectId>, Option<Zone>) {
+    (
+        bound_move_members(state, ability, target_filter),
+        expected_move_origin(state, origin, target_filter),
+    )
+}
+
+/// CR 608.2d + CR 400.7: "you may return this card from your graveyard to the
+/// battlefield" (`ChangeZone { target: SelfRef }`) is an impossible option once
+/// the source can no longer move: it left the zone the move expects (CR 400.7
+/// makes it a new object), ceased to exist (CR 111.7), or is an emblem
+/// (CR 114.5). An empty binding means the source is no longer the object "~"
+/// names — `resolve` moves nothing then (its CR 400.7 `SelfRef` guard) — so it
+/// is impossible too. Declining keeps an "If you do" rider from running: that
+/// clause checks whether the player chose the move (CR 118.12), and an
+/// impossible move can't be chosen (CR 608.2d).
+pub(crate) fn optional_self_move_is_infeasible(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    origin: Option<Zone>,
+) -> bool {
+    let (members, expected_origin) =
+        referent_move_members(state, ability, origin, &TargetFilter::SelfRef);
+    members
+        .into_iter()
+        .all(|id| zone_move_member_cannot_move(state, id, expected_origin))
+}
+
+/// CR 608.2d + CR 400.7: "you may put that card onto the battlefield" /
+/// "you may exile it" on an event referent (`ChangeZone { target:
+/// TriggeringSource }`) is an impossible option once every bound object can no
+/// longer move — it left the zone the trigger event put it in (or the effect's
+/// explicit origin), ceased to exist (CR 111.7), or is an emblem (CR 114.5).
+/// Declining keeps an "If you do" rider (Academy Rector's search) from running:
+/// that clause checks whether the player chose the move (CR 118.12), and an
+/// impossible move can't be chosen (CR 608.2d). An empty binding stays feasible:
+/// `resolve` then reaches its untargeted zone-scan path, which this predicate
+/// does not model.
+pub(crate) fn optional_triggering_source_move_is_infeasible(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    origin: Option<Zone>,
+) -> bool {
+    let (members, expected_origin) =
+        referent_move_members(state, ability, origin, &TargetFilter::TriggeringSource);
+    !members.is_empty()
+        && members
+            .into_iter()
+            .all(|id| zone_move_member_cannot_move(state, id, expected_origin))
+}
+
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -833,19 +965,7 @@ pub fn resolve(
         }
     }
     let target_filter = &effective_target_filter;
-    if origin.is_none() && matches!(target_filter, TargetFilter::TriggeringSource) {
-        origin = state
-            .current_trigger_event
-            .as_ref()
-            .and_then(|event| match event {
-                GameEvent::ZoneChanged { to, .. } => Some(*to),
-                // CR 701.17c: the milled card is in "the zone it moved to from
-                // the library", which is where a "…, then exile it" clause on a
-                // mill trigger must move it from.
-                GameEvent::Milled { to, .. } => Some(*to),
-                _ => None,
-            });
-    }
+    let origin = expected_move_origin(state, origin, target_filter);
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(state, ability, target_filter);
     let track_exiled_by_source =
@@ -868,24 +988,7 @@ pub fn resolve(
         return Ok(completed_result(0));
     }
 
-    // CR 608.2c + 603.10a: Resolve the subject across self-ref → event-context →
-    // chosen-targets, the unified 3-tier dispatch shared by zone-change-style
-    // effects whose subject can be the source itself, an event-context
-    // referent, or a pre-selected target. See `targeting::resolved_targets`.
-    // CR 608.2b: a `ParentTargetSlot` whose target was illegal as the ability
-    // resolved moves nothing (Goblin Welder's graveyard artifact card).
-    let targeted_objects =
-        crate::game::effects::resolved_effect_object_ids(state, ability, target_filter);
-    // CR 730.3c: when this effect references the object that just left the
-    // battlefield (a flicker/blink's "return it") and that object was a merged
-    // permanent's survivor, act on the component cards it split into as well, so
-    // the whole pile is moved — not just the survivor. A no-op for ordinary
-    // (freshly chosen) targets.
-    let targeted_objects = crate::game::merge::expand_returned_merge_components(
-        state,
-        targeted_objects,
-        target_filter,
-    );
+    let targeted_objects = bound_move_members(state, ability, target_filter);
     let targeted_objects: Vec<ObjectId> = if exile_tracked_set_library_only {
         targeted_objects
             .into_iter()
@@ -1872,23 +1975,10 @@ pub(crate) fn process_one_zone_move_with_terminal(
     events: &mut Vec<GameEvent>,
 ) -> crate::game::zone_pipeline::ZoneMoveTerminalResult {
     let obj_id = member.object_id;
-    // CR 400.7 + CR 111.7: An object that has already left the game (a token
-    // that ceased to exist via CR 704.5d, or any other object removed from
-    // `state.objects` since this effect snapshotted it as a target) cannot
-    // undergo a further zone change — skip silently rather than falling
-    // through to `move_to_zone`, which assumes the object is live and panics
-    // otherwise. A delayed trigger that snapshots `TargetFilter::LastCreated`
-    // (e.g. Kari Zev, Skyship Raider's "exile that token at end of combat")
-    // is the common path here: the token dies in combat before the delayed
-    // trigger fires.
-    if !state.objects.contains_key(&obj_id) {
-        return crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(
-            crate::types::game_state::ZoneMoveCompletion::Remained,
-        );
-    }
-
-    // CR 114.5: Emblems cannot be moved between zones.
-    if state.objects.get(&obj_id).is_some_and(|o| o.is_emblem) {
+    // CR 400.7 + CR 111.7 + CR 114.5 + CR 603.7c: a member that left the game,
+    // is an emblem, or is no longer in the expected origin zone stays where it
+    // is (see `zone_move_member_cannot_move`).
+    if zone_move_member_cannot_move(state, obj_id, ctx.origin) {
         return crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(
             crate::types::game_state::ZoneMoveCompletion::Remained,
         );
@@ -1899,16 +1989,6 @@ pub(crate) fn process_one_zone_move_with_terminal(
         .get(&obj_id)
         .map(|o| o.zone)
         .unwrap_or(Zone::Battlefield);
-
-    // CR 400.7 + CR 603.7c: If an origin zone is specified and the object is
-    // no longer in that zone, the zone change is impossible — skip silently.
-    if let Some(expected_origin) = ctx.origin {
-        if from_zone != expected_origin {
-            return crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(
-                crate::types::game_state::ZoneMoveCompletion::Remained,
-            );
-        }
-    }
 
     // CR 110.2a: `enters_under_player` was pre-resolved at resolver entry;
     // pass it straight to the zone-move pipeline so replacement effects see
@@ -3531,6 +3611,202 @@ mod tests {
         // guard must refuse the move. With the arm removed `origin` is `None`,
         // the guard is skipped, and this card is bounced out of the graveyard.
         assert_eq!(build(Zone::Graveyard), Zone::Graveyard);
+    }
+
+    /// An optional `ChangeZone` from source `ObjectId(100)` controlled by P0,
+    /// putting `target` onto the battlefield under P0's control.
+    fn optional_referent_move(target: TargetFilter, origin: Option<Zone>) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin,
+                destination: Zone::Battlefield,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability
+    }
+
+    /// P1's card that died (battlefield → graveyard), recorded as the current
+    /// trigger event — the "that card" of The Reaper, King No More.
+    fn died_card_event(state: &mut GameState) -> ObjectId {
+        let card = create_object(
+            state,
+            CardId(1),
+            PlayerId(1),
+            "Died Card".to_string(),
+            Zone::Graveyard,
+        );
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: card,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                card,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        });
+        card
+    }
+
+    /// U1-a/b/c — CR 608.2d + CR 400.7 + CR 111.7: a `TriggeringSource` move is
+    /// offerable while the event's card is still in the zone the event put it
+    /// in, and impossible once it left that zone or ceased to exist.
+    #[test]
+    fn optional_triggering_source_move_feasibility_follows_the_event_zone() {
+        let ability = optional_referent_move(TargetFilter::TriggeringSource, None);
+
+        let mut state = GameState::new_two_player(42);
+        died_card_event(&mut state);
+        assert!(
+            !optional_triggering_source_move_is_infeasible(&state, &ability, None),
+            "the card is still in the graveyard the event put it in"
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let card = died_card_event(&mut state);
+        zones::move_to_zone(&mut state, card, Zone::Exile, &mut Vec::new());
+        assert!(
+            optional_triggering_source_move_is_infeasible(&state, &ability, None),
+            "a card exiled from the graveyard is a new object (CR 400.7)"
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let card = died_card_event(&mut state);
+        state.players[1].graveyard.retain(|id| *id != card);
+        state.objects.remove(&card);
+        assert!(
+            optional_triggering_source_move_is_infeasible(&state, &ability, None),
+            "an object that ceased to exist cannot move (CR 111.7)"
+        );
+    }
+
+    /// U1-d — CR 608.2d + CR 400.7: an explicit origin governs a
+    /// `TriggeringSource` move even when the trigger event is not a zone change
+    /// (the Tergrid shape: "put that card onto the battlefield" from a
+    /// graveyard after a discard).
+    #[test]
+    fn optional_triggering_source_move_reads_an_explicit_origin() {
+        let ability = optional_referent_move(TargetFilter::TriggeringSource, Some(Zone::Graveyard));
+        let build = |resident: Zone| {
+            let mut state = GameState::new_two_player(42);
+            let card = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(1),
+                "Discarded Card".to_string(),
+                resident,
+            );
+            state.current_trigger_event = Some(GameEvent::Discarded {
+                player_id: PlayerId(1),
+                object_id: card,
+                source_id: None,
+            });
+            state
+        };
+        assert!(
+            !optional_triggering_source_move_is_infeasible(
+                &build(Zone::Graveyard),
+                &ability,
+                Some(Zone::Graveyard)
+            ),
+            "reach: the discarded card is in the graveyard the effect names"
+        );
+        assert!(
+            optional_triggering_source_move_is_infeasible(
+                &build(Zone::Exile),
+                &ability,
+                Some(Zone::Graveyard)
+            ),
+            "a card that left the named origin can't be moved from it"
+        );
+    }
+
+    /// U1-e — CR 608.2d + CR 400.7: "you may return this card from your
+    /// graveyard" is offerable for the exact source and impossible once the
+    /// source is a new object (stale incarnation).
+    #[test]
+    fn optional_self_move_feasibility_follows_the_source_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Graveyard Source".to_string(),
+            Zone::Graveyard,
+        );
+        let mut ability = optional_referent_move(TargetFilter::SelfRef, Some(Zone::Graveyard));
+        ability.source_id = source;
+        let incarnation = state.objects[&source].incarnation;
+
+        ability.source_incarnation = Some(incarnation);
+        assert!(
+            !optional_self_move_is_infeasible(&state, &ability, Some(Zone::Graveyard)),
+            "the exact source in its graveyard can be returned"
+        );
+
+        ability.source_incarnation = Some(incarnation + 1);
+        assert!(
+            optional_self_move_is_infeasible(&state, &ability, Some(Zone::Graveyard)),
+            "a stale incarnation names no object, so there is nothing to return"
+        );
+    }
+
+    /// U1-f — CR 400.7 + CR 603.7c: the per-member move leaves a member that is
+    /// no longer in the expected origin where it is.
+    #[test]
+    fn zone_move_member_outside_its_origin_remains() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Exiled Card".to_string(),
+            Zone::Exile,
+        );
+        let ctx = ChangeZoneIterationCtx {
+            source_id: ObjectId(100),
+            controller: PlayerId(0),
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            enter_transformed: false,
+            enters_under_player: Some(PlayerId(0)),
+            duration: None,
+            track_exiled_by_source: false,
+            face_down_in_exile: Default::default(),
+            face_down_profile: None,
+            library_placement: None,
+            enter_attached_to: None,
+        };
+        let member = ChangeZoneMemberEntry {
+            object_id: card,
+            enter_with_counters: vec![],
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+        };
+        let result =
+            process_one_zone_move_with_terminal(&mut state, &ctx, &member, &mut Vec::new());
+        assert!(matches!(
+            result,
+            crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(
+                crate::types::game_state::ZoneMoveCompletion::Remained
+            )
+        ));
+        assert_eq!(state.objects[&card].zone, Zone::Exile);
     }
 
     #[test]

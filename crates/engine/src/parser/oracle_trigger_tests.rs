@@ -16,7 +16,7 @@ use crate::types::ability::{
     DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageModification, DamageSource,
     DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope, FilterProp,
     ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectProperty,
-    ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerScope,
+    ObjectScope, PerPlayerScope, PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope,
     PropertyAggregate, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RoundingMode,
     SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
     TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, XModification,
@@ -111,7 +111,8 @@ fn assert_owner_relative_loss_scope(ability: &AbilityDefinition) {
     assert_eq!(
         ability.player_scope,
         Some(PlayerFilter::AllExcept {
-            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner)
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::All,
         })
     );
 }
@@ -152,7 +153,8 @@ fn dies_trigger_owner_subject_anchors_each_other_player_scope() {
     assert_eq!(
         lose.player_scope,
         Some(PlayerFilter::AllExcept {
-            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner)
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::All,
         })
     );
 }
@@ -11422,6 +11424,96 @@ fn trigger_when_you_lose_control_maps_to_changes_controller() {
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
 }
 
+/// CR 603.2 + CR 603.10d: "Whenever an opponent gains control of a permanent
+/// from you" (Zidane, Tantalus Thief) is the opponent-gains half of the
+/// look-back control triggers: ChangesController, the changing permanent in
+/// `valid_card`, the gaining opponent in `valid_target`.
+#[test]
+fn trigger_opponent_gains_control_from_you_maps_to_changes_controller() {
+    let def = parse_trigger_line(
+        "Whenever an opponent gains control of a permanent from you, you create a Treasure token.",
+        "Zidane, Tantalus Thief",
+    );
+    assert_eq!(
+        def.mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Loses
+        }
+    );
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(TypedFilter::permanent()))
+    );
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+}
+
+/// Fail-closed boundaries of the control-change trigger class. Collection runs
+/// after the change, so only subjects that can't depend on the permanent's
+/// post-change state are claimed: a subject with its own controller, any other
+/// type, or any property stays `Unknown`. Positive guard: "a permanent" and
+/// "~" in the same frame are claimed.
+#[test]
+fn trigger_control_change_unsupported_shapes_stay_unknown() {
+    for (text, name) in [
+        (
+            "Whenever an opponent gains control of a creature you control from you, draw a card.",
+            "Probe",
+        ),
+        (
+            "Whenever an opponent gains control of an attacking creature from you, draw a card.",
+            "Probe",
+        ),
+        (
+            "Whenever an opponent gains control of a creature from you, draw a card.",
+            "Probe",
+        ),
+        (
+            "Whenever an opponent gains control of a permanent you own from you, draw a card.",
+            "Probe",
+        ),
+        (
+            "Whenever an opponent gains control of one or more permanents from you, draw a card.",
+            "Probe",
+        ),
+        (
+            "Whenever an opponent gains control of permanents from you, draw a card.",
+            "Probe",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "{text:?} must fail closed, got {:?}",
+            def.mode
+        );
+    }
+    for (text, subject) in [
+        (
+            "Whenever an opponent gains control of a permanent from you, draw a card.",
+            TargetFilter::Typed(TypedFilter::permanent()),
+        ),
+        (
+            "Whenever an opponent gains control of ~ from you, draw a card.",
+            TargetFilter::SelfRef,
+        ),
+    ] {
+        let def = parse_trigger_line(text, "Probe");
+        assert_eq!(
+            def.mode,
+            TriggerMode::ChangesController {
+                side: ControlChangeSide::Loses
+            },
+            "reach: {text:?}"
+        );
+        assert_eq!(def.valid_card, Some(subject), "{text:?}");
+    }
+}
+
 /// CR 603.2 + CR 603.10 + CR 603.3a: Risky Move's second ability, verbatim.
 /// "When you gain control of ~ from another player" maps to ChangesController
 /// `{ side: Gains }` with valid_card = SelfRef; "from another player" adds no
@@ -15693,6 +15785,144 @@ fn trigger_other_than_first_instant_spell_is_a_fire_time_constraint() {
     assert!(def.execute.is_some(), "the payoff must remain reachable");
 }
 
+// SHAPE: CR 603.2 makes the ordinal an event qualifier, not the immediately
+// following intervening-if form described by CR 603.4.
+#[test]
+fn trigger_other_than_first_possessive_full_tracker_oracle() {
+    let parsed = parse_oracle_text(
+        "Menace\nModular 2 (This creature enters with two +1/+1 counters on it. When it dies, you may put its +1/+1 counters on target artifact creature.)\nWhenever you cast a spell other than your first spell each turn, put a +1/+1 counter on this creature.",
+        "Arcbound Tracker",
+        &["Menace".to_string(), "Modular".to_string()],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Dog".to_string()],
+    );
+    let def = parsed
+        .triggers
+        .iter()
+        .find(|def| def.mode == TriggerMode::SpellCast)
+        .expect("complete Oracle must retain its executable cast trigger");
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        ))
+    );
+    assert_eq!(def.valid_card, None);
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::NthSpellThisTurn {
+            n: 1,
+            comparator: Comparator::GT,
+            filter: None,
+        })
+    );
+    assert_eq!(def.condition, None);
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("counter payoff remains reachable");
+    assert_no_unimplemented(execute);
+    assert_eq!(
+        execute.effect.as_ref(),
+        &Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    );
+}
+
+// SHAPE: both grammatical forms share the same typed spell-quality axis.
+#[test]
+fn trigger_other_than_first_possessive_matches_repeated_quality() {
+    for quality in ["instant", "creature", "red", "historic"] {
+        let head = format!(
+            "Whenever you cast a {quality} spell other than your first {quality} spell each turn, draw a card."
+        );
+        let def = parse_trigger_line(&head, "Possessive nonfirst shape fixture");
+        let filter = parse_spell_history_filter(quality).expect("known spell quality");
+        assert_eq!(def.mode, TriggerMode::SpellCast, "{head}");
+        assert_eq!(def.valid_card, Some(filter.clone()), "{head}");
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::NthSpellThisTurn {
+                n: 1,
+                comparator: Comparator::GT,
+                filter: Some(filter),
+            }),
+            "{head}"
+        );
+        assert_eq!(def.condition, None, "{head}");
+        assert_no_unimplemented(def.execute.as_deref().expect("draw payoff"));
+    }
+}
+
+// SHAPE: a recognized determiner commits; malformed tails cannot broaden to
+// unconditional SpellCast. Accepted siblings guard the rejection assertions.
+#[test]
+fn other_than_first_classifier_possessive_commitment_boundaries() {
+    for accepted in [
+        "you cast a spell other than your first spell each turn",
+        "you cast an instant spell other than your first instant spell each turn",
+        "an opponent casts an instant spell other than the first instant spell that player casts each turn",
+        "enchanted player casts a spell other than the first spell they cast each turn",
+    ] {
+        assert!(matches!(
+            parse_other_than_first_spell_trigger(accepted),
+            OtherThanFirstSpellParse::Accepted(_)
+        ), "{accepted}");
+        let def = parse_trigger_line(
+            &format!("Whenever {accepted}, draw a card."),
+            "Accepted nonfirst shape fixture",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast, "{accepted}");
+        assert_no_unimplemented(def.execute.as_deref().expect("draw payoff"));
+    }
+    for ordinary in [
+        "you cast a spell",
+        "an opponent casts an instant spell",
+        "you cast another spell",
+        "you cast a spell other than your second spell each turn",
+    ] {
+        assert!(
+            matches!(
+                parse_other_than_first_spell_trigger(ordinary),
+                OtherThanFirstSpellParse::NotCandidate
+            ),
+            "{ordinary}"
+        );
+    }
+    for rejected in [
+        "you cast a spell other than your first spell each turn or copies a spell",
+        "you cast a spell other than your first spell that turn",
+        "you cast a spell other than your first spell each turn extra",
+        "you cast a spell other than your first spell",
+        "you cast a spell other than your first each turn",
+        "you cast an instant spell other than your first sorcery spell each turn",
+        "you cast a red spell other than your first blue spell each turn",
+        "you cast a magenta spell other than your first magenta spell each turn",
+        "an opponent casts a spell other than your first spell each turn",
+        "a player casts a spell other than your first spell each turn",
+        "enchanted player casts a spell other than your first spell each turn",
+    ] {
+        assert!(
+            matches!(
+                parse_other_than_first_spell_trigger(rejected),
+                OtherThanFirstSpellParse::Rejected
+            ),
+            "{rejected}"
+        );
+        let def = parse_trigger_line(
+            &format!("Whenever {rejected}, draw a card."),
+            "Rejected nonfirst shape fixture",
+        );
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "{rejected}: {def:?}"
+        );
+    }
+}
+
 #[test]
 fn trigger_ordinary_opponent_spell_cast_remains_generic_spellcast() {
     let def = parse_trigger_line(
@@ -18100,6 +18330,44 @@ fn trigger_unless_they_pay_disjunctive_mana_builds_one_of() {
 }
 
 #[test]
+fn trigger_unless_you_disjunction_builds_controller_one_of() {
+    // CR 118.12a: Fear My Authority — "abandon this scheme unless you
+    // discard a card or pay 3 life". The you-disjunction binds both
+    // branches with the controller as payer; the cleaned body must lower
+    // to AbandonScheme (not Unimplemented, not the bare leaf).
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, abandon this scheme unless you discard a card or pay 3 life.",
+        "Fear My Authority",
+    );
+    let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::Controller);
+    let AbilityCost::OneOf { costs } = &unless_pay.cost else {
+        panic!("cost should be OneOf, got {:?}", unless_pay.cost);
+    };
+    assert_eq!(
+        costs.len(),
+        2,
+        "OneOf should have discard + pay-life branches: {costs:?}"
+    );
+    assert!(
+        matches!(&costs[0], AbilityCost::Discard { .. }),
+        "first branch should be Discard, got {:?}",
+        costs[0]
+    );
+    assert!(
+        matches!(&costs[1], AbilityCost::PayLife { .. }),
+        "second branch should be PayLife, got {:?}",
+        costs[1]
+    );
+    let execute = def.execute.as_deref().expect("trigger has a body");
+    assert!(
+        matches!(*execute.effect, Effect::AbandonScheme),
+        "cleaned body must be AbandonScheme, got {:?}",
+        execute.effect
+    );
+}
+
+#[test]
 fn trigger_unless_they_pay_binds_to_that_player_damage_target() {
     let def = parse_trigger_line(
             "Whenever an opponent casts a creature spell, this enchantment deals 2 damage to that player unless they pay {2}.",
@@ -19611,6 +19879,60 @@ fn trigger_chaos_no_zone_stamped_by_parser() {
 fn trigger_set_in_motion_mode() {
     let def = parse_trigger_line("When you set this scheme in motion, draw a card.", "Scheme");
     assert_eq!(def.mode, TriggerMode::SetInMotion);
+}
+
+/// CR 904.9 + CR 607.2d: "When you set this scheme in motion, choose an
+/// opponent" (Imprison This Insolent Wretch) keeps the choice
+/// resolution-local in isolation — the `LinkedChoice(PersistedPlayer)`
+/// relation flips `persist` at document lowering only when a
+/// `SourceChosenPlayer` reader exists on the same card.
+#[test]
+fn trigger_set_in_motion_choose_opponent_stays_local_in_isolation() {
+    use crate::types::ability::ChoiceType;
+    let def = parse_trigger_line(
+        "When you set this scheme in motion, choose an opponent.",
+        "Imprison This Insolent Wretch",
+    );
+    assert_eq!(def.mode, TriggerMode::SetInMotion);
+    let execute = def.execute.as_deref().expect("choose body");
+    match execute.effect.as_ref() {
+        Effect::Choose {
+            choice_type: ChoiceType::Opponent { .. },
+            persist,
+            ..
+        } => assert!(
+            !persist,
+            "isolated choice must stay resolution-local; the document relation owns the flip"
+        ),
+        other => panic!("expected Choose{{Opponent}} body, got {other:?}"),
+    }
+}
+
+/// CR 904.9 + CR 603.1: "As you set this scheme in motion, choose an
+/// opponent" (Bow to My Command) lowers to the dedicated `AsSetInMotion`
+/// mode — NOT the "When ..." sibling's `SetInMotion`: the choice is made
+/// inside the turn-based action and must never touch the stack. Persist is
+/// likewise relation-owned (see above).
+#[test]
+fn trigger_as_set_in_motion_choose_opponent_mode() {
+    use crate::types::ability::ChoiceType;
+    let def = parse_trigger_line(
+        "As you set this scheme in motion, choose an opponent.",
+        "Bow to My Command",
+    );
+    assert_eq!(def.mode, TriggerMode::AsSetInMotion);
+    let execute = def.execute.as_deref().expect("choose body");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                ..
+            }
+        ),
+        "expected Choose{{Opponent}} body, got {:?}",
+        execute.effect
+    );
 }
 
 #[test]
@@ -33539,6 +33861,86 @@ fn gix_its_controller_antecedent_does_not_leak_to_later_that_player() {
     }
 }
 
+/// Issue #10347 — Basalt Golem: "Whenever this creature becomes blocked by a
+/// creature, that creature's controller sacrifices it at end of combat. If the
+/// player does, they create a 0/2 colorless Wall artifact creature token with
+/// defender." Both anaphors name the BLOCKER's side.
+///
+/// CR 608.2c (read the whole text and apply the rules of English): "it" is the
+/// possessor of the subject phrase — that creature — not the ability's source,
+/// and "the player" / "they" is that creature's controller. CR 701.21a is why
+/// they must agree: a player can't sacrifice a permanent they don't control, so
+/// a source-self subject authorizes nobody. CR 111.2: the player who creates the
+/// token owns it.
+#[test]
+fn basalt_golem_delayed_sacrifice_names_the_blocker_and_its_controller() {
+    let def = parse_trigger_line(
+        "Whenever this creature becomes blocked by a creature, that creature's controller \
+         sacrifices it at end of combat. If the player does, they create a 0/2 colorless Wall \
+         artifact creature token with defender.",
+        "Basalt Golem",
+    );
+    assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+    let execute = def.execute.as_ref().expect("trigger should have execute");
+    assert_no_unimplemented(execute.as_ref());
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected a delayed trigger, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *condition,
+        DelayedTriggerCondition::AtNextPhase {
+            phase: crate::types::phase::Phase::EndCombat
+        },
+        "CR 603.7a: 'at end of combat' schedules a delayed triggered ability"
+    );
+    match effect.effect.as_ref() {
+        Effect::Sacrifice { target, count, .. } => {
+            assert_eq!(
+                *target,
+                TargetFilter::ParentTarget,
+                "CR 608.2c: 'sacrifices it' names the blocker the subject's possessive \
+                 introduced, never the trigger source"
+            );
+            assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        }
+        other => panic!("expected the delayed payload to be a Sacrifice, got {other:?}"),
+    }
+    let wall = effect
+        .sub_ability
+        .as_deref()
+        .expect("the gated Wall rider is the sacrifice's continuation");
+    match wall.effect.as_ref() {
+        Effect::Token {
+            name,
+            power,
+            toughness,
+            owner,
+            keywords,
+            ..
+        } => {
+            assert_eq!(name, "Wall");
+            assert_eq!(*power, PtValue::Fixed(0));
+            assert_eq!(*toughness, PtValue::Fixed(2));
+            assert_eq!(keywords, &[Keyword::Defender]);
+            assert_eq!(
+                *owner,
+                TargetFilter::ParentTargetController,
+                "CR 111.2: the player who sacrificed creates the Wall, so it is that \
+                 creature's controller — not the ability's own controller"
+            );
+        }
+        other => panic!("expected a Wall Token rider, got {other:?}"),
+    }
+    assert_eq!(
+        wall.condition,
+        Some(AbilityCondition::effect_performed()),
+        "CR 608.2c: 'If the player does' gates the Wall on the sacrifice happening"
+    );
+}
+
 /// Issue #1670 — Star Athlete: "Whenever this creature attacks, choose up to
 /// one target nonland permanent. Its controller may sacrifice it. If they
 /// don't, this creature deals 5 damage to that player." The "that player"
@@ -39118,6 +39520,7 @@ fn akroan_horse_etb_parsed_trigger() {
     assert_eq!(
         etb_exec.effect.as_ref(),
         &Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: crate::types::ability::ChoiceType::opponent(),
             persist: false,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -39303,6 +39706,23 @@ fn count_qualified_blocks_preserves_article_qualified_shapes() {
         assert_eq!(trigger.condition, None);
         assert_no_unimplemented(trigger.execute.as_deref().unwrap());
     }
+}
+
+/// CR 701.33a-b: verbatim The Very Soil Shall Shake abandon line.
+#[test]
+fn very_soil_abandon_clause_parses_to_abandon_scheme() {
+    let def = parse_trigger_line(
+        "When a creature you control dies, abandon this scheme.",
+        "The Very Soil Shall Shake",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    let execute = def.execute.as_deref().expect("abandon body");
+    assert!(
+        matches!(*execute.effect, Effect::AbandonScheme),
+        "expected Effect::AbandonScheme, got {:?}",
+        execute.effect
+    );
+    assert_no_unimplemented(execute);
 }
 
 /// PU4: the same text without the override sentence parses to the same chain

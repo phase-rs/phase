@@ -4042,10 +4042,10 @@ impl GameObject {
     /// with `chosen_card_name` so a same-clause read of "the last chosen name and
     /// creature type" (Psychic Paper) reports both halves from the same choice.
     pub fn chosen_creature_type(&self) -> Option<&str> {
-        self.chosen_attributes.iter().rev().find_map(|a| match a {
-            ChosenAttribute::CreatureType(s) => Some(s.as_str()),
-            _ => None,
-        })
+        self.chosen_attributes
+            .iter()
+            .rev()
+            .find_map(ChosenAttribute::creature_type)
     }
 
     /// CR 612.8 + CR 613.7: The most recently chosen card name (Psychic Paper's

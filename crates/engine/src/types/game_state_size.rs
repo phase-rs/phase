@@ -67,6 +67,16 @@
 //! are already boxed, so nothing large went inline; the ceiling moved to
 //! 14,352.next_multiple_of(256) + 256 = 14,848.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc at 14,864 B when the
+//! scheme-support branch merged main's tracked-set member origins
+//! (`tracked_set_member_origins`, an `im::HashMap`, 24 B inline) alongside
+//! the branch's own named-label scratch (`named_label_this_resolution`,
+//! `Option<String>`, 24 B inline): each side was green alone under 14,848,
+//! and the union crossed it by 16 B. Neither field is a large
+//! rarely-populated one — both are ordinary 24 B fields, and the origins
+//! map is already heap-shared — so the ceiling moves to
+//! 14,864.next_multiple_of(256) + 256 = 15,360.
+//!
 //! Base `GameState` on x86_64-pc-windows-msvc measured 14,336 B at
 //! `nightly-2026-04-19`, exactly at the ceiling of that time. The attacked-player referent
 //! work adds `attack_target: Option<AttackTarget>` to `ZoneChangeCombatStatus`
@@ -80,6 +90,14 @@
 //! boxing keeps `GameState` under the ceiling above. Boxing OpponentGuess.owner leaves NamedChoice and
 //! ChooseOneOfBranch more than 200 B apart, so `WaitingFor` carries an intentional
 //! `#[allow(clippy::large_enum_variant)]`; the GameState ceiling above is the bound.
+//!
+//! `GameState` re-measured on x86_64-pc-windows-msvc at 14,864 B when the
+//! CR 603.10d control-change evidence tables (`control_change_captures`,
+//! `control_change_observations`, and their two `u64` id counters) landed.
+//! Both tables are empty outside a resolution, so they are lazily boxed
+//! (`LazyBoxedMap`: unallocated while empty, so an empty clone allocates
+//! nothing); `GameState` then measures 14,832 B, under the unchanged 14,848
+//! ceiling.
 //!
 //! `GameState` re-measured on x86_64-unknown-linux-gnu (`nightly-2026-04-19`) at
 //! 14,880 B when the loop shortcut's ∞ mark gained `unbounded_rising`, a 24 B map

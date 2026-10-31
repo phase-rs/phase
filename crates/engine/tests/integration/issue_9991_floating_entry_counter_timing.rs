@@ -492,6 +492,9 @@ fn choice_boundary_leaves_post_entry_dynamic_work_unfrozen() {
             choice_type: ChoiceType::CreatureType {
                 options: vec!["Dog".into(), "Wolf".into()],
             },
+            // Merge collision: the branch's `chooser` field postdates this
+            // upstream test. `You` is the historic controller-choice default.
+            chooser: ControllerRef::You,
             persist: true,
             selection: TargetSelectionMode::Chosen,
         },

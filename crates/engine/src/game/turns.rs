@@ -9,7 +9,6 @@ use crate::types::ability::{
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::format::GameFormat;
 use crate::types::game_state::{
     AutoPassMode, EmptyPoolLifeLossCause, ExtraPhase, ExtraTurn, GameState, InsertedPhaseResume,
     LoopCollapseAxis, PayableResource, PendingCounterAddition, PendingEffectResolved,
@@ -1768,6 +1767,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // once-per-turn tracking (Assemble the Players, Johann, Apprentice Sorcerer).
     state.top_of_library_cast_permissions_used.clear();
     state.cards_exiled_with_source_this_turn.clear();
+    // CR 608.2e: a paused fan-out's control-change capture outlives its link
+    // only until its resolution ends, and no resolution spans a turn boundary.
+    state.control_change_captures.clear();
     // CR 702.94a: Reset per-player first-card-drawn-this-turn tracking for miracle.
     state.first_card_drawn_this_turn.clear();
     state.cards_drawn_this_turn.clear();
@@ -1892,7 +1894,23 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 614.1c: Pending ETB counters are turn-scoped (e.g., "this turn" effects).
     state.pending_etb_counters.clear();
     state.modal_modes_chosen_this_turn.clear();
+    // CR 603.4: the completed turn just ended for its shared-turn key, so
+    // every recipient's "since your last turn ended" window restarts empty.
+    // Other players' windows keep accumulating. Degrades to the completed
+    // player alone when the format has no shared team turns.
+    let window_reset_key = completed_turn_key;
+    let window_reset: Vec<PlayerId> = state
+        .players
+        .iter()
+        .map(|candidate| candidate.id)
+        .filter(|id| {
+            super::topology::normalize_shared_turn_recipient(state, *id) == window_reset_key
+        })
+        .collect();
     for player in &mut state.players {
+        if window_reset.contains(&player.id) {
+            player.opponent_spells_cast_since_own_last_turn = 0;
+        }
         player.has_drawn_this_turn = false;
         player.lands_played_this_turn = 0;
         player.life_gained_this_turn = 0;
@@ -1900,6 +1918,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         player.life_lost_last_turn = player.life_lost_this_turn;
         player.life_lost_this_turn = 0;
         player.descended_this_turn = false;
+        // CR 603.4: Snapshot draws before reset for "if you drew a card last
+        // turn" conditions, mirroring the life-lost snapshot above.
+        player.cards_drawn_last_turn = player.cards_drawn_this_turn;
         player.cards_drawn_this_turn = 0;
         // CR 121.1 + CR 504.1: Per-step counter is also reset at turn start so
         // a fresh turn always begins with `cards_drawn_this_step == 0` (the
@@ -2786,10 +2807,12 @@ fn clear_cleanup_damage(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// choose which cards to discard down to maximum hand size, or `None` if
 /// cleanup completes immediately.
 ///
-/// CR 514.3a: a `Some` return additionally means "triggered abilities were put
-/// on the stack and the active player must receive priority before another
-/// cleanup step begins" — either the control-reversion delayed triggers below,
-/// or a parked `deferred_triggers` batch settled at the tail of this function.
+/// CR 514.3a: a `Some` return also means that triggered abilities were put on
+/// the stack at the end of the step and the active player must receive priority
+/// before another cleanup step begins. Those abilities are the ones the control
+/// reversion triggered (collected as it is published), the delayed abilities
+/// waiting for this cleanup step (collected with them), and any batch parked
+/// before cleanup, settled together at the tail of this function.
 pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
     // Snapshot this turn's attacks so "attacked you during their last
     // turn" (Avenge / O-Kagachi / Weathered Sentinels) can query each player's
@@ -2865,7 +2888,12 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // control of that <permanent> this turn" delayed triggers (Stolen Uniform)
     // observe the loss. The gain side already emits this event; the silent
     // layer-2 revert did not, so the loss trigger could never fire.
-    let control_reverting: Vec<(ObjectId, PlayerId)> = state
+    //
+    // CR 514.2 + CR 603.10d: every "until end of turn" effect ends in one
+    // simultaneous action, so the reversion is one instruction: fix its
+    // population, settle, and capture the look-back watchers and subjects
+    // before any effect is pruned.
+    let control_reverting: Vec<ObjectId> = state
         .transient_continuous_effects
         .iter()
         .filter(|e| {
@@ -2878,12 +2906,19 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
                 })
         })
         .filter_map(|e| match &e.affected {
-            TargetFilter::SpecificObject { id } => {
-                state.objects.get(id).map(|o| (*id, o.controller))
-            }
+            TargetFilter::SpecificObject { id } => state.objects.contains_key(id).then_some(*id),
             _ => None,
         })
         .collect();
+    let control_revert_boundary = (!control_reverting.is_empty()).then(|| {
+        super::layers::flush_layers(state);
+        super::effects::gain_control::InstructionBoundary::Own(
+            super::effects::gain_control::capture_control_change_instruction(
+                state,
+                control_reverting.iter().copied(),
+            ),
+        )
+    });
 
     // CR 514.2: Prune "until end of turn" transient continuous effects.
     super::layers::prune_end_of_turn_effects(state);
@@ -2898,38 +2933,78 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 
     // CR 613.1b: recompute layer-2 control now the effect is gone, then emit the
     // loss event for every object whose controller actually reverted.
-    if !control_reverting.is_empty() {
+    if let Some(boundary) = control_revert_boundary {
+        // CR 514.2: the members' pre-revert evidence was fixed above, before
+        // the prune; read it now, then publish against the reverted board.
+        let members: Vec<_> = control_reverting
+            .iter()
+            .map(|object_id| {
+                super::effects::gain_control::instruction_member(state, &boundary, *object_id)
+            })
+            .collect();
         super::layers::flush_layers(state);
+        // CR 603.2c: the occurrences this reversion publishes, as positions in
+        // the action's event buffer.
+        let reversion_start = events.len();
         let mut seen_reverting = HashSet::new();
-        for (object_id, old_controller) in control_reverting {
+        for (object_id, member) in control_reverting.into_iter().zip(members) {
             if !seen_reverting.insert(object_id) {
                 continue;
             }
-            if let Some(new_controller) = state.objects.get(&object_id).map(|o| o.controller) {
-                if new_controller != old_controller {
-                    events.push(GameEvent::ControllerChanged {
-                        object_id,
-                        old_controller,
-                        new_controller,
-                    });
-                }
-            }
+            let (Some(member), Some(new_controller)) =
+                (member, state.objects.get(&object_id).map(|o| o.controller))
+            else {
+                continue;
+            };
+            super::effects::gain_control::publish_controller_changed(
+                state,
+                events,
+                member,
+                new_controller,
+            );
         }
 
-        // CR 514.3a: a triggered ability that triggers during cleanup (the
-        // "when you lose control ... this turn" reflexive) is put on the stack
-        // and the active player gets priority; another cleanup step begins once
-        // the stack empties. Fire delayed triggers on the loss event(s) BEFORE
-        // the stated-duration prune below can remove them, then hand back
-        // priority so the trigger resolves.
-        let stack_before = state.stack.len();
-        let delayed_events = super::triggers::check_delayed_triggers(state, events);
-        events.extend(delayed_events);
-        if state.stack.len() > stack_before {
-            return Some(WaitingFor::Priority {
-                player: state.active_player,
-            });
-        }
+        // CR 603.2 + CR 603.10d + CR 603.7: the reversion triggers its
+        // abilities as it happens. The printed lose-side abilities come from the
+        // watchers its boundary latched before the prune above. The printed
+        // gain-side abilities come from the reverted board. The delayed "when you
+        // lose control ... this turn" abilities still exist here, because the
+        // CR 514.2 "this turn" prune below has not run yet. CR 514.3a + CR 603.3b:
+        // they are put on the stack only "at this point", after the rest of
+        // CR 514.2 and the CR 514.1 discard, as one batch: by the deferred drain
+        // at the tail of this function, or, when cleanup pauses for the discard,
+        // by the pipeline that settles the discard answer.
+        super::triggers::collect_unclaimed_triggers_into_deferred(
+            state,
+            events,
+            reversion_start,
+            None,
+        );
+        // CR 603.7 + CR 514.3a: a delayed ability waiting to be put on the
+        // stack "at the beginning of the next cleanup step" triggers on THIS
+        // step's own `PhaseChanged { Cleanup }` event, which precedes the
+        // reversion's published events above. The reversion block is where a
+        // cleanup step without a pipeline settles these abilities, so scan the
+        // whole action buffer for delayed abilities here. CR 603.2c: each
+        // matched occurrence is claimed for every collector, so the pipeline's
+        // later scans cannot collect it a second time.
+        let consumed = state.consumed_before_priority_trigger_events.clone();
+        let unclaimed_delayed = super::triggers::unclaimed_trigger_events_from(
+            events,
+            0,
+            super::triggers::TriggerCollectionRequester::Delayed,
+            &consumed,
+        );
+        super::triggers::collect_unclaimed_delayed_triggers_into_deferred(
+            state,
+            events,
+            &unclaimed_delayed,
+        );
+        // CR 603.2c: an ability triggers only once per occurrence. The
+        // post-action pipeline scans this action's whole buffer, so claim
+        // the collected occurrences from its ordinary collector (delayed
+        // occurrences were claimed by the collector above).
+        super::triggers::claim_events_for_ordinary_collection(state, events, reversion_start);
     }
     // CR 514.2 + CR 611.2a: Expire `PlayFromExile` permissions whose duration
     // was `UntilEndOfTurn` (impulse-draw "you may play it this turn").
@@ -3058,31 +3133,14 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // should perform a full CR 704 pass at CR 514.3a's exact instant is a
     // separate question, deliberately not answered here.
     //
-    // REACHABILITY — read this block as defence in depth, NOT as documentation
-    // of a live path. No production route through the public API was FOUND that
-    // reaches it with a non-empty queue. The two structural reasons, which need
-    // no census: the drain at the end of `process_phase_triggers` sits in that
-    // function's shared body rather than in any one arm, so it runs for whatever
-    // phase/step arm reaches it; and the pipeline's drain likewise sits in
-    // `engine_priority::run_post_action_pipeline_from`'s body, so it runs for
-    // settlements routed through it. The one cleanup path that pauses and
-    // resumes — discard to maximum hand size — never re-enters this function
-    // (its resume runs `finish_cleanup_discard` and then the pipeline), so its
-    // CR 514.3a settlement comes from the pipeline, not from here.
-    //
-    // The remaining input, "who parks a batch during cleanup", rests on an
-    // identifier search for `collect_triggers_into_deferred` that returns no hit
-    // in this file. That instrument cannot see a macro-generated or
-    // trait-dispatched call, so treat it as "none found", not "none exists" —
-    // which is the second reason the block stays.
-    //
-    // It is kept regardless: CR 514.3a is a real obligation at this exact
-    // instant, the block is inert when the queue is empty (the gate refuses, it
-    // returns `None`, and cleanup advances unchanged), and it is the local
-    // guarantee that a future producer which parks a batch during cleanup
-    // cannot carry it across the Cleanup -> Untap wrap. If you are looking for
-    // the code that settles a parked batch in practice, it is the step-boundary
-    // drain in `process_phase_triggers` or the post-action pipeline.
+    // REACHABILITY — this is the live settlement for the abilities the control
+    // reversion above triggers (CR 514.2 + CR 603.2) and for the delayed
+    // abilities waiting for this cleanup step that the same block collects.
+    // They wait in `deferred_triggers` from the moment of the reversion until
+    // here. A batch parked before cleanup joins them, as CR 603.3b requires.
+    // When cleanup instead pauses for discard to maximum hand size, the resume
+    // runs `finish_cleanup_discard` and then the pipeline, which settles the
+    // same queue in this step.
     //
     // A parked `deferred_triggers` batch IS "a triggered ability waiting to be
     // put onto the stack", so it must settle HERE, during cleanup — not survive
@@ -3122,15 +3180,10 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // passing. No CR draw rule is claimed for that case — CR 104.4b's draw is
     // for loops of MANDATORY actions and expressly excludes loops containing an
     // optional action, so it is not the authority here.
-    // NOTE: this is NOT the argument `priority.rs:86-89` makes for the
-    // control-reversion case — that one is monotone-decreasing (its one-shot TCE
-    // is already pruned, so no new event re-fires). Nothing analogous holds for
-    // `deferred_triggers`, which can in principle be re-parked by a resolving
-    // ability; the two parts above are why termination holds anyway.
-    //
-    // Structurally identical to the CR 514.3a control-reversion block above
-    // (`check_delayed_triggers` + stack-growth pause); same authority, same
-    // shape, different waiting population.
+    // NOTE: the control-reversion population cannot repeat on its own. Its
+    // until-end-of-turn effects are pruned in the first cleanup step, so a
+    // repeated step publishes no new reversion. Only a newly created
+    // until-end-of-turn control effect starts another.
     //
     // `drain_deferred_trigger_queue` (the restrictive member, gate
     // `can_drain_deferred_triggers(state, /*allow_spell_on_stack=*/false)`) is
@@ -3323,11 +3376,13 @@ pub fn finish_cleanup_discard(
 /// game per CR 903.2 (Commander supports both two-player and multiplayer
 /// setups) — the skip rule applies to it.
 ///
-/// The team case intentionally checks the format enum rather than the broader
+/// The team case intentionally checks the 2HG family rather than the broader
 /// `team_based` axis: CR 103.8b names Two-Headed Giant specifically, while
 /// CR 805 shared-team-turns can be used by other multiplayer variants.
+/// 2HG Commander is a Two-Headed Giant game (two teams of two per CR 810.1),
+/// so its starting team skips too.
 fn first_player_skips_first_draw(state: &GameState) -> bool {
-    matches!(state.format_config.format, GameFormat::TwoHeadedGiant) || state.players.len() == 2
+    state.format_config.format.is_two_headed_giant_family() || state.players.len() == 2
 }
 
 /// CR 103.8 + CR 614.1b + CR 614.10: Whether the active player should skip
@@ -4117,6 +4172,27 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.turn_number = 1;
         state
+    }
+
+    #[test]
+    fn first_draw_skip_covers_the_2hg_family_but_not_other_team_play() {
+        use crate::types::format::FormatConfig;
+
+        // CR 103.8b: both 2HG variants' starting teams skip.
+        let two_hg = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        assert!(first_player_skips_first_draw(&two_hg));
+        let two_hg_commander = GameState::new(FormatConfig::two_headed_giant_commander(), 4, 42);
+        assert!(first_player_skips_first_draw(&two_hg_commander));
+        // CR 103.8c: all other multiplayer games — including shared-turns
+        // Archenemy — do not skip.
+        let commander = GameState::new(FormatConfig::commander(), 4, 42);
+        assert!(!first_player_skips_first_draw(&commander));
+        let archenemy = GameState::new(FormatConfig::archenemy(), 4, 42);
+        assert!(!first_player_skips_first_draw(&archenemy));
+        // CR 904.13 is not a Two-Headed Giant game (CR 810.1), so the
+        // CR 103.8b skip does not reach Archenemy Commander either.
+        let archenemy_commander = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+        assert!(!first_player_skips_first_draw(&archenemy_commander));
     }
 
     fn stun_removal_commands(state: &GameState, object_id: ObjectId) -> usize {
@@ -5201,6 +5277,96 @@ card into your hand at the beginning of your next end step.";
         assert_eq!(state.active_player, P0);
         assert_eq!(state.players[0].hand.len(), 8);
         assert_eq!(state.steps_started_this_turn.count(Phase::Cleanup), 2);
+    }
+
+    /// CR 514.3a + CR 603.2 + CR 603.10d: a cleanup reached by the deferred-
+    /// transition retry (no post-action pipeline scans its events) still puts
+    /// the reversion's printed trigger on the stack, in the cleanup step.
+    /// REVERT-PROBE: without the collect in `execute_cleanup` the trigger is
+    /// never stacked and the turn wraps.
+    #[test]
+    fn deferred_cleanup_retry_stacks_the_reversion_trigger() {
+        use crate::game::scenario::GameScenario;
+        use crate::game::zones::move_to_zone;
+        use crate::types::game_state::{CastingVariant, OwedSpellFinalPart};
+
+        const KHARN: &str = "Berzerker \u{2014} Kh\u{e2}rn the Betrayer attacks or blocks each \
+            combat if able.\nSigil of Corruption \u{2014} When you lose control of Kh\u{e2}rn the \
+            Betrayer, draw two cards.\nThe Betrayer \u{2014} If damage would be dealt to \
+            Kh\u{e2}rn the Betrayer, prevent that damage and an opponent of your choice gains \
+            control of it.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::End);
+        scenario.with_library_top(P0, &["Card A", "Card B"]);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Reach Through Mists", true, "Draw a card.")
+            .id();
+        let kharn = scenario
+            .add_creature_from_oracle(P1, "Kh\u{e2}rn the Betrayer", 5, 1, KHARN)
+            .as_legendary()
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        move_to_zone(state, spell, Zone::Stack, &mut Vec::new());
+        state.phase = Phase::Cleanup;
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.resolving_stack_entry = Some(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: P0,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(spell.0),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        // P0 controls Khârn through an until-end-of-turn effect that ends in
+        // this cleanup (CR 514.2).
+        state.add_transient_continuous_effect(
+            kharn,
+            P0,
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: kharn },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+        crate::game::layers::flush_layers(state);
+        assert_eq!(state.objects[&kharn].controller, P0);
+        let starting_turn = state.turn_number;
+
+        let mut events = Vec::new();
+        let waiting_for = crate::game::engine::settle_deferred_phase_transition(state, &mut events);
+
+        // Reach guard: the final part ran.
+        assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(state.resolving_spell_final_part.is_none());
+        assert_eq!(
+            state.objects[&kharn].controller, P1,
+            "REACH: control reverted at cleanup"
+        );
+        assert_eq!(waiting_for, WaitingFor::Priority { player: P0 });
+        assert_eq!(state.phase, Phase::Cleanup);
+        assert_eq!(state.turn_number, starting_turn, "the turn does not end");
+        let stacked: Vec<_> = state
+            .stack
+            .iter()
+            .filter(|entry| {
+                matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                    && entry.source_id == kharn
+            })
+            .collect();
+        assert_eq!(stacked.len(), 1, "the reversion's trigger is on the stack");
+        assert_eq!(
+            stacked[0].controller, P0,
+            "CR 603.10d: the player who lost control controls it"
+        );
+        assert!(state.deferred_triggers.is_empty());
     }
 
     #[test]
@@ -6437,6 +6603,65 @@ card into your hand at the beginning of your next end step.";
         assert_eq!(state.turn_number, 2);
         assert_eq!(state.active_player, PlayerId(1));
         assert_eq!(state.priority_player, PlayerId(1));
+    }
+
+    /// CR 121.1 + CR 603.4: turn start snapshots each player's draws into
+    /// `cards_drawn_last_turn` before zeroing this-turn (Mine Is the Only
+    /// Truth's "if you drew a card last turn"). Mirrors the life-lost
+    /// snapshot in the same loop.
+    ///
+    /// DISCRIMINATION: drop the snapshot line and the previous turn's draws
+    /// are lost at the boundary, so the upkeep condition can never fire.
+    #[test]
+    fn start_next_turn_snapshots_draws_into_last_turn() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.turn_number = 1;
+        state.players[0].cards_drawn_this_turn = 3;
+        state.players[1].cards_drawn_this_turn = 0;
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(
+            state.players[0].cards_drawn_last_turn, 3,
+            "previous turn's draws must survive as last-turn snapshot"
+        );
+        assert_eq!(
+            state.players[0].cards_drawn_this_turn, 0,
+            "this-turn counter must reset"
+        );
+        assert_eq!(
+            state.players[1].cards_drawn_last_turn, 0,
+            "a player who drew nothing snapshots zero"
+        );
+    }
+
+    /// CR 603.4: ending a turn restarts that player's "since your last turn
+    /// ended" window empty while other players' windows keep accumulating
+    /// (I Bask in Your Silent Awe).
+    ///
+    /// DISCRIMINATION: drop the reset and a stale window survives the
+    /// boundary, so the upkeep condition wrongly stays silent.
+    #[test]
+    fn start_next_turn_resets_only_completed_player_since_window() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.turn_number = 1;
+        state.players[0].opponent_spells_cast_since_own_last_turn = 2;
+        state.players[1].opponent_spells_cast_since_own_last_turn = 5;
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+
+        assert_eq!(
+            state.players[0].opponent_spells_cast_since_own_last_turn, 0,
+            "completed player's window must restart empty"
+        );
+        assert_eq!(
+            state.players[1].opponent_spells_cast_since_own_last_turn, 5,
+            "other player's window must keep accumulating"
+        );
     }
 
     /// T-U7c. CR 500.8 + CR 603.7b: a "that combat" trigger whose combat never

@@ -3004,6 +3004,9 @@ fn a_room_cast_from_the_graveyard_offers_the_face_choice_per_cast() {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Any),
         );
@@ -11746,6 +11749,9 @@ fn grant_graveyard_creature_cast_and_bury(
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
@@ -13235,4 +13241,146 @@ fn modal_land_face_election_requires_a_modal_land_back_face() {
     assert!(!modal_land_face_election_available(&transform_land));
     assert!(!modal_land_face_election_available(&spell_spell));
     assert!(!modal_land_face_election_available(&single_land));
+}
+
+/// The resolution land-play board with a spell (sorcery) // land card in exile
+/// instead of a plain land. `back_layout` selects a modal or transform back.
+fn resolution_spell_land_board(
+    back_layout: crate::types::card::LayoutKind,
+) -> (GameState, ObjectId) {
+    let mut state = setup_game_at_main_phase();
+    state.stack.push_back(no_op_stack_entry(7_920, PlayerId(0)));
+    let card = create_object(
+        &mut state,
+        CardId(7_921),
+        PlayerId(0),
+        "Spell Front".to_string(),
+        Zone::Exile,
+    );
+    let obj = state.objects.get_mut(&card).unwrap();
+    obj.card_types.core_types.push(CoreType::Sorcery);
+    obj.base_card_types = obj.card_types.clone();
+    let mut card_types = CardType::default();
+    card_types.core_types.push(CoreType::Land);
+    obj.back_face = Some(BackFaceData {
+        name: "Land Back".to_string(),
+        card_types,
+        layout_kind: Some(back_layout),
+        ..Default::default()
+    });
+    (state, card)
+}
+
+/// Put a P0 permanent carrying a "can't play lands" static (CR 101.2) onto
+/// the battlefield.
+fn add_cant_play_land_static(state: &mut GameState, card_id: u64) {
+    let source = create_object(
+        state,
+        CardId(card_id),
+        PlayerId(0),
+        "Static Source".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .static_definitions
+        .push(
+            StaticDefinition::new(StaticMode::Other("CantPlayLand".to_string())).affected(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+            ),
+        );
+}
+
+/// B6a — CR 712.12 + CR 305.2a + CR 116.2a: the land back face of a
+/// spell//land modal card is played during resolution by that face, from the
+/// zone it was in, and counts as the turn's land play.
+#[test]
+fn play_land_face_during_resolution_enters_by_its_back_face() {
+    let (mut state, card) = resolution_spell_land_board(crate::types::card::LayoutKind::Modal);
+    let mut events = Vec::new();
+    let commit = play_land_face_during_resolution(&mut state, PlayerId(0), card, &mut events);
+    assert_eq!(commit, Some(LandPlayCommit::Entered));
+    let obj = &state.objects[&card];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert_eq!(obj.name, "Land Back");
+    assert!(obj.modal_back_face);
+    assert_eq!(state.lands_played_this_turn, 1);
+    assert_eq!(state.players[0].lands_played_this_turn, 1);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        GameEvent::LandPlayed {
+            object_id,
+            player_id: PlayerId(0),
+            from_zone: Zone::Exile,
+        } if *object_id == card
+    )));
+}
+
+/// B6b — CR 712.12 + CR 101.2 + CR 305.2b + CR 305.3: the land face of a
+/// spell//land card may be played during resolution only for a modal land back
+/// face, on the player's turn, with no "can't play lands" prohibition, and
+/// below the allowance.
+#[test]
+fn resolution_back_land_face_play_is_legal_requires_a_modal_land_back_turn_and_allowance() {
+    use crate::types::card::LayoutKind;
+    let (state, card) = resolution_spell_land_board(LayoutKind::Modal);
+    assert!(
+        resolution_back_land_face_play_is_legal(&state, PlayerId(0), card),
+        "positive baseline: a modal land back face on P0's turn below the allowance"
+    );
+    assert!(
+        !resolution_land_play_is_legal(&state, PlayerId(0), card),
+        "the front face itself is not a land (CR 712.8a)"
+    );
+    assert!(
+        !state.objects[&card].modal_back_face,
+        "the probe does not mutate the real object"
+    );
+
+    let (transform, transform_card) = resolution_spell_land_board(LayoutKind::Transform);
+    assert!(
+        !resolution_back_land_face_play_is_legal(&transform, PlayerId(0), transform_card),
+        "a transform land back face is not a modal land face"
+    );
+
+    let mut single = state.clone();
+    single.objects.get_mut(&card).unwrap().back_face = None;
+    assert!(
+        !resolution_back_land_face_play_is_legal(&single, PlayerId(0), card),
+        "a single-faced card has no land face"
+    );
+
+    let mut at_allowance = state.clone();
+    at_allowance.lands_played_this_turn = 1;
+    at_allowance.players[0].lands_played_this_turn = 1;
+    assert!(!resolution_back_land_face_play_is_legal(
+        &at_allowance,
+        PlayerId(0),
+        card
+    ));
+
+    let mut opponents_turn = state.clone();
+    opponents_turn.active_player = PlayerId(1);
+    assert!(!resolution_back_land_face_play_is_legal(
+        &opponents_turn,
+        PlayerId(0),
+        card
+    ));
+
+    let mut prohibited = state.clone();
+    add_cant_play_land_static(&mut prohibited, 7_922);
+    assert!(
+        crate::game::static_abilities::player_has_static_other(
+            &prohibited,
+            PlayerId(0),
+            "CantPlayLand"
+        ),
+        "reach-guard: the prohibition is in force"
+    );
+    assert!(
+        !resolution_back_land_face_play_is_legal(&prohibited, PlayerId(0), card),
+        "CR 101.2: a \"can't play lands\" static refuses the land face"
+    );
 }

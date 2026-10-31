@@ -257,6 +257,7 @@ impl VoteIr {
         let parsed = match &self.pre_vote_choose {
             Some(choice_type) => {
                 let mut root = parsed_clause(Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type: choice_type.clone(),
                     persist: true,
                     selection: TargetSelectionMode::Random,
@@ -283,6 +284,7 @@ impl VoteIr {
             Some(choice_type) => AbilityDefinition::new(
                 kind,
                 Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type,
                     persist: true,
                     selection: TargetSelectionMode::Random,

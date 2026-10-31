@@ -4320,9 +4320,9 @@ fn target_intent(effect_kind: EffectKind, detail: TargetEffectDetail) -> Interac
 
 fn pay_cost_intent(kind: &PayCostKind) -> InteractionIntentCode {
     match kind {
-        PayCostKind::Discard | PayCostKind::Reveal | PayCostKind::Behold { .. } => {
-            InteractionIntentCode::Pay
-        }
+        PayCostKind::Discard
+        | PayCostKind::Reveal { shared_quality: _ }
+        | PayCostKind::Behold { .. } => InteractionIntentCode::Pay,
         PayCostKind::Sacrifice => InteractionIntentCode::Sacrifice,
         PayCostKind::ReturnToHand => InteractionIntentCode::Return,
         PayCostKind::ExileFromZone { .. }
@@ -4553,7 +4553,7 @@ fn selection_projection(
                     mode: TapCreaturesSelectionMode::Fixed | TapCreaturesSelectionMode::VariableX,
                 }
                 | PayCostKind::Discard
-                | PayCostKind::Reveal
+                | PayCostKind::Reveal { shared_quality: _ }
                 | PayCostKind::Sacrifice
                 | PayCostKind::ReturnToHand
                 | PayCostKind::ExileFromZone { .. }

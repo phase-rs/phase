@@ -233,7 +233,7 @@ fn twinned_vision_stolen_hand_spell_draws_two_for_new_controller() {
         control_changed |= result.events.iter().any(|event| {
             matches!(
                 event,
-                GameEvent::ControllerChanged { object_id, old_controller, new_controller }
+                GameEvent::ControllerChanged { object_id, old_controller, new_controller, .. }
                     if *object_id == spell && *old_controller == P0 && *new_controller == P1
             )
         });

@@ -3694,6 +3694,7 @@ mod tests {
             &mut seat_state,
             SeatMutation::SetKind {
                 seat_index: 1,
+                expected_kind: None,
                 kind: SeatKind::WaitingHuman,
             },
             &ctx,
@@ -9519,6 +9520,7 @@ mod tests {
     fn seat_ai_at(seat_index: u8, deck: DeckChoice) -> SeatMutation {
         SeatMutation::SetKind {
             seat_index,
+            expected_kind: None,
             kind: SeatKind::Ai {
                 difficulty: AiDifficulty::Easy,
                 deck,
@@ -9647,6 +9649,87 @@ mod tests {
             .apply_seat_delta(seat_state, &SeatDelta::empty(), &db);
 
         assert!(mgr.try_session(&code).unwrap().state_revision > before);
+    }
+
+    #[test]
+    fn conditional_seat_assignment_preserves_joined_session_and_advances_revision() {
+        let mut mgr = SessionManager::new();
+        let (code, host) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                4,
+                MatchConfig::default(),
+                Some(FormatConfig::commander()),
+            )
+            .unwrap();
+        let db = lands_db();
+        let guest_data = name_deck("Forest", 8);
+        let (guest, _) = join_game_with_name(
+            &mut mgr,
+            &code,
+            crate::resolve_deck(&db, &guest_data).unwrap(),
+            Some(DeckChoice::DeckList(Box::new(guest_data.clone()))),
+            "Guest".to_string(),
+        )
+        .unwrap();
+        let (other, _) =
+            join_game_with_name(&mut mgr, &code, make_deck(), None, "Other".to_string()).unwrap();
+        let before = mgr.try_session(&code).unwrap().state_revision;
+        let mut mutation = seat_ai_at(1, list_choice("Mountain", 1));
+        if let SeatMutation::SetKind { expected_kind, .. } = &mut mutation {
+            *expected_kind = Some(SeatKind::WaitingHuman);
+        }
+        let delta = run_seat_mutation(&mut mgr, &code, &db, mutation);
+        mgr.unindex_tokens(&delta.invalidated_tokens);
+        {
+            let session = mgr.try_session(&code).unwrap();
+            assert_eq!(session.seat_state().seats[1], SeatKind::JoinedHuman);
+            assert_eq!(
+                session.player_tokens,
+                vec![host.clone(), guest.clone(), other.clone(), String::new()]
+            );
+            assert_eq!(session.display_names[1], "Guest");
+            assert!(session.connected[1]);
+            assert_eq!(
+                main_deck_names(session.decks[1].as_ref().unwrap()),
+                guest_data.main_deck
+            );
+            assert_eq!(
+                session.deck_choices[1],
+                Some(DeckChoice::DeckList(Box::new(guest_data)))
+            );
+            assert!(session.state_revision > before);
+        }
+        assert_eq!(mgr.game_for_token(&guest), Some(code.as_str()));
+        assert_eq!(mgr.game_for_token(&other), Some(code.as_str()));
+        run_seat_mutation(
+            &mut mgr,
+            &code,
+            &db,
+            seat_ai_at(3, list_choice("Mountain", 1)),
+        );
+        assert!(matches!(
+            mgr.try_session(&code).unwrap().seat_state().seats[3],
+            SeatKind::Ai { .. }
+        ));
+        let delta = run_seat_mutation(
+            &mut mgr,
+            &code,
+            &db,
+            SeatMutation::SetKind {
+                seat_index: 1,
+                kind: SeatKind::WaitingHuman,
+                expected_kind: None,
+            },
+        );
+        mgr.unindex_tokens(&delta.invalidated_tokens);
+        assert_eq!(delta.invalidated_tokens, vec![guest.clone()]);
+        assert_eq!(mgr.game_for_token(&guest), None);
+        assert_eq!(mgr.game_for_token(&host), Some(code.as_str()));
+        assert_eq!(mgr.game_for_token(&other), Some(code.as_str()));
     }
 
     #[test]
@@ -9788,6 +9871,7 @@ mod tests {
             &db,
             SeatMutation::SetKind {
                 seat_index: 1,
+                expected_kind: None,
                 kind: SeatKind::WaitingHuman,
             },
         );

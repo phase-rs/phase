@@ -44,10 +44,11 @@ use crate::types::ability::{
     ConjureSource, ContinuousEffectOnset, ContinuousModification, ControllerRef, CountBinding,
     DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
     ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
-    NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount,
-    PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
-    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
+    NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PlayerRelation,
+    PreventionAmount, PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
+    RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement, StaticCondition,
+    StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
+    TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
@@ -1079,24 +1080,10 @@ pub(super) fn attach_graveyard_redirect_rider_to_prior_graveyard_cast_grant(
     let Some(prev) = defs.last_mut() else {
         return false;
     };
-    let Effect::GenericEffect {
-        static_abilities, ..
-    } = &mut *prev.effect
-    else {
-        return false;
-    };
-    let [grant] = static_abilities.as_mut_slice() else {
-        return false;
-    };
-    let [ContinuousModification::GrantStaticAbility { definition }] =
-        grant.modifications.as_mut_slice()
-    else {
-        return false;
-    };
-    let StaticMode::GraveyardCastPermission {
+    let Some(StaticMode::GraveyardCastPermission {
         graveyard_destination_replacement: slot @ None,
         ..
-    } = &mut definition.mode
+    }) = crate::parser::oracle_ir::ast::granted_graveyard_permission_mut(&mut prev.effect)
     else {
         return false;
     };
@@ -1794,6 +1781,106 @@ pub(super) fn gate_other_revealed_card_on_multiplayer_reveal(def: &mut AbilityDe
 /// cannot be carried to the spell cast through it.
 pub(super) const CAST_RIDER_ON_LINGERING_GRANT_GAP: &str = "cast_rider_on_lingering_grant";
 
+/// CR 614.1c + CR 122.1 + CR 613.1d: fold a "cast this way" rider into the
+/// granted graveyard cast permission it follows — "You may cast a creature spell
+/// from your graveyard this turn. If you do, it enters with a finality counter on
+/// it and is a Vampire in addition to its other types." (The Tomb of Aclazotz).
+///
+/// The rider describes the spell cast through the grant, which does not exist
+/// while the granting ability resolves, so left as a sub-ability it
+/// would run then and act on nothing. The permission carries both halves to the
+/// cast instead (`GraveyardCastPermission::{enters_with_counter,
+/// enters_modifications}`), applied when the spell is cast through it.
+///
+/// Folds only a rider made entirely of those two instructions — at most one
+/// single counter and one modification set — gated by "If you do" or by
+/// nothing ("If you cast a spell this way" reads as an ungated sibling). Any
+/// other tail keeps its shape.
+pub(super) fn fold_cast_rider_into_graveyard_grant(def: &mut AbilityDefinition) {
+    if crate::parser::oracle_ir::ast::is_graveyard_permission_grant(&def.effect) {
+        if let Some(rider) = def
+            .sub_ability
+            .as_deref()
+            .and_then(graveyard_grant_cast_rider)
+        {
+            if let Some(StaticMode::GraveyardCastPermission {
+                enters_with_counter,
+                enters_modifications,
+                ..
+            }) = crate::parser::oracle_ir::ast::granted_graveyard_permission_mut(&mut def.effect)
+            {
+                if enters_with_counter.is_none() && enters_modifications.is_empty() {
+                    *enters_with_counter = rider.counter;
+                    *enters_modifications = rider.modifications;
+                    def.sub_ability = None;
+                }
+            }
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        fold_cast_rider_into_graveyard_grant(sub);
+    }
+    if let Some(els) = def.else_ability.as_mut() {
+        fold_cast_rider_into_graveyard_grant(els);
+    }
+    for mode in def.mode_abilities.iter_mut() {
+        fold_cast_rider_into_graveyard_grant(mode);
+    }
+}
+
+/// The two halves of a "cast this way" rider a graveyard grant carries.
+struct GraveyardGrantCastRider {
+    counter: Option<crate::types::counter::CounterType>,
+    modifications: crate::types::ability::PendingEntersModifications,
+}
+
+/// The rider [`fold_cast_rider_into_graveyard_grant`] folds, read off the
+/// grant's sub-ability chain; `None` when the chain holds anything else.
+fn graveyard_grant_cast_rider(first: &AbilityDefinition) -> Option<GraveyardGrantCastRider> {
+    let gate_is_foldable = match &first.condition {
+        None => true,
+        Some(crate::types::ability::AbilityCondition::EffectOutcome { signal, .. }) => matches!(
+            signal,
+            crate::types::ability::EffectOutcomeSignal::OptionalEffectPerformed
+        ),
+        Some(_) => false,
+    };
+    if !gate_is_foldable {
+        return None;
+    }
+    let mut rider = GraveyardGrantCastRider {
+        counter: None,
+        modifications: Default::default(),
+    };
+    let mut node = Some(first);
+    let mut gate_read = false;
+    while let Some(def) = node {
+        // Only the first link carries the gate, read above.
+        let plain_link = def.else_ability.is_none()
+            && def.mode_abilities.is_empty()
+            && def.cost.is_none()
+            && (!gate_read || def.condition.is_none());
+        gate_read = true;
+        if !plain_link {
+            return None;
+        }
+        match &*def.effect {
+            Effect::AddPendingETBCounters {
+                counter_type,
+                count: QuantityExpr::Fixed { value: 1 },
+            } if rider.counter.is_none() => rider.counter = Some(counter_type.clone()),
+            Effect::AddPendingEntersModifications {
+                rider: modifications,
+            } if rider.modifications.is_empty() && !modifications.is_empty() => {
+                rider.modifications = modifications.clone();
+            }
+            _ => return None,
+        }
+        node = def.sub_ability.as_deref();
+    }
+    Some(rider)
+}
+
 /// CR 608.2c + CR 611.2f: refuse a `GrantCastingPermission` whose "If you do, …" rider cannot
 /// reach the spell it describes.
 ///
@@ -1821,11 +1908,15 @@ pub(super) const CAST_RIDER_ON_LINGERING_GRANT_GAP: &str = "cast_rider_on_linger
 /// per-permission rider).
 ///
 /// SCOPED TO `GrantCastingPermission`, and that is deliberate. A lingering
-/// `Effect::CastFromZone` CAN carry a deferred rider: The Tomb of Aclazotz ("You
-/// may cast a creature spell from your graveyard this turn. If you do, it enters
-/// with a finality counter …") lowers its rider to `AddPendingETBCounters`, which
-/// binds when the spell later enters. Refusing every lingering cast with a rider
-/// would sweep that in. Measured over the card-data export: the only
+/// `Effect::CastFromZone` CAN carry a deferred rider: "the creature cast this
+/// way enters with a finality counter on it" lowers to `AddPendingETBCounters`,
+/// recorded on the permission the grant creates and bound when the spell later
+/// enters. Refusing every lingering cast with a rider would sweep that in. (A
+/// granted graveyard cast permission is a `GenericEffect`, not a
+/// `GrantCastingPermission`, so this gate passes it;
+/// `fold_cast_rider_into_graveyard_grant`, which runs after it, folds its rider
+/// into the permission — The Tomb of Aclazotz.) Measured over the card-data
+/// export: the only
 /// `GrantCastingPermission` followed by an `OptionalEffectPerformed`-gated rider is
 /// Chiss-Goria's, so this gate moves exactly one card. Should a deferred-binding
 /// rider ever reach this grant, the gate refuses it — fail-closed, an honest gap
@@ -3192,6 +3283,7 @@ impl ReflexiveGateParent {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -4235,6 +4327,9 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::DeclaredPlayer { .. }
             | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
+            // CR 108.3 + CR 508.1d: per-member owner anchor — never the
+            // last-created reader this classifier looks for.
+            | TargetFilter::AffectedObjectOwner
             | TargetFilter::SourceChosenPlayer
             | TargetFilter::OriginalController
             | TargetFilter::OriginalSource
@@ -4333,6 +4428,9 @@ pub(super) fn filter_tree_has_chosen_card(filter: &TargetFilter) -> bool {
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — never the
+        // chosen-card reader this classifier looks for.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
@@ -6031,12 +6129,15 @@ fn parse_repeat_count_tail(input: &str) -> OracleResult<'_, QuantityExpr> {
 /// "Each opponent discards a card" → (Some(Opponent), "discard a card")
 /// "Each other player sacrifices a creature" → (Some(Opponent), "sacrifice a creature")
 /// "Each player draws a card" → (Some(All), "draw a card")
-pub(crate) fn strip_player_scope_subject(text: &str) -> (Option<PlayerFilter>, String) {
+pub(crate) fn strip_player_scope_subject(
+    text: &str,
+    target_anchor_in_scope: bool,
+) -> (Option<PlayerFilter>, String) {
     let (scope, stripped) = strip_linked_exile_owner_subject(text);
     if scope.is_some() {
         return (scope, stripped);
     }
-    strip_each_player_subject(text)
+    strip_each_player_subject(text, target_anchor_in_scope)
 }
 
 /// CR 101.4 + CR 608.2c + CR 109.5: Strip a prepositional player-scoped
@@ -6121,7 +6222,10 @@ pub(crate) fn parse_each_of_triggering_players_opponents(
     .parse(i)
 }
 
-pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
+pub(super) fn strip_each_player_subject(
+    text: &str,
+    target_anchor_in_scope: bool,
+) -> (Option<PlayerFilter>, String) {
     // CR 701.9a + CR 608.2c: Reserve only the exact Kroxa/Strongarm
     // mandatory-FILTERED decline-tail grammar for its dedicated dispatcher.
     // A broad `who didn't` reservation also captures unrelated relative clauses
@@ -6132,44 +6236,78 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
     }
 
     let lower = text.to_lowercase();
-    let scope_rest = nom_on_lower(text, &lower, |i| {
-        alt((
-            value(
-                PlayerFilter::HighestSpeed,
-                tag("each player with the highest speed among players "),
-            ),
-            value(PlayerFilter::Opponent, tag("each other player ")),
-            // CR 102.2 + CR 603.2: "each of ⟨that player | its controller⟩'s
-            // opponents" — the TRIGGERING player's opponents (mandatory variant),
-            // fanned out per-player. Must precede the bare "each opponent " arm,
-            // which scopes to the ABILITY CONTROLLER's opponents instead.
-            parse_each_of_triggering_players_opponents,
-            value(PlayerFilter::Opponent, tag("each opponent ")),
-            // CR 608.2c + CR 109.4 + CR 608.2h: "each player other than <ref>" —
-            // all players except the anchor's player (resolved with last-known
-            // information when the anchor object has left the battlefield, e.g.
-            // Fractured Identity's exiled permanent). Placed before the bare
-            // "each player " arm so the longer prefix wins.
+    // CR 102.2 + CR 608.2c + CR 109.4: "each of your other opponents/foes" —
+    // the partitive + "other" spelling (Surrender Your Thoughts, Feed the
+    // Machine, May Civilization Collapse). Unlike bare "each other player"
+    // (above, controller-anchored) the "other" here anaphors to a TARGETED
+    // player from an earlier instruction in the same chain, so the scope
+    // lowers to opponents-except-the-parent-target. Hoisted out of the `alt`
+    // below because the gate is a runtime bool, not a text prefix: without a
+    // targeted-player antecedent the anchor is undefined and the arm declines
+    // (falling through to the subject path below, which drops "other" — the
+    // pre-existing behavior for unanchored partitives). The result still flows
+    // through the shared bail checks after the `alt` (may-play, who-last-chose,
+    // choose-headed residuals), so a future "each of your other opponents
+    // choose ..." keeps its dedicated dispatcher.
+    let gated_scope_rest = target_anchor_in_scope.then(|| {
+        nom_on_lower(text, &lower, |i| {
             map(
-                preceded(
-                    tag("each player other than "),
-                    terminated(parse_excluded_player_anchor, tag(" ")),
+                terminated(
+                    alt((
+                        tag::<_, _, OracleError<'_>>("each of your other opponent"),
+                        tag("each of your other foe"),
+                    )),
+                    (opt(tag("s")), tag(" ")),
                 ),
-                |anchor| PlayerFilter::AllExcept {
-                    exclude: Box::new(anchor),
+                |_| PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::TargetPlayer),
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 },
-            ),
-            value(PlayerFilter::All, tag("each player ")),
-            value(PlayerFilter::Opponent, tag("for each opponent, you ")),
-            value(PlayerFilter::All, tag("for each player, you ")),
-            // CR 101.4 + CR 608.2c: comma-prefixed per-player imperative scope —
-            // "For each player, <imperative> ... that player controls" (Curse of
-            // Fenric I). The more-specific "for each player, you choose"/"choose
-            // ... in that player's zone" handlers run earlier in the dispatcher,
-            // so only the bare imperative residual reaches here.
-            value(PlayerFilter::All, tag("for each player, ")),
-        ))
-        .parse(i)
+            )
+            .parse(i)
+        })
+    });
+    let scope_rest = gated_scope_rest.flatten().or_else(|| {
+        nom_on_lower(text, &lower, |i| {
+            alt((
+                value(
+                    PlayerFilter::HighestSpeed,
+                    tag("each player with the highest speed among players "),
+                ),
+                value(PlayerFilter::Opponent, tag("each other player ")),
+                // CR 102.2 + CR 603.2: "each of ⟨that player | its controller⟩'s
+                // opponents" — the TRIGGERING player's opponents (mandatory variant),
+                // fanned out per-player. Must precede the bare "each opponent " arm,
+                // which scopes to the ABILITY CONTROLLER's opponents instead.
+                parse_each_of_triggering_players_opponents,
+                value(PlayerFilter::Opponent, tag("each opponent ")),
+                // CR 608.2c + CR 109.4 + CR 608.2h: "each player other than <ref>" —
+                // all players except the anchor's player (resolved with last-known
+                // information when the anchor object has left the battlefield, e.g.
+                // Fractured Identity's exiled permanent). Placed before the bare
+                // "each player " arm so the longer prefix wins.
+                map(
+                    preceded(
+                        tag("each player other than "),
+                        terminated(parse_excluded_player_anchor, tag(" ")),
+                    ),
+                    |anchor| PlayerFilter::AllExcept {
+                        exclude: Box::new(anchor),
+                        relation: PlayerRelation::All,
+                    },
+                ),
+                value(PlayerFilter::All, tag("each player ")),
+                value(PlayerFilter::Opponent, tag("for each opponent, you ")),
+                value(PlayerFilter::All, tag("for each player, you ")),
+                // CR 101.4 + CR 608.2c: comma-prefixed per-player imperative scope —
+                // "For each player, <imperative> ... that player controls" (Curse of
+                // Fenric I). The more-specific "for each player, you choose"/"choose
+                // ... in that player's zone" handlers run earlier in the dispatcher,
+                // so only the bare imperative residual reaches here.
+                value(PlayerFilter::All, tag("for each player, ")),
+            ))
+            .parse(i)
+        })
     });
     let Some((scope, rest)) = scope_rest else {
         return (None, text.to_string());
@@ -7204,8 +7342,19 @@ pub(super) fn parse_damage_player_scope(
 /// variant that excludes both the controller and the triggering player).
 /// "each other player" excludes the controller (the only "other" antecedent
 /// available outside trigger context) and reduces to plain `Opponent`.
-pub(crate) fn parse_damage_each_player_scope(text: &str) -> Option<PlayerFilter> {
-    let (filter, rest) = parse_damage_each_player_scope_with_remainder(text)?;
+///
+/// `target_anchor_in_scope` is the caller's `chain_prior_targeted_player`: it
+/// gates ONLY the "each of your other opponents/foes" arm, whose "other"
+/// anaphors to a TARGETED player from an earlier instruction in the same chain
+/// (Fate of the Flammable). Without a targeted-player antecedent the anchor is
+/// undefined and that arm declines (fail-closed); every other arm ignores the
+/// gate.
+pub(crate) fn parse_damage_each_player_scope(
+    text: &str,
+    target_anchor_in_scope: bool,
+) -> Option<PlayerFilter> {
+    let (filter, rest) =
+        parse_damage_each_player_scope_with_remainder(text, target_anchor_in_scope)?;
     rest.chars()
         .all(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation())
         .then_some(filter)
@@ -7279,7 +7428,12 @@ fn fold_each_object_legs<'a>(
         }) else {
             break;
         };
-        if parse_damage_each_player_scope(&after_and.to_lowercase()).is_some() {
+        if parse_damage_each_player_scope(
+            &after_and.to_lowercase(),
+            ctx.chain_prior_targeted_player,
+        )
+        .is_some()
+        {
             break;
         }
         let mut leg_ctx = ctx.clone();
@@ -7303,7 +7457,46 @@ fn fold_each_object_legs<'a>(
 /// remainder. Unlike `parse_damage_each_player_scope` it is NOT all-consuming —
 /// used only by the multi-target damage CHAIN primary, which hands the trailing
 /// " and M damage to ..." segment back to the loop.
-fn parse_damage_each_player_scope_with_remainder(text: &str) -> Option<(PlayerFilter, &str)> {
+fn parse_damage_each_player_scope_with_remainder(
+    text: &str,
+    target_anchor_in_scope: bool,
+) -> Option<(PlayerFilter, &str)> {
+    // CR 102.2 + CR 608.2c + CR 109.4: "each of your other opponents/foes" —
+    // the partitive + "other" spelling. Unlike bare "each other opponent"
+    // (which anaphors to the TRIGGERING opponent), the "other" here anaphors
+    // to a TARGETED player from an earlier instruction in the same chain (Fate
+    // of the Flammable: "target opponent ... this scheme deals 3 damage to
+    // each of your other opponents"). Hoisted out of the `alt` below because
+    // the gate is a runtime bool, not a text prefix: without a
+    // targeted-player antecedent the anchor is undefined and the arm declines
+    // rather than installing a wrong-referent rule. Hoisting is
+    // behavior-preserving — the `alt` below declines this shape (its
+    // `opt("of your ")` + singular-stem arm cannot match "other ..."), so no
+    // previously-accepted input is stolen.
+    // ("each of your other players" is deliberately unhandled — no live card
+    // carries it, and its teammate-inclusive base needs `AllExcept`, not
+    // `OpponentExcept`.)
+    if target_anchor_in_scope {
+        let mut gated = preceded(
+            tag("each "),
+            terminated(
+                alt((
+                    tag::<_, _, OracleError<'_>>("of your other opponent"),
+                    tag("of your other foe"),
+                )),
+                opt(tag("s")),
+            ),
+        );
+        if let Ok((rest, _)) = gated.parse(text) {
+            return Some((
+                PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::TargetPlayer),
+                    relation: crate::types::ability::PlayerRelation::Opponent,
+                },
+                rest,
+            ));
+        }
+    }
     let (rest, filter) = preceded(
         tag("each "),
         alt((
@@ -10146,11 +10339,81 @@ pub(super) fn try_parse_bidirectional_prevent(
 
 /// Thin wrapper around `try_parse_damage_with_remainder` for callers that don't
 /// need the remainder (e.g., `parse_cost_resource_ast`). The remainder is only
-/// safely discardable when `try_split_damage_compound` has already run and found
-/// no compound connector.
+/// safely discardable when it carries no compound connector — enforced below,
+/// not merely documented: several callers (the subject path, the for-each
+/// path) never ran `try_split_damage_compound`, so trusting them to have found
+/// no connector silently dropped continuations.
 pub(super) fn try_parse_damage(lower: &str, text: &str, ctx: &mut ParseContext) -> Option<Effect> {
-    let (effect, _remainder) = try_parse_damage_with_remainder(text, lower, ctx)?;
+    let (effect, remainder) = try_parse_damage_with_remainder(text, lower, ctx)?;
+    // CR 608.2c: fail-closed guard — an "and" connector trailing a
+    // single-target damage parse means a continuation instruction the
+    // splitters never consumed. When the tail is a further DAMAGE leg
+    // ("and each creature they control", "and 2 damage to you", "and that
+    // much damage to ...", "and that player ..."), accepting the primary
+    // alone would silently drop half the damage (Which of You Burns
+    // Brightest?, The Great Work ch.I, Disorder, Dragonspark Reactor,
+    // Friendly Fire) — decline so the clause falls through to an honest
+    // Unimplemented instead of a half-wrong DealDamage. Any other tail is a
+    // verb-led instruction the splitter owns ("and the other can't block",
+    // "and the damage can't be prevented") — the wrapper accepts the primary
+    // and drops it, exactly the upstream behavior the chain tests pin (Trial
+    // of Agony; complement-anaphor binding is out of scope here). Bare
+    // "and" / empty tails stay declined (malformed input fails closed).
+    // Deliberately "and"-only: comma trailers are a mixed class — ", where
+    // X is ..." is a live amount binding (Basalt Ravager, Minsc & Boo, Mana
+    // Cannons) that must keep accepting, and the wrapper cannot tell it from
+    // a chain-loop abort. Punctuation-only remainders (".", ",") are the
+    // clean terminator and still accept.
+    let rest = remainder.trim_start_matches([',', ' ', '.']);
+    // allow-noncombinator: structural conjunction-boundary scan on a post-parse remainder, not parsing dispatch.
+    if rest == "and" {
+        return None;
+    }
+    // Pattern 1 (optional fixed prefix): strip one "and " connector; without
+    // it the remainder is a comma trailer or clean terminator and accepts.
+    let tail = preceded(tag::<_, _, OracleError<'_>>("and "), nom::combinator::rest)
+        .parse(rest)
+        .ok()
+        .map(|(_, tail)| tail.trim_start());
+    let Some(tail) = tail else {
+        return Some(effect);
+    };
+    if tail.is_empty() || damage_leg_head(&tail.to_lowercase()) {
+        return None;
+    }
     Some(effect)
+}
+
+/// CR 608.2c: damage-leg heads for the `try_parse_damage` compound-connector
+/// guard — the closed recipient-phrase class that extends the damage ("each
+/// ...", "target ...", "any ...", "all ...", anaphoric "that/those ...",
+/// numeral/"X damage to ..."). Heads are lowercased by the caller; matching is
+/// prefix-structural, not parsing dispatch. Deliberately NOT heads: "the ..."
+/// (Trial of Agony's "the other can't block", Arrow Storm's "the damage can't
+/// be prevented" — verb-led instructions the splitter owns, accepted for
+/// upstream parity) and possessives (no "and its/their ..." damage leg exists
+/// in the 6006-card damage corpus; possessive-headed instructions are common).
+fn damage_leg_head(tail_lower: &str) -> bool {
+    // Bare "each" (truncated input) fails closed; no arm is a prefix of
+    // another, so `alt` needs no longest-first ordering.
+    if tail_lower == "each" {
+        return true;
+    }
+    alt((
+        tag::<_, _, OracleError<'_>>("each "),
+        tag("target "),
+        tag("any "),
+        tag("all "),
+        tag("that "),
+        tag("those "),
+        tag("x "),
+    ))
+    .parse(tail_lower)
+    .is_ok()
+        || tail_lower
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_digit)
 }
 
 /// CR 608.2c: Bind a bare "those cards" aggregate only to its typed chain antecedent.
@@ -10306,7 +10569,9 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
             // player (DamageEachPlayer resolves per recipient), NOT the caster.
             // Classify the recipient scope BEFORE parsing the amount so the
             // count's controller threads to `ScopedPlayer` (Acidic Soil).
-            let each_player_scope = parse_damage_each_player_scope(target_phrase).is_some();
+            let each_player_scope =
+                parse_damage_each_player_scope(target_phrase, ctx.chain_prior_targeted_player)
+                    .is_some();
             // CR 115.1 + CR 608.2c: a declared player recipient ("target player",
             // "target opponent") is the antecedent of a "that player" / "they" in
             // the amount (Anathemancer). Classified by the target grammar on a
@@ -10384,7 +10649,10 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     // "each player" → DamageEachPlayer (per-player varying damage)
                     // "each creature" → DamageAll (uniform damage to objects)
                     // "each foe" — archaic synonym for opponent (friend/foe cards)
-                    if let Some(player_filter) = parse_damage_each_player_scope(target_phrase) {
+                    if let Some(player_filter) = parse_damage_each_player_scope(
+                        target_phrase,
+                        ctx.chain_prior_targeted_player,
+                    ) {
                         return Some((
                             Effect::DamageEachPlayer {
                                 amount: qty,
@@ -10404,10 +10672,13 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     // (Pompeii, Volcanic Eruption, etc.).
                     let trimmed = remainder.trim_start_matches([',', ' ']);
                     let trimmed_lower = trimmed.to_lowercase();
+                    let target_anchor_in_scope = ctx.chain_prior_targeted_player;
                     let player_filter = tag::<_, _, OracleError<'_>>("and ")
                         .parse(trimmed_lower.as_str())
                         .ok()
-                        .and_then(|(after_and, _)| parse_damage_each_player_scope(after_and));
+                        .and_then(|(after_and, _)| {
+                            parse_damage_each_player_scope(after_and, target_anchor_in_scope)
+                        });
                     let leftover = if player_filter.is_some() {
                         ""
                     } else {
@@ -10629,7 +10900,10 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 "",
             ));
         }
-        if let Some(player_filter) = parse_damage_each_player_scope(after_to_for_classification) {
+        if let Some(player_filter) = parse_damage_each_player_scope(
+            after_to_for_classification,
+            ctx.chain_prior_targeted_player,
+        ) {
             return Some((
                 Effect::DamageEachPlayer {
                     amount,
@@ -10646,9 +10920,10 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         // player half and hand the continuation back to the chain loop (CR 120.2b
         // independent events). NOT the " and each " compound (caught upstream by
         // the compound parser); the chain joins two separately-amounted segments.
-        if let Some((player_filter, rem)) =
-            parse_damage_each_player_scope_with_remainder(after_to_for_classification)
-        {
+        if let Some((player_filter, rem)) = parse_damage_each_player_scope_with_remainder(
+            after_to_for_classification,
+            ctx.chain_prior_targeted_player,
+        ) {
             let consumed = after_to_for_classification.len() - rem.len();
             let rem_full = &after_to[consumed..];
             return Some((
@@ -10671,10 +10946,13 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         // dispatch upstream (Pompeii, Goblin Chainwhirler, Hurricane class).
         let trimmed = rem.trim_start_matches([',', ' ']);
         let trimmed_lower = trimmed.to_lowercase();
+        let target_anchor_in_scope = ctx.chain_prior_targeted_player;
         let player_filter = tag::<_, _, OracleError<'_>>("and ")
             .parse(trimmed_lower.as_str())
             .ok()
-            .and_then(|(after_and, _)| parse_damage_each_player_scope(after_and));
+            .and_then(|(after_and, _)| {
+                parse_damage_each_player_scope(after_and, target_anchor_in_scope)
+            });
         let rem_out = if player_filter.is_some() { "" } else { rem };
         return Some((
             Effect::DamageAll {
@@ -14760,6 +15038,7 @@ mod tests {
         use crate::types::ability::PlayerFilter;
         let (scope, residual) = super::strip_each_player_subject(
             "for each player, destroy up to one target creature that player controls",
+            false,
         );
         assert_eq!(scope, Some(PlayerFilter::All));
         assert_eq!(
@@ -14775,14 +15054,16 @@ mod tests {
     // Fractured Identity and the "each player other than ⟨ref⟩ does X" class.
     #[test]
     fn each_player_other_than_its_controller_strips_to_all_except_scope() {
-        use crate::types::ability::PlayerFilter;
+        use crate::types::ability::{PlayerFilter, PlayerRelation};
         let (scope, residual) = super::strip_each_player_subject(
             "each player other than its controller creates a token that's a copy of it.",
+            false,
         );
         assert_eq!(
             scope,
             Some(PlayerFilter::AllExcept {
                 exclude: Box::new(PlayerFilter::ParentObjectTargetController),
+                relation: PlayerRelation::All,
             }),
         );
         assert_eq!(
@@ -14802,6 +15083,7 @@ mod tests {
         use crate::types::player::PlayerCounterKind;
         let (scope, residual) = super::strip_each_player_subject(
             "each opponent who has three or more poison counters exiles the top card of their library",
+            false,
         );
         assert_eq!(
             scope,
@@ -14828,6 +15110,7 @@ mod tests {
         };
         let (scope, residual) = super::strip_each_player_subject(
             "each opponent with two or more cards in hand discards a card",
+            false,
         );
         assert_eq!(
             scope,
@@ -14851,6 +15134,7 @@ mod tests {
         use crate::types::ability::PlayerFilter;
         let (scope, residual) = super::strip_player_scope_subject(
             "the owner of each card exiled with ~ puts that card on the bottom of their library",
+            false,
         );
         assert_eq!(scope, Some(PlayerFilter::OwnersOfCardsExiledBySource));
         assert_eq!(
@@ -16687,6 +16971,7 @@ mod where_x_tests {
                 qty: QuantityRef::Variable { name: "X".into() },
             },
             filter: Some(filter.clone()),
+            shared_quality: None,
         };
         let mut unbound = None;
         super::apply_where_x_to_ability_cost(&mut cost, Some(expression), &mut unbound);
@@ -16696,6 +16981,7 @@ mod where_x_tests {
             AbilityCost::Reveal {
                 count: expected,
                 filter: Some(filter),
+                shared_quality: None,
             }
         );
     }
@@ -17723,6 +18009,7 @@ mod dq_d_player_set_lift_tests {
     fn prepositional_player_scope_preserves_opponent_iteration() {
         let (scope, body) = strip_player_scope_subject(
             "For each opponent, you create a 2/2 black Zombie creature token unless they sacrifice a creature.",
+            false,
         );
         assert_eq!(scope, Some(PlayerFilter::Opponent));
         assert_eq!(

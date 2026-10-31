@@ -36,7 +36,6 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_entries, CounterType};
 use crate::types::display_only::{CanonicalDigest, DisplayOnly};
 use crate::types::events::GameEvent;
-use crate::types::format::GameFormat;
 use crate::types::game_state::{
     CastingVariant, CombatDamageSubStep, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
     SyntheticTriggerProvenance, TriggerSourceRead, WaitingFor,
@@ -1776,7 +1775,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         views.pending_payment_remaining = pending_payment_remaining(state, viewer);
     }
 
-    if state.format_config.format == GameFormat::Planechase {
+    if state.format_config.format.is_planechase_family() {
         let roll_player = crate::game::turn_control::priority_seat(state);
         let can_viewer_roll = viewer.is_some_and(|viewer| {
             crate::game::turn_control::authorized_submitter_for_player(state, roll_player) == viewer
@@ -1791,7 +1790,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         });
     }
 
-    if state.format_config.format == GameFormat::Archenemy {
+    if state.format_config.format.is_archenemy_family() {
         if let Some(archenemy) = crate::game::topology::archenemy(state) {
             let hero_player_ids = state
                 .seat_order

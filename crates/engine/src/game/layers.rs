@@ -4562,7 +4562,7 @@ fn player_filter_reads_zone(filter: &PlayerFilter, zone: Zone) -> bool {
             .as_deref()
             .is_some_and(|f| target_filter_reads_zone(f, zone)),
         // CR 608.2c: self-composing exclusion anchor — recurse on the exclude.
-        PlayerFilter::AllExcept { exclude } => player_filter_reads_zone(exclude, zone),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_reads_zone(exclude, zone),
         // CR 102.1 + CR 608.2c: the union reads what any member reads.
         PlayerFilter::AnyOf { filters } => {
             filters.iter().any(|f| player_filter_reads_zone(f, zone))
@@ -4722,6 +4722,8 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::AdditionalCostPaymentCount
         | QuantityRef::AdditionalCostPaymentCountFor { .. }
@@ -5054,6 +5056,8 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -5094,7 +5098,7 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
             .as_deref()
             .is_some_and(target_filter_reads_life_total),
         // CR 608.2c: self-composing exclusion anchor — recurse on the exclude.
-        PlayerFilter::AllExcept { exclude } => player_filter_reads_life(exclude),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_reads_life(exclude),
         // CR 102.1 + CR 608.2c: the union reads what any member reads.
         PlayerFilter::AnyOf { filters } => filters.iter().any(player_filter_reads_life),
         // CR 109.4 + CR 109.5: controls-count routes its object `filter` and its
@@ -5347,6 +5351,9 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — resolved per affected
+        // member at install, never via layer re-derivation here.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
@@ -9624,20 +9631,7 @@ fn retire_ended_effects(
         return false;
     }
     match retirement_owner {
-        StateDurationRetirementOwner::LayerSettlement => {
-            let command =
-                crate::types::resolved_commands::ResolvedContinuousEffectRetirementCommand {
-                    effects: ended,
-                    cause: state.current_or_begin_rules_execution_node(),
-                };
-            state
-                .retire_exact_continuous_effects(&command.effects)
-                .expect("the settled selection must match its stored continuous effects");
-            state
-                .resolved_rules_journal
-                .record_continuous_effect_retirement(command)
-                .expect("state-duration retirement must have a live journal cause");
-        }
+        StateDurationRetirementOwner::LayerSettlement => retire_and_journal(state, ended),
         StateDurationRetirementOwner::AttachmentCommand => {
             state
                 .retire_exact_continuous_effects(&ended)
@@ -9645,6 +9639,39 @@ fn retire_ended_effects(
         }
     }
     true
+}
+
+/// Remove the exact stored records and journal that removal under the current
+/// execution node, so command replay removes them verbatim.
+fn retire_and_journal(state: &mut GameState, effects: Vec<TransientContinuousEffect>) {
+    let command = crate::types::resolved_commands::ResolvedContinuousEffectRetirementCommand {
+        effects,
+        cause: state.current_or_begin_rules_execution_node(),
+    };
+    state
+        .retire_exact_continuous_effects(&command.effects)
+        .expect("the retired selection must match its stored continuous effects");
+    state
+        .resolved_rules_journal
+        .record_continuous_effect_retirement(command)
+        .expect("continuous-effect retirement must have a live journal cause");
+}
+
+/// End the resolution-created effect `effect_id` whose single cast permission
+/// (CR 601.3) has just been used: its Oracle wording authorizes one cast ("you
+/// may cast a creature spell from your graveyard this turn"). Its stated duration
+/// has not run out — the cast it allowed ends it — so it is removed here, and
+/// journaled as the `prune_*` passes journal the effects whose durations end.
+pub(crate) fn retire_used_single_cast_grant(state: &mut GameState, effect_id: u64) {
+    let used: Vec<_> = state
+        .transient_continuous_effects
+        .iter()
+        .filter(|effect| effect.id == effect_id)
+        .cloned()
+        .collect();
+    if !used.is_empty() {
+        retire_and_journal(state, used);
+    }
 }
 
 /// CR 611.2b: end every duration the settled board shows has ended, one family
@@ -31805,6 +31832,7 @@ mod tests {
         // CR 608.2c: exclusion anchor recurses.
         assert!(player_filter_reads_life(&PlayerFilter::AllExcept {
             exclude: Box::new(PlayerFilter::OpponentGainedLife),
+            relation: crate::types::ability::PlayerRelation::All,
         }));
         // CR 109.4 + CR 109.5: controls-count routes its object filter.
         assert!(player_filter_reads_life(&PlayerFilter::ControlsCount {

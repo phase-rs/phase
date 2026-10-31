@@ -1054,64 +1054,7 @@ fn evaluate_planechase(
         };
     }
 
-    // CR 901.15a: a shared planar deck must contain at least 40 cards, or at
-    // least ten cards per player if there are fewer than four players.
-    let min_planar_cards = 40usize.min(request.player_count.saturating_mul(10));
-    if request.planar_deck.len() < min_planar_cards {
-        reasons.push(format!(
-            "Planar deck has {} cards (minimum {min_planar_cards})",
-            request.planar_deck.len()
-        ));
-    }
-
-    let mut seen_names = HashSet::new();
-    let mut duplicates = BTreeSet::new();
-    let mut non_planar = BTreeSet::new();
-    let mut planes = 0usize;
-    let mut phenomena = 0usize;
-    for name in &request.planar_deck {
-        let Some(face) = db.get_face_by_name(name) else {
-            continue;
-        };
-        let canonical = face.name.to_lowercase();
-        if !seen_names.insert(canonical) {
-            duplicates.insert(face.name.clone());
-        }
-        let is_plane = face.card_type.core_types.contains(&CoreType::Plane);
-        let is_phenomenon = face.card_type.core_types.contains(&CoreType::Phenomenon);
-        if is_plane {
-            planes += 1;
-        }
-        if is_phenomenon {
-            phenomena += 1;
-        }
-        if !is_plane && !is_phenomenon {
-            non_planar.insert(face.name.clone());
-        }
-    }
-    if !duplicates.is_empty() {
-        reasons.push(summarize_cards(
-            "Planar deck singleton violations",
-            &duplicates,
-            6,
-        ));
-    }
-    if !non_planar.is_empty() {
-        reasons.push(summarize_cards(
-            "Planar deck cards must be Plane or Phenomenon",
-            &non_planar,
-            6,
-        ));
-    }
-    if planes == 0 {
-        reasons.push("Planar deck must contain at least one Plane".to_string());
-    }
-    let max_phenomena = request.player_count.saturating_mul(2);
-    if phenomena > max_phenomena {
-        reasons.push(format!(
-            "Planar deck has {phenomena} phenomena (maximum {max_phenomena})"
-        ));
-    }
+    validate_planar_deck(db, &request.planar_deck, request.player_count, &mut reasons);
 
     CompatibilityCheck {
         compatible: reasons.is_empty(),
@@ -1163,7 +1106,12 @@ fn evaluate_archenemy(
     }
 
     if !request.scheme_deck.is_empty() {
-        validate_scheme_deck(db, &request.scheme_deck, &mut reasons);
+        validate_scheme_deck(
+            db,
+            &request.scheme_deck,
+            SchemeDeckRules::archenemy(),
+            &mut reasons,
+        );
     }
 
     CompatibilityCheck {
@@ -1172,13 +1120,181 @@ fn evaluate_archenemy(
     }
 }
 
-fn validate_scheme_deck(db: &CardDatabase, scheme_deck: &[String], reasons: &mut Vec<String>) {
-    // CR 904.3: A scheme deck must contain at least twenty scheme cards and
-    // can't contain more than two copies of any card by English name.
-    if scheme_deck.len() < 20 {
+// Called from BOTH `evaluate_selected_format`'s ArchenemyCommander arm (the
+// full path) and `quick_archenemy_commander_check` (the summary path's
+// ArchenemyCommander arm) — mirrors `evaluate_archenemy`'s sharing shape,
+// but the player deck follows CR 903.5 through the shared commander
+// validator while the supplementary scheme deck follows CR 904.13d. An
+// empty scheme deck is valid: heroes bring none (only the archenemy's
+// payload carries one — see `deck_loading.rs`), and one-deck-at-a-time
+// validation cannot know which seat submitted.
+/// Shared planar-deck construction rules (CR 901.15a): minimum 40 cards
+/// (or ten per player below four players), singleton, Plane-or-Phenomenon
+/// types only, at least one Plane, at most two phenomena per player.
+/// Called from BOTH `evaluate_planechase` (default Planechase) and
+/// `evaluate_planechase_commander` (the Commander composition) — the
+/// planar deck follows the same rules under either.
+fn validate_planar_deck(
+    db: &CardDatabase,
+    planar_deck: &[String],
+    player_count: usize,
+    reasons: &mut Vec<String>,
+) {
+    // CR 901.15a: a shared planar deck must contain at least 40 cards, or at
+    // least ten cards per player if there are fewer than four players.
+    let min_planar_cards = 40usize.min(player_count.saturating_mul(10));
+    if planar_deck.len() < min_planar_cards {
         reasons.push(format!(
-            "Scheme deck has {} cards (minimum 20)",
-            scheme_deck.len()
+            "Planar deck has {} cards (minimum {min_planar_cards})",
+            planar_deck.len()
+        ));
+    }
+
+    let mut seen_names = HashSet::new();
+    let mut duplicates = BTreeSet::new();
+    let mut non_planar = BTreeSet::new();
+    let mut planes = 0usize;
+    let mut phenomena = 0usize;
+    for name in planar_deck {
+        let Some(face) = db.get_face_by_name(name) else {
+            continue;
+        };
+        let canonical = face.name.to_lowercase();
+        if !seen_names.insert(canonical) {
+            duplicates.insert(face.name.clone());
+        }
+        let is_plane = face.card_type.core_types.contains(&CoreType::Plane);
+        let is_phenomenon = face.card_type.core_types.contains(&CoreType::Phenomenon);
+        if is_plane {
+            planes += 1;
+        }
+        if is_phenomenon {
+            phenomena += 1;
+        }
+        if !is_plane && !is_phenomenon {
+            non_planar.insert(face.name.clone());
+        }
+    }
+    if !duplicates.is_empty() {
+        reasons.push(summarize_cards(
+            "Planar deck singleton violations",
+            &duplicates,
+            6,
+        ));
+    }
+    if !non_planar.is_empty() {
+        reasons.push(summarize_cards(
+            "Planar deck cards must be Plane or Phenomenon",
+            &non_planar,
+            6,
+        ));
+    }
+    if planes == 0 {
+        reasons.push("Planar deck must contain at least one Plane".to_string());
+    }
+    let max_phenomena = player_count.saturating_mul(2);
+    if phenomena > max_phenomena {
+        reasons.push(format!(
+            "Planar deck has {phenomena} phenomena (maximum {max_phenomena})"
+        ));
+    }
+}
+
+// Called from BOTH `evaluate_selected_format`'s PlanechaseCommander arm (the
+// full path) and `quick_planechase_commander_check` (the summary path's
+// PlanechaseCommander arm) — mirrors `evaluate_planechase`'s sharing shape,
+// but the player deck follows CR 903.5 through the shared commander
+// validator while the supplementary planar deck follows CR 901.15a. An
+// empty planar deck is valid: one-deck-at-a-time validation cannot know
+// which seat submitted (only the host's payload carries the communal deck
+// — see `deck_loading.rs`).
+fn evaluate_planechase_commander(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    unknown_cards: &BTreeSet<String>,
+    format_rules: &FormatConfig,
+) -> CompatibilityCheck {
+    let mut check = evaluate_commander_with_format(
+        db,
+        request,
+        unknown_cards,
+        CommanderVariantRules::planechase_commander(),
+        format_rules,
+    );
+    if !request.planar_deck.is_empty() {
+        let reasons_before = check.reasons.len();
+        validate_planar_deck(
+            db,
+            &request.planar_deck,
+            request.player_count,
+            &mut check.reasons,
+        );
+        check.compatible = check.compatible && check.reasons.len() == reasons_before;
+    }
+    check
+}
+
+fn evaluate_archenemy_commander(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    unknown_cards: &BTreeSet<String>,
+    format_rules: &FormatConfig,
+) -> CompatibilityCheck {
+    let mut check = evaluate_commander_with_format(
+        db,
+        request,
+        unknown_cards,
+        CommanderVariantRules::archenemy_commander(),
+        format_rules,
+    );
+    if !request.scheme_deck.is_empty() {
+        let reasons_before = check.reasons.len();
+        validate_scheme_deck(
+            db,
+            &request.scheme_deck,
+            SchemeDeckRules::archenemy_commander(),
+            &mut check.reasons,
+        );
+        check.compatible = check.compatible && check.reasons.len() == reasons_before;
+    }
+    check
+}
+
+/// Scheme-deck construction rules: CR 904.3 (default Archenemy — at least
+/// twenty schemes, at most two copies each) vs CR 904.13d (Archenemy
+/// Commander — at least ten schemes, singleton).
+struct SchemeDeckRules {
+    minimum: usize,
+    max_copies: u32,
+}
+
+impl SchemeDeckRules {
+    fn archenemy() -> Self {
+        Self {
+            minimum: 20,
+            max_copies: 2,
+        }
+    }
+
+    fn archenemy_commander() -> Self {
+        Self {
+            minimum: 10,
+            max_copies: 1,
+        }
+    }
+}
+
+fn validate_scheme_deck(
+    db: &CardDatabase,
+    scheme_deck: &[String],
+    rules: SchemeDeckRules,
+    reasons: &mut Vec<String>,
+) {
+    if scheme_deck.len() < rules.minimum {
+        reasons.push(format!(
+            "Scheme deck has {} cards (minimum {})",
+            scheme_deck.len(),
+            rules.minimum
         ));
     }
 
@@ -1200,7 +1316,7 @@ fn validate_scheme_deck(db: &CardDatabase, scheme_deck: &[String], reasons: &mut
 
     let over_limit: BTreeSet<String> = counts
         .into_iter()
-        .filter(|(_, count)| *count > 2)
+        .filter(|(_, count)| *count > rules.max_copies)
         .filter_map(|(name, count)| {
             db.get_face_by_name(&name)
                 .map(|face| format!("{} ({count} copies)", face.name))
@@ -1260,6 +1376,42 @@ impl CommanderVariantRules {
             eligible: is_commander_eligible,
             eligibility_error:
                 "Commander cards must be legendary creatures or explicitly allow being a commander",
+            skip_commander_legality: false,
+            partner_grant: None,
+        }
+    }
+
+    /// 2HG Commander decks are Commander decks (CR 903.3 / CR 903.5): same
+    /// eligibility predicate and Commander legality table, own error label.
+    fn two_headed_giant_commander() -> Self {
+        Self {
+            eligible: is_commander_eligible,
+            eligibility_error:
+                "Two-Headed Giant Commander cards must be legendary creatures or explicitly allow being a commander",
+            skip_commander_legality: false,
+            partner_grant: None,
+        }
+    }
+
+    /// CR 904.13a: Archenemy Commander decks are Commander decks — same
+    /// eligibility predicate and Commander legality table, own error label.
+    fn archenemy_commander() -> Self {
+        Self {
+            eligible: is_commander_eligible,
+            eligibility_error:
+                "Archenemy Commander cards must be legendary creatures or explicitly allow being a commander",
+            skip_commander_legality: false,
+            partner_grant: None,
+        }
+    }
+
+    /// Planechase Commander decks are Commander decks — same eligibility
+    /// predicate and Commander legality table, own error label.
+    fn planechase_commander() -> Self {
+        Self {
+            eligible: is_commander_eligible,
+            eligibility_error:
+                "Planechase Commander cards must be legendary creatures or explicitly allow being a commander",
             skip_commander_legality: false,
             partner_grant: None,
         }
@@ -2535,6 +2687,69 @@ fn quick_archenemy_check(
     }
 }
 
+/// Summary-path twin of [`evaluate_archenemy_commander`]: the shared
+/// commander quick check first, then the CR 904.13d scheme rules when a
+/// scheme deck was submitted. A failing scheme deck keeps the commander
+/// check's unknown-cards set — the deck is still the same submission.
+fn quick_archenemy_commander_check(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    format_rules: &FormatConfig,
+) -> QuickCheckResult {
+    let check = quick_commander_check(
+        db,
+        request,
+        CommanderVariantRules::archenemy_commander(),
+        format_rules,
+    );
+    if check.reason.is_some() || request.scheme_deck.is_empty() {
+        return check;
+    }
+    let mut reasons = Vec::new();
+    validate_scheme_deck(
+        db,
+        &request.scheme_deck,
+        SchemeDeckRules::archenemy_commander(),
+        &mut reasons,
+    );
+    match reasons.into_iter().next() {
+        Some(reason) => QuickCheckResult {
+            reason: Some(reason),
+            unknown_cards: check.unknown_cards,
+        },
+        None => check,
+    }
+}
+
+/// Summary-path twin of [`evaluate_planechase_commander`]: the shared
+/// commander quick check first, then the CR 901.15a planar rules when a
+/// planar deck was submitted. A failing planar deck keeps the commander
+/// check's unknown-cards set — the deck is still the same submission.
+fn quick_planechase_commander_check(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    format_rules: &FormatConfig,
+) -> QuickCheckResult {
+    let check = quick_commander_check(
+        db,
+        request,
+        CommanderVariantRules::planechase_commander(),
+        format_rules,
+    );
+    if check.reason.is_some() || request.planar_deck.is_empty() {
+        return check;
+    }
+    let mut reasons = Vec::new();
+    validate_planar_deck(db, &request.planar_deck, request.player_count, &mut reasons);
+    match reasons.into_iter().next() {
+        Some(reason) => QuickCheckResult {
+            reason: Some(reason),
+            unknown_cards: check.unknown_cards,
+        },
+        None => check,
+    }
+}
+
 /// The Custom-format rejection sentinels shared by the summary and full
 /// deck-compatibility paths (and the authoritative `validate_deck_for_format`
 /// gate) so no two call sites can drift apart on wording. Four consts, not
@@ -2654,6 +2869,15 @@ fn evaluate_selected_format_summary(
             CommanderVariantRules::commander(),
             &format_rules,
         ),
+        // CR 903.5 with CR 810 seating: routes through the shared commander
+        // validator — deck shape, legality table, and pairing all read from
+        // `format_rules`, so only the variant rules (error label) differ.
+        GameFormat::TwoHeadedGiantCommander => quick_commander_check(
+            db,
+            request,
+            CommanderVariantRules::two_headed_giant_commander(),
+            &format_rules,
+        ),
         GameFormat::FreeformCommander => quick_commander_check(
             db,
             request,
@@ -2687,6 +2911,16 @@ fn evaluate_selected_format_summary(
         GameFormat::Momir => quick_momir_check(db, request),
         GameFormat::Planechase => quick_planechase_check(db, request, &format_rules),
         GameFormat::Archenemy => quick_archenemy_check(db, request, &format_rules),
+        // CR 903.5 + CR 904.13d: Commander player deck plus 10-singleton
+        // scheme deck — see the matching arm in the full dispatch.
+        GameFormat::ArchenemyCommander => {
+            quick_archenemy_commander_check(db, request, &format_rules)
+        }
+        // CR 903.5 + CR 901.15a: Commander player deck plus communal
+        // planar deck — see the matching arm in the full dispatch.
+        GameFormat::PlanechaseCommander => {
+            quick_planechase_commander_check(db, request, &format_rules)
+        }
         GameFormat::Brawl | GameFormat::HistoricBrawl => {
             quick_brawl_check(db, request, &format.label(), &format_rules)
         }
@@ -3098,6 +3332,21 @@ fn evaluate_selected_format(
             }
             check.compatible
         }
+        // CR 903.5 with CR 810 seating — see the matching arm in the
+        // quick-check dispatch.
+        GameFormat::TwoHeadedGiantCommander => {
+            let check = evaluate_commander_with_format(
+                db,
+                request,
+                unknown_cards,
+                CommanderVariantRules::two_headed_giant_commander(),
+                &format_rules,
+            );
+            if !check.compatible {
+                reasons.extend(check.reasons);
+            }
+            check.compatible
+        }
         GameFormat::Pioneer
         | GameFormat::Modern
         | GameFormat::Premodern
@@ -3199,6 +3448,24 @@ fn evaluate_selected_format(
         }
         GameFormat::Archenemy => {
             let check = evaluate_archenemy(db, request, unknown_cards, &format_rules);
+            if !check.compatible {
+                reasons.extend(check.reasons);
+            }
+            check.compatible
+        }
+        // CR 903.5 + CR 904.13d: Commander player deck plus 10-singleton
+        // scheme deck — see the matching arm in the quick-check dispatch.
+        GameFormat::ArchenemyCommander => {
+            let check = evaluate_archenemy_commander(db, request, unknown_cards, &format_rules);
+            if !check.compatible {
+                reasons.extend(check.reasons);
+            }
+            check.compatible
+        }
+        // CR 903.5 + CR 901.15a: Commander player deck plus communal
+        // planar deck — see the matching arm in the quick-check dispatch.
+        GameFormat::PlanechaseCommander => {
+            let check = evaluate_planechase_commander(db, request, unknown_cards, &format_rules);
             if !check.compatible {
                 reasons.extend(check.reasons);
             }
@@ -6071,6 +6338,339 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.contains("must be legendary creatures")));
+    }
+
+    #[test]
+    fn two_headed_giant_commander_accepts_100_card_commander_deck() {
+        // CR 903.5a: 99 main + commander = 100. Basic lands are exempt
+        // from CR 903.5b singleton, so 99x Plains is a valid filler.
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: expand("Plains", 99),
+            sideboard: Vec::new(),
+            commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::TwoHeadedGiantCommander)),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+        };
+
+        let full = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(full.selected_format_compatible, Some(true));
+        assert!(
+            full.selected_format_reasons.is_empty(),
+            "{:?}",
+            full.selected_format_reasons
+        );
+
+        // The summary (quick-check) twin must agree.
+        let summary = evaluate_deck_compatibility(
+            &db,
+            &DeckCompatibilityRequest {
+                summary_only: true,
+                ..request
+            },
+        );
+        assert_eq!(summary.selected_format_compatible, Some(true));
+    }
+
+    #[test]
+    fn two_headed_giant_commander_rejects_wrong_size() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: expand("Plains", 98),
+            sideboard: Vec::new(),
+            commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::TwoHeadedGiantCommander)),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+        };
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|reason| { reason.contains("Two-Headed Giant Commander deck must have") }));
+    }
+
+    #[test]
+    fn two_headed_giant_commander_rejects_ineligible_commander() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: expand("Plains", 99),
+            sideboard: Vec::new(),
+            commander: vec!["Legal Standard".to_string()],
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::TwoHeadedGiantCommander)),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+        };
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|reason| { reason.contains("Two-Headed Giant Commander cards must be") }));
+    }
+
+    #[test]
+    fn two_headed_giant_commander_enforces_commander_ban_list() {
+        // Shared Commander card pool: a commander-banned card is illegal
+        // in 2HG Commander too.
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let mut main = expand("Plains", 98);
+        main.push("Commander Banned".to_string());
+        let request = DeckCompatibilityRequest {
+            main_deck: main,
+            sideboard: Vec::new(),
+            commander: vec!["Legal Commander".to_string()],
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::TwoHeadedGiantCommander)),
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+        };
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|reason| reason.contains("Commander Banned")));
+    }
+
+    fn archenemy_commander_test_db() -> CardDatabase {
+        let mut cards = Map::new();
+        insert_planechase_card(&mut cards, "Legal Commander", &["Legendary"], &["Creature"]);
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+        insert_planechase_card(&mut cards, "Legal Standard", &[], &[]);
+        for index in 1..=10 {
+            insert_scheme_card(&mut cards, &format!("Scheme {index}"));
+        }
+        CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap()
+    }
+
+    fn archenemy_commander_request(
+        main_count: usize,
+        commander: &str,
+        scheme_deck: Vec<String>,
+        summary_only: bool,
+    ) -> DeckCompatibilityRequest {
+        DeckCompatibilityRequest {
+            main_deck: expand("Plains", main_count),
+            sideboard: Vec::new(),
+            commander: vec![commander.to_string()],
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck,
+            signature_spell: Vec::new(),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::ArchenemyCommander)),
+            selected_match_type: None,
+            player_count: 4,
+            summary_only,
+            draft_set_codes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn archenemy_commander_accepts_hero_deck_without_scheme_deck() {
+        // CR 903.5a: 99 main + commander = 100. Heroes bring no scheme
+        // deck, so an empty one is valid.
+        let db = archenemy_commander_test_db();
+        for summary_only in [false, true] {
+            let request =
+                archenemy_commander_request(99, "Legal Commander", Vec::new(), summary_only);
+            let result = evaluate_deck_compatibility(&db, &request);
+            assert_eq!(
+                result.selected_format_compatible,
+                Some(true),
+                "summary_only={summary_only}: {:?}",
+                result.selected_format_reasons
+            );
+        }
+    }
+
+    #[test]
+    fn archenemy_commander_accepts_ten_singleton_scheme_deck() {
+        // CR 904.13d: at least ten schemes, singleton by English name.
+        let db = archenemy_commander_test_db();
+        for summary_only in [false, true] {
+            let request =
+                archenemy_commander_request(99, "Legal Commander", scheme_names(10), summary_only);
+            let result = evaluate_deck_compatibility(&db, &request);
+            assert_eq!(
+                result.selected_format_compatible,
+                Some(true),
+                "summary_only={summary_only}: {:?}",
+                result.selected_format_reasons
+            );
+        }
+    }
+
+    #[test]
+    fn archenemy_commander_rejects_short_scheme_deck() {
+        let db = archenemy_commander_test_db();
+        let request = archenemy_commander_request(99, "Legal Commander", scheme_names(9), false);
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|reason| { reason.contains("minimum 10") }));
+    }
+
+    #[test]
+    fn archenemy_commander_rejects_duplicate_scheme() {
+        // CR 904.13d is singleton where CR 904.3 allows two copies.
+        let db = archenemy_commander_test_db();
+        let mut schemes = scheme_names(9);
+        schemes.push("Scheme 1".to_string());
+        let request = archenemy_commander_request(99, "Legal Commander", schemes, false);
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|reason| { reason.contains("Scheme deck copy-limit violations") }));
+    }
+
+    #[test]
+    fn archenemy_commander_rejects_ineligible_commander() {
+        let db = archenemy_commander_test_db();
+        let request = archenemy_commander_request(99, "Legal Standard", Vec::new(), false);
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|reason| { reason.contains("Archenemy Commander cards must be") }));
+    }
+
+    fn planechase_commander_test_db() -> CardDatabase {
+        let mut cards = Map::new();
+        insert_planechase_card(&mut cards, "Legal Commander", &["Legendary"], &["Creature"]);
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+        insert_planechase_card(&mut cards, "Legal Standard", &[], &[]);
+        for index in 1..=40 {
+            insert_planechase_card(&mut cards, &format!("Plane {index}"), &[], &["Plane"]);
+        }
+        for index in 1..=5 {
+            insert_planechase_card(
+                &mut cards,
+                &format!("Phenomenon {index}"),
+                &[],
+                &["Phenomenon"],
+            );
+        }
+        CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap()
+    }
+
+    fn planechase_commander_request(
+        main_count: usize,
+        commander: &str,
+        planar_deck: Vec<String>,
+        summary_only: bool,
+    ) -> DeckCompatibilityRequest {
+        DeckCompatibilityRequest {
+            main_deck: expand("Plains", main_count),
+            sideboard: Vec::new(),
+            commander: vec![commander.to_string()],
+            companion: Vec::new(),
+            planar_deck,
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: Some(SelectedFormat::Tag(GameFormat::PlanechaseCommander)),
+            selected_match_type: None,
+            player_count: 4,
+            summary_only,
+            draft_set_codes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn planechase_commander_accepts_commander_deck_without_planar_deck() {
+        // CR 903.5a: 99 main + commander = 100. An empty planar slot is
+        // valid: only the host's payload carries the communal deck.
+        let db = planechase_commander_test_db();
+        for summary_only in [false, true] {
+            let request =
+                planechase_commander_request(99, "Legal Commander", Vec::new(), summary_only);
+            let result = evaluate_deck_compatibility(&db, &request);
+            assert_eq!(
+                result.selected_format_compatible,
+                Some(true),
+                "summary_only={summary_only}: {:?}",
+                result.selected_format_reasons
+            );
+        }
+    }
+
+    #[test]
+    fn planechase_commander_accepts_forty_singleton_planar_deck() {
+        // CR 901.15a: at least 40 singleton planes/phenomena at 4 players.
+        let db = planechase_commander_test_db();
+        for summary_only in [false, true] {
+            let request =
+                planechase_commander_request(99, "Legal Commander", plane_names(40), summary_only);
+            let result = evaluate_deck_compatibility(&db, &request);
+            assert_eq!(
+                result.selected_format_compatible,
+                Some(true),
+                "summary_only={summary_only}: {:?}",
+                result.selected_format_reasons
+            );
+        }
+    }
+
+    #[test]
+    fn planechase_commander_rejects_short_planar_deck() {
+        let db = planechase_commander_test_db();
+        let request = planechase_commander_request(99, "Legal Commander", plane_names(39), false);
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|reason| { reason.contains("minimum 40") }));
+    }
+
+    #[test]
+    fn planechase_commander_rejects_ineligible_commander() {
+        let db = planechase_commander_test_db();
+        let request = planechase_commander_request(99, "Legal Standard", Vec::new(), false);
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|reason| { reason.contains("Planechase Commander cards must be") }));
     }
 
     #[test]

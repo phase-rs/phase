@@ -27,7 +27,7 @@ import type {
   InteractionPreviewRequest,
   InteractionSubmission,
 } from "./generated/interaction";
-import type { BracketDeckRequest, BracketEstimate, CommanderBracketTier } from "../types/bracketEstimate";
+import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 
 import {
   AdapterError,
@@ -56,6 +56,7 @@ import type { TransportConnection, TransportPeer } from "../network/transport";
 import type { P2PMessage } from "../network/protocol";
 import { WIRE_PROTOCOL_VERSION, legalActionsFromWire, legalActionsToWire } from "../network/protocol";
 import type {
+  DeckListData,
   PlayerSlot,
   SeatKind,
   SeatMutation,
@@ -184,18 +185,7 @@ function reconnectRejectionReason(
   }
 }
 
-interface DeckSeatPayload {
-  main_deck: string[];
-  sideboard: string[];
-  commander: string[];
-  companion?: string[];
-  signature_spell?: string[];
-  planar_deck?: string[];
-  scheme_deck?: string[];
-  bracket_tier?: CommanderBracketTier;
-  /** The owner's explicit printing choices; display-only. Omitted when empty. */
-  printings?: DeckPrinting[];
-}
+type DeckSeatPayload = DeckListData;
 
 interface DeckListPayload {
   player: DeckSeatPayload;
