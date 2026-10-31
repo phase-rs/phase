@@ -20,6 +20,7 @@ use crate::types::triggers::AttackTargetFilter;
 const DIAGNOSTIC_JULIUS: &str = "Dr. Julius Jumblemorph is every creature type (even if this card isn't on the battlefield).\nWhenever a host you control enters, you may search your library and/or graveyard for a card with augment and combine it with that host. If you search your library this way, shuffle.";
 const DIAGNOSTIC_JERMANE: &str = "{G}, {T}: Put two +1/+1 counters on target creature with four or more legs.\n{1}{G}{G}, {T}: Until end of turn, all creatures able to block target creature with four or more legs do so.";
 const DIAGNOSTIC_RANKLE: &str = "Flying, haste\nWhenever Rankle, Master of Pranksters deals combat damage to a player, choose one at random —\n• Each player creates a token that's a copy of Glen Elendra Pranksters.\n• Each player creates a token that's a copy of Pyretic Prankster.\n• Each player creates a token that's a copy of Spiteful Prankster.";
+const DIAGNOSTIC_EREBOS: &str = "Choose one —\n• Target creature gets -X/-X until end of turn. You gain X life.\n• Exile up to twice X target cards from graveyards.";
 
 fn diagnostic_fallback(context: &str, text: &str, line_index: usize) -> OracleDiagnostic {
     OracleDiagnostic::TargetFallback {
@@ -110,6 +111,18 @@ fn diagnostic_provenance_printed_cards() {
             vec!["Faerie".into(), "Rogue".into()],
             diagnostic_rankle_modes(1),
         ),
+        (
+            "Erebos's Intervention",
+            DIAGNOSTIC_EREBOS,
+            vec![],
+            vec!["Instant".into()],
+            vec![],
+            vec![diagnostic_fallback(
+                "parse_target could not classify",
+                "up to twice X target cards from graveyards",
+                0,
+            )],
+        ),
     ];
     for (name, text, keywords, types, subtypes, expected) in cases {
         let parsed = parse_oracle_text(text, name, &keywords, &types, &subtypes);
@@ -140,14 +153,38 @@ fn diagnostic_provenance_printed_cards() {
                     .len(),
                 3
             );
+        } else if name == "Erebos's Intervention" {
+            // Contract: header-line attribution for modal spells (mode items and
+            // swallow findings carry the bullet line).
+            // Reach guard: the spell route must produce a two-mode modal.
+            let modal = parsed.modal.as_ref().expect("modal spell retained");
+            assert_eq!(modal.mode_count, 2);
+            assert_eq!(parsed.abilities.len(), 2, "one ability per mode");
+            // Existence before attribution: the parse-time warning list (SwallowedClause
+            // filtered out by diagnostic_parse_time) carries the bullet-2 fallback.
+            let fallback = warnings
+                .iter()
+                .find(|warning| {
+                    matches!(warning, OracleDiagnostic::TargetFallback { text, .. }
+                        if text == "up to twice X target cards from graveyards")
+                })
+                .expect("bullet-2 target fallback retained");
+            assert_eq!(
+                fallback.line_index(),
+                0,
+                "modal-spell warnings attribute to the header line"
+            );
         }
     }
 }
 
 #[test]
 fn diagnostic_provenance_inherited_prefix_structural_composites() {
-    // Structural, non-printed compositions of Jermane and Rankle. Rankle's
-    // metadata is required for self-reference normalization of both modal headers.
+    // Structural composite: no printed card in AtomicCards has a parse-time warning on a line
+    // before a triggered modal (verified: no multi-line face in the export carries an inherited
+    // duplicate). Nearest printed cards: Jermane, Pride of the Circus (line-1 must-block warning)
+    // and Rankle, Master of Pranksters (triggered modal). Rankle's metadata is required for
+    // self-reference normalization of both modal headers.
     let first = format!("{DIAGNOSTIC_JERMANE}\n{DIAGNOSTIC_RANKLE}");
     let repeated = format!("{first}\n{DIAGNOSTIC_RANKLE}");
     let mut expected = vec![diagnostic_must_block(1), diagnostic_must_block(1)];
@@ -177,8 +214,10 @@ fn diagnostic_provenance_inherited_prefix_structural_composites() {
 
 #[test]
 fn diagnostic_provenance_level_reparse_precedes_main_loop() {
-    // Structural, non-printed fixture: Enclave Cryptologist's level layout,
-    // Dr. Julius's ordinary trigger, and Jermane's must-block activation.
+    // Structural composite: no printed leveler in AtomicCards produces a parse-time warning (all 27
+    // faces with a physical LEVEL header checked). Nearest printed card: Enclave Cryptologist
+    // (level layout); the warning-bearing lines are verbatim from Dr. Julius Jumblemorph and
+    // Jermane, Pride of the Circus.
     let text = "Level up {1}{U} ({1}{U}: Put a level counter on this. Level up only as a sorcery.)\nWhenever a host you control enters, you may search your library and/or graveyard for a card with augment and combine it with that host. If you search your library this way, shuffle.\nLEVEL 1-2\n0/1\n{1}{G}{G}, {T}: Until end of turn, all creatures able to block target creature with four or more legs do so.\nLEVEL 3+\n0/1\n{T}: Draw a card.";
     let parsed = parse_oracle_text(
         text,
