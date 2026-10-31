@@ -1,5 +1,6 @@
 //! Coin-branch announcement and execution regressions.
-//! Synthetic fixtures deliberately omit Crooked Scales' repeat instruction.
+//! Crooked Scales fixtures use the printed text; the five tests whose flow the closing
+//! "unless you pay {3} and repeat this process" changes use `CROOKED_SCALES_WITHOUT_PAYMENT`.
 
 use engine::ai_support::legal_actions;
 use engine::game::casting::can_activate_ability_now;
@@ -102,9 +103,6 @@ fn assert_finished(runner: &GameRunner) {
 
 // Byte-identical to data/mtgjson/AtomicCards.json .data["Chaotic Strike"][0].text.
 const CHAOTIC_STRIKE: &str = "Cast this spell only during combat after blockers are declared.\nFlip a coin. If you win the flip, target creature gets +1/+1 until end of turn.\nDraw a card.";
-// Synthetic supported two-branch fixture, not the complete Crooked Scales card.
-// The payment/repeat suffix is deliberately absent from this T witness.
-const TWO_BRANCHES: &str = "{4}, {T}: Flip a coin. If you win the flip, destroy target creature an opponent controls. If you lose the flip, destroy target creature you control.";
 
 fn chaotic_fixture(with_creatures: bool) -> (GameRunner, ObjectId, Vec<ObjectId>) {
     // SHAPE eligibility: the live parser must retain both the targeted win and
@@ -279,22 +277,14 @@ fn chaotic_strike_cannot_be_cast_without_a_legal_target() {
     assert_finished(&empty);
 }
 
-// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
-// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
-// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
-// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
-// test isolates the announced branch targets. Shape: An artifact's activated ability with one coin
-// whose win branch destroys a declared target creature an opponent controls and whose lose branch
-// destroys a separately declared target creature you control.
 fn two_branch_fixture(
     own_pool: bool,
     opponent_pool: bool,
 ) -> (GameRunner, ObjectId, Vec<ObjectId>, Vec<ObjectId>) {
     // SHAPE eligibility: both supported Destroy leaves belong to this one coin.
     let parsed = parse_oracle_text(
-        TWO_BRANCHES,
-        "Synthetic Two-Branch Scales",
+        CROOKED_SCALES,
+        "Crooked Scales",
         &[],
         &["Artifact".into()],
         &[],
@@ -313,15 +303,15 @@ fn two_branch_fixture(
     assert_eq!(*run, CoinFlipRun::single());
     for branch in [win, lose] {
         assert!(matches!(branch.effect.as_ref(), Effect::Destroy { .. }));
-        assert!(branch.unless_pay.is_none());
         assert!(branch.sub_ability.is_none());
     }
-    assert!(root.sub_ability.is_none());
+    // Printed text: the losing outcome carries its unless-pay {3} (never reached on a win).
+    assert!(lose.unless_pay.is_some());
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let source = scenario
-        .add_artifact_from_oracle(P0, "Synthetic Two-Branch Scales", TWO_BRANCHES)
+        .add_artifact_from_oracle(P0, "Crooked Scales", CROOKED_SCALES)
         .id();
     let own = if own_pool {
         vec![
@@ -345,14 +335,6 @@ fn two_branch_fixture(
     (runner, source, own, opposing)
 }
 
-// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
-// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
-// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
-// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
-// test isolates the announced branch targets. Shape: Activating that two-branch coin ability
-// prompts for two target slots (opponent creature, own creature) before cost payment and flipping,
-// then each chosen object becomes a target.
 #[test]
 fn two_branch_activation_announces_both_targets_before_flipping() {
     let (mut runner, source, own, opposing) = two_branch_fixture(true, true);
@@ -429,14 +411,6 @@ fn two_branch_activation_announces_both_targets_before_flipping() {
     assert_finished(&runner);
 }
 
-// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
-// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
-// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
-// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
-// test isolates the announced branch targets. Shape: That two-branch coin activation is offered and
-// resolves with both creature pools present, but is refused before tapping or paying when either
-// branch's target pool is empty.
 fn refuses_missing_pool(own_pool: bool, opponent_pool: bool) {
     let (mut valid, source, own, opposing) = two_branch_fixture(true, true);
     assert!(
@@ -470,50 +444,21 @@ fn refuses_missing_pool(own_pool: bool, opponent_pool: bool) {
     assert_finished(&missing);
 }
 
-// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
-// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
-// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
-// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
-// test isolates the announced branch targets. Shape: The two-branch coin activation is refused when
-// no creature you control exists for the lose branch's declared target.
 #[test]
 fn two_branch_activation_requires_an_own_creature() {
     refuses_missing_pool(false, true);
 }
 
-// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
-// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
-// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
-// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
-// test isolates the announced branch targets. Shape: The two-branch coin activation is refused when
-// no opponent's creature exists for the win branch's declared target.
 #[test]
 fn two_branch_activation_requires_an_opponents_creature() {
     refuses_missing_pool(true, false);
 }
 
-// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
-// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
-// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
-// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
-// test isolates the announced branch targets. Shape: The two-branch coin activation is refused when
-// neither branch has any legal target creature.
 #[test]
 fn two_branch_activation_requires_both_creature_pools() {
     refuses_missing_pool(false, false);
 }
 
-// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
-// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
-// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
-// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
-// test isolates the announced branch targets. Shape: A won flip of the two-branch coin destroys
-// only the announced opponent creature, leaving the lose branch's announced creature and
-// distractors untouched, with one coin terminal.
 #[test]
 fn two_branch_win_destroys_only_the_announced_opponents_creature() {
     let (mut runner, source, own, opposing) = two_branch_fixture(true, true);
@@ -541,14 +486,103 @@ fn two_branch_win_destroys_only_the_announced_opponents_creature() {
     assert_finished(&runner);
 }
 
-// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
-// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
-// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
-// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
-// test isolates the announced branch targets. Shape: The announced two-branch coin ability on the
-// stack serializes its branch bindings; restores missing them fail for every wire version, and the
-// intact restore destroys the win branch's target.
+// Byte-identical to the "Crooked Scales" oracle_text in the exported MTGJSON card data.
+const CROOKED_SCALES: &str = "{4}, {T}: Flip a coin. If you win the flip, destroy target creature an opponent controls. If you lose the flip, destroy target creature you control unless you pay {3} and repeat this process.";
+
+// Crooked Scales without its closing "unless you pay {3} and repeat this process": for the tests
+// whose flow the printed clause changes (the losing outcome would first ask to pay {3}; the engine
+// does not complete that prompt or the repeat, a tracked follow-up).
+const CROOKED_SCALES_WITHOUT_PAYMENT: &str = "{4}, {T}: Flip a coin. If you win the flip, destroy target creature an opponent controls. If you lose the flip, destroy target creature you control.";
+
+// Byte-identical to the "Goblin Bangchuckers" oracle_text in the exported MTGJSON card data.
+const GOBLIN_BANGCHUCKERS: &str = "{T}: Flip a coin. If you win the flip, this creature deals 2 damage to any target. If you lose the flip, this creature deals 2 damage to itself.";
+
+/// Real card: Crooked Scales with its printed Oracle text. CR 602.2b + CR 601.2c: both outcome
+/// targets are announced on activation, before the flip; CR 705.2 + CR 608.2c: a won flip
+/// destroys only the announced opponent's creature, and the lose outcome's unless-pay and
+/// "repeat this process" (which the engine parses as Unimplemented) never run.
+#[test]
+fn crooked_scales_printed_text_announces_both_targets_and_a_won_flip_destroys_only_the_opponents_creature(
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_artifact_from_oracle(P0, "Crooked Scales", CROOKED_SCALES)
+        .id();
+    let own = scenario.add_creature(P0, "Chosen Own", 2, 2).id();
+    let own_distractor = scenario.add_creature(P0, "Own Distractor", 3, 3).id();
+    let opposing = scenario.add_creature(P1, "Chosen Opponent", 4, 4).id();
+    let opposing_distractor = scenario.add_creature(P1, "Opponent Distractor", 5, 5).id();
+    mana(&mut scenario, 4);
+    let mut runner = scenario.build();
+    pin_outcomes(&mut runner, &[true]);
+    let mut events = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activation reaches announcement")
+        .events;
+    let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+        panic!(
+            "both coin-outcome targets must be announced on activation, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        target_slots.len(),
+        2,
+        "one declared occurrence per outcome: opponent's creature, then your creature"
+    );
+    for (slot, expected, excluded) in [
+        (0, [opposing, opposing_distractor], [own, own_distractor]),
+        (1, [own, own_distractor], [opposing, opposing_distractor]),
+    ] {
+        for creature in expected {
+            assert!(target_slots[slot]
+                .legal_targets
+                .contains(&TargetRef::Object(creature)));
+        }
+        for creature in excluded {
+            assert!(!target_slots[slot]
+                .legal_targets
+                .contains(&TargetRef::Object(creature)));
+        }
+    }
+    assert!(flips(&events).is_empty(), "announced before any flip");
+    for target in [opposing, own] {
+        events.extend(
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                })
+                .expect("announce outcome target")
+                .events,
+        );
+    }
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pay announced activation")
+                .events,
+        );
+    }
+    finish(&mut runner, &mut events);
+    assert_eq!(flips(&events), vec![true], "reach: forced win resolves");
+    assert_eq!(
+        runner.state().objects[&opposing].zone,
+        Zone::Graveyard,
+        "the won outcome destroys the announced opponent's creature"
+    );
+    for untouched in [own, own_distractor, opposing_distractor, source] {
+        assert_eq!(runner.state().objects[&untouched].zone, Zone::Battlefield);
+    }
+    assert_eq!(coin_terminals(&events, source), 1);
+    assert_finished(&runner);
+}
+
 #[test]
 fn coin_branch_stack_persistence_is_strict_and_current_bindings_execute() {
     use engine::types::resolution::{ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION};
@@ -2338,14 +2372,13 @@ fn pass_to_coin_keep(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
     );
 }
 
-// Real cards: Crooked Scales exhibits this shape; its text is "{4}, {T}: Flip a coin. If you win
-// the flip, destroy target creature an opponent controls. If you lose the flip, destroy target
-// creature you control unless you pay {3} and repeat this process". The fixture drops the trailing
-// "unless you pay {3} and repeat this process" clause (the engine parses the unless-pay, whose
-// completion is a tracked follow-up, and parses "repeat this process" as Unimplemented), so the
-// test isolates the announced branch targets. Shape: The two-branch Destroy coin activation under
-// Krark's Thumb: at the keep prompt each branch holds its pinned target, a restore with a tampered
-// pin is refused, and a stale incarnation is not destroyed.
+// Real cards: Crooked Scales (printed) has the two outcome-declared targets this test needs, but in
+// this test the printed closing clause "unless you pay {3} and repeat this process" changes the
+// flow (the losing outcome would first ask to pay {3}; the engine does not complete that prompt or
+// the repeat, a tracked follow-up), so the test uses the card's text without that clause
+// (CROOKED_SCALES_WITHOUT_PAYMENT). Shape: The two-branch Destroy coin activation under Krark's
+// Thumb: at the keep prompt each branch holds its pinned target, a restore with a tampered pin is
+// refused, and a stale incarnation is not destroyed.
 #[test]
 fn thumb_restore_keeps_each_declared_branch_occurrence_and_refuses_pin_drift() {
     use engine::types::ability::{AbilityDefinition, AbilityKind};
@@ -2369,7 +2402,7 @@ fn thumb_restore_keeps_each_declared_branch_occurrence_and_refuses_pin_drift() {
                 .id();
             let distractor = scenario.add_creature(P1, "Never announced", 4, 4).id();
             let parsed = parse_oracle_text(
-                TWO_BRANCHES,
+                CROOKED_SCALES_WITHOUT_PAYMENT,
                 "Synthetic Scales",
                 &[],
                 &["Artifact".into()],
@@ -2378,7 +2411,7 @@ fn thumb_restore_keeps_each_declared_branch_occurrence_and_refuses_pin_drift() {
             let definition: AbilityDefinition = parsed.abilities[0].clone();
             assert_eq!(definition.kind, AbilityKind::Activated);
             let source = scenario
-                .add_artifact_from_oracle(P0, "Synthetic Scales", TWO_BRANCHES)
+                .add_artifact_from_oracle(P0, "Synthetic Scales", CROOKED_SCALES_WITHOUT_PAYMENT)
                 .id();
             mana(&mut scenario, 4);
             let mut runner = scenario.build();
@@ -2486,40 +2519,41 @@ fn thumb_restore_keeps_each_declared_branch_occurrence_and_refuses_pin_drift() {
     }
 }
 
-// Real cards: Tavern Swindler (win-only untargeted life gain) is supported; the test calls the
-// resolver directly on a hand-built ResolvedAbility, so a parsed Tavern Swindler definition could
-// replace the AST literal; Synthetic source itself is a textless body. Shape: An untargeted single
-// coin whose win-only outcome gains its controller life, resolved directly via flip_coin::resolve
-// first without its resolved branch carrier (must refuse untouched) then canonically. Printed
-// neighbours: Tavern Swindler ("{T}, Pay 3 life: Flip a coin. If you win the flip, you gain 6
-// life."); Stitch in Time ("Flip a coin. If you win the flip, take an extra turn after this one.").
 #[test]
 fn malformed_coin_carrier_refuses_before_rng_or_mutation_and_canonical_executes() {
     use engine::game::ability_utils::build_resolved_from_def;
     use engine::game::effects::flip_coin;
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, EffectError, QuantityExpr, ResolvedAbility,
-    };
+    use engine::types::ability::{EffectError, ResolvedAbility};
+    // Tavern Swindler, printed text (byte-identical to the exported MTGJSON oracle_text).
+    const TAVERN_SWINDLER: &str =
+        "{T}, Pay 3 life: Flip a coin. If you win the flip, you gain 6 life.";
+    let definition = parse_oracle_text(
+        TAVERN_SWINDLER,
+        "Tavern Swindler",
+        &[],
+        &["Creature".into()],
+        &["Human".into(), "Rogue".into()],
+    )
+    .abilities
+    .remove(0);
+    assert!(
+        matches!(
+            definition.effect.as_ref(),
+            Effect::FlipCoins {
+                win_effect: Some(_),
+                lose_effect: None,
+                ..
+            }
+        ),
+        "reach: the printed text parses to a win-only coin: {definition:#?}"
+    );
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let source = scenario.add_creature(P0, "Synthetic source", 2, 2).id();
+    let source = scenario
+        .add_creature_from_oracle(P0, "Tavern Swindler", 2, 2, TAVERN_SWINDLER)
+        .id();
     let mut runner = scenario.build();
     pin_outcomes(&mut runner, &[true, false, true]);
-    let definition = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::FlipCoins {
-            flips: CoinFlipRun::single(),
-            win_effect: Some(Box::new(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::GainLife {
-                    amount: QuantityExpr::Fixed { value: 3 },
-                    player: TargetFilter::Controller,
-                },
-            ))),
-            lose_effect: None,
-            flipper: TargetFilter::Controller,
-        },
-    );
     let malformed = ResolvedAbility::new((*definition.effect).clone(), vec![], source, P0);
     let before = serde_json::to_value(runner.state()).unwrap();
     let mut expected_rng = runner.state().rng.clone();
@@ -2541,59 +2575,57 @@ fn malformed_coin_carrier_refuses_before_rng_or_mutation_and_canonical_executes(
     let canonical = build_resolved_from_def(&definition, source, P0);
     flip_coin::resolve(runner.state_mut(), &canonical, &mut events).unwrap();
     assert_eq!(flips(&events), vec![true]);
-    assert_eq!(runner.life(P0), 23);
+    assert_eq!(runner.life(P0), 26);
     assert_finished(&runner);
 }
 
-// Real cards: Goblin Bangchuckers exhibits the self-damage loss variant ("{T}: Flip a coin. If you
-// win the flip, this creature deals 2 damage to any target. If you lose the flip, this creature
-// deals 2 damage to itself."). The ParentTarget loss variant is the engine's misparse of the
-// Bangchuckers/Kaboomist "deals 2 damage to itself" clause (see the PR body), not a printed shape.
-// Orcish Captain ("{1}: Flip a coin. If you win the flip, target Orc creature gets +2/+0 until end
-// of turn. If you lose the flip, it gets -0/-2 until end of turn.") has a loss clause whose "it"
-// refers to the win clause's target; this fixture does not model that and the PR body lists it as a
-// known limitation.
+// Real cards: the two ParentTarget rows use Goblin Bangchuckers, printed (Goblin Bangchuckers
+// ("{T}: Flip a coin. If you win the flip, this creature deals 2 damage to any target. If you lose
+// the flip, this creature deals 2 damage to itself.")); the engine parses its loss clause as a
+// ParentTarget damage with no declaration of its own (the printed meaning is damage to itself; see
+// the PR body). The self-damage row is a made-up control for that printed meaning, because the
+// parser cannot yet produce it. Orcish Captain ("{1}: Flip a coin. If you win the flip, target Orc
+// creature gets +2/+0 until end of turn. If you lose the flip, it gets -0/-2 until end of turn.")
+// has a loss clause whose "it" refers to the win clause's target; this test does not model that and
+// the PR body lists it as a known limitation.
 #[test]
 fn bangchuckers_shaped_loss_never_borrows_the_win_only_target() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, DamageSource, QuantityExpr, TypedFilter,
-    };
+    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TypedFilter};
     for (won, self_damage) in [(true, false), (false, false), (false, true)] {
-        let damage = |target, damage_source| Effect::DealDamage {
-            amount: QuantityExpr::Fixed { value: 2 },
-            target,
-            damage_source,
-            excess: None,
-        };
-        let coin = Effect::FlipCoins {
-            flips: CoinFlipRun::single(),
-            win_effect: Some(Box::new(AbilityDefinition::new(
-                AbilityKind::Activated,
-                damage(TargetFilter::Typed(TypedFilter::creature()), None),
-            ))),
-            lose_effect: Some(Box::new(AbilityDefinition::new(
-                AbilityKind::Activated,
-                damage(
-                    if self_damage {
-                        TargetFilter::SelfRef
-                    } else {
-                        TargetFilter::ParentTarget
-                    },
-                    if self_damage {
-                        None
-                    } else {
-                        Some(DamageSource::Target)
-                    },
-                ),
-            ))),
-            flipper: TargetFilter::Controller,
-        };
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
-        let source = scenario
-            .add_creature(P0, "Synthetic Bangchucker", 3, 5)
-            .with_ability_definition(AbilityDefinition::new(AbilityKind::Activated, coin))
-            .id();
+        let source = if self_damage {
+            // Control: the printed loss semantics (the creature damages itself) as an AST, because
+            // the parser cannot yet produce it (the printed text parses to a ParentTarget loss).
+            let damage = |target| Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target,
+                damage_source: None,
+                excess: None,
+            };
+            let coin = Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    damage(TargetFilter::Typed(TypedFilter::creature())),
+                ))),
+                lose_effect: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    damage(TargetFilter::SelfRef),
+                ))),
+                flipper: TargetFilter::Controller,
+            };
+            scenario
+                .add_creature(P0, "Synthetic Bangchucker", 3, 5)
+                .with_ability_definition(AbilityDefinition::new(AbilityKind::Activated, coin))
+                .id()
+        } else {
+            // Goblin Bangchuckers, printed text: the engine parses its loss clause as a
+            // ParentTarget damage with no declaration of its own.
+            scenario
+                .add_creature_from_oracle(P0, "Goblin Bangchuckers", 2, 2, GOBLIN_BANGCHUCKERS)
+                .id()
+        };
         let target = scenario.add_creature(P1, "Win-only target", 4, 5).id();
         let distractor = scenario.add_creature(P1, "Distractor", 4, 5).id();
         let mut runner = scenario.build();
@@ -2760,44 +2792,13 @@ fn repeated_bound_branch_recomputes_counter_quantity_from_a_pristine_template() 
     }
 }
 
-// Real cards: Chaotic Strike is supported and already used in this file; it adds a cast-timing
-// restriction (combat after blockers) and a draw successor. The test edits pins on the stack
-// directly, so the counter effect is incidental and Chaotic Strike's pump could serve. Shape: A
-// spell with one coin whose win-only branch targets a creature declared at cast, checking the
-// branch's own incarnation pin over stale root pins written onto the stack entry. Printed
-// neighbours: Chaotic Strike ("Cast this spell only during combat after blockers are declared. /
-// Flip a coin. If you win the flip, target creature gets +1/+1 until end of turn. / Draw a card.");
-// Aleatory ("Cast this spell only during combat after blockers are declared. / Flip a coin. If you
-// win the flip, target creature gets +1/+1 until end of turn. / Draw a card at the beginning of the
-// next turn's upkeep.").
 #[test]
 fn independent_coin_declaration_owns_its_pins_even_when_incoming_id_is_reused() {
-    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TypedFilter};
-    use engine::types::counter::CounterType;
     use engine::types::identifiers::ObjectIncarnationRef;
     for keyed_child in [None, Some(false), Some(true)] {
-        let coin = Effect::FlipCoins {
-            flips: CoinFlipRun::single(),
-            win_effect: Some(Box::new(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::PutCounter {
-                    counter_type: CounterType::Plus1Plus1,
-                    count: QuantityExpr::Fixed { value: 3 },
-                    target: TargetFilter::Typed(TypedFilter::creature()),
-                },
-            ))),
-            lose_effect: None,
-            flipper: TargetFilter::Controller,
-        };
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        let target = scenario.add_creature(P0, "New incarnation", 2, 2).id();
-        let distractor = scenario.add_creature(P1, "Unchosen", 4, 4).id();
-        let spell = scenario
-            .add_spell_to_hand(P0, "Synthetic independently targeted coin", true)
-            .with_ability(coin)
-            .id();
-        let mut runner = scenario.build();
+        // Chaotic Strike, printed text: the win-only branch targets a creature declared at cast.
+        let (mut runner, spell, creatures) = chaotic_fixture(true);
+        let (target, distractor) = (creatures[0], creatures[1]);
         let old = ObjectIncarnationRef::from_object(&runner.state().objects[&target]);
         runner
             .state_mut()
@@ -2805,7 +2806,6 @@ fn independent_coin_declaration_owns_its_pins_even_when_incoming_id_is_reused() 
             .get_mut(&target)
             .unwrap()
             .incarnation += 1;
-        pin_outcomes(&mut runner, &[true]);
         drop(runner.cast(spell).target_object(target).commit());
         let current = ObjectIncarnationRef::from_object(&runner.state().objects[&target]);
         let root = runner
@@ -2830,17 +2830,17 @@ fn independent_coin_declaration_owns_its_pins_even_when_incoming_id_is_reused() 
         finish(&mut runner, &mut events);
         let stale = keyed_child == Some(true);
         assert_eq!(flips(&events), if stale { vec![] } else { vec![true] });
+        let pt = |id: ObjectId| {
+            let object = &runner.state().objects[&id];
+            (object.power.unwrap(), object.toughness.unwrap())
+        };
+        // Chaotic Strike's win pumps +1/+1 until end of turn; a stale pin pumps nothing.
+        assert_eq!(pt(target), if stale { (2, 2) } else { (3, 3) });
         assert_eq!(
-            runner.state().objects[&target]
-                .counters
-                .get(&CounterType::Plus1Plus1)
-                .copied()
-                .unwrap_or(0),
-            if stale { 0 } else { 3 }
+            pt(distractor),
+            (4, 4),
+            "the unchosen creature is never pumped"
         );
-        assert!(!runner.state().objects[&distractor]
-            .counters
-            .contains_key(&CounterType::Plus1Plus1));
         assert_finished(&runner);
     }
 }
@@ -2986,17 +2986,13 @@ fn thumb_completed_empty_choice_restores_and_runs_only_independent_instructions(
     }
 }
 
-// T2: synthetic clauses with disjoint target pools expose traversal order.
-// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
-// A two-branch coin (win destroys an opponent's target creature, loss destroys your target
-// creature) followed by an independent 'exile target artifact', optionally nested in an outer
-// coin's win; declaration order Won, Lost, successor. Nearest printed card: Crooked Scales ("{4},
-// {T}: Flip a coin. If you win the flip, destroy target creature an opponent controls. If you lose
-// the flip, destroy target creature you control unless you pay {3} and repeat this process.");
-// Goblin Archaeologist ("{R}, {T}: Flip a coin. If you win the flip, destroy target artifact and
-// untap this creature. If you lose the flip, sacrifice this creature.") -- Crooked Scales: same two
-// targeted branches but Unimplemented repeat suffix, no successor; Archaeologist: targeted win plus
-// extra clause, untargeted loss.
+// Real cards: Crooked Scales (printed) has the two outcome-declared targets this test needs, but in
+// this test the printed closing clause "unless you pay {3} and repeat this process" changes the
+// flow (the losing outcome would first ask to pay {3}; the engine does not complete that prompt or
+// the repeat, a tracked follow-up), so the test uses the card's text without that clause
+// (CROOKED_SCALES_WITHOUT_PAYMENT). Shape: A two-branch coin (win destroys an opponent's target
+// creature, loss destroys your target creature) followed by an independent 'exile target artifact',
+// optionally nested in an outer coin's win; declaration order Won, Lost, successor.
 #[test]
 fn coin_children_precede_a_targeted_successor_and_nested_children() {
     use engine::types::ability::{AbilityDefinition, AbilityKind};
@@ -3004,7 +3000,7 @@ fn coin_children_precede_a_targeted_successor_and_nested_children() {
         for won in [false, true] {
             for bulk in [false, true] {
                 let mut root = parse_oracle_text(
-                    TWO_BRANCHES,
+                    CROOKED_SCALES_WITHOUT_PAYMENT,
                     "Synthetic ordered branches",
                     &[],
                     &["Artifact".into()],
@@ -3129,21 +3125,20 @@ fn chaotic_strike_loss_still_draws_without_pumping_either_creature() {
     assert_finished(&runner);
 }
 
-// T4: remove announced targets with actual response spells, not fixture edits.
-// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
-// A two-branch opponent/own targeted destroy coin followed by an independent life gain, where
-// instant responses exile one or both announced branch targets before resolution; legality is per
-// branch occurrence. Nearest printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the
-// flip, destroy target creature an opponent controls. If you lose the flip, destroy target creature
-// you control unless you pay {3} and repeat this process.") -- Same two targeted destroy branches;
-// lacks an independent tail and its repeat suffix is Unimplemented.
+// Real cards: Crooked Scales (printed) has the two outcome-declared targets this test needs, but in
+// this test the printed closing clause "unless you pay {3} and repeat this process" changes the
+// flow (the losing outcome would first ask to pay {3}; the engine does not complete that prompt or
+// the repeat, a tracked follow-up), so the test uses the card's text without that clause
+// (CROOKED_SCALES_WITHOUT_PAYMENT). Shape: A two-branch opponent/own targeted destroy coin followed
+// by an independent life gain, where instant responses exile one or both announced branch targets
+// before resolution; legality is per branch occurrence.
 #[test]
 fn illegal_coin_children_do_not_substitute_distractors_or_suppress_a_legal_tail() {
     use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr};
     for removed in [0, 1, 2, 3] {
         for won in [false, true] {
             let mut definition = parse_oracle_text(
-                TWO_BRANCHES,
+                CROOKED_SCALES_WITHOUT_PAYMENT,
                 "Synthetic legality coin",
                 &[],
                 &["Artifact".into()],
@@ -3499,16 +3494,6 @@ fn restored_retarget_changes_only_the_addressed_coin_or_later_occurrence() {
     }
 }
 
-// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
-// AI legal-action generation while declaring an activated coin's two branch targets in turn: each
-// slot offers only its own legal pool (opponent creatures, then yours) and no empty choice. Nearest
-// printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target
-// creature an opponent controls. If you lose the flip, destroy target creature you control unless
-// you pay {3} and repeat this process."); Mogg Assassin ("{T}: You choose target creature an
-// opponent controls, and that opponent chooses target creature. Flip a coin. If you win the flip,
-// destroy the creature you chose. If you lose the flip, destroy the creature your opponent chose.")
-// -- Scales: same two disjoint-pool branch slots, Unimplemented repeat suffix; Mogg Assassin: two
-// declared slots, different choosers, before the coin.
 #[test]
 fn ai_required_coin_branch_slots_generate_only_the_current_legal_pool() {
     let (mut runner, source, own, opposing) = two_branch_fixture(true, true);
@@ -3732,15 +3717,13 @@ fn one_coin_occurrence_rejects_duplicate_targets_but_accepts_two_distinct_creatu
     assert_finished(&runner);
 }
 
-// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
-// In three players, an opponent copies a two-branch opponent/own targeted coin activation and
-// chooses new branch targets relative to the copy's controller, leaving the original intact.
-// Nearest printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target
-// creature an opponent controls. If you lose the flip, destroy target creature you control unless
-// you pay {3} and repeat this process."); Odds ("Flip a coin. If it comes up heads, counter target
-// instant or sorcery spell. If it comes up tails, copy that spell and you may choose new targets
-// for the copy.") -- Scales: same two controller-relative branch targets, Unimplemented suffix;
-// Odds: copies a spell with new targets, not an activated coin.
+// Real cards: Crooked Scales (printed) has the two outcome-declared targets this test needs, but in
+// this test the printed closing clause "unless you pay {3} and repeat this process" changes the
+// flow (the losing outcome would first ask to pay {3}; the engine does not complete that prompt or
+// the repeat, a tracked follow-up), so the test uses the card's text without that clause
+// (CROOKED_SCALES_WITHOUT_PAYMENT). Shape: In three players, an opponent copies a two-branch
+// opponent/own targeted coin activation and chooses new branch targets relative to the copy's
+// controller, leaving the original intact.
 #[test]
 fn cross_controller_activated_copy_rebinds_each_branch_without_mutating_original() {
     use engine::types::ability::{
@@ -3752,7 +3735,7 @@ fn cross_controller_activated_copy_rebinds_each_branch_without_mutating_original
         let mut scenario = GameScenario::new_n_player(3, 7);
         scenario.at_phase(Phase::PreCombatMain);
         let mut definition = parse_oracle_text(
-            TWO_BRANCHES,
+            CROOKED_SCALES_WITHOUT_PAYMENT,
             "Synthetic copied activation",
             &[],
             &["Artifact".into()],
@@ -3917,13 +3900,13 @@ fn cross_controller_activated_copy_rebinds_each_branch_without_mutating_original
     }
 }
 
-// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
-// In three players, a two-branch opponent/own targeted coin activated from a source owned by
-// another player, with the source destroyed, the own target blinked, or the own target stolen in
-// response. Nearest printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip,
-// destroy target creature an opponent controls. If you lose the flip, destroy target creature you
-// control unless you pay {3} and repeat this process.") -- Same two controller-relative branch
-// targets; Unimplemented repeat suffix and no owner/controller split.
+// Real cards: Crooked Scales (printed) has the two outcome-declared targets this test needs, but in
+// this test the printed closing clause "unless you pay {3} and repeat this process" changes the
+// flow (the losing outcome would first ask to pay {3}; the engine does not complete that prompt or
+// the repeat, a tracked follow-up), so the test uses the card's text without that clause
+// (CROOKED_SCALES_WITHOUT_PAYMENT). Shape: In three players, a two-branch opponent/own targeted
+// coin activated from a source owned by another player, with the source destroyed, the own target
+// blinked, or the own target stolen in response.
 #[test]
 fn three_seat_borrowed_source_and_target_keep_controller_and_incarnation_authority() {
     use engine::types::player::PlayerId;
@@ -3933,7 +3916,7 @@ fn three_seat_borrowed_source_and_target_keep_controller_and_incarnation_authori
             let mut scenario = GameScenario::new_n_player(3, 7);
             scenario.at_phase(Phase::PreCombatMain);
             let mut definition = parse_oracle_text(
-                TWO_BRANCHES,
+                CROOKED_SCALES_WITHOUT_PAYMENT,
                 "Synthetic borrowed source",
                 &[],
                 &["Artifact".into()],
@@ -4089,7 +4072,7 @@ fn three_seat_borrowed_source_and_target_keep_controller_and_incarnation_authori
 fn optional_empty_coin_slot_does_not_steal_the_later_target() {
     for empty in [false, true] {
         let mut definition = parse_oracle_text(
-            TWO_BRANCHES,
+            CROOKED_SCALES,
             "Synthetic optional branch",
             &[],
             &["Artifact".into()],
@@ -4488,27 +4471,31 @@ fn copied_coin_child_re_elects_a_departed_announcer_without_rebinding_other_grou
     assert_finished(&runner);
 }
 
-// Real cards: Orcish Captain (supported, {1} cost so it can be activated twice) has a repeatable
-// branch-declared target; it has one target rather than two, and the fixture strips Scales' {4},{T}
-// cost to allow repetition. Shape: Two stacked activations of the same coin ability with identical
-// or different branch targets; stack display groups them only when branch declarations match, and
-// each resolves its own target. Printed neighbours: Orcish Captain ("{1}: Flip a coin. If you win
-// the flip, target Orc creature gets +2/+0 until end of turn. If you lose the flip, it gets -0/-2
-// until end of turn.").
 #[test]
 fn differently_bound_coin_children_do_not_coalesce_and_each_resolves_its_own_target() {
     use engine::game::stack::stack_display_groups;
     for same in [false, true] {
-        let (mut runner, source, own, opposing) = two_branch_fixture(true, true);
-        // Synthetic no-cost repeated activation; all declaration and resolution
-        // still go through the production activation pipeline.
-        let mut abilities = runner.state().objects[&source].abilities.as_ref().clone();
-        abilities[0].cost = None;
-        let object = runner.state_mut().objects.get_mut(&source).unwrap();
-        object.abilities = std::sync::Arc::new(abilities.clone());
-        object.base_abilities = std::sync::Arc::new(abilities);
+        // Crooked Scales, printed text. Eight mana pays two activations; the artifact is untapped
+        // between them (as an untap effect would), so both activations go through the
+        // production activation pipeline with the printed {4},{T} cost.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_artifact_from_oracle(P0, "Crooked Scales", CROOKED_SCALES)
+            .id();
+        let own = [
+            scenario.add_creature(P0, "Chosen Own", 2, 2).id(),
+            scenario.add_creature(P0, "Own Distractor", 3, 3).id(),
+        ];
+        let opposing = [
+            scenario.add_creature(P1, "Chosen Opponent", 4, 4).id(),
+            scenario.add_creature(P1, "Opponent Distractor", 5, 5).id(),
+        ];
+        mana(&mut scenario, 8);
+        let mut runner = scenario.build();
         pin_outcomes(&mut runner, &[true, true]);
         for opponent in [opposing[0], if same { opposing[0] } else { opposing[1] }] {
+            runner.state_mut().objects.get_mut(&source).unwrap().tapped = false;
             runner
                 .act(GameAction::ActivateAbility {
                     source_id: source,
@@ -4522,6 +4509,9 @@ fn differently_bound_coin_children_do_not_coalesce_and_each_resolves_its_own_tar
                         target: Some(TargetRef::Object(target)),
                     })
                     .unwrap();
+            }
+            if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+                runner.act(GameAction::PassPriority).unwrap();
             }
         }
         assert_eq!(runner.state().stack.len(), 2);
@@ -4548,13 +4538,6 @@ fn differently_bound_coin_children_do_not_coalesce_and_each_resolves_its_own_tar
     }
 }
 
-// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
-// An announced two-branch targeted coin activation whose branch children get injected hidden and
-// public snapshot metadata, projected for the opponent viewer without changing authoritative state.
-// Nearest printed card: Crooked Scales ("{4}, {T}: Flip a coin. If you win the flip, destroy target
-// creature an opponent controls. If you lose the flip, destroy target creature you control unless
-// you pay {3} and repeat this process.") -- Same two announced branch targets; its repeat suffix is
-// Unimplemented and the metadata injection is card-independent.
 #[test]
 fn viewer_projection_redacts_hidden_coin_child_context_but_keeps_public_sibling_context() {
     use engine::game::visibility::filter_state_for_viewer;
@@ -4563,7 +4546,7 @@ fn viewer_projection_redacts_hidden_coin_child_context_but_keeps_public_sibling_
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let mut definition = parse_oracle_text(
-        TWO_BRANCHES,
+        CROOKED_SCALES,
         "Synthetic redacted coin",
         &[],
         &["Artifact".into()],
@@ -5154,14 +5137,6 @@ fn fanout_attachment_tail_keeps_enchant_restriction_with_and_without_coin_parent
     }
 }
 
-// Real cards: Either has a target-free coin with only a won-branch effect. The incoming occurrences
-// come from the test, not the card. Stitch in Time's extra turn and Tavern Swindler's pay-3-life
-// cost would change the finish and life assertions. Shape: A target-free single-coin spell (won
-// branch gains life) whose stack entry is hand-seeded with one pinned and one unpinned incoming
-// occurrence, which must keep deterministic pins through a Krark's Thumb keep and save/restore.
-// Printed neighbours: Stitch in Time ("Flip a coin. If you win the flip, take an extra turn after
-// this one."); Tavern Swindler ("{T}, Pay 3 life: Flip a coin. If you win the flip, you gain 6
-// life.").
 #[test]
 fn mixed_incoming_pins_round_trip_through_a_production_thumb_keep() {
     use engine::types::game_state::PersistedGameState;
@@ -5179,16 +5154,18 @@ fn mixed_incoming_pins_round_trip_through_a_production_thumb_keep() {
     let b = scenario
         .add_creature(P0, "Resolution-time referent", 3, 3)
         .id();
+    // Stitch in Time, printed text: a target-free win-only coin (a Sorcery).
     let spell = scenario
         .add_spell_to_hand_from_oracle(
             P0,
-            "Synthetic mixed incoming coin",
-            true,
-            "Flip a coin. If you win the flip, you gain 3 life.",
+            "Stitch in Time",
+            false,
+            "Flip a coin. If you win the flip, take an extra turn after this one.",
         )
         .id();
     let mut runner = scenario.build();
     pin_outcomes(&mut runner, &[true, false]);
+    let extra_turns_before = runner.state().extra_turns.len();
     drop(runner.cast(spell).commit());
     let a_pin = ObjectIncarnationRef::from_object(&runner.state().objects[&a]);
     let b_pin = ObjectIncarnationRef::from_object(&runner.state().objects[&b]);
@@ -5247,7 +5224,12 @@ fn mixed_incoming_pins_round_trip_through_a_production_thumb_keep() {
     );
     finish(&mut runner, &mut events);
     assert_eq!(flips(&events), vec![true]);
-    assert_eq!(runner.life(P0), 23);
+    // CR 500.7: the won flip queues exactly one extra turn for the caster.
+    assert_eq!(
+        runner.state().extra_turns.len(),
+        extra_turns_before + 1,
+        "the kept winning flip queues Stitch in Time's extra turn"
+    );
     assert_finished(&runner);
 }
 
@@ -5330,59 +5312,34 @@ fn both_coin_branch_targets_emit_events_and_the_heroic_target_triggers_once() {
     assert_finished(&runner);
 }
 
-// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
-// A non-coin spell targets a creature and creates a next-end-step delayed trigger that puts a
-// counter on 'that creature'; after a two-target flicker returns it as a new object, the trigger
-// must not affect it. Nearest printed card: Goblin Kites ("{R}: Target creature you control with
-// toughness 2 or less gains flying until end of turn. Flip a coin at the beginning of the next end
-// step. If you lose the flip, sacrifice that creature.") -- Targets a creature and delays an
-// end-step instruction on 'that creature', but that instruction is a coin flip; this test is the
-// non-coin control.
 #[test]
 fn non_coin_delayed_reference_retains_its_creation_pin_across_a_blink() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, DelayedTriggerCondition, QuantityExpr, TypedFilter,
-    };
-    use engine::types::counter::CounterType;
+    // Spinal Embrace, printed text (byte-identical to the exported MTGJSON oracle_text): gain
+    // control of a creature and sacrifice it at the beginning of the next end step.
+    const SPINAL_EMBRACE: &str = "Cast this spell only during combat.\nUntap target creature you don't control and gain control of it. It gains haste until end of turn. At the beginning of the next end step, sacrifice it. If you do, you gain life equal to its toughness.";
     for blink in [false, true] {
-        let definition = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::TargetOnly {
-                target: TargetFilter::Typed(TypedFilter::creature()),
-            },
-        )
-        .sub_ability(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::CreateDelayedTrigger {
-                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-                effect: Box::new(AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::PutCounter {
-                        counter_type: CounterType::Plus1Plus1,
-                        count: QuantityExpr::Fixed { value: 1 },
-                        target: TargetFilter::ParentTarget,
-                    },
-                )),
-                uses_tracked_set: false,
-            },
-        ));
         let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PostCombatMain);
+        scenario.at_phase(Phase::EndCombat);
         let creature = scenario
-            .add_creature(P0, "Delayed non-coin referent", 2, 2)
+            .add_creature(P1, "Delayed non-coin referent", 2, 2)
             .id();
         let land = scenario
             .add_land_from_oracle(P0, "Other flicker target", "")
             .id();
-        let spell = scenario
-            .add_spell_to_hand(P0, "Synthetic non-coin delayed counter", true)
-            .with_ability_definition(definition)
+        let embrace = scenario
+            .add_spell_to_hand_from_oracle(P0, "Spinal Embrace", true, SPINAL_EMBRACE)
+            .with_mana_cost(ManaCost::zero())
             .id();
         let flicker = scenario.add_spell_to_hand_from_oracle(P0, "Ghostly Flicker", true,
             "Exile two target artifacts, creatures, and/or lands you control, then return those cards to the battlefield under your control.").id();
         let mut runner = scenario.build();
-        runner.cast(spell).target_object(creature).resolve();
+        runner.cast(embrace).target_object(creature).resolve();
         assert_finished(&runner);
+        assert_eq!(
+            runner.state().objects[&creature].controller,
+            P0,
+            "reach: Spinal Embrace gained control of the creature"
+        );
         let incarnation = runner.state().objects[&creature].incarnation;
         if blink {
             runner
@@ -5403,15 +5360,17 @@ fn non_coin_delayed_reference_retains_its_creation_pin_across_a_blink() {
         runner.advance_to_end_step();
         finish(&mut runner, &mut Vec::new());
         assert_eq!(runner.state().phase, Phase::End);
-        // CR 603.7c + CR 400.7: the delayed reference affects only the original object.
+        // CR 603.7c + CR 400.7: the delayed sacrifice affects only the original object, and
+        // the life gain happens only if the sacrifice happened.
         assert_eq!(
-            runner.state().objects[&creature]
-                .counters
-                .get(&CounterType::Plus1Plus1)
-                .copied()
-                .unwrap_or(0),
-            u32::from(!blink)
+            runner.state().objects[&creature].zone,
+            if blink {
+                Zone::Battlefield
+            } else {
+                Zone::Graveyard
+            }
         );
+        assert_eq!(runner.life(P0), if blink { 20 } else { 22 });
         assert_finished(&runner);
     }
 }
@@ -5457,14 +5416,15 @@ fn non_coin_blink_and_exile_life_riders_follow_the_moved_object() {
     assert_finished(&runner);
 }
 
-// Real cards: Bangchuckers exhibits only the plain variant (won branch deals 2 damage to any
-// target) and is an activated ability, not a spell. No printed coin card has the
-// declare-creature-then-redirect-shield variant, so that half needs a synthetic. Shape: A coin
-// spell whose won branch deals 2 damage to any target (variant: declares a creature, then a
-// damage-redirect shield to a chosen target); the pool must exclude lands and noncreature
-// artifacts. Printed neighbours: Goblin Bangchuckers ("{T}: Flip a coin. If you win the flip, this
-// creature deals 2 damage to any target. If you lose the flip, this creature deals 2 damage to
-// itself.").
+// Real cards: the plain half uses Goblin Bangchuckers, printed (Goblin Bangchuckers ("{T}: Flip a
+// coin. If you win the flip, this creature deals 2 damage to any target. If you lose the flip, this
+// creature deals 2 damage to itself.")). The replacement half (declare a creature, then a
+// damage-redirect shield to a chosen target) is made up: none of the 86 printed coin-flip cards in
+// the exported card data does that. Nearest printed card: Desperate Gambit ("Choose a source you
+// control and flip a coin. If you win the flip, the next time that source would deal damage this
+// turn, it deals double that damage instead. If you lose the flip, the next time it would deal
+// damage this turn, prevent that damage.") -- a coin that chooses a source and installs a damage
+// replacement, but declares no creature first.
 #[test]
 fn coin_damage_any_target_legality_uses_the_declaring_instruction() {
     use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TypedFilter};
@@ -5503,27 +5463,45 @@ fn coin_damage_any_target_legality_uses_the_declaring_instruction() {
         let artifact = scenario
             .add_artifact_from_oracle(P1, "Not a creature", "")
             .id();
-        let spell = scenario
-            .add_spell_to_hand(P0, "Synthetic damage target coin", true)
-            .with_ability(Effect::FlipCoins {
-                flips: CoinFlipRun::single(),
-                win_effect: Some(Box::new(branch)),
-                lose_effect: None,
-                flipper: TargetFilter::Controller,
-            })
-            .id();
+        let source = if replacement {
+            scenario
+                .add_spell_to_hand(P0, "Synthetic damage target coin", true)
+                .with_ability(Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
+                    win_effect: Some(Box::new(branch)),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                })
+                .id()
+        } else {
+            // Goblin Bangchuckers, printed text: its win branch deals 2 damage to any target.
+            scenario
+                .add_creature_from_oracle(P0, "Goblin Bangchuckers", 2, 2, GOBLIN_BANGCHUCKERS)
+                .id()
+        };
         let mut runner = scenario.build();
         pin_outcomes(&mut runner, &[true]);
-        let card_id = runner.state().objects[&spell].card_id;
-        let mut events = runner
-            .act(GameAction::CastSpell {
-                object_id: spell,
-                card_id,
-                targets: vec![],
-                payment_mode: CastPaymentMode::Auto,
-            })
-            .unwrap()
-            .events;
+        let mut events = if replacement {
+            let card_id = runner.state().objects[&source].card_id;
+            runner
+                .act(GameAction::CastSpell {
+                    object_id: source,
+                    card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap()
+                .events
+        } else {
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap()
+                .events
+        };
         if replacement {
             runner
                 .act(GameAction::ChooseTarget {
@@ -5807,45 +5785,26 @@ fn coin_attachment_host_uses_its_own_branch_aura() {
     assert_finished(&runner);
 }
 
-// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
-// A non-coin 'return target creature card from your graveyard to the battlefield' spell whose
-// result is forwarded to an AST-added rider (resolution-timed) putting two +1/+1 counters on the
-// returned object. Nearest printed card: Ral Zarek, Guest Lecturer ("[+1]: Surveil 2. / [−1]: Any
-// number of target players each discard a card. / [−2]: Return target creature card with mana value
-// 3 or less from your graveyard to the battlefield. / [−7]: Flip five coins. Target opponent skips
-// their next X turns, where X is the number of coins that came up heads.") -- Its -2 returns a
-// target creature card from graveyard to battlefield; it has no counter rider on the returned
-// object.
 #[test]
 fn non_coin_forwarded_parent_target_resolution_rider_keeps_its_bound_object() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, QuantityExpr, TargetChoiceTiming,
-    };
     use engine::types::counter::CounterType;
-    let mut definition = parse_oracle_text(
-        "Return target creature card from your graveyard to the battlefield.",
-        "Synthetic non-coin forwarding",
+    // Miraculous Recovery, printed text (byte-identical to the exported MTGJSON oracle_text).
+    const MIRACULOUS_RECOVERY: &str =
+        "Return target creature card from your graveyard to the battlefield. Put a +1/+1 counter on it.";
+    let definition = parse_oracle_text(
+        MIRACULOUS_RECOVERY,
+        "Miraculous Recovery",
         &[],
         &["Instant".into()],
         &[],
     )
     .abilities
     .remove(0);
-    assert!(matches!(
-        definition.effect.as_ref(),
-        Effect::ChangeZone { .. }
-    ));
-    definition.forward_result = true;
-    let mut rider = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::PutCounter {
-            counter_type: CounterType::Plus1Plus1,
-            count: QuantityExpr::Fixed { value: 2 },
-            target: TargetFilter::ParentTarget,
-        },
+    assert!(
+        matches!(definition.effect.as_ref(), Effect::ChangeZone { .. })
+            && definition.forward_result,
+        "reach: the printed text forwards the returned card to its rider: {definition:#?}"
     );
-    rider.target_choice_timing = TargetChoiceTiming::Resolution;
-    definition.sub_ability = Some(Box::new(rider));
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let target = scenario
@@ -5853,7 +5812,7 @@ fn non_coin_forwarded_parent_target_resolution_rider_keeps_its_bound_object() {
         .id();
     let other = scenario.add_creature(P0, "Unrelated creature", 3, 3).id();
     let spell = scenario
-        .add_spell_to_hand(P0, "Synthetic non-coin forwarding", true)
+        .add_spell_to_hand(P0, "Miraculous Recovery", true)
         .with_ability_definition(definition)
         .id();
     let mut runner = scenario.build();
@@ -5867,7 +5826,7 @@ fn non_coin_forwarded_parent_target_resolution_rider_keeps_its_bound_object() {
         runner.state().objects[&target]
             .counters
             .get(&CounterType::Plus1Plus1),
-        Some(&2)
+        Some(&1)
     );
     assert!(!runner.state().objects[&other]
         .counters
@@ -6087,36 +6046,23 @@ fn coin_lost_numbered_reference_keeps_branch_base_and_outer_legality_across_rest
     }
 }
 
-// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
-// A resolved creature-target root whose incarnation pin is set by hand: its inherited 'put counters
-// on that creature' rider, resolved directly, must do nothing once the target becomes a new
-// incarnation. Nearest printed card: Goblin Kites ("{R}: Target creature you control with toughness
-// 2 or less gains flying until end of turn. Flip a coin at the beginning of the next end step. If
-// you lose the flip, sacrifice that creature.") -- A later instruction refers back to 'that
-// creature' targeted earlier; it is a coin sacrifice, not a counter rider, and is not driven by
-// hand.
 #[test]
 fn declaring_root_delayed_pin_still_guards_its_inherited_counter_rider() {
     use engine::game::ability_utils::build_resolved_from_def;
     use engine::game::effects;
-    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TypedFilter};
     use engine::types::counter::CounterType;
     use engine::types::identifiers::ObjectIncarnationRef;
+    // Big Play, printed text (byte-identical to the exported MTGJSON oracle_text): a
+    // creature-target root whose later "Put a +1/+1 counter on it" inherits that target.
+    const BIG_PLAY: &str = "Target creature gets +2/+2 and gains reach until end of turn. Put a +1/+1 counter on it. (A creature with reach can block creatures with flying.)";
     for stale in [false, true] {
-        let definition = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::TargetOnly {
-                target: TargetFilter::Typed(TypedFilter::creature()),
-            },
-        )
-        .sub_ability(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::PutCounter {
-                counter_type: CounterType::Plus1Plus1,
-                count: QuantityExpr::Fixed { value: 3 },
-                target: TargetFilter::ParentTarget,
-            },
-        ));
+        let definition = parse_oracle_text(BIG_PLAY, "Big Play", &[], &["Instant".into()], &[])
+            .abilities
+            .remove(0);
+        assert!(
+            definition.sub_ability.is_some(),
+            "reach: the counter rider is a later instruction of the same ability: {definition:#?}"
+        );
         let mut scenario = GameScenario::new();
         let target = scenario
             .add_creature(P0, "Captured delayed referent", 2, 2)
@@ -6152,7 +6098,7 @@ fn declaring_root_delayed_pin_still_guards_its_inherited_counter_rider() {
                 .get(&CounterType::Plus1Plus1)
                 .copied()
                 .unwrap_or(0),
-            if stale { 0 } else { 3 }
+            if stale { 0 } else { 1 }
         );
         assert_finished(&runner);
     }
@@ -6506,16 +6452,19 @@ fn coin_scope_player_declaration_does_not_shadow_object_antecedent() {
     }
 }
 
-// Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
-// A non-coin chain declares an artifact, a creature and a player, then a target permanent sharing a
-// card type with 'it'; the antecedent must stay the chain's first object (the artifact). Nearest
-// printed card: Ral Zarek ("[+1]: Tap target permanent, then untap another target permanent. /
-// [−2]: Ral Zarek deals 3 damage to any target. / [−7]: Flip five coins. Take an extra turn after
-// this one for each coin that comes up heads."); Mogg Assassin ("{T}: You choose target creature an
-// opponent controls, and that opponent chooses target creature. Flip a coin. If you win the flip,
-// destroy the creature you chose. If you lose the flip, destroy the creature your opponent chose.")
-// -- Both declare several targets in sequence in one ability; neither has a dependent shares-a-type
-// target, and Mogg Assassin's is a coin ability.
+// Real cards: no printed card exhibits this shape (searched every oracle_text in the exported card
+// data for "shares a card type with it/that": 14 cards; none declares an artifact, a creature and a
+// player before a target that shares a card type with the first). Shape: a non-coin chain declares
+// an artifact, a creature and a player, then a target permanent sharing a card type with 'it'; the
+// antecedent must stay the chain's first object (the artifact). Nearest printed cards: Daring Thief
+// ("Inspired — Whenever this creature becomes untapped, you may exchange control of target nonland
+// permanent you control and target permanent an opponent controls that shares a card type with
+// it."); Chaotic Transformation ("Exile up to one target artifact, up to one target creature, up to
+// one target enchantment, up to one target planeswalker, and/or up to one target land. For each
+// permanent exiled this way, its controller reveals cards from the top of their library until they
+// reveal a card that shares a card type with it, puts that card onto the battlefield, then
+// shuffles.") -- the first has a later target that shares a card type with an earlier one; the
+// second declares several typed targets in sequence.
 #[test]
 fn non_coin_scope_keeps_first_prefix_object_across_later_declarations() {
     use engine::types::ability::{
