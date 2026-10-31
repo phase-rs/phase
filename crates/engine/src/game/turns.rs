@@ -5259,7 +5259,7 @@ card into your hand at the beginning of your next end step.";
         scenario.at_phase(Phase::End);
         scenario.with_library_top(P0, &["Card A", "Card B"]);
         let spell = scenario
-            .add_spell_to_hand_from_oracle(P0, "Plain Draw", false, "Draw a card.")
+            .add_spell_to_hand_from_oracle(P0, "Reach Through Mists", true, "Draw a card.")
             .id();
         let kharn = scenario
             .add_creature_from_oracle(P1, "Kh\u{e2}rn the Betrayer", 5, 1, KHARN)
