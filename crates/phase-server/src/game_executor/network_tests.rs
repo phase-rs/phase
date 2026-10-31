@@ -3325,6 +3325,76 @@ async fn lifecycle_publication(
     (references, revision)
 }
 
+#[test]
+fn codec_bound_socket_withheld_then_delta() {
+    run_async_test(|| async {
+        use state_codec::FrameKind;
+
+        const CAP: usize = 256 * 1024;
+        let table = NativeTable::capped_duel(CAP).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+            table.keep_all().await;
+            let mut peer = codec_seat(&table, PlayerId(0), false).await;
+            let baseline = peer.resync().await;
+            assert_eq!(baseline.kind, Some(FrameKind::Full));
+            assert!(baseline.payload_bytes < CAP);
+            peer.fence(false).await;
+            let before = peer.baseline.clone().unwrap();
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let id = session.state.players[0].hand[0];
+            let name = session.state.objects[&id].name.clone();
+            drop(session);
+            let (_, withheld_revision) =
+                lifecycle_publication(&table, &table.key, move |session| {
+                    session.state.objects.get_mut(&id).unwrap().name = "x".repeat(CAP * 2);
+                })
+                .await;
+            let notice = loop {
+                let reply = peer.next().await;
+                if reply.value["type"] == "StateWithheld" {
+                    break reply;
+                }
+                assert_ne!(
+                    reply.value["type"], "StateUpdate",
+                    "oversized state was sent"
+                );
+            };
+            assert_eq!(notice.value["data"]["state_revision"], withheld_revision);
+            assert_eq!(
+                notice.value["data"]["withheld"],
+                serde_json::json!({ "type": "StateUpdate" })
+            );
+            assert!(notice.payload_bytes <= CAP);
+            assert!(notice.kind.is_none());
+            assert_eq!(
+                peer.baseline.as_ref().unwrap().as_bytes(),
+                before.as_bytes()
+            );
+            assert_eq!(
+                peer.baseline.as_ref().unwrap().revision(),
+                before.revision()
+            );
+            let (references, revision) =
+                lifecycle_publication(&table, &table.key, move |session| {
+                    session.state.objects.get_mut(&id).unwrap().name = name;
+                    session.state.players[0].life -= 1;
+                })
+                .await;
+            let next = peer.state().await;
+            assert_eq!(next.kind, Some(FrameKind::Delta));
+            assert_eq!(next.value["data"]["state_revision"], revision);
+            assert_eq!(next.value, references[0]);
+            assert!(next.payload_bytes <= CAP);
+            peer.fence(false).await;
+        })
+        .await;
+        table.server.abort();
+        outcome.expect("bounded codec socket recovery");
+    });
+}
+
 /// One spectator, no AI or connected seats: real publication/transport and HTTP
 /// collection, not command-driven full-game or resource acceptance.
 #[test]

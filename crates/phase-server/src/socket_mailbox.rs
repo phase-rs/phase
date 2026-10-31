@@ -557,6 +557,40 @@ mod tests {
     }
 
     #[test]
+    fn codec_bound_over_bound_retry_retains_resync_permit() {
+        let (sender, _mailbox) = channel();
+        let mut next = envelope(state_update(3), Some(CommandId(9)));
+        next.state_encoding = StateEncoding::Resync(sender.try_admit_resync().unwrap());
+        let stripped = retried(next.over_bound("strip".into()));
+        assert!(matches!(
+            &stripped.message,
+            ServerMessage::StateUpdate { events, log_entries, .. }
+                if events.is_empty() && log_entries.is_empty()
+        ));
+        assert!(
+            matches!(&stripped.state_encoding, StateEncoding::Resync(_)),
+            "stripped retry must retain the resync owner"
+        );
+        assert!(matches!(sender.try_admit_resync(), Err(RefusalError::Full)));
+        let withheld = retried(stripped.over_bound("withhold".into()));
+        assert!(matches!(
+            &withheld.message,
+            ServerMessage::StateWithheld { .. }
+        ));
+        assert!(
+            matches!(&withheld.state_encoding, StateEncoding::Resync(_)),
+            "withheld retry must retain the resync owner"
+        );
+        assert!(matches!(sender.try_admit_resync(), Err(RefusalError::Full)));
+        drop(withheld);
+        drop(
+            sender
+                .try_admit_resync()
+                .expect("dropping retry releases resync admission"),
+        );
+    }
+
+    #[test]
     fn over_bound_state_update_strips_presentation_then_withholds_keeping_correlation() {
         let id = Some(CommandId(5));
         let stripped = retried(envelope(state_update(3), id).over_bound("r".to_string()));

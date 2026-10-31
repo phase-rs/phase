@@ -1725,6 +1725,436 @@ mod codec_tests {
         }
     }
 
+    async fn bounded(
+        encoder: &mut ConnectionEncoder,
+        message: Envelope,
+        encoding: Encoding,
+        bound: usize,
+    ) -> PreparedApplication {
+        let owner = std::mem::replace(encoder, ConnectionEncoder::Legacy);
+        let outcome = encode_application(
+            &GameExecutor::new(NonZeroUsize::MIN),
+            owner,
+            message,
+            encoding,
+            bound,
+        )
+        .await
+        .unwrap();
+        *encoder = outcome.encoder;
+        outcome.prepared.unwrap()
+    }
+
+    fn presentation_update(raw: &GameState, revision: u64) -> ServerMessage {
+        use engine::types::log::{GameLogEntry, LogCategory, LogSegment};
+
+        let events = vec![
+            GameEvent::PriorityPassed {
+                player_id: PlayerId(0),
+            };
+            512
+        ];
+        let mut update = projected_update(raw, PlayerId(0), revision, events);
+        let ServerMessage::StateUpdate {
+            events,
+            log_entries,
+            ..
+        } = &mut update
+        else {
+            panic!("projected update required")
+        };
+        assert_eq!(events.len(), 512);
+        *log_entries = vec![GameLogEntry {
+            seq: 1,
+            turn: 1,
+            phase: Phase::PreCombatMain,
+            category: LogCategory::Game,
+            segments: vec![LogSegment::Text("bounded presentation fixture".repeat(512))],
+            presentation: Default::default(),
+        }];
+        update
+    }
+
+    fn strip_presentation(message: &mut ServerMessage) {
+        let ServerMessage::StateUpdate {
+            events,
+            log_entries,
+            ..
+        } = message
+        else {
+            panic!("projected update required")
+        };
+        assert!(!events.is_empty(), "stripping must remove events");
+        assert!(!log_entries.is_empty(), "stripping must remove log entries");
+        events.clear();
+        log_entries.clear();
+    }
+
+    async fn assert_codec_bound_uses_wire_frame(encoding: Encoding) {
+        let mut raw = raw_state(128);
+        let mut encoder = ConnectionEncoder::codec();
+        let mut receiver = None;
+        deliver(
+            &mut encoder,
+            &mut receiver,
+            envelope(projected_update(&raw, PlayerId(0), 100, Vec::new()), None),
+            encoding,
+        )
+        .await;
+        raw.players[0].life -= 1;
+        let message = projected_update(&raw, PlayerId(0), 101, Vec::new());
+        let next = envelope(message.clone(), None);
+        let expected = serde_json::to_vec(&next).unwrap();
+        let delta = encoder.prepare_ref(&next, encoding).unwrap();
+        let full = ConnectionEncoder::codec()
+            .prepare_ref(&next, encoding)
+            .unwrap();
+        let legacy = ConnectionEncoder::Legacy
+            .prepare_ref(&next, encoding)
+            .unwrap();
+        assert_eq!(
+            codec_frame(delta.frame.clone()).await.kind(),
+            FrameKind::Delta
+        );
+        assert_eq!(
+            codec_frame(full.frame.clone()).await.kind(),
+            FrameKind::Full
+        );
+        let small = payload_len(&delta.frame);
+        let large = payload_len(&full.frame).min(payload_len(&legacy.frame));
+        assert!(
+            small + 1 < large,
+            "wire sizes must separate Delta from Full/legacy"
+        );
+        let bound = small + 1;
+        if encoding == Encoding::GzipEnvelope {
+            assert!(matches!(delta.frame, Message::Binary(_)));
+            assert!(matches!(full.frame, Message::Binary(_)));
+            assert!(
+                codec_frame(delta.frame.clone())
+                    .await
+                    .to_bytes()
+                    .unwrap()
+                    .len()
+                    > bound,
+                "gzip bound must reject the uncompressed codec frame"
+            );
+        }
+        let prepared = bounded(&mut encoder, next, encoding, bound).await;
+        assert_eq!(
+            prepared.frame, delta.frame,
+            "bounded preparation must preserve fitting Delta bytes"
+        );
+        assert!(
+            prepared.replaced.is_none(),
+            "fitting Delta must not be replaced"
+        );
+        assert_eq!(
+            receive(&mut receiver, prepared.frame, &expected, 101).await,
+            FrameKind::Delta
+        );
+        encoder.commit(prepared.candidate);
+        let mut fresh = ConnectionEncoder::codec();
+        let replaced = bounded(&mut fresh, envelope(message, None), encoding, bound).await;
+        assert!(
+            replaced.replaced.is_some(),
+            "oversized Full must be replaced"
+        );
+        assert!(payload_len(&replaced.frame) <= bound);
+        let Message::Text(text) = (match replaced.frame {
+            Message::Binary(bytes) => Message::Text(
+                wire::decode_client_envelope(bytes.to_vec(), 32 * 1024 * 1024)
+                    .await
+                    .unwrap()
+                    .into(),
+            ),
+            other => other,
+        }) else {
+            panic!("application frame required")
+        };
+        assert!(matches!(
+            serde_json::from_str::<ServerMessage>(&text).unwrap(),
+            ServerMessage::StateWithheld { .. }
+        ));
+        assert!(replaced.candidate.is_none());
+    }
+
+    #[tokio::test]
+    async fn codec_bound_plain_uses_encoded_frame() {
+        assert_codec_bound_uses_wire_frame(Encoding::Plain).await;
+    }
+
+    #[tokio::test]
+    async fn codec_bound_gzip_uses_compressed_frame() {
+        assert_codec_bound_uses_wire_frame(Encoding::GzipEnvelope).await;
+    }
+
+    #[tokio::test]
+    async fn codec_bound_stripped_candidate_matches_receiver() {
+        let mut raw = raw_state(12);
+        let mut encoder = ConnectionEncoder::codec();
+        let mut receiver = None;
+        deliver(
+            &mut encoder,
+            &mut receiver,
+            envelope(projected_update(&raw, PlayerId(0), 100, Vec::new()), None),
+            Encoding::Plain,
+        )
+        .await;
+        raw.players[0].life -= 1;
+        let message = presentation_update(&raw, 101);
+        let mut stripped = message.clone();
+        strip_presentation(&mut stripped);
+        let stripped = envelope(stripped, Some(CommandId(8)));
+        let expected = serde_json::to_vec(&stripped).unwrap();
+        let next = envelope(message, Some(CommandId(8)));
+        let original = encoder.prepare_ref(&next, Encoding::Plain).unwrap();
+        let fitting = encoder.prepare_ref(&stripped, Encoding::Plain).unwrap();
+        let bound = payload_len(&fitting.frame);
+        assert!(
+            payload_len(&original.frame) > bound,
+            "strip retry reach guard"
+        );
+        let prepared = bounded(&mut encoder, next, Encoding::Plain, bound).await;
+        assert!(prepared.replaced.is_some(), "presentation must be stripped");
+        assert_eq!(
+            prepared.candidate.as_ref().unwrap().state.as_bytes(),
+            expected,
+            "retry candidate must be the stripped projection"
+        );
+        receive(&mut receiver, prepared.frame, &expected, 101).await;
+        encoder.commit(prepared.candidate);
+        assert_eq!(
+            delivered(&encoder).state.as_bytes(),
+            receiver.as_ref().unwrap().as_bytes()
+        );
+        let received: ServerMessage =
+            serde_json::from_slice(receiver.as_ref().unwrap().as_bytes()).unwrap();
+        let ServerMessage::StateUpdate {
+            events,
+            log_entries,
+            ..
+        } = received
+        else {
+            panic!("stripped StateUpdate required")
+        };
+        assert!(events.is_empty());
+        assert!(log_entries.is_empty());
+        raw.players[1].life -= 1;
+        assert_eq!(
+            deliver(
+                &mut encoder,
+                &mut receiver,
+                envelope(projected_update(&raw, PlayerId(0), 102, Vec::new()), None),
+                Encoding::Plain
+            )
+            .await,
+            FrameKind::Delta
+        );
+    }
+
+    #[tokio::test]
+    async fn codec_bound_withheld_preserves_delivered_baseline() {
+        let mut raw = raw_state(12);
+        let mut encoder = ConnectionEncoder::codec();
+        let mut receiver = None;
+        deliver(
+            &mut encoder,
+            &mut receiver,
+            envelope(projected_update(&raw, PlayerId(0), 100, Vec::new()), None),
+            Encoding::Plain,
+        )
+        .await;
+        let before = receiver.as_ref().unwrap().clone();
+        let before_key = delivered(&encoder).full_key.clone();
+        let before_viewer = delivered(&encoder).viewer;
+        let notice = envelope(
+            ServerMessage::StateWithheld {
+                full_key: Some(key()),
+                state_revision: 101,
+                withheld: server_core::protocol::WithheldFrame::StateUpdate,
+                reason: crate::socket_mailbox::STATE_UPDATE_WITHHELD.into(),
+            },
+            None,
+        );
+        let bound = payload_len(&encoder.prepare_ref(&notice, Encoding::Plain).unwrap().frame);
+        let large = raw_state(128);
+        let message = presentation_update(&large, 101);
+        let mut stripped = message.clone();
+        strip_presentation(&mut stripped);
+        assert!(
+            payload_len(
+                &encoder
+                    .prepare_ref(&envelope(stripped, None), Encoding::Plain)
+                    .unwrap()
+                    .frame
+            ) > bound,
+            "even stripped state must exceed the notice bound"
+        );
+        let prepared = bounded(
+            &mut encoder,
+            envelope(message, None),
+            Encoding::Plain,
+            bound,
+        )
+        .await;
+        assert!(prepared.replaced.is_some(), "withheld retry reach guard");
+        let Message::Text(text) = prepared.frame else {
+            panic!("plain notice required")
+        };
+        assert_eq!(text.as_str(), serde_json::to_string(&notice).unwrap());
+        assert!(
+            prepared.candidate.is_none(),
+            "withheld frame cannot advance the baseline"
+        );
+        encoder.commit(prepared.candidate);
+        assert_eq!(delivered(&encoder).state.as_bytes(), before.as_bytes());
+        assert_eq!(delivered(&encoder).state.revision(), before.revision());
+        assert_eq!(delivered(&encoder).full_key, before_key);
+        assert_eq!(delivered(&encoder).viewer, before_viewer);
+        assert_eq!(receiver.as_ref().unwrap().as_bytes(), before.as_bytes());
+        raw.players[1].life -= 1;
+        assert_eq!(
+            deliver(
+                &mut encoder,
+                &mut receiver,
+                envelope(projected_update(&raw, PlayerId(0), 102, Vec::new()), None),
+                Encoding::Plain
+            )
+            .await,
+            FrameKind::Delta
+        );
+    }
+
+    #[tokio::test]
+    async fn codec_bound_started_withheld_creates_no_baseline() {
+        let mut encoder = ConnectionEncoder::codec();
+        let notice = envelope(
+            ServerMessage::StateWithheld {
+                full_key: Some(key()),
+                state_revision: 100,
+                withheld: server_core::protocol::WithheldFrame::GameStarted {
+                    your_player: PlayerId(0),
+                },
+                reason: crate::socket_mailbox::GAME_STARTED_WITHHELD.into(),
+            },
+            None,
+        );
+        let bound = payload_len(&encoder.prepare_ref(&notice, Encoding::Plain).unwrap().frame);
+        let started = envelope(projected_started(&raw_state(12), PlayerId(0)), None);
+        assert!(
+            payload_len(
+                &encoder
+                    .prepare_ref(&started, Encoding::Plain)
+                    .unwrap()
+                    .frame
+            ) > bound
+        );
+        let prepared = bounded(&mut encoder, started, Encoding::Plain, bound).await;
+        assert!(
+            prepared.replaced.is_some(),
+            "GameStarted replacement reach guard"
+        );
+        let Message::Text(text) = prepared.frame else {
+            panic!("plain notice required")
+        };
+        assert_eq!(text.as_str(), serde_json::to_string(&notice).unwrap());
+        assert!(
+            prepared.candidate.is_none(),
+            "withheld bootstrap cannot create a baseline"
+        );
+        encoder.commit(prepared.candidate);
+        assert!(matches!(
+            encoder,
+            ConnectionEncoder::Codec(DeliveredState { baseline: None })
+        ));
+    }
+
+    #[tokio::test]
+    async fn codec_bound_resync_retry_stays_full_and_releases_permit() {
+        let raw = raw_state(12);
+        let mut encoder = ConnectionEncoder::codec();
+        let mut receiver = None;
+        deliver(
+            &mut encoder,
+            &mut receiver,
+            envelope(projected_update(&raw, PlayerId(0), 100, Vec::new()), None),
+            Encoding::Plain,
+        )
+        .await;
+        let (sender, _mailbox) = crate::socket_mailbox::channel();
+        let message = presentation_update(&raw, 101);
+        let mut stripped = message.clone();
+        strip_presentation(&mut stripped);
+        let stripped = envelope(stripped, None);
+        let expected = serde_json::to_vec(&stripped).unwrap();
+        let full = ConnectionEncoder::codec()
+            .prepare_ref(&stripped, Encoding::Plain)
+            .unwrap();
+        assert_eq!(
+            codec_frame(full.frame.clone()).await.kind(),
+            FrameKind::Full
+        );
+        assert_eq!(
+            codec_frame(
+                encoder
+                    .prepare_ref(&stripped, Encoding::Plain)
+                    .unwrap()
+                    .frame
+            )
+            .await
+            .kind(),
+            FrameKind::Delta
+        );
+        let bound = payload_len(&full.frame);
+        let mut next = envelope(message.clone(), None);
+        next.state_encoding =
+            crate::socket_mailbox::StateEncoding::Resync(sender.try_admit_resync().unwrap());
+        assert!(payload_len(&encoder.prepare_ref(&next, Encoding::Plain).unwrap().frame) > bound);
+        let prepared = bounded(&mut encoder, next, Encoding::Plain, bound).await;
+        assert!(
+            prepared.replaced.is_some(),
+            "resync strip retry reach guard"
+        );
+        assert_eq!(
+            receive(&mut receiver, prepared.frame, &expected, 101).await,
+            FrameKind::Full,
+            "stripped resync must retain its forced Full hint"
+        );
+        drop(
+            sender
+                .try_admit_resync()
+                .expect("bounded retry releases resync admission"),
+        );
+        encoder.commit(prepared.candidate);
+
+        let notice = envelope(
+            ServerMessage::StateWithheld {
+                full_key: Some(key()),
+                state_revision: 101,
+                withheld: server_core::protocol::WithheldFrame::StateUpdate,
+                reason: crate::socket_mailbox::STATE_UPDATE_WITHHELD.into(),
+            },
+            None,
+        );
+        let bound = payload_len(&encoder.prepare_ref(&notice, Encoding::Plain).unwrap().frame);
+        let mut next = envelope(message, None);
+        next.state_encoding =
+            crate::socket_mailbox::StateEncoding::Resync(sender.try_admit_resync().unwrap());
+        let prepared = bounded(&mut encoder, next, Encoding::Plain, bound).await;
+        assert!(prepared.replaced.is_some());
+        let Message::Text(text) = prepared.frame else {
+            panic!("plain notice required")
+        };
+        assert_eq!(text.as_str(), serde_json::to_string(&notice).unwrap());
+        assert!(prepared.candidate.is_none());
+        drop(
+            sender
+                .try_admit_resync()
+                .expect("withheld resync releases admission"),
+        );
+    }
+
     #[tokio::test]
     async fn codec_resync_hint_forces_only_its_frame() {
         use crate::socket_mailbox::StateEncoding;
