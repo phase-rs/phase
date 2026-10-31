@@ -13711,7 +13711,7 @@ fn parse_damage_noun_with_scope(input: &str) -> OracleResult<'_, Option<CombatDa
 /// 'prevent'", and this grammar never says "prevent". A prevention shield with no
 /// recipient DELETES the damage instead of moving it.
 ///
-/// `pub(crate)` solely so `game::replacement`'s
+/// `pub` solely so `engine::game::replacement`'s
 /// `durable_redirect_route_is_total_over_parser_recipients` can drive the real
 /// grammar rather than restating an inevitably-drifting hand-written list of the
 /// filters it emits. That test is what keeps

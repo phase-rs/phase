@@ -2042,7 +2042,7 @@ pub fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousModificat
 ///      parse the remaining text as an ability body → `GrantAbility`
 ///      wrapping the parsed `AbilityDefinition`.
 ///
-/// Visibility: `pub(crate)` so external crate-local callers can reuse the
+/// Visibility: `pub` so `phase-engine` callers can reuse the
 /// canonical inner classifier without exposing the private
 /// `parse_quoted_ability` / `parse_quoted_rule_static_modifications` helpers.
 pub fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModification> {

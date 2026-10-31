@@ -6862,7 +6862,7 @@ fn rebind_attack_anaphor_in_quantity(expr: &mut QuantityExpr) {
     }
 }
 
-// pub(crate) so the runtime gate tests in game/triggers.rs can drive the
+// pub so phase-engine's runtime gate tests in game/triggers.rs can drive the
 // production bridge directly (discriminating against this function rather than a
 // hand-built filter). Sole non-test caller remains parse_trigger_line below.
 pub fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<TriggerCondition> {
