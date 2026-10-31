@@ -2789,16 +2789,14 @@ pub(super) fn handle_copy_target_choice(
             .get(&source_id)
             .map_or(0, |entry| entry.created_ids.len() + 1);
         let copy_continuation = state.liminal_entries.get(&source_id).and_then(|entry| {
-            entry.copy_resume.as_ref().and_then(|copy| {
-                (entry.remaining_count > 0).then(|| {
-                    (
-                        entry.object.projected().owner,
-                        copy.clone(),
-                        entry.enter_tapped,
-                        entry.enter_with_counters.clone(),
-                        entry.remaining_count,
-                    )
-                })
+            entry.copy_resume.as_ref().map(|copy| {
+                (
+                    entry.object.projected().owner,
+                    copy.clone(),
+                    entry.enter_tapped,
+                    entry.enter_with_counters.clone(),
+                    entry.remaining_count,
+                )
             })
         });
         // CR 707.9b: a copy effect's "except" clauses (Embalm/Eternalize's
@@ -2839,6 +2837,20 @@ pub(super) fn handle_copy_target_choice(
                 }));
             }
         }
+        // CR 614.1c + CR 122.6: hold the one-shot counter exceptions so the
+        // realized copy's own entry counters and intrinsic loyalty share one placement.
+        let mut entry_counter_exceptions = Vec::new();
+        if let Effect::BecomeCopy {
+            additional_modifications,
+            ..
+        } = &mut ability.effect
+        {
+            let (held, remaining) = effects::become_copy::partition_entry_counter_exceptions(
+                std::mem::take(additional_modifications),
+            );
+            *additional_modifications = remaining;
+            entry_counter_exceptions = held;
+        }
         // CR 403.3 + CR 603.6a: the commit applies the token's enter-with-counters, which can
         // PAUSE on a CR 616.1 ordering choice between two AddCounter replacements. On that pause
         // the only stashed post-action is the entry finalization, and its `Suppress` emission mode
@@ -2872,11 +2884,28 @@ pub(super) fn handle_copy_target_choice(
         ) {
             return Ok(state.waiting_for.clone());
         }
+        let entrant_pin = state
+            .objects
+            .get(&source_id)
+            .map(crate::types::identifiers::ObjectIncarnationRef::from_object);
         // CR 614.12a: the copy target was chosen before the token entered; the
         // `BecomeCopy` here overwrites the token's copiable values with the
         // chosen source's values, then layers/consumes the folded copy
         // exceptions (CR 707.9b).
         let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+        // CR 707.9f: type-gated exceptions apply only to an installed copy,
+        // not to the uncopied entrant if installation failed.
+        let copy_applied = entrant_pin
+            .is_some_and(|pin| effects::become_copy::has_installed_copy_effect(state, pin));
+        let held_exceptions: &[crate::types::ability::ContinuousModification] = if copy_applied {
+            &entry_counter_exceptions
+        } else {
+            &[]
+        };
+        // CR 608.2c + CR 614.12a: the selected copy and its rider chain have
+        // completed. Retire their paused dispatch before entry-counter or
+        // named-choice children can hide the CopyToken owner.
+        state.finish_active_paused_post_replacement_dispatch();
         let mut counter_pause_post_actions = Vec::new();
         if has_liminal_entry {
             counter_pause_post_actions.push(
@@ -2891,13 +2920,15 @@ pub(super) fn handle_copy_target_choice(
             copy.attack_request = copy
                 .attack_request
                 .after_entrants(entrants_through_this_entry);
-            counter_pause_post_actions.push(PendingCounterPostAction::ContinueCopyTokenCreation {
-                owner,
-                copy,
-                enter_tapped,
-                enter_with_counters,
-                remaining_count,
-            });
+            counter_pause_post_actions.push(
+                PendingCounterPostAction::ContinueLiminalCopyTokenBatch {
+                    owner,
+                    copy,
+                    enter_tapped,
+                    enter_with_counters,
+                    remaining_count,
+                },
+            );
         }
         if let Some(waiting_for) = finish_copy_target_choice_entry(
             state,
@@ -2905,12 +2936,14 @@ pub(super) fn handle_copy_target_choice(
             events,
             counter_pause_post_actions,
             true,
-            CopyEntryCounters::ReplacementsOnly,
+            CopyEntryCounters::Merged {
+                exceptions: held_exceptions,
+            },
         )? {
             return Ok(waiting_for);
         }
         if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
-            copy_continuation
+            copy_continuation.filter(|(_, _, _, _, remaining_count)| *remaining_count > 0)
         {
             let initial_created_ids = state.last_created_token_ids.clone();
             let status =
@@ -3023,7 +3056,7 @@ pub(super) fn handle_copy_target_choice(
         events,
         Vec::new(),
         true,
-        CopyEntryCounters::Ordinary {
+        CopyEntryCounters::Merged {
             exceptions: held_exceptions,
         },
     )? {
@@ -3040,15 +3073,15 @@ pub(super) fn handle_copy_target_choice(
 /// counters, and therefore who completes the entry after a counter pause.
 #[derive(Clone, Copy)]
 enum CopyEntryCounters<'a> {
-    /// Meld and liminal entries: only the entrant's own "enters with"
-    /// replacement counters. The caller's post-actions complete the entry.
+    /// Meld: only the entrant's own "enters with" replacement counters.
+    /// Its caller's post-actions retain ownership of completing the entry.
     ReplacementsOnly,
-    /// The ordinary interactive enter-as-copy: one merged placement per counter
-    /// type from the entrant's own "enters with" counters, the copied
+    /// Ordinary and liminal token enter-as-copy entries: one merged placement
+    /// per counter type from the entrant's own "enters with" counters, the copied
     /// planeswalker's intrinsic loyalty (CR 306.5b), and the held copy
     /// exceptions (CR 707.9f; empty when the copy did not apply). A counter
     /// pause mints `FinishCopyTargetChoiceEntry` to complete the entry.
-    Ordinary {
+    Merged {
         exceptions: &'a [crate::types::ability::ContinuousModification],
     },
 }
@@ -3082,7 +3115,7 @@ fn finish_copy_target_choice_entry(
     }
     let (counters, completion_witness) = match entry_counters {
         CopyEntryCounters::ReplacementsOnly => (enter_modifiers.counters, None),
-        CopyEntryCounters::Ordinary { exceptions } => {
+        CopyEntryCounters::Merged { exceptions } => {
             let entrant = state
                 .objects
                 .get(&source_id)
@@ -3123,11 +3156,14 @@ fn finish_copy_target_choice_entry(
         }
     };
     if !apply_etb_counters(state, source_id, &counters, events) {
-        // Only the ordinary caller has a witness. Meld and liminal entries
-        // retain their existing, structurally different completions.
+        // Ordinary and liminal-token (Merged) callers carry a witness, placed first so the entry tail precedes their caller actions; Meld retains its structurally different completion.
         if let Some(entrant) = completion_witness {
-            counter_pause_post_actions
-                .push(PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant });
+            // CR 614.12a + CR 616.1: required entry choices precede token
+            // publication and the remaining batch, after all counter additions settle.
+            counter_pause_post_actions.insert(
+                0,
+                PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant },
+            );
         }
         super::effects::counters::append_pending_counter_post_actions(
             state,
