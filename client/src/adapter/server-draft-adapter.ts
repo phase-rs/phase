@@ -851,7 +851,11 @@ export class ServerDraftAdapter implements EngineAdapter {
       case "DraftActionRejected": {
         const data = msg.data as { reason: string };
         this.emit({ type: "draftActionRejected", reason: data.reason });
-        if (this.draftReject) {
+        // The wire carries no correlation id, and preparation has not sent a
+        // frame yet: while SubmitDeck is still `PreparingDeck`, a rejection can
+        // only answer an EARLIER action, so it must not abort this submission
+        // with another action's reason.
+        if (this.draftReject && this.draftActionStage === "AwaitingReply") {
           this.draftReject(
             new AdapterError("ACTION_REJECTED", data.reason, true),
           );

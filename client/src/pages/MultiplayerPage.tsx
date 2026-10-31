@@ -649,7 +649,7 @@ function MultiplayerPageContent({
 
         void withSavedDeckLibraryOrSkip((txn) => touchDeckPlayed(txn, deckName), "run-unguarded");
       } else if (action.type === "host" && action.settings.pile?.type === "SavedDeck") {
-        // An unreadable pile is not checked here; the host-deck read below reports it.
+        // An unreadable pile is not checked here; the server/P2P host-deck read below, or the local AI start for an all-AI table, reports it.
         const pile = loadSavedDeck(action.settings.pile.name);
         if (pile) {
           const refusal = await checkDeck(pile, action.settings.formatConfig.format);

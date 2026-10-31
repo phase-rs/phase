@@ -1210,6 +1210,38 @@ describe("ServerDraftAdapter", () => {
       expect(settled).toHaveBeenCalledWith(expect.objectContaining({ pick_number: 18 }));
     });
 
+    it("ignores an earlier action's rejection while preparation has sent nothing, then submits on the same slot", async () => {
+      const metadata = heldArt<PrintingEntry[]>();
+      artIO.catalog.mockReturnValue(metadata.promise);
+      const rejectedEvents: string[] = [];
+      adapter.onEvent((event) => {
+        if (event.type === "draftActionRejected") rejectedEvents.push(event.reason);
+      });
+      const pending = adapter.submitDeck(["Plains", "Island"], []);
+      const readOutcome = trackRejection(pending);
+      await drainArt();
+      expect(ws.send).not.toHaveBeenCalled();
+      // Nothing has been sent, so this rejection can only answer an EARLIER
+      // action; it must not abort a submission the server never saw.
+      receive(ws, "DraftActionRejected", { reason: "PileNotActive" });
+      expect(await readOutcome()).toBe("never settled");
+      expect(rejectedEvents).toEqual(["PileNotActive"]);
+      expect(ws.send).not.toHaveBeenCalled();
+      metadata.resolve([ART_B, ART_A]);
+      await drainArt();
+      expect(JSON.parse(ws.send.mock.calls[0][0]).data.action.data.printings).toEqual(MAIN_ART);
+      receive(ws, "DraftStateUpdate", { view: createMockDraftView({ pick_number: 20 }) });
+      await expect(pending).resolves.toMatchObject({ pick_number: 20 });
+    });
+
+    it("still rejects a submission the server refuses AFTER it was sent", async () => {
+      const pending = adapter.submitDeck(["Plains", "Island"], []);
+      await drainArt();
+      expect(ws.send.mock.calls).toHaveLength(1);
+      receive(ws, "DraftActionRejected", { reason: "DeckInvalid" });
+      await expect(pending).rejects.toThrow("DeckInvalid");
+    });
+
     it.each(["draft_code", "player_token", "seat_index", "socket", "closed"])("revalidates %s after preparation rather than sending stale names", async (changed) => {
       const metadata = heldArt<PrintingEntry[]>();
       artIO.catalog.mockReturnValue(metadata.promise);
@@ -1246,7 +1278,7 @@ describe("ServerDraftAdapter", () => {
       await next;
     });
 
-    it.each(["close", "error", "dispose", "rejection"])("cancels held work on %s without sending or clearing a successor's slot", async (cancel) => {
+    it.each(["close", "error", "dispose"])("cancels held work on %s without sending or clearing a successor's slot", async (cancel) => {
       const metadata = heldArt<PrintingEntry[]>();
       artIO.catalog.mockReturnValueOnce(metadata.promise);
       const pending = adapter.submitDeck(["Plains"], []);
@@ -1254,8 +1286,7 @@ describe("ServerDraftAdapter", () => {
       await drainArt();
       if (cancel === "close") ws.dispatchSynthetic("close");
       else if (cancel === "error") ws.onerror?.();
-      else if (cancel === "dispose") adapter.dispose();
-      else receive(ws, "DraftActionRejected", { reason: "cancelled" });
+      else adapter.dispose();
       await rejected;
       let live = ws;
       let successor: Promise<DraftPlayerView>;
