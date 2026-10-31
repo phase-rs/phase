@@ -2229,9 +2229,11 @@ const GAIN_NINETY_EIGHT: &str = "{0}: You gain 98 life.";
 /// the cycles and stashes nothing, so a later loss stands. It performs them too
 /// where P0's own field cannot hold the lump, and where a cycle stores P0's gain
 /// in P1's field (CR 810.9 + CR 810.9a), so P0's counter carries the gain, and
-/// the offer names P0's life axis, never P1's. Where it fits — reaching the cap
-/// exactly and below it — the gain is stashed and collapses at the boundary,
-/// and a later loss or gain moves the total as it would after performing.
+/// the offer names P0's life axis, never P1's, also where the cap holds back
+/// the cycle the offer reads. Where it fits — reaching the cap exactly and below
+/// it, and a lump that fits after an offer cycle the cap held back — the gain
+/// is stashed and collapses at the boundary, and a later loss or gain moves the
+/// total as it would after performing. No ∞ life mark outlives the boundary.
 /// Residual: a lump that fits stays batched and is exact only while nothing
 /// before the step ends is held back by the cap; a later gain that no settling
 /// take makes, carrying the total to the cap and followed by a loss, still ends
@@ -2392,6 +2394,32 @@ fn a_life_shortcut_held_at_the_cap_matches_performing_the_cycles() {
             gained: 12,
         },
         Row {
+            name: "Two-Headed Giant, P0's field at the cap, the cap holds back the cycle the \
+                   offer reads",
+            two_headed_giant: true,
+            fields: team(i32::MAX, -400),
+            gain: 150,
+            cycles: 3,
+            unbounded: vec![mana, life],
+            responders: vec![P1, P2, PlayerId(3)],
+            between: vec![],
+            stashed: None,
+            gained: 600,
+        },
+        Row {
+            name: "Two-Headed Giant, a lump that fits, the cap holds back the cycle the offer \
+                   reads",
+            two_headed_giant: true,
+            fields: team(i32::MAX - 45, -10),
+            gain: 20,
+            cycles: 1,
+            unbounded: vec![mana, life],
+            responders: vec![P1, P2, PlayerId(3)],
+            between: vec![],
+            stashed: Some(20),
+            gained: 40,
+        },
+        Row {
             name: "Two-Headed Giant, the lump would spill at the boundary, then P0 loses 4",
             two_headed_giant: true,
             fields: team(i32::MAX - 6, -20),
@@ -2513,6 +2541,15 @@ fn a_life_shortcut_held_at_the_cap_matches_performing_the_cycles() {
             Some(_) => events.extend(collapse(&mut runner, row.cycles)),
             None => pass_to_a_boundary_without_a_collapse(&mut runner),
         }
+        // A marked take's ∞ life axes are the gains it stashed, and the boundary that applies
+        // them ends their marks, so no ∞ life mark outlives it.
+        let marks = runner.state().unbounded_resources.get(&P0);
+        assert!(
+            marks.is_none_or(|axes| !axes
+                .iter()
+                .any(|axis| matches!(axis, ResourceAxis::Life(_)))),
+            "{name}: no ∞ life mark outlives the boundary, got {marks:?}"
+        );
         let shortcut = LifeOutcome::read(&runner, &events);
 
         // The reference: decline, perform the same cycles, activate `between`,
