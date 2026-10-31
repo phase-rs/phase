@@ -75,9 +75,9 @@ pub use payment_continuation::{
     classify_payment_continuation, witness_payment_continuation, witness_payment_continuations,
     witness_targeted_cast_offer, AcceptedPaymentSuccessor, PaymentContinuationBatch,
     PaymentContinuationBatchStatus, PaymentContinuationIndeterminate, PaymentContinuationRoot,
-    PaymentContinuationState, PaymentContinuationUnsupported, TargetedCastVerdict,
-    TargetedCastWitness, PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS, PAYMENT_CONTINUATION_MAX_ROOTS,
-    TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS,
+    PaymentContinuationState, PaymentContinuationStep, PaymentContinuationUnsupported,
+    TargetedCastVerdict, TargetedCastWitness, PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
+    PAYMENT_CONTINUATION_MAX_ROOTS, TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS,
 };
 #[cfg(feature = "test-support")]
 pub use payment_continuation::{
@@ -100,6 +100,14 @@ pub use targeted_exchange::{
 };
 #[cfg(feature = "test-support")]
 pub use targeted_exchange::{targeted_exchange_verdict_with_budget, TargetedExchangeBudget};
+
+/// CR 605.1a + CR 605.3a: whether `action` activates a mana ability — a land's
+/// mana ability or an activated ability that is a mana ability, wherever its
+/// source is.
+pub fn activates_mana_ability(state: &GameState, action: &GameAction) -> bool {
+    matches!(action, GameAction::TapLandForMana { .. })
+        || casting::activates_mana_ability(state, action)
+}
 
 /// Filter `candidate_actions` down to the actions that are actually legal now.
 ///
