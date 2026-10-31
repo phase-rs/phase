@@ -660,10 +660,10 @@ pub struct TriggerSourceContext {
     /// The observed object's printing, latched beside `lki` and `printed_ref` at the same observation
     /// (`GameObject::snapshot_for_zone_change`). Display-only: CR 203.1 + CR 206.1, a printing has no
     /// effect on game play, so no rules or AI path reads it. A departed source's stack row discloses it
-    /// only while it discloses `lki.name` (`derived_views::stack_row_source`). It is exposed exactly as
-    /// the former `lki.printing` was: captured from the same `self.printing` at the same observation,
-    /// never cleared in place, and dropped with the whole context
-    /// (`visibility::redact_zone_change_record`). Left out of the `Debug` impl below. Absent from the
+    /// only while it discloses `lki.name` (`derived_views::stack_row_source`). It is never cleared in
+    /// place: it is dropped with the whole context when the source is hidden from a viewer
+    /// (`visibility::redact_zone_change_record`). Deliberately not written by the `Debug` impl below
+    /// (that impl does not destructure, so a new field is not a compile error there). Absent from the
     /// wire when empty.
     #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
     pub printing: DisplayOnly<Option<SharedPrinting>>,
