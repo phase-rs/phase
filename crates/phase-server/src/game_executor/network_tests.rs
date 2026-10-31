@@ -3965,5 +3965,43 @@ mod oversized_publication {
                 outcome.expect("the concession's state never reached the spectator");
             });
         }
+
+        /// N6. A `ClientMessage::Concede` that hands priority to an AI seat
+        /// runs that seat's decision.
+        #[test]
+        fn a_concede_message_that_passes_priority_to_an_ai_seat_runs_the_ai() {
+            run_async_test(|| async {
+                let table = NativeTable::seated(
+                    GameExecutor::new(NonZeroUsize::MIN),
+                    3,
+                    FormatConfig::free_for_all(),
+                )
+                .await;
+                let mut scenario = GameScenario::new_n_player(3, 37);
+                scenario.at_phase(Phase::PreCombatMain);
+                install(&table, scenario.build().state().clone(), &[P1]).await;
+                let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+                    let mut p0 = table.connect(P0).await;
+                    let mut p2 = table.connect(P2).await;
+                    send_test_message(&mut p0, &ClientMessage::Concede, false).await;
+                    loop {
+                        let update = until_type(&mut p2, "StateUpdate").await;
+                        if update["data"]["state"]["waiting_for"]
+                            == serde_json::json!({ "type": "Priority", "data": { "player": 2 } })
+                        {
+                            assert_eq!(
+                                update["data"]["eliminated_players"],
+                                serde_json::json!([0]),
+                                "{update}"
+                            );
+                            break;
+                        }
+                    }
+                })
+                .await;
+                table.server.abort();
+                outcome.expect("the AI seat never acted after the concession");
+            });
+        }
     }
 }

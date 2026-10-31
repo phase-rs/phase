@@ -1,3 +1,6 @@
+// The auto-trait proof for im-backed game state held across the nested
+// Full-socket handler futures exceeds the default limit of 128.
+#![recursion_limit = "256"]
 mod admin;
 mod data_bootstrap;
 mod draft_pools;
@@ -8658,6 +8661,7 @@ async fn handle_full_concession(
         let _ = tx.send(message);
         return;
     };
+    let lock_start = Instant::now();
     let session = lock_session(state, &game_code).await.ok();
     let current = match session.as_deref() {
         Some(session) => {
@@ -8728,6 +8732,7 @@ async fn handle_full_concession(
                     .expect("authenticated concession retains its runtime")
                     .key
                     .clone();
+                let ai = (!ended).then(|| session.begin_ai_run());
                 Ok::<_, SessionActionError>((
                     revision,
                     result,
@@ -8737,6 +8742,7 @@ async fn handle_full_concession(
                     session.rewind_options(),
                     full_key,
                     session.player_count,
+                    ai,
                 ))
             })
             .await;
@@ -8746,20 +8752,64 @@ async fn handle_full_concession(
             FULL_SOCKET_AUTHORITY_REJECTION.to_string(),
         ))
     };
-    let (lease, (revision, result, takeback, winner, terminal, rewinds, full_key, player_count)) =
-        match result {
-            Ok(result) => result,
-            Err(error) => {
-                let message = match (scope, error) {
-                    (ConcessionScope::Game, SessionActionError::Operational(message)) => {
-                        ServerMessage::ActionFailed { message }
-                    }
-                    (_, error) => session_action_error_message(error),
-                };
-                let _ = tx.send(message);
-                return;
+    let (
+        lease,
+        (revision, result, takeback, winner, terminal, rewinds, full_key, player_count, ai),
+    ) = match result {
+        Ok(result) => result,
+        Err(error) => {
+            let message = match (scope, error) {
+                (ConcessionScope::Game, SessionActionError::Operational(message)) => {
+                    ServerMessage::ActionFailed { message }
+                }
+                (_, error) => session_action_error_message(error),
+            };
+            let _ = tx.send(message);
+            return;
+        }
+    };
+    let ai_fault = match ai {
+        Some(ControlFlow::Continue(cursor)) => {
+            let publisher = game_executor::StateUpdatePublisher::capture(
+                connections,
+                Some(game_spectators),
+                full_key,
+                player_count,
+                Vec::new(),
+                Vec::new(),
+            )
+            .await;
+            let (takeback_before, takeback_after) = concession_takeback_notices(takeback, player);
+            if let Some(notice) = takeback_before {
+                publisher.notify_players(notice);
             }
-        };
+            let after_human = takeback_after
+                .into_iter()
+                .chain([ServerMessage::Conceded { player }])
+                .collect();
+            finish_full_ai_continuation(
+                lease,
+                ControlFlow::Continue(cursor),
+                result,
+                revision,
+                publisher,
+                after_human,
+                &tx.for_completion(None),
+                &context.game_executor,
+                state,
+                draft_state,
+                connections,
+                game_db,
+                game_code,
+                "concede",
+                lock_start,
+            )
+            .await;
+            return;
+        }
+        Some(ControlFlow::Break(outcome)) => outcome.fault,
+        None => None,
+    };
     // Terminal persistence is leaf I/O. Retain this game's publication lease
     // through retirement and fan-out, but release it before draft reporting.
     #[cfg(test)]
@@ -8819,6 +8869,7 @@ async fn handle_full_concession(
         })
         .await;
     publisher.finish(&context.game_executor).await;
+    broadcast_ai_failure(connections, &game_code, ai_fault).await;
     drop(lease);
     if retire {
         report_draft_game_over(draft_state, connections, &game_code, winner).await;
@@ -9002,7 +9053,7 @@ async fn handle_full_game_submission(
         revision,
         unpublished,
         takeback_after,
-        mut publisher,
+        publisher,
         ai,
     } = applied;
     let Some(human_result) = unpublished else {
@@ -9015,6 +9066,47 @@ async fn handle_full_game_submission(
         drop(session);
         return;
     };
+    finish_full_ai_continuation(
+        session,
+        ai,
+        human_result,
+        revision,
+        publisher,
+        takeback_after.into_iter().collect(),
+        &reply,
+        executor,
+        state,
+        draft_state,
+        connections,
+        game_db,
+        game_code,
+        kind,
+        lock_start,
+    )
+    .await;
+}
+
+/// Runs the AI continuation of a human transition whose publication waited on
+/// it, then publishes the human result, `after_human`, the AI transitions and
+/// any terminal delivery under the same game lease.
+#[allow(clippy::too_many_arguments)]
+async fn finish_full_ai_continuation(
+    session: OwnedMutexGuard<GameSession>,
+    ai: ControlFlow<AiRunOutcome, server_core::session::AiRunCursor>,
+    human_result: ActionResult,
+    revision: u64,
+    mut publisher: game_executor::StateUpdatePublisher,
+    after_human: Vec<ServerMessage>,
+    reply: &crate::socket_mailbox::Completion<'_>,
+    executor: &game_executor::GameExecutor,
+    state: &SharedState,
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    game_db: &SharedGameDb,
+    game_code: String,
+    kind: &'static str,
+    lock_start: Instant,
+) {
     let (session, ai) = match ai {
         std::ops::ControlFlow::Break(outcome) => (session, outcome),
         std::ops::ControlFlow::Continue(cursor) => executor.continue_ai(session, cursor).await,
@@ -9098,7 +9190,7 @@ async fn handle_full_game_submission(
                     );
                 }
             }
-            if let Some(notice) = takeback_after {
+            for notice in after_human {
                 publisher.notify_players(notice);
             }
             publisher
