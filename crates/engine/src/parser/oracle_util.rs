@@ -2982,14 +2982,14 @@ pub fn normalize_card_name_refs_reporting(
                 // ordinary rules text ("You gain 2 life." on Life of Toshiro
                 // Umezawa, "glyph counters" on Glyph of Delusion).
                 //
-                // CR 205.3j + CR 201.3a: an occurrence of that word used as a
-                // type ("a Gideon planeswalker", "destroy target Knight",
-                // "Sacrifice a Wall") must stay literal while subject occurrences
-                // ("Gideon becomes …") still normalize to `~`. The per-occurrence
-                // preserving replacer — the same replacer the single-word subtype
-                // name branch above uses — rejects those type positions. A
-                // multi-word short name stays case-insensitive, like a
-                // multi-word full name.
+                // CR 201.5c + CR 205.3j / CR 205.3m: an occurrence of that word
+                // used as a type ("a Gideon planeswalker", "destroy target
+                // Knight", "Sacrifice a Wall") must stay literal while subject
+                // occurrences ("Gideon becomes …") still normalize to `~`. The
+                // per-occurrence preserving replacer — the same replacer the
+                // single-word subtype name branch above uses — rejects those
+                // type positions. A multi-word short name stays
+                // case-insensitive, like a multi-word full name.
                 result = if is_single_word_short {
                     replace_all_words_case_sensitive_preserving_subtype_status_refs(
                         &result, short_name, "~",
