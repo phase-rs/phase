@@ -6,6 +6,10 @@ import { MemoryRouter, Route, Routes } from "react-router";
 import type * as Three from "three";
 import type * as Motion from "framer-motion";
 import { setTimeout as delay } from "node:timers/promises";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 import type { CardPrinting, GameObject, GameState } from "../../../adapter/types.ts";
 import type * as Platform from "../../../services/platform.ts";
@@ -1053,4 +1057,165 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
       if (leg === "death") expect(screen.queryByTestId("consumed-death-image")).toBeNull();
     },
   );
+
+  it("V15 classifies every import-bound image resolver and intermediate carrier", () => {
+    const src = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+    const objectHooks: Record<string, number> = {
+      "components/card/ArtCropCard.tsx": 1, "components/card/CardImage.tsx": 1,
+      "components/card/CardPreview.tsx": 2, "components/hand/MobileHandDrawer.tsx": 1,
+      "components/hand/OpponentHand.tsx": 1, "components/modal/CardTextboxPreview.tsx": 1,
+      "components/stack/StackEntry.tsx": 1, "components/zone/CommandDock.tsx": 1,
+      "components/zone/CommandZone.tsx": 1, "components/zone/CommanderCardZone.tsx": 1,
+      "components/zone/GraveyardPile.tsx": 1, "components/zone/LibraryPile.tsx": 1,
+      "components/animation/ResolvedAnimationImage.tsx": 1, "components/animation/RevealOverlay.tsx": 1,
+    };
+    const excludedHooks: Record<string, number> = {
+      "components/card/CardReportDialog.tsx": 1, "components/hand/CompanionFanCard.tsx": 1,
+      "components/controls/CardCoverageDashboard.tsx": 1, "components/deck-builder/CardGrid.tsx": 1,
+      "components/deck-builder/DeckStack.tsx": 1, "components/deck-builder/PrintingPickerModal.tsx": 1,
+      "components/draft/DraftCardFace.tsx": 1, "components/draft/LimitedDeckBuilder.tsx": 1,
+      "components/draft/SealedPackOpening.tsx": 1, "components/menu/MyDecks.tsx": 1,
+      "components/menu/home/HomeDashboard.tsx": 1, "pages/GameSetupPage.tsx": 1,
+      "hooks/usePlayerAvatarImage.ts": 1,
+    };
+    const expectedImages: Record<string, number> = {
+      "components/board/PermanentCard.tsx": 2, "components/board/AttachmentFan.tsx": 1,
+      "components/board/ArchenemyPanel.tsx": 1, "components/board/PlanechasePanel.tsx": 1,
+      "components/hand/PlayerHand.tsx": 2, "components/hand/MobileHeldHandCard.tsx": 1,
+      "components/hud/BattlefieldPeekPopover.tsx": 1, "components/hud/IncomingAttackersPopover.tsx": 1,
+      "components/hud/DialogAttachmentCard.tsx": 1, "components/zone/ZoneViewer.tsx": 1,
+      "components/modal/CardChoiceModal.tsx": 22, "components/modal/cardChoice/libraryModals.tsx": 6,
+      "components/modal/cardChoice/SelectableCardGrid.tsx": 1, "components/modal/RetargetChoiceModal.tsx": 1,
+      "components/modal/SeparatePilesModal.tsx": 2, "components/chrome/DebugLibraryViewer.tsx": 1,
+      "pages/GamePage.tsx": 2,
+    };
+    const expectedHelpers: Record<string, number> = {
+      "components/animation/ResolvedAnimationImage.tsx": 1, "components/stack/StackEntry.tsx": 1,
+      "components/zone/CommandDock.tsx": 1, "components/zone/CommanderCardZone.tsx": 1,
+      "components/zone/GraveyardPile.tsx": 1, "components/zone/LibraryPile.tsx": 1,
+      "components/zone/ZoneViewer.tsx": 1, "components/modal/CardChoiceModal.tsx": 20,
+      "components/modal/cardChoice/libraryModals.tsx": 6,
+      "components/modal/cardChoice/SelectableCardGrid.tsx": 1, "components/modal/RetargetChoiceModal.tsx": 1,
+    };
+    const hooks: Record<string, number> = {};
+    const images: Record<string, number> = {};
+    const helpers: Record<string, number> = {};
+    const exclusions: Record<string, number> = {};
+    const intermediates: Record<string, number> = {};
+    const failures: string[] = [];
+    function enclosing(node: ts.Node): string {
+      for (let current: ts.Node | undefined = node.parent; current; current = current.parent) {
+        if ((ts.isFunctionDeclaration(current) || ts.isFunctionExpression(current)) && current.name) return current.name.text;
+        if (ts.isVariableDeclaration(current) && ts.isIdentifier(current.name)) return current.name.text;
+      }
+      return "<module>";
+    }
+    function scan(directory: string) {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name !== "__tests__") scan(path);
+          continue;
+        }
+        if (!/\.tsx?$/.test(path) || /\.(test|stories)\./.test(path)) continue;
+        const file = relative(src, path).split("\\").join("/");
+        const text = readFileSync(path, "utf8");
+        // Every count and every failure branch below requires one of these identifiers
+        // somewhere in the file (imports keep the imported name, and the special-cased
+        // files contain them too), so a file without them cannot change the census.
+        // Skipping its parse keeps discovery whole-tree inside the test's time budget.
+        if (!/useCardImage|CardImage|objectImageProps|HandCard|ZoneFanCard|DrawerCard|CardTextboxPreview/.test(text)) continue;
+        const source = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
+        const bindings: Record<string, Set<string>> = { useCardImage: new Set(), CardImage: new Set(), objectImageProps: new Set() };
+        const namespaces: Record<string, string> = {};
+        const expectedModule: Record<string, string> = {
+          useCardImage: "hooks/useCardImage", CardImage: "components/card/CardImage", objectImageProps: "services/cardImageLookup",
+        };
+        for (const statement of source.statements) {
+          if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
+          const module = relative(src, resolve(dirname(path), statement.moduleSpecifier.text)).split("\\").join("/").replace(/\.tsx?$/, "");
+          const named = statement.importClause?.namedBindings;
+          if (named && ts.isNamedImports(named)) {
+            for (const binding of named.elements) {
+              const name = binding.propertyName?.text ?? binding.name.text;
+              if (expectedModule[name] === module) bindings[name].add(binding.name.text);
+            }
+          } else if (named && ts.isNamespaceImport(named)) namespaces[named.name.text] = module;
+        }
+        function matches(expression: ts.Node, kind: string): boolean {
+          return ts.isIdentifier(expression) ? bindings[kind].has(expression.text)
+            : ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression)
+              && namespaces[expression.expression.text] === expectedModule[kind] && expression.name.text === kind;
+        }
+        const ownerField = (properties: ts.NodeArray<ts.ObjectLiteralElementLike>) => properties.find((property) =>
+          property.name && ts.isIdentifier(property.name) && property.name.text === "ownerPrinting");
+        function visit(node: ts.Node) {
+          const location = `${file}:${enclosing(node)}`;
+          if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+            for (const kind of Object.keys(bindings)) if (matches(node.initializer, kind)) bindings[kind].add(node.name.text);
+          }
+          if (ts.isCallExpression(node) && matches(node.expression, "useCardImage")) {
+            hooks[file] = (hooks[file] ?? 0) + 1;
+            const options = node.arguments[1];
+            const properties = options && ts.isObjectLiteralExpression(options) ? options.properties : undefined;
+            if (objectHooks[file]) {
+              const owner = properties && ownerField(properties);
+              if (!owner || ts.isPropertyAssignment(owner) && ts.isIdentifier(owner.initializer) && owner.initializer.text === "undefined")
+                failures.push(`unforwarded useCardImage at ${location}`);
+              if (properties?.some((property) => property.name?.getText(source) === "showOwnerPrintings"))
+                failures.push(`explicit toggle override at ${location}; the public facade owns selection`);
+            } else if (!excludedHooks[file]) failures.push(`unclassified useCardImage at ${location}`);
+          }
+          if (ts.isCallExpression(node) && matches(node.expression, "objectImageProps")) helpers[file] = (helpers[file] ?? 0) + 1;
+          if (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) {
+            const attributes = node.attributes.properties;
+            const attr = (name: string) => attributes.find((attribute) => ts.isJsxAttribute(attribute) && attribute.name.getText(source) === name);
+            const tag = node.tagName.getText(source);
+            if (["HandCard", "ZoneFanCard", "DrawerCard", "CardTextboxPreview"].includes(tag)) {
+              if (!attr("ownerPrinting")) failures.push(`unforwarded intermediate ${tag} at ${location}`);
+              intermediates[tag] = (intermediates[tag] ?? 0) + 1;
+            }
+            if (file === "pages/GamePage.tsx" && tag === "ChoiceModal" && enclosing(node) === "AbilityChoiceModal" && !attr("previewObjectId"))
+              failures.push(`missing ability subject at ${location}`);
+            if (matches(node.tagName, "CardImage")) {
+              const excluded = file === "components/modal/BoosterPackModal.tsx"
+                || file === "pages/GamePage.tsx" && enclosing(node) === "CompanionRevealPrompt";
+              if (excluded) exclusions[file] = (exclusions[file] ?? 0) + 1;
+              else {
+                images[file] = (images[file] ?? 0) + 1;
+                const approvedSpread = attributes.some((attribute) => ts.isJsxSpreadAttribute(attribute)
+                  && ts.isCallExpression(attribute.expression)
+                  && (matches(attribute.expression.expression, "objectImageProps")
+                    || file === "components/modal/SeparatePilesModal.tsx" && attribute.expression.expression.getText(source) === "objectImageProps"));
+                if (!attr("ownerPrinting") && !approvedSpread) failures.push(`unforwarded CardImage at ${location}`);
+              }
+            }
+          }
+          if (ts.isReturnStatement(node) && node.expression && ts.isObjectLiteralExpression(node.expression)
+            && (file === "components/animation/ResolvedAnimationImage.tsx" && enclosing(node) === "visibleAnimationImageSnapshot"
+              || file === "components/modal/SeparatePilesModal.tsx" && enclosing(node) === "objectImageProps")) {
+            if (!ownerField(node.expression.properties)) failures.push(`dropped capture/projection printing at ${location}`);
+          }
+          if (file === "components/animation/RevealOverlay.tsx" && ts.isCallExpression(node)
+            && ts.isPropertyAccessExpression(node.expression) && node.expression.expression.getText(source) === "cards"
+            && node.expression.name.text === "push" && node.arguments[0] && ts.isObjectLiteralExpression(node.arguments[0])
+            && !ownerField(node.arguments[0].properties)) failures.push(`dropped reveal row printing at ${location}`);
+          ts.forEachChild(node, visit);
+        }
+        visit(source);
+      }
+    }
+    scan(src);
+    expect(failures, failures.join("\n")).toEqual([]);
+    expect(hooks).toEqual({ ...objectHooks, ...excludedHooks });
+    expect(Object.values(hooks).reduce((sum, count) => sum + count, 0)).toBe(28);
+    expect(Object.values(objectHooks).reduce((sum, count) => sum + count, 0)).toBe(15);
+    expect(images).toEqual(expectedImages);
+    expect(Object.values(images).reduce((sum, count) => sum + count, 0)).toBe(47);
+    expect(helpers).toEqual(expectedHelpers);
+    expect(Object.values(helpers).reduce((sum, count) => sum + count, 0)).toBe(35);
+    expect(Object.keys(helpers)).toHaveLength(11);
+    expect(exclusions).toEqual({ "components/modal/BoosterPackModal.tsx": 1, "pages/GamePage.tsx": 1 });
+    expect(intermediates).toEqual({ HandCard: 1, ZoneFanCard: 2, DrawerCard: 1, CardTextboxPreview: 3 });
+  });
 });
