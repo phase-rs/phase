@@ -2072,6 +2072,86 @@ mod codec_tests {
     }
 
     #[tokio::test]
+    async fn codec_bound_skip_keeps_codec_baseline_and_continues() {
+        let mut raw = raw_state(12);
+        let mut encoder = ConnectionEncoder::codec();
+        let mut receiver = None;
+        deliver(
+            &mut encoder,
+            &mut receiver,
+            envelope(projected_update(&raw, PlayerId(0), 100, Vec::new()), None),
+            Encoding::Plain,
+        )
+        .await;
+        let before_state = delivered(&encoder).state.as_bytes().to_vec();
+        let before_revision = delivered(&encoder).state.revision();
+        let before_key = delivered(&encoder).full_key.clone();
+        let before_viewer = delivered(&encoder).viewer;
+        assert_eq!(receiver.as_ref().unwrap().as_bytes(), before_state);
+
+        raw.players[0].life -= 1;
+        let (sender, _mailbox) = crate::socket_mailbox::channel();
+        let mut next = envelope(projected_update(&raw, PlayerId(0), 101, Vec::new()), None);
+        next.state_encoding =
+            crate::socket_mailbox::StateEncoding::Resync(sender.try_admit_resync().unwrap());
+        // Smaller than every frame, including the StateWithheld replacement, so
+        // preparation terminates on the terminal SKIP path the writer turns
+        // into a logged `continue`.
+        let owner = std::mem::replace(&mut encoder, ConnectionEncoder::Legacy);
+        let outcome = encode_application(
+            &GameExecutor::new(NonZeroUsize::MIN),
+            owner,
+            next,
+            Encoding::Plain,
+            1,
+        )
+        .await
+        .unwrap();
+        encoder = outcome.encoder;
+        match outcome.prepared {
+            Err(EncodingFailure::OverBound(reason)) => assert!(
+                !reason.is_empty(),
+                "terminal skip must carry its over-bound reason"
+            ),
+            Err(other) => {
+                panic!("over-bound state must terminate on the skip path: {other:?}")
+            }
+            Ok(_) => panic!("over-bound state must terminate on the skip path"),
+        }
+        // The writer restores `outcome.encoder` and continues: the connection
+        // stays on the codec lane with the last delivered baseline untouched,
+        // because the skipped envelope never reached `commit`.
+        assert!(
+            matches!(encoder, ConnectionEncoder::Codec(_)),
+            "skip must keep the connection on the codec lane"
+        );
+        assert_eq!(delivered(&encoder).state.as_bytes(), before_state);
+        assert_eq!(delivered(&encoder).state.revision(), before_revision);
+        assert_eq!(delivered(&encoder).full_key, before_key);
+        assert_eq!(delivered(&encoder).viewer, before_viewer);
+        assert_eq!(receiver.as_ref().unwrap().as_bytes(), before_state);
+        drop(
+            sender
+                .try_admit_resync()
+                .expect("skipped over-bound frame releases resync admission"),
+        );
+
+        raw.players[1].life -= 1;
+        assert_eq!(
+            deliver(
+                &mut encoder,
+                &mut receiver,
+                envelope(projected_update(&raw, PlayerId(0), 102, Vec::new()), None),
+                Encoding::Plain
+            )
+            .await,
+            FrameKind::Delta,
+            "next fitting state must delta against the pre-skip baseline"
+        );
+        assert_eq!(delivered(&encoder).state.revision(), Some(102));
+    }
+
+    #[tokio::test]
     async fn codec_bound_resync_retry_stays_full_and_releases_permit() {
         let raw = raw_state(12);
         let mut encoder = ConnectionEncoder::codec();
