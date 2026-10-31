@@ -5087,8 +5087,8 @@ impl<'a> DocEmitter<'a> {
     /// Bind retained diagnostics to the dispatch/header line of this parse unit.
     /// Level reparses use their returned physical line; joined bodies and modal
     /// blocks (including as-enters anchors) use their initiating dispatch line;
-    /// known divergence: a modal bullet's parse-time warnings carry the header line
-    /// while its items and swallow findings carry the bullet line.
+    /// known divergence: a modal bullet's or as-enters anchor mode's parse-time warnings
+    /// carry the header line while its items and swallow findings carry the mode's own line.
     fn begin_diagnostic_unit(&mut self, line: usize, diagnostic_count: usize) {
         self.close_diagnostic_run(diagnostic_count);
         self.active_diagnostic_run = DiagnosticRun {

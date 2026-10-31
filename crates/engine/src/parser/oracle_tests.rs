@@ -284,8 +284,125 @@ fn diagnostic_provenance_level_reparse_precedes_main_loop() {
 }
 
 #[test]
+fn diagnostic_provenance_joined_spell_body_structural_composite() {
+    // Structural composite: no printed card in AtomicCards has a nonzero-line joined spell
+    // body with a parse-time warning from its continuation (checked the full export).
+    // Nearest printed card: Suffocation; its warning is in the first resolution paragraph.
+    // Reorder its verified paragraphs so the warning-bearing damage instruction continues
+    // the delayed draw, after the cast restriction at line 0.
+    let lines = [
+        "Cast this spell only if you were dealt damage this turn by a red instant or sorcery spell.",
+        "Draw a card at the beginning of the next turn's upkeep.",
+        "Suffocation deals 4 damage to the controller of the last red instant or sorcery spell that dealt damage to you this turn.",
+    ];
+    let text = lines.join("\n");
+    let parsed = parse_oracle_text(&text, "Suffocation", &[], &["Instant".into()], &[]);
+    let warnings = diagnostic_parse_time(&parsed);
+    let fallback = warnings
+        .iter()
+        .find(|warning| {
+            matches!(warning, OracleDiagnostic::TargetFallback { text, .. }
+                if text == "the controller of the last red instant or sorcery spell that dealt damage to you this turn")
+        })
+        .expect("continuation's damage-target fallback retained");
+    assert_eq!(
+        fallback.line_index(),
+        1,
+        "joined-body warnings use the first resolution line, not the continuation"
+    );
+    assert_eq!(
+        warnings,
+        vec![diagnostic_fallback(
+            "parse_target could not classify",
+            "the controller of the last red instant or sorcery spell that dealt damage to you this turn",
+            1,
+        )]
+    );
+    let body = normalize_card_name_refs(&lines[1..].join("\n"), "Suffocation");
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .any(|ability| ability.description.as_deref() == Some(body.as_str())),
+        "both resolution paragraphs must reach the joined spell-body route"
+    );
+    let prefix = parse_oracle_text(
+        &lines[..2].join("\n"),
+        "Suffocation",
+        &[],
+        &["Instant".into()],
+        &[],
+    );
+    assert!(
+        diagnostic_parse_time(&prefix).is_empty(),
+        "the dispatch paragraph alone does not produce the continuation's warning"
+    );
+}
+
+#[test]
+fn diagnostic_provenance_as_enters_anchor_structural_composite() {
+    // Structural composite: no printed card in AtomicCards has an as-enters anchor mode
+    // with a parse-time warning (checked the full export). Nearest printed card: Outpost
+    // Siege, whose Khans-or-Dragons header and Dragons mode are retained below.
+    // Add a preceding keyword line and replace the Khans body with Dr. Julius Jumblemorph's
+    // verified warning-bearing trigger so the header is line 1 and the warning's mode is line 2.
+    let text = "Indestructible\nAs this enchantment enters, choose Khans or Dragons.\n• Khans — Whenever a host you control enters, you may search your library and/or graveyard for a card with augment and combine it with that host. If you search your library this way, shuffle.\n• Dragons — Whenever a creature you control leaves the battlefield, this enchantment deals 1 damage to any target.";
+    let parsed = parse_oracle_text(
+        text,
+        "Outpost Siege",
+        &["Indestructible".into()],
+        &["Enchantment".into()],
+        &[],
+    );
+    let warnings = diagnostic_parse_time(&parsed);
+    let fallback = warnings
+        .iter()
+        .find(|warning| {
+            matches!(warning, OracleDiagnostic::TargetFallback { context, text, .. }
+                if context == "search-filter-suffix unmatched" && text == "combine it with that host")
+        })
+        .expect("anchor-mode trigger's search-filter fallback retained");
+    assert_eq!(
+        fallback.line_index(),
+        1,
+        "anchor-mode warnings use the dispatch header, not the mode's own line"
+    );
+    assert_eq!(
+        warnings,
+        vec![diagnostic_fallback(
+            "search-filter-suffix unmatched",
+            "combine it with that host",
+            1,
+        )]
+    );
+    assert!(
+        parsed.replacements.iter().any(|replacement| {
+            replacement.execute.as_ref().is_some_and(|execute| {
+                matches!(execute.effect.as_ref(), Effect::Choose {
+                    choice_type: ChoiceType::Labeled { options },
+                    persist: true,
+                    ..
+                } if options == &["Khans", "Dragons"])
+            })
+        }),
+        "as-enters labeled-choice replacement retained"
+    );
+    assert_eq!(parsed.triggers.len(), 2, "both anchor triggers retained");
+    for (trigger, expected_label) in parsed.triggers.iter().zip(["Khans", "Dragons"]) {
+        assert!(
+            matches!(trigger.condition.as_ref(),
+                Some(TriggerCondition::ChosenLabelIs { label }) if label == expected_label),
+            "anchor trigger must retain its chosen-label condition"
+        );
+    }
+}
+
+#[test]
 fn diagnostic_provenance_cross_line_dedup_building_block() {
-    // Structural building-block test: no printed cross-line dedup witness is known.
+    // Structural building-block test: no printed card in AtomicCards emits an identical
+    // TargetFallback/IgnoredRemainder on two lines (searched the full export for repeated
+    // parse-time warnings across lines). Nearest printed card: Jermane, Pride of the Circus
+    // (both lines print "target creature with four or more legs"; only line 1 warns).
     // Both deduplicating variants must remain unattributed until emitter sealing.
     let lines = ["", "", "earlier unit", "", "later unit"];
     for first in [
