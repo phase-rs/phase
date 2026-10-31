@@ -3987,6 +3987,219 @@ fn etrata_granted_turn_face_up_ability_parses() {
     );
 }
 
+/// CR 608.2c: "If you can't" names the outcome of the instruction before it
+/// (Fading, CR 702.32a, is the printed analog: "remove a fade counter … If you
+/// can't, sacrifice the permanent"). The generic lowering of that rider,
+/// `Not { ZoneChangedThisWay { Any } }`, reads the zone-change ledger, which an
+/// antecedent whose success is never a zone change (removing or putting a
+/// counter, tapping, life, damage, …) never writes. After such antecedents the
+/// guard is constant, so the rider must be an explicit strict-failure gap
+/// (`cant_rider_without_zone_change_antecedent`) instead of a wrong guard.
+///
+/// Rows (a)–(c) are the class (Temp of the Damned, Cocoon, and a building-block
+/// line whose antecedent is a compound clause). Rows (d)–(f) are boundary
+/// guards that pass at base: a zone-changing antecedent (Eldrazi Monument), a
+/// `PayCost` antecedent outside the set that keeps the rewrite's performed
+/// signal (Greenbelt Rampager), and a compound antecedent with a zone-changing
+/// conjunct. They share this test so it fails at base.
+#[test]
+fn generic_cant_rider_after_zone_ledger_invisible_antecedents_is_a_strict_failure() {
+    use crate::types::ability::AbilityCondition;
+    use crate::types::phase::Phase;
+
+    const COCOON: &str = "Enchant creature you control\nWhen this Aura enters, tap enchanted creature and put three pupa counters on this Aura.\nEnchanted creature doesn't untap during your untap step if this Aura has a pupa counter on it.\nAt the beginning of your upkeep, remove a pupa counter from this Aura. If you can't, sacrifice it, put a +1/+1 counter on enchanted creature, and that creature gains flying.";
+    const ELDRAZI_MONUMENT: &str = "Creatures you control get +1/+1 and have flying and indestructible.\nAt the beginning of your upkeep, sacrifice a creature. If you can't, sacrifice this artifact.";
+    const GREENBELT_RAMPAGER: &str = "When this creature enters, pay {E}{E} (two energy counters). If you can't, return this creature to its owner's hand and you get {E}.";
+    const MARKER: &str = "cant_rider_without_zone_change_antecedent";
+
+    let generic_cant = AbilityCondition::Not {
+        condition: Box::new(AbilityCondition::ZoneChangedThisWay {
+            filter: TargetFilter::Any,
+            destination: None,
+        }),
+    };
+    /// The execute chain, head first, following `sub_ability`.
+    fn chain(head: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+        std::iter::successors(Some(head), |def| def.sub_ability.as_deref()).collect()
+    }
+    let is_marker = |def: &AbilityDefinition| matches!(&*def.effect, Effect::Unimplemented { name, .. } if name == MARKER);
+    fn upkeep_execute(parsed: &ParsedAbilities) -> &AbilityDefinition {
+        parsed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.phase == Some(Phase::Upkeep))
+            .and_then(|trigger| trigger.execute.as_deref())
+            .unwrap_or_else(|| panic!("an upkeep trigger with an execute chain: {parsed:#?}"))
+    }
+
+    // (a) Temp of the Damned: the rider after `RemoveCounter` is the marker.
+    let temp = parse_oracle_text(
+        TEMP_OF_THE_DAMNED,
+        "Temp of the Damned",
+        &[],
+        &["Creature".to_string()],
+        &["Zombie".to_string()],
+    );
+    assert_eq!(temp.triggers.len(), 1, "{:#?}", temp.triggers);
+    let head = upkeep_execute(&temp);
+    assert!(
+        matches!(
+            &*head.effect,
+            Effect::RemoveCounter {
+                counter_type: Some(counter),
+                target: TargetFilter::SelfRef,
+                ..
+            } if *counter == crate::types::counter::parse_counter_type("funk")
+        ),
+        "Temp's upkeep head must remove a funk counter from itself: {head:#?}"
+    );
+    let rider = head.sub_ability.as_deref().expect("Temp's rider");
+    assert!(
+        is_marker(rider),
+        "Temp's \"If you can't, sacrifice it\" rider must be the marker: {rider:#?}"
+    );
+
+    // (b) Cocoon: the one-chunk compound rider is replaced whole.
+    let cocoon = parse_oracle_text(
+        COCOON,
+        "Cocoon",
+        &["Enchant".to_string()],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    assert_eq!(cocoon.triggers.len(), 2, "{:#?}", cocoon.triggers);
+    let head = upkeep_execute(&cocoon);
+    assert!(
+        matches!(
+            &*head.effect,
+            Effect::RemoveCounter {
+                counter_type: Some(counter),
+                target: TargetFilter::SelfRef,
+                ..
+            } if *counter == crate::types::counter::parse_counter_type("pupa")
+        ),
+        "Cocoon's upkeep head must remove a pupa counter from itself: {head:#?}"
+    );
+    let rider = head.sub_ability.as_deref().expect("Cocoon's rider");
+    assert!(
+        is_marker(rider),
+        "Cocoon's rider must be the marker: {rider:#?}"
+    );
+    assert!(
+        chain(head)
+            .iter()
+            .all(|def| def.condition.as_ref() != Some(&generic_cant)),
+        "no node of Cocoon's upkeep chain may keep the generic guard: {head:#?}"
+    );
+
+    // (c) Building block, not a card: a compound antecedent whose every
+    // conjunct is in the set.
+    let compound_in_set = parse_oracle_text(
+        "At the beginning of your upkeep, tap target creature an opponent controls and put a stun counter on it. If you can't, sacrifice this creature.",
+        "Test Creature",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let head = upkeep_execute(&compound_in_set);
+    assert!(
+        matches!(
+            &*head.effect,
+            Effect::SetTapState {
+                state: crate::types::ability::TapStateChange::Tap,
+                ..
+            }
+        ),
+        "{head:#?}"
+    );
+    assert!(
+        chain(head).iter().any(|def| matches!(
+            &*def.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Stun,
+                ..
+            }
+        )),
+        "{head:#?}"
+    );
+    assert!(
+        chain(head).iter().any(|def| is_marker(def)),
+        "the rider after an all-in-set compound must be the marker: {head:#?}"
+    );
+
+    // (d) Eldrazi Monument: a `Sacrifice` antecedent keeps the generic guard.
+    let monument = parse_oracle_text(
+        ELDRAZI_MONUMENT,
+        "Eldrazi Monument",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let head = upkeep_execute(&monument);
+    assert!(
+        matches!(&*head.effect, Effect::Sacrifice { .. }),
+        "{head:#?}"
+    );
+    assert_eq!(
+        head.sub_ability
+            .as_deref()
+            .and_then(|rider| rider.condition.clone()),
+        Some(generic_cant.clone()),
+        "Eldrazi Monument's rider reaches the rider stage with the generic guard"
+    );
+    assert!(!chain(head).iter().any(|def| is_marker(def)), "{head:#?}");
+
+    // (e) Greenbelt Rampager: a `PayCost` antecedent (outside the set) keeps
+    // the rewrite's `Not { OptionalEffectPerformed }`.
+    let rampager = parse_oracle_text(
+        GREENBELT_RAMPAGER,
+        "Greenbelt Rampager",
+        &[],
+        &["Creature".to_string()],
+        &["Elephant".to_string()],
+    );
+    let head = rampager
+        .triggers
+        .iter()
+        .find_map(|trigger| trigger.execute.as_deref())
+        .expect("Greenbelt Rampager's ETB trigger");
+    assert!(matches!(&*head.effect, Effect::PayCost { .. }), "{head:#?}");
+    assert_eq!(
+        head.sub_ability
+            .as_deref()
+            .and_then(|rider| rider.condition.clone()),
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        }),
+        "the rewrite re-expresses Greenbelt Rampager's rider"
+    );
+    assert!(!chain(head).iter().any(|def| is_marker(def)), "{head:#?}");
+
+    // (f) Building block, not a card: a compound antecedent with a
+    // zone-changing conjunct keeps the generic guard.
+    let compound_mover = parse_oracle_text(
+        "At the beginning of your upkeep, tap target creature and put it on top of its owner's library. If you can't, you lose 4 life.",
+        "Test Creature",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let head = upkeep_execute(&compound_mover);
+    assert!(
+        chain(head)
+            .iter()
+            .any(|def| def.condition.as_ref() == Some(&generic_cant)),
+        "the rider was lowered generically and reached the predicate: {head:#?}"
+    );
+    assert!(
+        chain(head)
+            .iter()
+            .any(|def| matches!(&*def.effect, Effect::PutAtLibraryPosition { .. })),
+        "the compound antecedent carries a zone-changing conjunct: {head:#?}"
+    );
+    assert!(!chain(head).iter().any(|def| is_marker(def)), "{head:#?}");
+}
+
 /// CR 603.2 + CR 115.1 + CR 208.1 + CR 613.4b: Exuberant Wolfbear's attack
 /// trigger uses the transitive inverted-genitive base-P/T form, "change the
 /// base power and toughness of target Human you control to this creature's
@@ -34701,4 +34914,305 @@ fn self_exile_land_grant_class_parses_until_self_cast_and_self_permission() {
             link = def.sub_ability.as_deref();
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// CR 614.1c + CR 603.6d + CR 706.4: "As this creature enters, roll <dice>.
+// It enters with <counters> equal to the result / the total of those results."
+// Oracle text verbatim (Scryfall / card-data).
+// ---------------------------------------------------------------------------
+
+const NEVERWINTER_HYDRA: &str = "As this creature enters, roll X d6. It enters with a number of +1/+1 counters on it equal to the total of those results.\nTrample\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)";
+const HYDRADOODLE: &str = "As this creature enters, roll X six-sided dice. This creature enters with a number of +1/+1 counters on it equal to the total of those results.\nReach, trample";
+const HAMMER_JAMMER: &str = "As this creature enters, roll a six-sided die. This creature enters with a number of +1/+1 counters on it equal to the result.\nWhenever you roll a die, remove all +1/+1 counters from this creature, then put a number of +1/+1 counters on it equal to the result.";
+const JUMBO_IMP: &str = "Flying\nAs this creature enters, roll a six-sided die. This creature enters with a number of +1/+1 counters on it equal to the result.\nAt the beginning of your upkeep, roll a six-sided die and put a number of +1/+1 counters on this creature equal to the result.\nAt the beginning of your end step, roll a six-sided die and remove a number of +1/+1 counters from this creature equal to the result.";
+const TEMP_OF_THE_DAMNED: &str = "As this creature enters, roll a six-sided die. This creature enters with a number of funk counters on it equal to the result.\nAt the beginning of your upkeep, remove a funk counter from this creature. If you can't, sacrifice it.";
+
+/// R2. Every class line is one `Moved` + `SelfRef` replacement: the roll heads
+/// the execute chain (CR 603.6d: it happens as part of the entry) and the
+/// counter placement it determines follows it (CR 614.1c + CR 122.6). X is the
+/// X paid for the spell (CR 107.3m); the count is the die-result channel
+/// (CR 706.4). No gap remains on any face.
+#[test]
+fn as_enters_roll_lines_compose_one_counter_replacement() {
+    let cost_x = QuantityExpr::Ref {
+        qty: QuantityRef::CostXPaid,
+    };
+    let one = QuantityExpr::Fixed { value: 1 };
+    for (name, oracle, keyword_names, count, counter, line) in [
+        (
+            "Neverwinter Hydra",
+            NEVERWINTER_HYDRA,
+            vec!["Trample", "Ward"],
+            cost_x.clone(),
+            CounterType::Plus1Plus1,
+            "As this creature enters, roll X d6. It enters with a number of +1/+1 counters on it equal to the total of those results.",
+        ),
+        (
+            "Hydradoodle",
+            HYDRADOODLE,
+            vec!["Reach", "Trample"],
+            cost_x.clone(),
+            CounterType::Plus1Plus1,
+            "As this creature enters, roll X six-sided dice. This creature enters with a number of +1/+1 counters on it equal to the total of those results.",
+        ),
+        (
+            "Hammer Jammer",
+            HAMMER_JAMMER,
+            vec![],
+            one.clone(),
+            CounterType::Plus1Plus1,
+            "As this creature enters, roll a six-sided die. This creature enters with a number of +1/+1 counters on it equal to the result.",
+        ),
+        (
+            "Jumbo Imp",
+            JUMBO_IMP,
+            vec!["Flying"],
+            one.clone(),
+            CounterType::Plus1Plus1,
+            "As this creature enters, roll a six-sided die. This creature enters with a number of +1/+1 counters on it equal to the result.",
+        ),
+        (
+            "Temp of the Damned",
+            TEMP_OF_THE_DAMNED,
+            vec![],
+            one.clone(),
+            crate::types::counter::parse_counter_type("funk"),
+            "As this creature enters, roll a six-sided die. This creature enters with a number of funk counters on it equal to the result.",
+        ),
+    ] {
+        let keyword_names: Vec<String> = keyword_names.iter().map(|k| k.to_string()).collect();
+        let parsed = parse_oracle_text(
+            oracle,
+            name,
+            &keyword_names,
+            &["Creature".to_string()],
+            &[],
+        );
+        let moved: Vec<_> = parsed
+            .replacements
+            .iter()
+            .filter(|repl| repl.event == ReplacementEvent::Moved)
+            .collect();
+        assert_eq!(moved.len(), 1, "{name}: {:#?}", parsed.replacements);
+        let repl = moved[0];
+        assert_eq!(repl.valid_card, Some(TargetFilter::SelfRef), "{name}");
+        assert_eq!(repl.destination_zone, Some(Zone::Battlefield), "{name}");
+        assert!(repl.condition.is_none(), "{name}");
+        let execute = repl.execute.as_deref().expect("execute");
+        assert_eq!(
+            *execute.effect,
+            Effect::RollDie {
+                count: count.clone(),
+                sides: 6,
+                results: vec![],
+                modifier: None,
+            },
+            "{name}"
+        );
+        let put = execute.sub_ability.as_deref().expect("counter placement");
+        assert_eq!(
+            *put.effect,
+            Effect::PutCounter {
+                counter_type: counter.clone(),
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::SelfRef,
+            },
+            "{name}"
+        );
+        assert!(put.sub_ability.is_none(), "{name}");
+        // The coverage-gap half of this row (the game-side gap authority) lives
+        // in `tests/integration/as_enters_dice_counters.rs`.
+        assert!(
+            parsed.abilities.iter().all(|a| !matches!(
+                &*a.effect,
+                Effect::Unimplemented { name, .. } if name == "enters_with_clause"
+            )),
+            "{name}: {:?}",
+            parsed.abilities
+        );
+        // Reach guard: the keyword lines still parse.
+        let expected_keywords: &[fn(&Keyword) -> bool] = match name {
+            "Neverwinter Hydra" => &[
+                |k| matches!(k, Keyword::Trample),
+                |k| matches!(k, Keyword::Ward(_)),
+            ],
+            "Hydradoodle" => &[
+                |k| matches!(k, Keyword::Reach),
+                |k| matches!(k, Keyword::Trample),
+            ],
+            "Jumbo Imp" => &[|k| matches!(k, Keyword::Flying)],
+            _ => &[],
+        };
+        assert_eq!(
+            parsed.extracted_keywords.len(),
+            expected_keywords.len(),
+            "{name}: {:?}",
+            parsed.extracted_keywords
+        );
+        for expected in expected_keywords {
+            assert!(
+                parsed.extracted_keywords.iter().any(expected),
+                "{name}: {:?}",
+                parsed.extracted_keywords
+            );
+        }
+        assert_eq!(enters_with_fails_closed(line, name), None, "{name}");
+        // Reach guard: the card's other lines still parse as before.
+        match name {
+            "Hammer Jammer" => assert_eq!(parsed.triggers.len(), 1, "{name}"),
+            "Jumbo Imp" => assert_eq!(parsed.triggers.len(), 2, "{name}"),
+            "Temp of the Damned" => assert_eq!(parsed.triggers.len(), 1, "{name}"),
+            _ => assert!(parsed.triggers.is_empty(), "{name}: {:?}", parsed.triggers),
+        }
+    }
+}
+
+/// R3. Lines the composition does not claim keep their verdict: one
+/// `enters_with_clause` gap, the whole line, and the gap authority reports
+/// `Clause` (CR 614.1c + CR 608.2c). The helper-level reach guards
+/// (`split_as_enters_roll_prefix` admitted the frame) live beside the
+/// composition in `oracle_replacement.rs`'s tests.
+#[test]
+fn as_enters_roll_lines_the_composition_declines_stay_one_clause_gap() {
+    for line in [
+        // (a) a gate on the counter sentence would also gate the roll.
+        "As this creature enters, roll a six-sided die. If this creature was kicked, it enters with a number of +1/+1 counters on it equal to the result.",
+        "As this creature enters, roll a six-sided die. If you cast it, it enters with a number of +1/+1 counters on it equal to the result.",
+        // (b) a distributive subject.
+        "As this creature enters, roll a six-sided die. Each other creature you control enters with a number of +1/+1 counters on it equal to the result.",
+        // (c) a non-modifier instruction (a keyword grant) beside the counters.
+        "As this creature enters, roll a six-sided die. This creature enters with flying and with a number of +1/+1 counters on it equal to the result.",
+        // (c') a quoted granted ability: the split itself declines.
+        "As this creature enters, roll a six-sided die. This creature enters with a number of +1/+1 counters on it equal to the result and with \"{T}: Add {G}.\"",
+        // (e) frame + roll + two enters-with sentences: three units.
+        "As this creature enters, roll a six-sided die. This creature enters with a number of +1/+1 counters on it equal to the result. This creature enters with a number of charge counters on it equal to the result.",
+    ] {
+        let name = "Roll Witness";
+        let parsed = parse_oracle_text(line, name, &[], &["Creature".to_string()], &[]);
+        assert!(
+            parsed
+                .replacements
+                .iter()
+                .all(|repl| repl.event != ReplacementEvent::Moved),
+            "{line}: no replacement may carry half of the line, got {:?}",
+            parsed.replacements
+        );
+        assert_eq!(
+            parsed
+                .abilities
+                .iter()
+                .filter(|a| matches!(
+                    &*a.effect,
+                    Effect::Unimplemented { name, .. } if name == "enters_with_clause"
+                ))
+                .count(),
+            1,
+            "{line}: {:?}",
+            parsed.abilities
+        );
+        assert_eq!(
+            enters_with_fails_closed(line, name),
+            Some(EntersWithGap::Clause),
+            "{line}"
+        );
+    }
+}
+
+/// Every JSON object under `value` whose `"type"` tag is `effect_type`.
+fn effects_of_type<'a>(
+    value: &'a serde_json::Value,
+    effect_type: &str,
+    out: &mut Vec<&'a serde_json::Value>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("type").and_then(serde_json::Value::as_str) == Some(effect_type) {
+                out.push(value);
+            }
+            for child in map.values() {
+                effects_of_type(child, effect_type, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                effects_of_type(child, effect_type, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn die_roll_trigger_effects(oracle: &str, name: &str, effect_type: &str) -> Vec<serde_json::Value> {
+    let parsed = parse_oracle_text(oracle, name, &[], &["Creature".to_string()], &[]);
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::RolledDieOnce)
+        .unwrap_or_else(|| panic!("{name}: a RolledDieOnce trigger, got {:?}", parsed.triggers));
+    let json = serde_json::to_value(&trigger.execute).expect("serializable trigger body");
+    let mut found = Vec::new();
+    effects_of_type(&json, effect_type, &mut found);
+    found.into_iter().cloned().collect()
+}
+
+/// R11. CR 608.2k + CR 706.1: a die-roll trigger condition names a player's
+/// roll and no object, so a bare "it" in the body is the ability's own source
+/// (`SelfRef`), never `TriggeringSource` (which resolves to no object for a
+/// `DieRolled` event). Explicit referents and other condition shapes are
+/// untouched.
+#[test]
+fn die_roll_trigger_bodies_bind_a_bare_it_to_the_source() {
+    let self_ref = serde_json::json!({ "type": "SelfRef" });
+    let triggering = serde_json::json!({ "type": "TriggeringSource" });
+
+    // Hammer Jammer: "remove all +1/+1 counters from this creature, then put …
+    // on it" — both halves name the source.
+    let puts = die_roll_trigger_effects(HAMMER_JAMMER, "Hammer Jammer", "PutCounter");
+    assert_eq!(puts.len(), 1, "{puts:?}");
+    assert_eq!(puts[0]["target"], self_ref);
+    let removes = die_roll_trigger_effects(HAMMER_JAMMER, "Hammer Jammer", "RemoveCounter");
+    assert_eq!(removes.len(), 1, "{removes:?}");
+    assert_eq!(removes[0]["target"], self_ref);
+
+    // Monoxa: "Monoxa gains first strike … it gains menace … it gains lifelink".
+    const MONOXA: &str = "Whenever you roll a 3 or higher, Monoxa gains first strike until end of turn. If the roll was 4 or higher, it gains menace until end of turn. If the roll was 5 or higher, it gains lifelink until end of turn.\n{6}: Roll a six-sided die.";
+    let grants = die_roll_trigger_effects(MONOXA, "Monoxa, Midway Manager", "GenericEffect");
+    assert_eq!(grants.len(), 3, "{grants:?}");
+    for grant in &grants {
+        let statics = grant["static_abilities"].as_array().expect("statics");
+        assert!(!statics.is_empty(), "{grant:?}");
+        for stat in statics {
+            assert_eq!(stat["affected"], self_ref, "{grant:?}");
+        }
+    }
+
+    // Siblings that keep `TriggeringSource`.
+    const BLASTRONAUTS: &str = "When this creature enters, open an Attraction.\nWhenever you roll a 6, you may copy the spell, ability, or Attraction visit that caused you to roll that die. You may choose new targets for the copy.";
+    let copies = die_roll_trigger_effects(BLASTRONAUTS, "Goblin Blastronauts", "CopySpell");
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert_eq!(copies[0]["target"], triggering);
+    const PRIORITY_BOARDING: &str = "Whenever you roll a die, you may reveal the top card of your library. Do this only once each turn. Whenever you reveal a card with mana value less than the result this way, you may exile it. If you do, you may play it this turn.";
+    let exiles = die_roll_trigger_effects(PRIORITY_BOARDING, "Priority Boarding", "ChangeZone");
+    assert_eq!(exiles.len(), 1, "{exiles:?}");
+    assert_eq!(exiles[0]["target"], triggering);
+    let parsed = parse_oracle_text(
+        "Whenever you cast a spell, put a +1/+1 counter on it.",
+        "Spell Witness",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::SpellCast)
+        .expect("spell-cast trigger");
+    let json = serde_json::to_value(&trigger.execute).expect("serializable trigger body");
+    let mut spell_puts = Vec::new();
+    effects_of_type(&json, "PutCounter", &mut spell_puts);
+    assert_eq!(spell_puts.len(), 1);
+    assert_eq!(spell_puts[0]["target"], triggering);
 }

@@ -1026,22 +1026,15 @@ fn if_you_do_object_anchor(
 /// one of these zone-change-ledger-invisible effect classes; other effects
 /// (Sacrifice, Exile, Discard, Mill, …) keep the zone-change proxy unchanged,
 /// since their success IS a `ZoneChanged`/`PermanentSacrificed` event.
+/// A generic rider this rewrite does not claim, whose every antecedent passes
+/// `effect_success_is_zone_ledger_invisible`, is not re-expressed here; it
+/// strict-fails through
+/// `cant_rider_reads_only_zone_ledger_invisible_antecedents` below.
 fn rewrite_cant_rider_for_non_zone_change_parent(
     condition: Option<AbilityCondition>,
     clauses: &[ClauseIr],
 ) -> Option<AbilityCondition> {
-    let is_generic_cant = matches!(
-        &condition,
-        Some(AbilityCondition::Not { condition })
-            if matches!(
-                condition.as_ref(),
-                AbilityCondition::ZoneChangedThisWay {
-                    filter: TargetFilter::Any,
-                    destination: None,
-                }
-            )
-    );
-    if !is_generic_cant {
+    if !is_generic_cant_rider(condition.as_ref()) {
         return condition;
     }
     let prev_is_ledger_invisible = clauses
@@ -1060,6 +1053,107 @@ fn rewrite_cant_rider_for_non_zone_change_parent(
         });
     }
     condition
+}
+
+/// CR 608.2c: whether a condition is the generic lowering of "if you can't" /
+/// "if they can't" (`try_nom_condition_as_ability_condition`), shared by the
+/// rewrite and the strict-fail sibling below.
+fn is_generic_cant_rider(condition: Option<&AbilityCondition>) -> bool {
+    matches!(
+        condition,
+        Some(AbilityCondition::Not { condition })
+            if matches!(
+                condition.as_ref(),
+                AbilityCondition::ZoneChangedThisWay {
+                    filter: TargetFilter::Any,
+                    destination: None,
+                }
+            )
+    )
+}
+
+/// CR 608.2c: whether an effect's success is invisible to the zone-change
+/// ledger that the generic "if you can't" guard reads.
+///
+/// The ledger (`last_zone_changed_ids`) is rewritten after each resolved node
+/// from that node's own `ZoneChanged` events (`effects::resolve_chain_body`)
+/// and cleared per top-level resolution. Each member's success is a non-zone
+/// event in `effects::mandatory_parent_effect_performed` (`CounterAdded`,
+/// `CounterRemoved`, `PermanentTapped`/`PermanentUntapped`, `LifeChanged`,
+/// `DamageDealt`, `StickerPlaced`, `StackPushed`, `TurnedFaceUp`), and its
+/// resolver moves no object, so its success never reaches the ledger.
+///
+/// `PayCost` (its `AbilityCost` may sacrifice, discard or exile) and `NoOp`
+/// (nothing to perform) are deliberately absent. An effect may join only after
+/// both checks: a non-zone success event in that authority, and a resolver
+/// that moves no object.
+fn effect_success_is_zone_ledger_invisible(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::PutCounter { .. }
+            | Effect::PutCounterAll { .. }
+            | Effect::RemoveCounter { .. }
+            | Effect::MoveCounters { .. }
+            | Effect::MultiplyCounter { .. }
+            | Effect::ReproduceEventCounters { .. }
+            | Effect::SetTapState { .. }
+            | Effect::GainLife { .. }
+            | Effect::LoseLife { .. }
+            | Effect::DealDamage { .. }
+            | Effect::DamageAll { .. }
+            | Effect::Fight { .. }
+            | Effect::PutSticker { .. }
+            | Effect::ApplySticker { .. }
+            | Effect::CopySpell { .. }
+            | Effect::TurnFaceUp { .. }
+    )
+}
+
+/// CR 608.2c: a compound clause's "and" remainder resolves as its own nodes,
+/// each of which rewrites the ledger; every one must be certified.
+fn def_chain_is_zone_ledger_invisible(def: &AbilityDefinition) -> bool {
+    effect_success_is_zone_ledger_invisible(def.effect.as_ref())
+        && def.cost.is_none()
+        && def.unless_pay.is_none()
+        && def.else_ability.is_none()
+        && def.mode_abilities.is_empty()
+        && def
+            .sub_ability
+            .as_deref()
+            .is_none_or(def_chain_is_zone_ledger_invisible)
+}
+
+/// CR 608.2c: "If you can't" names the outcome of the instruction before it
+/// (Fading's printed form (CR 702.32a) — "remove a fade counter … If you
+/// can't, sacrifice" — is answered by the counter-removal count,
+/// `PreviousEffectAmount`, never the ledger). After antecedents whose success
+/// is never a zone change, the generic `Not { ZoneChangedThisWay }` guard is
+/// true whether or not the instruction was performed, so the rider is a
+/// strict failure until its guard is repaired (Temp of the Damned, Cocoon). A
+/// rider any rewrite above already re-expressed is not this shape; an
+/// uncertified clause (another effect, another disposition, a continuation
+/// channel, an "unless" payment) keeps today's parse.
+fn cant_rider_reads_only_zone_ledger_invisible_antecedents(
+    condition: Option<&AbilityCondition>,
+    clauses: &[ClauseIr],
+) -> bool {
+    is_generic_cant_rider(condition)
+        && !clauses.is_empty()
+        && clauses.iter().all(|clause| {
+            matches!(
+                clause.disposition,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None
+                }
+            ) && clause.parsed.unless_pay.is_none()
+                && effect_success_is_zone_ledger_invisible(&clause.parsed.effect)
+                && clause
+                    .parsed
+                    .sub_ability
+                    .as_deref()
+                    .is_none_or(def_chain_is_zone_ledger_invisible)
+        })
 }
 
 /// CR 603.12 + CR 701.16a + CR 608.2c: rebind an active-past "you exiled …
@@ -46603,6 +46697,24 @@ fn parse_effect_chain_ir_body(
             unimplemented_clause(
                 &mut builder,
                 "keyword_anaphor_resolution_time_pick",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
+        // CR 608.2c: a generic "if you can't" rider whose every
+        // antecedent's success is invisible to the zone-change ledger has a
+        // constant guard (a successful counter removal still reads "can't").
+        // Runs after the rewrite family so a `TurnFaceUp`/`PayCost` parent the
+        // rewrite re-expressed is never marked. Strict-fail so coverage reports
+        // the gap — see the predicate.
+        if cant_rider_reads_only_zone_ledger_invisible_antecedents(
+            condition.as_ref(),
+            builder.clauses(),
+        ) {
+            unimplemented_clause(
+                &mut builder,
+                "cant_rider_without_zone_change_antecedent",
                 normalized_text,
                 chunk.boundary_after,
             );

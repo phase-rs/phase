@@ -1279,6 +1279,13 @@ fn candidate_passes_batched_filters(
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
     conditions: FiringConditions<'_>,
 ) -> bool {
+    // CR 614.12a + CR 603.6d + CR 603.2c: a parked entrant (its as-enters
+    // continuation has not completed) is not a member of a "one or more"
+    // batch; it is collected once, by its release or owner, against the
+    // realized entrant.
+    if crate::game::engine_replacement::entry_event_is_parked(state, candidate) {
+        return false;
+    }
     if event_is_suppressed_by_static_triggers_cached(
         state,
         candidate,
@@ -3830,12 +3837,21 @@ pub(crate) fn departure_observer_provably_excludes(
 /// self-departure check: for a source that leaves and later re-enters within
 /// the same batch, its own departure index is always strictly less than its
 /// last-entry index, so it is correctly excluded.
+///
+/// CR 614.1c + CR 614.12 + CR 113.6 + CR 603.10: an entrant's as-enters roll
+/// was made before its entry happened, so its abilities did not function yet,
+/// and that one entrant is not an observer of that event, wherever the event
+/// sits in this batch and in whichever action collects it.
 fn live_battlefield_source_was_present_at_event(
+    event: &GameEvent,
     event_idx: usize,
     source_id: ObjectId,
     battlefield_entry_index: &std::collections::HashMap<ObjectId, usize>,
 ) -> bool {
-    battlefield_entry_index
+    !matches!(
+        event,
+        GameEvent::DieRolled { pre_entry_source: Some(entrant), .. } if *entrant == source_id
+    ) && battlefield_entry_index
         .get(&source_id)
         .is_none_or(|&entry_idx| event_idx >= entry_idx)
 }
@@ -4720,6 +4736,13 @@ pub(crate) fn collect_logical_zone_trigger_segment(
 /// counter placement) remain the generic post-action collector's authority.
 /// A paused carrier calls this exactly once for each completed segment; that
 /// generic collector must not rediscover the retained zone-change records.
+///
+/// CR 603.2c + CR 603.6a: a member whose as-enters continuation is still
+/// paused is parked (`entry_event_is_parked`); its occurrence is neither
+/// retained nor collected here at the pause. It stays in the owner's
+/// `paused_current.delivery_events` and is retained and collected once, at its
+/// owner's resume (after `take_entry_continuation_custody`), with the event's
+/// other newcomers.
 pub(crate) fn append_and_collect_logical_zone_trigger_segment(
     state: &mut GameState,
     group: &mut LogicalZoneChangeGroup,
@@ -4727,7 +4750,10 @@ pub(crate) fn append_and_collect_logical_zone_trigger_segment(
 ) -> Result<(), String> {
     let zone_change_events: Vec<_> = events
         .iter()
-        .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+        .filter(|event| {
+            matches!(event, GameEvent::ZoneChanged { .. })
+                && !crate::game::engine_replacement::entry_event_is_parked(state, event)
+        })
         .cloned()
         .collect();
     group.append_delivery_events(&zone_change_events)?;
@@ -5294,6 +5320,15 @@ fn collect_pending_triggers_with_collection(
     let battlefield_entry_index = battlefield_entry_observation_indices(events);
 
     for (event_idx, event) in events.iter().enumerate() {
+        // CR 614.12a + CR 603.6d + CR 603.2c: an entry whose as-enters
+        // continuation has not completed is collected only by its replay,
+        // release or owner, never by a collector running at the pause. An
+        // in-loop skip (not a filtered slice), so every event index this pass
+        // computes keeps its meaning and the parked entrant still observes
+        // the later events of the same batch.
+        if crate::game::engine_replacement::entry_event_is_parked(state, event) {
+            continue;
+        }
         // CR 603.2 / CR 603.3: Per-event dedup. A single printed trigger definition
         // fires at most once per eligible event, even if multiple scan paths
         // (battlefield, leaves-battlefield last-known-information, graveyard/exile/stack)
@@ -5345,6 +5380,7 @@ fn collect_pending_triggers_with_collection(
         // Scan candidate permanents for matching triggers
         for obj_id in candidates.iter().copied() {
             if !live_battlefield_source_was_present_at_event(
+                event,
                 event_idx,
                 obj_id,
                 &battlefield_entry_index,
@@ -5832,6 +5868,7 @@ fn collect_pending_triggers_with_collection(
                     .collect();
                 for obj_id in shadow_population {
                     if !live_battlefield_source_was_present_at_event(
+                        event,
                         event_idx,
                         obj_id,
                         &battlefield_entry_index,
@@ -9365,7 +9402,7 @@ fn paused_observer_trigger_events(state: &GameState, candidates: Vec<GameEvent>)
             !matches!(
                 ev,
                 GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
-            ) && !state.deferred_entry_events.contains(ev)
+            ) && !state.park_contains_event(ev)
         })
         .collect()
 }
@@ -11938,6 +11975,11 @@ pub(super) fn drain_deferred_trigger_queue_with_policy(
     events_out: &mut Vec<GameEvent>,
     policy: DeferredTriggerDrainPolicy,
 ) -> Option<crate::types::game_state::WaitingFor> {
+    // CR 603.3 + CR 603.3b: release a settled, un-owned as-enters entry into
+    // the queue before the gate reads it, so it shares this drain with the
+    // triggers already queued. Collecting is safe under every gate; only
+    // placement is gated.
+    crate::game::engine_replacement::collect_settled_entry_continuation_triggers(state);
     if !can_drain_deferred_triggers(state, policy) {
         return None;
     }
@@ -11961,6 +12003,11 @@ pub(crate) fn drain_deferred_trigger_queue(
     state: &mut GameState,
     events_out: &mut Vec<GameEvent>,
 ) -> Option<crate::types::game_state::WaitingFor> {
+    // CR 603.3 + CR 603.3b: release a settled, un-owned as-enters entry into
+    // the queue before the gate reads it, so it shares this drain with the
+    // triggers already queued. Collecting is safe under every gate; only
+    // placement is gated.
+    crate::game::engine_replacement::collect_settled_entry_continuation_triggers(state);
     if !should_drain_deferred_triggers_now(state) {
         return None;
     }
@@ -12023,6 +12070,11 @@ pub(crate) fn drain_deferred_triggers_after_stack_object_announcement(
     if state.pending_resolution_completion.is_some() {
         return None;
     }
+    // CR 603.3 + CR 603.3b: release a settled, un-owned as-enters entry into
+    // the queue before the gate reads it, so it shares this drain with the
+    // triggers already queued. Collecting is safe under every gate; only
+    // placement is gated.
+    crate::game::engine_replacement::collect_settled_entry_continuation_triggers(state);
     if !can_drain_deferred_triggers(state, DeferredTriggerDrainPolicy::SettledPriority) {
         return None;
     }
@@ -15353,6 +15405,12 @@ fn delayed_whenever_event_firings(
     let mut consumed = HashSet::new();
     let mut firings = Vec::new();
     for (index, event) in events.iter().enumerate() {
+        // CR 614.12a + CR 603.6d + CR 603.2c: a parked entry (its as-enters
+        // continuation has not completed) is matched only by its release or
+        // owner custody. Skipped after `enumerate()`, so raw indices hold.
+        if crate::game::engine_replacement::entry_event_is_parked(state, event) {
+            continue;
+        }
         // CR 120.4b: a whole-event threshold is decided on the summed batch,
         // so admission uses the threshold-free filters, as printed does.
         let admitted = if damage_received_aggregates_whole_event(trigger) {
@@ -16107,6 +16165,10 @@ fn is_reflexive_lifetime(condition: &crate::types::ability::DelayedTriggerCondit
     )
 }
 
+/// CR 614.12a + CR 603.6d + CR 603.2c: every arm skips a parked entry (an
+/// entry whose as-enters continuation has not completed); its one delayed
+/// collection is the settled release's or its owner's custody. The skip runs
+/// after `enumerate()`, so raw batch indices are preserved.
 fn delayed_trigger_event_with_index(
     condition: &crate::types::ability::DelayedTriggerCondition,
     events: &[GameEvent],
@@ -16124,6 +16186,7 @@ fn delayed_trigger_event_with_index(
         DelayedTriggerCondition::AtNextPhase { phase } => events
             .iter()
             .enumerate()
+            .filter(|(_, e)| !crate::game::engine_replacement::entry_event_is_parked(state, e))
             .find(|(_, e)| matches!(e, GameEvent::PhaseChanged { phase: p } if p == phase))
             .map(|(idx, event)| (idx, event.clone())),
         DelayedTriggerCondition::AtNextPhaseForPlayer {
@@ -16163,6 +16226,7 @@ fn delayed_trigger_event_with_index(
             events
                 .iter()
                 .enumerate()
+                .filter(|(_, e)| !crate::game::engine_replacement::entry_event_is_parked(state, e))
                 .find(|(_, e)| matches!(e, GameEvent::PhaseChanged { phase: p } if p == phase))
                 .map(|(idx, event)| (idx, event.clone()))
         }
@@ -16179,6 +16243,7 @@ fn delayed_trigger_event_with_index(
             events
                 .iter()
                 .enumerate()
+                .filter(|(_, e)| !crate::game::engine_replacement::entry_event_is_parked(state, e))
                 .find(|(_, e)| matches!(e, GameEvent::PhaseChanged { phase: p } if p == phase))
                 .map(|(idx, event)| (idx, event.clone()))
         }
@@ -16187,6 +16252,7 @@ fn delayed_trigger_event_with_index(
         DelayedTriggerCondition::WhenLeavesPlay { object_id } => events
             .iter()
             .enumerate()
+            .filter(|(_, e)| !crate::game::engine_replacement::entry_event_is_parked(state, e))
             .find(|(_, e)| {
                 matches!(e,
                     GameEvent::ZoneChanged { object_id: id, from: Some(Zone::Battlefield), record, .. }
@@ -16236,6 +16302,7 @@ fn delayed_trigger_event_with_index(
         DelayedTriggerCondition::WhenDiesOrExiled { filter } => events
             .iter()
             .enumerate()
+            .filter(|(_, e)| !crate::game::engine_replacement::entry_event_is_parked(state, e))
             .find(|(_, e)| {
                 matches!(
                     e,
@@ -16270,6 +16337,7 @@ fn delayed_trigger_event_with_index(
                 events
                     .iter()
                     .enumerate()
+                    .filter(|(_, e)| !crate::game::engine_replacement::entry_event_is_parked(state, e))
                     .find(|(_, event)| matcher(event, trigger, source_context, state))
                     .map(|(idx, event)| (idx, event.clone()))
             } else {
@@ -16302,6 +16370,9 @@ fn delayed_trigger_event_with_index(
 /// entrant for its resolution-time "one of them" choice, and the carried
 /// intervening-if conjunction keeps only the FIRED event's alternative gate
 /// (M3) rather than conjoining both alternatives' gates.
+///
+/// CR 614.12a + CR 603.6d + CR 603.2c: a parked entry is skipped (after
+/// `enumerate()`, so indices hold), as in `delayed_trigger_event_with_index`.
 fn delayed_when_next_event_matches(
     trigger: &TriggerDefinition,
     or_trigger: &Option<Box<TriggerDefinition>>,
@@ -16316,6 +16387,7 @@ fn delayed_when_next_event_matches(
     events
         .iter()
         .enumerate()
+        .filter(|(_, e)| !crate::game::engine_replacement::entry_event_is_parked(state, e))
         .filter_map(|(idx, event)| {
             for (alternative, t) in alternatives.clone().enumerate() {
                 if let Some(matcher) = super::trigger_matchers::trigger_matcher(t.mode.clone()) {
@@ -16329,6 +16401,8 @@ fn delayed_when_next_event_matches(
         .collect()
 }
 
+/// CR 614.12a + CR 603.6d + CR 603.2c: a parked entry is skipped (after
+/// `enumerate()`, so indices hold), as in `delayed_trigger_event_with_index`.
 #[allow(clippy::too_many_arguments)] // The condition supplies independent zone, filter, and exact-source facts.
 fn delayed_zone_change_event_with_index(
     events: &[GameEvent],
@@ -16343,6 +16417,7 @@ fn delayed_zone_change_event_with_index(
     events
         .iter()
         .enumerate()
+        .filter(|(_, e)| !crate::game::engine_replacement::entry_event_is_parked(state, e))
         .find(|(_, event)| {
             matches!(
                 event,
@@ -19476,17 +19551,87 @@ pub mod tests {
         let boundaries = battlefield_entry_observation_indices(&events);
 
         assert!(
-            !live_battlefield_source_was_present_at_event(0, saga, &boundaries),
+            !live_battlefield_source_was_present_at_event(&events[0], 0, saga, &boundaries),
             "the entering Saga must not observe an unrelated pre-entry sacrifice"
         );
         assert!(
-            live_battlefield_source_was_present_at_event(1, saga, &boundaries),
+            live_battlefield_source_was_present_at_event(&events[1], 1, saga, &boundaries),
             "the Saga's intrinsic lore counter belongs to its entry lifetime"
         );
         assert!(live_battlefield_source_was_present_at_event(
+            &events[2],
             2,
             saga,
             &boundaries
+        ));
+    }
+
+    /// CR 614.1c + CR 113.6 + CR 603.10: a stamped roll refuses its entrant and
+    /// no one else; an unstamped roll and any other event fall to the entry index.
+    #[test]
+    fn a_stamped_roll_refuses_only_its_entrant() {
+        let (entrant, other) = (ObjectId(1), ObjectId(2));
+        let roll = |pre_entry_source| GameEvent::DieRolled {
+            player_id: PlayerId(0),
+            sides: 6,
+            result: Some(3),
+            pre_entry_source,
+        };
+        let no_entries = std::collections::HashMap::new();
+        let stamped = roll(Some(entrant));
+        assert!(!live_battlefield_source_was_present_at_event(
+            &stamped,
+            0,
+            entrant,
+            &no_entries
+        ));
+        assert!(live_battlefield_source_was_present_at_event(
+            &stamped,
+            0,
+            other,
+            &no_entries
+        ));
+
+        // The record refuses at a position the index alone would admit.
+        let entered_at_zero = std::collections::HashMap::from([(entrant, 0)]);
+        assert!(!live_battlefield_source_was_present_at_event(
+            &stamped,
+            5,
+            entrant,
+            &entered_at_zero
+        ));
+
+        // No record: the index decides, on either side of the boundary.
+        let unstamped = roll(None);
+        let entered_at_two = std::collections::HashMap::from([(entrant, 2)]);
+        assert!(!live_battlefield_source_was_present_at_event(
+            &unstamped,
+            1,
+            entrant,
+            &entered_at_two
+        ));
+        assert!(live_battlefield_source_was_present_at_event(
+            &unstamped,
+            2,
+            entrant,
+            &entered_at_two
+        ));
+
+        // Another kind of event: the same.
+        let other_event = GameEvent::MonarchChanged {
+            player_id: PlayerId(0),
+        };
+        assert!(!live_battlefield_source_was_present_at_event(
+            &other_event,
+            1,
+            entrant,
+            &entered_at_two
+        ));
+        assert!(live_battlefield_source_was_present_at_event(
+            &other_event,
+            2,
+            entrant,
+            &entered_at_two
         ));
     }
 
@@ -43846,6 +43991,7 @@ pub mod tests {
                 player_id: PlayerId(0),
                 sides: 6,
                 result: Some(rolled),
+                pre_entry_source: None,
             }];
             process_triggers(&mut state, &events);
 
@@ -45635,7 +45781,12 @@ pub mod tests {
         for settled in [false, true] {
             let (mut state, mut events) = observer_helper_fixture(settled);
             let parked = events[0].clone();
-            state.deferred_entry_events.push(parked.clone());
+            state
+                .deferred_entry_events
+                .push(crate::types::game_state::ParkedEntry::pending(
+                    parked.clone(),
+                    None,
+                ));
             if settled {
                 collect_and_drain_observer_triggers_if_settled(&mut state, &mut events, 0);
             } else {
@@ -45647,7 +45798,7 @@ pub mod tests {
             );
             assert_eq!(
                 state.deferred_entry_events,
-                vec![parked],
+                vec![crate::types::game_state::ParkedEntry::pending(parked, None)],
                 "settled={settled}: the owner's store is untouched"
             );
         }
@@ -56422,5 +56573,198 @@ mod object_sweep_sharing_tests {
             clear_post_collection_transients,
             reference_clear_post_collection_transients,
         );
+    }
+}
+
+#[cfg(test)]
+mod entry_continuation_hold_tests {
+    //! U4-T3 / U4-T4 / U4-T5: an entry whose as-enters continuation has not
+    //! completed is held at the collection choke point, refused as a batched
+    //! member and dropped from a logical owner's segment (CR 614.12a,
+    //! CR 603.6d and CR 603.2c); a settled one is released ahead of the drain
+    //! gate (CR 603.3 and CR 603.3b).
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::zones::{create_object, record_and_emit_entry_from_no_zone};
+    use crate::types::game_state::PendingCounterAdditionQueue;
+    use crate::types::identifiers::CardId;
+    use crate::types::phase::Phase;
+
+    const SOUL_WARDEN: &str = "Whenever another creature enters, you gain 1 life.";
+    const WELCOMING_VAMPIRE: &str = "Flying\nWhenever one or more other creatures you control with power 2 or less enter, draw a card. This ability triggers only once each turn.";
+
+    /// A board with one observer creature on P0's battlefield.
+    fn observer_board(oracle: &str) -> (GameState, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let observer = scenario
+            .add_creature_from_oracle(P0, "Observer", 2, 3, oracle)
+            .id();
+        (scenario.build().state().clone(), observer)
+    }
+
+    /// A 1/1 creature P0 controls that has just entered; its entry event.
+    fn enter(state: &mut GameState, card: u64) -> GameEvent {
+        let id = create_object(
+            state,
+            CardId(card),
+            P0,
+            format!("Entrant {card}"),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).expect("entrant");
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(1);
+        obj.toughness = Some(1);
+        obj.base_power = Some(1);
+        obj.base_toughness = Some(1);
+        let mut events = Vec::new();
+        record_and_emit_entry_from_no_zone(state, id, &mut events).expect("entered");
+        events
+            .into_iter()
+            .find(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+            .expect("entry event")
+    }
+
+    fn from_source(
+        contexts: &[PendingTriggerContext],
+        source: ObjectId,
+    ) -> Vec<&PendingTriggerContext> {
+        contexts
+            .iter()
+            .filter(|context| context.pending.source_id == source)
+            .collect()
+    }
+
+    /// U4-T3. The hold at the choke point, in ordinary and Segment collection,
+    /// and the batched-candidate refusal.
+    #[test]
+    fn a_parked_entry_is_held_at_the_collection_choke_point() {
+        let (mut state, warden) = observer_board(SOUL_WARDEN);
+        let parked = enter(&mut state, 900);
+        let live = enter(&mut state, 901);
+        state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry::pending(
+            parked.clone(),
+            None,
+        )];
+        collect_triggers_into_deferred(&mut state, &[parked.clone(), live.clone()]);
+        let collected = from_source(&state.deferred_triggers, warden);
+        assert_eq!(collected.len(), 1, "exactly the unparked entry");
+        assert_eq!(collected[0].trigger_events, vec![live.clone()]);
+
+        // Positive pair: unparked, both entries trigger.
+        let (mut state, warden) = observer_board(SOUL_WARDEN);
+        let first = enter(&mut state, 900);
+        let second = enter(&mut state, 901);
+        collect_triggers_into_deferred(&mut state, &[first, second]);
+        assert_eq!(from_source(&state.deferred_triggers, warden).len(), 2);
+
+        // Segment mode.
+        let (mut state, warden) = observer_board(SOUL_WARDEN);
+        let parked = enter(&mut state, 900);
+        let live = enter(&mut state, 901);
+        state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry::pending(
+            parked.clone(),
+            None,
+        )];
+        let group = state.allocate_logical_zone_change_group(&[]);
+        let segment =
+            collect_logical_zone_trigger_segment(&mut state, &group, &[parked, live.clone()]);
+        let collected = from_source(&segment, warden);
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].trigger_events, vec![live]);
+
+        // Batched sibling: a "one or more … enter" trigger counts only the
+        // unparked member.
+        let (mut state, vampire) = observer_board(WELCOMING_VAMPIRE);
+        let parked = enter(&mut state, 900);
+        let live = enter(&mut state, 901);
+        state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry::pending(
+            parked.clone(),
+            None,
+        )];
+        collect_triggers_into_deferred(&mut state, &[parked, live.clone()]);
+        let collected = from_source(&state.deferred_triggers, vampire);
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].trigger_events, vec![live]);
+    }
+
+    /// U4-T4. The segment filter: a parked member is neither retained nor
+    /// collected by its owner's pause segment.
+    #[test]
+    fn a_parked_member_is_dropped_from_its_owners_segment() {
+        let (mut state, warden) = observer_board(SOUL_WARDEN);
+        let parked = enter(&mut state, 900);
+        let live = enter(&mut state, 901);
+        state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry::pending(
+            parked.clone(),
+            None,
+        )];
+        let mut group = state.allocate_logical_zone_change_group(&[]);
+        append_and_collect_logical_zone_trigger_segment(
+            &mut state,
+            &mut group,
+            &[parked.clone(), live.clone()],
+        )
+        .expect("segment");
+        let retained: Vec<&GameEvent> = group
+            .all_origin_occurrences
+            .iter()
+            .map(|occurrence| &occurrence.event)
+            .collect();
+        assert_eq!(retained, vec![&live], "the parked member is not retained");
+        assert_eq!(from_source(&state.deferred_triggers, warden).len(), 1);
+    }
+
+    /// U4-T5. The release runs ahead of the drain gate: an empty queue no
+    /// longer refuses a drain whose settled park holds an entry.
+    #[test]
+    fn the_release_runs_ahead_of_the_drain_gate() {
+        let (mut state, warden) = observer_board(SOUL_WARDEN);
+        let parked = enter(&mut state, 900);
+        state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry {
+            event: parked,
+            state: crate::types::game_state::ParkedEntryState::Completed,
+        }];
+        assert!(state.deferred_triggers.is_empty());
+        let mut events = Vec::new();
+        let _ = drain_deferred_trigger_queue(&mut state, &mut events);
+        assert!(state.deferred_entry_events.is_empty(), "the park was taken");
+        assert_eq!(
+            state
+                .stack
+                .iter()
+                .filter(|entry| entry.source_id == warden)
+                .count(),
+            1,
+            "Soul Warden's trigger is on the stack"
+        );
+
+        // The BASE empty-queue refusal, shown to fire: no park, nothing placed.
+        let (mut state, _) = observer_board(SOUL_WARDEN);
+        enter(&mut state, 900);
+        let stack_before = state.stack.len();
+        let mut events = Vec::new();
+        assert!(drain_deferred_trigger_queue(&mut state, &mut events).is_none());
+        assert_eq!(state.stack.len(), stack_before);
+
+        // A live resolution frame: nothing is released, the park is kept.
+        let (mut state, _) = observer_board(SOUL_WARDEN);
+        let parked = enter(&mut state, 900);
+        let parked = crate::types::game_state::ParkedEntry {
+            event: parked,
+            state: crate::types::game_state::ParkedEntryState::Completed,
+        };
+        state.deferred_entry_events = vec![parked.clone()];
+        state.push_counter_additions(PendingCounterAdditionQueue {
+            remaining: Vec::new(),
+            completion: None,
+        });
+        let mut events = Vec::new();
+        assert!(drain_deferred_trigger_queue(&mut state, &mut events).is_none());
+        assert_eq!(state.deferred_entry_events, vec![parked]);
+        assert!(state.deferred_triggers.is_empty());
+        assert!(state.stack.is_empty());
     }
 }

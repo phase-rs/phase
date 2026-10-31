@@ -4924,6 +4924,7 @@ pub(super) fn match_rolled_die(
         player_id,
         sides,
         result,
+        ..
     } = event
     {
         if trigger.die_sides.is_some_and(|required| required != *sides) {
@@ -6953,6 +6954,7 @@ mod tests {
                 player_id: PlayerId(0),
                 sides: 20,
                 result: Some(13),
+                pre_entry_source: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -6963,6 +6965,7 @@ mod tests {
                 player_id: PlayerId(0),
                 sides: 6,
                 result: Some(4),
+                pre_entry_source: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -6973,6 +6976,7 @@ mod tests {
                 player_id: PlayerId(1),
                 sides: 20,
                 result: Some(13),
+                pre_entry_source: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -6994,6 +6998,7 @@ mod tests {
             player_id: PlayerId(0),
             sides: 6,
             result,
+            pre_entry_source: None,
         };
 
         // CR 706.2: Exact([1]) — fires on Some(1), not Some(2).

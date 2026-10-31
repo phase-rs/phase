@@ -1075,6 +1075,10 @@ fn collect_search_observer_triggers(
     let owned =
         super::announcement_triggers::take_inline_trigger_span(state, events, events_before_drain);
     let announced = owned.is_empty() && owned.end < events.len();
+    // CR 603.3 + CR 603.3b: a settled, un-owned as-enters entry is released into
+    // the same queue this collector fills, so the pipeline's drain places both
+    // together. Released first, so the queued-witness filter below sees it.
+    crate::game::engine_replacement::collect_settled_entry_continuation_triggers(state);
     let uncollected_events = super::triggers::filter_already_collected_trigger_events_from(
         state,
         &events[..owned.end],
@@ -6022,6 +6026,10 @@ pub(super) fn handle_resolution_choice(
             GameAction::ChooseBranch { index },
         ) => {
             set_priority(state, player);
+            // Computed before `branches` moves into the selection: the exact
+            // predicate the enters-counter capture keys on.
+            let replays_enters_counter_capture =
+                crate::game::engine_replacement::is_enters_counter_choice(&branches);
             effects::choose_one_of::resolve_branch(
                 state,
                 effects::choose_one_of::BranchSelection {
@@ -6048,22 +6056,27 @@ pub(super) fn handle_resolution_choice(
             // the chosen counter onto the still-entering permanent, replay the
             // deferred entry through the trigger pipeline so ETB observers see the
             // counter as the permanent enters (pre-entry per CR 614.12a, not a
-            // post-entry counter add). For a normal (non-entry) `ChooseOneOf`,
-            // `deferred_entry_events` is empty, so this is a no-op — the
-            // disambiguator. This is safe because `deferred_entry_events` is
-            // populated ONLY by the ETB-replacement capture (sole production
-            // write-site), and `CopyTargetChoice` drains it via its own
-            // `handle_copy_target_choice` handler, so it is never non-empty during
-            // an unrelated `ChooseBranch`.
-            let deferred = std::mem::take(&mut state.deferred_entry_events);
-            let source_still_on_bf = state
-                .objects
-                .get(&source_id)
-                .is_some_and(|o| o.zone == Zone::Battlefield);
-            if !deferred.is_empty() && source_still_on_bf {
-                super::triggers::process_triggers(state, &deferred);
-                let delayed = super::triggers::check_delayed_triggers(state, &deferred);
-                events.extend(delayed);
+            // post-entry counter add).
+            //
+            // CR 614.12a: replay only the enters-with-your-choice-of-counter
+            // capture's park (`is_enters_counter_choice`, Denry Klin).
+            // `deferred_entry_events` is also written by the as-enters
+            // continuation bracket (`EntryContinuationParking`, CR 603.6d). A
+            // park for any other `ChooseOneOf` continuation is collected by its
+            // logical owner's resume or by the settled-entry release, not here,
+            // and so is another entrant's park, which this replay leaves alone.
+            if replays_enters_counter_capture {
+                let deferred =
+                    crate::game::engine_replacement::take_parked_entries_of(state, source_id);
+                let source_still_on_bf = state
+                    .objects
+                    .get(&source_id)
+                    .is_some_and(|o| o.zone == Zone::Battlefield);
+                if !deferred.is_empty() && source_still_on_bf {
+                    super::triggers::process_triggers(state, &deferred);
+                    let delayed = super::triggers::check_delayed_triggers(state, &deferred);
+                    events.extend(delayed);
+                }
             }
             // CR 608.2c + CR 122.1: advance any paused resolution chain after the
             // branch resolves. This is the standard post-resolution step every
@@ -8194,7 +8207,10 @@ pub(super) fn handle_resolution_choice(
                 .filter(|source| {
                     source.is_exact_object_and_resolution()
                         && source.prompt.identity.expected_zone == Zone::Battlefield
-                        && !state.deferred_entry_events.is_empty()
+                        && crate::game::engine_replacement::entry_park_holds_entrant(
+                            state,
+                            source.prompt.identity.reference.object_id,
+                        )
                 })
                 .map(|source| source.prompt.identity.reference.object_id)
             {
@@ -8214,10 +8230,11 @@ pub(super) fn handle_resolution_choice(
                 // trigger pause (OrderTriggers / DistributeAmong / target
                 // selection) raised by simultaneously-fired observers.
                 //
-                // Gated on `deferred_entry_events` being non-empty so a non-entry
+                // Gated on the park holding this permanent's entry so a non-entry
                 // persisted `NamedChoice` (Pithing Needle naming, Morophon type
-                // choice) takes the unchanged `else` path below — the no-op
-                // disambiguator that keeps the working path byte-for-byte intact.
+                // choice) takes the unchanged `else` path below, whatever another
+                // entrant has parked — the disambiguator that keeps the working
+                // path byte-for-byte intact.
                 // `last_named_choice` is left set across the helper's continuation
                 // drain (cleared after, mirroring the plain path) so any dependent
                 // continuation reads the answer.

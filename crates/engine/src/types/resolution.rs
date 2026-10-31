@@ -3331,6 +3331,26 @@ impl ResolutionStack {
         drains.finish_dispatch(dispatch.dispatch)
     }
 
+    /// CR 603.6d + CR 614.12a: bind `entrant` to the resident of `dispatch`'s own
+    /// frame, wherever that frame now sits. That resident is the dispatch itself
+    /// or the nested drain that owns the rest of the entry (CR 616.1g). A
+    /// consumed frame binds nothing, so the entry stays pending.
+    pub(crate) fn bind_parked_entrant(
+        &mut self,
+        dispatch: IdentifiedPostReplacementDispatch,
+        entrant: ObjectIncarnationRef,
+    ) -> bool {
+        let Some(drains) = self.post_replacement_frame_mut(dispatch.frame) else {
+            Self::report_missing_post_replacement_frame(dispatch);
+            return false;
+        };
+        let Some(resident) = drains.resident_mut() else {
+            return false;
+        };
+        resident.parked_entrants.push(entrant);
+        true
+    }
+
     /// Returns the active ChangeZone frame, or its exact immediate parent
     /// while a post-replacement child raised by that zone change is active.
     /// This is the one Devour snapshot relationship that survives a paused
@@ -6094,6 +6114,7 @@ impl LegacyReplacementTailsWire {
                         // to the affected object's controller, exactly as it did
                         // before the field existed.
                         controller: None,
+                        parked_entrants: Vec::new(),
                     },
                     ResidentDrainPolicy::Replace,
                 );
@@ -6466,7 +6487,10 @@ mod tests {
             sacrificed: victim,
             record,
         };
-        state.deferred_entry_events = vec![exploit.clone()];
+        state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry::pending(
+            exploit.clone(),
+            None,
+        )];
         (state, exploit)
     }
 
@@ -6521,6 +6545,57 @@ mod tests {
         assert!(value.get("resolution_state_version").is_none());
     }
 
+    /// CR 616.1g: a binding lands on the resident of the dispatch's own frame,
+    /// which is the nested drain that owns the rest of the entry, beside any
+    /// binding that drain already holds. A consumed frame binds nothing.
+    #[test]
+    fn a_bind_lands_on_the_nested_drain_that_owns_the_rest_of_the_entry() {
+        let inert = || {
+            PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::unimplemented("nested", "park-binding fixture"),
+                ),
+            )))
+        };
+        let mut state = GameState::new_two_player(42);
+        state.install_post_replacement_drain(inert(), ResidentDrainPolicy::Replace);
+        let (_, outer) = state
+            .begin_post_replacement_dispatch()
+            .expect("the outer drain dispatches");
+        let nested = PostReplacementDrain {
+            status: DrainStatus::Paused,
+            ..inert()
+        };
+        state
+            .active_post_replacement_drains_mut()
+            .expect("the frame")
+            .install(nested, ResidentDrainPolicy::Replace);
+        assert!(!state.post_replacement_dispatch_is_resident_top(outer));
+        state
+            .finish_post_replacement_dispatch(outer)
+            .expect("the outer drain retires");
+
+        let first = ObjectIncarnationRef::of(ObjectId(1), 1);
+        let second = ObjectIncarnationRef::of(ObjectId(2), 1);
+        assert!(state.bind_parked_entrant(outer, first));
+        assert!(state.bind_parked_entrant(outer, second));
+        assert_eq!(
+            state
+                .active_post_replacement_drains()
+                .and_then(PostReplacementDrainStack::resident)
+                .expect("the nested drain")
+                .parked_entrants,
+            vec![first, second]
+        );
+
+        let _ = state
+            .resolution_stack
+            .take_active_post_replacement()
+            .expect("the frame is active");
+        assert!(!state.bind_parked_entrant(outer, first));
+    }
+
     #[test]
     fn exploit_victim_record_survives_v1_and_v2_resolution_wires() {
         let (state, expected) = state_with_recorded_exploit_event();
@@ -6530,8 +6605,11 @@ mod tests {
             let restored: ResolutionStateWire =
                 serde_json::from_value(wire).expect("complete exploit evidence restores");
             assert_eq!(
-                restored.game_state().deferred_entry_events,
-                vec![expected.clone()]
+                restored
+                    .game_state()
+                    .parked_entry_events()
+                    .collect::<Vec<_>>(),
+                vec![&expected]
             );
         }
     }
@@ -6542,7 +6620,7 @@ mod tests {
         let mut wires = [v1_wire_value(state.clone()), v2_wire_value(state)];
 
         for wire in &mut wires {
-            wire["deferred_entry_events"][0]["data"]
+            wire["deferred_entry_events"][0]["event"]["data"]
                 .as_object_mut()
                 .expect("event data is an object")
                 .remove("record");
@@ -6555,7 +6633,10 @@ mod tests {
                 ),
                 "{error}"
             );
-            assert!(error.contains("$.deferred_entry_events[0].data"), "{error}");
+            assert!(
+                error.contains("$.deferred_entry_events[0].event.data"),
+                "{error}"
+            );
         }
     }
 

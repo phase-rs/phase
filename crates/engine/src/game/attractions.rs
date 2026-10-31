@@ -286,6 +286,7 @@ pub(crate) fn complete_roll_to_visit(
             player_id: player,
             sides: 6,
             result: Some(roll),
+            pre_entry_source: None,
         });
     }
 

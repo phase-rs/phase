@@ -17,6 +17,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TriggerFiring};
 use crate::types::player::PlayerId;
+use crate::types::resolution::ResolutionFrame;
 use crate::types::resolved_commands::{
     ResolvedStackEntryFinalizeCommand, ResolvedStackEntryFinalizeReplayInvariantError,
     ResolvedStackPushCommand, ResolvedStackPushOrigin, ResolvedStackPushReplayInvariantError,
@@ -174,6 +175,22 @@ pub(super) fn abandon_active_resolution_carrier(
     disposition: super::lifecycle::DelayedTerminalDisposition,
 ) {
     super::priority::clear_priority_passes(state);
+    let carrier = state.resolving_stack_entry.as_ref().map(|entry| entry.id);
+    // An owner drain whose chain raised no child is the active frame at its own
+    // prompt.
+    if matches!(
+        state.resolution_stack.last(),
+        Some(ResolutionFrame::PostReplacement(_))
+    ) {
+        state.abandon_active_replacement_tails();
+        // CR 800.4a: a paused ChangeZone owner beneath it is the same family, and
+        // its tail goes with it, as in `abandon_change_zone_family_for_controller`.
+        if state.active_change_zone_frame().is_some() {
+            let _ = state
+                .take_active_change_zone_frame()
+                .expect("the checked ChangeZone owner is the active frame");
+        }
+    }
     let _ = state
         .clear_active_ability_continuation()
         .expect("resolution abandonment cannot clear a buried ability continuation");
@@ -191,7 +208,9 @@ pub(super) fn abandon_active_resolution_carrier(
         state.resolving_stack_object = object;
     }
     state.resolution_source_relatch = None;
-    state.deferred_entry_events.clear();
+    // A completed entry survives, and a pending entry of another carrier stays for
+    // its producer.
+    super::engine_replacement::drop_abandoned_family_entries(state, carrier);
     state.pending_token_battlefield_entry = None;
 }
 
@@ -7313,6 +7332,82 @@ mod tests {
             lower[..2]
         );
         assert_eq!(state.objects[&lower[2]].zone, Zone::Graveyard);
+    }
+
+    /// Decision 3 of the park: a whole-carrier abandonment owns only the pending
+    /// entries of the family it abandons. A completed entry happened, and a
+    /// pending entry of another carrier stays for its producer.
+    #[test]
+    fn abandoning_a_resolution_drops_only_its_own_pending_entries() {
+        use crate::types::game_state::{ParkedEntry, ParkedEntryState};
+
+        fn parked(id: u64, state: ParkedEntryState) -> ParkedEntry {
+            ParkedEntry {
+                event: GameEvent::LandPlayed {
+                    object_id: ObjectId(id),
+                    player_id: PlayerId(0),
+                    from_zone: Zone::Hand,
+                },
+                state,
+            }
+        }
+        let pending = |carrier| ParkedEntryState::Pending { carrier };
+        let completed = parked(1, ParkedEntryState::Completed);
+        let other = ObjectId(9_002);
+
+        for zone in [Zone::Graveyard, Zone::Stack] {
+            let mut state = setup();
+            let carrier = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Carrier".to_string(),
+                zone,
+            );
+            state.resolving_stack_entry = Some(pending_spell_entry(carrier));
+            if zone == Zone::Stack {
+                state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell: carrier });
+            }
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            state.deferred_entry_events = vec![
+                completed.clone(),
+                parked(2, pending(Some(carrier))),
+                parked(3, pending(Some(other))),
+                parked(4, pending(None)),
+            ];
+            abandon_active_resolution_carrier(
+                &mut state,
+                super::super::lifecycle::DelayedTerminalDisposition::Removed,
+            );
+            assert_eq!(
+                state.deferred_entry_events,
+                vec![
+                    completed.clone(),
+                    parked(3, pending(Some(other))),
+                    parked(4, pending(None)),
+                ],
+                "{zone:?}"
+            );
+            assert_eq!(
+                state.resolving_stack_entry.is_some(),
+                zone == Zone::Stack,
+                "reach guard: an owed spell keeps its carrier"
+            );
+        }
+
+        // No carrier: the abandoned family is the entries parked outside one.
+        let mut state = setup();
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.deferred_entry_events = vec![completed.clone(), parked(4, pending(None))];
+        abandon_active_resolution_carrier(
+            &mut state,
+            super::super::lifecycle::DelayedTerminalDisposition::Removed,
+        );
+        assert_eq!(state.deferred_entry_events, vec![completed]);
     }
 
     /// CR 608.2n: abandoning a resolution family keeps the carrier of an instant

@@ -3679,7 +3679,7 @@ export type GameEvent =
   // the engine's authoritative roll (1..=sides after modifiers). `result` is
   // `null` for the symbolic planar die (CR 901.9d / CR 706.7), which has no
   // numeric face value to animate.
-  | { type: "DieRolled"; data: { player_id: PlayerId; sides: number; result: number | null } }
+  | { type: "DieRolled"; data: { player_id: PlayerId; sides: number; result: number | null; pre_entry_source?: ObjectId } }
   // CR 706.6: a die roll ignored by a replacement, shown so players see what
   // the lowest roll was. Display mirror only — never a rules roll: triggers,
   // results tables, aggregates, and AI must not read it. `result` is always

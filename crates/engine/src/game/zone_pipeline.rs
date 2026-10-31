@@ -1684,6 +1684,14 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 .collect()
         };
         if let Some(ref paused_current) = paused_current {
+            // CR 603.6d + CR 603.2c: the batch resumes only after the paused
+            // member's as-enters continuation completed; custody takes its
+            // parked entry (and runs its delayed half) so the segment below
+            // collects it once, against the realized entrant.
+            crate::game::engine_replacement::take_entry_continuation_custody(
+                state,
+                &paused_current.delivery_events,
+            );
             crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                 state,
                 &mut logical_zone_change_group,
@@ -4312,6 +4320,20 @@ pub(crate) fn deliver_replaced_zone_change(
                 Some(object_id)
             };
             counters_to_apply.extend(pending);
+            // CR 603.6d + CR 614.1c + CR 122.6: an as-enters roll is part of this entry,
+            // so counters of the kind it places are one placement with the roll's, and
+            // no counter choice comes before the roll. Counters of any other kind stay here.
+            // CR 508.4: an attacking entry keeps its counter step: only that pause
+            // records `enters_attacking` for the resume, so the entrant is still placed
+            // in combat after a chain that pauses.
+            if !enters_attacking {
+                counters_to_apply =
+                    crate::game::engine_replacement::hand_entry_counters_to_as_enters_roll(
+                        state,
+                        object_id,
+                        counters_to_apply,
+                    );
+            }
             if !counters_to_apply.is_empty()
                 && !crate::game::engine_replacement::apply_etb_counters(
                     state,

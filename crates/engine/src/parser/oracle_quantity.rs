@@ -2092,22 +2092,31 @@ pub(crate) fn parse_event_context_quantity_with_context(
         return Some(expr);
     }
 
+    // CR 706.2: "the result" of a coin flip / die roll — the result amount
+    // is exposed via the same EventContextAmount channel that "that much" /
+    // "that many" use (Adorable Kitten "You gain life equal to the result"
+    // after roll-a-die). Both compile to the same runtime resolver.
+    // CR 706.4 + CR 706.2 + CR 706.6: "the total of those results" is the aggregate of
+    // the surviving dice's results; the same runtime channel, with
+    // `die_result_this_resolution` holding the survivors' total.
+    if all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("the result"),
+        tag("the total of those results"),
+    )))
+    .parse(lower)
+    .is_ok()
+    {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+    }
+
     match lower {
         // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
         "that much" | "that many" | "that many cards" => {
             return Some(QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
             })
-        }
-        // CR 706.2: "the result" of a coin flip / die roll — the result amount
-        // is exposed via the same EventContextAmount channel that "that much" /
-        // "that many" use (Adorable Kitten "You gain life equal to the result"
-        // after roll-a-die). Both compile to the same runtime resolver.
-        // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
-        "the result" => {
-            return Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
-            });
         }
         // CR 608.2k: bare anaphoric "its" — referent bound at parse time by the
         // enclosing clause's subject/target. Emits `Anaphoric` so context
@@ -6437,6 +6446,28 @@ mod tests {
                 qty: QuantityRef::EventContextAmount
             })
         );
+    }
+
+    /// CR 706.4 + CR 706.2: "the total of those results" (Neverwinter Hydra,
+    /// Hydradoodle) names the same die-result channel as "the result". The
+    /// phrase is matched whole: a suffixed phrase is not consumed by this arm,
+    /// and the CDA authority stays blind to the bare die-result phrase (the
+    /// where-X binder relies on that).
+    #[test]
+    fn parse_event_context_quantity_die_result_aggregate() {
+        let event_amount = Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+        assert_eq!(
+            parse_event_context_quantity("the total of those results"),
+            event_amount
+        );
+        assert_eq!(parse_event_context_quantity("the result"), event_amount);
+        assert_ne!(
+            parse_event_context_quantity("the total of those results plus one"),
+            event_amount
+        );
+        assert_eq!(parse_cda_quantity("the total of those results"), None);
     }
 
     /// The TOTAL channel. Every phrase here names an unqualified

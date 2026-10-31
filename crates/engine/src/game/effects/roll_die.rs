@@ -222,6 +222,24 @@ pub(crate) fn resolve_step(
     // independently with the same sides/modifier/results table.
     let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as u32;
 
+    // CR 706.1: an instruction to roll zero dice names no dice, so nothing is
+    // proposed (`roll_dice_matcher` refuses a zero-count roll anyway) and the
+    // RNG is untouched. CR 706.4: the text says how to use the results; with
+    // no dice rolled the total of those results is 0 (Hydradoodle's ruling:
+    // "you won't roll any dice as it enters and it will be a 0/0"). Unlike a
+    // replacement-prevented roll (CR 614.6, which keeps `None`), the
+    // instruction's result is a determined zero, so a later "equal to the
+    // total of those results" reader cannot fall through to another channel.
+    if count == 0 {
+        state.die_result_this_resolution = Some(0);
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::RollDie,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(ResolutionProgress::Complete);
+    }
+
     // Slot context must be captured while `ability` is still in scope — past
     // the proposal below, a CR 616.1 suspension drops it.
     let parked = crate::game::targeting::capture_parked_slot_context(state, ability);
@@ -687,6 +705,12 @@ pub(crate) fn resume_after_ignore(
     let mut total_actual = running_total;
     let mut rolled_any = already_rolled_any;
 
+    // CR 614.1c + CR 614.12 + CR 113.6: this is the one seam that knows both which
+    // roll this is and that its source has not entered.
+    let pre_entry_source =
+        crate::game::engine_replacement::entrant_entry_is_pending(state, source_id)
+            .then_some(source_id);
+
     // CR 706.3a: resume at the first die that has not yet run its branch. A
     // fresh instruction starts at 0; a resume after an interactive branch starts
     // just past the die that suspended, so no branch runs twice and none is
@@ -744,6 +768,7 @@ pub(crate) fn resume_after_ignore(
             player_id: roller,
             sides,
             result: Some(actual),
+            pre_entry_source,
         });
 
         let actual_amount = i32::from(actual);
@@ -871,9 +896,114 @@ mod tests {
         AbilityDefinition, AbilityKind, BounceSelection, DieResultBranch, QuantityExpr,
         TargetFilter,
     };
-    use crate::types::game_state::{StackEntry, StackEntryKind};
-    use crate::types::identifiers::ObjectId;
+    use crate::types::game_state::{ParkedEntry, ParkedEntryState, StackEntry, StackEntryKind};
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    /// An entrant on the battlefield, and its entry event.
+    fn entrant_and_entry(state: &mut GameState) -> (ObjectId, GameEvent) {
+        let entrant = crate::game::zones::create_object(
+            state,
+            CardId(900),
+            PlayerId(0),
+            "Entrant".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        crate::game::zones::record_and_emit_entry_from_no_zone(state, entrant, &mut events)
+            .expect("entered");
+        let entry = events
+            .into_iter()
+            .find(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+            .expect("entry event");
+        (entrant, entry)
+    }
+
+    /// The `pre_entry_source` of each die `source` rolls, with two dice.
+    fn stamps_of_two_dice(state: &mut GameState, source: ObjectId) -> Vec<Option<ObjectId>> {
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 2 },
+                sides: 6,
+                results: vec![],
+                modifier: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(state, &ability, &mut events).expect("the roll resolves");
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DieRolled {
+                    pre_entry_source, ..
+                } => Some(*pre_entry_source),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 614.1c + CR 614.12 + CR 113.6: every die of an instruction its source
+    /// makes before its entry happened names that source; any other roll names
+    /// no one.
+    #[test]
+    fn a_pending_sources_dice_are_all_stamped() {
+        let mut state = GameState::new_two_player(42);
+        let (entrant, entry) = entrant_and_entry(&mut state);
+        state.deferred_entry_events = vec![ParkedEntry::pending(entry, None)];
+        assert_eq!(
+            stamps_of_two_dice(&mut state, entrant),
+            vec![Some(entrant), Some(entrant)]
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let (entrant, _) = entrant_and_entry(&mut state);
+        assert_eq!(stamps_of_two_dice(&mut state, entrant), vec![None, None]);
+    }
+
+    /// CR 603.2: a completed entry happened, so its entrant's later roll is an
+    /// ordinary roll, though the entry still waits for its collector. No printed
+    /// route rolls in this window (no chain puts a permanent onto the battlefield
+    /// and then rolls), so this row is direct.
+    #[test]
+    fn a_completed_sources_dice_are_not_stamped() {
+        let mut state = GameState::new_two_player(42);
+        let (entrant, entry) = entrant_and_entry(&mut state);
+        state.deferred_entry_events = vec![ParkedEntry {
+            event: entry,
+            state: ParkedEntryState::Completed,
+        }];
+        assert_eq!(stamps_of_two_dice(&mut state, entrant), vec![None, None]);
+    }
+
+    /// The stamp's wire: it round-trips, an older payload decodes to no stamp, and
+    /// an unstamped event writes no key.
+    #[test]
+    fn the_stamp_serializes_only_when_present() {
+        let roll = |pre_entry_source| GameEvent::DieRolled {
+            player_id: PlayerId(0),
+            sides: 6,
+            result: Some(3),
+            pre_entry_source,
+        };
+        let stamped = roll(Some(ObjectId(7)));
+        let mut wire = serde_json::to_value(&stamped).expect("serializes");
+        assert_eq!(
+            serde_json::from_value::<GameEvent>(wire.clone()).expect("decodes"),
+            stamped
+        );
+        let data = wire["data"].as_object_mut().expect("the event's data");
+        assert_eq!(data.remove("pre_entry_source"), Some(7.into()));
+        assert_eq!(
+            serde_json::from_value::<GameEvent>(wire).expect("decodes"),
+            roll(None)
+        );
+        let unstamped = serde_json::to_value(roll(None)).expect("serializes");
+        assert!(unstamped["data"].get("pre_entry_source").is_none());
+    }
 
     #[test]
     fn roll_die_emits_event_and_resolves_branch() {
@@ -1554,8 +1684,10 @@ mod tests {
         );
     }
 
-    /// CR 706.1: If the requested number of dice resolves to 0, no die result
-    /// exists for an inline `EventContextAmount` consumer.
+    /// CR 706.1: If the requested number of dice resolves to 0, no die is
+    /// rolled. CR 706.4 leaves the use of the results to the ability's text, and
+    /// the total of no results is 0 (Hydradoodle's ruling), so an inline
+    /// `EventContextAmount` consumer reads 0 — never the stale die result.
     #[test]
     fn roll_die_count_zero_clears_stale_die_result() {
         use crate::types::ability::{QuantityRef, TargetFilter};
@@ -1601,7 +1733,7 @@ mod tests {
                 .all(|event| !matches!(event, GameEvent::DieRolled { .. })),
             "count 0 must not emit a die roll"
         );
-        assert_eq!(state.die_result_this_resolution, None);
+        assert_eq!(state.die_result_this_resolution, Some(0));
         assert_eq!(
             state.players[0].hand.len(),
             0,
@@ -1751,7 +1883,8 @@ mod tests {
                 GameEvent::DieRolled {
                     player_id: PlayerId(0),
                     sides: 20,
-                    result: Some(17)
+                    result: Some(17),
+                    ..
                 }
             )),
             "the surviving die must still emit DieRolled, got {events:?}"

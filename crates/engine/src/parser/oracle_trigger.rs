@@ -13940,6 +13940,18 @@ fn trigger_object_pronoun_ref_for_condition(
         return Some(TargetFilter::SelfRef);
     }
 
+    // CR 608.2k + CR 706.1: a die-roll condition ("you roll a die", "an
+    // opponent rolls one or more dice") refers to a player's roll and to no
+    // object, so a bare "it" in the body names the ability's own source, which
+    // the body itself names ("from this creature, then … on it", Hammer
+    // Jammer). Recognition is the trigger arm's own condition grammar.
+    if terminated(parse_die_roll_condition, (opt(tag(",")), eof))
+        .parse(after_keyword)
+        .is_ok()
+    {
+        return Some(TargetFilter::SelfRef);
+    }
+
     None
 }
 
@@ -17580,8 +17592,8 @@ fn try_parse_die_roll_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefini
     .parse(lower)
     .ok()?;
 
-    let (rest, valid_target) = parse_die_roll_actor(rest).ok()?;
-    let (rest, (mode, batched, die_sides, die_result)) = parse_die_roll_object(rest).ok()?;
+    let (rest, (valid_target, (mode, batched, die_sides, die_result))) =
+        parse_die_roll_condition(rest).ok()?;
     if !rest.is_empty() {
         return None;
     }
@@ -17593,6 +17605,14 @@ fn try_parse_die_roll_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefini
     def.die_sides = die_sides;
     def.die_result = die_result;
     Some((mode, def))
+}
+
+/// CR 706.1 + CR 706.2: the die-roll trigger condition after "whenever " —
+/// the rolling player axis then the die object axis. The single grammar shared
+/// by trigger recognition (`try_parse_die_roll_trigger`) and the bare-pronoun
+/// pin (`trigger_object_pronoun_ref_for_condition`), so the two cannot drift.
+fn parse_die_roll_condition(input: &str) -> OracleResult<'_, (TargetFilter, DieRollObject)> {
+    pair(parse_die_roll_actor, parse_die_roll_object).parse(input)
 }
 
 fn parse_die_roll_actor(input: &str) -> OracleResult<'_, TargetFilter> {
@@ -17607,9 +17627,12 @@ fn parse_die_roll_actor(input: &str) -> OracleResult<'_, TargetFilter> {
     .parse(input)
 }
 
-fn parse_die_roll_object(
-    input: &str,
-) -> OracleResult<'_, (TriggerMode, bool, Option<u8>, Option<DieResultFilter>)> {
+/// The die object axis of a die-roll trigger condition: the trigger mode,
+/// whether it is batched ("one or more dice"), the die's sides, and the
+/// rolled-face filter.
+type DieRollObject = (TriggerMode, bool, Option<u8>, Option<DieResultFilter>);
+
+fn parse_die_roll_object(input: &str) -> OracleResult<'_, DieRollObject> {
     alt((
         value(
             (TriggerMode::RolledDie, true, None, None),

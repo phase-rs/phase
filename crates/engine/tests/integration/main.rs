@@ -63,6 +63,7 @@ mod arcum_weathervane_supertype_removal;
 mod arena_of_glory_any_of_that_mana_haste;
 mod ark_of_hunger_play_from_graveyard_751;
 mod armored_kincaller_or_condition;
+mod as_enters_dice_counters;
 mod ashaya_nontoken_lands;
 mod aspect_of_wolf_per_axis_xy;
 mod athreos_god_of_passage_targeted_opponent_unless_pay;

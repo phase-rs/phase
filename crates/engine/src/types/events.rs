@@ -1849,6 +1849,14 @@ pub enum GameEvent {
         player_id: PlayerId,
         sides: u8,
         result: Option<u8>,
+        /// CR 614.1c + CR 614.12 + CR 113.6 + CR 603.10: the entrant whose as-enters
+        /// replacement made this roll before its entry happened. Its abilities do not
+        /// function yet, so it alone is not an observer of this event. `None` for
+        /// every other roll, and for the as-enters roll of an entry that paused on
+        /// its counters first: an entry put onto the battlefield attacking, or one
+        /// whose counter step for counters of another kind paused (filed residuals).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pre_entry_source: Option<ObjectId>,
     },
     /// CR 706.6: A die roll ignored by a replacement (Barbarian Class, Pixie
     /// Guide, Wyll) — the NATURAL value, before any modifier (modifiers never

@@ -316,6 +316,7 @@ impl Run {
                     player_id,
                     sides,
                     result,
+                    ..
                 } => Some((*player_id, *sides, *result)),
                 _ => None,
             })

@@ -1737,9 +1737,17 @@ fn apply_action_boundary_core(
     // triggers. A token realization and an owed final part on the same action
     // share one pass.
     let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
+    // CR 603.3 + CR 603.6d: a direct-return handler (`handle_tribute_choice`) that
+    // settled an as-enters continuation runs no pipeline of its own, so the parked
+    // entry is released by this convergence pass, the action's first, ahead of its
+    // SBA check.
+    let settled_entry_continuation_is_parked =
+        matches!(result.waiting_for, WaitingFor::Priority { .. })
+            && !state.deferred_entry_events.is_empty();
     if (resumed_parked_root && matches!(result.waiting_for, WaitingFor::Priority { .. }))
         || realized_token_entry
         || owed_spell_final_part_is_due
+        || settled_entry_continuation_is_parked
     {
         if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
             let failure = boundary_life_change_failure(state);
@@ -18571,11 +18579,14 @@ fn park_land_played_for_deferred_entry(
     object_id: ObjectId,
     origin_zone: Zone,
 ) {
-    state.deferred_entry_events.push(GameEvent::LandPlayed {
-        object_id,
-        player_id: player,
-        from_zone: origin_zone,
-    });
+    crate::game::engine_replacement::park_pending_entry(
+        state,
+        GameEvent::LandPlayed {
+            object_id,
+            player_id: player,
+            from_zone: origin_zone,
+        },
+    );
 }
 
 fn mark_land_played_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone) {

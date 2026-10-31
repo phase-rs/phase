@@ -7703,6 +7703,64 @@ pub struct PendingTokenBattlefieldEntry {
     pub source_id: ObjectId,
 }
 
+/// CR 603.2 + CR 614.12a: whether a parked entry happened. Each producer records
+/// this; the settled take, the whole-carrier abandonment and
+/// `entrant_entry_is_pending` read it, and every other reader of the park keeps
+/// its membership reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ParkedEntryState {
+    /// Its entry has not happened. `carrier` is the stack object whose
+    /// resolution parked it, `None` outside a resolution.
+    Pending { carrier: Option<ObjectId> },
+    /// Its entry happened and it waits for its collector (CR 603.2).
+    Completed,
+}
+
+/// One entry in [`GameState::deferred_entry_events`]: the entry occurrence and
+/// whether it happened.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ParkedEntry {
+    pub event: GameEvent,
+    pub state: ParkedEntryState,
+}
+
+impl ParkedEntry {
+    /// An entry that has not happened yet, parked by the resolution of `carrier`.
+    pub fn pending(event: GameEvent, carrier: Option<ObjectId>) -> Self {
+        Self {
+            event,
+            state: ParkedEntryState::Pending { carrier },
+        }
+    }
+}
+
+/// An object with an `event` key is the current shape. Anything else is a
+/// pre-[`ParkedEntry`] bare `GameEvent`: a legacy paused drain has no binding, so
+/// such an entry could never complete, and `Completed` keeps it collectable, as
+/// its take did for an entrant whose owner and controller were still in the game.
+impl<'de> Deserialize<'de> for ParkedEntry {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Repr {
+            event: GameEvent,
+            state: ParkedEntryState,
+        }
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("event").is_some() {
+            let Repr { event, state } =
+                serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            return Ok(Self { event, state });
+        }
+        let event = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            event,
+            state: ParkedEntryState::Completed,
+        })
+    }
+}
+
 /// CR 707.2 + CR 614.1c: everything the non-liminal copy-token entry tail still
 /// has to do for ONE token after its body is materialized — the copy exceptions,
 /// its entry counters, its entry events, and the rest of the batch.
@@ -22803,19 +22861,22 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_replacement_token_substitution_count: Option<i32>,
 
-    /// CR 614.12a + CR 707.9 + CR 603.2: `ZoneChanged`-to-battlefield events
-    /// for an object whose entry is paused mid-resolution awaiting an
-    /// interactive choice (e.g. `WaitingFor::CopyTargetChoice`). Per CR
-    /// 614.12a, effects that modify how a permanent enters function
-    /// continuously *while it is entering* — so the entry isn't finalized
-    /// (and trigger scanning can't run) until the choice resolves. The
-    /// post-action pipeline moves matching events here before
-    /// `process_triggers`, and `handle_copy_target_choice` replays them
-    /// after `BecomeCopy` resolves + layers re-evaluate so granted ETBs
-    /// (Callidus Assassin's destroy-same-name) and observer ETBs
-    /// (Soul Warden) match against the fully-realized copy.
+    /// CR 614.12a + CR 707.9 + CR 603.2: the park. Entry occurrences whose
+    /// collection is deferred, written by every producer that pauses an entry:
+    /// an as-enters continuation's bracket, a mid-entry choice's capture
+    /// (`CopyTargetChoice`, an enters-counter `ChooseOneOfBranch`, an as-enters
+    /// `NamedChoice`), a played land's pause and a meld's. Per CR 614.12a,
+    /// effects that modify how a permanent enters function continuously *while
+    /// it is entering*, so trigger scanning waits for the realized object
+    /// (Callidus Assassin's granted ETB, Soul Warden on the finished copy).
+    ///
+    /// Each entry carries a [`ParkedEntryState`]: `Pending` until its producer
+    /// records that the entry happened, then `Completed` until its collector
+    /// takes it. Only the settled take, the whole-carrier abandonment and
+    /// `entrant_entry_is_pending` read the state. Every other reader holds a
+    /// parked entry the same in either state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deferred_entry_events: Vec<GameEvent>,
+    pub deferred_entry_events: Vec<ParkedEntry>,
 
     /// CR 400.7 + CR 403.3 + CR 614.12a: a token that was committed to the battlefield with its
     /// entry EVENTS suppressed and whose CR 400.7 record has NOT been written yet, because the
@@ -27263,6 +27324,12 @@ pub struct PostReplacementDrain {
     /// where the affected object's controller remains the fallback.
     #[serde(default)]
     pub controller: Option<crate::types::player::PlayerId>,
+
+    /// CR 603.6d + CR 614.12a: the entrants whose entry this paused continuation
+    /// parked. Empty for every other drain. The binding dies with its drain
+    /// unless a retire hands it on to the drain that owns the rest of the entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked_entrants: Vec<crate::types::identifiers::ObjectIncarnationRef>,
 }
 
 /// CR 616.1g: what an install does when a continuation is already resident.
@@ -27387,6 +27454,22 @@ impl PostReplacementDrain {
             event_source: None,
             event_target: None,
             controller: None,
+            parked_entrants: Vec::new(),
+        }
+    }
+
+    /// The owner of a copied as-enters choice's chain. That chain runs outside a
+    /// dispatch, so this drain has no event context: it exists to carry
+    /// `entrant`'s binding to the completion authority.
+    pub fn paused_owner_of(entrant: crate::types::identifiers::ObjectIncarnationRef) -> Self {
+        Self {
+            status: DrainStatus::Paused,
+            source: None,
+            applied: HashSet::new(),
+            event_source: None,
+            event_target: None,
+            controller: None,
+            parked_entrants: vec![entrant],
         }
     }
 
@@ -27457,7 +27540,11 @@ impl PostReplacementDrainStack {
     /// Wielder of Mysteries' win; Abundance's reveal-until). Colliding on mere
     /// residency drops it, and `draw_through_replacement` — which gates its drain on
     /// `has_post_replacement_drain()`, i.e. on `has_ready()` — then never runs it.
-    pub fn install(&mut self, drain: PostReplacementDrain, policy: ResidentDrainPolicy) -> bool {
+    pub fn install(
+        &mut self,
+        mut drain: PostReplacementDrain,
+        policy: ResidentDrainPolicy,
+    ) -> bool {
         match policy {
             ResidentDrainPolicy::KeepResident if self.has_ready() => false,
             ResidentDrainPolicy::KeepResident => {
@@ -27479,7 +27566,12 @@ impl PostReplacementDrainStack {
                     .last()
                     .is_some_and(|resident| matches!(resident.status, DrainStatus::Ready(_)))
                 {
-                    self.drains.pop();
+                    // CR 616.1g: the incoming drain now owns the rest of the
+                    // event, so the entries the evicted drain would have
+                    // completed are its to complete.
+                    if let Some(evicted) = self.drains.pop() {
+                        drain.parked_entrants.extend(evicted.parked_entrants);
+                    }
                 }
                 self.drains.push(drain);
                 true
@@ -27595,6 +27687,14 @@ impl PostReplacementDrainStack {
     /// `GameState::abandon_active_post_replacement_drains`.
     pub fn abandon_all(&mut self) {
         self.drains.clear();
+    }
+
+    /// Take every entrant bound to a drain in this frame, leaving the drains.
+    pub fn take_parked_entrants(&mut self) -> Vec<crate::types::identifiers::ObjectIncarnationRef> {
+        self.drains
+            .iter_mut()
+            .flat_map(|drain| std::mem::take(&mut drain.parked_entrants))
+            .collect()
     }
 
     /// This frame's identity, or `None` if it has never been dispatched.
@@ -30237,6 +30337,51 @@ impl GameState {
             .finish_post_replacement_dispatch(dispatch)
     }
 
+    /// Bind `entrant` to the resident of `dispatch`'s own frame, found by
+    /// identity. Pure delegation.
+    pub(crate) fn bind_parked_entrant(
+        &mut self,
+        dispatch: super::resolution::IdentifiedPostReplacementDispatch,
+        entrant: crate::types::identifiers::ObjectIncarnationRef,
+    ) -> bool {
+        self.resolution_stack.bind_parked_entrant(dispatch, entrant)
+    }
+
+    /// Bind `entrant` to the active frame's resident drain. `false` when there
+    /// is no resident, or the resident carries another entrant, whose abandonment
+    /// would end this binding too: the caller parks `entrant`'s own owner.
+    pub(crate) fn bind_parked_entrant_to_active_drain(
+        &mut self,
+        entrant: crate::types::identifiers::ObjectIncarnationRef,
+    ) -> bool {
+        let Some(resident) = self
+            .active_post_replacement_drains_mut()
+            .and_then(PostReplacementDrainStack::resident_mut)
+            .filter(|drain| {
+                drain
+                    .parked_entrants
+                    .iter()
+                    .all(|bound| bound.object_id == entrant.object_id)
+            })
+        else {
+            return false;
+        };
+        resident.parked_entrants.push(entrant);
+        true
+    }
+
+    /// The parked entry occurrences, in either state.
+    pub(crate) fn parked_entry_events(&self) -> impl Iterator<Item = &GameEvent> {
+        self.deferred_entry_events
+            .iter()
+            .map(|parked| &parked.event)
+    }
+
+    /// Whether `event` is parked, in either state, by equality.
+    pub(crate) fn park_contains_event(&self, event: &GameEvent) -> bool {
+        self.parked_entry_events().any(|parked| parked == event)
+    }
+
     /// CR 608.2c + CR 614.1a: Retires the exact top general drain after its
     /// interrupted instruction completes. An empty Attach replacement pair
     /// also retires its marked child before generic continuation draining can
@@ -30245,7 +30390,13 @@ impl GameState {
         let finished = self
             .active_post_replacement_drains_mut()
             .and_then(PostReplacementDrainStack::finish_paused_dispatch);
-        if finished.is_some() {
+        if let Some(finished) = finished {
+            // CR 603.2: the continuation is over, so the entries it parked are
+            // recorded here, the one completion authority of a paused dispatch.
+            crate::game::engine_replacement::record_parked_entry_completion(
+                self,
+                &finished.parked_entrants,
+            );
             if !self
                 .resolution_stack
                 .take_active_empty_post_replacement_attach_choice_pair()
@@ -30292,10 +30443,18 @@ impl GameState {
     /// Its only production caller is `continue_replacement_impl`'s
     /// no-post-effect ACCEPT; the no-post-effect DECLINE deliberately does not
     /// call it (CR 614.6 + CR 616.1f).
+    ///
+    /// That accept is a retire inside a running event, not an abandonment: no
+    /// one left, and the continuation's tail goes on through its own frame, so
+    /// the entries these drains parked reach the completion authority. The
+    /// abandonment path is [`Self::abandon_active_replacement_tails`].
     pub fn abandon_active_post_replacement_drains(&mut self) {
-        if let Some(drains) = self.active_post_replacement_drains_mut() {
-            drains.abandon_all();
-        }
+        let Some(drains) = self.active_post_replacement_drains_mut() else {
+            return;
+        };
+        let entrants = drains.take_parked_entrants();
+        drains.abandon_all();
+        crate::game::engine_replacement::record_parked_entry_completion(self, &entrants);
     }
 
     /// Returns the complete general post-replacement drain authority. A
@@ -36797,6 +36956,81 @@ mod drain_stack_reentrancy_tests {
         )))
     }
 
+    /// CR 616.1g: an evicted `Ready` drain's binding moves onto the drain that
+    /// now owns the rest of the event, and a discarded incoming drain moves
+    /// nothing.
+    #[test]
+    fn an_evicted_drain_hands_its_binding_to_the_incoming_drain() {
+        let entrant = ObjectIncarnationRef::of(ObjectId(1), 1);
+        let mut bound = ready_drain("bound");
+        bound.parked_entrants.push(entrant);
+
+        let mut stack = PostReplacementDrainStack::default();
+        stack.install(bound.clone(), ResidentDrainPolicy::Replace);
+        assert!(stack.install(ready_drain("incoming"), ResidentDrainPolicy::Replace));
+        assert_eq!(stack.len(), 1);
+        assert_eq!(
+            stack.resident().expect("incoming").parked_entrants,
+            vec![entrant]
+        );
+
+        let mut stack = PostReplacementDrainStack::default();
+        stack.install(bound, ResidentDrainPolicy::Replace);
+        assert!(!stack.install(ready_drain("incoming"), ResidentDrainPolicy::KeepResident));
+        assert_eq!(
+            stack.resident().expect("resident").parked_entrants,
+            vec![entrant]
+        );
+    }
+
+    /// The park's wire shape: both states round-trip byte-stably, a pre-bump bare
+    /// `GameEvent` decodes as `Completed` (its take read presence, and a legacy
+    /// paused drain has no binding), a malformed event still reports its schema
+    /// error, and a drain with no binding writes no key.
+    #[test]
+    fn a_parked_entry_round_trips_and_a_bare_event_decodes_as_completed() {
+        let event = GameEvent::LandPlayed {
+            object_id: ObjectId(1),
+            player_id: PlayerId(0),
+            from_zone: Zone::Hand,
+        };
+        for state in [
+            ParkedEntryState::Completed,
+            ParkedEntryState::Pending { carrier: None },
+            ParkedEntryState::Pending {
+                carrier: Some(ObjectId(5)),
+            },
+        ] {
+            let entry = ParkedEntry {
+                event: event.clone(),
+                state,
+            };
+            let wire = serde_json::to_value(&entry).expect("serializes");
+            let decoded: ParkedEntry = serde_json::from_value(wire.clone()).expect("decodes");
+            assert_eq!(decoded, entry);
+            assert_eq!(serde_json::to_value(&decoded).expect("serializes"), wire);
+        }
+
+        let legacy = serde_json::to_value(&event).expect("serializes");
+        let decoded: ParkedEntry = serde_json::from_value(legacy).expect("decodes");
+        assert_eq!(decoded.event, event);
+        assert_eq!(decoded.state, ParkedEntryState::Completed);
+
+        let mut malformed =
+            serde_json::to_value(ParkedEntry::pending(event, None)).expect("serializes");
+        malformed["event"]["data"]
+            .as_object_mut()
+            .expect("event data is an object")
+            .remove("object_id");
+        let error = serde_json::from_value::<ParkedEntry>(malformed)
+            .expect_err("a malformed event refuses")
+            .to_string();
+        assert!(error.contains("missing field `object_id`"), "{error}");
+
+        let wire = serde_json::to_value(ready_drain("empty")).expect("serializes");
+        assert!(wire.get("parked_entrants").is_none(), "{wire}");
+    }
+
     /// CR 616.1g: a continuation that is RUNNING must not block a new one from
     /// being installed.
     ///
@@ -38125,7 +38359,7 @@ mod tests {
             sacrificed: victim,
             record,
         };
-        state.deferred_entry_events = vec![exploit.clone()];
+        state.deferred_entry_events = vec![ParkedEntry::pending(exploit.clone(), None)];
         (state, exploit)
     }
 
@@ -38136,7 +38370,10 @@ mod tests {
         let direct: GameState =
             serde_json::from_value(serde_json::to_value(&state).expect("current state serializes"))
                 .expect("current state with complete exploit evidence decodes");
-        assert_eq!(direct.deferred_entry_events, vec![expected.clone()]);
+        assert_eq!(
+            direct.parked_entry_events().collect::<Vec<_>>(),
+            vec![&expected]
+        );
 
         for persisted in [
             PersistedGameState::Raw(Box::new(state.clone())),
@@ -38147,7 +38384,10 @@ mod tests {
             )
             .expect("persisted state with complete exploit evidence decodes")
             .into_game_state_unchecked();
-            assert_eq!(restored.deferred_entry_events, vec![expected.clone()]);
+            assert_eq!(
+                restored.parked_entry_events().collect::<Vec<_>>(),
+                vec![&expected]
+            );
         }
     }
 
@@ -38542,39 +38782,40 @@ mod tests {
             serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
                 .expect("versioned fixture serializes");
         let base = serde_json::to_value(state).expect("fixture serializes");
-        let event_path = "$.deferred_entry_events[0].data";
+        let event_path = "$.deferred_entry_events[0].event.data";
 
         let mut cases = Vec::new();
         let mut missing_record = base.clone();
-        missing_record["deferred_entry_events"][0]["data"]
+        missing_record["deferred_entry_events"][0]["event"]["data"]
             .as_object_mut()
             .expect("event data is an object")
             .remove("record");
         cases.push((missing_record, "record is missing"));
 
         let mut null_record = base.clone();
-        null_record["deferred_entry_events"][0]["data"]["record"] = serde_json::Value::Null;
+        null_record["deferred_entry_events"][0]["event"]["data"]["record"] =
+            serde_json::Value::Null;
         cases.push((null_record, "record must be an object"));
 
         let mut scalar_record = base.clone();
-        scalar_record["deferred_entry_events"][0]["data"]["record"] =
+        scalar_record["deferred_entry_events"][0]["event"]["data"]["record"] =
             serde_json::Value::from("not a record");
         cases.push((scalar_record, "record must be an object"));
 
         let mut missing_token = base.clone();
-        missing_token["deferred_entry_events"][0]["data"]["record"]
+        missing_token["deferred_entry_events"][0]["event"]["data"]["record"]
             .as_object_mut()
             .expect("record is an object")
             .remove("is_token");
         cases.push((missing_token, "record.is_token is missing"));
 
         let mut invalid_token = base.clone();
-        invalid_token["deferred_entry_events"][0]["data"]["record"]["is_token"] =
+        invalid_token["deferred_entry_events"][0]["event"]["data"]["record"]["is_token"] =
             serde_json::Value::from("true");
         cases.push((invalid_token, "record.is_token must be a boolean"));
 
         let mut mismatched_id = base.clone();
-        mismatched_id["deferred_entry_events"][0]["data"]["record"]["object_id"] =
+        mismatched_id["deferred_entry_events"][0]["event"]["data"]["record"]["object_id"] =
             serde_json::Value::from(99_999_u64);
         cases.push((
             mismatched_id,
@@ -38594,7 +38835,7 @@ mod tests {
         }
 
         let mut partial_record = base.clone();
-        partial_record["deferred_entry_events"][0]["data"]["record"]
+        partial_record["deferred_entry_events"][0]["event"]["data"]["record"]
             .as_object_mut()
             .expect("record is an object")
             .remove("name");
@@ -38633,7 +38874,7 @@ mod tests {
                     .expect("wire is an object")
                     .remove("resolution_frames");
             }
-            historical_wire["deferred_entry_events"][0]["data"]
+            historical_wire["deferred_entry_events"][0]["event"]["data"]
                 .as_object_mut()
                 .expect("event data is an object")
                 .remove("record");
@@ -41314,7 +41555,7 @@ mod tests {
         let record = persisted_zone_change_record(ObjectId(9_151), 19, 0);
         let event = persisted_zone_change_event(record.clone());
         state.zone_changes_this_turn.push_back(record);
-        state.deferred_entry_events = vec![event.clone()];
+        state.deferred_entry_events = vec![ParkedEntry::pending(event.clone(), None)];
         state.pending_trigger_event_batch = vec![event.clone()];
         state.current_trigger_event = Some(event.clone());
         state.current_trigger_events = vec![event.clone()];
@@ -41520,7 +41761,7 @@ mod tests {
         serde_json::from_value::<PersistedGameState>(persisted)
             .expect("historical journal event is not a live occurrence carrier");
 
-        state.deferred_entry_events = vec![historical];
+        state.deferred_entry_events = vec![ParkedEntry::pending(historical, None)];
         let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
             .expect("live carrier fixture serializes");
         let error = serde_json::from_value::<PersistedGameState>(persisted)
@@ -46828,13 +47069,14 @@ mod tests {
             "reach guard: a settled state equals its copy"
         );
         let mut unsettled = settled.clone();
-        unsettled
-            .deferred_entry_events
-            .push(GameEvent::PermanentTapped {
+        unsettled.deferred_entry_events.push(ParkedEntry::pending(
+            GameEvent::PermanentTapped {
                 object_id: ObjectId(50),
                 caused_by: None,
                 incarnation: Some(3),
-            });
+            },
+            None,
+        ));
         assert!(!unsettled.is_loop_comparable());
         let normalized = unsettled.normalize_for_loop();
         assert!(

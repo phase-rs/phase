@@ -127,6 +127,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // Routes that consult `enters_with_fails_closed` record the line as the
     // `enters_with_clause` gap. An arm that reads every sentence of such a line
     // must dispatch above this gate.
+    // CR 614.1c + CR 603.6d + CR 706.4: "As ~ enters, roll <dice>. ~ enters
+    // with <counters> equal to the result." reads both sentences, so it
+    // dispatches above the gate below (Neverwinter Hydra, Hammer Jammer).
+    if let Some(Ok(def)) = as_enters_roll_enters_with_outcome(&norm_lower) {
+        return Some(def.description(text.to_string()));
+    }
     if is_line_owned_enters_with_clause(&norm_lower) {
         return None;
     }
@@ -4672,6 +4678,135 @@ impl EntersWithGap {
     }
 }
 
+/// CR 614.1c + CR 706.1: is this parsed "As ~ enters, <body>" body a bare
+/// die-roll instruction the as-enters roll composition can carry? A results
+/// table (CR 706.3) is out of class; a roll modifier is part of the roll
+/// (CR 706.2). Every gating or choice-bearing field must be empty, as in
+/// [`as_enters_one_shot_is_admissible`], and the roll must be the whole body.
+fn is_as_enters_roll_prefix(def: &AbilityDefinition) -> bool {
+    let bare_roll = match &*def.effect {
+        Effect::RollDie { results, .. } => results.is_empty(),
+        _ => false,
+    };
+    bare_roll
+        && def.sub_ability.is_none()
+        && def.condition.is_none()
+        && !def.optional
+        && def.optional_player.is_none()
+        && def.optional_for.is_none()
+        && def.unless_pay.is_none()
+        && def.else_ability.is_none()
+        && def.player_scope.is_none()
+        && def.repeat_for.is_none()
+        && def.repeat_until.is_none()
+        && def.modal.is_none()
+        && def.mode_abilities.is_empty()
+        && def.unlowered_guard.is_none()
+}
+
+/// CR 614.1c + CR 706.1: split a two-sentence "As ~ enters, roll <dice>.
+/// <enters-with sentence>" line into its parsed roll and its second sentence
+/// (a subslice of `norm_lower`). `None` for any other shape: a quoted span, a
+/// unit count other than two, no as-enters frame, no entry verb in the second
+/// sentence, or a first-sentence body that is not a bare die roll.
+fn split_as_enters_roll_prefix(norm_lower: &str) -> Option<(AbilityDefinition, &str)> {
+    if nom_primitives::strip_double_quoted_spans(norm_lower) != norm_lower {
+        return None;
+    }
+    let units = alphanumeric_sentence_units(norm_lower);
+    let [frame_unit, enters_with_unit] = units.as_slice() else {
+        return None;
+    };
+    let (body, ()) = parse_as_self_enters_frame(frame_unit).ok()?;
+    nom_primitives::scan_at_word_boundaries(enters_with_unit, parse_entry_verb_with)?;
+    // Punctuation cleanup on the pre-tokenized body (drop the sentence terminator).
+    let body = body.trim().trim_end_matches('.').trim();
+    if body.is_empty() {
+        return None;
+    }
+    let mut roll = parse_effect_chain(body, AbilityKind::Spell);
+    if !is_as_enters_roll_prefix(&roll) {
+        return None;
+    }
+    // CR 107.3m: the X of an as-enters roll is the X paid for the spell that
+    // became the permanent.
+    if let Effect::RollDie { count, .. } = &mut *roll.effect {
+        rewrite_variable_x_to_cost_x_paid(count);
+    }
+    Some((roll, enters_with_unit))
+}
+
+/// Is this execute node a modification of how the entering permanent itself
+/// enters (CR 614.1c: counters, CR 122.6; tapped, CR 614.1d)? Allowlist: any
+/// other effect is not an event modifier of this permanent.
+fn is_self_entry_modifier(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::PutCounter {
+            target: TargetFilter::SelfRef,
+            ..
+        } | Effect::SetTapState {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    )
+}
+
+/// CR 614.1c + CR 603.6d + CR 706.4 + CR 122.6: the single composition
+/// authority for "As ~ enters, roll <dice>. ~ enters with <counters> equal to
+/// the result / the total of those results." The roll happens as part of the
+/// entry event and the counters it determines are given as the permanent
+/// enters, so one `Moved` replacement carries both: the roll heads the execute
+/// chain and the enters-with sentence's self modifiers follow it.
+///
+/// `None` when the line is not this shape. `Some(Ok(def))` when the second
+/// sentence is an ungated, self-only enters-with replacement whose execute is
+/// self entry modifiers only. Otherwise `Some(Err(..))` with the line's
+/// [`classify_multi_sentence`] verdict, so a line this composition does not
+/// claim keeps exactly the verdict it had without it.
+fn as_enters_roll_enters_with_outcome(
+    norm_lower: &str,
+) -> Option<Result<ReplacementDefinition, EntersWithDecline>> {
+    let (roll, sentence) = split_as_enters_roll_prefix(norm_lower)?;
+    let claimed = enters_with_counters_outcome(sentence, sentence)
+        .ok()
+        .and_then(|mut inner| {
+            // CR 614.12: the frame's "this creature" names only this permanent.
+            let self_only = matches!(inner.event, ReplacementEvent::Moved)
+                && inner.valid_card == Some(TargetFilter::SelfRef);
+            // A gate on the counter sentence would also gate the roll.
+            let ungated = inner.condition.is_none();
+            let execute = inner.execute.take()?;
+            (self_only && ungated && chain_is_self_entry_modifiers(&execute)).then(|| {
+                inner.execute = Some(Box::new(roll.sub_ability(*execute)));
+                inner
+            })
+        });
+    Some(claimed.ok_or_else(|| classify_multi_sentence(&alphanumeric_sentence_units(norm_lower))))
+}
+
+/// Every node of `execute` (through `sub_ability`) is a self entry modifier.
+fn chain_is_self_entry_modifiers(execute: &AbilityDefinition) -> bool {
+    let mut node = Some(execute);
+    while let Some(def) = node {
+        if !is_self_entry_modifier(&def.effect) {
+            return false;
+        }
+        node = def.sub_ability.as_deref();
+    }
+    true
+}
+
+/// The sentence units of `text` that carry a word: punctuation-only fragments
+/// are not sentences. Shared by the multi-sentence enters-with classifier and
+/// the as-enters roll composition so the two read the same units.
+fn alphanumeric_sentence_units(text: &str) -> Vec<&str> {
+    nom_primitives::split_sentence_units(text)
+        .into_iter()
+        .filter(|unit| unit.chars().any(char::is_alphanumeric))
+        .collect()
+}
+
 /// CR 614.1c + CR 608.2c: the multi-sentence step of
 /// [`enters_with_counters_outcome`]. One replacement carries one enters-with
 /// sentence, so a line of several sentences is classified, never claimed
@@ -4679,17 +4814,21 @@ impl EntersWithGap {
 /// ("… and with \"Pay 3 life: Regenerate this creature.\"") does not split the
 /// line, and punctuation-only fragments are not sentences.
 ///
-/// `None` when the line has no entry verb followed by "with " or is a single
-/// sentence; otherwise the line's [`classify_multi_sentence`] verdict. Shared
+/// `None` when the line has no entry verb followed by "with ", is a single
+/// sentence, or is an as-enters roll line the composition claims
+/// ([`as_enters_roll_enters_with_outcome`]); otherwise the composition's
+/// decline or the line's [`classify_multi_sentence`] verdict. Shared
 /// by the enters-with arm and the replacement dispatcher's gate
 /// ([`is_line_owned_enters_with_clause`]) so the two cannot drift.
 fn multi_sentence_enters_with_decline(norm_lower: &str) -> Option<EntersWithDecline> {
     nom_primitives::scan_at_word_boundaries(norm_lower, parse_entry_verb_with)?;
+    match as_enters_roll_enters_with_outcome(norm_lower) {
+        Some(Ok(_)) => return None,
+        Some(Err(decline)) => return Some(decline),
+        None => {}
+    }
     let masked = nom_primitives::strip_double_quoted_spans(norm_lower);
-    let units: Vec<&str> = nom_primitives::split_sentence_units(&masked)
-        .into_iter()
-        .filter(|unit| unit.chars().any(char::is_alphanumeric))
-        .collect();
+    let units = alphanumeric_sentence_units(&masked);
     (units.len() > 1).then(|| classify_multi_sentence(&units))
 }
 
@@ -4721,6 +4860,13 @@ fn enters_with_counters_outcome(
     // CR 614.1c: no entry verb followed by "with " anywhere — not this shape.
     if nom_primitives::scan_at_word_boundaries(norm_lower, parse_entry_verb_with).is_none() {
         return Err(EntersWithDecline::NotThisShape);
+    }
+
+    // CR 614.1c + CR 603.6d + CR 706.4: an "As ~ enters, roll <dice>." frame
+    // followed by its enters-with sentence is one replacement; the composition
+    // authority owns both its claim and its decline.
+    if let Some(outcome) = as_enters_roll_enters_with_outcome(norm_lower) {
+        return outcome.map(|def| def.description(original_text.to_string()));
     }
 
     // CR 614.1c + CR 608.2c: one replacement carries one enters-with sentence;
@@ -32726,6 +32872,100 @@ mod tests {
             "{:?}",
             packleader.abilities
         );
+    }
+
+    fn roll_norm(line: &str) -> String {
+        replace_self_refs(&strip_reminder_text(line), "Roll Witness").to_lowercase()
+    }
+
+    /// R2/R3 helper rows. CR 614.1c + CR 603.6d + CR 706.4: the composition
+    /// claims an ungated self-only roll line, and the dispatcher gate then no
+    /// longer owns it; every line it declines keeps `Clause` and stays
+    /// line-owned. The gated, distributive and non-modifier lines reach the new
+    /// composition check (`split_as_enters_roll_prefix` admits them, and their
+    /// enters-with sentence parses alone), so their gap is that check's, not an
+    /// upstream decline.
+    #[test]
+    fn as_enters_roll_composition_claims_and_declines() {
+        for line in [
+            "As this creature enters, roll X d6. It enters with a number of +1/+1 counters on it equal to the total of those results.",
+            "As this creature enters, roll a six-sided die. This creature enters with a number of funk counters on it equal to the result.",
+        ] {
+            let norm = roll_norm(line);
+            assert!(
+                matches!(as_enters_roll_enters_with_outcome(&norm), Some(Ok(_))),
+                "{norm}"
+            );
+            assert!(!is_line_owned_enters_with_clause(&norm), "{norm}");
+            assert_eq!(multi_sentence_enters_with_decline(&norm), None, "{norm}");
+        }
+        // `(line, admitted by the split, reaches the composition's own check)`.
+        for (line, admitted, reaches_check) in [
+            // A gate the enters-with reader carries as a condition: the
+            // composition's ungated check declines it.
+            (
+                "As this creature enters, roll a six-sided die. If this creature was kicked, it enters with a number of +1/+1 counters on it equal to the result.",
+                true,
+                true,
+            ),
+            // A gate the enters-with reader itself declines.
+            (
+                "As this creature enters, roll a six-sided die. If you cast it, it enters with a number of +1/+1 counters on it equal to the result.",
+                true,
+                false,
+            ),
+            // A distributive subject: not this permanent (CR 614.12).
+            (
+                "As this creature enters, roll a six-sided die. Each other creature you control enters with a number of +1/+1 counters on it equal to the result.",
+                true,
+                true,
+            ),
+            // A non-modifier node (the keyword grant) in the execute.
+            (
+                "As this creature enters, roll a six-sided die. This creature enters with flying and with a number of +1/+1 counters on it equal to the result.",
+                true,
+                true,
+            ),
+            (
+                "As this creature enters, roll a six-sided die. This creature enters with a number of +1/+1 counters on it equal to the result. This creature enters with a number of charge counters on it equal to the result.",
+                false,
+                false,
+            ),
+        ] {
+            let norm = roll_norm(line);
+            assert!(is_line_owned_enters_with_clause(&norm), "{norm}");
+            assert_eq!(
+                as_enters_roll_enters_with_outcome(&norm).map(Result::err),
+                admitted.then_some(Some(EntersWithDecline::FailsClosed(EntersWithGap::Clause))),
+                "{norm}"
+            );
+            let split = split_as_enters_roll_prefix(&norm);
+            assert_eq!(split.is_some(), admitted, "{norm}");
+            if let Some((_, sentence)) = split {
+                assert_eq!(
+                    enters_with_counters_outcome(sentence, sentence).is_ok(),
+                    reaches_check,
+                    "reach guard, the enters-with sentence parses alone: {sentence}"
+                );
+            }
+        }
+        // A results table is out of class (CR 706.3): the roll prefix declines.
+        let mut table_roll = parse_effect_chain("roll a d20", AbilityKind::Spell);
+        assert!(is_as_enters_roll_prefix(&table_roll));
+        if let Effect::RollDie { results, .. } = &mut *table_roll.effect {
+            results.push(crate::types::ability::DieResultBranch {
+                min: 1,
+                max: 20,
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )),
+            });
+        }
+        assert!(!is_as_enters_roll_prefix(&table_roll));
     }
 
     /// CR 614.1c: the typed decline separates "my shape, gate fails closed" and

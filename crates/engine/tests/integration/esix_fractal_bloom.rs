@@ -1200,11 +1200,11 @@ fn substitute_copies_do_not_re_enter_esixs_own_replacement() {
 /// broken one, and it is recorded here so no later reader mistakes it for
 /// evidence.
 ///
-/// `capture_deferred_entry_events_if_mid_entry_choice` clears
-/// `state.deferred_entry_events` UNCONDITIONALLY once its `CopyTargetChoice` arm
+/// `capture_deferred_entry_events_if_mid_entry_choice` removes only the parked
+/// entries of the prompt's own `source_id` once its `CopyTargetChoice` arm
 /// selects, and its capture loop only pushes a `ZoneChanged { to: Battlefield }`
-/// for the prompt's own `source_id`. Esix is a resident permanent that is not
-/// entering, so the loop matches nothing and the vector is observably empty —
+/// for that source. Esix is a resident permanent that is not entering, so the
+/// loop matches nothing and the vector is observably empty —
 /// but that is a property of THIS fixture, not of the code: the copy batch calls
 /// the same dispatcher with an *entering* token as `source_id`, so a fixture
 /// whose copies raise a mid-entry choice could populate it.
