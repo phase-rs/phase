@@ -35,7 +35,7 @@ These rules are defined in CLAUDE.md and are enforced without exception. Violati
 
 **Nom combinator reference:** See `nom_combinators.md` in this skill directory for the complete list of nom parsers and combinators organized by module. Consult this when choosing which combinator to use.
 
-**Copy-paste patterns + the enforcement gate:** When you need to translate a string-method idiom into combinators, open `crates/engine/src/parser/oracle_nom/PATTERNS.md` — it indexes every common shape (strip prefix, strip suffix, optional trailing clause, alternatives, word-boundary scan, delimiter split, contains-check, peek-without-consume) with copy-pasteable code. The pre-commit hook `scripts/check-parser-combinators.sh` actively rejects new lines containing `.strip_prefix(...)`, `.strip_suffix(...)`, `.contains("...")`, `.starts_with("...")`, `.ends_with("...")`, `.split_once(...)`, `.find("...")`, or `.trim_end_matches("...")` against string literals inside `crates/engine/src/parser/`. If a use is genuinely structural (post-tokenization punctuation cleanup, `TextPair` dual-string stripping, runtime char scans) annotate the line `// allow-noncombinator: <one-line reason>` per PATTERNS.md §9. Existing offenders are grandfathered; new code is gated.
+**Copy-paste patterns + the enforcement gate:** When you need to translate a string-method idiom into combinators, open `crates/phase-parser/src/parser/oracle_nom/PATTERNS.md` — it indexes every common shape (strip prefix, strip suffix, optional trailing clause, alternatives, word-boundary scan, delimiter split, contains-check, peek-without-consume) with copy-pasteable code. The pre-commit hook `scripts/check-parser-combinators.sh` actively rejects new lines containing `.strip_prefix(...)`, `.strip_suffix(...)`, `.contains("...")`, `.starts_with("...")`, `.ends_with("...")`, `.split_once(...)`, `.find("...")`, or `.trim_end_matches("...")` against string literals inside `crates/phase-parser/src/parser/`. If a use is genuinely structural (post-tokenization punctuation cleanup, `TextPair` dual-string stripping, runtime char scans) annotate the line `// allow-noncombinator: <one-line reason>` per PATTERNS.md §9. Existing offenders are grandfathered; new code is gated.
 
 **The only acceptable uses of `starts_with`/`strip_prefix` in parser code:**
 - `TextPair::strip_prefix` for dual-string case-bridging operations (this is structural, not dispatch)
@@ -323,7 +323,7 @@ All parser branches delegate atomic parsing to shared nom 8.0 combinators:
 | `enchant.rs` | "Enchant {filter}" attachment-restriction combinators |
 | `return_as_aura.rs` | "return ~ ... attached to" / return-as-Aura combinators |
 
-The leaf combinators that `Keyword` decoding needs (`parse_number`, `parse_color`, `parse_subtype`, `parse_zone_filter`, `parse_property_filter`, the enchant legs, `OracleResult`/`OracleError`, …) are defined in `crates/engine/src/types/text_grammar.rs`. Every one that parser code still calls is re-exported at its old parser path; call it by that path. The ones no parser code calls have no parser path: the English-number legs (including `parse_article_number`; reach them through `parse_number`), the other private helpers, and `parse_enchant_player_base`. The nom mandate and the combinator gate bind the new file.
+The leaf combinators that `Keyword` decoding needs (`parse_number`, `parse_color`, `parse_subtype`, `parse_zone_filter`, `parse_property_filter`, the enchant legs, `OracleResult`/`OracleError`, …) are defined in `crates/phase-ast/src/types/text_grammar.rs`. Every one that parser code still calls is re-exported at its old parser path; call it by that path. The ones no parser code calls have no parser path: the English-number legs (including `parse_article_number`; reach them through `parse_number`), the other private helpers, and `parse_enchant_player_base`. The nom mandate and the combinator gate bind the new file.
 
 ### Two-Phase Parse/Lower Architecture (clause level)
 
@@ -994,7 +994,7 @@ or support classification. Node IDs and source offsets retain their local scope.
 
 The parser must never silently discard Oracle text. Every clause must either be represented in the parsed AST OR cause the line to fail and yield `Effect::Unimplemented` carrying the original phrase. **Anything in between is a parser lie.**
 
-The `crates/engine/src/parser/swallow_check.rs` module audits each card's parsed `ParsedAbilities` against its original Oracle text and emits a `parse_warning` for every marker phrase that has no AST representation. Findings surface in the coverage report via `CardFace::parse_warnings` (also written into each card's entry in `client/public/card-data.json`).
+The `crates/phase-parser/src/parser/swallow_check.rs` module audits each card's parsed `ParsedAbilities` against its original Oracle text and emits a `parse_warning` for every marker phrase that has no AST representation. Findings surface in the coverage report via `CardFace::parse_warnings` (also written into each card's entry in `client/public/card-data.json`).
 
 **Reading current swallow gaps:**
 

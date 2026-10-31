@@ -57,7 +57,7 @@ from zone_authority_census import (
     CensusError, ScanState, strip_noncode, iter_production_lines, non_test_code,
 )
 
-SCOPE = "crates/engine/src/parser"
+SCOPE = "crates/phase-parser/src/parser"
 LEDGER = "scripts/residue-ratchet.txt"
 # `fold_type_union` / `parse_filter_phrase_union` (issue #10364) are union-fold
 # wrappers over the readers below and return the same `(filter, remainder)`

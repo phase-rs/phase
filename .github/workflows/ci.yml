@@ -78,7 +78,7 @@ jobs:
 
       - name: Parser combinator gate
         # Diff-based gate: new parser code must use nom combinators, not
-        # string-matching methods. See crates/engine/src/parser/oracle_nom/PATTERNS.md.
+        # string-matching methods. See crates/phase-parser/src/parser/oracle_nom/PATTERNS.md.
         run: |
           BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then

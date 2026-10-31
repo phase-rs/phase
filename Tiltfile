@@ -69,6 +69,8 @@ ENGINE_SRC = [
     'crates/phase-ast/data/',
     'crates/phase-ast/build.rs',
     'crates/phase-ast/Cargo.toml',
+    'crates/phase-parser/src/',
+    'crates/phase-parser/Cargo.toml',
 ]
 ENGINE_TESTS = ['crates/engine/tests/']
 # `crates/engine/src/types/format.rs` `include_str!`s the first two files
@@ -240,7 +242,7 @@ local_resource('server',
 # `cargo test-all`) do not enable engine/proptest; a feature mismatch here would
 # force a rebuild.
 local_resource('build-native',
-    cmd = 'cargo nextest run -p phase-ast -p phase-engine -p phase-ai --no-run',
+    cmd = 'cargo nextest run -p phase-ast -p phase-parser -p phase-engine -p phase-ai --no-run',
     deps = ENGINE_SRC + ENGINE_TESTS + AI_SRC + AI_TESTS + CLIENT_ENGINE_INPUTS,
     ignore = TMP_IGNORE,
     allow_parallel = True,
@@ -249,7 +251,7 @@ local_resource('build-native',
 )
 
 local_resource('test-engine',
-    cmd = 'cargo nextest run -p phase-ast -p phase-engine',
+    cmd = 'cargo nextest run -p phase-ast -p phase-parser -p phase-engine',
     deps = ENGINE_SRC + ENGINE_TESTS + CLIENT_ENGINE_INPUTS,
     ignore = TMP_IGNORE,
     resource_deps = ['build-native'],
@@ -699,6 +701,7 @@ local_resource('probe-pin-census',
     deps = [
         'crates/engine/src/',
         'crates/phase-ast/src/',
+        'crates/phase-parser/src/',
         'crates/phase-ai/src/',
         # THE BUILD INPUTS OF THE TARGET THIS PIN RESOLVES BY BUILDING (`--test integration`).
         # A lockfile- or manifest-only edit changes what that target compiles while every watched
@@ -708,8 +711,8 @@ local_resource('probe-pin-census',
         # "everything that can break the build" reading the comment above already rejects for the
         # thousand-odd sibling test files.
         # WHICH manifests, MEASURED not shotgunned (`cargo tree -p phase-engine -e normal,dev`
-        # intersected with the workspace members): phase-engine and phase-ast are the workspace
-        # members in this target's graph, so their manifests plus the workspace root's --
+        # intersected with the workspace members): phase-engine, phase-ast and phase-parser are the
+        # workspace members in this target's graph, so their manifests plus the workspace root's --
         # [profile.test] and [workspace.dependencies], which this target resolves through -- are
         # the whole set.
         # Sibling crate manifests are deliberately absent: they cannot reach this build.
@@ -720,6 +723,7 @@ local_resource('probe-pin-census',
         'Cargo.toml',
         'crates/engine/Cargo.toml',
         'crates/phase-ast/Cargo.toml',
+        'crates/phase-parser/Cargo.toml',
         # NOT a manifest, watched on the same one-file rule: [env] here sets
         # RUST_MIN_STACK = 16777216, which that file records as load-bearing for test threads
         # (Debug-formatting the Effect <-> AbilityDefinition recursion overflows a default
