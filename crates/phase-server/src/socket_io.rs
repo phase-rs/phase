@@ -918,6 +918,7 @@ impl ConnectionEncoder {
     }
 
     /// One unbounded preparation that consumes the envelope and its resync permit.
+    #[cfg(test)]
     fn prepare(
         &self,
         envelope: crate::socket_mailbox::Envelope,
