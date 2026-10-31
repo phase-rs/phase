@@ -401,7 +401,8 @@ fn importance(event: &GameEvent) -> LogImportance {
         // dungeon), so the timeline is the only place a player learns which room
         // they landed in and what it does.
         | GameEvent::RoomEntered { .. }
-        | GameEvent::ArmyAmassed { .. } => LogImportance::Context,
+        | GameEvent::ArmyAmassed { .. }
+        | GameEvent::ShortcutRepetition { .. } => LogImportance::Context,
         // A countered spell or prevented damage is the decisive outcome of an
         // otherwise-visible action, so Timeline must not make that outcome
         // disappear behind the Details view.
@@ -609,6 +610,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::DamageCleared { .. }
         | GameEvent::GameOver { .. }
         | GameEvent::ResolutionHalted { .. }
+        | GameEvent::ShortcutRepetition { .. }
         | GameEvent::CounterAdded { .. }
         | GameEvent::ObjectIntensified { .. }
         | GameEvent::Evolved { .. }
@@ -896,6 +898,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         // CR 732.2: a halted runaway resolution is game-flow control, grouped
         // with GameOver under `Game` rather than object-state `State`.
         | GameEvent::ResolutionHalted { .. }
+        | GameEvent::ShortcutRepetition { .. }
         | GameEvent::PlayerLost { .. }
         | GameEvent::PlayerEliminated { .. }
         // CR 103.1: grouped with the setup event MulliganStarted under `Game`
@@ -1889,6 +1892,16 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::ResolutionHalted { .. } => {
             vec![text("Resolution halted — possible mandatory loop")]
         }
+
+        // CR 732.2a: engine-authored raw text, like `ResolutionHalted` above.
+        GameEvent::ShortcutRepetition {
+            controller,
+            repetition,
+        } => vec![
+            player_seg(state, *controller),
+            text(" repeats the loop — repetition "),
+            num(crate::game::arithmetic::u32_to_i32_saturating(*repetition)),
+        ],
 
         GameEvent::MonarchChanged { player_id } => {
             vec![player_seg(state, *player_id), text(" becomes the monarch")]

@@ -33861,6 +33861,86 @@ fn gix_its_controller_antecedent_does_not_leak_to_later_that_player() {
     }
 }
 
+/// Issue #10347 — Basalt Golem: "Whenever this creature becomes blocked by a
+/// creature, that creature's controller sacrifices it at end of combat. If the
+/// player does, they create a 0/2 colorless Wall artifact creature token with
+/// defender." Both anaphors name the BLOCKER's side.
+///
+/// CR 608.2c (read the whole text and apply the rules of English): "it" is the
+/// possessor of the subject phrase — that creature — not the ability's source,
+/// and "the player" / "they" is that creature's controller. CR 701.21a is why
+/// they must agree: a player can't sacrifice a permanent they don't control, so
+/// a source-self subject authorizes nobody. CR 111.2: the player who creates the
+/// token owns it.
+#[test]
+fn basalt_golem_delayed_sacrifice_names_the_blocker_and_its_controller() {
+    let def = parse_trigger_line(
+        "Whenever this creature becomes blocked by a creature, that creature's controller \
+         sacrifices it at end of combat. If the player does, they create a 0/2 colorless Wall \
+         artifact creature token with defender.",
+        "Basalt Golem",
+    );
+    assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+    let execute = def.execute.as_ref().expect("trigger should have execute");
+    assert_no_unimplemented(execute.as_ref());
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected a delayed trigger, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *condition,
+        DelayedTriggerCondition::AtNextPhase {
+            phase: crate::types::phase::Phase::EndCombat
+        },
+        "CR 603.7a: 'at end of combat' schedules a delayed triggered ability"
+    );
+    match effect.effect.as_ref() {
+        Effect::Sacrifice { target, count, .. } => {
+            assert_eq!(
+                *target,
+                TargetFilter::ParentTarget,
+                "CR 608.2c: 'sacrifices it' names the blocker the subject's possessive \
+                 introduced, never the trigger source"
+            );
+            assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        }
+        other => panic!("expected the delayed payload to be a Sacrifice, got {other:?}"),
+    }
+    let wall = effect
+        .sub_ability
+        .as_deref()
+        .expect("the gated Wall rider is the sacrifice's continuation");
+    match wall.effect.as_ref() {
+        Effect::Token {
+            name,
+            power,
+            toughness,
+            owner,
+            keywords,
+            ..
+        } => {
+            assert_eq!(name, "Wall");
+            assert_eq!(*power, PtValue::Fixed(0));
+            assert_eq!(*toughness, PtValue::Fixed(2));
+            assert_eq!(keywords, &[Keyword::Defender]);
+            assert_eq!(
+                *owner,
+                TargetFilter::ParentTargetController,
+                "CR 111.2: the player who sacrificed creates the Wall, so it is that \
+                 creature's controller — not the ability's own controller"
+            );
+        }
+        other => panic!("expected a Wall Token rider, got {other:?}"),
+    }
+    assert_eq!(
+        wall.condition,
+        Some(AbilityCondition::effect_performed()),
+        "CR 608.2c: 'If the player does' gates the Wall on the sacrifice happening"
+    );
+}
+
 /// Issue #1670 — Star Athlete: "Whenever this creature attacks, choose up to
 /// one target nonland permanent. Its controller may sacrifice it. If they
 /// don't, this creature deals 5 damage to that player." The "that player"

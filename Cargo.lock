@@ -1953,6 +1953,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "phase-ast"
+version = "0.119.0"
+dependencies = [
+ "im",
+ "nom",
+ "serde",
+ "serde_ignored",
+ "serde_json",
+ "strum",
+ "thiserror 2.0.18",
+ "toml",
+]
+
+[[package]]
 name = "phase-engine"
 version = "0.119.0"
 dependencies = [
@@ -1964,6 +1978,7 @@ dependencies = [
  "libc",
  "nom",
  "petgraph",
+ "phase-ast",
  "phase-engine",
  "pretty_assertions",
  "proptest",

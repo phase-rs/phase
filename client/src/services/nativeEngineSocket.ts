@@ -5,8 +5,13 @@ import { normalizeLanEndpoint } from "./lan";
 
 type BridgeEvent =
   | { type: "message"; text: string }
+  | { type: "fragment"; text: string }
   | { type: "closed"; code: number; reason: string }
   | { type: "error"; detail: string };
+
+// Declares that this client reassembles `fragment` events; a shell splits texts only when told.
+type BridgeTextDelivery = "fragments";
+const TEXT_DELIVERY: BridgeTextDelivery = "fragments";
 
 type CloseListener = (event: CloseEvent) => void;
 type MessageListener = (event: MessageEvent<string>) => void;
@@ -37,6 +42,8 @@ export class NativeEngineSocket {
   private readonly closeListeners = new Map<CloseListener, boolean>();
   private readonly messageListeners = new Map<MessageListener, boolean>();
   private readonly pendingEvents: BridgeEvent[] = [];
+  // The shell splits one received message into fragments, so `pendingText` never exceeds the bridge's `MAX_BRIDGE_MESSAGE_BYTES`.
+  private pendingText = "";
   private bridgeId: number | null = null;
   private _readyState = NativeEngineSocket.CONNECTING;
 
@@ -116,8 +123,8 @@ export class NativeEngineSocket {
       const bridgeId = await this.invokeDesktop<number>(
         this.destination ? "connect_lan_server" : "connect_native_engine",
         this.destination
-          ? { url: lanUrl, origin: this.destination.origin, onEvent: channel }
-          : { onEvent: channel },
+          ? { url: lanUrl, origin: this.destination.origin, onEvent: channel, textDelivery: TEXT_DELIVERY }
+          : { onEvent: channel, textDelivery: TEXT_DELIVERY },
       );
       this.bridgeId = bridgeId;
       if (this.readyState === NativeEngineSocket.CLOSING) {
@@ -163,9 +170,14 @@ export class NativeEngineSocket {
 
   private dispatchBridgeEvent(event: BridgeEvent): void {
     switch (event.type) {
-      case "message":
+      case "fragment":
+        this.pendingText += event.text;
+        break;
+      case "message": {
+        const text = this.pendingText + event.text;
+        this.pendingText = "";
         if (this.readyState === NativeEngineSocket.OPEN) {
-          const message = new MessageEvent<string>("message", { data: event.text });
+          const message = new MessageEvent<string>("message", { data: text });
           this.onmessage?.(message);
           for (const [listener, once] of this.messageListeners) {
             listener(message);
@@ -173,6 +185,7 @@ export class NativeEngineSocket {
           }
         }
         break;
+      }
       case "error":
         if (this.readyState !== NativeEngineSocket.CLOSED) {
           this.onerror?.(new Event("error"));

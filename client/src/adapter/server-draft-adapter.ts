@@ -12,6 +12,7 @@ import type {
   ObjectId,
   PlayerId,
   SubmitResult,
+  WithheldFrame,
 } from "./types";
 import type {
   InteractionPreview,
@@ -1035,11 +1036,30 @@ export class ServerDraftAdapter implements EngineAdapter {
         const data = msg.data as { message: string };
         const pending = this.submission.take(msg.command_id);
         if (pending) {
-          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
           this.emit({ type: "actionPendingChanged", pending: false });
         } else if (this.submission.unmatched(msg.command_id).surfaces) {
           this.emit({ type: "error", message: data.message });
         }
+        break;
+      }
+
+      case "StateWithheld": {
+        const data = msg.data as {
+          full_key?: FullSessionKey;
+          withheld: WithheldFrame;
+          reason: string;
+        };
+        if (data.withheld.type === "StateUpdate" && fullSessionKeysEqual(data.full_key, this.acceptedFullKey)) {
+          const pending = this.submission.take(msg.command_id);
+          if (pending) {
+            pending.resolve({ events: [], log_entries: [] });
+            this.emit({ type: "actionPendingChanged", pending: false });
+          } else if (this.submission.unmatched(msg.command_id).releasesIndicator) {
+            this.emit({ type: "actionPendingChanged", pending: false });
+          }
+        }
+        this.emit({ type: "error", message: data.reason });
         break;
       }
 
@@ -1090,7 +1110,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
         if (pending) {
           this.pendingManaPaymentPreviews.delete(data.request_id);
-          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
         }
         break;
       }
@@ -1110,7 +1130,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         const pending = this.pendingInteractionPreviews.get(data.request_id);
         if (pending) {
           this.pendingInteractionPreviews.delete(data.request_id);
-          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
         }
         break;
       }

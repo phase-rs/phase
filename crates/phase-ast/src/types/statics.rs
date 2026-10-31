@@ -854,7 +854,7 @@ pub enum CostReductionReach {
 impl CostReductionReach {
     /// Serde `skip_serializing_if` for the CR 118.7b default, so card data that
     /// predates this axis round-trips byte-identically.
-    pub(crate) fn is_spills_to_generic(&self) -> bool {
+    pub fn is_spills_to_generic(&self) -> bool {
         matches!(self, CostReductionReach::SpillsToGeneric)
     }
 }
@@ -2804,7 +2804,7 @@ impl StaticMode {
     /// `_`, and no bare-binding catch-all (`other => None`) either. Sub-patterns
     /// INSIDE a variant (`StaticMode::Other(_)`, `StaticMode::Foo { .. }`) are
     /// deliberately fine — they name the variant.
-    pub(crate) fn defending_player_anchor_polarity(&self) -> Option<DefendingPlayerAnchorPolarity> {
+    pub fn defending_player_anchor_polarity(&self) -> Option<DefendingPlayerAnchorPolarity> {
         match self {
             StaticMode::CantAttack | StaticMode::CantAttackOrBlock => {
                 Some(DefendingPlayerAnchorPolarity::Prohibition)
