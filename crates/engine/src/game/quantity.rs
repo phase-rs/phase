@@ -1671,6 +1671,7 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
         unless_pay: None,
         batched: _,
         die_sides: _,
+        gotcha_condition: _,
         expend_threshold: _,
         attack_target_filter: _,
         player_actions: _,

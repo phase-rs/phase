@@ -63,6 +63,31 @@ impl ObjectIncarnationRefExt for ObjectIncarnationRef {
     }
 }
 
+/// The [`ObjectIdentityBinding`] constructor and check that read a live
+/// [`GameObject`] or [`GameState`].
+pub trait ObjectIdentityBindingExt {
+    /// Convenience: capture the current incarnation and zone of a live object.
+    fn from_object(obj: &GameObject) -> Self;
+
+    /// CR 400.7: whether this binding still matches the live object — the same
+    /// incarnation still in its expected zone.
+    fn is_current(&self, state: &crate::types::game_state::GameState) -> bool;
+}
+
+impl ObjectIdentityBindingExt for ObjectIdentityBinding {
+    fn from_object(obj: &GameObject) -> Self {
+        Self::new(ObjectIncarnationRef::from_object(obj), obj.zone)
+    }
+
+    fn is_current(&self, state: &crate::types::game_state::GameState) -> bool {
+        self.reference.is_current(state)
+            && state
+                .objects
+                .get(&self.reference.object_id)
+                .is_some_and(|object| object.zone == self.expected_zone)
+    }
+}
+
 impl GameObject {
     /// Capture this object's live display routing as a [`DisplayIdentity`].
     pub fn display_identity(&self) -> DisplayIdentity {

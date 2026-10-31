@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Host","waiting":"Waiting","value":"{{ms}} ms","description":"Round-trip latency to the host. A missing reply does not disconnect the game."},
+  "playerLatency": {
+    "host": "Host",
+    "waiting": "Waiting",
+    "value": "{{ms}} ms",
+    "description": "Round-trip latency to the host. A missing reply does not disconnect the game."
+  },
   "abilityBlock": {
     "badge": "Blocked",
     "cantBeActivated": "This ability can't be activated",
@@ -2902,6 +2907,36 @@
       "winner": "{{name}} won the contest.",
       "tie": "It's a tie — nothing happens.",
       "cancelled": "The contest was cancelled — nothing happens."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

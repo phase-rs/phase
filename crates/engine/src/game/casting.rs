@@ -27336,6 +27336,12 @@ pub(crate) fn can_pay_ability_cost_now(
     ability_index: Option<usize>,
     life: &ActivationLifeWindow,
 ) -> bool {
+    // Un-card: reject SayPhrase costs (including inside Composite/OneOf) for
+    // players who have not opted in, before the dry run reaches the payment
+    // authority. Uses the shared helper to handle all cost shapes uniformly.
+    if super::un_actions::cost_requires_unavailable_speech(state, player, cost) {
+        return false;
+    }
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
     payable_with_mana_ability_window_life(state, player, source_id, cost, life, |state, cost| {
         super::costs::can_pay(

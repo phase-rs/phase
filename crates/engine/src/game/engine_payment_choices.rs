@@ -710,6 +710,11 @@ pub(super) fn handle_unless_payment_choose_cost(
                         .to_string(),
                 ));
             }
+            if crate::game::un_actions::cost_requires_unavailable_speech(state, player, &picked) {
+                return Err(EngineError::InvalidAction(
+                    "Player has not opted in to Un-card spoken actions".to_string(),
+                ));
+            }
             // strict-failure: CR 118.12a disjunctive unless-costs with a counter branch are
             // refused at the pick, not removed from the offered `costs` list;
             // `legal_actions` already excludes the refused index.
@@ -1139,22 +1144,35 @@ pub(super) fn handle_unless_payment(
             // Phase 3). Resolution scope auto-taps via `pay_effect_mana_cost`
             // — the same final mana path the old `pay_unless_cost` shim used —
             // and maps an unpayable cost to the "unless" branch fall-through.
-            AbilityCost::Mana { .. } => {
-                match costs::pay_ability_cost_for_resolution(
+            // Un-card: `SayPhrase` pays through the same authority (no resources move).
+            AbilityCost::Mana { .. } | AbilityCost::SayPhrase { .. } => {
+                // Un-card: SayPhrase requires the player to have opted in. If they
+                // have not, the cost is unpaid and the "unless" branch fires
+                // exactly as if they had declined (CR 118.12a). Otherwise pay
+                // through the single payment authority.
+                if crate::game::un_actions::cost_requires_unavailable_speech(
                     state,
                     player,
                     &cost,
-                    pending_effect.as_ref(),
-                    events,
-                )? {
-                    PaymentOutcome::Paid => {}
-                    PaymentOutcome::Failed { .. } => payment_failed = true,
-                    // CR 118.12 + CR 605.3b + CR 616.1: An auto-tapped mana
-                    // ability can pause on a replacement-aware zone cost.
-                    // Its cursor owns the exact UnlessPayment continuation;
-                    // preserve that choice instead of resolving the effect.
-                    PaymentOutcome::Paused { .. } => {
-                        return Ok(action_result(events, state.waiting_for.clone()));
+                ) {
+                    payment_failed = true;
+                } else {
+                    match costs::pay_ability_cost_for_resolution(
+                        state,
+                        player,
+                        &cost,
+                        pending_effect.as_ref(),
+                        events,
+                    )? {
+                        PaymentOutcome::Paid => {}
+                        PaymentOutcome::Failed { .. } => payment_failed = true,
+                        // CR 118.12 + CR 605.3b + CR 616.1: An auto-tapped mana
+                        // ability can pause on a replacement-aware zone cost.
+                        // Its cursor owns the exact UnlessPayment continuation;
+                        // preserve that choice instead of resolving the effect.
+                        PaymentOutcome::Paused { .. } => {
+                            return Ok(action_result(events, state.waiting_for.clone()));
+                        }
                     }
                 }
             }
@@ -1908,6 +1926,8 @@ fn finish_unless_payment(
                     *p,
                     &poll_cost,
                     pending_effect.as_ref(),
+                ) && !crate::game::un_actions::cost_requires_unavailable_speech(
+                    state, *p, &poll_cost,
                 )
             })
             .and_then(|head| remaining[head..].split_first())

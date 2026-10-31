@@ -1528,6 +1528,10 @@ fn apply_action_boundary_core(
     // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
     // consumed by sub_ability continuations via EventContextAmount fallback.
     state.clear_player_action_transients();
+    // A Gotcha window lives only until the next game action (Un-card actions).
+    if !matches!(&action, GameAction::UnAction { .. }) && !is_actor_scoped_preference {
+        state.un_actions.gotcha_offers.clear();
+    }
     if authorize_actor && recovered_stale_priority_pass && !pre_recovery_pass_was_authorized {
         lifecycle.discard();
         return Err(EngineError::WrongPlayer);
@@ -2327,6 +2331,7 @@ fn finish_action_boundary_with_lifecycle(
     }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
+    super::un_actions::refresh_menu(state);
     // A reversed activation (CR 602.2b + CR 601.2h) already had its pre-action
     // state restored by `apply_action_boundary_core`: nothing happened, so it
     // must not let a standing auto-pass consume the restored priority, resolve
@@ -2385,6 +2390,8 @@ fn finish_action_boundary_with_lifecycle(
     mark_public_state_from_events(state, &result.events);
     elide_middle_repetitions(&mut result.events);
     finalize_rules_state(state);
+    super::un_actions::announce_pending_tells(state);
+    super::un_actions::refresh_menu(state);
     result.waiting_for = state.waiting_for.clone();
     if matches!(mode, PublicFinalizeMode::Immediate) {
         finalize_display_state(state);
@@ -12137,6 +12144,13 @@ fn apply_action(
             }
         }
         return Ok(ActionResult::applied(vec![], state.waiting_for.clone()));
+    }
+
+    // Un-card actions (no CR entry): opt-in toggle, gestures from the Un-actions
+    // menu, and "Gotcha!". Legal in any state and routed by `actor`; a gesture
+    // never advances the game, and "Gotcha!" feeds the ordinary trigger pipeline.
+    if let GameAction::UnAction { action: un_action } = &action {
+        return super::un_actions::apply_un_action(state, actor, un_action.clone());
     }
 
     // CR 603.3b: Preferences are written only by a live `OrderTriggers` response.

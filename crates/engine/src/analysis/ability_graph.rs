@@ -1318,6 +1318,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::LoyaltyAbilityActivated
         | TriggerMode::Evolve
         | TriggerMode::Evolved
+        | TriggerMode::GotchaSaid
         | TriggerMode::Explored
         | TriggerMode::Exploited
         | TriggerMode::Enlisted
@@ -1708,6 +1709,8 @@ fn fold_cost(acc: &mut NodeAcc, cost: &AbilityCost) {
     match cost {
         // CR 106.1: mana costs ⇒ requires Mana (R3-MANA-COLLAPSE).
         AbilityCost::Mana { cost } => sink_mana_cost(acc, cost),
+        // Un-card: saying a phrase consumes and produces nothing on any axis.
+        AbilityCost::SayPhrase { .. } => {}
         AbilityCost::ManaDynamic { .. } => acc.net.mana[COLORLESS_INDEX] -= 1,
         AbilityCost::Waterbend { cost } => sink_mana_cost(acc, cost),
         AbilityCost::NinjutsuFamily { mana_cost, .. } => sink_mana_cost(acc, mana_cost),

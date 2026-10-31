@@ -936,6 +936,10 @@ pub(crate) fn action_preserves_interaction(action: &GameAction) -> bool {
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
             | GameAction::SetReplacementAutoChoice { .. }
+            | GameAction::UnAction {
+                action: crate::types::un_actions::UnAction::SetEnabled { .. }
+                    | crate::types::un_actions::UnAction::PerformTell { .. },
+            }
             | GameAction::SetTriggerOrderTemplate { .. }
             | GameAction::CancelAutoPass
             | GameAction::GrantDebugPermission { .. }
@@ -6396,6 +6400,7 @@ fn project_action_payload(
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
         | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::UnAction { .. }
         | GameAction::SetTriggerOrderTemplate { .. } => {}
         GameAction::AssignCombatDamage {
             assignments,
@@ -6875,6 +6880,7 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::SetMayTriggerAutoChoice { .. } => {
             InteractionActionCode::SetMayTriggerAutoChoice
         }
+        GameAction::UnAction { .. } => InteractionActionCode::UnAction,
         GameAction::SetTriggerOrderTemplate { .. } => {
             InteractionActionCode::SetTriggerOrderTemplate
         }

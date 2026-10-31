@@ -911,6 +911,7 @@ fn classify(action: &GameAction, prompt: &WaitingFor) -> Choice {
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
         | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::UnAction { .. }
         | GameAction::SetTriggerOrderTemplate { .. }
         | GameAction::Debug(_)
         | GameAction::GrantDebugPermission { .. }

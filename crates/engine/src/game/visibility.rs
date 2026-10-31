@@ -1652,6 +1652,23 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     filtered.pending_begin_game_abilities.clear();
     filtered.resolving_begin_game_abilities = false;
 
+    // Un-card actions: enabled status and Gotcha offers are private to the entitled player.
+    // The gesture menu is derived from all active abilities in the game and is shared.
+    if let Some(viewer_id) = viewer {
+        filtered
+            .un_actions
+            .enabled_players
+            .retain(|p| *p == viewer_id);
+        filtered
+            .un_actions
+            .gotcha_offers
+            .retain(|o| o.player == viewer_id);
+    } else {
+        filtered.un_actions.enabled_players.clear();
+        filtered.un_actions.gotcha_offers.clear();
+    }
+    filtered.un_actions.pending_offers.clear();
+
     // Hidden-information + fairness integrity: the game's RNG is a deterministic
     // ChaCha20 stream seeded from `rng_seed`, and that seed is a serialized field
     // of `GameState`. Broadcasting it to clients (every `StateUpdate` /
@@ -15231,6 +15248,52 @@ mod tests {
             shared > 0,
             "redacting one object must not copy every other object"
         );
+    }
+
+    #[test]
+    fn un_actions_gotcha_offers_and_opt_in_are_filtered_to_viewer() {
+        let mut state = GameState::new_two_player(42);
+        state.un_actions.enabled_players = vec![PlayerId(0), PlayerId(1)];
+        let binding = crate::types::identifiers::ObjectIdentityBinding::new(
+            crate::types::identifiers::ObjectIncarnationRef {
+                object_id: ObjectId(100),
+                incarnation: 0,
+            },
+            Zone::Graveyard,
+        );
+        state.un_actions.gotcha_offers = vec![
+            crate::types::un_actions::GotchaOffer {
+                id: 1,
+                player: PlayerId(0),
+                source: binding,
+                returns: binding,
+            },
+            crate::types::un_actions::GotchaOffer {
+                id: 2,
+                player: PlayerId(1),
+                source: binding,
+                returns: binding,
+            },
+        ];
+
+        // Viewer P0 sees only P0's offer and P0's enabled status.
+        let p0_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(p0_view.un_actions.enabled_players, vec![PlayerId(0)]);
+        assert_eq!(p0_view.un_actions.gotcha_offers.len(), 1);
+        assert_eq!(p0_view.un_actions.gotcha_offers[0].id, 1);
+        assert_eq!(p0_view.un_actions.gotcha_offers[0].player, PlayerId(0));
+
+        // Viewer P1 sees only P1's offer and P1's enabled status.
+        let p1_view = filter_state_for_viewer(&state, PlayerId(1));
+        assert_eq!(p1_view.un_actions.enabled_players, vec![PlayerId(1)]);
+        assert_eq!(p1_view.un_actions.gotcha_offers.len(), 1);
+        assert_eq!(p1_view.un_actions.gotcha_offers[0].id, 2);
+        assert_eq!(p1_view.un_actions.gotcha_offers[0].player, PlayerId(1));
+
+        // Unseated spectator sees no gotcha offers and no enabled players.
+        let spectator_view = filter_state_for_unseated_viewer(&state);
+        assert!(spectator_view.un_actions.enabled_players.is_empty());
+        assert!(spectator_view.un_actions.gotcha_offers.is_empty());
     }
 
     /// CR 603.2h: a resolution cast's carried "Do this only once each turn" limit is

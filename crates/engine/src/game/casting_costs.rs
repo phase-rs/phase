@@ -7505,6 +7505,7 @@ fn validate_x_mana_sacrifice_residual(
             AbilityCost::Sacrifice(_)
             | AbilityCost::Mana { .. }
             | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
             | AbilityCost::Loyalty { .. }
@@ -18600,7 +18601,8 @@ pub fn ability_cost_has_x(cost: &crate::types::ability::AbilityCost) -> bool {
         | AbilityCost::Blight { .. }
         | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
-        | AbilityCost::GetPlayerCounters { .. } => false,
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::SayPhrase { .. } => false,
     }
 }
 

@@ -26,6 +26,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         // zone_change_clause_matches / check_trigger_condition respectively.
         TriggerMode::ChangesZone | TriggerMode::Evolve => match_changes_zone,
         TriggerMode::Evolved => match_evolved,
+        TriggerMode::GotchaSaid => match_gotcha_said,
         TriggerMode::ChangesZoneAll => match_changes_zone_all,
         // CR 702.55c: Haunt payoff — fires from exile when the haunted creature
         // dies; resolved through the `ExileLinkKind::Haunt` link.
@@ -555,6 +556,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 702.100b: "Whenever [a creature] evolves" fires only when the
     // evolve ability's resolution actually put one or more +1/+1 counters on it.
     r.insert(TriggerMode::Evolved, match_evolved);
+    r.insert(TriggerMode::GotchaSaid, match_gotcha_said);
 
     // CR 702.122e: Crew trigger matchers
     r.insert(TriggerMode::Crewed, match_vehicle_crewed);
@@ -1020,6 +1022,10 @@ fn count_matching_trigger_event_subjects(
         GameEvent::CreatureExerted { object_id, .. } => count_one(*object_id),
         GameEvent::CreatureEnlisted { attacker, .. } => count_one(*attacker),
         GameEvent::ArmyAmassed { object_id, .. } => count_one(*object_id),
+        // Un-card events carry no object subject.
+        GameEvent::UnTellPerformed { .. }
+        | GameEvent::PhraseSaid { .. }
+        | GameEvent::GotchaSaid { .. } => 0,
         GameEvent::ZoneChanged { object_id, .. }
         | GameEvent::Discarded { object_id, .. }
         // CR 701.17a + CR 603.2c: one milled card per event, so a batched
@@ -2698,6 +2704,17 @@ pub(super) fn match_evolved(
     } else {
         false
     }
+}
+
+/// Un-card Gotcha (no CR entry): the "When you do" reflexive trigger fires on the
+/// Gotcha ability's own source when its controller calls "Gotcha!".
+pub(super) fn match_gotcha_said(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    _state: &GameState,
+) -> bool {
+    matches!(event, GameEvent::GotchaSaid { source, .. } if source.reference == source_context.identity.reference)
 }
 
 pub(super) fn match_counter_removed(

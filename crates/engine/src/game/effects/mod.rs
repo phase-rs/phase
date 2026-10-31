@@ -9479,6 +9479,7 @@ fn ability_cost_reads_filter_population(
             | AbilityCost::NinjutsuFamily { .. }
             | AbilityCost::KeywordCostOfCastSpell { .. }
             | AbilityCost::GetPlayerCounters { .. }
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Unimplemented { .. } => false,
         }
 }
@@ -9754,6 +9755,7 @@ fn trigger_matchers_read_filter_population(
         // A limit-ledger key mapping between split halves; names no population.
         limit_leader_offset: _,
         attack_cost_condition,
+        gotcha_condition: _,
     } = trigger;
     [valid_card, valid_target, valid_subject_player, valid_source]
         .into_iter()
@@ -16470,9 +16472,12 @@ fn optionality_is_per_iteration(state: &GameState, ability: &ResolvedAbility) ->
 /// `costs::can_pay` (resolution scope) decides before the "you may" is offered.
 /// `PayLife` excludes "pay any amount of life" (`is_pay_any_amount`): X is chosen at
 /// payment and 0 is always payable (CR 119.4b), so it is never impossible.
+/// A spoken Un-action payment is infeasible for a payer who has not opted in.
 fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
-    matches!(cost, AbilityCost::TapCreatures { .. })
-        || matches!(cost, AbilityCost::PayLife { amount }
+    matches!(
+        cost,
+        AbilityCost::TapCreatures { .. } | AbilityCost::SayPhrase { .. }
+    ) || matches!(cost, AbilityCost::PayLife { amount }
             if !crate::types::ability::is_pay_any_amount(amount))
 }
 
@@ -23044,7 +23049,11 @@ fn resolve_chain_body(
             return Ok(ResolutionProgress::Waiting);
         }
 
-        let description = ability.description.clone();
+        // Un-card: a "you may say ..." prompt names the phrase it asks for.
+        let description = ability
+            .description
+            .clone()
+            .or_else(|| crate::game::un_actions::say_phrase_prompt(&ability.effect));
         // Deliberately the DIRECT store read rather than `stored_may_answer`, and this is
         // not a duplicated authority: the KEY is what has to be built in one place, and it
         // was — by `upfront_optional_gate`, above. `stored_may_answer` would re-enter the
@@ -23159,69 +23168,16 @@ fn resolve_chain_body(
                         *p,
                         &resolved_cost,
                         ability,
+                    ) && !crate::game::un_actions::cost_requires_unavailable_speech(
+                        state,
+                        *p,
+                        &resolved_cost,
                     )
                 })
                 .and_then(|head| unless_payers[head..].split_first())
             {
-                let mut pending = ability.clone();
-                pending.unless_pay = None;
-                // CR 118.12a: A disjunctive unless-cost (`OneOf`) surfaces a
-                // sub-cost choice first; the chosen single cost re-enters
-                // `WaitingFor::UnlessPayment` via
-                // `handle_unless_payment_choose_cost`. This keeps the
-                // single-cost branch in `handle_unless_payment` unchanged.
-                state.waiting_for = match resolved_cost {
-                    AbilityCost::OneOf { costs } => WaitingFor::UnlessPaymentChooseCost {
-                        player: payer,
-                        costs,
-                        pending_effect: Box::new(pending),
-                        trigger_event: state.current_trigger_event.clone(),
-                        effect_description: ability.description.clone(),
-                        remaining_choices: vec![],
-                        chosen: vec![],
-                    },
-                    // CR 702.24a + CR 118.12: A `Composite` of `OneOf`s is
-                    // what `expand_per_counter` produces from a `OneOf` base
-                    // cost at N ≥ 2 (e.g., Jötun Owl Keeper's "{W} or {U}"
-                    // cumulative-upkeep cost with 2 age counters → 2
-                    // independent disjunctive choices). Drive each choice
-                    // sequentially via `UnlessPaymentChooseCost`, accumulate
-                    // picks, and re-enter `UnlessPayment` with the resulting
-                    // `Composite` of chosen sub-costs as a single payment.
-                    // "Each choice is made separately for each age counter,
-                    // then either the entire set of costs is paid, or none
-                    // of them is paid."
-                    AbilityCost::Composite { costs }
-                        if !costs.is_empty()
-                            && costs.iter().all(|c| matches!(c, AbilityCost::OneOf { .. })) =>
-                    {
-                        let mut queue: Vec<Vec<AbilityCost>> = costs
-                            .into_iter()
-                            .map(|c| match c {
-                                AbilityCost::OneOf { costs } => costs,
-                                _ => unreachable!("matched all-OneOf guard above"),
-                            })
-                            .collect();
-                        let first = queue.remove(0);
-                        WaitingFor::UnlessPaymentChooseCost {
-                            player: payer,
-                            costs: first,
-                            pending_effect: Box::new(pending),
-                            trigger_event: state.current_trigger_event.clone(),
-                            effect_description: ability.description.clone(),
-                            remaining_choices: queue,
-                            chosen: vec![],
-                        }
-                    }
-                    cost => WaitingFor::UnlessPayment {
-                        player: payer,
-                        cost,
-                        pending_effect: Box::new(pending),
-                        trigger_event: state.current_trigger_event.clone(),
-                        effect_description: ability.description.clone(),
-                        remaining: remaining_payers.to_vec(),
-                    },
-                };
+                state.waiting_for =
+                    unless_payment_prompt(state, ability, payer, remaining_payers, resolved_cost);
                 return Ok(ResolutionProgress::Waiting);
             }
         }
@@ -26551,6 +26507,103 @@ fn resolved_unless_cost(
     crate::game::keywords::resolve_self_mana_in_ability_cost(state, ability.source_id, &expanded)
 }
 
+/// The prompt an unless-cost puts to `payer`, with `remaining_payers` next in line.
+/// Kept out of `resolve_chain_body` so its `WaitingFor` temporaries stay out of
+/// that recursive frame.
+fn unless_payment_prompt(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    payer: PlayerId,
+    remaining_payers: &[PlayerId],
+    resolved_cost: AbilityCost,
+) -> WaitingFor {
+    let mut pending = ability.clone();
+    pending.unless_pay = None;
+    // CR 118.12a: A disjunctive unless-cost (`OneOf`) surfaces a
+    // sub-cost choice first; the chosen single cost re-enters
+    // `WaitingFor::UnlessPayment` via
+    // `handle_unless_payment_choose_cost`. This keeps the
+    // single-cost branch in `handle_unless_payment` unchanged.
+    match resolved_cost {
+        AbilityCost::OneOf { costs } => {
+            let available_costs: Vec<_> = costs
+                .into_iter()
+                .filter(|c| {
+                    !crate::game::un_actions::cost_requires_unavailable_speech(state, payer, c)
+                })
+                .collect();
+            if available_costs.len() == 1 {
+                WaitingFor::UnlessPayment {
+                    player: payer,
+                    cost: available_costs.into_iter().next().unwrap(),
+                    pending_effect: Box::new(pending),
+                    trigger_event: state.current_trigger_event.clone(),
+                    effect_description: ability.description.clone(),
+                    remaining: remaining_payers.to_vec(),
+                }
+            } else {
+                WaitingFor::UnlessPaymentChooseCost {
+                    player: payer,
+                    costs: available_costs,
+                    pending_effect: Box::new(pending),
+                    trigger_event: state.current_trigger_event.clone(),
+                    effect_description: ability.description.clone(),
+                    remaining_choices: vec![],
+                    chosen: vec![],
+                }
+            }
+        }
+        // CR 702.24a + CR 118.12: A `Composite` of `OneOf`s is
+        // what `expand_per_counter` produces from a `OneOf` base
+        // cost at N ≥ 2 (e.g., Jötun Owl Keeper's "{W} or {U}"
+        // cumulative-upkeep cost with 2 age counters → 2
+        // independent disjunctive choices). Drive each choice
+        // sequentially via `UnlessPaymentChooseCost`, accumulate
+        // picks, and re-enter `UnlessPayment` with the resulting
+        // `Composite` of chosen sub-costs as a single payment.
+        // "Each choice is made separately for each age counter,
+        // then either the entire set of costs is paid, or none
+        // of them is paid."
+        AbilityCost::Composite { costs }
+            if !costs.is_empty()
+                && costs.iter().all(|c| matches!(c, AbilityCost::OneOf { .. })) =>
+        {
+            let mut queue: Vec<Vec<AbilityCost>> = costs
+                .into_iter()
+                .map(|c| match c {
+                    AbilityCost::OneOf { costs } => costs
+                        .into_iter()
+                        .filter(|sub| {
+                            !crate::game::un_actions::cost_requires_unavailable_speech(
+                                state, payer, sub,
+                            )
+                        })
+                        .collect(),
+                    _ => unreachable!("matched all-OneOf guard above"),
+                })
+                .collect();
+            let first = queue.remove(0);
+            WaitingFor::UnlessPaymentChooseCost {
+                player: payer,
+                costs: first,
+                pending_effect: Box::new(pending),
+                trigger_event: state.current_trigger_event.clone(),
+                effect_description: ability.description.clone(),
+                remaining_choices: queue,
+                chosen: vec![],
+            }
+        }
+        cost => WaitingFor::UnlessPayment {
+            player: payer,
+            cost,
+            pending_effect: Box::new(pending),
+            trigger_event: state.current_trigger_event.clone(),
+            effect_description: ability.description.clone(),
+            remaining: remaining_payers.to_vec(),
+        },
+    }
+}
+
 /// CR 118.6: a cost that requires paying a nonexistent mana cost can't be paid.
 fn unless_cost_is_unpayable(cost: &AbilityCost) -> bool {
     match cost {
@@ -26564,7 +26617,9 @@ fn unless_cost_is_unpayable(cost: &AbilityCost) -> bool {
             mana_cost: cost, ..
         } => *cost == ManaCost::NoCost,
         AbilityCost::PerCounter { base, .. } => unless_cost_is_unpayable(base),
-        AbilityCost::ManaDynamic { .. }
+        // Un-card: a spoken phrase is always payable by an opted-in player.
+        AbilityCost::SayPhrase { .. }
+        | AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
