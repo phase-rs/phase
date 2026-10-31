@@ -1840,6 +1840,10 @@ fn subject_anchored_optional_actor(
             | TargetFilter::ChosenDamageSource { .. }
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
+            // CR 108.3 + CR 508.1d: per-member owner anchor — names no single
+            // actor, so it cannot lift to a delayed trigger; refused like the
+            // other resolution-scoped bindings above.
+            | TargetFilter::AffectedObjectOwner
             | TargetFilter::AllPlayers => None,
         },
         // CR 608.2c + CR 608.2d: during THIS resolution every event-context and
@@ -1888,6 +1892,9 @@ fn subject_anchored_optional_actor(
             | TargetFilter::ControllerAndControlledPermanents { .. }
             | TargetFilter::Or { .. }
             | TargetFilter::And { .. }
+            // CR 108.3 + CR 508.1d: per-member owner anchor — resolved per
+            // affected member at install, never one announcer.
+            | TargetFilter::AffectedObjectOwner
             | TargetFilter::Not { .. } => None,
 
             // An already-resolved `PlayerId`, not a reference to one. CR 109.5

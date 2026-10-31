@@ -16,6 +16,7 @@ import { usePoolFolderIndex } from "../../hooks/usePoolFolderIndex";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { formatJoinShare } from "../../services/serverDetection";
 import { expandParsedDeck } from "../../services/deckParser";
+import { deckListIdentityKey } from "../../multiplayer/deckListData";
 import { formatSuppliesDeck } from "../../data/formatRegistry";
 import { suppliedAiDeckChoice } from "../../services/pileSource";
 import { SelectField } from "../ui/SelectField";
@@ -31,7 +32,7 @@ function deckChoiceKey(choice: DeckChoice): string {
     case "Named":
       return `Named:${choice.data}`;
     case "DeckList":
-      return JSON.stringify(choice.data);
+      return deckListIdentityKey(choice.data);
   }
 }
 

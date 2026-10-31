@@ -2814,7 +2814,10 @@ pub fn fallback_action(
             ..
         } => issued_selection(contract),
         WaitingFor::PayCost {
-            resume: CostResume::Resolution | CostResume::TurnFaceUp { .. },
+            resume:
+                CostResume::Resolution
+                | CostResume::TeamTapPayment { .. }
+                | CostResume::TurnFaceUp { .. },
             ..
         } => issued(|action| matches!(action, GameAction::SelectCards { .. })),
 

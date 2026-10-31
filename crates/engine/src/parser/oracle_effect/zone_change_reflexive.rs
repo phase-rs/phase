@@ -150,6 +150,7 @@ fn target_names_one_object(target: &TargetFilter) -> bool {
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => true,
     }
 }

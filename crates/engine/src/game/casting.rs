@@ -3395,6 +3395,9 @@ fn matches_via_origin_scoped_branch(
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — resolved per affected
+        // member at install, never this match's referent.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
@@ -14676,10 +14679,81 @@ impl ResolutionSpellFaceLegality {
     pub(crate) const fn count(self) -> u8 {
         self.front as u8 + self.back as u8
     }
+}
 
-    pub(crate) const fn only_back(self) -> bool {
-        !self.front && self.back
+/// What electing one face of a card does during resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolutionFaceAction {
+    /// CR 608.2g + CR 712.11b: the elected spell face is cast while the
+    /// instructing effect resolves.
+    Cast,
+    /// CR 712.12 + CR 305.2a: the elected land face is played while the
+    /// instructing effect resolves, counting against the land allowance.
+    PlayLand,
+}
+
+/// The legal faces of a card under one frozen resolution-time policy, and what
+/// electing each one does. `None` means the face may not be elected. Spell
+/// faces come from [`ResolutionSpellFaceLegality`]; a land face is admitted
+/// only by [`resolution_land_face_admission`] (CR 701.18b + CR 712.12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolutionFaceLegality {
+    pub(crate) front: Option<ResolutionFaceAction>,
+    pub(crate) back: Option<ResolutionFaceAction>,
+}
+
+impl ResolutionFaceLegality {
+    pub(crate) const fn count(self) -> u8 {
+        self.front.is_some() as u8 + self.back.is_some() as u8
     }
+
+    /// The face named by the wire bool on `GameAction::ChooseModalFace`.
+    pub(crate) const fn face(self, back_face: bool) -> Option<ResolutionFaceAction> {
+        if back_face {
+            self.back
+        } else {
+            self.front
+        }
+    }
+
+    fn from_faces(spell: ResolutionSpellFaceLegality, land_back: bool) -> Self {
+        // A spell//land back face is never a spell face:
+        // `resolution_spell_face_choice_available` excludes land faces.
+        debug_assert!(!(spell.back && land_back));
+        Self {
+            front: spell.front.then_some(ResolutionFaceAction::Cast),
+            back: if spell.back {
+                Some(ResolutionFaceAction::Cast)
+            } else if land_back {
+                Some(ResolutionFaceAction::PlayLand)
+            } else {
+                None
+            },
+        }
+    }
+}
+
+/// CR 701.18b + CR 712.12: whether a resolution-owned election under `policy`
+/// may elect `object_id`'s land back face. To *play* a card is to cast it or
+/// play it as a land, so only a Play instruction admits a land face (a Cast
+/// instruction never does, CR 601.2). The face choice must still be open, and
+/// the land face must be legal to play now
+/// ([`super::engine::resolution_back_land_face_play_is_legal`]: modal land back
+/// face, the player's turn, no prohibition, allowance open). The single
+/// land-face authority read by initiation, legal actions, and the
+/// `ChooseModalFace` reducer.
+pub(crate) fn resolution_land_face_admission(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+) -> bool {
+    policy.play_mode.is_play()
+        && state
+            .objects
+            .get(&object_id)
+            .is_some_and(|obj| !obj.cast_face_committed)
+        && super::engine::resolution_back_land_face_play_is_legal(state, player, object_id)
 }
 
 /// Immutable starting point for prospective resolution casts.  A resolution
@@ -14712,6 +14786,21 @@ impl ResolutionCastProjection {
         #[cfg(test)]
         let _target_depth = ResolutionCastProjectionTargetDepthGuard::enter();
         resolution_spell_face_legality_from_baseline(&self.baseline, player, object_id, request)
+    }
+
+    /// Every legal face of `object_id` under `request`: the spell faces
+    /// projected through the exact temporary permission, plus the land face
+    /// when the request's policy admits one (CR 701.18b + CR 712.12).
+    pub(in crate::game) fn face_legality(
+        &self,
+        player: PlayerId,
+        object_id: ObjectId,
+        request: &ResolutionCastRequest,
+    ) -> ResolutionFaceLegality {
+        ResolutionFaceLegality::from_faces(
+            self.spell_face_legality(player, object_id, request),
+            resolution_land_face_admission(&self.baseline, player, object_id, &request.face_policy),
+        )
     }
 
     /// Candidate-level reads (such as a free-cast window's MV budget) must use
@@ -15026,23 +15115,39 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
     legality
 }
 
-/// Public-to-the-engine indexed form for an already-issued modal choice.  The
-/// legal-action projector must read the same exact permission and frozen policy
-/// that the eventual reducer will consume.
-pub(crate) fn resolution_spell_face_legality_for_current_permission(
+/// Every legal face of a card under the exact temporary permission selected
+/// for this resolution election: its spell faces (CR 712.11b-c) plus, under a
+/// Play policy, its land face (CR 701.18b + CR 712.12).
+fn resolution_face_legality_for_permission(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
     policy: &crate::types::ability::ResolutionCastFacePolicy,
     permission_index: CastingPermissionIndex,
-) -> ResolutionSpellFaceLegality {
-    resolution_spell_face_legality_for_permission(
-        state,
-        player,
-        object_id,
-        policy,
-        permission_index,
+) -> ResolutionFaceLegality {
+    ResolutionFaceLegality::from_faces(
+        resolution_spell_face_legality_for_permission(
+            state,
+            player,
+            object_id,
+            policy,
+            permission_index,
+        ),
+        resolution_land_face_admission(state, player, object_id, policy),
     )
+}
+
+/// Public-to-the-engine indexed form for an already-issued modal choice.  The
+/// legal-action projector must read the same exact permission and frozen policy
+/// that the eventual reducer will consume.
+pub(crate) fn resolution_face_legality_for_current_permission(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+    permission_index: CastingPermissionIndex,
+) -> ResolutionFaceLegality {
+    resolution_face_legality_for_permission(state, player, object_id, policy, permission_index)
 }
 
 /// The resolution-time permission is appended immediately before its face
@@ -17414,6 +17519,16 @@ pub(super) enum ResolutionCastInitiation {
     Rejected(Box<crate::types::ability::ResolutionCastCleanup>),
 }
 
+/// The outcomes of beginning a resolution-owned face election.  `Cast` is a
+/// spell-face election (or its rejection); `PlayLandFace` is the CR 712.12
+/// land face as the only legal face under a Play policy (CR 701.18b).  The
+/// temporary permission has already been removed in that case: the caller
+/// plays the land face with the returned cleanup as its authority.
+pub(super) enum ResolutionElectionInitiation {
+    Cast(ResolutionCastInitiation),
+    PlayLandFace(Box<crate::types::ability::ResolutionCastCleanup>),
+}
+
 /// The one temporary permission that owns an in-flight resolution cast.  Both
 /// the real cast and a prospective clone install it through
 /// [`install_resolution_cast_permission`], so a candidate is checked against
@@ -17572,13 +17687,38 @@ pub(super) fn initiate_cast_during_resolution(
     request: ResolutionCastRequest,
     events: &mut Vec<GameEvent>,
 ) -> Result<ResolutionCastInitiation, EngineError> {
+    match initiate_resolution_election(state, player, hit_card, request, events)? {
+        ResolutionElectionInitiation::Cast(initiation) => Ok(initiation),
+        // CR 701.18b + CR 601.2: only a Play instruction can play a land; a
+        // Cast instruction never does.
+        // `resolution_land_face_admission` requires a Play policy, so this is
+        // a typed refusal for a mis-built request rather than a reachable arm.
+        ResolutionElectionInitiation::PlayLandFace(_) => Err(EngineError::InvalidAction(
+            "a Cast resolution policy cannot elect a land face".to_string(),
+        )),
+    }
+}
+
+/// CR 608.2g + CR 712.11b + CR 701.18b + CR 712.12: begin a resolution-owned
+/// face election for `hit_card` under `request`.  The exact temporary
+/// permission is installed first, then every legal face is read through it
+/// ([`resolution_face_legality_for_permission`]).  No legal face rejects the
+/// election; two open `ModalFaceChoice`; one spell face is cast at once; the
+/// land face alone (a Play policy only) is returned for the caller to play.
+pub(super) fn initiate_resolution_election(
+    state: &mut GameState,
+    player: PlayerId,
+    hit_card: ObjectId,
+    request: ResolutionCastRequest,
+    events: &mut Vec<GameEvent>,
+) -> Result<ResolutionElectionInitiation, EngineError> {
     let cleanup_for_rejection = request.cleanup.clone();
     let ResolutionCastPermission {
         index: casting_permission_index,
         payment_mode,
         additional_cost,
     } = install_resolution_cast_permission(state, player, hit_card, &request)?;
-    let legality = resolution_spell_face_legality_for_permission(
+    let legality = resolution_face_legality_for_permission(
         state,
         player,
         hit_card,
@@ -17592,9 +17732,9 @@ pub(super) fn initiate_cast_during_resolution(
             .expect("resolution cast card remains present")
             .casting_permissions
             .remove(casting_permission_index.0);
-        return Ok(ResolutionCastInitiation::Rejected(Box::new(
-            cleanup_for_rejection,
-        )));
+        return Ok(ResolutionElectionInitiation::Cast(
+            ResolutionCastInitiation::Rejected(Box::new(cleanup_for_rejection)),
+        ));
     }
 
     let has_face_election = state
@@ -17602,14 +17742,30 @@ pub(super) fn initiate_cast_during_resolution(
         .get(&hit_card)
         .is_some_and(resolution_spell_face_choice_available);
     if legality.count() == 2 {
-        return Ok(ResolutionCastInitiation::WaitingFor(Box::new(
-            WaitingFor::ModalFaceChoice {
+        return Ok(ResolutionElectionInitiation::Cast(
+            ResolutionCastInitiation::WaitingFor(Box::new(WaitingFor::ModalFaceChoice {
                 player,
                 object_id: hit_card,
                 card_id: state.objects[&hit_card].card_id,
                 payment_mode,
                 resolution_additional_cost: additional_cost.clone(),
-            },
+            })),
+        ));
+    }
+
+    // CR 712.12: the land face is the only legal face. Electing it is no
+    // player decision; the temporary cast permission is not the authority for
+    // a land play, so remove it and hand its cleanup to the caller, which
+    // plays the land face during resolution (CR 305.2a).
+    if legality.front.is_none() && legality.back == Some(ResolutionFaceAction::PlayLand) {
+        state
+            .objects
+            .get_mut(&hit_card)
+            .expect("resolution election card remains present")
+            .casting_permissions
+            .remove(casting_permission_index.0);
+        return Ok(ResolutionElectionInitiation::PlayLandFace(Box::new(
+            cleanup_for_rejection,
         )));
     }
 
@@ -17622,7 +17778,7 @@ pub(super) fn initiate_cast_during_resolution(
             .objects
             .get_mut(&hit_card)
             .expect("resolution cast card remains present");
-        if legality.only_back() {
+        if legality.back == Some(ResolutionFaceAction::Cast) {
             simulate_chosen_split_spell_back_face(object);
             object.modal_back_face = true;
         }
@@ -17644,7 +17800,11 @@ pub(super) fn initiate_cast_during_resolution(
             state.objects.insert(hit_card, object);
         }
     }
-    result.map(|waiting_for| ResolutionCastInitiation::WaitingFor(Box::new(waiting_for)))
+    result.map(|waiting_for| {
+        ResolutionElectionInitiation::Cast(ResolutionCastInitiation::WaitingFor(Box::new(
+            waiting_for,
+        )))
+    })
 }
 
 /// CR 712.11c / CR 709.3a: check the already-elected face's characteristics
@@ -19301,7 +19461,7 @@ fn announce_spell_on_stack(
 ) -> Result<(), EngineError> {
     // CR 601.2 + CR 733.1: the action boundary records sparse inverse edits
     // for this cast; the declaration retains only its identity and journal mark.
-    if state.spell_cast_reversal.is_none() {
+    if state.spell_cast_reversal.is_none() && !super::engine_casting::in_confirmed_take() {
         // CR 608.2g + CR 733.1: only the elected resolution-owned permission
         // can have consumed a parent choice inside this input. Other casts use
         // the existing action boundary directly, without serializing a prefix.
@@ -28362,7 +28522,9 @@ mod starting_life_board_state_tests {
         }
         for (id, baseline) in [(PlayerId(0), 40), (PlayerId(1), 20)] {
             assert_eq!(
-                state.format_config.starting_life_total_for_player(id),
+                state
+                    .format_config
+                    .starting_life_total_for_player(id, state.players.len()),
                 baseline
             );
             assert!(!ability_condition_is_board_state_evaluable(&condition(
@@ -31980,6 +32142,8 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::Speed { player }
         | QuantityRef::LifeGainedThisTurn { player }
         | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::CardsDrawnLastTurn { player }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
         | QuantityRef::LandsPlayedThisTurn { player, .. }
         | QuantityRef::PlayerChosenNumber { player }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
@@ -32168,7 +32332,7 @@ fn player_filter_reads_chosen_target(filter: &PlayerFilter, read: TargetRead) ->
         PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::TargetPlayer => true,
-        PlayerFilter::AllExcept { exclude } => player_filter_reads_chosen_target(exclude, read),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_reads_chosen_target(exclude, read),
         PlayerFilter::AnyOf { filters } => filters
             .iter()
             .any(|f| player_filter_reads_chosen_target(f, read)),
@@ -32317,6 +32481,9 @@ fn target_filter_reads_chosen_target(filter: &TargetFilter, read: TargetRead) ->
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — resolved per affected
+        // member at install, never a declared target of this activation.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => false,
     }
 }

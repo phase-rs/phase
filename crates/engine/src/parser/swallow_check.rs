@@ -6997,11 +6997,15 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// nameable". `Replacement` is in this set and its axis names phrases perfectly well —
     /// `Replacement_Instead` runs that same `SwallowedAxis::Replacement` and mints
     /// antecedents from it. See `SwallowedClause::gap`, case 1.
+    // `DamageSubjectConjunction` is deliberately absent: the `try_parse_damage`
+    // compound-connector guard declines conjunction-trailing remainders, so its
+    // former corpus witness (Disorder) now fails closed with no unit for the
+    // detector to fire on. The detector grammar itself stays pinned by the
+    // `damage_subject_conjunction_detector_*` unit tests below.
     const EXPECTED_NON_PHRASE: &[&str] = &[
         "APNAP",
         "ActivateOnlyDuring",
         "CombatPairingRelation",
-        "DamageSubjectConjunction",
         "Duration_NextTurn",
         "Duration_ThisTurn",
         "Duration_UntilEndOfTurn",
@@ -7021,7 +7025,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// A detector with no gap axis wired at its push site passes `None`.
     ///
     /// The reach guard is a SET EQUALITY, not a count and not `!is_empty()`. An
-    /// `assert!(!observed.is_empty())` here would be satisfied by nine of the ten
+    /// `assert!(!observed.is_empty())` here would be satisfied by eight of the nine
     /// ceasing to fire, which is the "guarded assertion satisfied by the guarded paths
     /// ceasing to fire" shape this suite has shipped before. This is red the moment any
     /// one of them stops.
@@ -7031,15 +7035,21 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         // also fire a phrase-bearing detector; those records are filtered out below, so a
         // card carrying both is fine.
         //
+        // NOTE (merge): the set below stays at nine rather than main's ten:
+        // this branch's `try_parse_damage` compound-connector guard fails
+        // conjunction-tailed damage closed (Burns/Disorder class), so
+        // `DamageSubjectConjunction` has no firing witness while the guard
+        // stands. See the deliberately-absent note on the expected set.
+        //
         // The `Duration_UntilEndOfTurn` fixture is Savage Punch, not the former Dragon Egg
         // fixture: Dragon Egg's token grant now carries its duration in the AST (CR 602.1a
         // + CR 611.2a), so it no longer fires this detector and cannot reach it. The set
-        // below stays at ten — a detector that stops firing here needs a different corpus
-        // card, never a shrunken set.
+        // below stays at nine — a detector that stops firing here needs a different corpus
+        // card, never a shrunken set (the `DamageSubjectConjunction` removal above is
+        // the branch's guard stance, not a stop-firing: see its note).
         let fixtures: &[(&str, &str, &[&str])] = &[
             ("Protection Racket", "At the beginning of your upkeep, repeat the following process for each opponent in turn order. Reveal the top card of your library. That player may pay life equal to that card's mana value. If they do, exile that card. Otherwise, put it into your hand.", &["Enchantment"]),
             ("Dementia Sliver", "All Slivers have \"{T}: Choose a card name. Target opponent reveals a card at random from their hand. If that card has the chosen name, that player discards it. Activate only during your turn.\"", &["Creature"]),
-            ("Disorder", "Disorder deals 2 damage to each white creature and each player who controls a white creature.", &["Sorcery"]),
             ("Perch Protection", "Gift an extra turn (You may promise an opponent a gift as you cast this spell. If you do, they take an extra turn after this one.)\nCreate four 2/2 blue Bird creature tokens with flying. If the gift was promised, all permanents you control phase out, and until your next turn, your life total can't change and you gain protection from everything.\nExile Perch Protection.", &["Instant"]),
             ("Jandor's Ring", "{2}, {T}, Discard the last card you drew this turn: Draw a card.", &["Artifact"]),
             ("Savage Punch", "Target creature you control fights target creature you don't control.\nFerocious — The creature you control gets +2/+2 until end of turn before it fights if you control a creature with power 4 or greater.", &["Sorcery"]),
@@ -7075,7 +7085,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
                 .iter()
                 .map(|d| (*d).to_string())
                 .collect::<BTreeSet<_>>(),
-            "observed non-phrase detector set differs from the corpus-measured ten; \
+            "observed non-phrase detector set differs from the corpus-measured nine; \
              observed = {observed:?}"
         );
 

@@ -9309,6 +9309,7 @@ pub fn synthesize_read_ahead(face: &mut CardFace) {
         // chapter number"; the chosen value is persisted on the entering Saga
         // so the `PutCounter` sub-ability can read it via `ChosenNumber`.
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::NumberRange {
                 min: 1,
                 // CR 702.155b: the Saga states its own upper bound (the final
@@ -10013,6 +10014,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         protector_replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::opponent(),
                 persist: true,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -10144,6 +10146,7 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
     let choose_stage = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::opponent(),
             persist: true,
             selection: crate::types::ability::TargetSelectionMode::Chosen,

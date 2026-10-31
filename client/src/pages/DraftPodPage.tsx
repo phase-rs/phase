@@ -1392,13 +1392,9 @@ function CompleteView({ onLeave }: { onLeave: () => void }) {
   // without an optional chain, and keeps that read off every other role's path.
   const launchableView =
     view?.launch_capability === "CommanderMultiplayer" && role === "host" ? view : null;
-  // `commanderLaunch` is the store's ONLY observable of a launch. The host's is
-  // written by its own local emit on the FIRST iteration of
-  // `sendCommanderLaunches` — the host is pod seat 0, `liveSeatDecks` is built
-  // in `view.seats` order, and `sendToSeat`'s seat-0 arm turns that send into a
-  // local event. The loop is synchronous, so the position does not matter to
-  // behaviour; what matters is that the window between the CLICK and that write
-  // is the whole `hostRoom` round-trip, covered by the store's
+  // `commanderLaunch` is written by the host's local event after the finalizer
+  // awaits engine-seat installs and enqueues remote invitations. The whole
+  // bring-up window before that write is covered by the store's
   // `commanderLaunchInFlight` re-entry guard rather than by this flag.
   const launchInFlight = commanderLaunch !== null;
   // The invitation IS the authorization: a guest holds a `commanderLaunch` only

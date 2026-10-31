@@ -2703,8 +2703,10 @@ pub fn candidate_actions_broad_with_probe(
         // CR 712.11b-c / CR 709.3-3a: a face election exposes only faces whose
         // own characteristics can be cast. Ordinary MDFC land/spell prompts
         // retain both actions. A resolution-owned prompt, however, exposes
-        // only faces the exact temporary permission can still cast; the handler
-        // independently enforces the same policy for forged direct submissions.
+        // only faces the exact temporary permission can still cast — plus,
+        // under a Play election, the land face when it can be played now
+        // (CR 701.18b + CR 712.12); the handler independently enforces the
+        // same policy for forged direct submissions.
         WaitingFor::ModalFaceChoice {
             player,
             object_id,
@@ -2724,28 +2726,22 @@ pub fn candidate_actions_broad_with_probe(
                         crate::types::ability::CastingPermission::ExileWithAltCost {
                             resolution_cleanup: Some(cleanup),
                             ..
-                        } => Some(crate::game::casting::resolution_spell_face_legality_for_current_permission(
-                            state,
-                            *player,
-                            *object_id,
-                            &cleanup.face_policy,
-                            index,
-                        )),
+                        } => Some(
+                            crate::game::casting::resolution_face_legality_for_current_permission(
+                                state,
+                                *player,
+                                *object_id,
+                                &cleanup.face_policy,
+                                index,
+                            ),
+                        ),
                         _ => None,
                     })
             });
             let mut actions: Vec<_> = [false, true]
                 .into_iter()
                 .filter(|back_face| {
-                    legal_faces.is_none_or(
-                        |faces| {
-                            if *back_face {
-                                faces.back
-                            } else {
-                                faces.front
-                            }
-                        },
-                    )
+                    legal_faces.is_none_or(|faces| faces.face(*back_face).is_some())
                 })
                 .map(|back_face| {
                     candidate(

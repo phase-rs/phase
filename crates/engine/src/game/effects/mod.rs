@@ -64,6 +64,7 @@ use crate::types::resolution::{
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
+pub mod abandon_scheme;
 pub mod adapt;
 pub mod add_restriction;
 pub mod add_target_replacement;
@@ -438,17 +439,19 @@ pub fn matches_player_scope(
                 && match scope {
                     PlayerFilter::Controller => p.id == controller,
                     PlayerFilter::All => true,
-                    // CR 608.2c + CR 109.4: predicate form — a player matches
-                    // unless it matches the `exclude` anchor. Exact for excludes
-                    // resolvable without ability targets (Controller, Opponent,
-                    // …); ability-target-dependent anchors
+                    // CR 608.2c + CR 109.4: predicate form — a player
+                    // matching the base `relation` matches unless it matches
+                    // the `exclude` anchor. Exact for excludes resolvable
+                    // without ability targets (Controller, Opponent, …);
+                    // ability-target-dependent anchors
                     // (ParentObjectTargetController) return `false` from this
                     // generic predicate, so the player_scope driver routes
                     // `AllExcept` through the ability-aware
                     // `speed_effects::players_for_filter` instead, which is
                     // authoritative for `AllExcept` effect-iteration.
-                    PlayerFilter::AllExcept { exclude } => {
-                        !matches_player_scope(state, p.id, exclude, controller, source_id)
+                    PlayerFilter::AllExcept { exclude, relation } => {
+                        crate::game::players::matches_relation(state, p.id, controller, *relation)
+                            && !matches_player_scope(state, p.id, exclude, controller, source_id)
                     }
                     // CR 102.1 + CR 608.2c: predicate form of the union — a
                     // player matches when any member names it.
@@ -785,6 +788,16 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
         QuantityRef::CardsDrawnThisTurn { .. } => {
             Some(u32_to_i32_saturating(p.cards_drawn_this_turn))
         }
+        // CR 121.1 + CR 603.4: cards drawn during the previous turn, read
+        // from the turn-start snapshot per candidate player.
+        QuantityRef::CardsDrawnLastTurn { .. } => {
+            Some(u32_to_i32_saturating(p.cards_drawn_last_turn))
+        }
+        // CR 601.2i + CR 603.4: spells cast by opponents since the
+        // candidate's last turn ended, read from the per-player window.
+        QuantityRef::OpponentSpellsCastSinceLastTurn { .. } => Some(u32_to_i32_saturating(
+            p.opponent_spells_cast_since_own_last_turn,
+        )),
         // CR 101.4 + CR 608.2d: the number this candidate secretly chose during
         // the current resolution. `None` for a player who chose nothing, which
         // fails the candidate predicate CLOSED — "each player who didn't choose
@@ -5226,6 +5239,9 @@ fn effect_enters_battlefield(effect: &Effect) -> bool {
         Effect::Encore => false,
         // not a co-entry ContinuationStep: it selects cards and moves nothing itself.
         Effect::ChooseFromZone { .. } => false,
+        // not a co-entry ContinuationStep: abandoning turns a scheme face
+        // down (or returns it to the scheme deck), never onto the battlefield.
+        Effect::AbandonScheme => false,
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
@@ -7238,11 +7254,16 @@ fn settle_shared_continuation_gate(ability: &ResolvedAbility) -> Option<Resolved
 ///   sub survives) or leave CR 603.4 unenforced (declining a body whose sub does
 ///   not).
 ///
-/// The two classes: a CR 603.12 performed/reflexive gate, whose truth is only
-/// knowable at resolution and is re-evaluated on its own; and a CR 615.5
+/// The three classes: a CR 603.12 performed/reflexive gate, whose truth is only
+/// knowable at resolution and is re-evaluated on its own; a CR 615.5
 /// INDEPENDENT per-event gate (Comeuppance's mutually-exclusive
 /// creature/noncreature reflection riders), which references the event rather
-/// than the parent's effect.
+/// than the parent's effect; and a CR 607.2d chosen-label gate (the
+/// self-or-others "If the player chooses others" branch), which references
+/// the paused choice's answer rather than the parent's gate — mutually
+/// exclusive with its sibling by construction, exactly like the Comeuppance
+/// riders. Without this, a deferred label gate that re-evaluates false on the
+/// drain would suppress its sibling instead of handing off to it.
 ///
 /// NOT included, deliberately: an unconditional `SequentialSibling` (it also
 /// runs on the false path, but as the next clause of the SAME gated sentence —
@@ -7255,6 +7276,7 @@ pub(crate) fn condition_survives_false_parent_gate(condition: &AbilityCondition)
         || matches!(
             condition,
             AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+                | AbilityCondition::ChosenLabelIs { .. }
         )
 }
 
@@ -8014,6 +8036,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -8337,6 +8360,9 @@ fn referent_exists_without_gated_action(
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — not an anaphor of a
+        // resolution result this gate looks for.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
@@ -8552,7 +8578,8 @@ fn condition_reads_filter_population(
         | AbilityCondition::DayNightIsNeither
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
-        | AbilityCondition::SourceLacksKeyword { .. } => false,
+        | AbilityCondition::SourceLacksKeyword { .. }
+        | AbilityCondition::ChosenLabelIs { .. } => false,
     }
 }
 
@@ -9354,7 +9381,8 @@ fn effect_fields_read_filter_population(
         | Effect::SetDayNight { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
-        | Effect::Unimplemented { .. } => false,
+        | Effect::Unimplemented { .. }
+        | Effect::AbandonScheme => false,
     }
 }
 
@@ -11301,6 +11329,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             // optional-decline branch selector — it reads the flip, not the
             // declined effect.
             | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
             // The frozen trigger-event damage/exploit read is independent of an
             // optional-effect decision, so it cannot select a decline branch.
             | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
@@ -11659,7 +11688,9 @@ fn scope_keeps_scoped_whole_hand_shuffle_local(scope: &PlayerFilter) -> bool {
         // `player_filter_references_tracked_set`'s treatment of the same variant.
         // Behaviour-identical while every arm above is `true`; recursing keeps it
         // from silently disagreeing with its anchor the moment one is not.
-        PlayerFilter::AllExcept { exclude } => scope_keeps_scoped_whole_hand_shuffle_local(exclude),
+        PlayerFilter::AllExcept { exclude, .. } => {
+            scope_keeps_scoped_whole_hand_shuffle_local(exclude)
+        }
         // The union keeps the pair local only when every member does.
         PlayerFilter::AnyOf { filters } => filters
             .iter()
@@ -13240,6 +13271,7 @@ fn resolve_legacy_effect(
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
         Effect::ArrangePlanarDeckTop { .. } => arrange_planar_deck::resolve(state, ability, events),
         Effect::Planeswalk => planeswalk::resolve(state, ability, events),
+        Effect::AbandonScheme => abandon_scheme::resolve(state, ability, events),
         Effect::ChaosEnsues => chaos_ensues::resolve(state, ability, events),
         Effect::ReverseTurnOrder => reverse_turn_order::resolve(state, ability, events),
         Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
@@ -13884,6 +13916,23 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
             return true;
         }
     }
+    // CR 608.2c + CR 108.3: `ForceAttack` with scope `All` ("Each of those
+    // creatures attacks its owner", The Dead Shall Serve) carries its
+    // subject in `target`, which `Effect::target_filter()` deliberately
+    // hides (no creature slot is announced for the broadcast scope). A
+    // `TrackedSet`-bound rider still consumes the moved set, so inspect
+    // the field directly — without this the producer never publishes and
+    // the rider grafts nothing.
+    if let Effect::ForceAttack {
+        scope: EffectScope::All,
+        target,
+        ..
+    } = effect
+    {
+        if filter_references_tracked_set(target) {
+            return true;
+        }
+    }
     false
 }
 
@@ -13998,7 +14047,9 @@ fn player_filter_references_tracked_set(filter: &PlayerFilter) -> bool {
         | PlayerFilter::PlayerAttribute { .. } => false,
         // The negation wrapper inherits its inner filter's consumption: an
         // "all except <tracked-set possessor>" scope still needs the set.
-        PlayerFilter::AllExcept { exclude } => player_filter_references_tracked_set(exclude),
+        PlayerFilter::AllExcept { exclude, .. } => {
+            player_filter_references_tracked_set(exclude)
+        }
         // The union needs the set when any member does.
         PlayerFilter::AnyOf { filters } => filters.iter().any(player_filter_references_tracked_set),
     }
@@ -16606,8 +16657,10 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             // instruction that resolves now (`DuringResolution`) is probed too,
             // per card through `cast_from_zone::resolution_play_route` — the
             // route `resolve` takes — so a land the player cannot play right now
-            // (allowance reached, not their turn) is not offered. A lingering
-            // `Play` grant is always grantable and stays unprobed.
+            // (allowance reached, not their turn) is not offered. A spell//land
+            // modal card is offered when either face is legal (CR 712.11c +
+            // CR 712.12). A lingering `Play` grant is always grantable and stays
+            // unprobed.
             let resolves_play_now = mode.is_play() && driver.is_during_resolution();
             if matches!(mode, CardPlayMode::Cast) || resolves_play_now {
                 // CR 608.2d: an untargeted free graveyard pick with nothing
@@ -16689,6 +16742,21 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                                     ability.controller,
                                     id,
                                 );
+                            }
+                            // CR 701.18b + CR 712.11c + CR 712.12 + CR 608.2d:
+                            // a spell//land modal card is offered when its spell
+                            // face can be cast or its land face played now. Each
+                            // face is judged by its own legality, through the
+                            // exact election `resolve` opens with this same
+                            // `ability`, before the whole-card constraint gate
+                            // below: an illegal spell face must not suppress a
+                            // legal land face, and vice versa.
+                            cast_from_zone::ResolutionPlayRoute::ElectFace => {
+                                return cast_from_zone::resolution_play_face_legality(
+                                    state, ability, id,
+                                )
+                                .count()
+                                    != 0;
                             }
                             // CR 712.12: the lingering land-face fallback grants
                             // a permission, which is always grantable.
@@ -17560,6 +17628,11 @@ fn resolve_context_player(
             return player;
         }
     }
+    // CR 108.3 + CR 508.1d: `AffectedObjectOwner` is deliberately unresolved
+    // here. It names no one player — only `force_attack::resolve`'s per-member
+    // graft consumes it, before this resolver could ever see it. If this
+    // anchor ever reaches this function, that caller is missing its per-member
+    // expansion: do not "fix" it by returning a concrete player here.
     ability.controller
 }
 
@@ -21241,6 +21314,10 @@ fn reset_top_level_resolution_state(state: &mut GameState) {
     state.chosen_color_this_resolution = None;
     // CR 608.2c: nor a prior resolution's "that color".
     state.named_color_this_resolution = None;
+    // CR 607.2d + CR 608.2c: nor a prior resolution's "that label" — a
+    // recycled self-or-others scheme's fresh answer must not inherit the label
+    // an earlier resolution named.
+    state.named_label_this_resolution = None;
     // CR 608.2c: "that sticker" names a sticker this resolution's own PutSticker
     // instruction placed; a new top-level resolution cannot inherit a prior one's.
     state.placed_sticker_this_resolution = None;
@@ -27209,6 +27286,19 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::CoinFlipOutcome { result } => state
             .resolution_coin_flip
             .is_some_and(|f| f.flipper == ability.controller && f.result == *result),
+        // CR 607.2d + CR 608.2c: "If [that|the] player chooses <label>" — the
+        // label THIS resolution's labeled choice named matches the anchor word
+        // (case-insensitive). Reads the named-choice continuation
+        // (`named_label_this_resolution`, written by the preceding `Choose {
+        // Labeled }` head's bind), NOT the source's persisted label history:
+        // labels accumulate across resolutions, so a recycled scheme's first
+        // answer would otherwise shadow every later one (CR 608.2c: follow
+        // the instructions in the order written). The static/trigger mirrors
+        // keep reading the persisted anchor via `eval_chosen_label_is`.
+        AbilityCondition::ChosenLabelIs { label } => state
+            .named_label_this_resolution
+            .as_deref()
+            .is_some_and(|chosen| chosen.eq_ignore_ascii_case(label)),
         // CR 603.12: A reflexive triggered ability ("when you do") triggers
         // "based on whether the trigger event or events occurred earlier during
         // the resolution" of the parent. Two independent ways the parent event
@@ -28066,11 +28156,14 @@ fn scoped_player_matches_filter(
         // controller nor an opponent.
         PlayerFilter::Opponent => crate::game::players::is_opponent(state, controller, candidate),
         PlayerFilter::All => true,
-        // CR 608.2c + CR 109.4: candidate matches unless it matches the anchor.
-        // Recursive against the same printed-controller-relative predicate;
-        // ability-target anchors fall through to the fail-closed arm below.
-        PlayerFilter::AllExcept { exclude } => {
-            !scoped_player_matches_filter(state, ability, candidate, exclude)
+        // CR 608.2c + CR 109.4 (+ CR 102.2/102.3 for an opponents base):
+        // a candidate matching the base relation matches unless it matches
+        // the anchor. Recursive against the same
+        // printed-controller-relative predicate; ability-target anchors fall
+        // through to the fail-closed arm below.
+        PlayerFilter::AllExcept { exclude, relation } => {
+            crate::game::players::matches_relation(state, candidate, controller, *relation)
+                && !scoped_player_matches_filter(state, ability, candidate, exclude)
         }
         PlayerFilter::AnyOf { filters } => filters
             .iter()
@@ -34549,6 +34642,62 @@ mod tests {
         assert_eq!(state.players[1].life, life_before - 2);
     }
 
+    /// CR 102.2 + CR 108.3: the player-scope fan-out driver routes
+    /// `AllExcept` through the ability-aware authority, so the owner-anchor
+    /// `Opponent` relation holds end to end: departed owner P0 excluded,
+    /// caster P1 not their own opponent, only P2 pays. Dropping `relation`
+    /// in the helper fans out to P1 too.
+    #[test]
+    fn owner_anchor_opponent_scope_fans_out_only_to_opponents() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 0);
+        let moved = ObjectId(7);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: moved,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(1),
+                },
+                controller: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(moved, Some(Zone::Battlefield), Zone::Graveyard)
+            }),
+        });
+        let mut ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+            Vec::new(),
+            ObjectId(900),
+            PlayerId(1),
+        );
+        ability.player_scope = Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::Opponent,
+        });
+        let life_before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
+        let mut events = Vec::new();
+        let progress = resolve_chain_body(&mut state, &ability, &mut events, 0, None)
+            .expect("scoped fan-out resolves");
+        assert!(
+            matches!(progress, ResolutionProgress::Complete),
+            "no prompt expected, got {progress:?}"
+        );
+        assert_eq!(state.players[0].life, life_before[0], "owner excluded");
+        assert_eq!(
+            state.players[1].life, life_before[1],
+            "caster is not their own opponent"
+        );
+        assert_eq!(
+            state.players[2].life,
+            life_before[2] - 1,
+            "only the non-owner opponent pays"
+        );
+    }
+
     #[test]
     fn random_reflexive_materializes_on_stack_before_effect() {
         let mut state = GameState::new_two_player(42);
@@ -39102,6 +39251,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::Keyword {
                     options: vec![],
                     count: 1,
@@ -46721,6 +46871,7 @@ mod tests {
         );
         let choice = ResolvedAbility::new(
             Effect::Choose {
+                chooser: ControllerRef::You,
                 choice_type: ChoiceType::color(),
                 persist: false,
                 selection: TargetSelectionMode::Chosen,
@@ -49692,6 +49843,7 @@ mod tests {
                     "PlayerCount(AllExcept(ControlsCount))".to_string(),
                     gain(player_count(PlayerFilter::AllExcept {
                         exclude: Box::new(controls(anaphor.clone(), one())),
+                        relation: crate::types::ability::PlayerRelation::All,
                     })),
                 ),
                 (
@@ -50708,6 +50860,7 @@ mod tests {
                 Box::new(move |filter: TargetFilter| {
                     ResolvedAbility::new(
                         Effect::Choose {
+                            chooser: ControllerRef::You,
                             choice_type: ChoiceType::Opponent {
                                 restriction: Some(Box::new(controls(filter))),
                                 distinctness: PlayerChoiceDistinctness::Independent,
@@ -52044,6 +52197,7 @@ mod tests {
         // iteration and must not re-enter the fan-out driver mid-instruction.
         let mut choose_return = ResolvedAbility::new(
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::creature_type(),
                 persist: true,
                 selection: TargetSelectionMode::Chosen,
@@ -59757,6 +59911,135 @@ mod tests {
         assert!(!optional_effect_is_infeasible(&state, &unbound));
     }
 
+    /// P0's main phase with a play source on the battlefield and one spell
+    /// (sorcery, generic(3)) // land modal card in `zone` (CR 712.12).
+    fn spell_land_feasibility_board(zone: Zone) -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(914),
+            PlayerId(0),
+            "Play Source".to_string(),
+            Zone::Battlefield,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(915),
+            PlayerId(0),
+            "Spell Front".to_string(),
+            zone,
+        );
+        let object = state.objects.get_mut(&card).unwrap();
+        object.card_types.core_types.push(CoreType::Sorcery);
+        object.base_card_types = object.card_types.clone();
+        object.mana_cost = crate::types::mana::ManaCost::generic(3);
+        let mut back_types = crate::types::card_type::CardType::default();
+        back_types.core_types.push(CoreType::Land);
+        object.back_face = Some(crate::game::game_object::BackFaceData {
+            name: "Land Back".to_string(),
+            card_types: back_types,
+            layout_kind: Some(crate::types::card::LayoutKind::Modal),
+            ..Default::default()
+        });
+        (state, source, card)
+    }
+
+    /// "Mana value 0 or less" on the instruction: the generic(3) spell face is
+    /// illegal under it, while the land face is unaffected.
+    fn with_mv_zero_constraint(mut ability: ResolvedAbility) -> ResolvedAbility {
+        if let Effect::CastFromZone { constraint, .. } = &mut ability.effect {
+            *constraint = Some(crate::types::ability::CastPermissionConstraint::ManaValue {
+                comparator: crate::types::ability::Comparator::LE,
+                value: crate::types::ability::QuantityExpr::Fixed { value: 0 },
+            });
+        }
+        ability
+    }
+
+    /// CR 701.18b + CR 712.11c + CR 712.12 + CR 608.2d: a Play that resolves
+    /// now offers a spell//land modal card when EITHER face is legal. An
+    /// illegal spell face does not suppress a legal land face; with neither
+    /// face legal (allowance reached, another player's turn, or a "can't play
+    /// lands" prohibition) there is no offer.
+    #[test]
+    fn optional_play_now_feasibility_offers_a_spell_land_card_when_either_face_is_legal() {
+        use crate::types::ability::CastFromZoneDriver;
+
+        for zone in [Zone::Exile, Zone::Library] {
+            let (state, source, card) = spell_land_feasibility_board(zone);
+            let now = play_instruction(source, Some(card), CastFromZoneDriver::DuringResolution);
+            assert!(
+                !optional_effect_is_infeasible(&state, &now),
+                "{zone:?}: both faces legal, offered"
+            );
+            let constrained = with_mv_zero_constraint(now.clone());
+            assert!(
+                !optional_effect_is_infeasible(&state, &constrained),
+                "{zone:?}: the spell face is illegal but the land face is legal, offered"
+            );
+
+            let (mut state, source, card) = spell_land_feasibility_board(zone);
+            at_land_allowance(&mut state);
+            let now = play_instruction(source, Some(card), CastFromZoneDriver::DuringResolution);
+            assert!(
+                !optional_effect_is_infeasible(&state, &now),
+                "{zone:?}: at the allowance the spell face alone keeps the offer"
+            );
+            assert!(
+                optional_effect_is_infeasible(&state, &with_mv_zero_constraint(now)),
+                "{zone:?}: CR 305.2b + illegal spell face, no legal face, no offer"
+            );
+
+            let (mut state, source, card) = spell_land_feasibility_board(zone);
+            state.active_player = PlayerId(1);
+            let now = play_instruction(source, Some(card), CastFromZoneDriver::DuringResolution);
+            assert!(
+                optional_effect_is_infeasible(&state, &with_mv_zero_constraint(now)),
+                "{zone:?}: CR 305.3 + illegal spell face, no legal face, no offer"
+            );
+
+            let (mut state, source, card) = spell_land_feasibility_board(zone);
+            let prohibitor = create_object(
+                &mut state,
+                CardId(916),
+                PlayerId(0),
+                "Static Source".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&prohibitor)
+                .unwrap()
+                .static_definitions
+                .push(
+                    crate::types::ability::StaticDefinition::new(
+                        crate::types::statics::StaticMode::Other("CantPlayLand".to_string()),
+                    )
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default()
+                            .controller(crate::types::ability::ControllerRef::You),
+                    )),
+                );
+            assert!(
+                crate::game::static_abilities::player_has_static_other(
+                    &state,
+                    PlayerId(0),
+                    "CantPlayLand"
+                ),
+                "reach-guard: the prohibition is in force"
+            );
+            let now = play_instruction(source, Some(card), CastFromZoneDriver::DuringResolution);
+            assert!(
+                optional_effect_is_infeasible(&state, &with_mv_zero_constraint(now)),
+                "{zone:?}: CR 101.2 prohibition + illegal spell face, no offer"
+            );
+        }
+    }
+
     /// CR 608.2g + CR 701.18b: a MULTI-card Play binding is not played now —
     /// `resolve` grants lingering permissions for it (the shared
     /// `single_resolution_card` cardinality authority) — so resolve-now land
@@ -61096,6 +61379,7 @@ mod tests {
             PlayerFilter::Opponent,
             PlayerFilter::AllExcept {
                 exclude: Box::new(PlayerFilter::Controller),
+                relation: crate::types::ability::PlayerRelation::All,
             },
             PlayerFilter::TrackedSetPossessor {
                 relation: crate::types::ability::PlayerRelation::Opponent,

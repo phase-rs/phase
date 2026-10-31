@@ -5715,12 +5715,32 @@ pub(crate) fn tap_creature_power_contribution(state: &GameState, id: ObjectId) -
 }
 
 /// CR 208.1 + CR 601.2f: Sum the CURRENT positive power of a set of creatures
-/// toward an aggregate total-power tap cost. Single authority shared by the
-/// activation gate, the AI candidate enumerator, and the selection validator so
-/// every seam agrees on which subsets satisfy the threshold.
+/// toward an aggregate total-power tap cost. Single authority for the
+/// can-pay UPPER BOUND shared by the activation gate, the AI candidate
+/// enumerator, and the payment gates: if even the clamped total of every
+/// eligible creature falls short, no subset can satisfy the threshold (any
+/// signed subset total is <= its clamped twin).
 pub(crate) fn tap_creatures_total_power(state: &GameState, ids: &[ObjectId]) -> i32 {
     ids.iter()
         .map(|&id| tap_creature_power_contribution(state, id))
+        .sum()
+}
+
+/// CR 107.1b + CR 208.1 + CR 601.2f: Sum the CURRENT SIGNED power of a set of
+/// creatures toward an aggregate total-power tap cost. Negative power counts:
+/// tapping 4, 4 and −1 totals 7, not 8. Single authority for VALIDATING a
+/// chosen subset — shared by the selection validator, the AI legality probe,
+/// and the collective session's combined check — so every seam agrees on
+/// which submitted subsets are legal.
+pub(crate) fn tap_creatures_signed_total_power(state: &GameState, ids: &[ObjectId]) -> i32 {
+    ids.iter()
+        .map(|&id| {
+            state
+                .objects
+                .get(&id)
+                .and_then(|obj| obj.power)
+                .unwrap_or(0)
+        })
         .sum()
 }
 
@@ -5737,8 +5757,8 @@ pub(crate) fn pay_tap_creatures_selection(
     // CR 601.2b: Validate the chosen set against the cost's requirement shape.
     // `Fixed`/`VariableX` are the count-bounded forms (tap a count within
     // [min_count, count]); `Aggregate(a)` is the Crew/Saddle/Teamwork form (tap
-    // any number whose total positive power, CR 208.1, satisfies the advertised
-    // comparator vs `a.value`). Bounds/aggregate-satisfaction is checked first,
+    // any number whose total signed power, CR 107.1b + CR 208.1, satisfies the
+    // advertised comparator vs `a.value`). Bounds/aggregate-satisfaction is checked first,
     // mirroring `handle_sacrifice_for_cost` and
     // `handle_tap_creatures_for_mana_ability` — the same-mechanism sibling that
     // validates this exact `TapCreaturesSelectionMode` type for the mana-ability
@@ -5763,10 +5783,10 @@ pub(crate) fn pay_tap_creatures_selection(
             }
         }
         TapCreaturesSelectionMode::Aggregate(aggregate) => {
-            let total_positive_power = tap_creatures_total_power(state, chosen);
-            if !aggregate.satisfied_by(total_positive_power) {
+            let total_power = tap_creatures_signed_total_power(state, chosen);
+            if !aggregate.satisfied_by(total_power) {
                 return Err(EngineError::InvalidAction(format!(
-                    "Tapped creatures' total power {total_positive_power} does not satisfy the \
+                    "Tapped creatures' total power {total_power} does not satisfy the \
                      required {:?} {}",
                     aggregate.comparator, aggregate.value
                 )));
@@ -5778,9 +5798,9 @@ pub(crate) fn pay_tap_creatures_selection(
     // creature already spent on this payment can't be spent again within the
     // same payment. Checked unconditionally, for every `mode`, BEFORE the tap
     // loop: the `Aggregate` arm above sums `chosen` with no dedup
-    // (`tap_creatures_total_power` — a duplicated id would double-count its
-    // power, letting `[a, a]` on a power-2 creature satisfy a "total power >=
-    // 4" requirement with only one real creature), so this loop is what
+    // (`tap_creatures_signed_total_power` — a duplicated id would double-count
+    // its power, letting `[a, a]` on a power-2 creature satisfy a "total power
+    // >= 4" requirement with only one real creature), so this loop is what
     // actually protects the aggregate case, not the match arm's own check.
     // Combined into a single pass with the membership check, mirroring
     // `handle_tap_creatures_for_mana_ability`.
@@ -11071,6 +11091,9 @@ fn pay_additional_cost_with_source(
                     stat,
                     comparator,
                     value,
+                    // Cast-time costs always pay singular; `collective` is a
+                    // resolution-only flag the parser never stamps here.
+                    ..
                 } => {
                     // CR 601.2f + CR 208.1: Snapshot the full constraint so the
                     // payment validator honors the advertised comparator. The

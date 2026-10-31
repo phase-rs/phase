@@ -2559,6 +2559,10 @@ impl CardPlayMode {
     pub fn is_play(&self) -> bool {
         matches!(self, Self::Play)
     }
+
+    pub fn is_cast(&self) -> bool {
+        matches!(self, Self::Cast)
+    }
 }
 
 fn play_from_exile_mode_default() -> CardPlayMode {
@@ -5926,14 +5930,22 @@ pub enum CastPermissionConstraint {
 /// `filter` is normalized when the policy is constructed.  `source_id` and
 /// `controller` are the real resolution context used to interpret that filter;
 /// `constraint` is the fixed cast-time condition, including the explicit
-/// `None` case for a route with no additional condition.  None of these fields
-/// has a serde default.
+/// `None` case for a route with no additional condition.  None of these four
+/// fields has a serde default.
+///
+/// `play_mode` is the one defaulted field. It defaults to `Cast` because every
+/// policy serialized before the field existed was a spell-only election
+/// (CR 601.2), so its absence names exactly that route. `Play` (CR 701.18b:
+/// to play a card is to cast it or play it as a land) additionally admits a
+/// modal double-faced card's land face (CR 712.12).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolutionCastFacePolicy {
     pub filter: TargetFilter,
     pub source_id: ObjectId,
     pub controller: PlayerId,
     pub constraint: Option<CastPermissionConstraint>,
+    #[serde(default, skip_serializing_if = "CardPlayMode::is_cast")]
+    pub play_mode: CardPlayMode,
 }
 
 impl ResolutionCastFacePolicy {
@@ -5948,7 +5960,15 @@ impl ResolutionCastFacePolicy {
             source_id,
             controller,
             constraint,
+            play_mode: CardPlayMode::Cast,
         }
+    }
+
+    /// CR 701.18b: an instruction to *play* the card (rather than cast it)
+    /// lets the election admit a land face (CR 712.12).
+    pub fn with_play_mode(mut self, play_mode: CardPlayMode) -> Self {
+        self.play_mode = play_mode;
+        self
     }
 }
 
@@ -7219,6 +7239,13 @@ pub enum ControllerRef {
     SpecificPlayer {
         id: PlayerId,
     },
+}
+
+impl ControllerRef {
+    /// `skip_serializing_if` predicate — the controller default needs no JSON byte.
+    pub fn is_you(&self) -> bool {
+        matches!(self, Self::You)
+    }
 }
 
 /// CR 301 / CR 303: Kinds of attachments to permanents.
@@ -9062,6 +9089,21 @@ pub enum TargetFilter {
     /// Distinct from `Owner` (which always reads the source object's owner) and
     /// `ParentTargetController` (which returns the controller per CR 109.4).
     ParentTargetOwner,
+    /// CR 108.3 + CR 508.1d + CR 608.2c: The owner of each object in the
+    /// affected set, resolved per member — the defender anchor for "Each of
+    /// them attacks its owner" (My Crushing Masterstroke) and "Each of those
+    /// creatures attacks its owner" (The Dead Shall Serve). Unlike
+    /// `ParentTargetOwner` (the owner of the parent ability's single target)
+    /// and `Owner` (the source object's owner), this names no one player at
+    /// parse time: every affected member can have a different owner, so the
+    /// anchor is only meaningful per member.
+    ///
+    /// ONLY consumer: `force_attack::resolve`'s owner-relative graft, which
+    /// enumerates the affected population and installs one per-object
+    /// requirement pinned to that member's owner. Every other consumer fails
+    /// closed (resolves to no player / matches nothing) — a single-player
+    /// reading of a per-member anchor would be silently wrong.
+    AffectedObjectOwner,
     /// CR 607.2d + CR 608.2c: Resolves to the player chosen for the source by
     /// a linked persisted choice ("the chosen player"). This is not a target
     /// slot and is distinct from `ControllerRef::ChosenPlayer`, which is
@@ -9313,6 +9355,7 @@ pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -9478,7 +9521,7 @@ pub(crate) fn player_filter_contains(
         PlayerFilter::AnyOf { filters } => filters.iter().any(|f| player_filter_contains(f, leaf)),
         // The excluded players are themselves a player filter, which can box
         // a `TargetFilter` of its own (e.g. `ControlsCount { filter }`).
-        PlayerFilter::AllExcept { exclude } => player_filter_contains(exclude, leaf),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_contains(exclude, leaf),
         // Leaves: no nested `TargetFilter`. `PlayerAttribute`'s `QuantityRef` /
         // `QuantityExpr` and `ControlsCount.count` are quantities, which the
         // scope rule on `filter_contains` assigns to the operand-closed twin.
@@ -9617,7 +9660,8 @@ pub(crate) fn filter_grammar_any(
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
-        | TargetFilter::AllPlayers => false,
+        | TargetFilter::AllPlayers
+        | TargetFilter::AffectedObjectOwner => false,
     }
 }
 
@@ -9771,7 +9815,7 @@ pub(crate) fn player_filter_grammar_any(
             quantity_ref_grammar_any(attr, visit) || quantity_expr_grammar_any(value, visit)
         }
         PlayerFilter::TrackedSetPossessor { filter, .. } => filter_grammar_any(filter, visit),
-        PlayerFilter::AllExcept { exclude } => player_filter_grammar_any(exclude, visit),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_grammar_any(exclude, visit),
         PlayerFilter::AnyOf { filters } => {
             filters.iter().any(|f| player_filter_grammar_any(f, visit))
         }
@@ -9926,6 +9970,8 @@ pub(crate) fn quantity_ref_grammar_any(
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -10140,6 +10186,7 @@ pub(crate) fn rewrite_filter_props<C>(
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => {}
     }
 }
@@ -10451,7 +10498,7 @@ pub(crate) fn rewrite_player_filter_props<C>(
             false,
             None,
         ),
-        PlayerFilter::AllExcept { exclude } => rewrite_player_filter_props(
+        PlayerFilter::AllExcept { exclude, .. } => rewrite_player_filter_props(
             exclude,
             rewrite_node,
             rewrite,
@@ -10751,6 +10798,8 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -11025,6 +11074,7 @@ pub(crate) fn filter_binds_player(
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -11429,6 +11479,9 @@ pub(crate) fn instruction_object_reach(effect: &Effect) -> InstructionObjectReac
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::ChaosEnsues
+        // CR 701.33b: abandoning turns the scheme face down and moves it to
+        // the scheme deck — a zone change outside any one slot.
+        | Effect::AbandonScheme
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
         | Effect::OpenAttractions { .. }
@@ -11730,6 +11783,9 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        // CR 701.33b: abandoning moves command-zone→scheme-deck, never a
+        // battlefield departure.
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -12776,6 +12832,7 @@ fn target_filter_has_unsupported_selected_ref(filter: &TargetFilter, nested: boo
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -12961,7 +13018,10 @@ fn player_filter_has_unsupported_selected_ref(player: &PlayerFilter) -> bool {
         PlayerFilter::AnyOf { filters } => filters
             .iter()
             .any(player_filter_has_unsupported_selected_ref),
-        PlayerFilter::AllExcept { exclude } => player_filter_has_unsupported_selected_ref(exclude),
+        PlayerFilter::AllExcept {
+            exclude,
+            relation: _,
+        } => player_filter_has_unsupported_selected_ref(exclude),
         PlayerFilter::PlayerAttribute { attr, value, .. } => {
             quantity_ref_has_unsupported_selected_ref(attr)
                 || quantity_expr_has_unsupported_selected_ref(value)
@@ -13140,6 +13200,8 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::Speed { player }
         | QuantityRef::LifeGainedThisTurn { player }
         | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::CardsDrawnLastTurn { player }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
         | QuantityRef::CardsDiscardedThisTurn { player }
         | QuantityRef::PlayerChosenNumber { player }
@@ -14606,6 +14668,22 @@ pub enum QuantityRef {
     /// "you've drawn two or more cards this turn" and "an opponent has drawn
     /// four or more cards this turn" reuse the existing per-player aggregate axis.
     CardsDrawnThisTurn { player: PlayerScope },
+    /// CR 121.1 + CR 603.4: Number of cards drawn during the previous turn,
+    /// scoped by `player`. Reads `Player::cards_drawn_last_turn`, snapshotted
+    /// from `cards_drawn_this_turn` at turn start (`turns.rs::start_next_turn`).
+    /// Backs "if you drew a card last turn" intervening-if conditions (Mine Is
+    /// the Only Truth). The this-turn/last-turn pair mirrors the
+    /// `SpellsCastThisTurn` / `SpellsCastLastTurn` split.
+    CardsDrawnLastTurn { player: PlayerScope },
+    /// CR 601.2i + CR 603.4: Number of spells cast by `player`'s opponents
+    /// since `player`'s last turn ended. Reads
+    /// `Player::opponent_spells_cast_since_own_last_turn`, bumped on every
+    /// finalized cast and reset when `player`'s turn ends. Backs "if no
+    /// opponent cast a spell since your last turn ended" intervening-if
+    /// conditions (I Bask in Your Silent Awe). Only `Controller` scope is
+    /// meaningful (each player tracks their own window); other scopes resolve
+    /// through the generic aggregate path without special semantics.
+    OpponentSpellsCastSinceLastTurn { player: PlayerScope },
     /// CR 403.3 + CR 608.2h + CR 608.2i: Count of battlefield entries this turn by
     /// the scoped player matching `filter`, using `battlefield_entries_this_turn`
     /// snapshots. CR 608.2i is the look-back exception that makes a departed
@@ -14999,6 +15077,8 @@ impl QuantityRef {
             | QuantityRef::SacrificedThisTurn { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::CardsDrawnThisTurn { player }
+            | QuantityRef::CardsDrawnLastTurn { player }
+            | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
             | QuantityRef::StartingLifeTotal { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }
@@ -15226,6 +15306,8 @@ impl QuantityRef {
             | QuantityRef::DescendedThisTurn
             | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
             | QuantityRef::SpellsCastLastTurn
+            | QuantityRef::CardsDrawnLastTurn { .. }
+            | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
             | QuantityRef::CardsDiscardedThisTurn { .. }
             | QuantityRef::PlayerActionsThisTurn { .. }
             | QuantityRef::DungeonsCompleted
@@ -15263,6 +15345,8 @@ impl QuantityRef {
             | QuantityRef::SacrificedThisTurn { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::CardsDrawnThisTurn { player }
+            | QuantityRef::CardsDrawnLastTurn { player }
+            | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
             | QuantityRef::StartingLifeTotal { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }
@@ -16277,17 +16361,27 @@ pub enum PlayerFilter {
     OpponentAttackingEnchantedPlayer,
     /// All players.
     All,
-    /// CR 608.2c + CR 109.4 + CR 608.2h: All non-eliminated players except those
-    /// matching `exclude`. The iteration-axis analogue of
-    /// `PlayerScope::AllPlayers { exclude }` (the quantity axis): the exclusion
-    /// anchor is itself a `PlayerFilter`, composing the enum with itself so
-    /// "each player other than its controller" parses to
+    /// CR 608.2c + CR 109.4 + CR 608.2h: Non-eliminated players matching
+    /// `relation` except those matching `exclude`. The iteration-axis analogue
+    /// of `PlayerScope::AllPlayers { exclude }` (the quantity axis): the
+    /// exclusion anchor is itself a `PlayerFilter`, composing the enum with
+    /// itself so "each player other than its controller" parses to
     /// `exclude: ParentObjectTargetController` and any future "each player other
-    /// than ⟨ref⟩" reuses the same variant. When the anchor object has left the
+    /// than ⟨ref⟩" reuses the same variant. `relation` selects the base
+    /// population (`All` preserves the original reading; `Opponent` covers
+    /// "each of your other opponents" with CR 102.3-aware opponent-ness via
+    /// `players::matches_relation`). When the anchor object has left the
     /// battlefield (e.g. the exiled permanent of Fractured Identity), the anchor
     /// is resolved with last-known information (CR 608.2h). `Box` breaks the
     /// enum's self-referential size cycle.
-    AllExcept { exclude: Box<PlayerFilter> },
+    AllExcept {
+        exclude: Box<PlayerFilter>,
+        #[serde(
+            default = "player_relation_all",
+            skip_serializing_if = "is_player_relation_all"
+        )]
+        relation: PlayerRelation,
+    },
     /// CR 702.179f: Each player whose speed is tied for the highest speed among players.
     HighestSpeed,
     /// "each player who [verb]ed a card this way" — scoped to players who owned objects
@@ -16692,6 +16786,8 @@ pub(crate) fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRe
         | QuantityRef::HandSize { .. } | QuantityRef::LifeTotal { .. } | QuantityRef::GraveyardSize { .. }
         | QuantityRef::StartingLifeTotal { .. } | QuantityRef::LifeLostThisTurn { .. } | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. } | QuantityRef::LifeGainedThisTurn { .. } | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. } | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::TokensCreatedThisTurn { .. } | QuantityRef::PlayerActionsThisTurn { .. }
@@ -16972,6 +17068,7 @@ impl Effect {
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
             | Effect::ChaosEnsues
+            | Effect::AbandonScheme
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
             | Effect::OpenAttractions { .. }
@@ -17132,6 +17229,7 @@ pub(crate) fn indicated_action_commit(effect: &Effect) -> IndicatedActionCommit 
         // CR 707.10: a copy of a spell isn't cast.
         Effect::CopySpell { .. } | Effect::EpicCopy { .. } => IndicatedActionCommit::OnAccept,
         Effect::StartYourEngines { .. }
+        | Effect::AbandonScheme
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
@@ -19846,9 +19944,10 @@ impl TapCreaturesAggregate {
 /// set must satisfy, for a `TapCreatures` cost.
 ///
 /// `Count { count }` is the fixed-number form (Conspire's "tap two creatures",
-/// Convoke-style "tap N creatures"). `Aggregate { stat, comparator, value }` is
-/// the "tap any number of creatures with total power N or greater" form used by
-/// Crew (CR 702.122a), Saddle (CR 702.171a), and Teamwork (CR 702.194a).
+/// Convoke-style "tap N creatures"). `Aggregate { stat, comparator, value,
+/// collective }` is the "tap any number of creatures with total power N or
+/// greater" form used by Crew (CR 702.122a), Saddle (CR 702.171a), and
+/// Teamwork (CR 702.194a).
 /// Mirrors `SacrificeRequirement` so the two cost families share one
 /// parameterization shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -19863,6 +19962,19 @@ pub enum TapCreaturesRequirement {
         stat: TapCreaturesAggregateStat,
         comparator: Comparator,
         value: i32,
+        /// CR 805.6: the threshold is met COLLECTIVELY by the payer's team —
+        /// each teammate selects their own untapped creatures in seat order
+        /// and the combined total is checked once at the end (Bow to My
+        /// Command's "they may tap … with total power 8 or greater" under a
+        /// shared team turn; 2017-06-13 ruling). Stamped only by the
+        /// phase-head "they may" trigger arm; every other producer parses a
+        /// singular payer. Read only by the resolution-time payment
+        /// authority (`game::costs`); cast-time and activation scopes always
+        /// pay singular and ignore it. Defaults to `false` so costs
+        /// serialized before the flag existed reload as singular, which is
+        /// what they were.
+        #[serde(default)]
+        collective: bool,
     },
 }
 
@@ -19902,12 +20014,15 @@ impl TapCreaturesRequirement {
     }
 
     /// "Tap any number of creatures you control with total power `value` or
-    /// greater" (Crew/Saddle/Teamwork).
+    /// greater" (Crew/Saddle/Teamwork). Always singular: the payer taps their
+    /// own creatures. Collective costs start here and are stamped by the
+    /// phase-head "they may" trigger arm.
     pub fn total_power_at_least(value: i32) -> Self {
         Self::Aggregate {
             stat: TapCreaturesAggregateStat::TotalPower,
             comparator: Comparator::GE,
             value,
+            collective: false,
         }
     }
 
@@ -19938,6 +20053,12 @@ impl TapCreaturesRequirement {
                 stat,
                 comparator,
                 value,
+                // Collective-ness selects the payment PATH (team session vs
+                // single prompt), never the selection MODE: a one-seat team
+                // pays a collective cost through the ordinary Aggregate
+                // prompt, and a multi-seat team's per-hero prompts are built
+                // directly as VariableX by the payment authority.
+                ..
             } => TapCreaturesSelectionMode::Aggregate(TapCreaturesAggregate {
                 stat: *stat,
                 comparator: *comparator,
@@ -25277,6 +25398,25 @@ pub enum Effect {
     /// Sets WaitingFor::NamedChoice and stores the result in GameState::last_named_choice.
     Choose {
         choice_type: ChoiceType,
+        /// CR 608.2d + CR 109.4: which player makes this choice. `You` (the
+        /// default) is the ability controller — the historic behavior for every
+        /// existing card. `TargetPlayer` / `TargetOpponent` bind a TARGETED
+        /// chooser ("target opponent chooses self or others" — the
+        /// self-or-others scheme class: The Fate of the Flammable, Feed the
+        /// Machine, May Civilization Collapse, Surrender Your Thoughts),
+        /// resolved from the ability's announced targets like the
+        /// `TargetFilter`-reading twin (`filter_inner` on `ability.targets`).
+        /// `ControllerRef` (not `PlayerFilter`) because it already carries the
+        /// announced-target slot — the same role `OpponentGuess::guesser`
+        /// plays. A targeted chooser surfaces its stack slot through the
+        /// companion-target-player path (`effect_references_target_player`),
+        /// never through `target_filter()` (still `None`: the choice is made
+        /// during resolution, CR 608.2d).
+        #[serde(
+            default = "default_controller_ref_you",
+            skip_serializing_if = "ControllerRef::is_you"
+        )]
+        chooser: ControllerRef,
         /// When true, persistable choice types store the chosen value on the
         /// source object's chosen_attributes. Some non-persisting choice types
         /// still carry source context for logs or prompts.
@@ -26048,6 +26188,12 @@ pub enum Effect {
     /// triggers and is put on the stack; on resolution its controller (the
     /// roller, CR 901.8) planeswalks (CR 701.31).
     Planeswalk,
+    /// CR 701.33a-b / CR 904.11: Abandon this scheme — turn the face-up ongoing
+    /// scheme that sourced this ability face down and put it on the bottom of
+    /// its owner's scheme deck. Payload-less resolving keyword action (mirrors
+    /// `Effect::Planeswalk`): the scheme is the ability source, never a target.
+    /// RUNTIME: abandon_scheme::resolve via game::archenemy::abandon.
+    AbandonScheme,
     /// CR 311.7 / CR 901.9b: Chaos ensues — the active plane's "whenever chaos
     /// ensues" triggered ability triggers. Payload-less resolving keyword action
     /// (mirrors `Effect::VentureIntoDungeon`). RUNTIME: chaos_ensues::resolve.
@@ -28012,6 +28158,20 @@ pub(crate) fn effect_references_target_player(effect: &Effect) -> bool {
     if mass_all_target_filter(effect).is_some_and(|t| matches!(t, TargetFilter::Player)) {
         return true;
     }
+    // CR 115.1 + CR 608.2d: a `Choose` with a targeted chooser ("target
+    // opponent chooses …") announces that player as a stack target — the slot
+    // the subject's target would have surfaced had the predicate carried it.
+    // Never through `target_filter()` (still `None`: the choice is made during
+    // resolution); the companion slot is the whole declaration.
+    if matches!(
+        effect,
+        Effect::Choose {
+            chooser: ControllerRef::TargetPlayer | ControllerRef::TargetOpponent,
+            ..
+        }
+    ) {
+        return true;
+    }
     effect_bound_filter_matches(effect, filter_references_target_player)
 }
 
@@ -28968,6 +29128,8 @@ pub(crate) fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::Speed { player }
         | QuantityRef::LifeGainedThisTurn { player }
         | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::CardsDrawnLastTurn { player }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
         | QuantityRef::LandsPlayedThisTurn { player, .. }
         | QuantityRef::PlayerChosenNumber { player }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
@@ -29227,6 +29389,8 @@ pub(crate) fn filter_recipient_read(filter: &TargetFilter) -> RecipientRead {
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // Per-member owner anchor: the same owner-field read as `Owner`.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers
         | TargetFilter::PlayerMatching { .. } => RecipientRead::Unread,
     }
@@ -30181,6 +30345,7 @@ impl TargetFilter {
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
+            | TargetFilter::AffectedObjectOwner
             | TargetFilter::AllPlayers => None,
         }
     }
@@ -30260,6 +30425,7 @@ impl TargetFilter {
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
+            | TargetFilter::AffectedObjectOwner
             | TargetFilter::AllPlayers => false,
         }
     }
@@ -30675,6 +30841,7 @@ impl TargetFilter {
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
+            | TargetFilter::AffectedObjectOwner
             | TargetFilter::AllPlayers => false,
         }
     }
@@ -31606,6 +31773,8 @@ impl Effect {
             // nor the note names a copied stack object.
             | Effect::CreateBoon { .. }
             | Effect::NoteNumber { .. }
+            // CR 701.33b: abandoning names no stack object at all.
+            | Effect::AbandonScheme
             | Effect::Unimplemented { .. } => false,
         }
     }
@@ -31856,6 +32025,8 @@ impl Effect {
             // note resolve their slot as operand, never as a donor.
             | Effect::CreateBoon { .. }
             | Effect::NoteNumber { .. }
+            // CR 701.33b: abandoning resolves its slot as operand.
+            | Effect::AbandonScheme
             | Effect::Unimplemented { .. } => AttachmentHostSlot::Operand,
         }
     }
@@ -32374,6 +32545,9 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            // CR 701.33b: AbandonScheme is non-targeted — "abandon this scheme"
+            // abandons its own source, no slot.
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
@@ -32835,6 +33009,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
@@ -33524,6 +33699,7 @@ impl Effect {
             | Effect::PhaseIn { .. }
             | Effect::PhaseOut { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::Populate
             | Effect::PreventDamage { .. }
             | Effect::Proliferate
@@ -33861,6 +34037,7 @@ impl Effect {
             | Effect::VentureInto { .. }
             | Effect::VentureIntoDungeon
             | Effect::WinTheGame { .. }
+            | Effect::AbandonScheme
             => None,
         }
     }
@@ -34517,6 +34694,7 @@ macro_rules! define_effect_quantity_walk {
             | Effect::VentureInto { .. }
             | Effect::TakeTheInitiative
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -34847,6 +35025,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -35202,6 +35381,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
@@ -35472,6 +35652,7 @@ impl Effect {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::RedistributeLifeTotals
             | Effect::ReverseTurnOrder
@@ -35654,6 +35835,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::TakeTheInitiative => "TakeTheInitiative",
         Effect::ArrangePlanarDeckTop { .. } => "ArrangePlanarDeckTop",
         Effect::Planeswalk => "Planeswalk",
+        Effect::AbandonScheme => "AbandonScheme",
         Effect::ChaosEnsues => "ChaosEnsues",
         Effect::RedistributeLifeTotals => "RedistributeLifeTotals",
         Effect::ReverseTurnOrder => "ReverseTurnOrder",
@@ -35912,6 +36094,7 @@ pub enum EffectKind {
     TakeTheInitiative,
     ArrangePlanarDeckTop,
     Planeswalk,
+    AbandonScheme,
     ChaosEnsues,
     RedistributeLifeTotals,
     ReverseTurnOrder,
@@ -36190,6 +36373,7 @@ impl From<&Effect> for EffectKind {
             Effect::TakeTheInitiative => EffectKind::TakeTheInitiative,
             Effect::ArrangePlanarDeckTop { .. } => EffectKind::ArrangePlanarDeckTop,
             Effect::Planeswalk => EffectKind::Planeswalk,
+            Effect::AbandonScheme => EffectKind::AbandonScheme,
             Effect::ChaosEnsues => EffectKind::ChaosEnsues,
             Effect::RedistributeLifeTotals => EffectKind::RedistributeLifeTotals,
             Effect::ReverseTurnOrder => EffectKind::ReverseTurnOrder,
@@ -38306,6 +38490,20 @@ pub enum AbilityCondition {
     /// state sources. Feeds `RepeatContinuation::WhileCondition` ("repeat this
     /// process") and any cross-sentence flip-result gate.
     CoinFlipOutcome { result: CoinFlipResult },
+    /// CR 607.2d + CR 608.2c: "If [that|the] player chooses <label>" — true
+    /// when THIS resolution's labeled choice named the anchor word
+    /// (case-insensitive). The effect-resolution mirror of
+    /// `StaticCondition::ChosenLabelIs` / `TriggerCondition::ChosenLabelIs`:
+    /// those gate anchor-word linked abilities (Khans Sieges) off the
+    /// source's persisted label; this gates sequential if-chose branches on
+    /// the current resolution's answer (the self-or-others scheme class: The
+    /// Fate of the Flammable, Feed the Machine, May Civilization Collapse,
+    /// Surrender Your Thoughts). Evaluated by `evaluate_condition` against
+    /// `state.named_label_this_resolution` (written by the preceding `Choose
+    /// { Labeled }` head's bind), NOT the persisted history: labels
+    /// accumulate across resolutions, so persisted history would let a
+    /// recycled scheme's first answer shadow every later one.
+    ChosenLabelIs { label: String },
     /// CR 603.12: "When you do" — a reflexive trigger based on whether the
     /// parent event actually occurred. An optional non-cost parent must be
     /// performed; an unpayable or declined `Effect::PayCost` is not an occurrence.
@@ -38900,6 +39098,7 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIsNeither
             | AbilityCondition::AdditionalCostPaid { .. }
             | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
             | AbilityCondition::WasCast { .. }
             | AbilityCondition::CastDuringPhase { .. }
             | AbilityCondition::CurrentPhaseIs { .. }
@@ -39014,6 +39213,7 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
             | AbilityCondition::ScopedPlayerMatches { .. } => None,
         }
     }
@@ -39138,6 +39338,7 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIsNeither
             | AbilityCondition::AdditionalCostPaid { .. }
             | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
             | AbilityCondition::WasCast { .. }
             | AbilityCondition::CastDuringPhase { .. }
             | AbilityCondition::CurrentPhaseIs { .. }
@@ -39244,6 +39445,7 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
             | AbilityCondition::ScopedPlayerMatches { .. } => false,
         }
     }
@@ -46358,6 +46560,7 @@ impl ResolvedAbility {
             | Effect::TakeTheInitiative
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
+            | Effect::AbandonScheme
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
