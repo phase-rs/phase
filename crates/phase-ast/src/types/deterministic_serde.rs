@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::identifiers::{ObjectId, TrackedSetId};
 use super::player::PlayerId;
 
-pub(crate) trait NumericMapKey: Sized {
+pub trait NumericMapKey: Sized {
     fn from_u64(value: u64) -> Option<Self>;
 }
 
@@ -148,7 +148,7 @@ fn cautious_map_capacity<K, V>(hint: Option<usize>) -> usize {
 
 /// Serde adapter for hash maps whose typed keys cannot be represented as JSON
 /// object keys. The wire form is a key-sorted sequence of `[key, value]` pairs.
-pub(crate) mod hash_map_entries {
+pub mod hash_map_entries {
     use std::collections::{hash_map::Entry, HashMap};
     use std::fmt;
     use std::hash::{BuildHasher, Hash};
@@ -158,7 +158,7 @@ pub(crate) mod hash_map_entries {
     use serde::ser::SerializeSeq;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub(crate) fn serialize<K, V, H, S>(
+    pub fn serialize<K, V, H, S>(
         values: &HashMap<K, V, H>,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
@@ -216,9 +216,7 @@ pub(crate) mod hash_map_entries {
         }
     }
 
-    pub(crate) fn deserialize<'de, K, V, H, D>(
-        deserializer: D,
-    ) -> Result<HashMap<K, V, H>, D::Error>
+    pub fn deserialize<'de, K, V, H, D>(deserializer: D) -> Result<HashMap<K, V, H>, D::Error>
     where
         K: Deserialize<'de> + Eq + Hash,
         V: Deserialize<'de>,
@@ -254,7 +252,7 @@ where
     }
 }
 
-pub(crate) fn deserialize_numeric_hash_map<'de, K, V, D>(
+pub fn deserialize_numeric_hash_map<'de, K, V, D>(
     deserializer: D,
 ) -> Result<HashMap<K, V>, D::Error>
 where
@@ -265,7 +263,7 @@ where
     deserializer.deserialize_map(NumericHashMapVisitor(PhantomData))
 }
 
-pub(crate) fn deserialize_option_numeric_hash_map<'de, K, V, D>(
+pub fn deserialize_option_numeric_hash_map<'de, K, V, D>(
     deserializer: D,
 ) -> Result<Option<HashMap<K, V>>, D::Error>
 where
@@ -305,7 +303,7 @@ where
     deserializer.deserialize_option(OptionalNumericHashMapVisitor(PhantomData))
 }
 
-pub(crate) fn hash_set<T, H, S>(values: &HashSet<T, H>, serializer: S) -> Result<S::Ok, S::Error>
+pub fn hash_set<T, H, S>(values: &HashSet<T, H>, serializer: S) -> Result<S::Ok, S::Error>
 where
     T: Ord + Serialize,
     S: Serializer,
@@ -313,7 +311,7 @@ where
     SortedHashSet(values).serialize(serializer)
 }
 
-pub(crate) fn option_hash_set<T, H, S>(
+pub fn option_hash_set<T, H, S>(
     values: &Option<HashSet<T, H>>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
@@ -324,10 +322,7 @@ where
     values.as_ref().map(SortedHashSet).serialize(serializer)
 }
 
-pub(crate) fn hash_map<K, V, H, S>(
-    values: &HashMap<K, V, H>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
+pub fn hash_map<K, V, H, S>(values: &HashMap<K, V, H>, serializer: S) -> Result<S::Ok, S::Error>
 where
     K: Ord + Serialize,
     V: Serialize,
@@ -336,7 +331,7 @@ where
     SortedHashMap(values).serialize(serializer)
 }
 
-pub(crate) fn option_hash_map<K, V, H, S>(
+pub fn option_hash_map<K, V, H, S>(
     values: &Option<HashMap<K, V, H>>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
@@ -348,7 +343,7 @@ where
     values.as_ref().map(SortedHashMap).serialize(serializer)
 }
 
-pub(crate) fn vec_hash_map<K, V, H, S>(
+pub fn vec_hash_map<K, V, H, S>(
     values: &[HashMap<K, V, H>],
     serializer: S,
 ) -> Result<S::Ok, S::Error>
@@ -386,7 +381,7 @@ where
     map.end()
 }
 
-pub(crate) fn hash_map_of_hash_set<K, V, H1, H2, S>(
+pub fn hash_map_of_hash_set<K, V, H1, H2, S>(
     values: &HashMap<K, HashSet<V, H2>, H1>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
@@ -398,10 +393,7 @@ where
     serialize_sorted_map_entries(values.iter(), SortedHashSet, serializer)
 }
 
-pub(crate) fn im_hash_set<T, H, S>(
-    values: &im::HashSet<T, H>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
+pub fn im_hash_set<T, H, S>(values: &im::HashSet<T, H>, serializer: S) -> Result<S::Ok, S::Error>
 where
     T: Clone + Eq + Hash + Ord + Serialize,
     H: BuildHasher,
@@ -412,7 +404,7 @@ where
     values.serialize(serializer)
 }
 
-pub(crate) fn im_hash_map<K, V, H, S>(
+pub fn im_hash_map<K, V, H, S>(
     values: &im::HashMap<K, V, H>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
@@ -425,7 +417,7 @@ where
     SortedImHashMap(values).serialize(serializer)
 }
 
-pub(crate) fn im_hash_map_of_im_hash_map<K1, K2, V, H1, H2, S>(
+pub fn im_hash_map_of_im_hash_map<K1, K2, V, H1, H2, S>(
     values: &im::HashMap<K1, im::HashMap<K2, V, H2>, H1>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
@@ -487,14 +479,14 @@ where
     }
 }
 
-#[cfg(test)]
-pub(crate) mod test_support {
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use std::hash::{BuildHasher, Hasher};
 
     #[derive(Clone, Default)]
-    pub(crate) struct ReverseBuildHasher;
+    pub struct ReverseBuildHasher;
 
-    pub(crate) struct ReverseHasher(u64);
+    pub struct ReverseHasher(u64);
 
     impl BuildHasher for ReverseBuildHasher {
         type Hasher = ReverseHasher;
@@ -907,7 +899,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "numeric map key 256 is out of range for engine::types::player::PlayerId"
+            "numeric map key 256 is out of range for phase_ast::types::player::PlayerId"
         );
     }
 

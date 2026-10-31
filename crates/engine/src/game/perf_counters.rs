@@ -78,6 +78,27 @@ pub struct HomogeneousTargetWalkCacheCounters {
     pub advances: u64,
 }
 
+/// Test-only counters for the targeted-cast offer witness
+/// (`ai_support::payment_continuation::witness_targeted_cast_offer`, consulted
+/// by the legal-action filter). Kept out of [`PerfCounterSnapshot`] for the
+/// same reason as the counter sets below: that struct's serialized field set
+/// powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TargetedOfferWitnessCounters {
+    /// Witness runs started by the offer filter.
+    pub calls: u64,
+    /// Runs that certified a completion.
+    pub completed: u64,
+    /// Reducer applications spent across all runs.
+    pub reducer_attempts: u64,
+    /// Phase-owned legality clones made inside the runs.
+    pub phase_owned_state_clones: u64,
+    /// Auto-payment wrapper calls made inside the runs (also counted in
+    /// [PerfCounterSnapshot::auto_payment_borrowed_wrapper_calls]).
+    pub auto_payment_wrapper_calls: u64,
+}
+
 /// Test-only counters for the prior-target-binding seams (cross-slot
 /// object-relative target binding, e.g. Puca's Mischief / Spawnbroker /
 /// Daring Thief). Kept out of [`PerfCounterSnapshot`] for the same reason the
@@ -466,6 +487,16 @@ thread_local! {
         })
     };
     #[cfg(feature = "test-support")]
+    static TARGETED_OFFER_WITNESS_COUNTERS: Cell<TargetedOfferWitnessCounters> = const {
+        Cell::new(TargetedOfferWitnessCounters {
+            calls: 0,
+            completed: 0,
+            reducer_attempts: 0,
+            phase_owned_state_clones: 0,
+            auto_payment_wrapper_calls: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
     static PRIOR_TARGET_BINDING_COUNTERS: Cell<PriorTargetBindingCounters> = const {
         Cell::new(PriorTargetBindingCounters {
             static_union_enumerations: 0,
@@ -574,6 +605,9 @@ pub(crate) enum LegalityClonePhase {
     RawValidation,
     GroupedManaReadiness,
     PostApplyCore,
+    /// Inside a targeted-cast offer witness run (counted by
+    /// [`TargetedOfferWitnessCounters`], not by [`PerfCounterSnapshot`]).
+    TargetedOfferWitness,
 }
 
 pub(crate) struct LegalityClonePhaseGuard {
@@ -660,6 +694,14 @@ fn record_phase_owned_state_clone_for(
         Some(LegalityClonePhase::PostApplyCore) => {
             snapshot.post_apply_auto_payment_core_state_clones += 1;
         }
+        Some(LegalityClonePhase::TargetedOfferWitness) => {
+            #[cfg(feature = "test-support")]
+            TARGETED_OFFER_WITNESS_COUNTERS.with(|cell| {
+                let mut counters = cell.get();
+                counters.phase_owned_state_clones += 1;
+                cell.set(counters);
+            });
+        }
         None => {}
     }
 }
@@ -697,6 +739,14 @@ pub(crate) fn record_auto_payment_borrowed_wrapper() {
                 | LegalityClonePhase::PostApplyCore,
             )
             | None => {}
+            Some(LegalityClonePhase::TargetedOfferWitness) => {
+                #[cfg(feature = "test-support")]
+                TARGETED_OFFER_WITNESS_COUNTERS.with(|cell| {
+                    let mut counters = cell.get();
+                    counters.auto_payment_wrapper_calls += 1;
+                    cell.set(counters);
+                });
+            }
         }
     });
     record_phase_owned_state_clone();
@@ -893,6 +943,33 @@ pub fn homogeneous_target_walk_cache_snapshot() -> HomogeneousTargetWalkCacheCou
 #[cfg(feature = "test-support")]
 pub fn prior_target_binding_snapshot() -> PriorTargetBindingCounters {
     PRIOR_TARGET_BINDING_COUNTERS.with(Cell::get)
+}
+
+/// One targeted-cast offer witness run: its spend, and whether it certified.
+#[cfg(feature = "test-support")]
+pub fn record_targeted_offer_witness(witness: &crate::ai_support::TargetedCastWitness) {
+    TARGETED_OFFER_WITNESS_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.calls += 1;
+        match witness.verdict {
+            crate::ai_support::TargetedCastVerdict::Completed => counters.completed += 1,
+            crate::ai_support::TargetedCastVerdict::NotFound
+            | crate::ai_support::TargetedCastVerdict::Indeterminate => {}
+        }
+        counters.reducer_attempts += witness.reducer_attempts as u64;
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn targeted_offer_witness_snapshot() -> TargetedOfferWitnessCounters {
+    TARGETED_OFFER_WITNESS_COUNTERS.with(Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+pub fn reset_targeted_offer_witness_counters() {
+    TARGETED_OFFER_WITNESS_COUNTERS
+        .with(|counters| counters.set(TargetedOfferWitnessCounters::default()));
 }
 
 /// CR 508.1d: one solver target-table build.

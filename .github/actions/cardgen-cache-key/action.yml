@@ -29,9 +29,9 @@ runs:
       #
       # Inputs, matching what oracle-gen's output depends on:
       #   - data/mtgjson/AtomicCards.json (gitignored, so hashed by content)
-      #   - engine sources, plus crates/engine/data/** and build.rs, which the
-      #     engine lib compiles in (include_str! / OUT_DIR embed)
-      #   - crates/engine/Cargo.toml and Cargo.lock (dep bumps such as nom)
+      #   - engine and phase-ast sources, plus crates/phase-ast/data/** and build.rs, which the
+      #     phase-ast lib compiles in (include_str! / OUT_DIR embed)
+      #   - crates/engine/Cargo.toml, crates/phase-ast/Cargo.toml and Cargo.lock (dep bumps such as nom)
       #   - data/bracket_lists.json, which oracle-gen reads from its data dir and
       #     stamps into each card's bracket signals
       # Tracked inputs use `git ls-files -s`: the index blob SHAs of the
@@ -47,9 +47,11 @@ runs:
         fi
         paths=(
           ':(glob)crates/engine/src/**/*.rs'
-          crates/engine/data
-          crates/engine/build.rs
+          ':(glob)crates/phase-ast/src/**/*.rs'
+          crates/phase-ast/data
+          crates/phase-ast/build.rs
           crates/engine/Cargo.toml
+          crates/phase-ast/Cargo.toml
           Cargo.lock
           data/bracket_lists.json
         )

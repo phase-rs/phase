@@ -45,6 +45,11 @@
 # A same-file deletion/addition can fit this per-file ceiling. This does not
 # prove unread text cannot be dropped, complete item #181, or fix its six cards.
 # Rollout: rebased parser PRs adding counted syntax can fail H, intentionally.
+# Issue #10364: `fold_type_union` and `parse_filter_phrase_union` were ADDED to
+# the counted HELPERS set in the same change that introduced them. They are
+# union-fold wrappers returning the same `(filter, remainder)` shape, so routing
+# a site through one must not quietly remove it from this ledger; the three rows
+# decremented below were re-measured with them counted.
 crates/engine/src/parser/oracle_cost.rs 3
 crates/engine/src/parser/oracle_effect/counter.rs 3
 crates/engine/src/parser/oracle_effect/imperative.rs 40
@@ -52,15 +57,15 @@ crates/engine/src/parser/oracle_effect/lower.rs 4
 crates/engine/src/parser/oracle_effect/mod.rs 19
 crates/engine/src/parser/oracle_effect/search.rs 1
 crates/engine/src/parser/oracle_effect/sequence.rs 2
-crates/engine/src/parser/oracle_effect/subject.rs 9
+crates/engine/src/parser/oracle_effect/subject.rs 8
 crates/engine/src/parser/oracle_effect/token.rs 1
 crates/engine/src/parser/oracle_keyword.rs 1
 crates/engine/src/parser/oracle_nom/condition.rs 12
 crates/engine/src/parser/oracle_replacement.rs 1
 crates/engine/src/parser/oracle_static/cost_mod.rs 3
 crates/engine/src/parser/oracle_static/dispatch.rs 5
-crates/engine/src/parser/oracle_static/evasion.rs 3
-crates/engine/src/parser/oracle_static/grammar.rs 3
+crates/engine/src/parser/oracle_static/evasion.rs 2
+crates/engine/src/parser/oracle_static/grammar.rs 1
 crates/engine/src/parser/oracle_static/keyword_grant.rs 3
 crates/engine/src/parser/oracle_static/restriction.rs 6
 crates/engine/src/parser/oracle_static/shared.rs 1

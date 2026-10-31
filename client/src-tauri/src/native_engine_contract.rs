@@ -120,8 +120,19 @@ pub enum NativeEngineError {
 #[cfg_attr(mobile, allow(dead_code))]
 pub enum BridgeEvent {
     Message { text: String },
+    Fragment { text: String },
     Closed { code: u16, reason: String },
     Error { detail: String },
+}
+
+/// A text-delivery mode the connecting client declares it can reassemble; a
+/// client that declares none receives every text as one `Message`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+// See `NativeEngineProgressPhase`: these variants are a shared wire contract.
+#[cfg_attr(mobile, allow(dead_code))]
+pub enum BridgeTextDelivery {
+    Fragments,
 }
 
 #[derive(Debug, Serialize)]
@@ -309,6 +320,10 @@ mod tests {
             r#"{"type":"message","text":"hello"}"#
         );
         assert_eq!(
+            serde_json::to_string(&BridgeEvent::Fragment { text: "hel".into() }).unwrap(),
+            r#"{"type":"fragment","text":"hel"}"#
+        );
+        assert_eq!(
             serde_json::to_string(&BridgeEvent::Closed {
                 code: 1000,
                 reason: "normal".into(),
@@ -349,6 +364,14 @@ mod tests {
                 format!(r#"{{"kind":"{kind}","detail":"d"}}"#)
             );
         }
+    }
+
+    #[test]
+    fn bridge_text_delivery_reads_the_client_wire_value() {
+        assert_eq!(
+            serde_json::from_str::<BridgeTextDelivery>(r#""fragments""#).unwrap(),
+            BridgeTextDelivery::Fragments
+        );
     }
 
     #[test]

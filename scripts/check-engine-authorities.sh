@@ -52,7 +52,7 @@ set -euo pipefail
 . "$(dirname "$0")/lib/added-lines.sh"
 
 BASE="${1:-$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)}"
-SCOPE=(crates/engine/src)
+SCOPE=(crates/engine/src crates/phase-ast/src)
 # Files allowed to touch raw keyword state: the authority module, the layer
 # engine that computes `obj.keywords`, and copy machinery that snapshots
 # characteristics wholesale. These files are outside the gate's view, so a line

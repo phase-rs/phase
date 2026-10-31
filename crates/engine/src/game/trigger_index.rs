@@ -500,6 +500,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         | GameEvent::HiddenSearchViewed { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::ResolutionHalted { .. }
+        | GameEvent::ShortcutRepetition { .. }
         // Contests are adapted physical minigames with no triggered-ability keys.
         | GameEvent::PhysicalContestStarted { .. }
         | GameEvent::PhysicalContestResolved { .. } => {}

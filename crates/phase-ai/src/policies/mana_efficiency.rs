@@ -41,7 +41,9 @@ impl ManaEfficiencyPolicy {
             if total == 0 {
                 return 0.0;
             }
-            let waste_ratio = wasteable as f64 / total as f64;
+            // `available_mana` also counts nonland sources and pool mana, which
+            // `total_mana_sources` does not.
+            let waste_ratio = (wasteable as f64 / total as f64).min(1.0);
             let patience_scale = 1.0 - ctx.config.profile.interaction_patience;
             -waste_ratio * patience_scale * 0.4
         } else if let Some(mv) = spell_mana_value(ctx) {
@@ -393,6 +395,71 @@ mod tests {
             score.abs() < 0.001,
             "interaction_patience=1.0 should produce near-zero penalty, got {score}"
         );
+    }
+
+    #[test]
+    fn nonland_mana_sources_keep_the_pass_penalty_in_band() {
+        use engine::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
+            SacrificeCost, TargetFilter,
+        };
+        use engine::types::mana::ManaColor;
+        use std::sync::Arc;
+
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        add_land(&mut state, PlayerId(0), false);
+        for _ in 0..3 {
+            let id = create_object(
+                &mut state,
+                CardId(300),
+                PlayerId(0),
+                "Treasure".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            let mut ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Red],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            );
+            ability.cost = Some(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                ],
+            });
+            Arc::make_mut(&mut obj.abilities).push(ability);
+        }
+        assert_eq!(zone_eval::available_mana(&state, PlayerId(0)), 4);
+
+        let mut config = AiConfig::default();
+        config.profile.interaction_patience = 0.0;
+        let decision = make_priority_decision();
+        let candidate = make_pass_candidate(PlayerId(0));
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+
+        let score = ManaEfficiencyPolicy.score(&ctx);
+        assert!((-0.4..0.0).contains(&score), "got {score}");
     }
 
     #[test]

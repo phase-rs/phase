@@ -1,5 +1,5 @@
 # Hand-authored token presets that `tokens-gen` merges into
-# `crates/engine/data/known-tokens.toml` and never rewrites.
+# `crates/phase-ast/data/known-tokens.toml` and never rewrites.
 #
 # `known-tokens.toml` is regenerated whole from MTGJSON per-set token data on
 # every run, so a row MTGJSON has no source for cannot survive in it — that is
