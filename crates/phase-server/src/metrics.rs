@@ -13,6 +13,11 @@
 //! `phase_drafts_with_connected_humans`) exist for one decision: a StatefulSet
 //! always removes its highest ordinal, so an autoscaler must be able to ask
 //! "does *this* replica still hold someone?" before it is allowed to shrink.
+//!
+//! `phase_ws_sent_payload_bytes_total` retains six process-lifetime totals for
+//! completed socket-writer payloads, separately from queue occupancy. Classes
+//! have no connection/game/player labels. Automatic protocol Pongs bypass the
+//! writer and are excluded; raw/gzip prefixes are included, framing is not.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -133,10 +138,55 @@ impl JevRelayStatus {
     }
 }
 
+/// Bounded telemetry classes, selected before writing from typed messages or
+/// the actual codec frame kind. These are not wire-protocol variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WsFrameType {
+    Full,
+    Delta,
+    StateUpdate,
+    GameStarted,
+    Other,
+    Control,
+}
+
+impl WsFrameType {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Full,
+        Self::Delta,
+        Self::StateUpdate,
+        Self::GameStarted,
+        Self::Other,
+        Self::Control,
+    ];
+
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::Full => 0,
+            Self::Delta => 1,
+            Self::StateUpdate => 2,
+            Self::GameStarted => 3,
+            Self::Other => 4,
+            Self::Control => 5,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Delta => "delta",
+            Self::StateUpdate => "state_update",
+            Self::GameStarted => "game_started",
+            Self::Other => "other",
+            Self::Control => "control",
+        }
+    }
+}
+
 /// Process-wide counters that cannot be recovered by reading live state.
 ///
-/// Everything else in [`Snapshot`] is sampled from the session/connection maps
-/// at scrape time; rejections leave no trace there, so they are counted here.
+/// Rejections, disconnects and successful writer bytes leave no live-state
+/// history. Occupancy gauges in [`Snapshot`] are sampled separately.
 #[derive(Debug, Default)]
 pub struct ServerMetrics {
     connection_limit: AtomicU64,
@@ -153,6 +203,7 @@ pub struct ServerMetrics {
     jev_upstream_unreachable: AtomicU64,
     ws_disconnects: [AtomicU64; DisconnectCause::ALL.len()],
     ws_quota_discards: AtomicU64,
+    ws_sent_payload_bytes: [AtomicU64; WsFrameType::ALL.len()],
 }
 
 impl ServerMetrics {
@@ -201,6 +252,24 @@ impl ServerMetrics {
 
     pub(crate) fn ws_disconnect_count(&self, cause: DisconnectCause) -> u64 {
         self.ws_disconnects[cause.index()].load(Ordering::Relaxed)
+    }
+
+    /// Count only a successfully completed writer operation, independently of
+    /// acknowledgement delivery or codec-baseline commit. Payload includes the
+    /// raw/gzip prefix, not WebSocket/TCP/TLS framing. Automatic protocol Pongs
+    /// bypass the writer and are excluded; peer-close completion uses the
+    /// declared echo payload, without sending a duplicate Close for telemetry.
+    pub(crate) fn record_ws_sent_payload_bytes(
+        &self,
+        frame_type: WsFrameType,
+        payload_bytes: usize,
+    ) {
+        self.ws_sent_payload_bytes[frame_type.index()]
+            .fetch_add(payload_bytes as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn ws_sent_payload_bytes(&self, frame_type: WsFrameType) -> u64 {
+        self.ws_sent_payload_bytes[frame_type.index()].load(Ordering::Relaxed)
     }
 
     pub(crate) fn record_ws_quota_discard(&self) {
@@ -254,6 +323,8 @@ pub struct Snapshot {
     /// First-observed transport failures, using a fixed label set.
     pub ws_disconnects: [u64; DisconnectCause::ALL.len()],
     pub ws_discarded_frames: u64,
+    /// Independently sampled relaxed counters, not an atomic frame transaction.
+    pub ws_sent_payload_bytes: [u64; WsFrameType::ALL.len()],
     pub build: BuildInfo,
 }
 
@@ -334,6 +405,8 @@ pub async fn collect(app: &AppState) -> Snapshot {
         ws_disconnects: DisconnectCause::ALL
             .map(|cause| app.context.metrics.ws_disconnect_count(cause)),
         ws_discarded_frames: app.context.metrics.ws_quota_discard_count(),
+        ws_sent_payload_bytes: WsFrameType::ALL
+            .map(|frame_type| app.context.metrics.ws_sent_payload_bytes(frame_type)),
         build: BuildInfo::current(app.mode),
     }
 }
@@ -438,6 +511,18 @@ pub fn render(snapshot: &Snapshot) -> String {
             cause.label()
         );
     }
+    let _ = writeln!(&mut out, "# HELP phase_ws_sent_payload_bytes_total Payload bytes of successfully completed application socket-writer operations, including explicit control operations and raw/gzip envelope prefixes; excludes automatic protocol Pong replies and WebSocket framing, TCP and TLS overhead.");
+    let _ = writeln!(&mut out, "# TYPE phase_ws_sent_payload_bytes_total counter");
+    for (frame_type, bytes) in WsFrameType::ALL
+        .into_iter()
+        .zip(snapshot.ws_sent_payload_bytes)
+    {
+        let _ = writeln!(
+            &mut out,
+            "phase_ws_sent_payload_bytes_total{{frame_type=\"{}\"}} {bytes}",
+            frame_type.label()
+        );
+    }
     let _ = writeln!(&mut out, "# HELP phase_ws_discarded_frames_total WebSocket frames discarded by bounded ingress policy.");
     let _ = writeln!(&mut out, "# TYPE phase_ws_discarded_frames_total counter");
     let _ = writeln!(
@@ -501,6 +586,7 @@ mod tests {
     fn snapshot() -> Snapshot {
         Snapshot {
             ws_disconnects: Default::default(),
+            ws_sent_payload_bytes: Default::default(),
             ws_discarded_frames: 12,
             connections: 7,
             connections_capacity: 200,
@@ -532,6 +618,37 @@ mod tests {
                 mode: "full",
             },
         }
+    }
+
+    #[test]
+    fn ws_sent_payload_render_uses_bounded_frame_types() {
+        let counters = ServerMetrics::default();
+        counters.record_ws_sent_payload_bytes(WsFrameType::Full, 120);
+        counters.record_ws_sent_payload_bytes(WsFrameType::Full, 7);
+        counters.record_ws_sent_payload_bytes(WsFrameType::Control, 13);
+        let mut fixture = snapshot();
+        fixture.ws_sent_payload_bytes =
+            WsFrameType::ALL.map(|kind| counters.ws_sent_payload_bytes(kind));
+        let body = render(&fixture);
+        assert!(body
+            .lines()
+            .any(|line| line == "# TYPE phase_ws_sent_payload_bytes_total counter"));
+        let samples: Vec<_> = body
+            .lines()
+            .filter(|line| line.starts_with("phase_ws_sent_payload_bytes_total{"))
+            .collect();
+        assert_eq!(
+            samples,
+            [
+                "phase_ws_sent_payload_bytes_total{frame_type=\"full\"} 127",
+                "phase_ws_sent_payload_bytes_total{frame_type=\"delta\"} 0",
+                "phase_ws_sent_payload_bytes_total{frame_type=\"state_update\"} 0",
+                "phase_ws_sent_payload_bytes_total{frame_type=\"game_started\"} 0",
+                "phase_ws_sent_payload_bytes_total{frame_type=\"other\"} 0",
+                "phase_ws_sent_payload_bytes_total{frame_type=\"control\"} 13",
+            ]
+        );
+        assert_eq!(render(&fixture), body, "scraping does not consume totals");
     }
 
     /// Scrapers depend on family names, types, labels and values, not HELP

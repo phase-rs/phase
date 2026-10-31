@@ -1,6 +1,8 @@
 //! Application payloads and optional command ownership share one ordered FIFO.
 //! Correlation is envelope metadata: legacy payloads, including unit replies,
 //! retain their existing wire shape.
+//! A single resync admission owner travels from decoder to dispatch to this
+//! FIFO and the encoding worker. Only its response carries a forced-FULL hint.
 
 use serde::{Deserialize, Serialize};
 use server_core::protocol::{ClientMessage, CommandId, ServerMessage};
@@ -15,12 +17,26 @@ pub(crate) enum RefusalError {
     Closed,
 }
 
+#[derive(Debug)]
+pub(crate) struct ResyncPermit {
+    _permit: OwnedSemaphorePermit,
+}
+
+#[derive(Debug, Default)]
+pub(crate) enum StateEncoding {
+    #[default]
+    Automatic,
+    Resync(ResyncPermit),
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ClientEnvelope {
     #[serde(flatten)]
     pub(crate) message: ClientMessage,
     #[serde(default)]
     command_id: Option<CommandId>,
+    #[serde(skip)]
+    pub(crate) resync: Option<ResyncPermit>,
 }
 
 pub(crate) enum QuotaRecovery {
@@ -79,20 +95,58 @@ pub(crate) struct Envelope {
     pub(crate) command_id: Option<CommandId>,
     #[serde(skip)]
     pub(crate) quota_refusal: Option<OwnedSemaphorePermit>,
+    #[serde(skip)]
+    pub(crate) state_encoding: StateEncoding,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Sender(mpsc::UnboundedSender<Envelope>, Arc<Semaphore>);
+pub(crate) struct Sender(
+    mpsc::UnboundedSender<Envelope>,
+    Arc<Semaphore>,
+    Arc<Semaphore>,
+);
 
 pub(crate) fn channel() -> (Sender, Receiver) {
     let (tx, rx) = mpsc::unbounded_channel();
     (
-        Sender(tx, Arc::new(Semaphore::new(MAX_PENDING_QUOTA_REFUSALS))),
+        Sender(
+            tx,
+            Arc::new(Semaphore::new(MAX_PENDING_QUOTA_REFUSALS)),
+            Arc::new(Semaphore::new(1)),
+        ),
         Receiver(rx),
     )
 }
 
 impl Sender {
+    pub(crate) fn try_admit_resync(&self) -> Result<ResyncPermit, RefusalError> {
+        if self.is_closed() {
+            return Err(RefusalError::Closed);
+        }
+        self.2
+            .clone()
+            .try_acquire_owned()
+            .map(|permit| ResyncPermit { _permit: permit })
+            .map_err(|_| RefusalError::Full)
+    }
+
+    /// Recipient-local recovery only; failed large projections stay owned by
+    /// the caller until it can drop them outside route locks on a CPU worker.
+    pub(crate) fn send_resync(
+        &self,
+        message: ServerMessage,
+        permit: ResyncPermit,
+        on_closed: impl FnOnce(ServerMessage),
+    ) -> Result<(), mpsc::error::SendError<()>> {
+        self.enqueue(
+            message,
+            None,
+            None,
+            StateEncoding::Resync(permit),
+            on_closed,
+        )
+    }
+
     pub(crate) fn send(&self, message: ServerMessage) -> Result<(), mpsc::error::SendError<()>> {
         self.send_completion(message, None)
     }
@@ -102,7 +156,7 @@ impl Sender {
         message: ServerMessage,
         command_id: Option<CommandId>,
     ) -> Result<(), mpsc::error::SendError<()>> {
-        self.enqueue(message, command_id, None, drop)
+        self.enqueue(message, command_id, None, StateEncoding::Automatic, drop)
     }
 
     pub(crate) fn send_refusal(
@@ -115,8 +169,14 @@ impl Sender {
             .clone()
             .try_acquire_owned()
             .map_err(|_| RefusalError::Full)?;
-        self.enqueue(message, command_id, Some(permit), drop)
-            .map_err(|_| RefusalError::Closed)
+        self.enqueue(
+            message,
+            command_id,
+            Some(permit),
+            StateEncoding::Automatic,
+            drop,
+        )
+        .map_err(|_| RefusalError::Closed)
     }
 
     /// Preserve failed payload ownership for callers that defer large drops
@@ -126,7 +186,7 @@ impl Sender {
         message: ServerMessage,
         on_closed: impl FnOnce(ServerMessage),
     ) -> Result<(), mpsc::error::SendError<()>> {
-        self.enqueue(message, None, None, on_closed)
+        self.enqueue(message, None, None, StateEncoding::Automatic, on_closed)
     }
 
     fn enqueue(
@@ -134,6 +194,7 @@ impl Sender {
         message: ServerMessage,
         command_id: Option<CommandId>,
         quota_refusal: Option<OwnedSemaphorePermit>,
+        state_encoding: StateEncoding,
         on_closed: impl FnOnce(ServerMessage),
     ) -> Result<(), mpsc::error::SendError<()>> {
         self.0
@@ -141,6 +202,7 @@ impl Sender {
                 message,
                 command_id,
                 quota_refusal,
+                state_encoding,
             })
             .map_err(|error| {
                 on_closed(error.0.message);
@@ -268,6 +330,7 @@ mod tests {
             message: ServerMessage::ActionNoOp,
             command_id: Some(CommandId(37)),
             quota_refusal: None,
+            state_encoding: StateEncoding::Automatic,
         };
         let wire = serde_json::to_value(envelope).unwrap();
         assert_eq!(wire["command_id"], 37);
@@ -283,11 +346,74 @@ mod tests {
             message: ServerMessage::ActionNoOp,
             command_id: None,
             quota_refusal: None,
+            state_encoding: StateEncoding::Automatic,
         })
         .unwrap();
         assert!(
             plain.get("command_id").is_none(),
             "ambient replies must not invent completion ownership"
         );
+    }
+
+    #[tokio::test]
+    async fn resync_ownership_releases_on_drop_and_closed_queue() {
+        let (sender, mut receiver) = channel();
+        let mut request: ClientEnvelope = serde_json::from_value(serde_json::json!({
+            "type": "ResyncState", "command_id": 99, "resync": true,
+        }))
+        .unwrap();
+        assert!(request.resync.is_none(), "clients cannot mint ownership");
+        assert_eq!(request.command_id(), None);
+        request.resync = Some(sender.try_admit_resync().unwrap());
+        assert!(matches!(sender.try_admit_resync(), Err(RefusalError::Full)));
+        drop(request);
+        let permit = sender.try_admit_resync().unwrap();
+        sender
+            .send_resync(ServerMessage::ActionNoOp, permit, drop)
+            .unwrap();
+        let response = receiver.recv_envelope().await.unwrap();
+        assert!(
+            matches!(sender.try_admit_resync(), Err(RefusalError::Full)),
+            "dequeue must not release ownership"
+        );
+        assert_eq!(
+            serde_json::to_value(&response).unwrap(),
+            serde_json::json!({"type": "ActionNoOp"})
+        );
+        drop(response);
+        let permit = sender.try_admit_resync().unwrap();
+        drop(receiver);
+        let mut recovered = None;
+        assert!(sender
+            .send_resync(ServerMessage::Pong { timestamp: 17 }, permit, |message| {
+                recovered = Some(message)
+            })
+            .is_err());
+        assert!(matches!(
+            recovered,
+            Some(ServerMessage::Pong { timestamp: 17 })
+        ));
+        assert_eq!(sender.2.available_permits(), 1, "failed enqueue releases");
+        assert!(matches!(
+            sender.try_admit_resync(),
+            Err(RefusalError::Closed)
+        ));
+
+        let (sender, receiver) = channel();
+        sender
+            .send_resync(
+                ServerMessage::ActionNoOp,
+                sender.try_admit_resync().unwrap(),
+                drop,
+            )
+            .unwrap();
+        drop(receiver);
+        assert_eq!(
+            sender.2.available_permits(),
+            1,
+            "teardown drops queued owners"
+        );
+        let (fresh, _receiver) = channel();
+        assert!(fresh.try_admit_resync().is_ok());
     }
 }
