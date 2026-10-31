@@ -133,4 +133,22 @@ describe("default-opponent prompt on a provider card", () => {
     await waitFor(() => expect(screen.getByText(CONNECTED_PROMPT)).toBeInTheDocument());
     expect(probe.testLlmEndpoint).toHaveBeenCalledTimes(1);
   });
+
+  it("displays stored default opponent name and badge even when profile's API key is empty on load", async () => {
+    const id = addProfile({ provider: "Anthropic", model: "claude-sonnet-5", apiKey: "" });
+    useLlmStore.getState().setDefaultOpponentProfileId(id);
+    render(<LlmOpponentsSection />);
+
+    // Shows the default opponent badge on the card even with missing key
+    expect(await screen.findByRole("status", { name: "" })).toHaveTextContent(/default opponent/i);
+
+    // Shows the stored default opponent in the dropdown rather than masking as built-in engine
+    const trigger = screen.getByRole("button", { name: "Default opponent" });
+    expect(trigger).toHaveTextContent("Claude");
+
+    // Switching dropdown back to Built-in engine AI updates the store
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("option", { name: /built-in engine/i }));
+    expect(useLlmStore.getState().defaultOpponentProfileId).toBeNull();
+  });
 });
