@@ -41689,8 +41689,10 @@ fn trigger_becomes_blocked_blockers_of_equipped_creature_stay_unbound() {
     }
 }
 
-/// CR 608.2k: a referent an earlier clause selected outranks the source, so
-/// "it" must not bind the source's blockers even under a `SelfRef` trigger.
+/// CR 608.2k: synthetic grammar probe (not a printed card; nearest printed
+/// analogues are Plague Wight with a source antecedent and Bob the Claymore
+/// with a nearer antecedent): a referent an earlier clause selected outranks the
+/// source, so "it" must not bind the source's blockers even under a `SelfRef` trigger.
 #[test]
 fn trigger_blocking_it_keeps_nearer_chain_referent() {
     let def = parse_trigger_line(
