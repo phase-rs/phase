@@ -3974,20 +3974,21 @@ fn pay_deferred_spell_sacrifices_at_commit(
     player: PlayerId,
     mut pending: PendingCast,
     completion: PendingSacrificeCostCompletion,
+    arrangement: Option<&[ObjectId]>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let mut chosen: Vec<ObjectId> = Vec::new();
     let mut determined: Vec<ObjectId> = Vec::new();
-    for entry in std::mem::take(&mut pending.deferred_sacrificed_permanents) {
+    for entry in &pending.deferred_sacrificed_permanents {
         match entry {
-            DeferredSpellSacrifice::Selected { object_id, .. } => chosen.push(object_id),
+            DeferredSpellSacrifice::Selected { object_id, .. } => chosen.push(*object_id),
             DeferredSpellSacrifice::All { filter } => {
                 let set = super::casting::find_determined_sacrifice_set(
                     state,
                     player,
                     pending.object_id,
                     pending.ability.context.granting_object,
-                    &filter,
+                    filter,
                 )
                 .ok_or_else(|| {
                     EngineError::ActionNotAllowed(
@@ -4004,6 +4005,43 @@ fn pay_deferred_spell_sacrifices_at_commit(
         }
     }
     determined.retain(|id| !chosen.contains(id));
+    // CR 404.3: the payer arranges its own sacrificed cards; the prompt resumes this commit.
+    let determined = match arrangement {
+        Some(order) => {
+            super::casting::arrange_determined_sacrifice_set(state, player, determined, order)?
+        }
+        None => {
+            let arranged =
+                super::casting::payer_arranged_sacrifice_members(state, player, &determined);
+            if arranged.len() >= 2 {
+                let PendingSacrificeCostCompletion::FinalizeSpell {
+                    phyrexian_choices,
+                    pre_payment_checks,
+                } = completion
+                else {
+                    return Err(EngineError::InvalidAction(
+                        "a sacrifice arrangement at the commit needs its spell finalization".into(),
+                    ));
+                };
+                let count = arranged.len();
+                let mut spell = Box::new(pending);
+                spell.prepaid_finalization = Some(Box::new(PrepaidSpellFinalization {
+                    phyrexian_choices,
+                    pre_payment_checks: Some(pre_payment_checks),
+                }));
+                return Ok(WaitingFor::PayCost {
+                    player,
+                    kind: PayCostKind::Sacrifice,
+                    choices: arranged,
+                    count,
+                    min_count: count,
+                    resume: CostResume::Spell { spell },
+                });
+            }
+            determined
+        }
+    };
+    pending.deferred_sacrificed_permanents.clear();
     // CR 601.2h + CR 118.3: the determined set is paid whole or not at all.
     // Selected entries published their records when they were chosen.
     publish_sacrifice_cost_paid_objects(state, &mut pending, &determined);
@@ -4737,6 +4775,24 @@ pub(crate) fn handle_sacrifice_for_cost(
         }
     }
 
+    // CR 404.3 + CR 601.2h: a spell's commit-time "sacrifice all" arrangement resumes that commit.
+    if let Some(finalization) = pending.prepaid_finalization.take() {
+        let pre_payment_checks = finalization.pre_payment_checks.ok_or_else(|| {
+            EngineError::InvalidAction("sacrifice arrangement lost its pre-payment checks".into())
+        })?;
+        return pay_deferred_spell_sacrifices_at_commit(
+            state,
+            player,
+            pending,
+            PendingSacrificeCostCompletion::FinalizeSpell {
+                phyrexian_choices: finalization.phyrexian_choices,
+                pre_payment_checks,
+            },
+            Some(chosen),
+            events,
+        );
+    }
+
     // CR 701.21a + CR 118.3 + CR 601.2h + CR 602.2b: Each selected
     // permanent must still satisfy this cost and be controlled by its payer
     // before any payment is recorded; unpayable costs cannot be paid.
@@ -4744,24 +4800,45 @@ pub(crate) fn handle_sacrifice_for_cost(
         Some(payment) => Some(payment.cost),
         None => pending.activation_cost.as_ref(),
     };
-    let filter = &selected_cost
+    let sacrifice = selected_cost
         .and_then(super::casting::find_non_self_sacrifice_cost)
         .ok_or_else(|| {
             EngineError::InvalidAction("sacrifice payment has no selected non-self cost".into())
-        })?
-        .target;
-    let live = super::casting::find_eligible_sacrifice_targets(
-        state,
-        player,
-        pending.object_id,
-        pending.ability.context.granting_object,
-        filter,
-    );
-    if chosen.iter().any(|id| !live.contains(id)) {
-        return Err(EngineError::ActionNotAllowed(
-            "Selected permanent no longer eligible for sacrifice".into(),
-        ));
-    }
+        })?;
+    let determined_set = matches!(sacrifice.requirement, SacrificeRequirement::All);
+    let arranged_set;
+    let chosen = if determined_set {
+        // CR 404.3 + CR 601.2h + CR 118.3: the whole determined set is paid, in the payer's order.
+        let set = super::casting::find_determined_sacrifice_set(
+            state,
+            player,
+            pending.object_id,
+            pending.ability.context.granting_object,
+            &sacrifice.target,
+        )
+        .ok_or_else(|| {
+            EngineError::ActionNotAllowed(
+                "A permanent in the determined sacrifice set can't be sacrificed".into(),
+            )
+        })?;
+        arranged_set =
+            super::casting::arrange_determined_sacrifice_set(state, player, set, chosen)?;
+        &arranged_set[..]
+    } else {
+        let live = super::casting::find_eligible_sacrifice_targets(
+            state,
+            player,
+            pending.object_id,
+            pending.ability.context.granting_object,
+            &sacrifice.target,
+        );
+        if chosen.iter().any(|id| !live.contains(id)) {
+            return Err(EngineError::ActionNotAllowed(
+                "Selected permanent no longer eligible for sacrifice".into(),
+            ));
+        }
+        chosen
+    };
 
     // CR 601.2h + CR 602.2b: costs are paid in any order; the source's own {T}/{Q} is paid before the sacrifice that removes it.
     if pending.activation_ability_index.is_some() && chosen.contains(&pending.object_id) {
@@ -4875,7 +4952,10 @@ pub(crate) fn handle_sacrifice_for_cost(
     // CR 107.3a + CR 107.3i: A sacrifice-derived X follows the selected
     // count; an X already announced for mana remains the same throughout this
     // activated ability, including a separate zero-count sacrifice cost.
-    if min_count == 0 && !matches!(pending.activation_residual, ActivationResidual::XMana) {
+    if min_count == 0
+        && !determined_set
+        && !matches!(pending.activation_residual, ActivationResidual::XMana)
+    {
         pending
             .ability
             .set_chosen_x_recursive(chosen.len().try_into().unwrap_or(u32::MAX));
@@ -6951,7 +7031,22 @@ fn surface_next_interactive_activation_cost_leg(
                         "A permanent in the determined sacrifice set can't be sacrificed".into(),
                     )
                 })?;
-                let n = set.len();
+                // CR 404.3: the payer arranges the cards it owns; fewer than two need no prompt.
+                let arranged =
+                    super::casting::payer_arranged_sacrifice_members(state, player, &set);
+                let n = arranged.len();
+                if n >= 2 {
+                    return Ok(Some(WaitingFor::PayCost {
+                        player,
+                        kind: PayCostKind::Sacrifice,
+                        choices: arranged,
+                        count: n,
+                        min_count: n,
+                        resume: CostResume::Spell {
+                            spell: Box::new(pending.clone()),
+                        },
+                    }));
+                }
                 // CR 601.2h + CR 118.3: the determined set is paid whole or not at all.
                 return handle_sacrifice_for_cost(
                     state,
@@ -6961,8 +7056,8 @@ fn surface_next_interactive_activation_cost_leg(
                     CostSelection {
                         min_count: n,
                         count: n,
-                        legal_permanents: &set,
-                        chosen: &set,
+                        legal_permanents: &arranged,
+                        chosen: &arranged,
                     },
                     events,
                 )
@@ -13448,6 +13543,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
                     cast_this_way_enters_mods,
                 }),
             },
+            None,
             events,
         );
     }

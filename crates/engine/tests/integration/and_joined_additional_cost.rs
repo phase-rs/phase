@@ -168,7 +168,7 @@ fn kaerveks_spite_sacrifices_everything_and_discards_the_hand() {
     let outcome = runner
         .cast(spell)
         .target_player(P1)
-        .pay_cost_with(&hand)
+        .pay_cost_with(&[swamps.as_slice(), &[bear], &hand].concat())
         .resolve();
 
     // CR 601.2g + CR 601.2h: the Swamps tapped for {B}{B}{B} are still
@@ -276,6 +276,32 @@ fn discard_rest_of_hand(runner: &mut GameRunner, cards: &[ObjectId]) {
         .expect("the whole hand is discarded");
 }
 
+/// Answers the CR 404.3 arrangement of the sacrificed permanents with `order`, or with the
+/// advertised order; returns the order paid.
+fn arrange_sacrifices(runner: &mut GameRunner, order: Option<&[ObjectId]>) -> Vec<ObjectId> {
+    let WaitingFor::PayCost {
+        kind: PayCostKind::Sacrifice,
+        choices,
+        count,
+        min_count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "the sacrificed permanents are arranged at payment, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((*min_count, *count), (choices.len(), choices.len()));
+    let order = order.map_or_else(|| choices.clone(), <[_]>::to_vec);
+    runner
+        .act(GameAction::SelectCards {
+            cards: order.clone(),
+        })
+        .expect("the arrangement is paid");
+    order
+}
+
 /// CR 601.2g + CR 601.2h: the hand is discarded when the cost is paid, after
 /// mana abilities, so a card discarded to Skirge Familiar in the mana window
 /// funds the spell and "discard your hand" then discards what is left.
@@ -305,6 +331,7 @@ fn kaerveks_spite_hand_funds_skirge_familiar_before_the_hand_is_discarded() {
     runner
         .act(GameAction::PassPriority)
         .expect("passing finishes the mana payment");
+    arrange_sacrifices(&mut runner, None);
     discard_rest_of_hand(&mut runner, &[hand[1], hand[2]]);
 
     let state = runner.state();
@@ -341,6 +368,7 @@ fn kaerveks_spite_paid_entirely_by_discarding_the_hand_to_skirge_familiars() {
     runner
         .act(GameAction::PassPriority)
         .expect("passing finishes the payment");
+    arrange_sacrifices(&mut runner, None);
 
     let state = runner.state();
     assert_eq!(state.stack.back().map(|e| e.id), Some(spell));
@@ -362,7 +390,11 @@ fn kaerveks_spite_with_an_empty_hand_still_resolves() {
         .collect();
     let mut runner = scenario.build();
 
-    let outcome = runner.cast(spell).target_player(P1).resolve();
+    let outcome = runner
+        .cast(spell)
+        .target_player(P1)
+        .pay_cost_with(&swamps)
+        .resolve();
 
     assert!(matches!(
         outcome.final_waiting_for(),
@@ -575,6 +607,7 @@ fn kaerveks_spite_owner_orders_the_discarded_hand_without_an_outcome_draw() {
         };
 
         cast_at_p1(&mut runner, spell, CastPaymentMode::Auto);
+        arrange_sacrifices(&mut runner, None);
         discard_rest_of_hand(&mut runner, &order);
 
         let state = runner.state();
@@ -625,6 +658,7 @@ fn kaerveks_spite_keeps_its_spent_mana_through_the_hand_discard() {
         } else {
             cast_at_p1(&mut runner, spell, mode);
         }
+        arrange_sacrifices(&mut runner, None);
         discard_rest_of_hand(&mut runner, &hand);
 
         let cast = &runner.state().objects[&spell];
@@ -653,6 +687,7 @@ fn kaerveks_spite_cancelled_at_the_hand_discard_restores_board_and_hand() {
     let mut runner = scenario.build();
 
     cast_at_p1(&mut runner, spell, CastPaymentMode::Auto);
+    arrange_sacrifices(&mut runner, None);
     assert!(
         matches!(
             runner.state().waiting_for,
@@ -751,6 +786,7 @@ fn kaerveks_spite_refuses_a_card_selected_twice_for_the_hand_discard() {
         }
         let mut runner = scenario.build();
         cast_at_p1(&mut runner, spell, CastPaymentMode::Auto);
+        arrange_sacrifices(&mut runner, None);
         let prompt = runner.state().waiting_for.clone();
         assert!(
             matches!(
@@ -961,8 +997,246 @@ fn kaerveks_spite_hand_discard_prompt_keeps_its_commit_decisions_out_of_the_proj
     }
     let mut runner = scenario.build();
     cast_at_p1(&mut runner, spell, CastPaymentMode::Auto);
+    arrange_sacrifices(&mut runner, None);
     assert!(carried(&runner.state().waiting_for));
     assert!(!carried(
         &filter_state_for_viewer(runner.state(), P0).waiting_for
     ));
+}
+
+/// Kaervek's Spite over two distinguishable creatures of P0's, paid from floating mana with an
+/// empty hand, plus whatever `extra` adds; returns the runner, the spell and the two creatures.
+fn kaerveks_spite_over_two_creatures(
+    extra: impl FnOnce(&mut GameScenario, ObjectId),
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = add_kaerveks_spite(&mut scenario);
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    extra(&mut scenario, spell);
+    (scenario.build(), spell, bears, giant)
+}
+
+fn p0_graveyard_order(runner: &GameRunner, ids: &[ObjectId]) -> Vec<ObjectId> {
+    runner.state().players[0]
+        .graveyard
+        .iter()
+        .copied()
+        .filter(|id| ids.contains(id))
+        .collect()
+}
+
+/// CR 404.3: the sacrificed creatures reach their owner's graveyard in the order the owner
+/// arranged, so Shallow Grave's "top creature card" is the owner's pick.
+#[test]
+fn kaerveks_spite_owner_orders_the_sacrificed_permanents() {
+    for giant_first in [false, true] {
+        let (mut runner, spell, bears, giant) = kaerveks_spite_over_two_creatures(|_, _| {});
+        let order = if giant_first {
+            [giant, bears]
+        } else {
+            [bears, giant]
+        };
+
+        cast_at_p1(&mut runner, spell, CastPaymentMode::Auto);
+        let WaitingFor::PayCost {
+            kind: PayCostKind::Sacrifice,
+            choices,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "reach guard: the arrangement prompt, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        let mut members = choices.clone();
+        members.sort();
+        let ai_selections: Vec<Vec<ObjectId>> = engine::ai_support::legal_actions(runner.state())
+            .into_iter()
+            .filter_map(|action| match action {
+                GameAction::SelectCards { cards } => Some(cards),
+                _ => None,
+            })
+            .collect();
+        assert!(!ai_selections.is_empty(), "the AI can answer the prompt");
+        for mut cards in ai_selections {
+            cards.sort();
+            assert_eq!(
+                cards, members,
+                "every AI answer orders exactly the arranged cards"
+            );
+        }
+        let paid = arrange_sacrifices(&mut runner, Some(&order));
+
+        assert_eq!(paid, order);
+        assert_eq!(runner.state().stack.back().map(|e| e.id), Some(spell));
+        assert_eq!(p0_graveyard_order(&runner, &order), order);
+    }
+}
+
+/// CR 404.3 + CR 701.21a + CR 111.1: only the payer's own cards are arranged; the stolen
+/// creature goes to its owner's graveyard and the token is not a card. A selection naming the
+/// stolen creature, leaving a card out, or naming one twice pays nothing.
+#[test]
+fn kaerveks_spite_arranges_only_the_payers_own_cards() {
+    let mut stolen = ObjectId(0);
+    let mut token = ObjectId(0);
+    let (mut runner, spell, bears, giant) = kaerveks_spite_over_two_creatures(|scenario, _| {
+        stolen = scenario
+            .add_creature(P1, "Stolen Ogre", 2, 2)
+            .controlled_by(P0)
+            .id();
+        token = scenario.add_creature(P0, "Soldier Token", 1, 1).id();
+    });
+    runner.state_mut().objects.get_mut(&token).unwrap().is_token = true;
+
+    cast_at_p1(&mut runner, spell, CastPaymentMode::Auto);
+    let prompt = runner.state().waiting_for.clone();
+    let WaitingFor::PayCost {
+        kind: PayCostKind::Sacrifice,
+        choices,
+        ..
+    } = &prompt
+    else {
+        panic!("reach guard: the arrangement prompt, got {prompt:?}");
+    };
+    assert_eq!(choices, &vec![bears, giant]);
+    for refused in [vec![bears, stolen], vec![giant], vec![giant, giant]] {
+        runner
+            .act(GameAction::SelectCards { cards: refused })
+            .expect_err("only the payer's own cards, each once, are arranged");
+        assert_eq!(runner.state().waiting_for, prompt);
+    }
+
+    arrange_sacrifices(&mut runner, Some(&[giant, bears]));
+    let state = runner.state();
+    assert_eq!(state.stack.back().map(|e| e.id), Some(spell));
+    assert_eq!(
+        p0_graveyard_order(&runner, &[bears, giant]),
+        vec![giant, bears]
+    );
+    assert!(state.players[1].graveyard.contains(&stolen));
+    assert_ne!(
+        state.objects.get(&token).map(|obj| obj.zone),
+        Some(Zone::Battlefield)
+    );
+}
+
+/// CR 404.3: one card of the payer's own needs no arrangement; the stolen creature and the token
+/// are still sacrificed with it.
+#[test]
+fn kaerveks_spite_with_one_own_card_sacrifices_without_a_prompt() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = add_kaerveks_spite(&mut scenario);
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let stolen = scenario
+        .add_creature(P1, "Stolen Ogre", 2, 2)
+        .controlled_by(P0)
+        .id();
+    let token = scenario.add_creature(P0, "Soldier Token", 1, 1).id();
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.state_mut().objects.get_mut(&token).unwrap().is_token = true;
+
+    cast_at_p1(&mut runner, spell, CastPaymentMode::Auto);
+
+    let state = runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        state.waiting_for
+    );
+    assert_eq!(state.stack.back().map(|e| e.id), Some(spell));
+    assert_eq!(state.objects[&bears].zone, Zone::Graveyard);
+    assert!(state.players[1].graveyard.contains(&stolen));
+    assert_ne!(
+        state.objects.get(&token).map(|obj| obj.zone),
+        Some(Zone::Battlefield)
+    );
+}
+
+/// CR 404.3 + CR 616.1: the arranged order survives a replacement choice on each sacrifice.
+#[test]
+fn kaerveks_spite_sacrifice_arrangement_survives_each_replacement_choice() {
+    for giant_first in [false, true] {
+        let (mut runner, spell, bears, giant) =
+            kaerveks_spite_over_two_creatures(|scenario, spell| {
+                scenario
+                    .add_creature(P1, "Graveyard Warden", 1, 1)
+                    .with_replacement_definition(optional_exile_instead_except(spell));
+            });
+        let order = if giant_first {
+            [giant, bears]
+        } else {
+            [bears, giant]
+        };
+
+        cast_at_p1(&mut runner, spell, CastPaymentMode::Auto);
+        arrange_sacrifices(&mut runner, Some(&order));
+        assert!(
+            runner.state().pending_cost_move_resume.is_some(),
+            "reach guard: the sacrifice parks on a cost resume, got {:?}",
+            runner.state().waiting_for
+        );
+        let mut choices = 0;
+        while let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for {
+            let decline = candidates
+                .iter()
+                .position(|c| c.description == "Decline")
+                .expect("a Decline option");
+            runner
+                .act(GameAction::ChooseReplacement { index: decline })
+                .expect("declining the redirect resumes the payment");
+            choices += 1;
+        }
+
+        assert_eq!(choices, 2);
+        assert_eq!(runner.state().stack.back().map(|e| e.id), Some(spell));
+        assert_eq!(p0_graveyard_order(&runner, &order), order);
+    }
+}
+
+/// CR 733.1: cancelling at the arrangement prompt reverses the cast before anything is
+/// sacrificed.
+#[test]
+fn kaerveks_spite_cancelled_at_the_sacrifice_arrangement_restores_the_board() {
+    let (mut runner, spell, bears, giant) = kaerveks_spite_over_two_creatures(|_, _| {});
+
+    cast_at_p1(&mut runner, spell, CastPaymentMode::Auto);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                ..
+            }
+        ),
+        "reach guard: the arrangement prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::CancelCast)
+        .expect("the cast can be cancelled at the prompt");
+
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+    assert_eq!(state.objects[&spell].zone, Zone::Hand);
+    for id in [bears, giant] {
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+    }
 }

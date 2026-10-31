@@ -1,15 +1,16 @@
 //! CR 701.21a + CR 601.2h + CR 118.3: "sacrifice all <filter>" is a determined
-//! set — every matching permanent the payer controls — paid whole, with no
-//! selection prompt, on both the spell additional-cost and activation channels.
+//! set — every matching permanent the payer controls — paid whole on both the
+//! spell additional-cost and activation channels. CR 404.3: the payer arranges
+//! only the cards in it that the payer owns; it never chooses members.
 
 use engine::game::engine::EngineError;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{CostPaidObjectRecord, ResolvedAbility};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{ActionResult, CastPaymentMode, WaitingFor};
+use engine::types::game_state::{ActionResult, CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 use engine::types::TargetRef;
@@ -42,27 +43,41 @@ fn cast(runner: &mut GameRunner, spell: ObjectId, mode: CastPaymentMode) {
         .unwrap();
 }
 
-/// Answers target prompts with P1 until the cast waits on anything else; a
-/// sacrifice selection prompt is never acceptable for a determined set.
+/// Answers target prompts with P1 until the cast waits on anything else.
 fn settle_targets(runner: &mut GameRunner) {
-    loop {
-        match &runner.state().waiting_for {
-            WaitingFor::TargetSelection { .. } => {
-                runner
-                    .act(GameAction::ChooseTarget {
-                        target: Some(TargetRef::Player(P1)),
-                    })
-                    .unwrap();
-            }
-            WaitingFor::PayCost { .. } => {
-                panic!(
-                    "determined set must not prompt: {:?}",
-                    runner.state().waiting_for
-                )
-            }
-            _ => return,
-        }
+    while let WaitingFor::TargetSelection { .. } = &runner.state().waiting_for {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1)),
+            })
+            .unwrap();
     }
+}
+
+/// Answers the CR 404.3 arrangement prompt — every advertised card, none optional — with
+/// `order`, or with the advertised order; returns the order paid.
+fn arrange(runner: &mut GameRunner, order: Option<&[ObjectId]>) -> Vec<ObjectId> {
+    let WaitingFor::PayCost {
+        kind: PayCostKind::Sacrifice,
+        choices,
+        count,
+        min_count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "the arrangement prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((*min_count, *count), (choices.len(), choices.len()));
+    let order = order.map_or_else(|| choices.clone(), <[_]>::to_vec);
+    runner
+        .act(GameAction::SelectCards {
+            cards: order.clone(),
+        })
+        .unwrap();
+    order
 }
 
 fn activate_mana(runner: &mut GameRunner, source: ObjectId) {
@@ -146,6 +161,7 @@ fn soulblast_sacrifices_every_creature_its_caster_controls_at_payment() {
             }
             runner.act(GameAction::PassPriority).unwrap();
         }
+        assert_eq!(arrange(&mut runner, None), vec![dork, vanilla], "{mode:?}");
 
         assert_spell_on_stack(&runner, spell);
         assert_eq!(zone(&runner, vanilla), Zone::Graveyard, "{mode:?}");
@@ -303,6 +319,7 @@ fn tomb_of_urami_sacrifices_all_its_controllers_lands_itself_included() {
         })
         .unwrap();
     settle_targets(&mut runner);
+    arrange(&mut runner, None);
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "{:?}",
@@ -459,6 +476,7 @@ fn soulblast_pays_for_a_creature_freed_by_sacrificing_its_assault_suit_for_mana(
 
         if sacrifice_suit {
             result.expect("the determined set is paid");
+            arrange(&mut runner, None);
             assert_spell_on_stack(&runner, spell);
             assert_eq!(zone(&runner, suit), Zone::Graveyard);
             assert_eq!(zone(&runner, suited), Zone::Graveyard);
@@ -517,6 +535,7 @@ fn tomb_of_urami_pays_for_a_land_freed_by_sacrificing_its_assault_suit_for_mana(
         activate_mana(&mut runner, swamp);
     }
     runner.act(GameAction::PassPriority).unwrap();
+    arrange(&mut runner, None);
 
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
@@ -526,4 +545,93 @@ fn tomb_of_urami_pays_for_a_land_freed_by_sacrificing_its_assault_suit_for_mana(
     for id in swamps.iter().chain([&tomb, &arbor]) {
         assert_eq!(zone(&runner, *id), Zone::Graveyard);
     }
+}
+
+/// CR 404.3 + CR 602.2b: Tomb of Urami's sacrificed lands reach the graveyard in the order its
+/// controller arranged, Tomb's own {T} paid first.
+#[test]
+fn tomb_of_urami_owner_orders_its_sacrificed_lands() {
+    for tomb_first in [false, true] {
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        let tomb = sc
+            .add_land_from_oracle(P0, "Tomb of Urami", TOMB_OF_URAMI)
+            .id();
+        let swamp = sc.add_basic_land(P0, ManaColor::Black);
+        sc.with_mana_pool(
+            P0,
+            (0..4)
+                .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = sc.build();
+        let order = if tomb_first {
+            [tomb, swamp]
+        } else {
+            [swamp, tomb]
+        };
+
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: tomb,
+                ability_index: 1,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        settle_targets(&mut runner);
+        arrange(&mut runner, Some(&order));
+
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        let graveyard: Vec<ObjectId> = runner.state().players[0]
+            .graveyard
+            .iter()
+            .copied()
+            .filter(|id| order.contains(id))
+            .collect();
+        assert_eq!(graveyard, order);
+        assert!(paid_snapshot_tapped(top_ability(&runner), tomb));
+    }
+}
+
+/// CR 404.3 + CR 701.21a: Tomb of Urami is its controller's only card in the set, so no
+/// arrangement is asked; the stolen land goes to its owner's graveyard with it.
+#[test]
+fn tomb_of_urami_with_a_stolen_land_sacrifices_without_a_prompt() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let tomb = sc
+        .add_land_from_oracle(P0, "Tomb of Urami", TOMB_OF_URAMI)
+        .id();
+    let stolen = sc
+        .add_land_from_oracle(P1, "Swamp", "({T}: Add {B}.)")
+        .controlled_by(P0)
+        .id();
+    sc.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = sc.build();
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: tomb,
+            ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    settle_targets(&mut runner);
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, tomb), Zone::Graveyard);
+    assert!(runner.state().players[1].graveyard.contains(&stolen));
 }

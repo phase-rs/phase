@@ -8631,8 +8631,9 @@ pub struct PendingCast {
     /// abilities; see `DeferredHandDiscardCost` for what each kind reserves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_hand_discard_cost: Option<DeferredHandDiscardCost>,
-    /// CR 601.2h: Set only on a cast suspended by its commit-time hand discard; the
-    /// discard's continuation finishes the cast from what the commit decided.
+    /// CR 601.2h: Set only on a cast suspended by a commit-time prompt (hand discard or
+    /// sacrifice arrangement); the prompt's continuation finishes the cast from what the
+    /// commit decided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepaid_finalization: Option<Box<PrepaidSpellFinalization>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
