@@ -594,14 +594,18 @@ fn branch_local_player_choice_follows_the_enclosing_choice_after_krark() {
     branch_local_player_choice(true);
 }
 
-// Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: a
+// Real cards: Krark's Thumb ("If you would flip a coin, instead flip two coins and ignore one.") is
+// the printed card in play. The spell is made up (Context Gamble: "Choose a creature you control
+// and an opponent. Choose a player. Flip a coin. If you lose the flip, that player gains control of
+// that creature."): the test pins the handoff recipient as the second, separately chosen player
+// (chosen-player index 1), and no printed card has two player choices before a coin. Shape: a
 // chosen-creature/chosen-player coin spell parked at Krark's Thumb's prompt restores its incoming
 // references without repinning; missing, wrong or null pins are refused; a stale pin makes the
-// handoff fizzle. The in-flight card state it persists: Krark's Thumb ("If you would flip a coin,
-// instead flip two coins and ignore one."); Risky Move ("At the beginning of each player's upkeep,
-// that player gains control of this enchantment. / When you gain control of this enchantment from
+// handoff fizzle. Nearest printed card: Risky Move ("At the beginning of each player's upkeep, that
+// player gains control of this enchantment. / When you gain control of this enchantment from
 // another player, choose a creature you control and an opponent. Flip a coin. If you lose the flip,
-// that opponent gains control of that creature.").
+// that opponent gains control of that creature.") -- one chosen creature and one chosen opponent,
+// then a flip whose loss hands the creature to that opponent.
 #[test]
 fn thumb_incoming_references_restore_without_repinning_and_reject_missing_pins() {
     use engine::types::ability::TargetRef;

@@ -1161,12 +1161,13 @@ fn assert_resting_at_priority(runner: &GameRunner) {
     assert!(runner.state().active_coin_flip_frame().is_none());
 }
 
-// Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: a 'flip a
-// coin, if you win gain 2 life' spell paused at Krark's Thumb's first keep prompt refuses a v7
-// Single-frame save; the current save completes paying once. The in-flight card state it persists:
-// Krark's Thumb ("If you would flip a coin, instead flip two coins and ignore one."); Tavern
-// Swindler ("{T}, Pay 3 life: Flip a coin. If you win the flip, you gain 6 life.").
-/// An old Single frame is refused; the current binding resumes and pays once.
+// Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). a
+// 'flip a coin, if you win gain 2 life' spell paused at Krark's Thumb's first keep prompt refuses a
+// v7 Single-frame save; the current save completes paying once. Krark's Thumb ("If you would flip a
+// coin, instead flip two coins and ignore one.") is the printed card in play; the coin ability it
+// persists is made up (an Effect literal that gains 2 life on a win). Nearest printed card: Tavern
+// Swindler ("{T}, Pay 3 life: Flip a coin. If you win the flip, you gain 6 life."). An old Single
+// frame is refused; the current binding resumes and pays once.
 #[test]
 fn legacy_v7_single_flip_save_is_refused_current_completes() {
     let effect = single_flip_with_win_life(2);
@@ -1230,13 +1231,14 @@ fn legacy_v7_single_flip_save_is_refused_current_completes() {
     assert_legacy_coin_refused(legacy);
 }
 
-// Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: a 'flip three
-// coins' spell with no branches paused at Krark's Thumb's first keep prompt refuses a v7 FlipN
-// save; the current save completes three kept flips. The in-flight card state it persists: Krark's
-// Thumb ("If you would flip a coin, instead flip two coins and ignore one."); Flock of Rabid Sheep
-// ("Flip X coins. For each flip you win, create a 2/2 green Sheep creature token named Rabid
-// Sheep.").
-/// An old bare FlipN frame is refused, while its current payload completes.
+// Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). a
+// 'flip three coins' spell with no branches paused at Krark's Thumb's first keep prompt refuses a
+// v7 FlipN save; the current save completes three kept flips. Krark's Thumb ("If you would flip a
+// coin, instead flip two coins and ignore one.") is the printed card in play; the coin ability it
+// persists is made up (an Effect literal that flips three coins with no branches). Nearest printed
+// card: Flock of Rabid Sheep ("Flip X coins. For each flip you win, create a 2/2 green Sheep
+// creature token named Rabid Sheep."). An old bare FlipN frame is refused, while its current
+// payload completes.
 #[test]
 fn legacy_v7_flip_n_save_is_refused_current_completes() {
     let effect = Effect::FlipCoins {
@@ -1278,13 +1280,14 @@ fn legacy_v7_flip_n_save_is_refused_current_completes() {
     }
 }
 
-// Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: a 'flip until
-// you lose, gain 1 life per win' spell paused at Krark's Thumb's first prompt (no wins yet) refuses
-// a v7 UntilLose save; the current save completes. The in-flight card state it persists: Krark's
-// Thumb ("If you would flip a coin, instead flip two coins and ignore one."); Crazed Firecat ("When
-// this creature enters, flip a coin until you lose a flip. Put a +1/+1 counter on this creature for
-// each flip you won.").
-/// An old UntilLose frame is refused even before any rewards are owed.
+// Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). a
+// 'flip until you lose, gain 1 life per win' spell paused at Krark's Thumb's first prompt (no wins
+// yet) refuses a v7 UntilLose save; the current save completes. Krark's Thumb ("If you would flip a
+// coin, instead flip two coins and ignore one.") is the printed card in play; the coin ability it
+// persists is made up (an Effect literal that flips until a loss and gains 1 life per win). Nearest
+// printed card: Crazed Firecat ("When this creature enters, flip a coin until you lose a flip. Put
+// a +1/+1 counter on this creature for each flip you won."). An old UntilLose frame is refused even
+// before any rewards are owed.
 #[test]
 fn legacy_v7_until_lose_frame_without_wins_is_refused() {
     let (mut runner, spell, _) = pause_at_first_keep(&until_loss_gain_life(), |_| true);
@@ -1324,13 +1327,14 @@ fn legacy_v7_until_lose_frame_without_wins_is_refused() {
     }
 }
 
-// Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: the
+// Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). the
 // until-lose life spell paused under Krark's Thumb after one kept win (reward owed) refuses a v7
-// save; the current save pays the owed and later rewards after the final loss. The in-flight card
-// state it persists: Krark's Thumb ("If you would flip a coin, instead flip two coins and ignore
-// one."); Crazed Firecat ("When this creature enters, flip a coin until you lose a flip. Put a
-// +1/+1 counter on this creature for each flip you won.").
-/// An old UntilLose frame with owed rewards is refused; current rewards survive.
+// save; the current save pays the owed and later rewards after the final loss. Krark's Thumb ("If
+// you would flip a coin, instead flip two coins and ignore one.") is the printed card in play; the
+// coin ability it persists is made up (an Effect literal that flips until a loss and gains 1 life
+// per win). Nearest printed card: Crazed Firecat ("When this creature enters, flip a coin until you
+// lose a flip. Put a +1/+1 counter on this creature for each flip you won."). An old UntilLose
+// frame with owed rewards is refused; current rewards survive.
 #[test]
 fn legacy_v7_until_lose_frame_with_owed_rewards_is_refused() {
     let (mut runner, spell, results) =

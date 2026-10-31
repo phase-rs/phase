@@ -10368,15 +10368,16 @@ mod tests {
         }
     }
 
-    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: a stack
-    // ability 'draw two, then flip a coin (win/lose: draw one)' round-trips; decode refuses missing
-    // coin_branches/won/lost, branches on a non-coin root, and misaligned branch pins. The
-    // in-flight card state it persists: Goblin Kaboomist ("At the beginning of your upkeep, create
-    // a colorless artifact token named Land Mine with "{R}, Sacrifice this token: This token deals
-    // 2 damage to target attacking creature without flying." Then flip a coin. If you lose the
-    // flip, this creature deals 2 damage to itself."); Goblin Artisans ("{T}: Flip a coin. If you
-    // win the flip, draw a card. If you lose the flip, counter target artifact spell you control
-    // that isn't the target of an ability from another creature named Goblin Artisans.").
+    // Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). a
+    // stack ability 'draw two, then flip a coin (win/lose: draw one)' round-trips; decode refuses
+    // missing coin_branches/won/lost, branches on a non-coin root, and misaligned branch pins. The
+    // coin ability it persists is made up (an Effect literal). Nearest printed cards: Goblin
+    // Kaboomist ("At the beginning of your upkeep, create a colorless artifact token named Land
+    // Mine with "{R}, Sacrifice this token: This token deals 2 damage to target attacking creature
+    // without flying." Then flip a coin. If you lose the flip, this creature deals 2 damage to
+    // itself."); Goblin Artisans ("{T}: Flip a coin. If you win the flip, draw a card. If you lose
+    // the flip, counter target artifact spell you control that isn't the target of an ability from
+    // another creature named Goblin Artisans.").
     #[test]
     fn resolution_wire_coin_decode_checks_nested_correspondence_and_pins() {
         use crate::game::ability_utils::build_resolved_from_def;
@@ -10699,13 +10700,14 @@ mod tests {
         }
     }
 
-    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: a spell
-    // with two nested target-then-coin layers paused at Krark's Thumb's inner keep prompt
+    // Real cards: wire/persistence test (it asserts how saved state restores, not card behavior). a
+    // spell with two nested target-then-coin layers paused at Krark's Thumb's inner keep prompt
     // (optionally after an exile response) restores and finishes; saves stripped of announcement
-    // provenance are refused. The in-flight card state it persists: Krark's Thumb ("If you would
-    // flip a coin, instead flip two coins and ignore one."); Chaotic Strike ("Cast this spell only
-    // during combat after blockers are declared. / Flip a coin. If you win the flip, target
-    // creature gets +1/+1 until end of turn. / Draw a card.").
+    // provenance are refused. Krark's Thumb ("If you would flip a coin, instead flip two coins and
+    // ignore one.") is the printed card in play; the coin ability it persists is made up (an Effect
+    // literal: the nested target-then-coin chain "Synthetic nested binding"). Nearest printed card:
+    // Chaotic Strike ("Cast this spell only during combat after blockers are declared. / Flip a
+    // coin. If you win the flip, target creature gets +1/+1 until end of turn. / Draw a card.").
     #[test]
     fn legacy_coin_resolution_without_announcement_provenance_is_refused() {
         use crate::types::actions::GameAction;
@@ -10821,13 +10823,14 @@ mod tests {
             .expect("non-coin v10 remains compatible");
     }
 
-    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: the same
-    // nested-binding spell parked at Krark's Thumb's prompt decodes as an unversioned GameState
-    // transport and a viewer-filtered state without legacy refusal, then finishes. The in-flight
-    // card state it persists: Krark's Thumb ("If you would flip a coin, instead flip two coins and
-    // ignore one."); Chaotic Strike ("Cast this spell only during combat after blockers are
-    // declared. / Flip a coin. If you win the flip, target creature gets +1/+1 until end of turn. /
-    // Draw a card.").
+    // Real cards: wire/persistence test (it asserts how saved state restores, not card behavior).
+    // the same nested-binding spell parked at Krark's Thumb's prompt decodes as an unversioned
+    // GameState transport and a viewer-filtered state without legacy refusal, then finishes.
+    // Krark's Thumb ("If you would flip a coin, instead flip two coins and ignore one.") is the
+    // printed card in play; the coin ability it persists is made up (an Effect literal: the nested
+    // target-then-coin chain "Synthetic nested binding"). Nearest printed card: Chaotic Strike
+    // ("Cast this spell only during combat after blockers are declared. / Flip a coin. If you win
+    // the flip, target creature gets +1/+1 until end of turn. / Draw a card.").
     #[test]
     fn current_coin_transport_decodes_without_legacy_persistence_refusal() {
         for illegal in [false, true] {

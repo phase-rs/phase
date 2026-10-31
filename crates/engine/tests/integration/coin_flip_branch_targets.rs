@@ -1,6 +1,6 @@
 //! Coin-branch announcement and execution regressions.
-//! Crooked Scales fixtures use the printed text; the five tests whose flow the closing
-//! "unless you pay {3} and repeat this process" changes use `CROOKED_SCALES_WITHOUT_PAYMENT`.
+//! Crooked Scales fixtures use the printed text; tests that resolve a lost flip decline the
+//! "unless you pay {3}" with `finish_declining_payment`.
 
 use engine::ai_support::legal_actions;
 use engine::game::casting::can_activate_ability_now;
@@ -16,9 +16,6 @@ use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 use rand::Rng;
-
-// Synthetic, targetless source-local punishment: isolates payment completion
-// from the missing announcement-time targets being investigated by T.
 
 fn pin_outcomes(runner: &mut GameRunner, outcomes: &[bool]) {
     let seed = (0..100_000)
@@ -89,6 +86,26 @@ fn finish(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
         );
     }
     panic!("announced ability did not finish within 20 priority passes");
+}
+
+/// Like `finish`, and declines Crooked Scales' "unless you pay {3}" when the lost flip offers it
+/// (CR 118.12a), so the printed text can be used by tests that resolve the losing outcome.
+fn finish_declining_payment(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
+    for _ in 0..20 {
+        let action = match runner.state().waiting_for {
+            WaitingFor::UnlessPayment { .. } => GameAction::PayUnlessCost { pay: false },
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            ref other => panic!("unexpected prompt while finishing: {other:?}"),
+        };
+        events.extend(
+            runner
+                .act(action)
+                .expect("finish the announced ability")
+                .events,
+        );
+    }
+    panic!("announced ability did not finish within 20 steps");
 }
 
 fn assert_finished(runner: &GameRunner) {
@@ -489,18 +506,14 @@ fn two_branch_win_destroys_only_the_announced_opponents_creature() {
 // Byte-identical to the "Crooked Scales" oracle_text in the exported MTGJSON card data.
 const CROOKED_SCALES: &str = "{4}, {T}: Flip a coin. If you win the flip, destroy target creature an opponent controls. If you lose the flip, destroy target creature you control unless you pay {3} and repeat this process.";
 
-// Crooked Scales without its closing "unless you pay {3} and repeat this process": for the tests
-// whose flow the printed clause changes (the losing outcome would first ask to pay {3}; the engine
-// does not complete that prompt or the repeat, a tracked follow-up).
-const CROOKED_SCALES_WITHOUT_PAYMENT: &str = "{4}, {T}: Flip a coin. If you win the flip, destroy target creature an opponent controls. If you lose the flip, destroy target creature you control.";
-
 // Byte-identical to the "Goblin Bangchuckers" oracle_text in the exported MTGJSON card data.
 const GOBLIN_BANGCHUCKERS: &str = "{T}: Flip a coin. If you win the flip, this creature deals 2 damage to any target. If you lose the flip, this creature deals 2 damage to itself.";
 
 /// Real card: Crooked Scales with its printed Oracle text. CR 602.2b + CR 601.2c: both outcome
 /// targets are announced on activation, before the flip; CR 705.2 + CR 608.2c: a won flip
-/// destroys only the announced opponent's creature, and the lose outcome's unless-pay and
-/// "repeat this process" (which the engine parses as Unimplemented) never run.
+/// destroys only the announced opponent's creature; the losing outcome's unless-pay {3} is never
+/// offered, and "repeat this process" (parsed as an Unimplemented root sub-ability that does
+/// nothing) has no effect.
 #[test]
 fn crooked_scales_printed_text_announces_both_targets_and_a_won_flip_destroys_only_the_opponents_creature(
 ) {
@@ -581,6 +594,99 @@ fn crooked_scales_printed_text_announces_both_targets_and_a_won_flip_destroys_on
     }
     assert_eq!(coin_terminals(&events, source), 1);
     assert_finished(&runner);
+}
+
+/// Real card: Crooked Scales with its printed Oracle text, losing the flip. CR 705.2 + CR 608.2c:
+/// the lose outcome uses the target announced for it. CR 118.12a: "destroy target creature you
+/// control unless you pay {3}" asks for the payment; declining destroys only the announced own
+/// creature, and paying destroys nothing. "repeat this process" is parsed as an Unimplemented
+/// root sub-ability that does nothing, so no second flip happens either way.
+#[test]
+fn crooked_scales_printed_text_lost_flip_asks_for_the_payment_and_destroys_the_announced_own_creature_only_when_declined(
+) {
+    for pay in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_artifact_from_oracle(P0, "Crooked Scales", CROOKED_SCALES)
+            .id();
+        let own = scenario.add_creature(P0, "Chosen Own", 2, 2).id();
+        let own_distractor = scenario.add_creature(P0, "Own Distractor", 3, 3).id();
+        let opposing = scenario.add_creature(P1, "Chosen Opponent", 4, 4).id();
+        let opposing_distractor = scenario.add_creature(P1, "Opponent Distractor", 5, 5).id();
+        // {4} for the activation, plus {3} when the test pays the unless-cost.
+        mana(&mut scenario, if pay { 7 } else { 4 });
+        let mut runner = scenario.build();
+        pin_outcomes(&mut runner, &[false, false]);
+        let mut events = runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("activation reaches announcement")
+            .events;
+        for target in [opposing, own] {
+            events.extend(
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    })
+                    .expect("announce outcome target")
+                    .events,
+            );
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+            events.extend(
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pay announced activation")
+                    .events,
+            );
+        }
+        // Resolve until the unless-cost is offered.
+        for _ in 0..20 {
+            if matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }) {
+                break;
+            }
+            events.extend(
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority toward the lost flip")
+                    .events,
+            );
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }),
+            "the lost flip offers the unless-cost: {:?}",
+            runner.state().waiting_for
+        );
+        events.extend(
+            runner
+                .act(GameAction::PayUnlessCost { pay })
+                .expect("answer the unless-cost")
+                .events,
+        );
+        finish(&mut runner, &mut events);
+        assert_eq!(
+            flips(&events),
+            vec![false],
+            "one flip: the repeat clause does nothing"
+        );
+        assert_eq!(
+            runner.state().objects[&own].zone,
+            if pay {
+                Zone::Battlefield
+            } else {
+                Zone::Graveyard
+            },
+            "declining destroys the announced own creature; paying destroys nothing"
+        );
+        for untouched in [own_distractor, opposing, opposing_distractor, source] {
+            assert_eq!(runner.state().objects[&untouched].zone, Zone::Battlefield);
+        }
+        assert_finished(&runner);
+    }
 }
 
 #[test]
@@ -2372,13 +2478,6 @@ fn pass_to_coin_keep(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
     );
 }
 
-// Real cards: Crooked Scales (printed) has the two outcome-declared targets this test needs, but in
-// this test the printed closing clause "unless you pay {3} and repeat this process" changes the
-// flow (the losing outcome would first ask to pay {3}; the engine does not complete that prompt or
-// the repeat, a tracked follow-up), so the test uses the card's text without that clause
-// (CROOKED_SCALES_WITHOUT_PAYMENT). Shape: The two-branch Destroy coin activation under Krark's
-// Thumb: at the keep prompt each branch holds its pinned target, a restore with a tampered pin is
-// refused, and a stale incarnation is not destroyed.
 #[test]
 fn thumb_restore_keeps_each_declared_branch_occurrence_and_refuses_pin_drift() {
     use engine::types::ability::{AbilityDefinition, AbilityKind};
@@ -2402,8 +2501,8 @@ fn thumb_restore_keeps_each_declared_branch_occurrence_and_refuses_pin_drift() {
                 .id();
             let distractor = scenario.add_creature(P1, "Never announced", 4, 4).id();
             let parsed = parse_oracle_text(
-                CROOKED_SCALES_WITHOUT_PAYMENT,
-                "Synthetic Scales",
+                CROOKED_SCALES,
+                "Crooked Scales",
                 &[],
                 &["Artifact".into()],
                 &[],
@@ -2411,7 +2510,7 @@ fn thumb_restore_keeps_each_declared_branch_occurrence_and_refuses_pin_drift() {
             let definition: AbilityDefinition = parsed.abilities[0].clone();
             assert_eq!(definition.kind, AbilityKind::Activated);
             let source = scenario
-                .add_artifact_from_oracle(P0, "Synthetic Scales", CROOKED_SCALES_WITHOUT_PAYMENT)
+                .add_artifact_from_oracle(P0, "Crooked Scales", CROOKED_SCALES)
                 .id();
             mana(&mut scenario, 4);
             let mut runner = scenario.build();
@@ -2499,7 +2598,7 @@ fn thumb_restore_keeps_each_declared_branch_occurrence_and_refuses_pin_drift() {
                     .unwrap()
                     .events,
             );
-            finish(&mut runner, &mut events);
+            finish_declining_payment(&mut runner, &mut events);
             assert_eq!(flips(&events), vec![won]);
             assert_eq!(
                 runner.state().objects[&selected].zone,
@@ -2986,13 +3085,14 @@ fn thumb_completed_empty_choice_restores_and_runs_only_independent_instructions(
     }
 }
 
-// Real cards: Crooked Scales (printed) has the two outcome-declared targets this test needs, but in
-// this test the printed closing clause "unless you pay {3} and repeat this process" changes the
-// flow (the losing outcome would first ask to pay {3}; the engine does not complete that prompt or
-// the repeat, a tracked follow-up), so the test uses the card's text without that clause
-// (CROOKED_SCALES_WITHOUT_PAYMENT). Shape: A two-branch coin (win destroys an opponent's target
-// creature, loss destroys your target creature) followed by an independent 'exile target artifact',
-// optionally nested in an outer coin's win; declaration order Won, Lost, successor.
+// Real cards: the coin ability is Crooked Scales' printed text with its {4},{T} cost removed (the
+// test is about declaration order, not payment), followed by Shattering Blow's printed text as an
+// independent successor, optionally nested as the win outcome of an outer made-up coin. None of the
+// 86 printed coin-flip cards in the exported card data has two outcome-declared targets followed by
+// a later independent targeted instruction. Nearest printed card: Chaotic Strike ("Cast this spell
+// only during combat after blockers are declared. / Flip a coin. If you win the flip, target
+// creature gets +1/+1 until end of turn. / Draw a card.") -- an outcome-declared target followed by
+// an independent instruction after the coin.
 #[test]
 fn coin_children_precede_a_targeted_successor_and_nested_children() {
     use engine::types::ability::{AbilityDefinition, AbilityKind};
@@ -3000,7 +3100,7 @@ fn coin_children_precede_a_targeted_successor_and_nested_children() {
         for won in [false, true] {
             for bulk in [false, true] {
                 let mut root = parse_oracle_text(
-                    CROOKED_SCALES_WITHOUT_PAYMENT,
+                    CROOKED_SCALES,
                     "Synthetic ordered branches",
                     &[],
                     &["Artifact".into()],
@@ -3063,15 +3163,29 @@ fn coin_children_precede_a_targeted_successor_and_nested_children() {
                         })
                         .expect("compact declaration follows Won, Lost, successor order")
                         .events;
-                    finish(&mut runner, &mut events);
+                    finish_declining_payment(&mut runner, &mut events);
                     events
                 } else {
-                    runner
-                        .activate(source, 0)
-                        .target_objects(&[opponent, own, later])
-                        .resolve()
-                        .events()
-                        .to_vec()
+                    let mut events = runner
+                        .act(GameAction::ActivateAbility {
+                            source_id: source,
+                            ability_index: 0,
+                            payment_mode: CastPaymentMode::Auto,
+                        })
+                        .unwrap()
+                        .events;
+                    for target in [opponent, own, later] {
+                        events.extend(
+                            runner
+                                .act(GameAction::ChooseTarget {
+                                    target: Some(TargetRef::Object(target)),
+                                })
+                                .expect("announce the next declaration")
+                                .events,
+                        );
+                    }
+                    finish_declining_payment(&mut runner, &mut events);
+                    events
                 };
                 assert_eq!(flips(&events), expected);
                 assert_eq!(
@@ -3125,20 +3239,20 @@ fn chaotic_strike_loss_still_draws_without_pumping_either_creature() {
     assert_finished(&runner);
 }
 
-// Real cards: Crooked Scales (printed) has the two outcome-declared targets this test needs, but in
-// this test the printed closing clause "unless you pay {3} and repeat this process" changes the
-// flow (the losing outcome would first ask to pay {3}; the engine does not complete that prompt or
-// the repeat, a tracked follow-up), so the test uses the card's text without that clause
-// (CROOKED_SCALES_WITHOUT_PAYMENT). Shape: A two-branch opponent/own targeted destroy coin followed
-// by an independent life gain, where instant responses exile one or both announced branch targets
-// before resolution; legality is per branch occurrence.
+// Real cards: the coin ability is Crooked Scales' printed text with its cost removed, followed by a
+// made-up independent "gain 2 life" tail; Final Death (printed) exiles announced targets in
+// response. None of the 86 printed coin-flip cards in the exported card data has two
+// outcome-declared targets followed by an independent instruction. Nearest printed card: Chaotic
+// Strike ("Cast this spell only during combat after blockers are declared. / Flip a coin. If you
+// win the flip, target creature gets +1/+1 until end of turn. / Draw a card.") -- an
+// outcome-declared target followed by an independent instruction after the coin.
 #[test]
 fn illegal_coin_children_do_not_substitute_distractors_or_suppress_a_legal_tail() {
     use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr};
     for removed in [0, 1, 2, 3] {
         for won in [false, true] {
             let mut definition = parse_oracle_text(
-                CROOKED_SCALES_WITHOUT_PAYMENT,
+                CROOKED_SCALES,
                 "Synthetic legality coin",
                 &[],
                 &["Artifact".into()],
@@ -3236,7 +3350,7 @@ fn illegal_coin_children_do_not_substitute_distractors_or_suppress_a_legal_tail(
                 children.lost.as_ref().unwrap().illegal_local_target_slots,
                 if removed & 2 != 0 { vec![0] } else { vec![] }
             );
-            finish(&mut runner, &mut events);
+            finish_declining_payment(&mut runner, &mut events);
             assert_eq!(
                 flips(&events),
                 if removed == 3 { vec![] } else { vec![won] }
@@ -3297,7 +3411,7 @@ fn separate_coin_target_occurrences_allow_the_same_creature() {
     }
 }
 
-// T2/T8: the engine supplies opaque addresses; the public answer is positional.
+// The engine supplies opaque addresses; the public answer is positional.
 // Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
 // A spell with opponent/own branch target creatures and an independent artifact-target tail,
 // retargeted by a choose-new-targets spell through a positional prompt that survives save/restore,
@@ -3717,13 +3831,9 @@ fn one_coin_occurrence_rejects_duplicate_targets_but_accepts_two_distinct_creatu
     assert_finished(&runner);
 }
 
-// Real cards: Crooked Scales (printed) has the two outcome-declared targets this test needs, but in
-// this test the printed closing clause "unless you pay {3} and repeat this process" changes the
-// flow (the losing outcome would first ask to pay {3}; the engine does not complete that prompt or
-// the repeat, a tracked follow-up), so the test uses the card's text without that clause
-// (CROOKED_SCALES_WITHOUT_PAYMENT). Shape: In three players, an opponent copies a two-branch
-// opponent/own targeted coin activation and chooses new branch targets relative to the copy's
-// controller, leaving the original intact.
+// Real cards: Crooked Scales' printed text with its cost removed (the test is about the copy's
+// target declarations, not payment), put on a textless source and copied in a three-seat game by
+// Return the Favor's first mode (printed text). No rules text is made up.
 #[test]
 fn cross_controller_activated_copy_rebinds_each_branch_without_mutating_original() {
     use engine::types::ability::{
@@ -3735,7 +3845,7 @@ fn cross_controller_activated_copy_rebinds_each_branch_without_mutating_original
         let mut scenario = GameScenario::new_n_player(3, 7);
         scenario.at_phase(Phase::PreCombatMain);
         let mut definition = parse_oracle_text(
-            CROOKED_SCALES_WITHOUT_PAYMENT,
+            CROOKED_SCALES,
             "Synthetic copied activation",
             &[],
             &["Artifact".into()],
@@ -3755,24 +3865,18 @@ fn cross_controller_activated_copy_rebinds_each_branch_without_mutating_original
         let copy_own = scenario.add_creature(P1, "Copy own target", 4, 4).id();
         let copy_opponent = scenario.add_creature(p2, "Copy opponent target", 5, 5).id();
         let spare = scenario.add_creature(p2, "Copy distractor", 6, 6).id();
+        // Return the Favor, printed text (byte-identical to the exported MTGJSON oracle_text);
+        // its first mode copies an activated ability and may choose new targets for the copy.
+        const RETURN_THE_FAVOR: &str = "Spree (Choose one or more additional costs.)\n+ {1} \u{2014} Copy target instant spell, sorcery spell, activated ability, or triggered ability. You may choose new targets for the copy.\n+ {1} \u{2014} Change the target of target spell or ability with a single target.";
         let copy_spell = scenario
-            .add_spell_to_hand(P1, "Synthetic ability copier", true)
-            .with_ability_definition(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::CopySpell {
-                    target: TargetFilter::StackAbility {
-                        controller: None,
-                        tag: None,
-                        kind: Some(StackAbilityKind::Activated),
-                    },
-                    retarget: CopyRetargetPermission::MayChooseNewTargets,
-                    copier: None,
-                    additional_modifications: vec![],
-                    starting_loyalty_from_casualty_sacrifice: false,
-                },
-            ))
-            .with_mana_cost(ManaCost::zero())
+            .add_spell_to_hand_from_oracle(P1, "Return the Favor", true, RETURN_THE_FAVOR)
             .id();
+        scenario.with_mana_pool(
+            P1,
+            (0..3)
+                .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+                .collect(),
+        );
         let mut runner = scenario.build();
         pin_outcomes(&mut runner, &[won, won]);
         runner
@@ -3795,7 +3899,11 @@ fn cross_controller_activated_copy_rebinds_each_branch_without_mutating_original
             runner.state().waiting_for,
             WaitingFor::Priority { player: P1 }
         ));
-        runner.cast(copy_spell).target_object(original.id).commit();
+        runner
+            .cast(copy_spell)
+            .modes(&[0])
+            .target_object(original.id)
+            .commit();
         for _ in 0..6 {
             if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
                 break;
@@ -3871,7 +3979,7 @@ fn cross_controller_activated_copy_rebinds_each_branch_without_mutating_original
             &original
         );
         let mut events = Vec::new();
-        finish(&mut runner, &mut events);
+        finish_declining_payment(&mut runner, &mut events);
         let actual: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
@@ -3900,13 +4008,14 @@ fn cross_controller_activated_copy_rebinds_each_branch_without_mutating_original
     }
 }
 
-// Real cards: Crooked Scales (printed) has the two outcome-declared targets this test needs, but in
-// this test the printed closing clause "unless you pay {3} and repeat this process" changes the
-// flow (the losing outcome would first ask to pay {3}; the engine does not complete that prompt or
-// the repeat, a tracked follow-up), so the test uses the card's text without that clause
-// (CROOKED_SCALES_WITHOUT_PAYMENT). Shape: In three players, a two-branch opponent/own targeted
-// coin activated from a source owned by another player, with the source destroyed, the own target
-// blinked, or the own target stolen in response.
+// Real cards: Crooked Scales' printed text with its cost removed, on a textless source owned by
+// another seat in a three-seat game; the responses are Shatter and Ghostly Flicker (printed) and a
+// made-up "Gain control of target creature." spell (no printed card has exactly that text). Nearest
+// printed cards for the made-up response: Act of Treason ("Gain control of target creature until
+// end of turn. Untap that creature. It gains haste until end of turn. (It can attack and {T} this
+// turn.)"); Threaten ("Untap target creature and gain control of it until end of turn. That
+// creature gains haste until end of turn. (It can attack and {T} this turn.)") -- both gain control
+// only until end of turn and add other effects.
 #[test]
 fn three_seat_borrowed_source_and_target_keep_controller_and_incarnation_authority() {
     use engine::types::player::PlayerId;
@@ -3916,7 +4025,7 @@ fn three_seat_borrowed_source_and_target_keep_controller_and_incarnation_authori
             let mut scenario = GameScenario::new_n_player(3, 7);
             scenario.at_phase(Phase::PreCombatMain);
             let mut definition = parse_oracle_text(
-                CROOKED_SCALES_WITHOUT_PAYMENT,
+                CROOKED_SCALES,
                 "Synthetic borrowed source",
                 &[],
                 &["Artifact".into()],
@@ -4032,7 +4141,7 @@ fn three_seat_borrowed_source_and_target_keep_controller_and_incarnation_authori
                 "unchanged" => assert_eq!(runner.state().objects[&own].controller, P0),
                 _ => unreachable!(),
             }
-            finish(&mut runner, &mut events);
+            finish_declining_payment(&mut runner, &mut events);
             assert_eq!(
                 flips(&events),
                 vec![won],
@@ -4545,20 +4654,11 @@ fn viewer_projection_redacts_hidden_coin_child_context_but_keeps_public_sibling_
     use engine::types::game_state::ManaSpentSourceSnapshot;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let mut definition = parse_oracle_text(
-        CROOKED_SCALES,
-        "Synthetic redacted coin",
-        &[],
-        &["Artifact".into()],
-        &[],
-    )
-    .abilities
-    .remove(0);
-    definition.cost = None;
+    // Crooked Scales, printed text and cost: the source of the announced coin ability.
     let source = scenario
-        .add_artifact_from_oracle(P0, "Public coin source", "")
-        .with_ability_definition(definition)
+        .add_artifact_from_oracle(P0, "Crooked Scales", CROOKED_SCALES)
         .id();
+    mana(&mut scenario, 4);
     let hidden = scenario
         .add_spell_to_hand(P0, "Hidden payment sentinel", true)
         .id();
@@ -4584,6 +4684,9 @@ fn viewer_projection_redacts_hidden_coin_child_context_but_keeps_public_sibling_
                 target: Some(TargetRef::Object(target)),
             })
             .unwrap();
+    }
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        runner.act(GameAction::PassPriority).unwrap();
     }
     let library = runner.state().players[0].library[0];
     let snapshot = |id| {
@@ -5169,8 +5272,9 @@ fn mixed_incoming_pins_round_trip_through_a_production_thumb_keep() {
     drop(runner.cast(spell).commit());
     let a_pin = ObjectIncarnationRef::from_object(&runner.state().objects[&a]);
     let b_pin = ObjectIncarnationRef::from_object(&runner.state().objects[&b]);
-    // Stage the live incoming channel produced by an earlier instruction:
-    // one announced occurrence plus an object appended during resolution.
+    // Hand-staged: Stitch in Time has no earlier instruction, so the incoming channel (one
+    // announced occurrence plus one object appended during resolution) is written by the test.
+    // Printed coin cards with a declared incoming target: Mogg Assassin and Invert Polarity.
     runner
         .state_mut()
         .stack
