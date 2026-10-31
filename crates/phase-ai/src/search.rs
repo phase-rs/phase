@@ -14,7 +14,6 @@ use engine::ai_support::{
     retarget_actions, root_may_yield_adverse_exchange, targeted_exchange_verdict,
     validated_candidate_actions_for_semantic_owner, AiDecisionContract, TargetedExchangeVerdict,
 };
-use engine::game::cost_payability::AbilityCostPayability;
 use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, ContinuousModification, Duration, Effect, ResolvedAbility,
@@ -1713,6 +1712,21 @@ pub fn fallback_action(
         }
         return gate(issued(|action| matches!(action, GameAction::CancelCast)));
     }
+    // CR 601.2h + CR 602.2b: a disjunctive activation cost is a payment
+    // choice, not an uncompletable cast, so it is answered before the
+    // pending-cast guard below: the first engine-issued branch (the engine
+    // offers only branches the activation can pay), else the issued cancel.
+    if matches!(
+        state.waiting_for,
+        WaitingFor::ActivationCostOneOfChoice { .. }
+    ) {
+        let branch =
+            issued(|action| matches!(action, GameAction::ChooseActivationCostBranch { .. }));
+        if branch.is_some() {
+            return gate(branch);
+        }
+        return gate(issued(|action| matches!(action, GameAction::CancelCast)));
+    }
 
     // Pending-cast states can always be escaped with CancelCast (CR 601.2).
     // Check this before the exhaustive match so every pending-cast variant
@@ -2103,15 +2117,9 @@ pub fn fallback_action(
             pay: zero_counter_payment_owed_by(state, *player),
         }),
 
-        // Disjunctive activation costs: default to the first payable branch.
-        WaitingFor::ActivationCostOneOfChoice {
-            player,
-            costs,
-            pending_cast,
-        } => costs
-            .iter()
-            .position(|cost| cost.is_payable(state, *player, pending_cast.object_id))
-            .map(|index| GameAction::ChooseActivationCostBranch { index }),
+        WaitingFor::ActivationCostOneOfChoice { .. } => {
+            unreachable!("handled before fallback match")
+        }
         // CR 118.12a: Disjunctive unless-cost choice. Fallback is to decline
         // the choice (let the effect resolve), mirroring `UnlessPayment`'s
         // pessimistic-default policy.
@@ -7336,6 +7344,66 @@ mod tests {
             .or_else(|| state.waiting_for.acting_players().first().copied())
             .unwrap_or(P0);
         AiDecisionContract::issue(state, owner)
+    }
+
+    /// CR 601.2h + CR 602.2b: Bloodthorn Flail's "Equip—Pay {3} or discard a
+    /// card" reaches the disjunctive activation-cost prompt through a real
+    /// activation. The fallback answers it with an engine-issued branch, not
+    /// the pending-cast guard's CancelCast.
+    #[test]
+    fn fallback_answers_activation_cost_one_of_choice_with_an_issued_branch() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+        let flail = scenario
+            .add_creature(P0, "Bloodthorn Flail", 0, 0)
+            .as_artifact()
+            .with_subtypes(vec!["Equipment"])
+            .from_oracle_text(
+                "Equipped creature gets +2/+1.\nEquip\u{2014}Pay {3} or discard a card.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        for _ in 0..3 {
+            runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Colorless,
+                engine::types::identifiers::ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: flail,
+                ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            })
+            .expect("equip is activatable with {3} available");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ActivationCostOneOfChoice { player, .. } if player == P0
+            ),
+            "reach: the disjunctive equip cost prompts, got {:?}",
+            runner.state().waiting_for
+        );
+        let contract = AiDecisionContract::issue(runner.state(), P0);
+        assert!(
+            contract.candidates.iter().any(|candidate| matches!(
+                candidate.action,
+                GameAction::ChooseActivationCostBranch { .. }
+            )),
+            "reach: the engine issues a payable branch"
+        );
+
+        let config = create_config(AiDifficulty::Easy, Platform::Native);
+        let fallback = fallback_action(runner.state(), &config, &contract).expect("fallback");
+        assert!(
+            matches!(fallback, GameAction::ChooseActivationCostBranch { .. }),
+            "the fallback picks an issued branch, got {fallback:?}"
+        );
+        assert!(contract.contains_action(runner.state(), &fallback));
+        runner.act(fallback).expect("the issued branch applies");
     }
 
     /// A mechanism fixture for the Counter specialist's cost/seat boundary.

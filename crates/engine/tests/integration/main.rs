@@ -198,6 +198,7 @@ mod codie_prepared_spell_trigger;
 mod codie_turn14_effect_zone_wedge;
 mod coin_flip_until_loss_loop;
 mod coin_of_fate;
+mod collect_evidence_self;
 mod collector_ouphe_mana_ability_prohibition;
 mod colorless_spell_cost_reduction;
 mod combat_celebrant_exert;

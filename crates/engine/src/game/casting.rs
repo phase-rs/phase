@@ -1877,7 +1877,7 @@ fn can_pay_escape_additional_cost(
     let Some((_, residual)) = super::keywords::effective_escape_data(state, escape_obj_id) else {
         return false;
     };
-    residual.is_payable(state, player, escape_obj_id)
+    residual.is_payable_for_spell(state, player, escape_obj_id)
 }
 
 /// CR 702.180: Check if an object has the Harmonize keyword. Off-zone-aware so a
@@ -18099,7 +18099,7 @@ fn evoke_cast_choice_eligibility(
     });
     let evoke_non_mana_affordable = evoke_non_mana_part
         .as_ref()
-        .is_none_or(|cost| cost.is_payable(state, player, object_id));
+        .is_none_or(|cost| cost.is_payable_for_spell(state, player, object_id));
 
     Some(EvokeCastChoiceEligibility {
         offer: EvokeCastChoiceOffer {
@@ -21499,7 +21499,7 @@ fn can_cast_prepared_now_with_probe(
         if let Some(FlashbackCost::NonMana(ref cost)) =
             super::keywords::effective_flashback_cost(state, prepared.object_id)
         {
-            if !cost.is_payable(state, player, prepared.object_id) {
+            if !cost.is_payable_for_spell(state, player, prepared.object_id) {
                 return false;
             }
         }
@@ -21557,7 +21557,10 @@ fn can_cast_prepared_now_with_probe(
             _ => None,
         };
         if let Some(extra) = static_extra {
-            if !extra.cost.is_payable(state, player, prepared.object_id) {
+            if !extra
+                .cost
+                .is_payable_for_spell(state, player, prepared.object_id)
+            {
                 return false;
             }
         }
@@ -26965,7 +26968,7 @@ fn alternative_cost_offer_payable(
     let state = terms_state.as_ref().unwrap_or(state);
     if !residual
         .as_ref()
-        .is_none_or(|cost| cost.is_payable(state, player, object_id))
+        .is_none_or(|cost| cost.is_payable_for_spell(state, player, object_id))
     {
         return false;
     }
@@ -27001,7 +27004,7 @@ fn alternative_cost_offer_payable(
             // required-cost flow applies; the combined life is priced above.
             && imposed
                 .as_ref()
-                .is_none_or(|cost| cost.is_payable(state, player, object_id))
+                .is_none_or(|cost| cost.is_payable_for_spell(state, player, object_id))
             // CR 118.3: a zero mana cost is always payable.
             && mana.as_ref().is_none_or(|m| {
                 can_pay_cost_after_auto_tap(state, player, object_id, m)

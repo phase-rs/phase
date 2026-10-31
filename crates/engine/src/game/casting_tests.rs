@@ -38029,7 +38029,7 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         assert!(
-            !cost.is_payable(&state, PlayerId(0), source),
+            !cost.is_payable_for_spell(&state, PlayerId(0), source),
             "cost must be unpayable when the source has no +1/+1 counters"
         );
         assert!(
@@ -38056,7 +38056,7 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         assert!(
-            !cost.is_payable(&state, PlayerId(0), source),
+            !cost.is_payable_for_spell(&state, PlayerId(0), source),
             "cost must be unpayable when the source has fewer than N counters"
         );
     }
@@ -39545,7 +39545,7 @@ mod unattach_cost {
         let (equipment, creature) = attached_equipment(&mut state);
         let cost = AbilityCost::Unattach;
 
-        assert!(cost.is_payable(&state, PlayerId(0), equipment));
+        assert!(cost.is_payable_for_spell(&state, PlayerId(0), equipment));
         pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
@@ -39569,7 +39569,7 @@ mod unattach_cost {
         crate::game::effects::attach::unattach(&mut state, equipment);
 
         assert!(
-            !AbilityCost::Unattach.is_payable(&state, PlayerId(0), equipment),
+            !AbilityCost::Unattach.is_payable_for_spell(&state, PlayerId(0), equipment),
             "unattach cost requires an attached source permanent"
         );
     }
@@ -39589,7 +39589,7 @@ mod unattach_cost {
         assert!(state.objects[&equipment].attached_to.is_some());
         assert!(state.objects[&creature].attachments.contains(&equipment));
         assert!(
-            !AbilityCost::Unattach.is_payable(&state, PlayerId(0), equipment),
+            !AbilityCost::Unattach.is_payable_for_spell(&state, PlayerId(0), equipment),
             "unattach cost is Equipment-only"
         );
     }
@@ -59363,7 +59363,7 @@ fn resolve_discard_requirement_fixed_one_empty_hand_is_unpayable_err() {
         Err(EngineError::ActionNotAllowed(_))
     ));
     // CR 601.2h: the payability gate excludes it too.
-    assert!(!cost.is_payable(&state, PlayerId(0), source));
+    assert!(!cost.is_payable_for_spell(&state, PlayerId(0), source));
 
     // Positive reach-guard: with one eligible card the helper resolves the real
     // interactive requirement (not a vacuous early return).
@@ -59387,7 +59387,7 @@ fn resolve_discard_requirement_fixed_one_empty_hand_is_unpayable_err() {
         }
         other => panic!("expected Ok(Some((1, [card]))), got {other:?}"),
     }
-    assert!(cost.is_payable(&state, PlayerId(0), source));
+    assert!(cost.is_payable_for_spell(&state, PlayerId(0), source));
 }
 
 /// Issue #6494 (no over-fire, casting path): a `Discard { Fixed(2) }` with THREE
