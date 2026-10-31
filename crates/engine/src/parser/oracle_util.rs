@@ -1713,13 +1713,35 @@ fn compound_short_self_name(card_name: &str) -> Option<String> {
         || is_core_type_name(&lower_first)
         || is_non_subtype_subject_name(&lower_first)
         || is_supertype_word(&lower_first)
-        || super::oracle_nom::primitives::is_keyword_word(&lower_first)
-        || super::oracle_nom::primitives::is_verb_word(&lower_first)
+        || is_rules_vocabulary_word(&lower_first)
         || is_subtype_word(&lower_first)
     {
         return None;
     }
     Some(format!("{first} {last}"))
+}
+
+/// CR 201.5c: only a shortened name *used to refer to the card* is treated as
+/// its name. A word that is Oracle rules vocabulary — an imperative instruction
+/// verb ("Return all …", "Search your library …") or a keyword ("Storm" on its
+/// own line, CR 702.40a; "gain fear") — keeps that rules meaning wherever it
+/// appears, so it is never derived as a printed shortened name, even when it is
+/// the leading word of the card's name ("Return of the Nightstalkers", "Storm of
+/// Memories", "Search for Tomorrow").
+///
+/// The single vocabulary guard shared by every derived single-word short-name
+/// strategy in [`normalize_card_name_refs_reporting`] (the "of" short name, the
+/// first-and-last-word compound, and the first-word fallback). `candidate_lower`
+/// must already be lowercase.
+fn is_rules_vocabulary_word(candidate_lower: &str) -> bool {
+    nom_primitives::is_keyword_word(candidate_lower)
+        || nom_primitives::is_verb_word(candidate_lower)
+        // CR 702: the full keyword registry, beyond the evergreen subset that
+        // `is_keyword_word` covers (e.g. "storm", "gift", "training").
+        || !matches!(
+            candidate_lower.parse::<crate::types::keywords::Keyword>(),
+            Ok(crate::types::keywords::Keyword::Unknown(_))
+        )
 }
 
 /// Replace all occurrences of `needle` in `haystack` with `replacement`,
@@ -1756,6 +1778,46 @@ fn follows_subtype_status_qualifier(haystack: &str, pos: usize) -> bool {
     ["attacking", "blocking", "tapped", "untapped", "unblocked"]
         .iter()
         .any(|qualifier| last_word.eq_ignore_ascii_case(qualifier))
+}
+
+/// nom combinator: an article or quantifier that introduces a type noun phrase
+/// ("a", "an", "another", "other", "target", "each", "all", "any"). Longest
+/// match first within shared prefixes ("another"/"any"/"an" before "a").
+fn parse_type_noun_determiner(i: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("another"),
+            tag("any"),
+            tag("all"),
+            tag("an"),
+            tag("a"),
+            tag("other"),
+            tag("target"),
+            tag("each"),
+        )),
+    )
+    .parse(i)
+}
+
+/// CR 201.5c + CR 205.3a: an occurrence directly preceded by an article or
+/// quantifier ("Sacrifice a Wall", "destroy target Knight", "another Cleric you
+/// control") is a subtype noun naming a class of objects, not the card's
+/// shortened name — a name used to refer to the card takes no determiner. "this
+/// <word>" is deliberately absent: "this Case" names the card itself, so it
+/// still normalizes. Per-occurrence sibling of `follows_subtype_status_qualifier`.
+/// `pos` is the byte index where the matched word starts.
+fn follows_type_noun_determiner(haystack: &str, pos: usize) -> bool {
+    let before = haystack[..pos].trim_end();
+    let last_word = before
+        .rsplit(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let matched = all_consuming(parse_type_noun_determiner)
+        .parse(last_word.as_str())
+        .is_ok();
+    matched
 }
 
 /// nom combinator: match the type-addition marker
@@ -1864,6 +1926,7 @@ fn replace_all_words_case_sensitive_preserving_subtype_status_refs(
             && at_word_end
             && pos >= last_end
             && !follows_subtype_status_qualifier(haystack, pos)
+            && !follows_type_noun_determiner(haystack, pos)
             && !precedes_type_addition_clause(haystack, end)
             && !precedes_core_type_word(haystack, end)
             && !precedes_attachment_qualifier(haystack, end)
@@ -2841,14 +2904,15 @@ pub fn normalize_card_name_refs_reporting(
 
     // "Of"-based short name: "Rosie Cotton of South Lane" → "Rosie Cotton"
     //
-    // Guard: case-insensitive matching here can collide with common English
-    // words that appear in Oracle text (e.g., "Out of Time" → short name
-    // "Out" would replace "out" in "phase out"). Skip the short-name
-    // strategy when the prefix is a single common English word.
+    // Guard: a multi-word short name is matched case-insensitively, which can
+    // collide with common English words in Oracle text (e.g., "Out of Time" →
+    // short name "Out" would replace "out" in "phase out"). Skip the short-name
+    // strategy when every word of the prefix is a common English word.
     if !result.contains('~') {
         if let Some(of_pos) = effective_name.find(" of ") {
             let short_name = &effective_name[..of_pos];
             let lower_short = short_name.to_lowercase();
+            let is_single_word_short = short_name.split_whitespace().count() == 1;
             // structural: not dispatch — guarding short names composed of common words
             // CR 201.5 / CR 201.5c: "Next of Kin" short name "Next" must not
             // rewrite temporal "the next end step" → "the ~ end step" (Gift of
@@ -2905,16 +2969,28 @@ pub fn normalize_card_name_refs_reporting(
                 && !is_all_common_words
                 && !subtype_in_type_change_context
                 && !of_short_name_collides_with_possessive_zone_phrase(&result, short_name)
+                // CR 201.5c: a rules-vocabulary word ("Return all …", a "Storm"
+                // keyword line) keeps its rules meaning; it is not a printed
+                // shortened name.
+                && !(is_single_word_short && is_rules_vocabulary_word(&lower_short))
             {
-                // CR 205.3j + CR 201.3a: when the short name is also a subtype
-                // word ("Gideon of the Trials" → "Gideon", a planeswalker
-                // type), an occurrence used as a type adjective ("a Gideon
-                // planeswalker") must stay literal while subject occurrences
-                // ("Gideon becomes …") still normalize to `~`. Route through
-                // the per-occurrence preserving replacer — the same replacer
-                // (and case-sensitivity precedent) the single-word subtype
-                // name branch above already uses.
-                result = if is_subtype_word(&lower_short) {
+                // CR 201.5c: only instances of the shortened name used to refer
+                // to the card are treated as its name. A single-word short name
+                // is a proper noun ("Kiora", "Gideon"), so it is matched
+                // case-sensitively — like the single-word full name and comma
+                // short name above — and the same word in another case stays
+                // ordinary rules text ("You gain 2 life." on Life of Toshiro
+                // Umezawa, "glyph counters" on Glyph of Delusion).
+                //
+                // CR 205.3j + CR 201.3a: an occurrence of that word used as a
+                // type ("a Gideon planeswalker", "destroy target Knight",
+                // "Sacrifice a Wall") must stay literal while subject occurrences
+                // ("Gideon becomes …") still normalize to `~`. The per-occurrence
+                // preserving replacer — the same replacer the single-word subtype
+                // name branch above uses — rejects those type positions. A
+                // multi-word short name stays case-insensitive, like a
+                // multi-word full name.
+                result = if is_single_word_short {
                     replace_all_words_case_sensitive_preserving_subtype_status_refs(
                         &result, short_name, "~",
                     )
@@ -2960,12 +3036,12 @@ pub fn normalize_card_name_refs_reporting(
                     ) || is_core_type_name(&lower_candidate)
                         || is_non_subtype_subject_name(&lower_candidate)
                         || is_supertype_word(&lower_candidate)
-                        || super::oracle_nom::primitives::is_keyword_word(&lower_candidate)
                         // CR 201.5: a sentence-initial imperative verb ("Search
-                        // your library...") is never a self-reference, even when
-                        // it is the first word of a verb-named card ("Search for
-                        // Tomorrow"). Reject it so the verb survives unmangled.
-                        || super::oracle_nom::primitives::is_verb_word(&lower_candidate)
+                        // your library...") or a keyword is never a self-reference,
+                        // even when it is the first word of the card's name
+                        // ("Search for Tomorrow"). Reject it so the word survives
+                        // unmangled.
+                        || is_rules_vocabulary_word(&lower_candidate)
                         || is_subtype_word(&lower_candidate)
                         || parse_subtype(&lower_candidate)
                             .is_some_and(|(_, consumed)| consumed == lower_candidate.len())
@@ -3385,18 +3461,22 @@ mod tests {
 
     #[test]
     fn normalize_curse_attachment_qualifier_keeps_subtype_literal() {
-        // Two occurrences of the same subtype-word short name in one text: the
-        // subject occurrence ("Curse is put …" — no article, the CR 201.5c
-        // shortened-name self-reference) normalizes to `~`, while the
-        // attachment-qualified type reference ("a Curse attached to enchanted
-        // player") must stay literal. This isolates the
-        // `precedes_attachment_qualifier` guard: without it the second
-        // occurrence folds to `~` like the first.
-        let text = "Whenever Curse is put into a graveyard from the battlefield, you may attach it to a Curse attached to enchanted player.";
+        // SYNTHETIC fixture (not printed Oracle text). No printed card isolates
+        // `precedes_attachment_qualifier`: every printed "Curse attached to"
+        // reference is determiner-led ("a Curse attached to enchanted player" on
+        // Curse of Misfortunes, the nearest printed card, covered by
+        // `normalize_of_short_name_curse_of_misfortunes_keeps_type_references_literal`),
+        // and `follows_type_noun_determiner` also holds that occurrence literal.
+        // So this text pairs a determiner-free subject occurrence ("Curse is put
+        // …", the CR 201.5c shortened-name self-reference, which normalizes to
+        // `~`) with "the Curse attached to enchanted player" ("the" is not a type
+        // determiner), which only the attachment-qualifier guard keeps literal:
+        // without it the second occurrence folds to `~` like the first.
+        let text = "Whenever Curse is put into a graveyard from the battlefield, you may attach it to the Curse attached to enchanted player.";
         let normalized = normalize_card_name_refs(text, "Curse of Misfortunes");
         assert_eq!(
             normalized,
-            "Whenever ~ is put into a graveyard from the battlefield, you may attach it to a Curse attached to enchanted player."
+            "Whenever ~ is put into a graveyard from the battlefield, you may attach it to the Curse attached to enchanted player."
         );
     }
 
@@ -4196,6 +4276,114 @@ mod tests {
         assert_eq!(
             normalized,
             "Whenever ~ is put into a graveyard from the battlefield, return it to the battlefield attached to you at the beginning of the next end step."
+        );
+    }
+
+    #[test]
+    fn normalize_of_short_name_single_word_is_case_sensitive() {
+        // CR 201.5c: only a shortened name used to refer to the card is its
+        // name. The single-word "of" short name is a proper noun, so the same
+        // word in lower case is ordinary rules text and stays literal.
+        for (text, name) in [
+            ("You gain 2 life.", "Life of Toshiro Umezawa"),
+            (
+                "Put X glyph counters on target creature that target Wall blocked this turn.",
+                "Glyph of Delusion",
+            ),
+            (
+                "For as long as this enchantment remains on the battlefield, exchange the text boxes of those creatures.",
+                "Exchange of Words",
+            ),
+            (
+                "If you don't, that player sacrifices all but that many permanents of their choice.",
+                "Choice of Damnations",
+            ),
+            (
+                "{2}: Target creature gains fear until end of turn. (It can't be blocked except by artifact creatures and/or black creatures.)",
+                "Fear of Fear Itself",
+            ),
+        ] {
+            assert_eq!(
+                normalize_card_name_refs(text, name),
+                text.replace("this enchantment", "~"),
+                "{name}: the lower-case rules word must stay literal"
+            );
+        }
+        // Paired positive (Kiora of Fire and Ashes' printed text): the capitalized
+        // subject occurrence still normalizes.
+        assert_eq!(
+            normalize_card_name_refs(
+                "When Kiora enters, create a 5/5 red Dragon creature token with flying.",
+                "Kiora of Fire and Ashes"
+            ),
+            "When ~ enters, create a 5/5 red Dragon creature token with flying."
+        );
+    }
+
+    #[test]
+    fn normalize_of_short_name_rejects_rules_vocabulary_words() {
+        // CR 201.5c: an imperative verb or a keyword keeps its rules meaning
+        // even when capitalized at the start of a sentence or line, so it is
+        // never derived as an "of" short name.
+        for (text, name) in [
+            (
+                "Return all Nightstalker permanent cards from your graveyard to the battlefield. Then destroy all Swamps you control.",
+                "Return of the Nightstalkers",
+            ),
+            (
+                "Storm (When you cast this spell, copy it for each spell cast before it this turn.)\nExile an instant or sorcery card with mana value 3 or less from your graveyard at random.",
+                "Storm of Memories",
+            ),
+        ] {
+            assert_eq!(
+                normalize_card_name_refs(text, name),
+                text,
+                "{name}: the rules word must stay literal"
+            );
+        }
+    }
+
+    #[test]
+    fn rules_vocabulary_word_covers_verbs_and_full_keyword_registry() {
+        // Verb (`is_verb_word`), evergreen keyword (`is_keyword_word`) and a
+        // non-evergreen keyword from the full `Keyword` registry.
+        for word in ["return", "search", "flash", "fear", "storm", "gift"] {
+            assert!(is_rules_vocabulary_word(word), "{word}");
+        }
+        for word in ["kiora", "life", "glyph", "gideon", "wall", "rosie"] {
+            assert!(!is_rules_vocabulary_word(word), "{word}");
+        }
+    }
+
+    #[test]
+    fn normalize_of_short_name_keeps_determiner_type_noun_literal() {
+        // CR 201.5c + CR 205.3a: a subtype word after an article or quantifier
+        // names a class of objects, not the card ("Sacrifice a Wall", "destroy
+        // target Knight", "another Cleric you control").
+        for (text, name) in [
+            ("{G}, Sacrifice a Wall: Draw a card.", "Wall of Mulch"),
+            (
+                "When this creature enters, you may pay {U}. If you don't, destroy target Knight and it can't be regenerated.",
+                "Knight of the Mists",
+            ),
+            (
+                "Whenever another Cleric you control enters, you gain 1 life.",
+                "Cleric of Life's Bond",
+            ),
+        ] {
+            assert_eq!(
+                normalize_card_name_refs(text, name),
+                text.replace("this creature", "~"),
+                "{name}: the determiner-led type noun must stay literal"
+            );
+        }
+        // Paired positive: "this <subtype>" still names the card itself.
+        assert_eq!(
+            normalize_card_name_refs(
+                "When this Case enters, it deals 3 damage to target creature an opponent controls.",
+                "Case of the Burning Masks",
+            ),
+            "When this ~ enters, it deals 3 damage to target creature an opponent controls."
         );
     }
 
