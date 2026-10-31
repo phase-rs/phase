@@ -895,7 +895,11 @@ pub(super) fn life_total_difference(target: i32, current: i64) -> i64 {
 }
 
 /// CR 119.5 + CR 701.12c + CR 701.12g: The player gains or loses `difference`
-/// as one life-gain or life-loss event through the replacement pipeline.
+/// as one life-gain or life-loss event through the replacement pipeline. The
+/// amount is the difference's magnitude saturated at `u32::MAX`: exact for any
+/// difference of at most `u32::MAX`, which covers every total the edit
+/// authority stores (each within `i32`, so a difference to an `i32` target
+/// fits); a hand-built total further than that from its target lands short.
 /// Returns the deferral when the pipeline paused.
 pub(super) fn apply_life_difference(
     state: &mut GameState,

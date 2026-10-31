@@ -7,20 +7,24 @@
 //! team's shared total (CR 810.4 + CR 810.9). A life replacement quantity past
 //! `u32` lands on `u32::MAX`. A mandatory life-gain loop at the cap is drawn
 //! (CR 104.4b + CR 732.4), as is a mandatory loop that drains a seat held at
-//! `i32::MIN`; an optional one is never drawn or offered a shortcut; and a
-//! shortcut whose gain cannot fit under `i32::MAX` from the board it is taken on
-//! is taken by performing its cycles, so its counters, events and total end as
-//! performing them leaves them, even after a later life change (CR 732.2c).
+//! `i32::MIN`; an optional one is never drawn or offered a shortcut. A
+//! shortcut's batched life lands at the take, and a shortcut whose cycles' life
+//! a lump would not store as performing stores it (a change an `i32` limit
+//! holds back, a loss, a change stored on a teammate, or life beside batched
+//! tokens or counters) is taken by performing its cycles, so its counters,
+//! events and total end as performing them leaves them, even after a later
+//! life change (CR 732.2c).
 
 use engine::analysis::decision_template::IterationCount;
 use engine::analysis::loop_check::ShortcutResponse;
-use engine::analysis::resource::ResourceAxis;
+use engine::analysis::resource::{CounterClass, ObjectClass, ResourceAxis};
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::players::team_life_sum;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
-    Effect, EffectKind, QuantityModification, ReplacementDefinition, TapStateChange, TargetRef,
+    AbilityDefinition, Effect, EffectKind, QuantityModification, ReplacementDefinition,
+    TapStateChange, TargetRef,
 };
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::counter::CounterType;
@@ -855,43 +859,62 @@ fn two_headed_giant_life_changes_cap_at_the_team_total() {
 
 /// The edit authority caps a Two-Headed Giant team's shared total and stores
 /// the change acting field first (CR 810.9), and replaying the journaled
-/// command on the same prefix reproduces both fields. A total outside `i32`
-/// (two members at `i32::MAX`) is never moved past the limit by a gain and
-/// moves exactly by a loss. A player who has left the game adjusts only its
-/// own total.
+/// command on the same prefix reproduces both fields, also where the change
+/// spills onto the teammate's field. A total outside `i32` (two members at
+/// `i32::MAX`) is never moved past the limit by a gain and moves exactly by a
+/// loss. A player who has left the game adjusts only its own total, also beside
+/// a departed teammate whose field has room.
 #[test]
 fn the_edit_authority_caps_a_shared_life_total_and_replays_its_spread() {
     let fields = |state: &GameState| -> Vec<i32> {
         state.players.iter().map(|player| player.life).collect()
     };
+    // Team A at `(p0, p1)`, P0 changes by `delta`: the edited state, and the
+    // journaled command replayed on the same prefix.
+    let edit_and_replay = |p0: i32, p1: i32, delta: i64| -> (GameState, GameState) {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 7);
+        state.players[0].life = p0;
+        state.players[1].life = p1;
+        let pre_state = state.clone();
+        state
+            .resolve_and_apply_player_edit(P0, ResolvedPlayerEdit::Life { delta })
+            .expect("the life change is accepted");
+        let command = state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .find_map(|entry| match &entry.command {
+                Some(ResolvedRulesCommand::PlayerEdit(command)) => Some(command.clone()),
+                _ => None,
+            })
+            .expect("the edit is journaled");
+        assert_eq!(command.edit, ResolvedPlayerEdit::Life { delta });
+        let mut replay = pre_state;
+        replay
+            .apply_resolved_player_edit(&command)
+            .expect("the recorded command replays");
+        (state, replay)
+    };
 
     // Cap: (MAX - 10, 5) + 100 -> (MAX - 5, 5), and its journal replay.
-    let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 7);
-    state.players[0].life = i32::MAX - 10;
-    state.players[1].life = 5;
-    let pre_state = state.clone();
-    state
-        .resolve_and_apply_player_edit(P0, ResolvedPlayerEdit::Life { delta: 100 })
-        .expect("the gain caps the team total");
+    let (state, replay) = edit_and_replay(i32::MAX - 10, 5, 100);
     assert_eq!(team_a_fields(&state), (i32::MAX - 5, 5));
     assert_eq!(team_life_sum(&state, P0), i64::from(i32::MAX));
     assert_eq!(state.players[0].life_gained_this_turn, 100);
-    let command = state
-        .resolved_rules_journal
-        .entries()
-        .iter()
-        .find_map(|entry| match &entry.command {
-            Some(ResolvedRulesCommand::PlayerEdit(command)) => Some(command.clone()),
-            _ => None,
-        })
-        .expect("the capped edit is journaled");
-    assert_eq!(command.edit, ResolvedPlayerEdit::Life { delta: 100 });
-    let mut replay = pre_state;
-    replay
-        .apply_resolved_player_edit(&command)
-        .expect("the recorded command replays");
-    assert_eq!(fields(&replay), fields(&state), "the spread replays");
+    assert_eq!(fields(&replay), fields(&state), "the capped change replays");
     assert_eq!(replay.players[0], state.players[0]);
+
+    // Spill: (MAX - 1, -100) + 50 -> P0's field takes 1, the spread moves 49
+    // onto P1's (CR 810.9 + CR 810.9a), and its journal replay.
+    let (state, replay) = edit_and_replay(i32::MAX - 1, -100, 50);
+    assert_eq!(team_a_fields(&state), (i32::MAX, -51));
+    assert_eq!(team_life_sum(&state, P0), i64::from(i32::MAX) - 51);
+    assert_eq!(state.players[0].life_gained_this_turn, 50);
+    assert_eq!(fields(&replay), fields(&state), "the spread replays");
+    assert_eq!(
+        (&replay.players[0], &replay.players[1]),
+        (&state.players[0], &state.players[1])
+    );
 
     // A team total outside `i32`: a gain does not move it, a loss moves it
     // by exactly the amount, on the acting field.
@@ -909,22 +932,31 @@ fn the_edit_authority_caps_a_shared_life_total_and_replays_its_spread() {
     assert_eq!(team_a_fields(&state), (i32::MAX - 1, i32::MAX));
     assert_eq!(state.players[0].life_lost_this_turn, 1);
 
-    // A player who has left the game adjusts only its own total.
-    let mut state = GameState::new_two_player(7);
+    // A player who has left the game adjusts only its own total, also beside a
+    // departed teammate whose field has room: team A has left the game, both
+    // members together (CR 810.8a), with P1's field at the cap.
+    let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 7);
+    state.players[0].life = -100;
     state.players[1].life = i32::MAX;
+    state.players[0].is_eliminated = true;
     state.players[1].is_eliminated = true;
     state
         .resolve_and_apply_player_edit(P1, ResolvedPlayerEdit::Life { delta: 5 })
         .expect("the departed player's gain is accepted");
     assert_eq!(state.players[1].life, i32::MAX);
     assert_eq!(state.players[1].life_gained_this_turn, 5);
-    assert_eq!(state.players[0].life, 20);
+    assert_eq!(
+        state.players[0].life, -100,
+        "the departed teammate's field takes no part of the gain"
+    );
 }
 
 /// Angel of Grace ("Your life total becomes 10.") in Two-Headed Giant sets
 /// the team's total to 10 (CR 810.9c): P0 gains or loses the difference from
-/// the team's exact total (CR 810.9a), which may lie outside `i32`, and the
-/// part of a change P0's field cannot hold is stored on the teammate's.
+/// the team's exact total (CR 810.9a), which a hand-built state may put outside
+/// `i32`; the difference lands exactly while it is at most `u32::MAX`, as in
+/// every row here, and the part of a change P0's field cannot hold is stored on
+/// the teammate's.
 #[test]
 fn two_headed_giant_set_life_lands_the_team_on_its_target() {
     let Some(db) = crate::support::shared_card_db() else {
@@ -1294,13 +1326,13 @@ fn activate_and_settle(runner: &mut GameRunner, source: ObjectId, index: usize) 
     events
 }
 
-/// Declines the shortcut offer and performs `cycles` more Lifedynamo cycles
-/// (the `indices` activations each), declining any offer that follows;
-/// returns every event.
+/// Declines the shortcut offer and performs `cycles` more dynamo cycles (the
+/// `indices` activations each), declining any offer that follows; returns every
+/// event.
 fn decline_and_perform(
     runner: &mut GameRunner,
     dynamo: ObjectId,
-    indices: [usize; 3],
+    indices: &[usize],
     cycles: u32,
 ) -> Vec<GameEvent> {
     /// Declines every loop shortcut offered (at most four in a row), settling
@@ -1328,7 +1360,7 @@ fn decline_and_perform(
 
     let mut events = decline_offers(runner);
     for _ in 0..cycles {
-        for index in indices {
+        for &index in indices {
             events.extend(activate_and_settle(runner, dynamo, index));
             events.extend(decline_offers(runner));
         }
@@ -1341,12 +1373,13 @@ fn decline_and_perform(
     events
 }
 
-/// The life state a shortcut or the performed cycles leave: P0's and P1's
-/// gained counters, team A's stored fields (`(P0, P1)`), P0's shared total, and
-/// the sum and last new total of P0's `LifeChanged` events.
+/// The life state a shortcut or the performed cycles leave: P0's gained and lost
+/// counters, P1's gained counter, team A's stored fields (`(P0, P1)`), P0's
+/// shared total, and the sum and last new total of P0's `LifeChanged` events.
 #[derive(Debug, PartialEq, Eq)]
 struct LifeOutcome {
     gained: u32,
+    lost: u32,
     teammate_gained: u32,
     fields: (i32, i32),
     team: i64,
@@ -1363,6 +1396,7 @@ impl LifeOutcome {
             .collect();
         LifeOutcome {
             gained: runner.state().players[0].life_gained_this_turn,
+            lost: runner.state().players[0].life_lost_this_turn,
             teammate_gained: runner.state().players[1].life_gained_this_turn,
             fields: team_a_fields(runner.state()),
             team: team_life_sum(runner.state(), P0),
@@ -1416,58 +1450,165 @@ fn mandatory_life_gain_loop(
     (runner, kickoff)
 }
 
-/// A P0 Lifedynamo (`lifedynamo(n)`) in Interactive loop detection, with the
-/// given stored life fields and P0's gained-this-turn counter preset to
-/// `gained`. Returns the runner, the Lifedynamo and its mana, life-gain and
-/// untap ability indices, in activation order.
-fn lifedynamo_board(
+/// A synthetic free engine of P0's (as in `combo_infinite_pile.rs`): tap for
+/// {C}, change life, untap, repeat. The mana, and any life it gains, are its
+/// unbounded axes.
+#[derive(Clone, Copy, Debug)]
+enum Dynamo {
+    /// `lifedynamo(n)`: P0 gains `n` life each cycle.
+    Gain(u32),
+    /// P0 gains `gain` life, then loses `loss` life, each cycle.
+    GainThenLose { gain: u32, loss: u32 },
+    /// P0 loses `loss` life, then gains `gain` life, each cycle.
+    LoseThenGain { loss: u32, gain: u32 },
+    /// Each of P0's opponents loses `n` life each cycle.
+    Drain(u32),
+}
+
+impl Dynamo {
+    /// The dynamo's synthetic text: the two orders of a gain and a loss share
+    /// one text and differ only in the order its abilities are activated.
+    fn text(self) -> String {
+        match self {
+            Dynamo::Gain(n) => lifedynamo(n),
+            Dynamo::GainThenLose { gain, loss } | Dynamo::LoseThenGain { loss, gain } => format!(
+                "{{T}}: Add {{C}}.\n{{0}}: You gain {gain} life.\n{{0}}: You lose {loss} life.\n\
+                 {{0}}: Untap Lifedynamo."
+            ),
+            Dynamo::Drain(n) => format!(
+                "{{T}}: Add {{C}}.\n{{0}}: Each opponent loses {n} life.\n{{0}}: Untap Lifedynamo."
+            ),
+        }
+    }
+
+    /// The `LifeChanged` events P0's own life reports each cycle.
+    fn p0_changes_per_cycle(self) -> usize {
+        match self {
+            Dynamo::Gain(_) => 1,
+            Dynamo::GainThenLose { .. } | Dynamo::LoseThenGain { .. } => 2,
+            Dynamo::Drain(_) => 0,
+        }
+    }
+
+    /// What one cycle moves P0's life by where no limit holds a change back.
+    fn p0_net_per_cycle(self) -> i64 {
+        match self {
+            Dynamo::Gain(gain) => i64::from(gain),
+            Dynamo::GainThenLose { gain, loss } | Dynamo::LoseThenGain { loss, gain } => {
+                i64::from(gain) - i64::from(loss)
+            }
+            Dynamo::Drain(_) => 0,
+        }
+    }
+}
+
+/// Whether `ability` gains life.
+fn gains_life(ability: &AbilityDefinition) -> bool {
+    matches!(&*ability.effect, Effect::GainLife { .. })
+}
+
+/// Whether `ability` loses life.
+fn loses_life(ability: &AbilityDefinition) -> bool {
+    matches!(&*ability.effect, Effect::LoseLife { .. })
+}
+
+/// Whether `ability` untaps.
+fn untaps(ability: &AbilityDefinition) -> bool {
+    matches!(
+        &*ability.effect,
+        Effect::SetTapState {
+            state: TapStateChange::Untap,
+            ..
+        }
+    )
+}
+
+/// The index of `source`'s first ability `matches` accepts.
+fn ability_index(
+    runner: &GameRunner,
+    source: ObjectId,
+    what: &str,
+    matches: impl Fn(&AbilityDefinition) -> bool,
+) -> usize {
+    runner.state().objects[&source]
+        .abilities
+        .iter()
+        .position(matches)
+        .unwrap_or_else(|| panic!("reach guard: the {what} ability parses"))
+}
+
+/// A P0 engine named Lifedynamo with `text` in Interactive loop detection, with
+/// the given stored life fields and gained-this-turn counter presets (any seat).
+fn engine_board(
     mut scenario: GameScenario,
     life_fields: &[(PlayerId, i32)],
-    n: u32,
-    gained: u32,
-) -> (GameRunner, ObjectId, [usize; 3]) {
+    text: &str,
+    counters: &[(PlayerId, u32)],
+) -> (GameRunner, ObjectId) {
     for &(player, life) in life_fields {
         scenario.with_life(player, life);
     }
-    let dynamo = scenario
-        .add_creature_from_oracle(P0, "Lifedynamo", 2, 2, &lifedynamo(n))
+    let engine = scenario
+        .add_creature_from_oracle(P0, "Lifedynamo", 2, 2, text)
         .id();
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
-    runner.state_mut().players[0].life_gained_this_turn = gained;
-    let abilities = &runner.state().objects[&dynamo].abilities;
-    let mana = abilities
-        .iter()
-        .position(is_mana_ability)
-        .expect("reach guard: Lifedynamo's mana ability parses");
-    let gain = abilities
-        .iter()
-        .position(|ability| matches!(&*ability.effect, Effect::GainLife { .. }))
-        .expect("reach guard: Lifedynamo's life-gain ability parses");
-    let untap = abilities
-        .iter()
-        .position(|ability| {
-            matches!(
-                &*ability.effect,
-                Effect::SetTapState {
-                    state: TapStateChange::Untap,
-                    ..
-                }
-            )
-        })
-        .expect("reach guard: Lifedynamo's untap ability parses");
-    (runner, dynamo, [mana, gain, untap])
+    for &(seat, gained) in counters {
+        let player = runner
+            .state_mut()
+            .players
+            .iter_mut()
+            .find(|player| player.id == seat)
+            .expect("the preset seat is in the game");
+        player.life_gained_this_turn = gained;
+    }
+    (runner, engine)
 }
 
-/// Performs one Lifedynamo cycle (mana, gain, untap) and asserts the shortcut
-/// offer that follows: P0's, with exactly `unbounded` as its unbounded axes.
+/// P0's `dynamo` on `engine_board`. Returns the runner, the dynamo and the
+/// ability indices of one cycle in the variant's activation order, each found
+/// by its effect.
+fn dynamo_board(
+    scenario: GameScenario,
+    life_fields: &[(PlayerId, i32)],
+    dynamo: Dynamo,
+    counters: &[(PlayerId, u32)],
+) -> (GameRunner, ObjectId, Vec<usize>) {
+    let (runner, id) = engine_board(scenario, life_fields, &dynamo.text(), counters);
+    let index = |what: &str, matches: fn(&AbilityDefinition) -> bool| {
+        ability_index(&runner, id, what, matches)
+    };
+    let mana = index("mana", is_mana_ability);
+    let untap = index("untap", untaps);
+    let indices = match dynamo {
+        Dynamo::Gain(_) => vec![mana, index("life-gain", gains_life), untap],
+        Dynamo::GainThenLose { .. } => vec![
+            mana,
+            index("life-gain", gains_life),
+            index("life-loss", loses_life),
+            untap,
+        ],
+        Dynamo::LoseThenGain { .. } => vec![
+            mana,
+            index("life-loss", loses_life),
+            index("life-gain", gains_life),
+            untap,
+        ],
+        Dynamo::Drain(_) => vec![mana, index("life-loss", loses_life), untap],
+    };
+    (runner, id, indices)
+}
+
+/// Performs one dynamo cycle (the `indices` activations) and asserts the
+/// shortcut offer that follows: P0's, with exactly `unbounded` as its unbounded
+/// axes.
 fn cycle_to_the_shortcut_offer(
     runner: &mut GameRunner,
     dynamo: ObjectId,
-    indices: [usize; 3],
+    indices: &[usize],
     unbounded: &[ResourceAxis],
 ) {
-    for index in indices {
+    for &index in indices {
         activate_and_settle(runner, dynamo, index);
     }
     let WaitingFor::LoopShortcut {
@@ -1535,28 +1676,168 @@ fn stash(runner: &GameRunner) -> Option<&Vec<PersistentAxisMaterialization>> {
     runner.state().pending_unbounded_materialization.get(&P0)
 }
 
-/// Passes to the step boundary, asserts P0's `LoopCollapse` amount prompt
-/// capped at `max`, and submits `max`; returns the submission's events.
-fn collapse(runner: &mut GameRunner, max: u32) -> Vec<GameEvent> {
-    pass_to_next_boundary(runner);
-    let WaitingFor::PayAmountChoice {
-        player,
-        resource: PayableResource::LoopCollapse { .. },
-        max: offered,
-        ..
-    } = &runner.state().waiting_for
-    else {
-        panic!(
-            "expected the loop-collapse amount prompt, got {:?}",
-            runner.state().waiting_for
+/// How a taken life shortcut lands at its accept (CR 732.2c).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Take {
+    /// The take performs its cycles: one `LifeChanged` per change, no ∞ mark.
+    Performed,
+    /// The take marks its ∞ `Mana(C)` axis and applies its batched life at the
+    /// take, as one P0 `LifeChanged` of the cycles' net.
+    Lump,
+}
+
+/// A dynamo shortcut board: P0's dynamo, the stored life fields, the
+/// gained-this-turn counter presets, and the texts of P0's `{0}` abilities
+/// activated after the take or the performed cycles, in order.
+struct ShortcutBoard {
+    two_headed_giant: bool,
+    fields: Vec<(PlayerId, i32)>,
+    dynamo: Dynamo,
+    counters: Vec<(PlayerId, u32)>,
+    between: Vec<&'static str>,
+}
+
+impl ShortcutBoard {
+    /// A two-player board with these stored life fields.
+    fn duel(fields: Vec<(PlayerId, i32)>, dynamo: Dynamo) -> Self {
+        ShortcutBoard {
+            two_headed_giant: false,
+            fields,
+            dynamo,
+            counters: Vec::new(),
+            between: Vec::new(),
+        }
+    }
+
+    /// A Two-Headed Giant board with team A's fields `(p0, p1)` and team B's
+    /// members at 20.
+    fn team(p0: i32, p1: i32, dynamo: Dynamo) -> Self {
+        ShortcutBoard {
+            two_headed_giant: true,
+            fields: vec![(P0, p0), (P1, p1), (P2, 20), (PlayerId(3), 20)],
+            dynamo,
+            counters: Vec::new(),
+            between: Vec::new(),
+        }
+    }
+
+    /// The board with these gained-this-turn counter presets.
+    fn counters(self, counters: Vec<(PlayerId, u32)>) -> Self {
+        ShortcutBoard { counters, ..self }
+    }
+
+    /// The board with these abilities activated after the take.
+    fn between(self, between: Vec<&'static str>) -> Self {
+        ShortcutBoard { between, ..self }
+    }
+
+    /// The runner, the dynamo, one cycle's ability indices and the `between`
+    /// abilities' sources.
+    fn build(&self) -> (GameRunner, ObjectId, Vec<usize>, Vec<ObjectId>) {
+        let mut scenario = if self.two_headed_giant {
+            two_headed_giant()
+        } else {
+            two_player()
+        };
+        let between = self
+            .between
+            .iter()
+            .map(|text| {
+                scenario
+                    .add_creature_from_oracle(P0, "Test Lifeshifter", 1, 1, text)
+                    .id()
+            })
+            .collect();
+        let (runner, dynamo, indices) =
+            dynamo_board(scenario, &self.fields, self.dynamo, &self.counters);
+        (runner, dynamo, indices, between)
+    }
+
+    /// P0's opponents, who answer the offer, in turn order.
+    fn responders(&self) -> Vec<PlayerId> {
+        if self.two_headed_giant {
+            vec![P1, P2, PlayerId(3)]
+        } else {
+            vec![P1]
+        }
+    }
+
+    /// The shortcut: one cycle offers it with exactly `unbounded`, it is
+    /// accepted at `Fixed(cycles)`, `between` is activated, and the step ends.
+    /// Asserts that the accept stashed nothing, wrote no collapse bound and
+    /// marked no ∞ `Life` axis, that it landed as `take` says, and that the
+    /// boundary asks no collapse amount. Returns the life outcome of the accept
+    /// onward.
+    fn take(&self, name: &str, cycles: u32, unbounded: &[ResourceAxis], take: Take) -> LifeOutcome {
+        let (mut runner, dynamo, indices, between) = self.build();
+        cycle_to_the_shortcut_offer(&mut runner, dynamo, &indices, unbounded);
+        runner
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(cycles),
+                template: None,
+            })
+            .expect("the shortcut declaration is accepted");
+        let mut events = accept_for_every_responder(&mut runner, &self.responders());
+        let p0_amounts: Vec<i64> = life_changes(&events)
+            .into_iter()
+            .filter(|&(player, _, _)| player == P0)
+            .map(|(_, amount, _)| i64::from(amount))
+            .collect();
+        assert_eq!(stash(&runner), None, "{name}: nothing is stashed");
+        assert_eq!(
+            runner.state().pending_materialization_count.get(&P0),
+            None,
+            "{name}: no collapse bound"
         );
-    };
-    assert_eq!(*player, P0);
-    assert_eq!(*offered, max);
-    runner
-        .act(GameAction::SubmitPayAmount { amount: max })
-        .expect("the collapse amount is accepted")
-        .events
+        let marks = runner.state().unbounded_resources.get(&P0);
+        assert!(
+            marks.is_none_or(|axes| !axes
+                .iter()
+                .any(|axis| matches!(axis, ResourceAxis::Life(_)))),
+            "{name}: no ∞ Life mark after the accept, got {marks:?}"
+        );
+        match take {
+            Take::Performed => {
+                assert_eq!(marks, None, "{name}: a performed take marks nothing");
+                assert_eq!(
+                    p0_amounts.len(),
+                    self.dynamo.p0_changes_per_cycle() * cycles as usize,
+                    "{name}: one LifeChanged per change, got {p0_amounts:?}"
+                );
+            }
+            Take::Lump => {
+                assert!(
+                    marks.is_some_and(|axes| axes.contains(&ResourceAxis::Mana(ManaType::Colorless))),
+                    "REACH-GUARD {name}: the Mark route marks ∞ Mana(C), got {marks:?}"
+                );
+                assert_eq!(
+                    p0_amounts,
+                    vec![self.dynamo.p0_net_per_cycle() * i64::from(cycles)],
+                    "{name}: one lump at the accept"
+                );
+            }
+        }
+        for &id in &between {
+            events.extend(activate_and_settle(&mut runner, id, 0));
+        }
+        pass_to_a_boundary_without_a_collapse(&mut runner);
+        LifeOutcome::read(&runner, &events)
+    }
+
+    /// The reference: one cycle offers the shortcut with exactly `unbounded`,
+    /// it is declined, `cycles` more cycles are performed, `between` is
+    /// activated, and the step ends. Returns the life outcome of the decline
+    /// onward.
+    fn perform(&self, cycles: u32, unbounded: &[ResourceAxis]) -> LifeOutcome {
+        let (mut runner, dynamo, indices, between) = self.build();
+        cycle_to_the_shortcut_offer(&mut runner, dynamo, &indices, unbounded);
+        let mut events = decline_and_perform(&mut runner, dynamo, &indices, cycles);
+        for &id in &between {
+            events.extend(activate_and_settle(&mut runner, id, 0));
+        }
+        pass_to_a_boundary_without_a_collapse(&mut runner);
+        LifeOutcome::read(&runner, &events)
+    }
 }
 
 /// CR 616.1 + CR 616.1f + CR 119.3: Dazzling Reflection ("You gain life equal
@@ -1945,11 +2226,12 @@ fn a_mandatory_drain_loop_against_a_seat_held_at_i32_min_is_drawn() {
 /// counter counts every cycle, and each cycle reports its 3,000,000.
 #[test]
 fn a_life_shortcut_gaining_past_i32_max_is_performed_at_the_take() {
-    let (mut runner, dynamo, indices) = lifedynamo_board(two_player(), &[(P0, 20)], 3_000_000, 0);
+    let (mut runner, dynamo, indices) =
+        dynamo_board(two_player(), &[(P0, 20)], Dynamo::Gain(3_000_000), &[]);
     cycle_to_the_shortcut_offer(
         &mut runner,
         dynamo,
-        indices,
+        &indices,
         &[
             ResourceAxis::Mana(ManaType::Colorless),
             ResourceAxis::Life(P0),
@@ -1986,18 +2268,23 @@ fn a_life_shortcut_gaining_past_i32_max_is_performed_at_the_take() {
 /// The cycles' 3,000,000,000 cannot fit under the cap, so accepting performs
 /// the 1,000 cycles at the take: nothing is stashed, the total stays at
 /// `i32::MAX`, the gained counter counts every cycle, and each cycle reports
-/// its 3,000,000. Residual: with the gained counter pinned at `u32::MAX` the
-/// period carries no reading, so nothing is stashed and the boundary asks no
-/// collapse amount.
+/// its 3,000,000. With the gained counter pinned at `u32::MAX` the take is
+/// performed too, since each cycle's gain is held at the cap (the cycle's
+/// `LifeChanged` events report it where the pinned counter cannot): nothing is
+/// stashed and the boundary asks no collapse amount.
 #[test]
 fn a_life_shortcut_offer_at_the_cap_carries_no_life_axis() {
     // Row A: the take performs the cycles.
-    let (mut runner, dynamo, indices) =
-        lifedynamo_board(two_player(), &[(P0, i32::MAX)], 3_000_000, 0);
+    let (mut runner, dynamo, indices) = dynamo_board(
+        two_player(),
+        &[(P0, i32::MAX)],
+        Dynamo::Gain(3_000_000),
+        &[],
+    );
     cycle_to_the_shortcut_offer(
         &mut runner,
         dynamo,
-        indices,
+        &indices,
         &[ResourceAxis::Mana(ManaType::Colorless)],
     );
     runner
@@ -2022,13 +2309,17 @@ fn a_life_shortcut_offer_at_the_cap_carries_no_life_axis() {
     assert!(is_priority(runner.state()));
     pass_to_a_boundary_without_a_collapse(&mut runner);
 
-    // Row B, residual: the gained counter is pinned at `u32::MAX`.
-    let (mut runner, dynamo, indices) =
-        lifedynamo_board(two_player(), &[(P0, i32::MAX)], 5, u32::MAX);
+    // Row B: the gained counter is pinned at `u32::MAX`.
+    let (mut runner, dynamo, indices) = dynamo_board(
+        two_player(),
+        &[(P0, i32::MAX)],
+        Dynamo::Gain(5),
+        &[(P0, u32::MAX)],
+    );
     cycle_to_the_shortcut_offer(
         &mut runner,
         dynamo,
-        indices,
+        &indices,
         &[ResourceAxis::Mana(ManaType::Colorless)],
     );
     runner
@@ -2065,7 +2356,8 @@ fn a_life_shortcut_offer_at_the_cap_carries_no_life_axis() {
 /// In Two-Headed Giant the cap is the team's shared total (CR 810.4 +
 /// CR 810.9a). With the gained counter pinned at `u32::MAX` the counter stays
 /// pinned and each performed cycle still reports 2. Control: from 22 the gain
-/// fits, so it is stashed and collapses in one lump of 2,000 at the boundary.
+/// fits, so it lands at the take in one lump of 2,000, and the boundary asks
+/// nothing.
 #[test]
 fn a_life_shortcut_period_crossing_the_cap_gains_the_rules_amount() {
     struct Row {
@@ -2076,9 +2368,7 @@ fn a_life_shortcut_period_crossing_the_cap_gains_the_rules_amount() {
         unbounded: Vec<ResourceAxis>,
         p0_life_at_offer: i32,
         responders: Vec<PlayerId>,
-        /// The per-cycle gain stashed at the accept, or `None` where the take
-        /// performs the cycles.
-        stashed: Option<u32>,
+        take: Take,
         p0_life_after: i32,
         gained_after: u32,
     }
@@ -2092,7 +2382,7 @@ fn a_life_shortcut_period_crossing_the_cap_gains_the_rules_amount() {
             unbounded: vec![mana],
             p0_life_at_offer: i32::MAX - 1,
             responders: vec![P1],
-            stashed: None,
+            take: Take::Performed,
             p0_life_after: i32::MAX,
             gained_after: 2002,
         },
@@ -2104,7 +2394,7 @@ fn a_life_shortcut_period_crossing_the_cap_gains_the_rules_amount() {
             unbounded: vec![mana],
             p0_life_at_offer: i32::MAX - 6,
             responders: vec![P1, P2, PlayerId(3)],
-            stashed: None,
+            take: Take::Performed,
             p0_life_after: i32::MAX - 5,
             gained_after: 2002,
         },
@@ -2116,7 +2406,7 @@ fn a_life_shortcut_period_crossing_the_cap_gains_the_rules_amount() {
             unbounded: vec![mana, ResourceAxis::Life(P0)],
             p0_life_at_offer: 22,
             responders: vec![P1],
-            stashed: Some(2),
+            take: Take::Lump,
             p0_life_after: 2022,
             gained_after: 2002,
         },
@@ -2128,7 +2418,7 @@ fn a_life_shortcut_period_crossing_the_cap_gains_the_rules_amount() {
             unbounded: vec![mana],
             p0_life_at_offer: i32::MAX - 1,
             responders: vec![P1],
-            stashed: None,
+            take: Take::Performed,
             p0_life_after: i32::MAX,
             gained_after: u32::MAX,
         },
@@ -2140,8 +2430,9 @@ fn a_life_shortcut_period_crossing_the_cap_gains_the_rules_amount() {
         } else {
             two_player()
         };
-        let (mut runner, dynamo, indices) = lifedynamo_board(scenario, &row.fields, 2, row.gained);
-        cycle_to_the_shortcut_offer(&mut runner, dynamo, indices, &row.unbounded);
+        let (mut runner, dynamo, indices) =
+            dynamo_board(scenario, &row.fields, Dynamo::Gain(2), &[(P0, row.gained)]);
+        cycle_to_the_shortcut_offer(&mut runner, dynamo, &indices, &row.unbounded);
         assert_eq!(runner.life(P0), row.p0_life_at_offer, "{name}");
         runner
             .act(GameAction::DeclareShortcut {
@@ -2151,29 +2442,25 @@ fn a_life_shortcut_period_crossing_the_cap_gains_the_rules_amount() {
             .expect("the shortcut declaration is accepted");
         let events = accept_for_every_responder(&mut runner, &row.responders);
 
-        let changes = match row.stashed {
-            Some(per_cycle_delta) => {
-                assert_eq!(
-                    stash(&runner),
-                    Some(&vec![PersistentAxisMaterialization::Life {
-                        player: P0,
-                        per_cycle_delta,
-                    }]),
-                    "{name}"
+        assert_eq!(stash(&runner), None, "{name}: nothing is stashed");
+        let changes = life_changes(&events);
+        match row.take {
+            Take::Lump => {
+                assert!(
+                    runner
+                        .state()
+                        .unbounded_resources
+                        .get(&P0)
+                        .is_some_and(|axes| axes.contains(&mana)),
+                    "REACH-GUARD {name}: the Mark route marks ∞ Mana(C)"
                 );
-                let changes = life_changes(&collapse(&mut runner, 1000));
                 assert_eq!(
                     changes,
                     vec![(P0, 2000, Some(row.p0_life_after))],
-                    "{name}: one lump"
+                    "{name}: one lump at the accept"
                 );
-                assert!(is_priority(runner.state()), "{name}");
-                assert_eq!(stash(&runner), None, "{name}: the stash is cleared");
-                changes
             }
-            None => {
-                assert_eq!(stash(&runner), None, "{name}: nothing is stashed");
-                let changes = life_changes(&events);
+            Take::Performed => {
                 assert_eq!(changes.len(), 1000, "{name}: one LifeChanged per cycle");
                 assert!(
                     changes
@@ -2181,11 +2468,10 @@ fn a_life_shortcut_period_crossing_the_cap_gains_the_rules_amount() {
                         .all(|&(player, amount, _)| player == P0 && amount == 2),
                     "{name}: each cycle reports 2"
                 );
-                assert!(is_priority(runner.state()), "{name}");
-                pass_to_a_boundary_without_a_collapse(&mut runner);
-                changes
             }
-        };
+        }
+        assert!(is_priority(runner.state()), "{name}");
+        pass_to_a_boundary_without_a_collapse(&mut runner);
 
         assert_eq!(runner.life(P0), row.p0_life_after, "{name}");
         assert_eq!(
@@ -2217,352 +2503,281 @@ const LOSE_FOUR: &str = "{0}: You lose 4 life.";
 /// and the step boundary.
 const GAIN_NINETY_EIGHT: &str = "{0}: You gain 98 life.";
 
+/// P0's `{0}` ability that gains 108 life, activated between a shortcut's
+/// accept and the step boundary.
+const GAIN_108: &str = "{0}: You gain 108 life.";
+
+/// P0's `{0}` ability that loses 25 life, activated between a shortcut's accept
+/// and the step boundary.
+const LOSE_TWENTY_FIVE: &str = "{0}: You lose 25 life.";
+
 /// CR 732.2c + CR 119.3: a taken shortcut leaves the game as if its cycles were
-/// performed at the take, so P0's gained counter, both stored life fields, the
-/// shared total and the sum of P0's `LifeChanged` amounts end where declining
-/// the shortcut and performing the cycles leaves them, also when P0 loses or
-/// gains life after the accept and before the step boundary. Where the cycles'
-/// gain cannot fit under `i32::MAX` from the board the shortcut is taken on —
-/// a two-player total held at the cap, a Two-Headed Giant team whose shared
-/// total is at the cap while P0's own field has room (CR 810.4 + CR 810.9a),
-/// a period crossing the cap and one cycle's worth past it — the take performs
-/// the cycles and stashes nothing, so a later loss stands. It performs them too
-/// where P0's own field cannot hold the lump, and where a cycle stores P0's gain
-/// in P1's field (CR 810.9 + CR 810.9a), so P0's counter carries the gain, and
-/// the offer names P0's life axis, never P1's, also where the cap holds back
-/// the cycle the offer reads. Where it fits — reaching the cap exactly and below
-/// it, and a lump that fits after an offer cycle the cap held back — the gain
-/// is stashed and collapses at the boundary, and a later loss or gain moves the
-/// total as it would after performing. No ∞ life mark outlives the boundary.
-/// Residual: a lump that fits stays batched and is exact only while nothing
-/// before the step ends is held back by the cap; a later gain that no settling
-/// take makes, carrying the total to the cap and followed by a loss, still ends
-/// above where performing ends, because the stashed lump is applied after the
-/// loss.
+/// performed at the take, so P0's gained and lost counters, both stored life
+/// fields, the shared total and the sum of P0's `LifeChanged` amounts end where
+/// declining the shortcut and performing the cycles leaves them, also when P0
+/// loses or gains life after the accept and before the step boundary. A take
+/// whose cycles' life a lump stores as performing stores it applies the lump at
+/// the take: below the cap, reaching it exactly, far below it before a later
+/// gain held at the cap and a loss, before a loss that would be lethal without
+/// the lump, beside a bystander pinned at the cap, and reaching the cap exactly
+/// with a pinned counter. Every other take performs its cycles: where a cycle's
+/// change is held at the cap (a total held at it, a period crossing it, a lump
+/// one cycle past it, a gain then a loss that touches it, with a readable or a
+/// pinned counter), where P0's own field cannot hold the lump, and where a cycle
+/// stores P0's gain in P1's field (CR 810.9 + CR 810.9a), also where P0's
+/// counter is pinned and cannot say who gained. The offer names P0's life axis,
+/// never P1's, and none where the counters cannot attribute the gain. The
+/// boundary asks no collapse amount, and no ∞ life mark follows the accept.
 #[test]
 fn a_life_shortcut_held_at_the_cap_matches_performing_the_cycles() {
     struct Row {
         name: &'static str,
-        two_headed_giant: bool,
-        fields: Vec<(PlayerId, i32)>,
-        gain: u32,
+        board: ShortcutBoard,
         cycles: u32,
         unbounded: Vec<ResourceAxis>,
-        responders: Vec<PlayerId>,
-        /// P0's `{0}` abilities activated after the accept, in order.
-        between: Vec<&'static str>,
-        /// The per-cycle gain stashed at the accept, or `None` where the take
-        /// performs the cycles.
-        stashed: Option<u32>,
+        take: Take,
         gained: u32,
     }
     let mana = ResourceAxis::Mana(ManaType::Colorless);
     let life = ResourceAxis::Life(P0);
-    let team = |p0: i32, p1: i32| vec![(P0, p0), (P1, p1), (P2, 20), (PlayerId(3), 20)];
+    let max = i32::MAX;
+    let duel = |p0: i32, dynamo: Dynamo| ShortcutBoard::duel(vec![(P0, p0)], dynamo);
+    let pinned = || vec![(P0, u32::MAX)];
     let rows = [
         Row {
             name: "held at the cap",
-            two_headed_giant: false,
-            fields: vec![(P0, i32::MAX)],
-            gain: 5,
+            board: duel(max, Dynamo::Gain(5)),
             cycles: 3,
             unbounded: vec![mana],
-            responders: vec![P1],
-            between: vec![],
-            stashed: None,
+            take: Take::Performed,
             gained: 20,
         },
         Row {
             name: "held at the cap, then P0 loses 4",
-            two_headed_giant: false,
-            fields: vec![(P0, i32::MAX)],
-            gain: 5,
+            board: duel(max, Dynamo::Gain(5)).between(vec![LOSE_FOUR]),
             cycles: 3,
             unbounded: vec![mana],
-            responders: vec![P1],
-            between: vec![LOSE_FOUR],
-            stashed: None,
+            take: Take::Performed,
             gained: 20,
         },
         Row {
             name: "Two-Headed Giant team held at the cap",
-            two_headed_giant: true,
-            fields: team(i32::MAX - 5, 5),
-            gain: 2,
+            board: ShortcutBoard::team(max - 5, 5, Dynamo::Gain(2)),
             cycles: 3,
             unbounded: vec![mana],
-            responders: vec![P1, P2, PlayerId(3)],
-            between: vec![],
-            stashed: None,
+            take: Take::Performed,
             gained: 8,
         },
         Row {
             name: "Two-Headed Giant team held at the cap, then P0 loses 4",
-            two_headed_giant: true,
-            fields: team(i32::MAX - 5, 5),
-            gain: 2,
+            board: ShortcutBoard::team(max - 5, 5, Dynamo::Gain(2)).between(vec![LOSE_FOUR]),
             cycles: 3,
             unbounded: vec![mana],
-            responders: vec![P1, P2, PlayerId(3)],
-            between: vec![LOSE_FOUR],
-            stashed: None,
+            take: Take::Performed,
             gained: 8,
         },
         Row {
             name: "crossing the cap",
-            two_headed_giant: false,
-            fields: vec![(P0, i32::MAX - 3)],
-            gain: 2,
+            board: duel(max - 3, Dynamo::Gain(2)),
             cycles: 3,
             unbounded: vec![mana],
-            responders: vec![P1],
-            between: vec![],
-            stashed: None,
+            take: Take::Performed,
             gained: 8,
         },
         Row {
             name: "crossing the cap, then P0 loses 4",
-            two_headed_giant: false,
-            fields: vec![(P0, i32::MAX - 3)],
-            gain: 2,
+            board: duel(max - 3, Dynamo::Gain(2)).between(vec![LOSE_FOUR]),
             cycles: 3,
             unbounded: vec![mana],
-            responders: vec![P1],
-            between: vec![LOSE_FOUR],
-            stashed: None,
+            take: Take::Performed,
             gained: 8,
         },
         Row {
             name: "one past the cap, then P0 loses 4",
-            two_headed_giant: false,
-            fields: vec![(P0, i32::MAX - 7)],
-            gain: 2,
+            board: duel(max - 7, Dynamo::Gain(2)).between(vec![LOSE_FOUR]),
             cycles: 3,
             unbounded: vec![mana, life],
-            responders: vec![P1],
-            between: vec![LOSE_FOUR],
-            stashed: None,
+            take: Take::Performed,
             gained: 8,
         },
         Row {
             name: "Two-Headed Giant, both fields grow, then P0 loses 4",
-            two_headed_giant: true,
-            fields: team(i32::MAX - 3, -20),
-            gain: 2,
+            board: ShortcutBoard::team(max - 3, -20, Dynamo::Gain(2)).between(vec![LOSE_FOUR]),
             cycles: 15,
             unbounded: vec![mana, life],
-            responders: vec![P1, P2, PlayerId(3)],
-            between: vec![LOSE_FOUR],
-            stashed: None,
+            take: Take::Performed,
             gained: 32,
         },
         Row {
             name: "Two-Headed Giant, P0's field one below the cap, the team has room",
-            two_headed_giant: true,
-            fields: team(i32::MAX - 3, -20),
-            gain: 2,
+            board: ShortcutBoard::team(max - 3, -20, Dynamo::Gain(2)),
             cycles: 5,
             unbounded: vec![mana, life],
-            responders: vec![P1, P2, PlayerId(3)],
-            between: vec![],
-            stashed: None,
+            take: Take::Performed,
             gained: 12,
         },
         Row {
             name: "Two-Headed Giant, P0's field one below the cap, the team has room, then P0 \
                    loses 4",
-            two_headed_giant: true,
-            fields: team(i32::MAX - 3, -20),
-            gain: 2,
+            board: ShortcutBoard::team(max - 3, -20, Dynamo::Gain(2)).between(vec![LOSE_FOUR]),
             cycles: 5,
             unbounded: vec![mana, life],
-            responders: vec![P1, P2, PlayerId(3)],
-            between: vec![LOSE_FOUR],
-            stashed: None,
+            take: Take::Performed,
             gained: 12,
         },
         Row {
             name: "Two-Headed Giant, P0's field at the cap, the team has room",
-            two_headed_giant: true,
-            fields: team(i32::MAX, -100),
-            gain: 2,
+            board: ShortcutBoard::team(max, -100, Dynamo::Gain(2)),
             cycles: 5,
             unbounded: vec![mana, life],
-            responders: vec![P1, P2, PlayerId(3)],
-            between: vec![],
-            stashed: None,
+            take: Take::Performed,
             gained: 12,
         },
         Row {
             name: "Two-Headed Giant, P0's field at the cap, the cap holds back the cycle the \
                    offer reads",
-            two_headed_giant: true,
-            fields: team(i32::MAX, -400),
-            gain: 150,
+            board: ShortcutBoard::team(max, -400, Dynamo::Gain(150)),
             cycles: 3,
             unbounded: vec![mana, life],
-            responders: vec![P1, P2, PlayerId(3)],
-            between: vec![],
-            stashed: None,
+            take: Take::Performed,
             gained: 600,
         },
         Row {
             name: "Two-Headed Giant, a lump that fits, the cap holds back the cycle the offer \
                    reads",
-            two_headed_giant: true,
-            fields: team(i32::MAX - 45, -10),
-            gain: 20,
+            board: ShortcutBoard::team(max - 45, -10, Dynamo::Gain(20)),
             cycles: 1,
             unbounded: vec![mana, life],
-            responders: vec![P1, P2, PlayerId(3)],
-            between: vec![],
-            stashed: Some(20),
+            take: Take::Lump,
             gained: 40,
         },
         Row {
-            name: "Two-Headed Giant, the lump would spill at the boundary, then P0 loses 4",
-            two_headed_giant: true,
-            fields: team(i32::MAX - 6, -20),
-            gain: 2,
+            name: "Two-Headed Giant, the lump would spill onto P1's field, then P0 loses 4",
+            board: ShortcutBoard::team(max - 6, -20, Dynamo::Gain(2)).between(vec![LOSE_FOUR]),
             cycles: 5,
             unbounded: vec![mana, life],
-            responders: vec![P1, P2, PlayerId(3)],
-            between: vec![LOSE_FOUR],
-            stashed: None,
+            take: Take::Performed,
             gained: 12,
         },
         Row {
             name: "Two-Headed Giant below the cap, then P0 loses 4",
-            two_headed_giant: true,
-            fields: team(20, 20),
-            gain: 2,
+            board: ShortcutBoard::team(20, 20, Dynamo::Gain(2)).between(vec![LOSE_FOUR]),
             cycles: 5,
             unbounded: vec![mana, life],
-            responders: vec![P1, P2, PlayerId(3)],
-            between: vec![LOSE_FOUR],
-            stashed: Some(2),
+            take: Take::Lump,
             gained: 12,
         },
         Row {
             name: "reaching the cap exactly, then P0 loses 4",
-            two_headed_giant: false,
-            fields: vec![(P0, i32::MAX - 8)],
-            gain: 2,
+            board: duel(max - 8, Dynamo::Gain(2)).between(vec![LOSE_FOUR]),
             cycles: 3,
             unbounded: vec![mana, life],
-            responders: vec![P1],
-            between: vec![LOSE_FOUR],
-            stashed: Some(2),
+            take: Take::Lump,
             gained: 8,
         },
         Row {
             name: "below the cap",
-            two_headed_giant: false,
-            fields: vec![(P0, 20)],
-            gain: 2,
+            board: duel(20, Dynamo::Gain(2)),
             cycles: 3,
             unbounded: vec![mana, life],
-            responders: vec![P1],
-            between: vec![],
-            stashed: Some(2),
+            take: Take::Lump,
             gained: 8,
         },
         Row {
             name: "below the cap, then P0 loses 4",
-            two_headed_giant: false,
-            fields: vec![(P0, 20)],
-            gain: 2,
+            board: duel(20, Dynamo::Gain(2)).between(vec![LOSE_FOUR]),
             cycles: 3,
             unbounded: vec![mana, life],
-            responders: vec![P1],
-            between: vec![LOSE_FOUR],
-            stashed: Some(2),
+            take: Take::Lump,
             gained: 8,
         },
         Row {
-            name: "stashed below the cap, then a gain carries the total to it",
-            two_headed_giant: false,
-            fields: vec![(P0, i32::MAX - 102)],
-            gain: 2,
+            name: "a lump below the cap, then a gain carries the total to it",
+            board: duel(max - 102, Dynamo::Gain(2)).between(vec![GAIN_NINETY_EIGHT]),
             cycles: 3,
             unbounded: vec![mana, life],
-            responders: vec![P1],
-            between: vec![GAIN_NINETY_EIGHT],
-            stashed: Some(2),
+            take: Take::Lump,
             gained: 106,
+        },
+        Row {
+            name: "a lump far below the cap, then a gain held at the cap and a loss",
+            board: duel(max - 110, Dynamo::Gain(2)).between(vec![GAIN_108, LOSE_FOUR]),
+            cycles: 3,
+            unbounded: vec![mana, life],
+            take: Take::Lump,
+            gained: 116,
+        },
+        Row {
+            name: "a lump below the cap, then a loss that would be lethal without it",
+            board: duel(20, Dynamo::Gain(2)).between(vec![LOSE_TWENTY_FIVE]),
+            cycles: 3,
+            unbounded: vec![mana, life],
+            take: Take::Lump,
+            gained: 8,
+        },
+        Row {
+            name: "Two-Headed Giant, P0's field at the cap with its gained counter pinned, the \
+                   team has room",
+            board: ShortcutBoard::team(max, -100, Dynamo::Gain(2)).counters(pinned()),
+            cycles: 5,
+            unbounded: vec![mana],
+            take: Take::Performed,
+            gained: u32::MAX,
+        },
+        Row {
+            name: "held at the cap with the gained counter pinned",
+            board: duel(max, Dynamo::Gain(5)).counters(pinned()),
+            cycles: 3,
+            unbounded: vec![mana],
+            take: Take::Performed,
+            gained: u32::MAX,
+        },
+        Row {
+            name: "crossing the cap in one cycle with the gained counter pinned",
+            board: duel(max - 3, Dynamo::Gain(2)).counters(pinned()),
+            cycles: 1,
+            unbounded: vec![mana],
+            take: Take::Performed,
+            gained: u32::MAX,
+        },
+        Row {
+            name: "a gain then a loss whose gain touches the cap",
+            board: duel(max - 20, Dynamo::GainThenLose { gain: 15, loss: 2 }),
+            cycles: 1,
+            unbounded: vec![mana],
+            take: Take::Performed,
+            gained: 30,
+        },
+        Row {
+            name: "a gain then a loss held at the cap every cycle",
+            board: duel(max - 2, Dynamo::GainThenLose { gain: 15, loss: 2 }),
+            cycles: 3,
+            unbounded: vec![mana],
+            take: Take::Performed,
+            gained: 60,
+        },
+        Row {
+            name: "a bystander pinned at the cap",
+            board: ShortcutBoard::duel(vec![(P0, 20), (P1, max)], Dynamo::Gain(2))
+                .counters(vec![(P1, u32::MAX)]),
+            cycles: 3,
+            unbounded: vec![mana, life],
+            take: Take::Lump,
+            gained: 8,
+        },
+        Row {
+            name: "reaching the cap exactly with the gained counter pinned",
+            board: duel(max - 4, Dynamo::Gain(2)).counters(pinned()),
+            cycles: 1,
+            unbounded: vec![mana],
+            take: Take::Lump,
+            gained: u32::MAX,
         },
     ];
     for row in rows {
         let name = row.name;
-        let board = || {
-            let mut scenario = if row.two_headed_giant {
-                two_headed_giant()
-            } else {
-                two_player()
-            };
-            let between: Vec<ObjectId> = row
-                .between
-                .iter()
-                .map(|text| {
-                    scenario
-                        .add_creature_from_oracle(P0, "Test Lifeshifter", 1, 1, text)
-                        .id()
-                })
-                .collect();
-            let (runner, dynamo, indices) = lifedynamo_board(scenario, &row.fields, row.gain, 0);
-            (runner, dynamo, indices, between)
-        };
-
-        // The shortcut: accept `Fixed(cycles)`, activate `between`, then reach
-        // the boundary, collapsing what was stashed.
-        let (mut runner, dynamo, indices, between) = board();
-        cycle_to_the_shortcut_offer(&mut runner, dynamo, indices, &row.unbounded);
-        runner
-            .act(GameAction::DeclareShortcut {
-                count: IterationCount::Fixed(row.cycles),
-                template: None,
-            })
-            .expect("the shortcut declaration is accepted");
-        let mut events = accept_for_every_responder(&mut runner, &row.responders);
-        assert_eq!(
-            stash(&runner),
-            row.stashed
-                .map(|per_cycle_delta| vec![PersistentAxisMaterialization::Life {
-                    player: P0,
-                    per_cycle_delta,
-                }])
-                .as_ref(),
-            "{name}: the stash"
-        );
-        for &id in &between {
-            events.extend(activate_and_settle(&mut runner, id, 0));
-        }
-        match row.stashed {
-            Some(_) => events.extend(collapse(&mut runner, row.cycles)),
-            None => pass_to_a_boundary_without_a_collapse(&mut runner),
-        }
-        // A marked take's ∞ life axes are the gains it stashed, and the boundary that applies
-        // them ends their marks, so no ∞ life mark outlives it.
-        let marks = runner.state().unbounded_resources.get(&P0);
-        assert!(
-            marks.is_none_or(|axes| !axes
-                .iter()
-                .any(|axis| matches!(axis, ResourceAxis::Life(_)))),
-            "{name}: no ∞ life mark outlives the boundary, got {marks:?}"
-        );
-        let shortcut = LifeOutcome::read(&runner, &events);
-
-        // The reference: decline, perform the same cycles, activate `between`,
-        // then reach the boundary.
-        let (mut runner, dynamo, indices, between) = board();
-        cycle_to_the_shortcut_offer(&mut runner, dynamo, indices, &row.unbounded);
-        let mut events = decline_and_perform(&mut runner, dynamo, indices, row.cycles);
-        for &id in &between {
-            events.extend(activate_and_settle(&mut runner, id, 0));
-        }
-        pass_to_a_boundary_without_a_collapse(&mut runner);
-        let performed = LifeOutcome::read(&runner, &events);
-
+        let shortcut = row.board.take(name, row.cycles, &row.unbounded, row.take);
+        let performed = row.board.perform(row.cycles, &row.unbounded);
         assert_eq!(shortcut, performed, "{name}");
         assert_eq!(shortcut.gained, row.gained, "{name}: the gained counter");
     }
@@ -2572,28 +2787,28 @@ fn a_life_shortcut_held_at_the_cap_matches_performing_the_cycles() {
 /// if their cycles were performed at each take. P0 performs one Lifedynamo cycle
 /// (gain 2), accepts `Fixed(4)`, performs one more cycle, accepts `Fixed(4)`
 /// again, then loses 4, and the step ends; the reference declines and performs
-/// the same ten cycles, then loses 4. From `i32::MAX - 12` the second take's
-/// gain together with the first's pending one cannot fit under the cap, so the
-/// second take applies the pending gain at its accepted count, performs its own
-/// cycles held at the cap and stashes nothing, and the loss then stands: P0 ends
-/// at `i32::MAX - 4` having gained 20, and the boundary asks nothing. From 20
-/// both gains fit and stay stashed under one bound of 4, and the boundary
-/// collapse lands P0 at 36, as performing does.
+/// the same ten cycles, then loses 4. Each take that fits applies its lump at
+/// the take, so neither stashes anything or records a collapse bound, and the
+/// boundary asks nothing. From 20 both lumps fit: P0 is at 40 after the second
+/// take and ends at 36. From `i32::MAX - 12` the first lump fits and the second
+/// take, from the cap, performs its cycles held at it: P0 is at `i32::MAX`
+/// after the second take and ends at `i32::MAX - 4`. Both have gained 20.
 #[test]
 fn two_life_shortcuts_in_one_step_match_performing_the_cycles() {
     let mana = ResourceAxis::Mana(ManaType::Colorless);
     let life = ResourceAxis::Life(P0);
-    // (name, P0's starting life, whether the second take stashes)
-    for (name, start, stashed) in [
-        ("past the cap", i32::MAX - 12, false),
-        ("below the cap", 20, true),
+    // (name, P0's starting life, P0's life after the second take)
+    for (name, start, after_takes) in [
+        ("past the cap", i32::MAX - 12, i32::MAX),
+        ("below the cap", 20, 40),
     ] {
         let board = || {
             let mut scenario = two_player();
             let loser = scenario
                 .add_creature_from_oracle(P0, "Test Lifeshifter", 1, 1, LOSE_FOUR)
                 .id();
-            let (runner, dynamo, indices) = lifedynamo_board(scenario, &[(P0, start)], 2, 0);
+            let (runner, dynamo, indices) =
+                dynamo_board(scenario, &[(P0, start)], Dynamo::Gain(2), &[]);
             (runner, dynamo, indices, loser)
         };
         let accept = |runner: &mut GameRunner| {
@@ -2608,9 +2823,9 @@ fn two_life_shortcuts_in_one_step_match_performing_the_cycles() {
 
         // The shortcut: one cycle, accept 4; one more cycle, accept 4; lose 4.
         let (mut runner, dynamo, indices, loser) = board();
-        cycle_to_the_shortcut_offer(&mut runner, dynamo, indices, &[mana, life]);
+        cycle_to_the_shortcut_offer(&mut runner, dynamo, &indices, &[mana, life]);
         let mut events = accept(&mut runner);
-        for index in indices {
+        for &index in &indices {
             events.extend(activate_and_settle(&mut runner, dynamo, index));
         }
         assert!(
@@ -2619,44 +2834,21 @@ fn two_life_shortcuts_in_one_step_match_performing_the_cycles() {
             runner.state().waiting_for
         );
         events.extend(accept(&mut runner));
-        if stashed {
-            assert_eq!(
-                stash(&runner),
-                Some(&vec![
-                    PersistentAxisMaterialization::Life {
-                        player: P0,
-                        per_cycle_delta: 2,
-                    };
-                    2
-                ]),
-                "{name}: both takes stash their gain"
-            );
-            assert_eq!(
-                runner.state().pending_materialization_count.get(&P0),
-                Some(&4),
-                "{name}: the stash's bound"
-            );
-        } else {
-            assert_eq!(stash(&runner), None, "{name}: nothing is left stashed");
-            assert_eq!(
-                runner.state().pending_materialization_count.get(&P0),
-                None,
-                "{name}: no bound is left"
-            );
-            assert_eq!(runner.life(P0), i32::MAX, "{name}: P0 after the take");
-        }
+        assert_eq!(stash(&runner), None, "{name}: nothing is stashed");
+        assert_eq!(
+            runner.state().pending_materialization_count.get(&P0),
+            None,
+            "{name}: no bound is recorded"
+        );
+        assert_eq!(runner.life(P0), after_takes, "{name}: P0 after the takes");
         events.extend(activate_and_settle(&mut runner, loser, 0));
-        if stashed {
-            events.extend(collapse(&mut runner, 4));
-        } else {
-            pass_to_a_boundary_without_a_collapse(&mut runner);
-        }
+        pass_to_a_boundary_without_a_collapse(&mut runner);
         let shortcut = LifeOutcome::read(&runner, &events);
 
         // The reference: decline, perform nine more cycles, lose 4.
         let (mut runner, dynamo, indices, loser) = board();
-        cycle_to_the_shortcut_offer(&mut runner, dynamo, indices, &[mana, life]);
-        let mut events = decline_and_perform(&mut runner, dynamo, indices, 9);
+        cycle_to_the_shortcut_offer(&mut runner, dynamo, &indices, &[mana, life]);
+        let mut events = decline_and_perform(&mut runner, dynamo, &indices, 9);
         events.extend(activate_and_settle(&mut runner, loser, 0));
         pass_to_a_boundary_without_a_collapse(&mut runner);
         let performed = LifeOutcome::read(&runner, &events);
@@ -2722,11 +2914,12 @@ fn angelic_accord_counts_the_life_a_shortcut_held_at_the_cap_gains() {
     for (count, gained, angels) in [(Some(3), 4, 1), (None, 4, 1), (Some(2), 3, 0)] {
         let mut scenario = two_player();
         scenario.add_enchantment_from_oracle(P0, "Angelic Accord", ANGELIC_ACCORD);
-        let (mut runner, dynamo, indices) = lifedynamo_board(scenario, &[(P0, i32::MAX)], 1, 0);
+        let (mut runner, dynamo, indices) =
+            dynamo_board(scenario, &[(P0, i32::MAX)], Dynamo::Gain(1), &[]);
         cycle_to_the_shortcut_offer(
             &mut runner,
             dynamo,
-            indices,
+            &indices,
             &[ResourceAxis::Mana(ManaType::Colorless)],
         );
         match count {
@@ -2740,7 +2933,7 @@ fn angelic_accord_counts_the_life_a_shortcut_held_at_the_cap_gains() {
                 accept_for_every_responder(&mut runner, &[P1]);
             }
             None => {
-                decline_and_perform(&mut runner, dynamo, indices, 3);
+                decline_and_perform(&mut runner, dynamo, &indices, 3);
             }
         }
 
@@ -2759,5 +2952,369 @@ fn angelic_accord_counts_the_life_a_shortcut_held_at_the_cap_gains() {
         );
         assert_eq!(angel_tokens, angels, "{count:?}: Angel tokens");
         assert_eq!(runner.life(P0), i32::MAX, "{count:?}");
+    }
+}
+
+/// CR 732.2c + CR 119.3: a period that gains 15 and then loses 2 nets 13 a
+/// cycle, so a `Fixed(3)` lump of 39 can fit under `i32::MAX` while a later
+/// cycle's gain, performed, is held at the cap before its loss. From
+/// `i32::MAX - 53` (`i32::MAX - 40` at the take) the third cycle's gain passes
+/// the cap, so the take performs the cycles and every counter, event and total
+/// ends where performing them leaves it: P0 at `i32::MAX - 2`, having gained 60
+/// and lost 8. Two above it fits: from `i32::MAX - 55` no cycle reaches the cap,
+/// and the lump lands at the take. A period that loses 2 before it gains 15
+/// peaks at its net, so from `i32::MAX - 53` and from `i32::MAX - 52` (reaching
+/// the cap exactly) its lump lands at the take too. Where the lump lands, the
+/// fields, the total and P0's `LifeChanged` sum match performing; its gained
+/// and lost counters are not compared, since a lump moves the gained counter by
+/// the net and the lost counter by nothing.
+#[test]
+fn a_gain_then_loss_shortcut_is_performed_where_a_later_cycle_passes_the_cap() {
+    let mana = ResourceAxis::Mana(ManaType::Colorless);
+    let life = ResourceAxis::Life(P0);
+    let max = i32::MAX;
+    let gain_then_lose = Dynamo::GainThenLose { gain: 15, loss: 2 };
+    let lose_then_gain = Dynamo::LoseThenGain { loss: 2, gain: 15 };
+    // (name, P0's starting life, the dynamo, the take, P0's life after)
+    let rows = [
+        (
+            "a gain then a loss whose third cycle's gain passes the cap",
+            max - 53,
+            gain_then_lose,
+            Take::Performed,
+            max - 2,
+        ),
+        (
+            "control: a gain then a loss no cycle carries to the cap",
+            max - 55,
+            gain_then_lose,
+            Take::Lump,
+            max - 3,
+        ),
+        (
+            "a loss then a gain peaking one below the cap",
+            max - 53,
+            lose_then_gain,
+            Take::Lump,
+            max - 1,
+        ),
+        (
+            "a loss then a gain reaching the cap exactly",
+            max - 52,
+            lose_then_gain,
+            Take::Lump,
+            max,
+        ),
+    ];
+    for (name, start, dynamo, take, p0_after) in rows {
+        let board = ShortcutBoard::duel(vec![(P0, start)], dynamo);
+        let shortcut = board.take(name, 3, &[mana, life], take);
+        let performed = board.perform(3, &[mana, life]);
+        let fields_and_events = |outcome: &LifeOutcome| {
+            (
+                outcome.fields,
+                outcome.team,
+                outcome.life_changed_total,
+                outcome.last_new_total,
+            )
+        };
+        assert_eq!(
+            fields_and_events(&shortcut),
+            fields_and_events(&performed),
+            "{name}"
+        );
+        assert_eq!(shortcut.fields.0, p0_after, "{name}: P0's life");
+        if take == Take::Performed {
+            assert_eq!(shortcut, performed, "{name}: every counter too");
+            assert_eq!((shortcut.gained, shortcut.lost), (60, 8), "{name}");
+        }
+    }
+}
+
+/// CR 119.3 + CR 704.5a + CR 732.2c: Platinum Angel ("You can't lose the game
+/// and your opponents can't win the game.") keeps P1 in the game at
+/// `i32::MIN + 4` while P0's drain dynamo makes each opponent lose 2 a cycle.
+/// One cycle leaves P1 at `i32::MIN + 2` and offers the shortcut with only its
+/// ∞ `Mana(C)` axis. A `Fixed(1)` take's cycle loses P1's total down to exactly
+/// `i32::MIN`, and a loss is not a gain a lump carries, so the take performs the
+/// cycle whether P1's lost counter is readable or pinned at `u32::MAX`: nothing
+/// is stashed or marked, the boundary asks nothing, the accept reports P1's loss
+/// of 2 at `i32::MIN`, and P1's life and lost counter and P0's life end where
+/// declining and performing the cycle leaves them.
+#[test]
+fn a_shortcut_losing_a_total_down_to_i32_min_is_performed_whatever_its_lost_counter() {
+    let Some(db) = crate::support::shared_card_db() else {
+        return;
+    };
+    let mana = ResourceAxis::Mana(ManaType::Colorless);
+    let board = |lost: u32| {
+        let mut scenario = two_player();
+        scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db);
+        let (mut runner, dynamo, indices) = dynamo_board(
+            scenario,
+            &[(P0, 20), (P1, i32::MIN + 4)],
+            Dynamo::Drain(2),
+            &[],
+        );
+        runner.state_mut().players[1].life_lost_this_turn = lost;
+        cycle_to_the_shortcut_offer(&mut runner, dynamo, &indices, &[mana]);
+        assert_eq!(
+            runner.life(P1),
+            i32::MIN + 2,
+            "REACH-GUARD: one cycle drains P1 by 2"
+        );
+        assert!(
+            !runner.state().players[1].is_eliminated,
+            "REACH-GUARD: Platinum Angel keeps P1 in the game"
+        );
+        (runner, dynamo, indices)
+    };
+    // P1's life, P1's lost counter, P0's life.
+    let reading = |runner: &GameRunner| {
+        (
+            runner.life(P1),
+            runner.state().players[1].life_lost_this_turn,
+            runner.life(P0),
+        )
+    };
+    // (name, P1's lost counter at the start, after)
+    for (name, lost, lost_after) in [("readable", 0, 4), ("pinned", u32::MAX, u32::MAX)] {
+        // The shortcut.
+        let (mut runner, _, _) = board(lost);
+        runner
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(1),
+                template: None,
+            })
+            .expect("the shortcut declaration is accepted");
+        let events = accept_for_every_responder(&mut runner, &[P1]);
+        assert_eq!(
+            life_changes(&events),
+            vec![(P1, -2, Some(i32::MIN))],
+            "{name}: the take performs the cycle's loss"
+        );
+        assert_eq!(stash(&runner), None, "{name}: nothing is stashed");
+        assert_eq!(
+            runner.state().unbounded_resources.get(&P0),
+            None,
+            "{name}: a performed take marks nothing"
+        );
+        pass_to_a_boundary_without_a_collapse(&mut runner);
+        let shortcut = reading(&runner);
+
+        // The reference: decline, perform the cycle.
+        let (mut runner, dynamo, indices) = board(lost);
+        decline_and_perform(&mut runner, dynamo, &indices, 1);
+        pass_to_a_boundary_without_a_collapse(&mut runner);
+        let performed = reading(&runner);
+
+        assert_eq!(shortcut, performed, "{name}");
+        assert_eq!(shortcut, (i32::MIN, lost_after, 20), "{name}");
+    }
+}
+
+/// A synthetic free engine of P0's whose cycle gains 2 life and puts a charge
+/// counter on itself.
+const LIFE_AND_CHARGE_DYNAMO: &str = "{T}: Add {C}.\n{0}: You gain 2 life.\n{0}: Put a charge \
+                                      counter on Lifedynamo.\n{0}: Untap Lifedynamo.";
+
+/// A synthetic free engine of P0's whose cycle gains 2 life and creates a Servo
+/// token.
+const LIFE_AND_SERVO_DYNAMO: &str = "{T}: Add {C}.\n{0}: You gain 2 life.\n{0}: Create a 1/1 \
+                                     colorless Servo artifact creature token.\n{0}: Untap \
+                                     Lifedynamo.";
+
+/// CR 732.2c + CR 119.3: a marked take lands its batched life at the take, at
+/// the accepted count, but its counters and tokens at the CR 500.5 boundary, at
+/// the count its controller names there, so a take that batches life beside
+/// either is performed instead. A `Fixed(3)` take of a cycle that gains 2 life
+/// and puts a charge counter on the dynamo, and of one that gains 2 life and
+/// creates a Servo with no battlefield-entry trigger on the board, performs all
+/// three cycles at the take: a `LifeChanged` per cycle, real counters or tokens
+/// at the take, nothing stashed or marked, and no boundary prompt. P0's life,
+/// gained counter, charge counters and Servos then end where declining and
+/// performing the cycles leaves them.
+#[test]
+fn a_life_shortcut_that_also_grows_tokens_or_counters_is_performed_at_the_take() {
+    let mana = ResourceAxis::Mana(ManaType::Colorless);
+    let life = ResourceAxis::Life(P0);
+    let charge = CounterType::Generic("charge".to_string());
+    let puts_a_counter =
+        |ability: &AbilityDefinition| matches!(&*ability.effect, Effect::PutCounter { .. });
+    let creates_a_token =
+        |ability: &AbilityDefinition| matches!(&*ability.effect, Effect::Token { .. });
+    // (name, the engine's text, its growth ability, the offer's growth axis, P0's charge
+    // counters and Servos after the take)
+    type Row = (
+        &'static str,
+        &'static str,
+        fn(&AbilityDefinition) -> bool,
+        ResourceAxis,
+        (u32, usize),
+    );
+    let rows: [Row; 2] = [
+        (
+            "charge counter",
+            LIFE_AND_CHARGE_DYNAMO,
+            puts_a_counter,
+            ResourceAxis::Counter(CounterClass::Other, ObjectClass::Creature),
+            (4, 0),
+        ),
+        (
+            "Servo token, no ETB trigger",
+            LIFE_AND_SERVO_DYNAMO,
+            creates_a_token,
+            ResourceAxis::TokensCreated,
+            (0, 4),
+        ),
+    ];
+    for (name, text, grows, growth_axis, growth_after) in rows {
+        let board = || {
+            let (runner, engine) = engine_board(two_player(), &[(P0, 20)], text, &[]);
+            let indices = [
+                ability_index(&runner, engine, "mana", is_mana_ability),
+                ability_index(&runner, engine, "life-gain", gains_life),
+                ability_index(&runner, engine, "growth", grows),
+                ability_index(&runner, engine, "untap", untaps),
+            ];
+            (runner, engine, indices)
+        };
+        // P0's life, P0's gained counter, the engine's charge counters, P0's Servos.
+        let reading = |runner: &GameRunner, engine: ObjectId| {
+            let state = runner.state();
+            let servos = state
+                .battlefield
+                .iter()
+                .filter_map(|id| state.objects.get(id))
+                .filter(|object| object.is_token && object.name == "Servo")
+                .count();
+            (
+                runner.life(P0),
+                state.players[0].life_gained_this_turn,
+                state.objects[&engine]
+                    .counters
+                    .get(&charge)
+                    .copied()
+                    .unwrap_or(0),
+                servos,
+            )
+        };
+
+        // The shortcut.
+        let (mut runner, engine, indices) = board();
+        cycle_to_the_shortcut_offer(&mut runner, engine, &indices, &[mana, life, growth_axis]);
+        runner
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(3),
+                template: None,
+            })
+            .expect("the shortcut declaration is accepted");
+        let events = accept_for_every_responder(&mut runner, &[P1]);
+        assert_eq!(
+            life_changes(&events)
+                .into_iter()
+                .map(|(player, amount, _)| (player, amount))
+                .collect::<Vec<_>>(),
+            vec![(P0, 2); 3],
+            "{name}: a LifeChanged per performed cycle"
+        );
+        assert_eq!(stash(&runner), None, "{name}: nothing is stashed");
+        assert_eq!(
+            runner.state().unbounded_resources.get(&P0),
+            None,
+            "{name}: a performed take marks nothing"
+        );
+        assert_eq!(
+            reading(&runner, engine),
+            (28, 8, growth_after.0, growth_after.1),
+            "{name}: every cycle's growth lands at the take"
+        );
+        pass_to_a_boundary_without_a_collapse(&mut runner);
+        let shortcut = reading(&runner, engine);
+
+        // The reference: decline, perform three cycles.
+        let (mut runner, engine, indices) = board();
+        cycle_to_the_shortcut_offer(&mut runner, engine, &indices, &[mana, life, growth_axis]);
+        decline_and_perform(&mut runner, engine, &indices, 3);
+        pass_to_a_boundary_without_a_collapse(&mut runner);
+        let performed = reading(&runner, engine);
+
+        assert_eq!(shortcut, performed, "{name}");
+    }
+}
+
+/// CR 104.4b + CR 810.9 + CR 810.9a: an optional life-gain loop (P2 holds
+/// Lightning Bolt and a Mountain, so a player can break it) is marked as P0's
+/// revocable ∞ life capability. In Two-Headed Giant with P0's own field at
+/// `i32::MAX`, every gain P0 makes is stored on P1's field, and the mark still
+/// names P0's life axis, the member whose counters gained, never P1's. Control:
+/// with room on P0's field the gains stay there and the mark names P0's life
+/// axis too.
+#[test]
+fn an_optional_life_gain_loop_marks_the_two_headed_giant_member_who_gains() {
+    // (name, team A's fields)
+    for (name, p0, p1) in [
+        (
+            "P0's field at the cap, the gains spill to P1",
+            i32::MAX,
+            -100,
+        ),
+        ("control: room on P0's field", 20, 20),
+    ] {
+        let mut scenario = two_headed_giant();
+        scenario.with_life(P0, p0);
+        scenario.with_life(P1, p1);
+        scenario.add_creature_from_oracle(P0, "Test Life Engine", 2, 2, SELF_LIFE_ENGINE);
+        scenario.add_basic_land(P2, engine::types::mana::ManaColor::Red);
+        scenario.add_bolt_to_hand(P2);
+        let kickoff = scenario
+            .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+        runner.cast(kickoff).resolve();
+
+        // Drive the loop's beats until it is marked.
+        for _ in 0..500 {
+            if runner.state().unbounded_resources.contains_key(&P0) {
+                break;
+            }
+            match runner.state().waiting_for.clone() {
+                WaitingFor::Priority { .. } => {
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("passing priority is accepted");
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    runner
+                        .act(GameAction::OrderTriggers {
+                            order: (0..triggers.len()).collect(),
+                        })
+                        .expect("ordering the triggers is accepted");
+                }
+                other => panic!("{name}: unexpected prompt while the loop runs: {other:?}"),
+            }
+        }
+
+        let state = runner.state();
+        assert!(
+            state.players[0].life_gained_this_turn > 0
+                && state.players[1].life_gained_this_turn == 0,
+            "REACH-GUARD {name}: P0 gains and P1 does not, got ({}, {})",
+            state.players[0].life_gained_this_turn,
+            state.players[1].life_gained_this_turn
+        );
+        if p0 == i32::MAX {
+            assert!(
+                state.players[0].life == i32::MAX && state.players[1].life > p1,
+                "REACH-GUARD {name}: the gains are stored on P1's field, got {:?}",
+                team_a_fields(state)
+            );
+        }
+        assert_eq!(
+            state.unbounded_resources.get(&P0),
+            Some(&std::collections::BTreeSet::from([ResourceAxis::Life(P0)])),
+            "{name}: the mark names P0's life axis"
+        );
     }
 }

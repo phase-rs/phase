@@ -1016,7 +1016,7 @@ pub(super) fn drain_pending_phase_transition_progress(
                     // registration that creates the stash, so on current code the only
                     // bound-less stash is one deserialized from a save written before the
                     // bound was tracked. Read through `engine::pending_collapse_bound`, the
-                    // one reading the take's life cap gate and settle share.
+                    // bound's one reading.
                     max: crate::game::engine::pending_collapse_bound(state, controller),
                     accumulated: 0,
                     source_id: ObjectId(0),

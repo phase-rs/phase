@@ -2122,10 +2122,12 @@ pub(crate) fn boundary_declines(
     }
 }
 
-/// CR 119.3: apply one stashed `PersistentAxisMaterialization::Life` item at `amount` cycles:
-/// `player` gains `per_cycle_delta × amount` life. Shared by the boundary's `LoopCollapse` arm
-/// and `game::engine`'s `settle_pending_life`, which applies a pending item at a later take.
-pub(crate) fn apply_stashed_life(
+/// CR 119.3: apply one batched `PersistentAxisMaterialization::Life` item at `amount` cycles:
+/// `player` gains `per_cycle_delta × amount` life. Shared by `game::engine`'s
+/// `materialize_object_growth_shortcut`, which applies a Mark take's life at the take, and the
+/// boundary's `LoopCollapse` arm, which applies a `Life` item only from a stash restored from a
+/// save written before that.
+pub(crate) fn apply_batched_life(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
     per_cycle_delta: u32,
@@ -3807,7 +3809,7 @@ pub(super) fn handle_resolution_choice(
                                 player: p,
                                 per_cycle_delta,
                             } => {
-                                apply_stashed_life(state, *p, *per_cycle_delta, amount, events)?;
+                                apply_batched_life(state, *p, *per_cycle_delta, amount, events)?;
                             }
                         }
                         // Reaching here means the growth applied.

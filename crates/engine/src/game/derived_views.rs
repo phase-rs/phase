@@ -1885,15 +1885,13 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // (CR 732.2c — the shortcut is already taken), never remove one.
     // Naming WHO reads the schedule is a claim every future consumer can break; naming what the
     // schedule may not DO is not. The stores are not filtered either:
-    // `unbounded_resources` keeps the mark until the boundary applies the growth, or, for a
-    // `Life` item, until a later take past the life cap applies it (`game::engine`'s
-    // `settle_pending_life`). (`unbounded_loop_enablers` is held in
+    // `unbounded_resources` keeps the mark until the boundary applies the growth; a Mark take
+    // marks no `Life` axis, since its life lands at the take. (`unbounded_loop_enablers` is held in
     // lockstep with it as an ENGINE-STATE invariant required by no CR — but see the inertness note
     // above: for the object-growth class that map is EMPTY, so the lockstep is vacuously satisfied
     // here and is load-bearing only for the Interactive Path-C class that populates it.)
     //
-    // What ends each `∞` is the boundary (or, for a `Life` item, a later take's
-    // `settle_pending_life`), never this projection:
+    // What ends every other `∞` is the boundary, never this projection:
     // `clear_collapsed_materializations` drops the collapsed axes once the growth is applied, and
     // `turns::drain_pending_phase_transition_progress` clears a `Mana(_)` axis when the step or
     // phase ends (CR 500.5).

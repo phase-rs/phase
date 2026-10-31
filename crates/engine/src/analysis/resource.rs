@@ -2600,11 +2600,14 @@ impl ResourceVector {
     /// `i32::MAX`): the counters still name who gained, while the fields hold only what the total
     /// stored, in whichever members' fields the spread put it. It is not `t` where the stored
     /// change has a size or a sign the counters do not count, as where a loss held at
-    /// `i32::MIN` comes before a gain; there, and where a member's counter is unreadable (it
-    /// fell, or ends at `u32::MAX`), the counters do not say who carries the stored change, and
-    /// `self`'s entries stand. Every other entry and axis is `self`'s, so a period with no spill
-    /// reads as `self`, and so does a player's own life total: its one member's clamped counter
-    /// change is `t` itself.
+    /// `i32::MIN` comes before a gain; there, and where a one-member total's counter is
+    /// unreadable (it fell, or ends at `u32::MAX`), the counters do not say who carries the
+    /// stored change, and `self`'s entries stand. A total with more than one member, a member's
+    /// counter unreadable and a member's field moved fails closed: its counters cannot say who
+    /// gained or lost (CR 810.9), so every member's entry is removed, the field holder's
+    /// included, and the total advertises no life axis. Every other entry and axis is `self`'s,
+    /// so a period with no spill reads as `self`, and so does a player's own life total: its one
+    /// member's clamped counter change is `t` itself.
     ///
     /// Why the bound: CR 810.9 applies the result of each member's gains and losses to the
     /// team's shared total, and CR 810.9a reads an individual player's life total as the team's,
@@ -2617,12 +2620,13 @@ impl ResourceVector {
     /// at most `t`.
     ///
     /// Where no entry of `self` is negative, no entry of the result is, and a total that grows
-    /// keeps a positive entry: where its counters are read they sum to at least `t`, so a member
-    /// that gained carries one. So the win-kind reader answers for the result as it answers for
-    /// `self`, and the unbounded-axis reader names a life axis for each total that grows and no
-    /// drain axis. Where a total's counters are read, a member gets a positive entry only if it
-    /// gained and its total grows. How a total's change is split across its members beyond that
-    /// is storage (CR 810.9a); the readers of the result read only signs.
+    /// keeps a positive entry, except a total that fails closed, which keeps none: where its
+    /// counters are read they sum to at least `t`, so a member that gained carries one. So the
+    /// win-kind reader answers for the result as it answers for `self`, and the unbounded-axis
+    /// reader names a life axis for each total that grows and can be attributed, and no drain
+    /// axis. Where a total's counters are read, a member gets a positive entry only if it gained
+    /// and its total grows. How a total's change is split across its members beyond that is
+    /// storage (CR 810.9a); the readers of the result read only signs.
     pub(crate) fn with_life_attributed(
         &self,
         prior: &GameState,
@@ -2631,9 +2635,18 @@ impl ResourceVector {
         let stored = |seat: PlayerId| self.life.get(&seat).copied().unwrap_or(0);
         let mut read = self.clone();
         for LifeTotalChanges {
-            members, counters, ..
+            members,
+            fields,
+            counters,
         } in life_total_changes(prior, current)
         {
+            // CR 810.9: the change cannot be attributed, so no member's life axis is advertised.
+            if counters.is_none() && members.len() > 1 && fields.iter().any(|&field| field != 0) {
+                for seat in &members {
+                    read.life.remove(seat);
+                }
+                continue;
+            }
             let total: i64 = members.iter().map(|&seat| stored(seat)).sum();
             let bound = |change: i64| change.clamp(total.min(0), total.max(0));
             let Some(counters) = counters.filter(|counters| bound(counters.iter().sum()) == total)
@@ -6272,19 +6285,18 @@ pub(crate) fn grown_beneficial_counter_deltas(
 /// carried, read from the player's per-turn counters ([`life_counter_change`]); a period that
 /// also loses life reads its net, gained minus lost. A taken shortcut leaves the game as if
 /// every elided cycle were performed at the take, and a lump the cap would hold back from the
-/// take's board would saturate against the board the step ends on instead, so such a take
-/// performs its cycles rather than batching them (`game::engine`'s
-/// `PeriodGrowth::collapse_is_replay`): at the cap δ decides that route, and the counters and
-/// `LifeChanged` then move as performing moves them. A counter that fell or ends at
-/// `u32::MAX` gives no reading, so δ is the stored gain, which stays the floor: the lump must
-/// still take the total where performing the cycles would. A player whose δ is not positive is
-/// not returned, and below the cap every δ is the stored gain, exactly. δ is read per player,
-/// from the player's own field and counters: in a shared-life format a gain the spread
-/// (`game::players::spread_life_change`) stored in a teammate's field is that teammate's
-/// stored gain. A take whose driven cycle stores a change off its player, as the members'
-/// per-turn counters attribute it, is performed instead (`game::engine`'s
-/// `PeriodGrowth::collapse_is_replay`), so no batched δ carries one unless a member's counter is
-/// unreadable (it fell, or ends at `u32::MAX`).
+/// take's board would not store what those cycles store, so such a take performs its cycles
+/// rather than batching them (`game::engine`'s `PeriodGrowth::collapse_is_replay`): at the cap
+/// δ decides that route, and the counters and `LifeChanged` then move as performing moves them.
+/// A counter that fell or ends at `u32::MAX` gives no reading, so δ is the stored gain, which
+/// stays the floor: the lump must still take the total where performing the cycles would. A
+/// player whose δ is not positive is not returned, and below the cap every δ is the stored
+/// gain, exactly. δ is read per player, from the player's own field and counters: in a
+/// shared-life format a gain the spread (`game::players::spread_life_change`) stored in a
+/// teammate's field is that teammate's stored gain. A take whose driven cycle's life is not a
+/// gain stored whole on each player's own field ([`life_not_stored_as_gains`]), or one of whose
+/// cycles would pass an `i32` limit (`game::engine`'s `PeriodGrowth::life_passes_a_limit`), is
+/// performed instead, so a batched δ is always a stored gain.
 pub(crate) fn grown_life_deltas(prior: &GameState, current: &GameState) -> Vec<(PlayerId, u32)> {
     let mut deltas = Vec::new();
     for after in &current.players {
@@ -6339,7 +6351,9 @@ fn own_field_change(prior: &GameState, current: &GameState, seat: PlayerId) -> i
 
 /// CR 810.4 + CR 810.9: one life total's changes since `prior`: its members, each member's
 /// field change ([`own_field_change`]) and, where every member's per-turn counters are readable
-/// ([`life_counter_change`]), each member's counter change, in member order.
+/// ([`life_counter_change`]), each member's counter change, in member order. Read by the take's
+/// gate ([`life_not_stored_as_gains`]) and by the offer's attribution
+/// ([`ResourceVector::with_life_attributed`]).
 struct LifeTotalChanges {
     members: Vec<PlayerId>,
     fields: Vec<i64>,
@@ -6348,7 +6362,9 @@ struct LifeTotalChanges {
 
 /// The [`LifeTotalChanges`] of every life total in `current`: players grouped by the total their
 /// life changes adjust (`game::topology::shared_resource_dedup_key`: a Two-Headed Giant team's
-/// shared total, CR 810.4, and otherwise the player's own).
+/// shared total, CR 810.4, and otherwise the player's own). Its two readers are the take's gate
+/// ([`life_not_stored_as_gains`]) and the offer's attribution
+/// ([`ResourceVector::with_life_attributed`]).
 fn life_total_changes(prior: &GameState, current: &GameState) -> Vec<LifeTotalChanges> {
     let mut totals: BTreeMap<crate::game::topology::TeamId, Vec<PlayerId>> = BTreeMap::new();
     for player in &current.players {
@@ -6383,60 +6399,166 @@ fn life_total_changes(prior: &GameState, current: &GameState) -> Vec<LifeTotalCh
         .collect()
 }
 
-/// CR 810.9 + CR 810.9a: each player's life change since `prior`, attributed to the player it
-/// happened to. Every player in `current` is returned.
+/// CR 119.3 + CR 810.9 + CR 810.9a: the players whose life change since `prior` is not a gain
+/// stored whole on their own field, read once per life total ([`life_total_changes`]). It is the
+/// take route's attribution reading: `game::engine`'s `PeriodGrowth::collapse_is_replay`
+/// performs a take whose driven cycle names anybody here. The offer reads
+/// [`ResourceVector::with_life_attributed`] instead, and whether a cycle's change passes an `i32`
+/// limit is `game::engine`'s `PeriodGrowth::life_passes_a_limit`'s question; this reads no limit,
+/// so a seat at a limit that the cycle leaves alone is never named.
 ///
-/// Players are grouped by the life total their changes adjust ([`life_total_changes`]). A group
-/// whose members' per-turn counters are all readable ([`life_counter_change`]) and sum to the
-/// change its members' fields stored reads the counters; any other group reads each member's
-/// field change. CR 810.9: gaining and losing life happen to each player individually and the
-/// result is applied to the shared total, while the spread (`game::players::spread_life_change`)
-/// stores a change on the changer's own field first and moves only what that field cannot hold
-/// within the `i32` limits on to the teammate. So the fields record where the total was stored,
-/// not who gained or lost (CR 810.9a: storage only), and the counters, which count the rules
-/// amount of each change, name who did.
+/// - In every total, each member whose own field fell. A fall is a loss, and the batched lump
+///   carries gains only ([`grown_life_deltas`]). This rests on no counter, so a lost counter
+///   pinned at `u32::MAX` cannot hide a loss down to exactly `i32::MIN`.
+/// - Where every member's per-turn counters are readable ([`life_counter_change`]), also each
+///   member whose counter change (the rules amount it gained minus the amount it lost, CR 119.3)
+///   differs from its own field's change. Either the spread
+///   (`game::players::spread_life_change`) stored part of the change on a teammate (CR 810.9a:
+///   the fields are storage only), or an `i32` limit held part of it back (an engine limit, not
+///   a rule).
+/// - Where a member's counter is unreadable (it fell, or ends at `u32::MAX`), also every member
+///   of a total with more than one member when any member's field moved. CR 810.9 has gaining
+///   and losing life happen to each player individually, and such a total's counters cannot say
+///   who did, so the take fails closed. A one-member total adds nobody here: its field change is
+///   its player's change.
 ///
-/// A one-member group whose sums agree has a field change equal to its counter change, so
-/// outside a shared life total this is each player's field change. A total that a limit held
-/// back, or a counter that fell (a turn boundary reset it) or ends at `u32::MAX`, keeps the
-/// field changes. This is the take route's reading ([`life_stored_off_its_player`]); the offer
-/// also reads the counters of a total an `i32` limit held back
-/// ([`ResourceVector::with_life_attributed`]).
-pub(crate) fn attributed_life_changes(
+/// Empty for a cycle whose changes are gains, each stored whole on its own player's field.
+pub(crate) fn life_not_stored_as_gains(
     prior: &GameState,
     current: &GameState,
-) -> BTreeMap<PlayerId, i64> {
-    let mut attributed = BTreeMap::new();
+) -> BTreeSet<PlayerId> {
+    let mut named = BTreeSet::new();
     for LifeTotalChanges {
         members,
         fields,
         counters,
     } in life_total_changes(prior, current)
     {
-        let readings = counters
-            .filter(|counters| counters.iter().sum::<i64>() == fields.iter().sum::<i64>())
-            .unwrap_or(fields);
-        attributed.extend(members.into_iter().zip(readings));
+        named.extend(
+            members
+                .iter()
+                .zip(&fields)
+                .filter(|&(_, &field)| field < 0)
+                .map(|(&seat, _)| seat),
+        );
+        match counters {
+            Some(counters) => named.extend(
+                members
+                    .iter()
+                    .zip(fields.iter().zip(&counters))
+                    .filter(|&(_, (field, counter))| counter != field)
+                    .map(|(&seat, _)| seat),
+            ),
+            None => {
+                if members.len() > 1 && fields.iter().any(|&field| field != 0) {
+                    named.extend(members.iter().copied());
+                }
+            }
+        }
     }
-    attributed
+    named
 }
 
-/// CR 810.9 + CR 810.9a: the players whose life change since `prior` was stored in a field other
-/// than their own, as their per-turn counters attribute it ([`attributed_life_changes`]): those
-/// whose attributed change is not the change their own field stored.
+/// CR 119.3: one account's running life change across one driven cycle, in the order its
+/// `LifeChanged` events report it, from 0 at the cycle's start: its net, and the highest and
+/// lowest values it reaches, each counting the start, so `peak ≥ 0 ≥ trough`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LifeExcursion {
+    net: i64,
+    peak: i64,
+    trough: i64,
+}
+
+impl LifeExcursion {
+    fn record(&mut self, amount: i64) {
+        self.net = self.net.saturating_add(amount);
+        self.peak = self.peak.max(self.net);
+        self.trough = self.trough.min(self.net);
+    }
+
+    /// Whether some cycle of `cycles` repetitions of the confirmed constant period this cycle
+    /// drove carries an account that stands at `start` past an `i32` life limit.
+    ///
+    /// Cycle k (1 ≤ k ≤ `cycles`) starts at `start + (k−1)·net`, so the highest value any cycle
+    /// reaches is `start + max(0, (cycles−1)·net) + peak` and the lowest is
+    /// `start + min(0, (cycles−1)·net) + trough`; the sums saturate in `i64`. Either one outside
+    /// the limits is a pass, tested with the edit authority's own saturation
+    /// (`game::arithmetic::saturating_life_total`, an engine limit, not a rule). The running
+    /// extremes, not the gross gain, bound the cycle, so a cycle that loses before it gains is
+    /// bounded by what it actually reaches.
+    pub(crate) fn passes_a_limit(&self, start: i64, cycles: u32) -> bool {
+        let before_last = self.net.saturating_mul(i64::from(cycles.saturating_sub(1)));
+        let passes = |offset: i64| {
+            crate::game::arithmetic::saturating_life_total(start, offset) - start != offset
+        };
+        passes(before_last.max(0).saturating_add(self.peak))
+            || passes(before_last.min(0).saturating_add(self.trough))
+    }
+}
+
+/// CR 119.3 + CR 810.9: the running life changes of one driven cycle
+/// ([`cycle_life_excursions`]): for each life total its events touch, the first player they name
+/// there and the total's [`LifeExcursion`], and for each player they name, that player's own.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CycleLifeExcursions {
+    totals: BTreeMap<crate::game::topology::TeamId, (PlayerId, LifeExcursion)>,
+    fields: BTreeMap<PlayerId, LifeExcursion>,
+}
+
+impl CycleLifeExcursions {
+    /// Each life total the cycle's events touch: the first player its events name, whose
+    /// `game::players::life_change_total` is the total's start, and the total's excursion.
+    pub(crate) fn totals(&self) -> impl Iterator<Item = (PlayerId, &LifeExcursion)> + '_ {
+        self.totals
+            .values()
+            .map(|(player, excursion)| (*player, excursion))
+    }
+
+    /// The changes the cycle's events name `player` for, or `None` where they name nothing.
+    pub(crate) fn field(&self, player: PlayerId) -> Option<&LifeExcursion> {
+        self.fields.get(&player)
+    }
+}
+
+/// CR 119.3 + CR 810.9: the [`CycleLifeExcursions`] of one driven cycle, read off its `events` in
+/// order; every event but `LifeChanged` is ignored. Each life change through the edit authority
+/// reports one `LifeChanged` carrying its rules amount, even where the stored total moved less
+/// (`game::arithmetic::reported_life_magnitude`), and the events are read one by one, so neither a
+/// pinned per-turn counter nor a saturated total hides a change. Totals are grouped as
+/// [`life_total_changes`] groups them (`game::topology::shared_resource_dedup_key` on `state`):
+/// CR 810.9 applies each member's change to the team's shared total.
 ///
-/// Empty outside a shared life total (a one-member group's attribution is its field change),
-/// wherever every change landed on its own player's field, and wherever attribution keeps the
-/// fields (a counter fell or is pinned, or a limit held the total back).
-pub(crate) fn life_stored_off_its_player(
-    prior: &GameState,
-    current: &GameState,
-) -> BTreeSet<PlayerId> {
-    attributed_life_changes(prior, current)
-        .into_iter()
-        .filter(|&(seat, attributed)| attributed != own_field_change(prior, current, seat))
-        .map(|(seat, _)| seat)
-        .collect()
+/// An amount the event clamps (`i32::MAX` for a gain, `i32::MIN` for a loss;
+/// `game::arithmetic::life_changed_amount` clamps any rules amount of 2^31 or more) reads as
+/// `u32::MAX` with its sign, the most one change carries, so a cycle whose amount the event
+/// cannot report exactly fails closed.
+pub(crate) fn cycle_life_excursions(
+    state: &GameState,
+    events: &[crate::types::events::GameEvent],
+) -> CycleLifeExcursions {
+    let mut read = CycleLifeExcursions::default();
+    for event in events {
+        let crate::types::events::GameEvent::LifeChanged {
+            player_id, amount, ..
+        } = event
+        else {
+            continue;
+        };
+        let amount = match *amount {
+            i32::MAX => i64::from(u32::MAX),
+            i32::MIN => -i64::from(u32::MAX),
+            amount => i64::from(amount),
+        };
+        read.totals
+            .entry(crate::game::topology::shared_resource_dedup_key(
+                state, *player_id,
+            ))
+            .or_insert_with(|| (*player_id, LifeExcursion::default()))
+            .1
+            .record(amount);
+        read.fields.entry(*player_id).or_default().record(amount);
+    }
+    read
 }
 
 /// CR 122.1: return a clone of `current` with every SHARED object's `Generic`
@@ -16139,27 +16261,27 @@ mod tests {
     }
 
     /// One board of the life attribution tests: (name, Two-Headed Giant, P0's and P1's seats,
-    /// the attributed (P0, P1) changes, whether a change was stored off its player).
-    type AttributionRow = (&'static str, bool, [AttributionSeat; 2], (i64, i64), bool);
+    /// the seats `life_not_stored_as_gains` names).
+    type AttributionRow = (&'static str, bool, [AttributionSeat; 2], &'static [u8]);
 
     /// The boards of the life attribution tests.
     fn attribution_rows() -> Vec<AttributionRow> {
         let max = i32::MAX;
         let min = i32::MIN;
+        let pinned = (u32::MAX, u32::MAX);
+        let untouched = ((20, 20), (0, 0), (0, 0));
         vec![
             (
                 "duel, counters disagree",
                 false,
-                [((20, 22), (0, 5), (0, 0)), ((20, 20), (0, 0), (0, 0))],
-                (2, 0),
-                false,
+                [((20, 22), (0, 5), (0, 0)), untouched],
+                &[0],
             ),
             (
                 "team, no spill",
                 true,
                 [((20, 22), (0, 2), (0, 0)), ((15, 15), (0, 0), (0, 0))],
-                (2, 0),
-                false,
+                &[],
             ),
             (
                 "team, part spilled",
@@ -16168,15 +16290,13 @@ mod tests {
                     ((max - 1, max), (0, 2), (0, 0)),
                     ((-20, -19), (0, 0), (0, 0)),
                 ],
-                (2, 0),
-                true,
+                &[0, 1],
             ),
             (
                 "team, all spilled",
                 true,
                 [((max, max), (0, 2), (0, 0)), ((-100, -98), (0, 0), (0, 0))],
-                (2, 0),
-                true,
+                &[0, 1],
             ),
             (
                 "team, total held at the cap",
@@ -16185,8 +16305,7 @@ mod tests {
                     ((max - 5, max - 5), (0, 2), (0, 0)),
                     ((5, 5), (0, 0), (0, 0)),
                 ],
-                (0, 0),
-                false,
+                &[0],
             ),
             (
                 "team, counter fell",
@@ -16195,37 +16314,32 @@ mod tests {
                     ((max - 1, max), (10, 2), (0, 0)),
                     ((-20, -19), (0, 0), (0, 0)),
                 ],
-                (1, 1),
-                false,
+                &[0, 1],
             ),
             (
                 "team, spilled gain and the teammate's own loss",
                 true,
                 [((max, max), (0, 2), (0, 0)), ((-100, -100), (0, 0), (0, 2))],
-                (2, -2),
-                true,
+                &[0, 1],
             ),
             (
                 "team, a member's loss spilled at i32::MIN while the teammate gains as much on \
                  its own field",
                 true,
                 [((min, min), (0, 0), (0, 2)), ((20, 20), (0, 2), (0, 0))],
-                (-2, 2),
-                true,
+                &[0, 1],
             ),
             (
                 "team, the same loss while the teammate gains more",
                 true,
                 [((min, min), (0, 0), (0, 2)), ((20, 21), (0, 3), (0, 0))],
-                (-2, 3),
-                true,
+                &[0, 1],
             ),
             (
                 "team, all spilled and held at the cap",
                 true,
                 [((max, max), (0, 150), (0, 0)), ((-100, 0), (0, 0), (0, 0))],
-                (0, 100),
-                false,
+                &[0, 1],
             ),
             (
                 "team, part spilled and held at the cap",
@@ -16234,74 +16348,96 @@ mod tests {
                     ((max - 5, max), (0, 20), (0, 0)),
                     ((-10, 0), (0, 0), (0, 0)),
                 ],
-                (5, 10),
-                false,
+                &[0, 1],
             ),
             (
                 "duel, a loss held at i32::MIN before a gain",
                 false,
-                [
-                    ((min + 1, min + 5), (0, 5), (0, 10)),
-                    ((20, 20), (0, 0), (0, 0)),
-                ],
-                (4, 0),
+                [((min + 1, min + 5), (0, 5), (0, 10)), untouched],
+                &[0],
+            ),
+            (
+                "team, a member's gained counter pinned while its gain spills",
+                true,
+                [((max, max), pinned, (0, 0)), ((-100, -98), (0, 0), (0, 0))],
+                &[0, 1],
+            ),
+            (
+                "duel, held at the cap with the gained counter pinned",
                 false,
+                [((max, max), pinned, (0, 0)), untouched],
+                &[],
+            ),
+            (
+                "duel, crossing the cap with the gained counter pinned",
+                false,
+                [((max - 1, max), pinned, (0, 0)), untouched],
+                &[],
+            ),
+            (
+                "duel, a counter fell below the cap",
+                false,
+                [((20, 22), (10, 2), (0, 0)), untouched],
+                &[],
+            ),
+            (
+                "duel, touches the cap and ends below",
+                false,
+                [((max - 2, max - 2), (0, 15), (0, 2)), untouched],
+                &[0],
+            ),
+            (
+                "team, a loss reaching i32::MIN exactly",
+                true,
+                [((min + 2, min), (0, 0), (0, 2)), untouched],
+                &[0],
+            ),
+            (
+                "duel, a gain and a loss below the cap",
+                false,
+                [((20, 33), (0, 15), (0, 2)), untouched],
+                &[],
+            ),
+            (
+                "duel, a pure gain",
+                false,
+                [((20, 22), (0, 2), (0, 0)), untouched],
+                &[],
+            ),
+            (
+                "duel, a bystander pinned at the cap, unchanged",
+                false,
+                [((20, 22), (0, 2), (0, 0)), ((max, max), pinned, (0, 0))],
+                &[],
+            ),
+            (
+                "duel, a loss reaching i32::MIN exactly, lost counter pinned",
+                false,
+                [untouched, ((min + 2, min), (0, 0), pinned)],
+                &[1],
             ),
         ]
     }
 
-    /// CR 810.9 + CR 810.9a: a life change is attributed to the player it happened to, read off
-    /// the per-turn counters, wherever every member of its shared life total has a readable
-    /// counter and the counters sum to the change the members' fields stored; otherwise each
-    /// member's field change is kept. Every player is returned.
-    #[test]
-    fn attributed_life_changes_credits_the_player_a_shared_total_spread_hid() {
-        for (name, team, seats, (p0, p1), _) in attribution_rows() {
-            let (prior, current) = attribution_frames(team, seats);
-            let attributed = attributed_life_changes(&prior, &current);
-            assert_eq!(
-                attributed.len(),
-                current.players.len(),
-                "{name}: every player is returned"
-            );
-            assert_eq!(
-                (attributed[&PlayerId(0)], attributed[&PlayerId(1)]),
-                (p0, p1),
-                "{name}"
-            );
-            assert!(
-                attributed
-                    .iter()
-                    .filter(|(seat, _)| seat.0 >= 2)
-                    .all(|(_, &change)| change == 0),
-                "{name}: an untouched seat changes nothing"
-            );
-        }
+    /// The players these seats name.
+    fn seat_set(seats: &[u8]) -> BTreeSet<PlayerId> {
+        seats.iter().copied().map(PlayerId).collect()
     }
 
-    /// CR 810.9 + CR 810.9a: the players a shared life total stored a change off are exactly
-    /// those whose attributed change is not their own field's. A duel, a team whose changes all
-    /// land on their own players' fields, a total the cap held back and a counter that fell
-    /// name nobody; a spilled gain, and a loss spilled at `i32::MIN`, name both members.
+    /// CR 119.3 + CR 810.9 + CR 810.9a: the take's gate names, in every total, each member whose
+    /// own field fell (a loss, whatever its counters); where every counter is readable, each
+    /// member whose counter change differs from its field change (a change the spread stored on
+    /// a teammate, or a limit held back); and where a counter is unreadable, every member of a
+    /// multi-member total whose field moved. A duel or a team whose changes are gains stored on
+    /// their own fields names nobody, and so does a one-member total with an unreadable counter
+    /// whose field did not fall, also beside a bystander pinned at the cap.
     #[test]
-    fn life_stored_off_its_player_names_the_members_a_shared_total_stored_a_change_off() {
-        let both = BTreeSet::from([PlayerId(0), PlayerId(1)]);
-        for (name, team, seats, (p0, p1), stored_off) in attribution_rows() {
+    fn life_not_stored_as_gains_names_each_member_whose_change_is_not_a_gain_on_its_own_field() {
+        for (name, team, seats, named) in attribution_rows() {
             let (prior, current) = attribution_frames(team, seats);
-            let attributed = attributed_life_changes(&prior, &current);
             assert_eq!(
-                (attributed[&PlayerId(0)], attributed[&PlayerId(1)]),
-                (p0, p1),
-                "REACH-GUARD {name}: the attribution this row reads"
-            );
-            let expected = if stored_off {
-                both.clone()
-            } else {
-                BTreeSet::new()
-            };
-            assert_eq!(
-                life_stored_off_its_player(&prior, &current),
-                expected,
+                life_not_stored_as_gains(&prior, &current),
+                seat_set(named),
                 "{name}"
             );
         }
@@ -16310,28 +16446,28 @@ mod tests {
     /// CR 810.9 + CR 810.9a: the offer's attributed life delta names the member a change
     /// happened to, bounded by the change its shared life total makes, so it never advertises a
     /// change the total does not make or a gain for a member who gains nothing, also where the
-    /// cap held the total back and the take's attribution keeps the fields. A period whose
-    /// spilled gain the teammate's own loss cancels keeps the field delta's empty life axis, so
-    /// the offer classifies it as an advantage loop with no life axis. A total whose counters do
-    /// not count its stored change (a loss held at `i32::MIN` before a gain), a total with a
-    /// counter that fell, and a total the cap holds still keep the field delta.
+    /// cap held the total back. A period whose spilled gain the teammate's own loss cancels
+    /// keeps the field delta's empty life axis, so the offer classifies it as an advantage loop
+    /// with no life axis. A total whose counters do not count its stored change (a loss held at
+    /// `i32::MIN` before a gain), a total the cap holds, and a duel whose counter is pinned keep
+    /// the field delta. A shared total with an unreadable counter (one that fell, or one pinned
+    /// at `u32::MAX`) whose fields moved fails closed: no member's life entry is advertised.
     #[test]
     fn with_life_attributed_never_advertises_a_change_its_shared_total_does_not_make() {
         use crate::analysis::loop_check::{classify_win_kind, WinKind};
         let p0 = PlayerId(0);
         let p1 = PlayerId(1);
-        let rows: BTreeMap<&str, ([AttributionSeat; 2], bool)> = attribution_rows()
+        let rows: BTreeMap<&str, ([AttributionSeat; 2], bool, &[u8])> = attribution_rows()
             .into_iter()
-            .map(|(name, team, seats, _, _)| (name, (seats, team)))
+            .map(|(name, team, seats, named)| (name, (seats, team, named)))
             .collect();
-        let read = |name: &str, (p0_change, p1_change): (i64, i64)| {
-            let (seats, team) = rows[name];
+        let read = |name: &str| {
+            let (seats, team, named) = rows[name];
             let (prior, current) = attribution_frames(team, seats);
-            let attributed = attributed_life_changes(&prior, &current);
             assert_eq!(
-                (attributed[&p0], attributed[&p1]),
-                (p0_change, p1_change),
-                "REACH-GUARD {name}: the attribution this row reads"
+                life_not_stored_as_gains(&prior, &current),
+                seat_set(named),
+                "REACH-GUARD {name}: the gate set this row reads"
             );
             let field_delta = ResourceVector::delta(
                 &ResourceVector::snapshot(&prior),
@@ -16341,15 +16477,12 @@ mod tests {
             (field_delta, attributed)
         };
 
-        for (name, attribution) in [
-            ("team, no spill", (2, 0)),
-            ("duel, counters disagree", (2, 0)),
-        ] {
-            let (field_delta, v) = read(name, attribution);
+        for name in ["team, no spill", "duel, counters disagree"] {
+            let (field_delta, v) = read(name);
             assert_eq!(v, field_delta, "{name}: no spill reads as the field delta");
         }
         for name in ["team, part spilled", "team, all spilled"] {
-            let (field_delta, v) = read(name, (2, 0));
+            let (field_delta, v) = read(name);
             assert!(
                 field_delta.life.get(&p1).is_some_and(|&change| change > 0),
                 "REACH-GUARD {name}: the field delta carries the spilled gain on P1"
@@ -16361,14 +16494,13 @@ mod tests {
             );
         }
         // P0 gains 150 (or 20), and the cap holds the shared total to 100 (or 15) of it, which
-        // the spread stores in P1's field (or in both). The take's attribution keeps the fields,
-        // since the counters do not sum to them; the offer still reads who gained, bounded by the
-        // change the total makes.
-        for (name, attribution, carried) in [
-            ("team, all spilled and held at the cap", (0, 100), 100),
-            ("team, part spilled and held at the cap", (5, 10), 15),
+        // the spread stores in P1's field (or in both). The offer still reads who gained,
+        // bounded by the change the total makes.
+        for (name, carried) in [
+            ("team, all spilled and held at the cap", 100),
+            ("team, part spilled and held at the cap", 15),
         ] {
-            let (field_delta, v) = read(name, attribution);
+            let (field_delta, v) = read(name);
             assert!(
                 field_delta.life.get(&p1).is_some_and(|&change| change > 0),
                 "REACH-GUARD {name}: the field delta carries the spilled gain on P1"
@@ -16388,24 +16520,54 @@ mod tests {
         // counters net a loss of 5, so they do not say who carries the growth, and the field
         // delta stands.
         let name = "duel, a loss held at i32::MIN before a gain";
-        let (field_delta, v) = read(name, (4, 0));
+        let (field_delta, v) = read(name);
         assert_eq!(
             field_delta.life.get(&p0),
             Some(&4),
             "REACH-GUARD {name}: the field delta grows P0's total"
         );
         assert_eq!(v, field_delta, "{name}: the field delta stands");
-        // A counter that fell gives no reading, and a total the cap holds still grows nobody.
-        for (name, attribution) in [
-            ("team, counter fell", (1, 1)),
-            ("team, total held at the cap", (0, 0)),
+        // A total the cap holds still grows nobody, and a duel's pinned counter leaves its one
+        // member's field change.
+        for name in [
+            "team, total held at the cap",
+            "duel, crossing the cap with the gained counter pinned",
         ] {
-            let (field_delta, v) = read(name, attribution);
+            let (field_delta, v) = read(name);
             assert_eq!(v, field_delta, "{name}: the field delta stands");
+        }
+        assert_eq!(
+            read("duel, crossing the cap with the gained counter pinned")
+                .1
+                .life,
+            BTreeMap::from([(p0, 1)]),
+            "the duel's pinned counter keeps P0's own field change"
+        );
+        // A shared total whose counter fell, or whose gaining member's counter is pinned, cannot
+        // say who gained: no member's life entry is advertised, the field holder's included.
+        for name in [
+            "team, counter fell",
+            "team, a member's gained counter pinned while its gain spills",
+        ] {
+            let (field_delta, v) = read(name);
+            assert!(
+                field_delta.life.get(&p1).is_some_and(|&change| change > 0),
+                "REACH-GUARD {name}: the field delta grows P1's field"
+            );
+            assert!(
+                !v.life.contains_key(&p0) && !v.life.contains_key(&p1),
+                "{name}: no life entry for P0 or P1, got {:?}",
+                v.life
+            );
+            let axes = v.unbounded_axes_for(p0);
+            assert!(
+                !axes.contains(&ResourceAxis::Life(p0)) && !axes.contains(&ResourceAxis::Life(p1)),
+                "{name}: no team-A life axis, got {axes:?}"
+            );
         }
 
         let name = "team, spilled gain and the teammate's own loss";
-        let (field_delta, v) = read(name, (2, -2));
+        let (field_delta, v) = read(name);
         assert_eq!(v, field_delta, "{name}: the total does not move");
         assert!(v.life.values().all(|&change| change >= 0), "{name}");
         let axes = v.unbounded_axes_for(p0);
@@ -16429,11 +16591,10 @@ mod tests {
                 ((-100, -98), (0, 0), (0, 1)),
             ],
         );
-        let attributed = attributed_life_changes(&prior, &current);
         assert_eq!(
-            (attributed[&p0], attributed[&p1]),
-            (3, -1),
-            "REACH-GUARD {name}: the attribution this row reads"
+            life_not_stored_as_gains(&prior, &current),
+            seat_set(&[0, 1]),
+            "REACH-GUARD {name}: the gate set this row reads"
         );
         let v = ResourceVector::delta(
             &ResourceVector::snapshot(&prior),
@@ -16446,6 +16607,104 @@ mod tests {
             axes.contains(&ResourceAxis::Life(p0)) && !axes.contains(&ResourceAxis::Life(p1)),
             "{name}: P0's life axis only, got {axes:?}"
         );
+    }
+
+    /// CR 119.3 + CR 810.9: a driven cycle's `LifeChanged` events read, in order, as each life
+    /// total's and each named player's running net, peak and trough from 0: a gain then a loss
+    /// peaks at the gain, a loss then a gain dips first, and in Two-Headed Giant both members'
+    /// changes run on the team's one total while each member keeps its own. An amount the event
+    /// clamps reads as `u32::MAX` with its sign, and a cycle with no life event reads as empty.
+    #[test]
+    fn cycle_life_excursions_reads_each_total_and_field_in_event_order() {
+        use crate::types::events::GameEvent;
+        let changed = |seat: u8, amount: i32| GameEvent::LifeChanged {
+            player_id: PlayerId(seat),
+            amount,
+            new_total: Default::default(),
+        };
+        let excursion = |net: i64, peak: i64, trough: i64| LifeExcursion { net, peak, trough };
+        let most = i64::from(u32::MAX);
+        /// (name, Two-Headed Giant, the cycle's events, each total's first player and
+        /// excursion, each named player's excursion)
+        type Row = (
+            &'static str,
+            bool,
+            Vec<GameEvent>,
+            Vec<(u8, LifeExcursion)>,
+            Vec<(u8, LifeExcursion)>,
+        );
+        let rows: Vec<Row> = vec![
+            (
+                "duel, a gain then a loss",
+                false,
+                vec![changed(0, 15), changed(0, -2)],
+                vec![(0, excursion(13, 15, 0))],
+                vec![(0, excursion(13, 15, 0))],
+            ),
+            (
+                "duel, a loss then a gain",
+                false,
+                vec![changed(0, -2), changed(0, 15)],
+                vec![(0, excursion(13, 13, -2))],
+                vec![(0, excursion(13, 13, -2))],
+            ),
+            (
+                "team, the members' changes interleave",
+                true,
+                vec![changed(0, 5), changed(1, -8), changed(0, 1)],
+                vec![(0, excursion(-2, 5, -3))],
+                vec![(0, excursion(6, 6, 0)), (1, excursion(-8, 0, -8))],
+            ),
+            (
+                "duel, a clamped gain",
+                false,
+                vec![changed(0, i32::MAX)],
+                vec![(0, excursion(most, most, 0))],
+                vec![(0, excursion(most, most, 0))],
+            ),
+            (
+                "duel, a clamped loss",
+                false,
+                vec![changed(0, i32::MIN)],
+                vec![(0, excursion(-most, 0, -most))],
+                vec![(0, excursion(-most, 0, -most))],
+            ),
+            (
+                "duel, no life event",
+                false,
+                vec![GameEvent::GameStarted],
+                vec![],
+                vec![],
+            ),
+        ];
+        for (name, team, events, totals, fields) in rows {
+            let state = if team {
+                GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 7)
+            } else {
+                GameState::new_two_player(7)
+            };
+            let read = cycle_life_excursions(&state, &events);
+            assert_eq!(
+                read.totals()
+                    .map(|(player, excursion)| (player, *excursion))
+                    .collect::<Vec<_>>(),
+                totals
+                    .into_iter()
+                    .map(|(seat, excursion)| (PlayerId(seat), excursion))
+                    .collect::<Vec<_>>(),
+                "{name}: the totals"
+            );
+            for seat in 0..2 {
+                assert_eq!(
+                    read.field(PlayerId(seat)),
+                    fields
+                        .iter()
+                        .find(|&&(named, _)| named == seat)
+                        .map(|(_, excursion)| excursion),
+                    "{name}: P{seat}'s own"
+                );
+            }
+        }
     }
 
     /// A battlefield permanent carrying ONE `TriggerMode::Phase` trigger whose step

@@ -4734,7 +4734,9 @@ pub struct PendingCopyTokenBatch {
 /// persistent-growth axis, applied at the CR 500.5 step/phase boundary at the
 /// controller-named N. Generalizes the shipped token-only deferred materialization to
 /// the whole persistent-materialization class (tokens, beneficial-growable counters,
-/// life gain). A future persistent axis
+/// life gain). A take applies a `Life` item at the take instead
+/// (`game::engine`'s `materialize_object_growth_shortcut`), so a stash holds one only from a
+/// save written before that. A future persistent axis
 /// is a new leaf variant + one submit arm + one clear arm (exhaustive `match` keeps
 /// every seam honest — a new variant will not compile until classified).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -4752,7 +4754,9 @@ pub enum PersistentAxisMaterialization {
     /// CR 122.1 / CR 701.34a: apply `per_cycle_delta × N` counters to each captured
     /// target (the beneficial-growable counter axis: Generic / +1/+1 / loyalty / defense).
     Counters(Vec<CounterGrowth>),
-    /// CR 119.3: gain `per_cycle_delta × N` life for `player` via the life-gain authority.
+    /// CR 119.3: gain `per_cycle_delta × N` life for `player` via the life-gain authority. A
+    /// take applies it at the take, at the accepted N; a stash holds one only from a save
+    /// written before that, and the boundary still applies it.
     Life {
         player: PlayerId,
         per_cycle_delta: u32,
@@ -23416,8 +23420,8 @@ declare_game_state! {
 
     /// CR 732.2a: for each controller that accepted an unbounded loop shortcut, the
     /// list of deferred persistent-axis materializations captured at accept. Part 1
-    /// marks the ∞ axes and mutates NOTHING (or, for a token loop, seeds a display
-    /// anchor); the concrete finite growth is applied at the next phase/step boundary,
+    /// marks the ∞ axes and applies the batched life (or, for a token loop, also seeds a
+    /// display anchor); the concrete finite growth is applied at the next phase/step boundary,
     /// where the controller is prompted (`PayableResource::LoopCollapse`) for a finite
     /// N. Each element is one `PersistentAxisMaterialization` — a per-axis batched item
     /// (`Tokens` mint recipe / `Counters` δ / `Life` δ) that applies N×δ. The token profile is a `CopiableValues`
@@ -23425,8 +23429,8 @@ declare_game_state! {
     /// `ResidualPermanent` (a token's `oracle_id` is empty). Written ONLY by
     /// `register_pending_materialization` (push); taken by `take_pending_materialization`;
     /// cleared axis-scoped by `clear_collapsed_materializations` (and, whole-player, by
-    /// `clear_unbounded_loop`). A `Life` item may instead be applied at a later take whose life
-    /// is past the cap (`game::engine`'s `settle_pending_life`).
+    /// `clear_unbounded_loop`). A take registers no `Life` item, since its life lands at the
+    /// take; a `Life` item is here only from a save written before that.
     ///
     /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
     /// `loop_fingerprint` (same unbounded family as `unbounded_resources` /
@@ -23443,11 +23447,9 @@ declare_game_state! {
     /// only let the controller collapse to at most N, because re-asking for a larger
     /// count would be a new game choice the accepted proposal never contained. Written
     /// by `materialize_fixed_shortcut` (the ONLY path that can register a deferred
-    /// materialization — `UntilLethal` never reaches it), and restored by `game::engine`'s
-    /// `settle_pending_life` for the items it keeps; read through
+    /// materialization — `UntilLethal` never reaches it); read through
     /// `game::engine::pending_collapse_bound` by the boundary prompt
-    /// (`turns::drain_pending_phase_transition_progress`), `PeriodGrowth::life_past_the_cap`
-    /// and `settle_pending_life`; cleared in
+    /// (`turns::drain_pending_phase_transition_progress`); cleared in
     /// lockstep with `pending_unbounded_materialization` by `take_pending_materialization`,
     /// `clear_collapsed_materializations` and `clear_unbounded_loop`.
     ///
@@ -34623,12 +34625,10 @@ impl GameState {
 
     /// CR 732.2a: single write authority for `pending_unbounded_materialization` —
     /// `game::engine::materialize_object_growth_shortcut` calls this, at accept, PUSHING
-    /// one deferred per-axis batched item (`Tokens` / `Counters` / `Life`) onto the
-    /// controller's list, and `game::engine`'s `settle_pending_life` re-registers, in order,
-    /// the items it keeps after applying a later take's pending life. Consumed at the next
-    /// phase/step boundary (`take_pending_materialization`) to apply the deferred finite
-    /// growth. Appends (multiple axes of one loop, or two accepts by the same controller,
-    /// coexist).
+    /// one deferred per-axis batched item (`Tokens` / `Counters`; its `Life` items land at the
+    /// take instead) onto the controller's list. Consumed at the next phase/step boundary
+    /// (`take_pending_materialization`) to apply the deferred finite growth. Appends (multiple
+    /// axes of one loop, or two accepts by the same controller, coexist).
     pub fn register_pending_materialization(
         &mut self,
         controller: PlayerId,
@@ -34720,9 +34720,10 @@ impl GameState {
     ///
     /// (a) UNOBSERVED → batch. `batch(N) ≡ perform-each(N)` by the growth-observed firewall's own
     ///     precondition: the batch route is entered only when no observer can make the lump apply
-    ///     differently from N separate applications. Life is exact only while no later change
-    ///     before the boundary is held back by the `i32` life limit; see
-    ///     `game::engine`'s `PeriodGrowth::collapse_is_replay`.
+    ///     differently from N separate applications. Life is applied at the take (route (f)),
+    ///     and the gate and the limit reading of `game::engine`'s
+    ///     `PeriodGrowth::collapse_is_replay` send every cycle whose life the lump would not
+    ///     store as performing stores it to route (b).
     /// (b) OBSERVED AT ACCEPT → the take performs the period
     ///     (`game::engine::drive_persistent_axis_collapse`), so observers fire exactly as they
     ///     would in manual play.
@@ -34740,14 +34741,16 @@ impl GameState {
     ///     accepted an unbounded advance; a responder who named a place (CR 732.2b) accepted no
     ///     such thing, and a sequence performed zero times reaches its ending point having done
     ///     nothing, so neither may take the elision. Identity again holds by performance.
-    /// (f) A LATER TAKE PAST THE LIFE CAP → `game::engine`'s `settle_pending_life` applies a
-    ///     pending `Life` item of a player in that take's settle scope (every member of a shared
-    ///     total past the cap, and each player whose own field is past) at its bound before that
-    ///     take performs its period. Identity holds for the settled life only while nothing
-    ///     between the earlier accept and this take was held back by the `i32` life limit; an item
-    ///     of the same stash left for the boundary (a `Tokens` or `Counters` item, or a `Life` item
-    ///     of a player outside the scope) keeps the boundary prompt, where naming fewer than the
-    ///     bound lands a state performing does not produce.
+    /// (f) LIFE LANDS AT THE TAKE → a Mark take applies its `Life` items at the accepted count
+    ///     (`game::engine`'s `materialize_object_growth_shortcut`), so no life waits for the
+    ///     boundary and no later change can reorder against it. Identity holds because the take
+    ///     batches life only where the driven cycle's life changes are gains, each stored whole
+    ///     on its player's own field, and no cycle of the accepted count would carry a total its
+    ///     life changes touch, or a gaining player's own field, past an `i32` limit. Then no
+    ///     change is held back and nothing spills, so every cycle repeats the driven cycle from
+    ///     where the one before it ended, and the lump lands where performing the cycles would.
+    ///     A take that would batch life beside a `Tokens` or `Counters` item, which the boundary
+    ///     applies at the count its controller names there, is performed instead (route (b)).
     ///
     /// Route (c) is the one the review indicted, and it is the route that ENFORCES CR 732.2c rather
     /// than departing from it. Once an observer appears, the other two options both break the
@@ -34789,9 +34792,9 @@ impl GameState {
     /// about them — it names what the boundary will REMOVE, not what the display may show.
     ///
     /// No item kind names a `Mana(_)` axis. Note the two axis classes end their `∞` by
-    /// different routes: `Tokens` / `Counters` / `Life` are DEFERRED and end here, when the
-    /// boundary applies the growth, or, for a `Life` item, when a later take's settle applies it
-    /// (route (f)); a `Mana(_)` is already materialized in the pool
+    /// different routes: `Tokens` / `Counters` are DEFERRED and end here, when the boundary
+    /// applies the growth (as does a `Life` item restored from an earlier save; a take marks no
+    /// `Life` axis, route (f)); a `Mana(_)` is already materialized in the pool
     /// (`mana_payment::refill_infinite_mana` re-tops it off this very store) and its `∞` ends at
     /// the CR 500.5 step/phase end instead.
     ///
@@ -34845,8 +34848,7 @@ impl GameState {
     /// CR 732.2a: end the ACTUALLY-collapsed persistent axes for `controller` after
     /// their deferred growth has been materialized — an AXIS-SCOPED collapse, not the
     /// whole-player `clear_unbounded_loop`. Scoped to `collapsed`, the exact set of
-    /// `PersistentAxisMaterialization` items that were applied at this boundary, or at a later
-    /// take by `game::engine`'s `settle_pending_life`:
+    /// `PersistentAxisMaterialization` items that were applied at this boundary:
     /// - `Tokens(_)` ⇒ remove `ResourceAxis::TokensCreated` and the token `unbounded_loop_pile`.
     /// - `Counters(growths)` ⇒ remove each `(object, counter)` display pair and the
     ///   `Counter(CounterClass, ObjectClass)` axes those growths back that no SURVIVING
@@ -34861,8 +34863,7 @@ impl GameState {
     /// (and its `unbounded_loop_enablers` entry in engine-state lockstep, mirroring
     /// `clear_unbounded_mana_loop`) only when its axis set becomes empty. Always removes
     /// the whole `pending_unbounded_materialization` list (owned by `take_` at the submit
-    /// site or in the settle). Leaves `clear_unbounded_mana_loop` / `clear_unbounded_loop`
-    /// untouched.
+    /// site). Leaves `clear_unbounded_mana_loop` / `clear_unbounded_loop` untouched.
     pub fn clear_collapsed_materializations(
         &mut self,
         controller: PlayerId,
