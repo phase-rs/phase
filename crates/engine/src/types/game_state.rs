@@ -497,6 +497,18 @@ pub enum AssistState {
     Paid { helper: PlayerId, generic: u32 },
 }
 
+/// CR 500.11 + CR 614.10a: One pending "[player] skips their next combat phase"
+/// (Revenant Patriarch, Stonehorn Dignitary, Blinding Angel, Moment of Silence).
+/// It is a virtual replacement of that player's combat phase beginning, used up
+/// when it applies, which skips the whole phase as one unit. CR 514.2: `duration` is the effect's own limit;
+/// Moment of Silence's "this turn" skip ends at cleanup if it found no combat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCombatPhaseSkip {
+    pub player: PlayerId,
+    #[serde(default)]
+    pub duration: Option<Duration>,
+}
+
 /// CR 614.10 + CR 614.10a: Turn-scoped combat-phase skip lifecycle for a single
 /// player. Backs `GameState::combat_phase_skip_next_turn` (False Peace / Empty
 /// City Ruse: "skips all combat phases of their next turn").
@@ -23633,6 +23645,11 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::vec_hash_map")]
     pub steps_to_skip: Vec<HashMap<Phase, u32>>,
 
+    /// CR 500.11 + CR 614.10a: Pending one-shot "skips their next combat phase"
+    /// effects, oldest first. Unlike `steps_to_skip`, each is a whole phase.
+    #[serde(default)]
+    pub pending_combat_phase_skips: Vec<PendingCombatPhaseSkip>,
+
     /// CR 614.10 + CR 614.10a: Per-player turn-scoped combat-phase skip state.
     /// Drives "skips all combat phases of their next turn" (False Peace / Empty
     /// City Ruse). Unlike `steps_to_skip` (a finite per-step counter), this is a
@@ -28676,6 +28693,11 @@ pub enum PhaseTransitionDrainState {
     /// interactive substitute. The APNAP cursor resumes only after that
     /// post-replacement continuation terminally drains.
     AwaitingPostReplacementContinuation,
+    /// CR 616.1: The step `next_phase` has not begun: the affected player is
+    /// choosing among replacements competing to replace its beginning (a combat
+    /// phase with skips of different scope pending). The answer, not this drain,
+    /// finishes the transition (`turns::resume_phase_begin_choice`).
+    AwaitingBeginChoice,
 }
 
 /// Why an empty-pool event is costing a player life. Two independent causes
@@ -28749,6 +28771,10 @@ pub struct PhaseTransitionProgress {
     pub entering_cleanup: bool,
     #[serde(default)]
     pub drain_state: PhaseTransitionDrainState,
+    /// CR 500.8: the schedule entry `next_phase` came from, held while its
+    /// beginning awaits a CR 616.1 choice (`AwaitingBeginChoice`).
+    #[serde(default)]
+    pub scheduled_begin: Option<ExtraPhase>,
 }
 
 #[cfg(test)]
@@ -28817,6 +28843,7 @@ mod phase_transition_progress_serde_tests {
             in_flight_life_loss: None,
             entering_cleanup: false,
             drain_state: PhaseTransitionDrainState::AwaitingPostReplacementContinuation,
+            scheduled_begin: None,
         };
         let mut legacy = serde_json::to_value(progress).expect("phase progress serializes");
         legacy
@@ -32557,6 +32584,7 @@ impl GameState {
             extra_turn_sequence_anchor: None,
             turns_to_skip: vec![0; player_count as usize],
             steps_to_skip: vec![HashMap::new(); player_count as usize],
+            pending_combat_phase_skips: Vec::new(),
             combat_phase_skip_next_turn: vec![
                 CombatPhaseSkipState::default();
                 player_count as usize
@@ -36351,6 +36379,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         extra_turn_sequence_anchor: _,
         turns_to_skip: _,
         steps_to_skip: _,
+        pending_combat_phase_skips: _,
         combat_phase_skip_next_turn: _,
         scheduled_turn_controls: _,
         extra_phases: _,
@@ -36743,6 +36772,7 @@ impl PartialEq for GameState {
             && self.extra_turn_sequence_anchor == other.extra_turn_sequence_anchor
             && self.turns_to_skip == other.turns_to_skip
             && self.steps_to_skip == other.steps_to_skip
+            && self.pending_combat_phase_skips == other.pending_combat_phase_skips
             && self.combat_phase_skip_next_turn == other.combat_phase_skip_next_turn
             && self.scheduled_turn_controls == other.scheduled_turn_controls
             && self.extra_phases == other.extra_phases

@@ -418,6 +418,10 @@ fn handle_replacement_choice_inner(
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
     let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
+    let parked_phase_begin = state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::BeginPhase { .. }));
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -430,6 +434,18 @@ fn handle_replacement_choice_inner(
     // delivered here.
     if std::mem::take(&mut state.replacement_may_cost_paused) {
         return Ok(state.waiting_for.clone());
+    }
+    // CR 616.1: the answer settles whether the parked step begins; the phase
+    // transition that asked owns what follows.
+    if parked_phase_begin
+        && !matches!(
+            result,
+            super::replacement::ReplacementResult::NeedsChoice(_)
+        )
+    {
+        return Ok(super::turns::resume_phase_begin_choice(
+            state, result, events,
+        ));
     }
     match result {
         super::replacement::ReplacementResult::Execute(event) => {
@@ -987,9 +1003,10 @@ fn handle_replacement_choice_inner(
                         }
                     }
                 }
-                // CR 614.1b + CR 614.10: BeginTurn / BeginPhase replacements are
-                // mandatory skip effects that never set `replacement_choice_waiting_for`
-                // (see `turns.rs` — NeedsChoice on these is treated as a bug). Arms are
+                // CR 614.1b + CR 614.10: BeginTurn replacements are mandatory skip
+                // effects that never set `replacement_choice_waiting_for` (see
+                // `turns.rs` — NeedsChoice on these is treated as a bug), and a
+                // BeginPhase choice resumes its transition before this match. Arms are
                 // present for exhaustiveness; reaching them is an engine error.
                 ProposedEvent::BeginTurn { .. } => {
                     debug_assert!(
@@ -1000,7 +1017,7 @@ fn handle_replacement_choice_inner(
                 ProposedEvent::BeginPhase { .. } => {
                     debug_assert!(
                         false,
-                        "handle_replacement_choice: BeginPhase is a mandatory-skip replacement and should never surface as a choice"
+                        "handle_replacement_choice: a BeginPhase choice resumes through its parked transition"
                     );
                 }
                 // CR 701.31 + CR 901.9c: Planeswalk is a mandatory full-replacement

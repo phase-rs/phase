@@ -10590,7 +10590,7 @@ fn pass_priority_once_with_pipeline(
             // the leave commits.
             match turns::advance_phase_once(state, events) {
                 turns::AdvancePhaseOnce::Deferred => false,
-                turns::AdvancePhaseOnce::Entry(_) | turns::AdvancePhaseOnce::Skipped => true,
+                turns::AdvancePhaseOnce::Entry(_) => true,
             }
         };
         if retry_advances {
@@ -12801,7 +12801,7 @@ pub(super) fn settle_deferred_phase_transition(
         }
         match turns::advance_phase_once(state, events) {
             turns::AdvancePhaseOnce::Deferred => {}
-            turns::AdvancePhaseOnce::Entry(_) | turns::AdvancePhaseOnce::Skipped => {
+            turns::AdvancePhaseOnce::Entry(_) => {
                 return turns::auto_advance(state, events);
             }
         }

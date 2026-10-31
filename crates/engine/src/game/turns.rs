@@ -67,6 +67,11 @@ fn last_step_of_phase(phase: Phase) -> Phase {
 /// added step was added after, or, with no added step open either, the one
 /// that holds the current step.
 pub(crate) fn final_step_of_phase_in_progress(state: &GameState) -> Phase {
+    final_step_of_phase_holding(state, state.phase)
+}
+
+/// [`final_step_of_phase_in_progress`] with `step` as the current step.
+fn final_step_of_phase_holding(state: &GameState, step: Phase) -> Phase {
     state
         .extra_phase_resume
         .iter()
@@ -82,7 +87,7 @@ pub(crate) fn final_step_of_phase_in_progress(state: &GameState) -> Phase {
                 state
                     .extra_phase_resume
                     .first()
-                    .map_or(state.phase, |unit| unit.anchor),
+                    .map_or(step, |unit| unit.anchor),
             )
         })
 }
@@ -224,37 +229,32 @@ impl ScheduledSuccessor {
 }
 
 /// CR 500.5: Advance through phase/step successors until one phase entry has
-/// been committed. A skipped successor is still a distinct one-hop transition:
-/// the loop, rather than recursive re-entry, advances past it.
+/// been committed.
 pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    loop {
-        match advance_phase_once(state, events) {
-            AdvancePhaseOnce::Entry(entry) => match *entry {
-                PhaseEntryOutcome::Entered { successor } => {
-                    debug_assert_eq!(state.phase, successor);
-                    return;
-                }
-                PhaseEntryOutcome::Paused {
-                    successor,
-                    waiting_for,
-                    progress,
-                } => {
-                    debug_assert_eq!(state.phase, successor);
-                    debug_assert_eq!(state.waiting_for, *waiting_for);
-                    debug_assert_eq!(
-                        state.pending_phase_transition_progress.as_ref(),
-                        Some(progress.as_ref())
-                    );
-                    return;
-                }
-            },
-            AdvancePhaseOnce::Skipped => {}
-            // A turn boundary is not allowed to consume any phase or turn
-            // state while a popped resolution carrier still owns the priority
-            // checkpoint.  The engine priority pipeline will settle that
-            // carrier and retry the same boundary.
-            AdvancePhaseOnce::Deferred => return,
-        }
+    match advance_phase_once(state, events) {
+        AdvancePhaseOnce::Entry(entry) => match *entry {
+            PhaseEntryOutcome::Entered { successor } => {
+                debug_assert_eq!(state.phase, successor);
+            }
+            PhaseEntryOutcome::Paused {
+                successor,
+                waiting_for,
+                progress,
+            } => {
+                debug_assert_eq!(state.phase, successor);
+                debug_assert_eq!(state.waiting_for, *waiting_for);
+                debug_assert_eq!(
+                    state.pending_phase_transition_progress.as_ref(),
+                    Some(progress.as_ref())
+                );
+            }
+            PhaseEntryOutcome::AwaitingBeginChoice => {}
+        },
+        // A turn boundary is not allowed to consume any phase or turn
+        // state while a popped resolution carrier still owns the priority
+        // checkpoint.  The engine priority pipeline will settle that
+        // carrier and retry the same boundary.
+        AdvancePhaseOnce::Deferred => {}
     }
 }
 
@@ -270,22 +270,45 @@ pub(in crate::game) enum PhaseEntryOutcome {
         waiting_for: Box<WaitingFor>,
         progress: Box<crate::types::game_state::PhaseTransitionProgress>,
     },
+    /// CR 616.1: competing replacements of the phase's beginning await the
+    /// affected player's choice. Nothing has been entered: `state.phase` is still
+    /// the step left, and [`resume_phase_begin_choice`] finishes the transition.
+    AwaitingBeginChoice,
 }
 
-/// One production phase-transition hop. This remains private until the
-/// mandatory-transition adapter can request exactly one committed unit; normal
-/// callers retain the existing "advance through skipped steps" behavior via
-/// [`advance_phase`].
+/// The result of one committed phase transition: the step that actually began,
+/// or a transition deferred with `state.phase` on the step to retry leaving.
 pub(in crate::game) enum AdvancePhaseOnce {
+    Entry(Box<PhaseEntryOutcome>),
+    Deferred,
+}
+
+/// CR 500.11: leave the current step and proceed to the next step that actually
+/// begins. A skipped step is "as though it didn't exist", so it is never
+/// reported to a caller: `state.phase` never rests on a skipped step for
+/// `auto_advance` to run its arm.
+pub(in crate::game) fn advance_phase_once(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> AdvancePhaseOnce {
+    loop {
+        match advance_phase_hop(state, events) {
+            PhaseHop::Entry(entry) => return AdvancePhaseOnce::Entry(entry),
+            PhaseHop::Skipped => {}
+            PhaseHop::Deferred => return AdvancePhaseOnce::Deferred,
+        }
+    }
+}
+
+/// One successor of the step being left. `Skipped` leaves `state.phase` on the
+/// skipped step, so the next hop computes the successor after it.
+enum PhaseHop {
     Entry(Box<PhaseEntryOutcome>),
     Skipped,
     Deferred,
 }
 
-pub(in crate::game) fn advance_phase_once(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) -> AdvancePhaseOnce {
+fn advance_phase_hop(state: &mut GameState, events: &mut Vec<GameEvent>) -> PhaseHop {
     // Check before consuming an extra phase, running end-combat teardown, or
     // mutating the outgoing turn. A nested resolution continuation can leave
     // the stack empty while its popped carrier is still live; that is not a
@@ -297,7 +320,7 @@ pub(in crate::game) fn advance_phase_once(
     let successor = ScheduledSuccessor::plan(state, leaving);
     let turn_ends = successor.ends_turn();
     if turn_ends && phase_transition_requires_settlement(state) {
-        return AdvancePhaseOnce::Deferred;
+        return PhaseHop::Deferred;
     }
     // CR 500.8: Extra phases are inserted *directly after* their anchor phase
     // (e.g., Aurelia's "after this phase" extra combat is inserted after the
@@ -310,8 +333,10 @@ pub(in crate::game) fn advance_phase_once(
     let (removed, next) = take_scheduled_successor(state, successor);
 
     // CR 511.3: End Combat teardown happens when the step ends, after its
-    // priority window, not when the step begins.
-    if leaving == Phase::EndCombat {
+    // priority window, not when the step begins. CR 614.10a: a skipped combat
+    // phase never began, so what waits for the end of a combat (Trench Behemoth's
+    // "next combat phase") waits past it.
+    if leaving == Phase::EndCombat && state.combat.is_some() {
         complete_end_combat_teardown(state);
     }
 
@@ -337,24 +362,139 @@ pub(in crate::game) fn advance_phase_once(
         // CR 508.8: a combat step with nothing attacking is skipped before it
         // could begin, so it proposes no begin event.
         let proposed = ProposedEvent::begin_phase(state.active_player, next);
-        if combat_step_skipped(state, next)
-            || matches!(
-                replacement::replace_event(state, proposed, events),
-                ReplacementResult::Prevented
-            )
-        {
-            // CR 500.11: "To skip a step, phase, or turn is to proceed past it
-            // as though it didn't exist." Advance `state.phase` past the skipped
-            // phase so the next loop iteration computes the phase AFTER it, then
-            // let the outer advance loop compute the phase AFTER it.
-            state.phase = next;
-            return AdvancePhaseOnce::Skipped;
+        let begin = if combat_step_skipped(state, next) {
+            ReplacementResult::Prevented
+        } else {
+            replacement::replace_event(state, proposed, events)
+        };
+        match begin {
+            ReplacementResult::Prevented => {
+                skip_past_prevented_step(state, next);
+                return PhaseHop::Skipped;
+            }
+            ReplacementResult::NeedsChoice(player) => {
+                park_phase_begin_choice(state, next, removed, player);
+                return PhaseHop::Entry(Box::new(PhaseEntryOutcome::AwaitingBeginChoice));
+            }
+            ReplacementResult::Execute(_) => {}
         }
     }
 
+    PhaseHop::Entry(Box::new(begin_scheduled_step(
+        state,
+        next,
+        removed,
+        events,
+        apnap_anchor,
+    )))
+}
+
+/// CR 500.11: "To skip a step, phase, or turn is to proceed past it as though it
+/// didn't exist." Leaves `state.phase` past what was skipped, so the next hop
+/// computes the phase AFTER it. Every skip of a beginning of combat step is of
+/// the whole combat phase, whose remaining steps never begin.
+fn skip_past_prevented_step(state: &mut GameState, step: Phase) {
+    state.phase = if step == Phase::BeginCombat {
+        final_step_of_skipped_phase(state, step)
+    } else {
+        step
+    };
+}
+
+/// CR 616.1: hold the transition to `next` on the affected player's choice among
+/// the replacements competing to replace its beginning. The cursor gates the turn
+/// interpreter and keeps the entry `take_scheduled_successor` already committed.
+fn park_phase_begin_choice(
+    state: &mut GameState,
+    next: Phase,
+    scheduled: Option<ExtraPhase>,
+    player: PlayerId,
+) {
+    use crate::types::game_state::{PhaseTransitionDrainState, PhaseTransitionProgress};
+
+    state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+    state.pending_phase_transition_progress = Some(PhaseTransitionProgress {
+        remaining_players: std::collections::VecDeque::new(),
+        next_phase: next,
+        previous_phase: Some(state.phase),
+        owed_life_loss: std::collections::VecDeque::new(),
+        in_flight_life_loss: None,
+        entering_cleanup: false,
+        drain_state: PhaseTransitionDrainState::AwaitingBeginChoice,
+        scheduled_begin: scheduled,
+    });
+}
+
+/// CR 616.1: finish the transition [`park_phase_begin_choice`] held, with the
+/// answered replacement pipeline's `result`. Returns the beat the game rests on.
+pub(super) fn resume_phase_begin_choice(
+    state: &mut GameState,
+    result: ReplacementResult,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    let Some(progress) = state.pending_phase_transition_progress.take() else {
+        debug_assert!(
+            false,
+            "a BeginPhase choice resumed with no parked transition"
+        );
+        return state.waiting_for.clone();
+    };
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    let next = progress.next_phase;
+    match result {
+        ReplacementResult::Prevented => {
+            skip_past_prevented_step(state, next);
+            if matches!(
+                advance_phase_once(state, events),
+                AdvancePhaseOnce::Deferred
+            ) {
+                state.deferred_step_trigger_resume = None;
+                return super::engine::settle_deferred_phase_transition(state, events);
+            }
+        }
+        ReplacementResult::Execute(_) => {
+            begin_scheduled_step(state, next, progress.scheduled_begin, events, None);
+        }
+        ReplacementResult::NeedsChoice(_) => {
+            debug_assert!(false, "an unanswered BeginPhase choice is still parked");
+        }
+    }
+    // CR 117.3a: the turn interpreter stopped at the prompt, and its owed run
+    // reaches the step that began.
+    resume_deferred_step_triggers(state, events).unwrap_or_else(|| state.waiting_for.clone())
+}
+
+/// CR 800.4a: the affected player left with their choice unanswered, so the
+/// transition it held is gone with it. The turn continues through CR 800.4j's
+/// skip of the departed player's remaining phases.
+pub(super) fn abandon_phase_begin_choice(state: &mut GameState) {
+    let parked = state
+        .pending_phase_transition_progress
+        .as_ref()
+        .is_some_and(|progress| {
+            progress.drain_state
+                == crate::types::game_state::PhaseTransitionDrainState::AwaitingBeginChoice
+        });
+    if parked {
+        state.pending_phase_transition_progress = None;
+        state.deferred_step_trigger_resume = None;
+    }
+}
+
+/// Enter `next`, the step a committed transition reached. `scheduled` is the
+/// schedule entry it came from, if any.
+fn begin_scheduled_step(
+    state: &mut GameState,
+    next: Phase,
+    scheduled: Option<ExtraPhase>,
+    events: &mut Vec<GameEvent>,
+    apnap_anchor: Option<PlayerId>,
+) -> PhaseEntryOutcome {
     // CR 500.8 + CR 508.1c: activate the scheduled combat's attacker restriction
     // when (and only when) that BeginCombat begins. A natural combat consumes no
-    // extra-phase entry, so `removed` is `None` and the restriction clears —
+    // extra-phase entry, so `scheduled` is `None` and the restriction clears —
     // natural combats are never restricted. The field persists untouched through
     // DeclareAttackers/DeclareBlockers/CombatDamage (entered with next != BeginCombat)
     // and is cleared at end of combat (CR 511.3).
@@ -362,15 +502,27 @@ pub(in crate::game) fn advance_phase_once(
     // `passes_combat_attacker_restriction` can evaluate source-relative
     // restriction predicates against the scheduling spell's actual object.
     if next == Phase::BeginCombat {
-        state.current_combat_attacker_restriction = removed
+        state.current_combat_attacker_restriction = scheduled
             .as_ref()
             .and_then(|ep| ep.attacker_restriction.clone());
-        state.current_combat_attacker_restriction_source = removed
+        state.current_combat_attacker_restriction_source = scheduled
             .as_ref()
             .and_then(|ep| ep.attacker_restriction_source);
     }
 
-    AdvancePhaseOnce::Entry(Box::new(enter_phase(state, next, events, apnap_anchor)))
+    enter_phase(state, next, events, apnap_anchor)
+}
+
+/// CR 500.11: the final step of the skipped phase that starts at `first`, none
+/// of whose steps begin. Successors go through the schedule so the phase ends
+/// where an added unit (CR 500.8) says it does.
+fn final_step_of_skipped_phase(state: &mut GameState, first: Phase) -> Phase {
+    let mut step = first;
+    while step != final_step_of_phase_holding(state, step) {
+        let successor = ScheduledSuccessor::plan(state, step);
+        (_, step) = take_scheduled_successor(state, successor);
+    }
+    step
 }
 
 /// A phase boundary must not retire a resolution owner or a typed continuation
@@ -636,6 +788,7 @@ fn enter_phase(
             in_flight_life_loss: None,
             entering_cleanup,
             drain_state: crate::types::game_state::PhaseTransitionDrainState::Ready,
+            scheduled_begin: None,
         });
     drain_pending_phase_transition_progress(state, events);
     match state.pending_phase_transition_progress.clone() {
@@ -2061,13 +2214,11 @@ pub fn begin_untap_or_subset_prompt(
         }));
     }
     execute_untap_with_choices(state, events, &chosen_not_to_untap);
-    // CR 500.5: Untap completion owns one phase-entry hop. The production
-    // `auto_advance` loop remains responsible for repeating through any
-    // skipped successor, so a bounded prospective unit cannot inherit that
-    // loop authority through this helper.
+    // CR 500.5: Untap completion owns one committed phase entry;
+    // `advance_phase_once` proceeds past any skipped successor.
     match advance_phase_once(state, events) {
         AdvancePhaseOnce::Deferred => UntapCompletion::LeaveDeferred,
-        AdvancePhaseOnce::Entry(_) | AdvancePhaseOnce::Skipped => UntapCompletion::Advanced,
+        AdvancePhaseOnce::Entry(_) => UntapCompletion::Advanced,
     }
 }
 
@@ -2922,6 +3073,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 
     // CR 514.2: Prune "until end of turn" transient continuous effects.
     super::layers::prune_end_of_turn_effects(state);
+    end_turn_limited_combat_phase_skips(state);
     // CR 514.2: EndOfTurn mana retention survives the End → Cleanup phase
     // boundary and expires as part of this cleanup action. The units remain in
     // the pool until the ordinary CR 500.5 / CR 703.4q cleanup-exit drain.
@@ -3438,6 +3590,14 @@ fn consume_next_step_skip(state: &mut GameState, step: Phase) -> bool {
     true
 }
 
+/// CR 514.2: a "skips their next combat phase this turn" that found no further
+/// combat phase ends with the turn.
+fn end_turn_limited_combat_phase_skips(state: &mut GameState) {
+    state
+        .pending_combat_phase_skips
+        .retain(|skip| skip.duration != Some(crate::types::ability::Duration::UntilEndOfTurn));
+}
+
 /// CR 500.11 + CR 614.10: why the untap, upkeep or draw step about to begin
 /// is skipped instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3454,11 +3614,7 @@ enum StepSkip {
 /// `step` for the active player. Only the untap, upkeep and draw steps are
 /// decided here. The begin-phase replacement pipeline (CR 614.1b) runs first;
 /// CR 508.8, CR 724.1d / CR 724.2d and CR 800.4 skip past a step without
-/// entering it. When the pipeline prevents a step, `advance_phase_once` sets
-/// `state.phase` to it without calling `enter_phase` and returns `Skipped`; a
-/// caller that discards that result lets `auto_advance` run that step's arm,
-/// and the untap, upkeep and draw arms ask this function again. Pure: a pending
-/// one-shot skip is reported, not used up.
+/// entering it. Pure: a pending one-shot skip is reported, not used up.
 fn step_skip(state: &GameState, step: Phase) -> Option<StepSkip> {
     let first_draw = match step {
         // CR 103.8: The starting player skips their first-turn draw step only
@@ -3686,16 +3842,19 @@ fn skip_eliminated_active_turn(
     events: &mut Vec<GameEvent>,
 ) -> AutoAdvanceStep {
     state.phase = Phase::Cleanup;
+    // CR 800.4j + CR 514.2: the turn still ends without an active player, and
+    // `execute_cleanup` isn't reached from here, so a skip limited to this turn
+    // can't carry into the target's next turn.
+    end_turn_limited_combat_phase_skips(state);
     // CR 500.8 + CR 800.4: the phases added to the turn are part of the
     // remainder skipped here; a unit still scheduled or open would otherwise
     // follow this cleanup step instead of the next turn.
     discard_scheduled_units(state);
     // CR 800.4 + CR 500.5: leaving the cleanup step is one transition unit
-    // (`advance_phase_once`); any subsequently skipped step remains work for
-    // the outer interpreter.
+    // (`advance_phase_once`).
     match advance_phase_once(state, events) {
         AdvancePhaseOnce::Deferred => AutoAdvanceStep::Deferred,
-        AdvancePhaseOnce::Entry(_) | AdvancePhaseOnce::Skipped => AutoAdvanceStep::Continue,
+        AdvancePhaseOnce::Entry(_) => AutoAdvanceStep::Continue,
     }
 }
 
@@ -3835,14 +3994,14 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // CR 502.4 / CR 117.3a: No player receives priority during the untap step.
             match advance_phase_once(state, events) {
                 AdvancePhaseOnce::Deferred => return AutoAdvanceStep::Deferred,
-                AdvancePhaseOnce::Entry(_) | AdvancePhaseOnce::Skipped => {}
+                AdvancePhaseOnce::Entry(_) => {}
             }
         }
         Phase::Upkeep => {
             if should_skip_step_now(state, Phase::Upkeep) {
                 match advance_phase_once(state, events) {
                     AdvancePhaseOnce::Deferred => return AutoAdvanceStep::Deferred,
-                    AdvancePhaseOnce::Entry(_) | AdvancePhaseOnce::Skipped => {}
+                    AdvancePhaseOnce::Entry(_) => {}
                 }
                 return AutoAdvanceStep::Continue;
             }
@@ -3909,7 +4068,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             if should_skip_step_now(state, Phase::Draw) {
                 match advance_phase_once(state, events) {
                     AdvancePhaseOnce::Deferred => return AutoAdvanceStep::Deferred,
-                    AdvancePhaseOnce::Entry(_) | AdvancePhaseOnce::Skipped => {}
+                    AdvancePhaseOnce::Entry(_) => {}
                 }
                 return AutoAdvanceStep::Continue;
             }
@@ -3991,15 +4150,6 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             ));
         }
         Phase::DeclareBlockers => {
-            // CR 508.8: a caller that ran this arm after a skip leaves the step unentered.
-            if combat_step_skipped(state, Phase::DeclareBlockers) {
-                return match advance_phase_once(state, events) {
-                    AdvancePhaseOnce::Deferred => AutoAdvanceStep::Deferred,
-                    AdvancePhaseOnce::Entry(_) | AdvancePhaseOnce::Skipped => {
-                        AutoAdvanceStep::Continue
-                    }
-                };
-            }
             // CR 509.1: Defending player declares blockers as a turn-based action.
             super::combat::prune_attackers_not_in_play(state);
             let has_attackers = super::combat::has_attackers_in_play(state);
@@ -4023,15 +4173,6 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             });
         }
         Phase::CombatDamage => {
-            // CR 508.8: a caller that ran this arm after a skip leaves the step unentered.
-            if combat_step_skipped(state, Phase::CombatDamage) {
-                return match advance_phase_once(state, events) {
-                    AdvancePhaseOnce::Deferred => AutoAdvanceStep::Deferred,
-                    AdvancePhaseOnce::Entry(_) | AdvancePhaseOnce::Skipped => {
-                        AutoAdvanceStep::Continue
-                    }
-                };
-            }
             // CR 510.1a + CR 613.4c: Combat damage equals a creature's power as determined
             // by the layer system (layer 7c applies P/T counters). Flush here so
             // combat_damage_amount reads evaluated power, not stale base power. commit_attackers
@@ -4119,7 +4260,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             }
             match advance_phase_once(state, events) {
                 AdvancePhaseOnce::Deferred => return AutoAdvanceStep::Deferred,
-                AdvancePhaseOnce::Entry(_) | AdvancePhaseOnce::Skipped => {}
+                AdvancePhaseOnce::Entry(_) => {}
             }
             // advance_phase_once handles start_next_turn when wrapping Cleanup -> Untap
             // Continue loop to process next turn's phases
@@ -4356,7 +4497,7 @@ mod tests {
     }
 
     #[test]
-    fn production_phase_handoffs_do_not_reenter_the_looping_advance_helper() {
+    fn production_phase_handoffs_use_advance_phase_once() {
         for (name, source, test_marker) in [
             (
                 "turns",
@@ -4379,7 +4520,7 @@ mod tests {
                 .expect("production source precedes its tests");
             assert!(
                 !source[..production_end].contains("advance_phase(state, events)"),
-                "{name} must use advance_phase_once before auto_advance; the outer interpreter owns repetition"
+                "{name} must use advance_phase_once before auto_advance so a deferred transition is reported"
             );
         }
     }
@@ -4388,6 +4529,9 @@ mod tests {
     fn empty_attacker_completion_clears_the_combat_restriction() {
         let mut state = setup();
         state.phase = Phase::DeclareAttackers;
+        // CR 500.11: this combat began; a skipped one, as though it didn't exist,
+        // has no end of combat to tear down.
+        state.combat = Some(crate::game::combat::CombatState::default());
         state.current_combat_attacker_restriction = Some(TargetFilter::Any);
         state.current_combat_attacker_restriction_source = Some(ObjectId(99));
         let mut events = Vec::new();
@@ -13122,6 +13266,7 @@ card into your hand at the beginning of your next end step.";
                 }),
                 entering_cleanup: false,
                 drain_state: crate::types::game_state::PhaseTransitionDrainState::Ready,
+                scheduled_begin: None,
             });
 
         // A replacement effect may have changed what was actually lost, so the
@@ -13602,6 +13747,72 @@ card into your hand at the beginning of your next end step.";
         );
     }
 
+    /// CR 616.1 + CR 500.8: a declined replacement of a combat's beginning lets it
+    /// begin after the answer, with what its schedule entry carried. Nothing of the
+    /// step happens before then. No printed card makes a phase's beginning optional
+    /// (the nearest is False Peace, which is mandatory: "Target player skips all
+    /// combat phases of their next turn."); `ReplacementMode::Optional` on a
+    /// BeginPhase definition is the shape the engine can express that reaches this
+    /// arm, so the object here is synthetic.
+    #[test]
+    fn phase_begin_choice_keeps_the_scheduled_entry_until_the_step_begins() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::ReplacementMode;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.phase = Phase::EndCombat;
+        state.extra_phases.push(ExtraPhase {
+            anchor: Phase::EndCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
+            attacker_restriction: Some(TargetFilter::Any),
+            attacker_restriction_source: Some(ObjectId(99)),
+            id: Default::default(),
+        });
+        let mut obj = GameObject::new(
+            ObjectId(200),
+            CardId(99),
+            PlayerId(1),
+            "MaySkipPhase".to_string(),
+            Zone::Battlefield,
+        );
+        obj.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::BeginPhase)
+                .mode(ReplacementMode::Optional { decline: None })]
+            .into();
+        state.objects.insert(ObjectId(200), obj);
+        state.battlefield.push_back(ObjectId(200));
+
+        let mut events = Vec::new();
+        assert!(matches!(
+            advance_phase_once(&mut state, &mut events),
+            AdvancePhaseOnce::Entry(entry)
+                if matches!(*entry, PhaseEntryOutcome::AwaitingBeginChoice)
+        ));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert_eq!(state.phase, Phase::EndCombat);
+        assert!(state.current_combat_attacker_restriction.is_none());
+
+        let result = replacement::continue_replacement(&mut state, 1, &mut events);
+        assert!(matches!(result, ReplacementResult::Execute(_)));
+        resume_phase_begin_choice(&mut state, result, &mut events);
+
+        assert_eq!(state.phase, Phase::BeginCombat);
+        assert!(state.pending_phase_transition_progress.is_none());
+        assert_eq!(
+            state.current_combat_attacker_restriction,
+            Some(TargetFilter::Any)
+        );
+        assert_eq!(
+            state.current_combat_attacker_restriction_source,
+            Some(ObjectId(99))
+        );
+    }
+
     #[test]
     fn phase_pipeline_skip_is_one_transition_hop() {
         use crate::game::game_object::GameObject;
@@ -13628,8 +13839,8 @@ card into your hand at the beginning of your next end step.";
 
         let mut events = Vec::new();
         assert!(matches!(
-            advance_phase_once(&mut state, &mut events),
-            AdvancePhaseOnce::Skipped
+            advance_phase_hop(&mut state, &mut events),
+            PhaseHop::Skipped
         ));
         assert_eq!(state.phase, Phase::Upkeep);
         assert!(
@@ -13642,8 +13853,8 @@ card into your hand at the beginning of your next end step.";
         state.objects.remove(&ObjectId(200));
         state.battlefield.clear();
         assert!(matches!(
-            advance_phase_once(&mut state, &mut events),
-            AdvancePhaseOnce::Entry(entry)
+            advance_phase_hop(&mut state, &mut events),
+            PhaseHop::Entry(entry)
                 if matches!(*entry, PhaseEntryOutcome::Entered { successor: Phase::Draw })
         ));
     }

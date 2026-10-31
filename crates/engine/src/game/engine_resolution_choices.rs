@@ -6115,7 +6115,7 @@ pub(super) fn handle_resolution_choice(
             {
                 match turns::advance_phase_once(state, events) {
                     turns::AdvancePhaseOnce::Deferred => {}
-                    turns::AdvancePhaseOnce::Entry(_) | turns::AdvancePhaseOnce::Skipped => {
+                    turns::AdvancePhaseOnce::Entry(_) => {
                         // CR 502.3 + CR 500.8: the run can enter an added untap step
                         // whose leave ends the turn and defers; the deferral goes to
                         // the settlement an untap-choice answer uses.
