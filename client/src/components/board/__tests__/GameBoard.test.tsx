@@ -189,7 +189,7 @@ describe("GameBoard multiplayer layout", () => {
     state.battlefield = objects.map((object) => object.id);
     useGameStore.setState({ gameState: state });
     useUiStore.setState({ selectedAttackers: [2] });
-    const { container } = render(<GameBoard effectiveMultiplayerBoardLayout={layout} showOpponentCards />);
+    const { container } = render(<GameBoard effectiveMultiplayerBoardLayout={layout} />);
     const seats = layout === "split" ? [0, 1, 2, 3] : [0, 2];
     for (const enabled of [true, false, true]) {
       act(() => usePreferencesStore.getState().setShowOwnerPrintings(enabled));
