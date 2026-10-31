@@ -1561,9 +1561,14 @@ pub(crate) fn outside_game_copy_printing(
     face: &CardFace,
 ) -> Option<CardPrinting> {
     let record = pool.printings.get().as_deref()?;
-    let (registered, current) = match section {
-        DeckSection::Sideboard => (&pool.registered_sideboard, &pool.current_sideboard),
-        DeckSection::Companion => (&pool.registered_companion, &pool.current_companion),
+    // Only the sideboard has an outside-the-game effect that brings copies in mid-game.
+    let (registered, current, brought_in) = match section {
+        DeckSection::Sideboard => (
+            &pool.registered_sideboard,
+            &pool.current_sideboard,
+            brought_in,
+        ),
+        DeckSection::Companion => (&pool.registered_companion, &pool.current_companion, &[][..]),
         // No outside-the-game creator takes from these; their copies are stamped at load
         // by `entry_copies`.
         DeckSection::MainDeck
@@ -1584,19 +1589,16 @@ pub(crate) fn outside_game_copy_printing(
     };
     // A multi-pick outside-game choice calls the sideboard route once per selection, and
     // each call adds 1 to `count`, so copies are counted, not uses.
-    let brought: u32 = match section {
-        DeckSection::Sideboard => brought_in
-            .iter()
-            .filter(|used| used.player == pool.player)
-            .filter(|used| {
-                current
-                    .get(used.sideboard_index)
-                    .is_some_and(|entry| deck_face_identity(&entry.card) == identity)
-            })
-            .map(|used| used.count)
-            .sum(),
-        _ => 0,
-    };
+    let brought: u32 = brought_in
+        .iter()
+        .filter(|used| used.player == pool.player)
+        .filter(|used| {
+            current
+                .get(used.sideboard_index)
+                .is_some_and(|entry| deck_face_identity(&entry.card) == identity)
+        })
+        .map(|used| used.count)
+        .sum();
     let taken = copies(registered).saturating_sub(copies(current)) + brought;
     record.printing_of(section, face, taken).cloned()
 }

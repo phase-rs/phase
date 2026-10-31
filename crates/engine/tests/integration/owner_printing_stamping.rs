@@ -1478,7 +1478,7 @@ mod post_load_creators {
     use engine::types::events::GameEvent;
     use engine::types::game_state::{
         CastPaymentMode, CompanionChoiceSource, CompanionDeclaration, CompanionRevealChoice,
-        OutsideGameChoiceSource, PersistedGameState, WaitingFor,
+        OutsideGameCardUse, OutsideGameChoiceSource, PersistedGameState, WaitingFor,
     };
     use engine::types::identifiers::ObjectId;
     use engine::types::mana::{ManaType, ManaUnit};
@@ -1809,8 +1809,83 @@ mod post_load_creators {
         assert_fresh_printing(&runner, companion, Some("qualified-companion"));
     }
 
-    /// The state after: a sideboard companion revealed (copy 0 of the entry), a Living Wish
-    /// fetch from the same entry (copy 1), and the companion put into hand.
+    /// Casts a Living Wish from P0's hand and brings sideboard slot 0 in, expecting
+    /// `available` copies to be offered. Returns the new hand object (found by a hand-id
+    /// diff, since every copy shares one oracle id), the Wish, and the choice's events.
+    fn fetch_with_living_wish(
+        runner: &mut GameRunner,
+        available: u32,
+        expected_printing: &str,
+    ) -> (ObjectId, ObjectId, Vec<GameEvent>) {
+        add_pool_mana(runner, &[ManaType::Green, ManaType::Colorless]);
+        let before = hand(runner, P0);
+        let wish = before
+            .iter()
+            .copied()
+            .find(|id| runner.state().objects[id].name == "Living Wish")
+            .expect("the hand holds Living Wish");
+        let card_id = runner.state().objects[&wish].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: wish,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("Living Wish is castable");
+        for _ in 0..8 {
+            if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority to resolve Living Wish");
+            } else {
+                break;
+            }
+        }
+        let WaitingFor::OutsideGameChoice {
+            player,
+            choices,
+            reveal,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "expected the outside-game choice, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert!(*reveal);
+        assert!(
+            matches!(
+                choices.as_slice(),
+                [entry] if entry.count == available
+                    && matches!(
+                        &entry.source,
+                        OutsideGameChoiceSource::Sideboard { sideboard_index: 0, .. }
+                    )
+            ),
+            "{choices:?}"
+        );
+        let result = runner
+            .act(GameAction::ChooseOutsideGameCards {
+                selections: vec![OutsideGameSelection::Sideboard { sideboard_index: 0 }],
+            })
+            .expect("the sideboard copy is brought in");
+        let fetched = only_new(&before, &hand(runner, P0));
+        let object = &runner.state().objects[&fetched];
+        assert_eq!(object.name, LURRUS);
+        assert_eq!(
+            object.printed_ref.as_ref().expect("printed ref").oracle_id,
+            LURRUS_ORACLE_ID
+        );
+        assert_fresh_printing(runner, fetched, Some(expected_printing));
+        (fetched, wish, result.events)
+    }
+
+    /// The state after: a sideboard companion revealed (copy 0 of a four-copy entry), three
+    /// Living Wish fetches from the same entry (copies 1-3), and the companion put into hand.
+    /// `fetched` is the first fetch.
     struct CompanionAndFetch {
         runner: GameRunner,
         fetched: ObjectId,
@@ -1823,13 +1898,15 @@ mod post_load_creators {
         let companion_slot = choice(DeckSection::Companion, &key, 1, "companion-slot");
         let first = choice(DeckSection::Sideboard, &key, 1, "q-first");
         let second = choice(DeckSection::Sideboard, &key, 1, "q-second");
+        let third = choice(DeckSection::Sideboard, &key, 1, "q-third");
+        let fourth = choice(DeckSection::Sideboard, &key, 1, "q-fourth");
         let list = DeckList {
             player: PlayerDeckList {
                 main_deck: names(&[("Living Wish", 20)]),
-                sideboard: vec![key.clone(); 2],
+                sideboard: vec![key.clone(); 4],
                 // Dropped from the pool in Standard; its row is retained, first.
                 companion: vec![key.clone()],
-                printings: vec![companion_slot, first, second],
+                printings: vec![companion_slot, first, second, third, fourth],
                 ..Default::default()
             },
             opponent: PlayerDeckList {
@@ -1856,7 +1933,7 @@ mod post_load_creators {
         );
         assert_eq!(companion_printing(&runner, P0), Some("q-first"));
         // Reach: the removal the ordinal rule reads.
-        assert_eq!(runner.state().deck_pools[0].current_sideboard[0].count, 1);
+        assert_eq!(runner.state().deck_pools[0].current_sideboard[0].count, 3);
 
         let jegantha = "Jegantha, the Wellspring";
         assert_offer(
@@ -1914,71 +1991,21 @@ mod post_load_creators {
         let mut runner = GameRunner::from_state(restored);
 
         play_to_main(&mut runner);
-        add_pool_mana(&mut runner, &[ManaType::Green, ManaType::Colorless]);
-        let before = hand(&runner, P0);
-        let wish = before
-            .iter()
-            .copied()
-            .find(|id| runner.state().objects[id].name == "Living Wish")
-            .expect("the opening hand holds Living Wish");
-        let card_id = runner.state().objects[&wish].card_id;
+        // Fixture setup: P1 already brought its own sideboard slot 0 in. P0's slot 0 is
+        // Lurrus, so a brought-in sum that ignored the seat would count this use.
         runner
-            .act(GameAction::CastSpell {
-                object_id: wish,
-                card_id,
-                targets: vec![],
-                payment_mode: CastPaymentMode::Auto,
-            })
-            .expect("Living Wish is castable");
-        for _ in 0..8 {
-            if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
-                runner
-                    .act(GameAction::PassPriority)
-                    .expect("pass priority to resolve Living Wish");
-            } else {
-                break;
-            }
-        }
-        let WaitingFor::OutsideGameChoice {
-            player,
-            choices,
-            reveal,
-            ..
-        } = &runner.state().waiting_for
-        else {
-            panic!(
-                "expected the outside-game choice, got {:?}",
-                runner.state().waiting_for
-            );
-        };
-        assert_eq!(*player, P0);
-        assert!(*reveal);
-        assert!(
-            matches!(
-                choices.as_slice(),
-                [entry] if entry.count == 1
-                    && matches!(
-                        &entry.source,
-                        OutsideGameChoiceSource::Sideboard { sideboard_index: 0, .. }
-                    )
-            ),
-            "{choices:?}"
-        );
-        let result = runner
-            .act(GameAction::ChooseOutsideGameCards {
-                selections: vec![OutsideGameSelection::Sideboard { sideboard_index: 0 }],
-            })
-            .expect("the sideboard copy is brought in");
-        let after_fetch = hand(&runner, P0);
-        let hand_before_cast: Vec<ObjectId> = before.clone();
-        let fetched = only_new(&hand_before_cast, &after_fetch);
-        let object = &runner.state().objects[&fetched];
-        assert_eq!(object.name, LURRUS);
-        assert_eq!(
-            object.printed_ref.as_ref().expect("printed ref").oracle_id,
-            LURRUS_ORACLE_ID
-        );
-        assert_fresh_printing(&runner, fetched, Some("q-second"));
+            .state_mut()
+            .outside_game_cards_brought_in
+            .push(OutsideGameCardUse {
+                player: P1,
+                sideboard_index: 0,
+                count: 1,
+            });
+
+        // Three Living Wish fetches from the one entry: the sideboard holds four copies,
+        // the companion took copy 0, so the fetches take copies 1, 2 and 3. The second
+        // fetch sees one use of count 1, the third one use of count 2 (copies, not uses).
+        let (fetched, wish, first_events) = fetch_with_living_wish(&mut runner, 3, "q-second");
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::Priority { player } if player == P0
@@ -1987,23 +2014,28 @@ mod post_load_creators {
         assert_eq!(runner.state().objects[&wish].zone, Zone::Exile);
         // Positive reveal control for the hidden-information test: the fetch revealed it.
         assert!(runner.state().revealed_cards.contains(&fetched));
-        assert!(result.events.iter().any(|event| matches!(
+        assert!(first_events.iter().any(|event| matches!(
             event,
             GameEvent::CardsRevealed { card_ids, .. } if card_ids.contains(&fetched)
         )));
-        // Both copies of the entry are now taken: registered 2 - current 1 + brought in 1.
+        let (second_fetch, _, _) = fetch_with_living_wish(&mut runner, 2, "q-third");
+        let (third_fetch, _, _) = fetch_with_living_wish(&mut runner, 1, "q-fourth");
+        // All four copies of the entry are taken. This asks the record alone; the fetches
+        // above are what exercise the brought-in term of the ordinal.
         let record = runner.state().deck_pools[0]
             .printings
             .get()
             .as_deref()
             .expect("P0 record");
         assert!(record
-            .printing_of(DeckSection::Sideboard, &qualified_face, 2)
+            .printing_of(DeckSection::Sideboard, &qualified_face, 4)
             .is_none());
 
         let companion_object = companion_to_hand(&mut runner);
         assert_fresh_printing(&runner, companion_object, Some("q-first"));
         assert_fresh_printing(&runner, fetched, Some("q-second"));
+        assert_fresh_printing(&runner, second_fetch, Some("q-third"));
+        assert_fresh_printing(&runner, third_fetch, Some("q-fourth"));
         CompanionAndFetch {
             runner,
             fetched,
@@ -2130,11 +2162,12 @@ mod post_load_creators {
         } = companion_and_fetch();
         let state = runner.state();
 
-        // The transient reveal ended: `CompanionToHand` was the next action after the fetch,
-        // and an action from `Priority` clears `revealed_cards`. (The positive control, that
-        // it WAS revealed, is in `companion_and_fetch`.) The public reveal is durable until
-        // the card changes zone (CR 701.20a; `CardsRevealed` publishes it), so the fetched
-        // card stays publicly identified, and its printing leaves with its identity
+        // The transient reveal ended: later actions from `Priority` clear `revealed_cards`.
+        // (The positive control, that it WAS revealed, is in `companion_and_fetch`.) The
+        // fetched card stays publicly identified through retained public identity knowledge
+        // under the engine's information policy: `CardsRevealed` publishes
+        // `public_revealed_cards` until the card changes zone (engine.rs ~9056-9074). That is
+        // not a CR-mandated reveal duration. Its printing leaves with its identity
         // (`redact_printed_identity`). Reach guard for the paired assertions below.
         assert!(!state.revealed_cards.contains(&fetched));
         assert!(state.public_revealed_cards.contains(&fetched));

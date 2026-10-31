@@ -394,10 +394,6 @@ impl DeckPrintingRecord {
         &self.rows
     }
 
-    pub fn lookup_names(&self) -> &[DeckFaceLookupName] {
-        &self.lookup_names
-    }
-
     /// The round-trip name `section`'s rows use for `face`.
     pub fn lookup_name(&self, section: DeckSection, face: &CardFace) -> Option<&str> {
         self.lookup_names
