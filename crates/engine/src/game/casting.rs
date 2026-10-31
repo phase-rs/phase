@@ -6506,7 +6506,7 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer

@@ -1232,7 +1232,7 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::DuringOpponentsTurn
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
-            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceHasDealtDamage { .. }
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
             | StaticCondition::RingLevelAtLeast { .. }

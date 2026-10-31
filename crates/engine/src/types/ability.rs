@@ -18427,15 +18427,26 @@ pub enum StaticCondition {
     /// CR 400.7: True when the source permanent entered the battlefield this turn.
     /// Used for "as long as this [permanent] entered this turn" conditional statics.
     SourceEnteredThisTurn,
-    /// CR 120.1 + CR 120.3/120.6 + CR 702.11b + CR 613.1f: True once the source
-    /// permanent has actually dealt damage (combat or noncombat) since it entered
-    /// the battlefield. Sticky per-object flag (set on the first nonzero amount of
-    /// damage actually dealt per CR 120.3/120.6, not the would-be amount of CR
-    /// 120.1a; reset when the object leaves the battlefield). Used as a Layer 6
-    /// (CR 613.1f) ability-adding gate for "has hexproof if it hasn't dealt damage
-    /// yet" (Palladia-Mors, the Ruiner; Karakyk Guardian). The "hasn't" negation
-    /// wraps this in `StaticCondition::Not`.
-    SourceHasDealtDamage,
+    /// CR 120.1 + CR 120.3 + CR 120.8 + CR 702.11b + CR 613.1f: True once the
+    /// source permanent has actually dealt damage of the selected `kind` since it
+    /// entered the battlefield. Sticky per-object flag (set on the first nonzero
+    /// amount of damage actually dealt, not the would-be amount of CR 120.1a;
+    /// CR 120.8: zero damage is not dealt; CR 400.7: reset when the object leaves
+    /// the battlefield). Used as a Layer 6 (CR 613.1f) ability-adding gate for
+    /// "has hexproof if it hasn't dealt damage yet" (Palladia-Mors, the Ruiner;
+    /// Karakyk Guardian) and "has hexproof as long as they haven't dealt combat
+    /// damage yet" (Ruric Thar, Magecrusher). The "hasn't" negation wraps this in
+    /// `StaticCondition::Not`.
+    SourceHasDealtDamage {
+        /// CR 120.2a / CR 120.2b: which damage class counts. `Any` (the default,
+        /// and what the former unit-variant record deserializes to) accepts both
+        /// and is elided on serialization so the existing wire shape is unchanged.
+        #[serde(
+            default = "default_damage_kind",
+            skip_serializing_if = "is_default_damage_kind"
+        )]
+        kind: DamageKindFilter,
+    },
     /// CR 701.43b: The source has been exerted during the current turn.
     SourceExertedThisTurn,
     /// CR 601.2 + CR 611.3a: True when the source permanent was cast (its
@@ -18661,7 +18672,7 @@ impl StaticCondition {
             | StaticCondition::DuringOpponentsTurn
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
-            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceHasDealtDamage { .. }
             | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
@@ -18775,7 +18786,7 @@ impl StaticCondition {
             | StaticCondition::DuringOpponentsTurn
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
-            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceHasDealtDamage { .. }
             | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
@@ -19012,7 +19023,7 @@ impl StaticCondition {
             | StaticCondition::DuringOpponentsTurn
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
-            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceHasDealtDamage { .. }
             | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
@@ -19134,7 +19145,7 @@ impl StaticCondition {
             | StaticCondition::DuringOpponentsTurn
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
-            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceHasDealtDamage { .. }
             | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
@@ -56177,6 +56188,36 @@ mod player_target_slot_tests {
 #[cfg(test)]
 mod monarch_subject_axis_tests {
     use super::*;
+
+    /// CR 120.2a / CR 120.2b: `SourceHasDealtDamage` gained a defaulted `kind`.
+    /// The former unit-shaped record must deserialize to `Any`, `Any` must
+    /// serialize without a `kind` key (existing card-data rows stay
+    /// byte-identical), and a qualified kind must round-trip.
+    #[test]
+    fn source_has_dealt_damage_kind_is_defaulted_and_elided_for_any() {
+        let any: StaticCondition =
+            serde_json::from_str(r#"{"type":"SourceHasDealtDamage"}"#).unwrap();
+        assert_eq!(
+            any,
+            StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::Any
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&any).unwrap(),
+            r#"{"type":"SourceHasDealtDamage"}"#
+        );
+        for kind in [
+            DamageKindFilter::CombatOnly,
+            DamageKindFilter::NoncombatOnly,
+        ] {
+            let cond = StaticCondition::SourceHasDealtDamage { kind };
+            let json = serde_json::to_string(&cond).unwrap();
+            assert!(json.contains("\"kind\""), "{json}");
+            let back: StaticCondition = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, cond);
+        }
+    }
 
     /// CR 725.1 + CR 109.5: every pre-existing `{"type":"IsMonarch"}` row in
     /// `card-data.json` and in the committed integration-card fixture must keep

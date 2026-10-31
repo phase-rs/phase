@@ -899,7 +899,10 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 ///    (CR 508.1k / 509.1g / 509.1h), "modified" (CR 700.9), "equipped"
 ///    (CR 301.5a) and "enchanted" (CR 303.4b) — nine phrases — plus the two
 ///    non-contraction "it entered …" forms handled below, "it entered this turn"
-///    and "it entered the battlefield this turn" (CR 400.7).
+///    and "it entered the battlefield this turn" (CR 400.7), plus the plural
+///    sticky-damage-history form "they haven't dealt [combat |noncombat ]damage
+///    yet" (CR 120.2a / CR 120.2b, Ruric Thar, Magecrusher), rewritten to
+///    "~ hasn't dealt … damage yet".
 ///    "it" is otherwise overloaded: "it's your
 ///    turn" is impersonal (a turn reference, not the source); "it's a Wall" /
 ///    "it's red" / "it's legendary" are type/characteristic gates with their own
@@ -999,6 +1002,23 @@ fn parse_self_pronoun_rewrite(input: &str) -> OracleResult<'_, String> {
         map(
             preceded((tag("it attacked "), space0), exact_tail("this turn")),
             |tail: &str| format!("~ attacked {tail}"),
+        ),
+        // CR 120.2a / CR 120.2b + CR 400.7: the plural bound pronoun of the
+        // sticky "hasn't dealt [combat |noncombat ]damage yet" gate (Ruric Thar,
+        // Magecrusher: "has hexproof as long as they haven't dealt combat damage
+        // yet"). The plural "they" pairs with the plural "haven't" only; the tail
+        // is the grammar's own `parse_dealt_damage_yet`, anchored to `eof` so a
+        // trailing "this turn" is refused. Re-emits the canonical "~ hasn't …"
+        // the grammar types as `Not(SourceHasDealtDamage { kind })`.
+        map(
+            preceded(
+                (tag("they "), nom_condition::parse_havent, tag(" ")),
+                terminated(
+                    recognize(nom_condition::parse_dealt_damage_yet),
+                    (space0, eof),
+                ),
+            ),
+            |tail: &str| format!("~ hasn't {tail}"),
         ),
     ))
     .parse(input)
@@ -1709,6 +1729,29 @@ mod rewrite_self_pronoun_subject_tests {
             rewrite_self_pronoun_subject("it attacked this turn"),
             "~ attacked this turn"
         );
+        // CR 120.2a / CR 120.2b: the plural sticky-damage-history arm (Ruric
+        // Thar, Magecrusher), both apostrophes, every damage class.
+        for (input, expected) in [
+            (
+                "they haven't dealt combat damage yet",
+                "~ hasn't dealt combat damage yet",
+            ),
+            (
+                "they haven\u{2019}t dealt combat damage yet",
+                "~ hasn't dealt combat damage yet",
+            ),
+            (
+                "They haven't dealt combat damage yet",
+                "~ hasn't dealt combat damage yet",
+            ),
+            ("they haven't dealt damage yet", "~ hasn't dealt damage yet"),
+            (
+                "they haven't dealt noncombat damage yet",
+                "~ hasn't dealt noncombat damage yet",
+            ),
+        ] {
+            assert_eq!(rewrite_self_pronoun_subject(input), expected, "{input:?}");
+        }
     }
 
     /// The `terminated(tag(..), eof)` anchor is the whole exact-tail contract: a
@@ -1733,6 +1776,11 @@ mod rewrite_self_pronoun_subject_tests {
             "it entered this turn and attacked",
             "it attacked this combat",
             "it attacked",
+            // The plural sticky-damage arm pairs "they" with "haven't" only and
+            // anchors its tail.
+            "they hasn't dealt combat damage yet",
+            "they haven't dealt damage yet this turn",
+            "they haven't been dealt damage yet",
             // Off-list predicates: characteristics, types, and the impersonal
             // "it's your turn" turn reference.
             "it's black",

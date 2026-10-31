@@ -1017,13 +1017,27 @@ pub(crate) fn apply_damage_after_replacement(
         // `has_hexproof` reads — otherwise the conditional hexproof grant for
         // "has hexproof if it hasn't dealt damage yet" would never drop at the
         // targeting check (a Clean `layers_dirty` no-ops `flush_layers`).
-        if state
+        //
+        // CR 120.2a / CR 120.2b: the same battlefield guard also records the
+        // damage KIND on the source object's `dealt_damage_kinds` latch (read by
+        // the "hasn't dealt combat damage yet" gate), so a non-battlefield source
+        // leaves neither store stale. Layers are dirtied when EITHER store
+        // changes: a source that already dealt noncombat damage has no new `Any`
+        // entry on its first combat hit but must still drop a combat-gated
+        // grant. The non-short-circuit `|` keeps both writes unconditional.
+        let on_battlefield = state
             .objects
             .get(&ctx.source_id)
-            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
-            && state.objects_that_dealt_damage.insert(ctx.source_id)
-        {
-            state.layers_dirty.mark_full();
+            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield);
+        if on_battlefield {
+            let newly_any = state.objects_that_dealt_damage.insert(ctx.source_id);
+            let newly_kind = state
+                .objects
+                .get_mut(&ctx.source_id)
+                .is_some_and(|obj| obj.dealt_damage_kinds.record(is_combat));
+            if newly_any | newly_kind {
+                state.layers_dirty.mark_full();
+            }
         }
     }
 
@@ -4715,6 +4729,175 @@ mod tests {
             has_hexproof(&runner.state().objects[&guardian]),
             "hexproof restored after flicker (clean slate, no damage dealt yet)"
         );
+    }
+
+    /// Writer-level fixture for the damage-history stores: a creature in `zone`
+    /// controlled by P1.
+    fn sticky_damage_source(state: &mut GameState, card: u64, zone: Zone) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            PlayerId(1),
+            "Sticky Source".to_string(),
+            zone,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
+    }
+
+    /// Drives the single damage-history writer (`apply_damage_after_replacement`)
+    /// with `amount` from `source` to P0.
+    fn deal_sticky_damage(state: &mut GameState, source: ObjectId, amount: u32, is_combat: bool) {
+        let ctx = DamageContext::from_source(state, source).expect("source ctx");
+        let event = ProposedEvent::Damage {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(0)),
+            amount,
+            is_combat,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        apply_damage_after_replacement(state, &ctx, event, is_combat, &mut events);
+    }
+
+    /// (Any, CombatOnly, NoncombatOnly) as answered by the production evaluator.
+    fn sticky_kinds(state: &GameState, id: ObjectId) -> (bool, bool, bool) {
+        use crate::game::conditions::eval_source_has_dealt_damage;
+        use crate::types::ability::DamageKindFilter;
+        (
+            eval_source_has_dealt_damage(state, id, DamageKindFilter::Any),
+            eval_source_has_dealt_damage(state, id, DamageKindFilter::CombatOnly),
+            eval_source_has_dealt_damage(state, id, DamageKindFilter::NoncombatOnly),
+        )
+    }
+
+    /// W5: the `Any` id set and the per-object kind latch are written together,
+    /// so for an object in `state.objects` they always agree.
+    fn assert_damage_stores_agree(state: &GameState, id: ObjectId) {
+        assert_eq!(
+            state.objects_that_dealt_damage.contains(&id),
+            !state.objects[&id].dealt_damage_kinds.is_empty(),
+            "Any id set and object kind latch must agree for {id:?}"
+        );
+    }
+
+    /// W1 - CR 400.7 + CR 120.2a / CR 120.2b: the battlefield guard wraps BOTH
+    /// damage-history stores. A source dealing damage from the graveyard or the
+    /// stack must leave the id set and the object latch untouched (and not
+    /// dirty layers), so when the same `ObjectId` later enters the battlefield
+    /// it is not pre-flagged (no battlefield-exit reset ever ran for it).
+    #[test]
+    fn sticky_damage_stores_ignore_non_battlefield_sources() {
+        use crate::game::layers::flush_layers;
+        use crate::game::zones::move_to_zone;
+
+        for (card, zone) in [(9101, Zone::Graveyard), (9102, Zone::Stack)] {
+            for is_combat in [false, true] {
+                let mut state = GameState::new_two_player(42);
+                let source = sticky_damage_source(&mut state, card, zone);
+                flush_layers(&mut state);
+                assert!(!state.layers_dirty.is_dirty());
+                let life_before = state.players[0].life;
+                deal_sticky_damage(&mut state, source, 2, is_combat);
+                // Reach-guard: the damage was really dealt (writer reached).
+                assert_eq!(
+                    state.players[0].life,
+                    life_before - 2,
+                    "{zone:?}/{is_combat}"
+                );
+                assert!(
+                    !state.objects_that_dealt_damage.contains(&source)
+                        && state.objects[&source].dealt_damage_kinds.is_empty(),
+                    "{zone:?}/{is_combat}: non-battlefield source must not be recorded"
+                );
+                assert_damage_stores_agree(&state, source);
+                assert!(
+                    !state.layers_dirty.is_dirty(),
+                    "{zone:?}/{is_combat}: nothing recorded, no layer dirtying"
+                );
+                let mut events = Vec::new();
+                move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
+                assert_eq!(
+                    sticky_kinds(&state, source),
+                    (false, false, false),
+                    "{zone:?}/{is_combat}: entered the battlefield pre-flagged"
+                );
+            }
+        }
+
+        // Paired positive: the same call from the battlefield DOES record the
+        // source in the Any set + the matching kind latch and dirties layers.
+        for is_combat in [false, true] {
+            let mut state = GameState::new_two_player(42);
+            let source = sticky_damage_source(&mut state, 9103, Zone::Battlefield);
+            flush_layers(&mut state);
+            assert!(!state.layers_dirty.is_dirty());
+            deal_sticky_damage(&mut state, source, 2, is_combat);
+            assert_eq!(sticky_kinds(&state, source), (true, is_combat, !is_combat));
+            assert_damage_stores_agree(&state, source);
+            assert!(state.layers_dirty.is_dirty());
+        }
+    }
+
+    /// W2 - CR 120.2a + CR 613.1f: a battlefield source that already dealt
+    /// NONCOMBAT damage (so it is already in the `Any` set) and then deals its
+    /// first COMBAT damage must still dirty the layers, otherwise a "hasn't
+    /// dealt combat damage yet" hexproof grant would never drop at the next
+    /// targeting check. Discriminates the `newly_any | newly_kind` gate from the
+    /// former `if any.insert(..) { mark_full }` gate.
+    #[test]
+    fn sticky_damage_first_combat_after_noncombat_dirties_layers() {
+        use crate::game::layers::flush_layers;
+
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9201, Zone::Battlefield);
+        flush_layers(&mut state);
+        deal_sticky_damage(&mut state, source, 1, false);
+        // Reach-guard: the first (noncombat) hit dirtied layers, and a flush
+        // really returns the state to Clean before the second hit.
+        assert!(state.layers_dirty.is_dirty());
+        flush_layers(&mut state);
+        assert!(!state.layers_dirty.is_dirty(), "flush must clean layers");
+        assert_eq!(sticky_kinds(&state, source), (true, false, true));
+        assert_damage_stores_agree(&state, source);
+
+        deal_sticky_damage(&mut state, source, 1, true);
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "first COMBAT damage must dirty layers even though Any was already set"
+        );
+        assert_eq!(sticky_kinds(&state, source), (true, true, true));
+        assert_damage_stores_agree(&state, source);
+    }
+
+    /// W3 - CR 120.8: a zero-amount damage event deals no damage, so the writer
+    /// records nothing and does not dirty layers; a later nonzero hit in the
+    /// same fixture does.
+    #[test]
+    fn sticky_damage_zero_amount_records_nothing() {
+        use crate::game::layers::flush_layers;
+
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9301, Zone::Battlefield);
+        flush_layers(&mut state);
+        for is_combat in [true, false] {
+            deal_sticky_damage(&mut state, source, 0, is_combat);
+        }
+        assert_eq!(sticky_kinds(&state, source), (false, false, false));
+        assert_damage_stores_agree(&state, source);
+        assert!(!state.layers_dirty.is_dirty());
+
+        // Paired positive: a nonzero hit from the same source is recorded.
+        deal_sticky_damage(&mut state, source, 3, true);
+        assert_eq!(sticky_kinds(&state, source), (true, true, false));
+        assert_damage_stores_agree(&state, source);
+        assert!(state.layers_dirty.is_dirty());
     }
 
     #[test]

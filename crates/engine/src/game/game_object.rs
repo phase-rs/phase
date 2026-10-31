@@ -9,9 +9,10 @@ use crate::types::ability::{
     AbilityProvenance, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
     BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
     CharacteristicSetRef, ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot,
-    ExiledSpellRider, ModalChoice, ReplacementDefinition, SeatDirection, SolveCondition,
-    SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState, TriggerPrintedOrigin,
+    DamageKindFilter, ExiledSpellRider, ModalChoice, ReplacementDefinition, SeatDirection,
+    SolveCondition, SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef,
+    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState,
+    TriggerPrintedOrigin,
 };
 use crate::types::card::{
     LayoutKind, PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef,
@@ -649,6 +650,47 @@ pub fn token_art_derivation_count() -> usize {
     TOKEN_ART_DERIVATION_COUNT.with(std::cell::Cell::get)
 }
 
+/// CR 120.2a / CR 120.2b: which kinds of damage this permanent has dealt since
+/// it entered the battlefield (CR 400.7). Two monotone latches (a source can
+/// have dealt both); `DamageKindFilter::Any` is their union. Written only by the
+/// damage writer (`apply_damage_after_replacement`) for battlefield sources, on a
+/// nonzero amount actually dealt (CR 120.8); cleared by
+/// `GameObject::reset_for_battlefield_exit`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DealtDamageKinds {
+    #[serde(default, skip_serializing_if = "is_false")]
+    combat: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    noncombat: bool,
+}
+
+impl DealtDamageKinds {
+    /// True when no damage of either kind has been recorded.
+    pub fn is_empty(&self) -> bool {
+        !self.combat && !self.noncombat
+    }
+
+    /// Records one nonzero damage event of the given kind (CR 120.2a combat /
+    /// CR 120.2b noncombat). Returns true when this changed the latch state.
+    pub(crate) fn record(&mut self, is_combat: bool) -> bool {
+        let slot = if is_combat {
+            &mut self.combat
+        } else {
+            &mut self.noncombat
+        };
+        !std::mem::replace(slot, true)
+    }
+
+    /// True when damage of the selected `kind` has been recorded.
+    pub fn has(&self, kind: DamageKindFilter) -> bool {
+        match kind {
+            DamageKindFilter::Any => !self.is_empty(),
+            DamageKindFilter::CombatOnly => self.combat,
+            DamageKindFilter::NoncombatOnly => self.noncombat,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameObject {
     pub id: ObjectId,
@@ -718,6 +760,14 @@ pub struct GameObject {
     // Combat
     pub damage_marked: u32,
     pub dealt_deathtouch_damage: bool,
+    /// CR 120.2a / CR 120.2b + CR 400.7: kinds of damage this permanent has
+    /// dealt since entering the battlefield. Backs
+    /// `StaticCondition::SourceHasDealtDamage { kind: CombatOnly | NoncombatOnly }`
+    /// ("has hexproof as long as they haven't dealt combat damage yet"); the
+    /// `Any` kind reads `GameState::objects_that_dealt_damage`, written together
+    /// with this field. Absent from the wire while empty.
+    #[serde(default, skip_serializing_if = "DealtDamageKinds::is_empty")]
+    pub dealt_damage_kinds: DealtDamageKinds,
 
     // Attachments
     /// CR 303.4 + CR 301.5: Host this attachment is attached to.
@@ -1720,6 +1770,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         cast_face_committed: _,
         damage_marked: _,
         dealt_deathtouch_damage: _,
+        dealt_damage_kinds: _,
         attached_to: _,
         attachments: _,
         paired_with: _,
@@ -3039,6 +3090,7 @@ impl GameObject {
             cast_face_committed: false,
             damage_marked: 0,
             dealt_deathtouch_damage: false,
+            dealt_damage_kinds: DealtDamageKinds::default(),
             attached_to: None,
             attachments: Vec::new(),
             protection_start_exempt_attachments: HashMap::new(),
@@ -3676,6 +3728,10 @@ impl GameObject {
         self.base_controller = Some(self.owner);
         // CR 701.37b: Monstrous designation clears when a permanent leaves the battlefield.
         self.monstrous = false;
+        // CR 400.7: the damage-kind history belongs to the old object; a
+        // re-entering permanent has dealt no damage of either kind
+        // (CR 120.2a / CR 120.2b).
+        self.dealt_damage_kinds = DealtDamageKinds::default();
         // CR 701.64b: Harnessed designation clears when a permanent leaves the battlefield.
         self.harnessed = false;
         // CR 701.15a / CR 701.35a: Goad and detain are battlefield-only designations.
@@ -4659,6 +4715,62 @@ mod tests {
             obj.gift_recipient.is_none(),
             "gift_recipient must clear on battlefield exit (CR 400.7)"
         );
+    }
+
+    /// W6 - CR 400.7 + CR 120.2a / CR 120.2b: the damage-kind history belongs to
+    /// the old object; a battlefield exit clears both latches.
+    #[test]
+    fn reset_for_battlefield_exit_clears_dealt_damage_kinds() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Ruric Thar, Magecrusher".to_string(),
+            Zone::Battlefield,
+        );
+        assert!(obj.dealt_damage_kinds.record(true));
+        assert!(obj.dealt_damage_kinds.record(false));
+        // Reach-guard: both latches really set; a repeat records no change.
+        assert!(!obj.dealt_damage_kinds.record(true));
+        assert!(obj.dealt_damage_kinds.has(DamageKindFilter::CombatOnly));
+        assert!(obj.dealt_damage_kinds.has(DamageKindFilter::NoncombatOnly));
+
+        obj.reset_for_battlefield_exit();
+
+        assert!(obj.dealt_damage_kinds.is_empty());
+        assert!(!obj.dealt_damage_kinds.has(DamageKindFilter::Any));
+    }
+
+    /// W6 serde: an empty history emits no `dealt_damage_kinds` key (stubs and
+    /// untouched objects keep their wire shape), a populated one round-trips,
+    /// and JSON written before the field existed deserializes to empty.
+    #[test]
+    fn dealt_damage_kinds_wire_shape() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Ruric Thar, Magecrusher".to_string(),
+            Zone::Battlefield,
+        );
+        let empty = serde_json::to_value(&obj).unwrap();
+        assert!(
+            empty.get("dealt_damage_kinds").is_none(),
+            "default history must not be serialized: {empty}"
+        );
+        let legacy: GameObject = serde_json::from_value(empty).unwrap();
+        assert!(legacy.dealt_damage_kinds.is_empty());
+
+        obj.dealt_damage_kinds.record(true);
+        let populated = serde_json::to_value(&obj).unwrap();
+        assert_eq!(
+            populated.get("dealt_damage_kinds"),
+            Some(&serde_json::json!({"combat": true}))
+        );
+        let back: GameObject = serde_json::from_value(populated).unwrap();
+        assert_eq!(back.dealt_damage_kinds, obj.dealt_damage_kinds);
+        assert!(back.dealt_damage_kinds.has(DamageKindFilter::CombatOnly));
+        assert!(!back.dealt_damage_kinds.has(DamageKindFilter::NoncombatOnly));
     }
 
     /// CR 400.7d: Entry reset also clears Gift recipient so effect-driven puts
