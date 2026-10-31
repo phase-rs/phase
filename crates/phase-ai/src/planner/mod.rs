@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use engine::ai_support::{
     activates_mana_ability, build_decision_context, classify_payment_continuation,
-    witness_payment_continuations, AcceptedPaymentSuccessor, AiDecisionContext, CandidateAction,
+    witness_payment_continuations, AiDecisionContext, CandidateAction,
     PaymentContinuationBatchStatus, PaymentContinuationState, PaymentContinuationStep,
     TacticalClass,
 };
@@ -123,12 +123,32 @@ pub(crate) fn prepare_payment_candidates(
                 .collect();
             let batch = witness_payment_continuations(state, &actions);
             match batch.status {
-                PaymentContinuationBatchStatus::Complete => {
-                    accepted_payment_candidates(state, candidates, batch.successors)
-                }
+                PaymentContinuationBatchStatus::Complete => candidates
+                    .into_iter()
+                    .enumerate()
+                    .zip(batch.successors)
+                    .filter_map(|((source_index, candidate), accepted)| {
+                        accepted.map(|accepted| PreparedCandidate {
+                            source_index,
+                            candidate,
+                            payment_successor: Some(accepted.state),
+                        })
+                    })
+                    .collect(),
                 PaymentContinuationBatchStatus::Indeterminate(_) => {
                     if batch.successors.iter().any(Option::is_some) {
-                        accepted_payment_candidates(state, candidates, batch.successors)
+                        candidates
+                            .into_iter()
+                            .enumerate()
+                            .zip(batch.successors)
+                            .filter_map(|((source_index, candidate), accepted)| {
+                                accepted.map(|accepted| PreparedCandidate {
+                                    source_index,
+                                    candidate,
+                                    payment_successor: Some(accepted.state),
+                                })
+                            })
+                            .collect()
                     } else {
                         candidates
                             .into_iter()
@@ -152,48 +172,44 @@ pub(crate) fn prepare_payment_candidates(
     }
 }
 
-/// Keep the witnessed payment edges, minus the mana activations the payment
-/// does not need.
+/// The action that finishes the payment in progress at `state` as it stands:
+/// an action that activates no mana ability (at `ManaPayment`, the pass that
+/// pays the total cost, CR 601.2h) and that the payment witness proves
+/// finalizes the root in its own step. `None` when `state` is not a payment
+/// the witness owns, or no such action is among `actions`.
 ///
-/// CR 601.2h + CR 118.3c: activating mana abilities is never mandatory. Once an
-/// edge that activates no mana ability pays the total cost and finalizes the
-/// root in its own step (at `ManaPayment`, the pass that lets the engine's
-/// payer finish), a mana activation that leaves the root still being paid only
-/// adds mana the payment won't spend (CR 106.4) and pays that ability's own
-/// cost — life, a card, a permanent, a tapped creature. Without this the
-/// search can prefer such an activation purely to keep the root parked one
-/// more ply, pushing the spell's resolution past its horizon (#10488).
-/// With no such finalizer every accepted edge is kept.
-fn accepted_payment_candidates(
-    state: &GameState,
-    candidates: Vec<CandidateAction>,
-    successors: Vec<Option<AcceptedPaymentSuccessor>>,
-) -> Vec<PreparedCandidate> {
-    let accepted: Vec<_> = candidates
-        .into_iter()
-        .enumerate()
-        .zip(successors)
-        .filter_map(|((source_index, candidate), accepted)| {
-            accepted.map(|accepted| (source_index, candidate, accepted))
+/// CR 118.3c: activating mana abilities is never mandatory, so finishing the
+/// payment now is always one way to continue it. Quiescence and rollouts use it
+/// to value a position in the middle of a payment as that payment completed:
+/// nobody gets priority while a spell is being paid for (CR 601.2), so such a
+/// position is not a quiet leaf. Further activations stay selectable as search
+/// edges, where they cost no depth (`search_value_at`).
+fn finalizing_payment_action(state: &GameState, actions: &[GameAction]) -> Option<GameAction> {
+    if !matches!(
+        classify_payment_continuation(state),
+        PaymentContinuationState::Affiliated(_)
+    ) {
+        return None;
+    }
+    let finishers: Vec<_> = actions
+        .iter()
+        .filter(|action| {
+            !matches!(action, GameAction::CancelCast) && !activates_mana_ability(state, action)
         })
+        .cloned()
         .collect();
-    let finalizes_without_mana = accepted.iter().any(|(_, candidate, accepted)| {
-        accepted.step == PaymentContinuationStep::Finalizes
-            && !activates_mana_ability(state, &candidate.action)
-    });
-    accepted
+    if finishers.is_empty() {
+        return None;
+    }
+    witness_payment_continuations(state, &finishers)
+        .successors
         .into_iter()
-        .filter(|(_, candidate, accepted)| {
-            !(finalizes_without_mana
-                && accepted.step == PaymentContinuationStep::Continues
-                && activates_mana_ability(state, &candidate.action))
+        .flatten()
+        .find(|accepted| match accepted.step {
+            PaymentContinuationStep::Finalizes => true,
+            PaymentContinuationStep::Continues => false,
         })
-        .map(|(source_index, candidate, accepted)| PreparedCandidate {
-            source_index,
-            candidate,
-            payment_successor: Some(accepted.state),
-        })
-        .collect()
+        .map(|accepted| accepted.action)
 }
 
 pub(crate) fn rank_prepared_candidates<F>(
@@ -1658,6 +1674,18 @@ impl<'a> PlannerServices<'a> {
                 }
             }
 
+            // Case 4: a payment in progress is not a quiet position; finish it
+            // as it stands (see `finalizing_payment_action`).
+            if let Some(action) = finalizing_payment_action(cursor.state(), &actions) {
+                match self.quiesce_step(node, &mut cursor, action) {
+                    QuiesceStep::Advanced(next) => {
+                        node = next;
+                        continue;
+                    }
+                    QuiesceStep::Failed => break,
+                }
+            }
+
             // Genuine decision point — stop quiescence
             break;
         }
@@ -1869,6 +1897,27 @@ impl<'a> PlannerServices<'a> {
         }
         if depth == 0 || matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
             return self.quiesced_leaf_eval_at(node, state);
+        }
+
+        // CR 601.2: a payment in progress and the cast it completes are one
+        // move; the rollout finishes the payment as it stands rather than
+        // spending its depth on mana activations (see `finalizing_payment_action`).
+        if matches!(
+            classify_payment_continuation(state),
+            PaymentContinuationState::Affiliated(_)
+        ) {
+            let actions: Vec<_> = self
+                .exact_decision_context(node, state)
+                .candidates
+                .iter()
+                .map(|candidate| candidate.action.clone())
+                .collect();
+            if let Some(action) = finalizing_payment_action(state, &actions) {
+                let mut finished = state.clone();
+                if apply_as_current_for_simulation(&mut finished, action).is_ok() {
+                    return self.rollout_estimate_at(None, &finished, depth);
+                }
+            }
         }
 
         let evaluation = self.planner_evaluation_at(node, state);
@@ -2093,6 +2142,16 @@ impl BeamContinuationPlanner {
         let node_player = state.waiting_for.acting_player();
         let is_maximizing = node_player.is_none_or(|player| player == services.ai_player);
         let scoring_player = node_player.unwrap_or(services.ai_player);
+        // CR 601.2: nobody receives priority while a spell or ability is being
+        // paid for, so a payment step and the cast it completes are one move.
+        // Charging a ply per mana activation let an extra activation (and its
+        // life, card or permanent) push the opponent's reply to the cast past
+        // the horizon (#10488). The node budget still bounds the payment chain.
+        let child_depth = match classify_payment_continuation(state) {
+            PaymentContinuationState::Affiliated(_) => depth,
+            PaymentContinuationState::NotAffiliated
+            | PaymentContinuationState::UnsupportedAffiliated(_) => depth - 1,
+        };
         let mut ranked = rank_prepared_candidates(
             candidates,
             // Interior beam node: `search_value` is always entered ≥1 ply below
@@ -2139,7 +2198,7 @@ impl BeamContinuationPlanner {
             let value = self.search_value_at(
                 child,
                 &sim,
-                depth - 1,
+                child_depth,
                 ply + 1,
                 alpha,
                 beta,

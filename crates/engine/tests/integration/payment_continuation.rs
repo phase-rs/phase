@@ -227,13 +227,17 @@ fn witness_reports_whether_an_edge_finalizes_the_root_itself() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Witnessed Draw", true, DRAW_ORACLE)
-        .with_mana_cost(ManaCost::generic(2))
+        .add_spell_to_hand_from_oracle(P0, "Divination", false, "Draw two cards.")
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 2,
+        })
         .id();
     scenario.with_mana_pool(
         P0,
-        (0..2)
-            .map(|_| ManaUnit::new(ManaType::Colorless, spell, false, Vec::new()))
+        [ManaType::Blue, ManaType::Colorless, ManaType::Colorless]
+            .into_iter()
+            .map(|color| ManaUnit::new(color, spell, false, Vec::new()))
             .collect(),
     );
     scenario.add_basic_land(P0, ManaColor::Blue);
