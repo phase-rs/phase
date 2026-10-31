@@ -38,8 +38,9 @@ const RURIC_KEYWORDS: &[&str] = &["Reach", "Vigilance", "Trample"];
 const RABID_BITE: &str =
     "Target creature you control deals damage equal to its power to target creature you don't control.";
 
-/// Verbatim Oracle text of Prodigal Pyromancer (an opponent's activated ability).
-const PRODIGAL_PYROMANCER: &str = "{T}: Prodigal Pyromancer deals 1 damage to any target.";
+/// Verbatim current Oracle text of Prodigal Pyromancer (an opponent's activated
+/// ability).
+const PRODIGAL_PYROMANCER: &str = "{T}: This creature deals 1 damage to any target.";
 
 fn add_ruric(scenario: &mut GameScenario, power: i32) -> ObjectId {
     scenario

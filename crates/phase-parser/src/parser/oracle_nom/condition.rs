@@ -2632,25 +2632,37 @@ pub(crate) fn parse_dealt_damage_yet(input: &str) -> OracleResult<'_, DamageKind
 /// Karakyk Guardian: "has hexproof if it hasn't dealt damage yet"; Ruric Thar,
 /// Magecrusher: "... they haven't dealt combat damage yet", after the SelfRef
 /// pronoun rewrite to "~ hasn't ..."). CR 120.2a / CR 120.2b: the optional
-/// qualifier selects the damage class. Accepts the self-referential subjects the
-/// conditional-keyword templates use ("it", "~", "this creature", "this
-/// permanent"). Only the negated "hasn't" idiom appears in Oracle text, so no
-/// affirmative form is produced here.
+/// qualifier selects the damage class. The source-named subjects ("~", "this
+/// creature", "this permanent") accept every damage class. CR 611.3a: the
+/// anaphoric "it" is accepted context-free only in the bare `Any` form (the
+/// Palladia-Mors / Karakyk Guardian / Oyaminartok templates); a qualified
+/// "it hasn't dealt combat damage yet" stays unrecognized here because on an
+/// attached-subject static "it" names the enchanted/equipped creature, not the
+/// source — mirroring the bare "it entered this turn" refusal. Only the negated
+/// "hasn't" idiom appears in Oracle text, so no affirmative form is produced.
 fn parse_source_hasnt_dealt_damage(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((
-        tag("it "),
-        tag("~ "),
-        tag("this creature "),
-        tag("this permanent "),
-    ))
-    .parse(input)?;
+    let hasnt_dealt_damage_yet = || preceded((parse_hasnt, tag(" ")), parse_dealt_damage_yet);
     map(
-        preceded((parse_hasnt, tag(" ")), parse_dealt_damage_yet),
+        alt((
+            preceded(
+                (
+                    alt((tag("~"), tag("this creature"), tag("this permanent"))),
+                    tag(" "),
+                ),
+                hasnt_dealt_damage_yet(),
+            ),
+            preceded(
+                tag("it "),
+                verify(hasnt_dealt_damage_yet(), |kind| {
+                    *kind == DamageKindFilter::Any
+                }),
+            ),
+        )),
         |kind| StaticCondition::Not {
             condition: Box::new(StaticCondition::SourceHasDealtDamage { kind }),
         },
     )
-    .parse(rest)
+    .parse(input)
 }
 
 /// CR 301.5a / CR 303.4 / CR 508.1k / CR 509.1g / CR 509.1h: gendered/plural
@@ -16845,7 +16857,7 @@ mod tests {
         };
         for (text, kind) in [
             (
-                "it hasn't dealt combat damage yet",
+                "~ hasn't dealt combat damage yet",
                 DamageKindFilter::CombatOnly,
             ),
             (
@@ -16869,7 +16881,10 @@ mod tests {
 
     // Hostile adjacent grammar: the per-turn "this turn" form is a different
     // concept and must not be typed as the sticky since-entering gate; the bare
-    // plural "they" is context-gated (only the SelfRef rewrite binds it).
+    // plural "they" is context-gated (only the SelfRef rewrite binds it). CR
+    // 611.3a: the anaphoric "it" with a damage-class qualifier is refused
+    // context-free (on an attached-subject static "it" is the enchanted /
+    // equipped creature, not the source); only the bare form stays accepted.
     #[test]
     fn test_source_hasnt_dealt_damage_yet_rejects_neighbours() {
         let is_sticky_gate = |text: &str| {
@@ -16884,8 +16899,13 @@ mod tests {
         assert!(!is_sticky_gate("it hasn't dealt combat damage this turn"));
         assert!(!is_sticky_gate("they haven't dealt damage yet"));
         assert!(!is_sticky_gate("they haven't dealt combat damage yet"));
-        // Positive reach-guard: the same predicate accepts the typed form.
-        assert!(is_sticky_gate("it hasn't dealt combat damage yet"));
+        assert!(!is_sticky_gate("it hasn't dealt combat damage yet"));
+        assert!(!is_sticky_gate("it hasn't dealt noncombat damage yet"));
+        assert!(!is_sticky_gate("it hasn\u{2019}t dealt combat damage yet"));
+        // Positive reach-guards: the same predicate accepts the source-named
+        // qualified form and the bare anaphoric form.
+        assert!(is_sticky_gate("~ hasn't dealt combat damage yet"));
+        assert!(is_sticky_gate("it hasn't dealt damage yet"));
     }
 
     // CR 400.7: Shardmage's Rescue — `~ entered this turn` (no "the battlefield").

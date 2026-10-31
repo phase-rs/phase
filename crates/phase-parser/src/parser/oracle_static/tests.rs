@@ -34042,6 +34042,177 @@ fn attached_subject_they_havent_dealt_combat_damage_stays_unrecognized() {
     ));
 }
 
+/// CR 611.3a + CR 120.2a + CR 120.2b: Ruric Thar's self-referential form binds
+/// the damage-class gate to the static's own source — `affected: SelfRef`
+/// with `Not(SourceHasDealtDamage { kind })` for both qualifiers, and the
+/// verbatim named-subject line through the full Oracle pipeline.
+#[test]
+fn ruric_thar_self_form_binds_qualified_damage_gate_to_itself() {
+    use crate::parser::oracle::parse_oracle_text;
+
+    for (text, kind) in [
+        (
+            "~ has hexproof as long as they haven't dealt combat damage yet.",
+            DamageKindFilter::CombatOnly,
+        ),
+        (
+            "~ has hexproof as long as they haven\u{2019}t dealt noncombat damage yet.",
+            DamageKindFilter::NoncombatOnly,
+        ),
+    ] {
+        let def = parse_static_line(text).expect("self static def");
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{text}");
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Hexproof
+            }],
+            "{text}"
+        );
+        assert_eq!(
+            def.condition,
+            Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceHasDealtDamage { kind }),
+            }),
+            "{text}"
+        );
+    }
+
+    let parsed = parse_oracle_text(
+        "Ruric Thar has hexproof as long as they haven't dealt combat damage yet.",
+        "Ruric Thar, Magecrusher",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Ogre".to_string(), "Warrior".to_string()],
+    );
+    let hexproof = parsed
+        .statics
+        .iter()
+        .find(|d| {
+            d.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof,
+                })
+        })
+        .expect("missing hexproof static");
+    assert_eq!(hexproof.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        hexproof.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::CombatOnly,
+            }),
+        })
+    );
+}
+
+/// CR 611.3a: on an attached / typed-subject static the anaphoric "it" names
+/// the enchanted / equipped / affected creature, not the source, so a
+/// damage-class-qualified "it hasn't dealt (non)combat damage yet" must not be
+/// typed as the source's `SourceHasDealtDamage` (which would read the Aura's or
+/// Equipment's damage history). Continuous grants keep an honest `Unrecognized`
+/// gate; the restriction arms (whose `affected` is hardcoded `SelfRef`) leave
+/// the gate unparsed and surface a swallowed-clause diagnostic.
+#[test]
+fn attached_subject_it_hasnt_dealt_qualified_damage_yet_stays_unrecognized() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+
+    let is_source_damage_gate = |c: &Option<StaticCondition>| {
+        matches!(
+            c,
+            Some(StaticCondition::Not { condition })
+                if matches!(**condition, StaticCondition::SourceHasDealtDamage { .. })
+        )
+    };
+
+    for subject in [
+        "Enchanted creature has",
+        "Equipped creature has",
+        "Creatures you control have",
+    ] {
+        for qualifier in ["combat", "noncombat"] {
+            let text =
+                format!("{subject} hexproof as long as it hasn't dealt {qualifier} damage yet.");
+            let def = parse_static_line(&text).expect("static def");
+            // Reach-guard: the grant and the typed subject were recognised.
+            assert_eq!(def.mode, StaticMode::Continuous, "{text}");
+            assert!(
+                matches!(def.affected, Some(TargetFilter::Typed(_))),
+                "{text}: {:?}",
+                def.affected
+            );
+            assert_eq!(
+                def.modifications,
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof
+                }],
+                "{text}"
+            );
+            assert_eq!(
+                def.condition,
+                Some(StaticCondition::Unrecognized {
+                    text: format!("it hasn't dealt {qualifier} damage yet"),
+                }),
+                "{text}"
+            );
+        }
+    }
+
+    for (restriction, mode) in [
+        ("can't block as long as", StaticMode::CantBlock),
+        ("can't block if", StaticMode::CantBlock),
+        ("can't attack if", StaticMode::CantAttack),
+        ("can't attack as long as", StaticMode::CantAttack),
+    ] {
+        for qualifier in ["combat", "noncombat"] {
+            let line =
+                format!("Enchanted creature {restriction} it hasn't dealt {qualifier} damage yet.");
+            let def = parse_static_line(&line).expect("restriction def");
+            // Reach-guard: the restriction itself was recognised.
+            assert_eq!(def.mode, mode, "{line}");
+            assert!(
+                !is_source_damage_gate(&def.condition),
+                "{line}: `it` must not bind to the source, got {:?}",
+                def.condition
+            );
+            assert_eq!(def.condition, None, "{line}");
+            // The unparsed gate stays coverage-visible through the full pipeline.
+            let parsed = parse_oracle_text(
+                &format!("Enchant creature\n{line}"),
+                "Attached Probe",
+                &[],
+                &["Enchantment".to_string()],
+                &["Aura".to_string()],
+            );
+            assert!(
+                parsed
+                    .parse_warnings
+                    .iter()
+                    .any(|w| matches!(w, OracleDiagnostic::SwallowedClause { .. })),
+                "{line}: expected a swallowed-clause diagnostic, got {:?}",
+                parsed.parse_warnings
+            );
+            assert!(
+                parsed
+                    .statics
+                    .iter()
+                    .all(|d| !is_source_damage_gate(&d.condition)),
+                "{line}: {:?}",
+                parsed.statics
+            );
+        }
+    }
+
+    // Positive reach-guard: Ruric's self-referential form is typed in the same
+    // pipeline.
+    let self_def =
+        parse_static_line("~ has hexproof as long as they haven't dealt combat damage yet.")
+            .expect("self static def");
+    assert_eq!(self_def.affected, Some(TargetFilter::SelfRef));
+    assert!(is_source_damage_gate(&self_def.condition));
+}
+
 #[test]
 fn self_static_resolves_it_pronoun_subject_to_source() {
     // CR 611.3a: "it" in a self-referential static gate refers to the source, so
