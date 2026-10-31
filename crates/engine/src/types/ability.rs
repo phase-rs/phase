@@ -2559,6 +2559,10 @@ impl CardPlayMode {
     pub fn is_play(&self) -> bool {
         matches!(self, Self::Play)
     }
+
+    pub fn is_cast(&self) -> bool {
+        matches!(self, Self::Cast)
+    }
 }
 
 fn play_from_exile_mode_default() -> CardPlayMode {
@@ -5926,14 +5930,22 @@ pub enum CastPermissionConstraint {
 /// `filter` is normalized when the policy is constructed.  `source_id` and
 /// `controller` are the real resolution context used to interpret that filter;
 /// `constraint` is the fixed cast-time condition, including the explicit
-/// `None` case for a route with no additional condition.  None of these fields
-/// has a serde default.
+/// `None` case for a route with no additional condition.  None of these four
+/// fields has a serde default.
+///
+/// `play_mode` is the one defaulted field. It defaults to `Cast` because every
+/// policy serialized before the field existed was a spell-only election
+/// (CR 601.2), so its absence names exactly that route. `Play` (CR 701.18b:
+/// to play a card is to cast it or play it as a land) additionally admits a
+/// modal double-faced card's land face (CR 712.12).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolutionCastFacePolicy {
     pub filter: TargetFilter,
     pub source_id: ObjectId,
     pub controller: PlayerId,
     pub constraint: Option<CastPermissionConstraint>,
+    #[serde(default, skip_serializing_if = "CardPlayMode::is_cast")]
+    pub play_mode: CardPlayMode,
 }
 
 impl ResolutionCastFacePolicy {
@@ -5948,7 +5960,15 @@ impl ResolutionCastFacePolicy {
             source_id,
             controller,
             constraint,
+            play_mode: CardPlayMode::Cast,
         }
+    }
+
+    /// CR 701.18b: an instruction to *play* the card (rather than cast it)
+    /// lets the election admit a land face (CR 712.12).
+    pub fn with_play_mode(mut self, play_mode: CardPlayMode) -> Self {
+        self.play_mode = play_mode;
+        self
     }
 }
 

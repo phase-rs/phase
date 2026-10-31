@@ -34937,8 +34937,10 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // land//land modal card, bound anywhere but the graveyard, keeps the
         // lingering grant at runtime (`ResolutionPlayRoute::LingeringFaceElection`)
         // — that covers Hideaway exile and Djinn-class library cards, which the
-        // grant delivers to exile; a spell//land MDFC is cast by its front face
-        // (CR 712.8a). An `alt_ability_cost` or an explicit
+        // grant delivers to exile; a spell//land MDFC takes the resolution-owned
+        // face election at runtime (`ResolutionPlayRoute::ElectFace`: cast the
+        // spell face or play the land face, CR 712.11b + CR 712.12), so this
+        // classification is unchanged for it. An `alt_ability_cost` or an explicit
         // `duration` likewise keeps the lingering grant (Cruelclaw's discard
         // alt cost; Rebound-style durational recasts). A `constraint` (a
         // conditional free-cast such as Beseech the Mirror's "you may cast the

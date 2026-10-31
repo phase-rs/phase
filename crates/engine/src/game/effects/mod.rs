@@ -16657,8 +16657,10 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             // instruction that resolves now (`DuringResolution`) is probed too,
             // per card through `cast_from_zone::resolution_play_route` — the
             // route `resolve` takes — so a land the player cannot play right now
-            // (allowance reached, not their turn) is not offered. A lingering
-            // `Play` grant is always grantable and stays unprobed.
+            // (allowance reached, not their turn) is not offered. A spell//land
+            // modal card is offered when either face is legal (CR 712.11c +
+            // CR 712.12). A lingering `Play` grant is always grantable and stays
+            // unprobed.
             let resolves_play_now = mode.is_play() && driver.is_during_resolution();
             if matches!(mode, CardPlayMode::Cast) || resolves_play_now {
                 // CR 608.2d: an untargeted free graveyard pick with nothing
@@ -16740,6 +16742,21 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                                     ability.controller,
                                     id,
                                 );
+                            }
+                            // CR 701.18b + CR 712.11c + CR 712.12 + CR 608.2d:
+                            // a spell//land modal card is offered when its spell
+                            // face can be cast or its land face played now. Each
+                            // face is judged by its own legality, through the
+                            // exact election `resolve` opens with this same
+                            // `ability`, before the whole-card constraint gate
+                            // below: an illegal spell face must not suppress a
+                            // legal land face, and vice versa.
+                            cast_from_zone::ResolutionPlayRoute::ElectFace => {
+                                return cast_from_zone::resolution_play_face_legality(
+                                    state, ability, id,
+                                )
+                                .count()
+                                    != 0;
                             }
                             // CR 712.12: the lingering land-face fallback grants
                             // a permission, which is always grantable.
@@ -59892,6 +59909,135 @@ mod tests {
         let (state, source, _) = play_feasibility_board(Zone::Exile, false);
         let unbound = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
         assert!(!optional_effect_is_infeasible(&state, &unbound));
+    }
+
+    /// P0's main phase with a play source on the battlefield and one spell
+    /// (sorcery, generic(3)) // land modal card in `zone` (CR 712.12).
+    fn spell_land_feasibility_board(zone: Zone) -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(914),
+            PlayerId(0),
+            "Play Source".to_string(),
+            Zone::Battlefield,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(915),
+            PlayerId(0),
+            "Spell Front".to_string(),
+            zone,
+        );
+        let object = state.objects.get_mut(&card).unwrap();
+        object.card_types.core_types.push(CoreType::Sorcery);
+        object.base_card_types = object.card_types.clone();
+        object.mana_cost = crate::types::mana::ManaCost::generic(3);
+        let mut back_types = crate::types::card_type::CardType::default();
+        back_types.core_types.push(CoreType::Land);
+        object.back_face = Some(crate::game::game_object::BackFaceData {
+            name: "Land Back".to_string(),
+            card_types: back_types,
+            layout_kind: Some(crate::types::card::LayoutKind::Modal),
+            ..Default::default()
+        });
+        (state, source, card)
+    }
+
+    /// "Mana value 0 or less" on the instruction: the generic(3) spell face is
+    /// illegal under it, while the land face is unaffected.
+    fn with_mv_zero_constraint(mut ability: ResolvedAbility) -> ResolvedAbility {
+        if let Effect::CastFromZone { constraint, .. } = &mut ability.effect {
+            *constraint = Some(crate::types::ability::CastPermissionConstraint::ManaValue {
+                comparator: crate::types::ability::Comparator::LE,
+                value: crate::types::ability::QuantityExpr::Fixed { value: 0 },
+            });
+        }
+        ability
+    }
+
+    /// CR 701.18b + CR 712.11c + CR 712.12 + CR 608.2d: a Play that resolves
+    /// now offers a spell//land modal card when EITHER face is legal. An
+    /// illegal spell face does not suppress a legal land face; with neither
+    /// face legal (allowance reached, another player's turn, or a "can't play
+    /// lands" prohibition) there is no offer.
+    #[test]
+    fn optional_play_now_feasibility_offers_a_spell_land_card_when_either_face_is_legal() {
+        use crate::types::ability::CastFromZoneDriver;
+
+        for zone in [Zone::Exile, Zone::Library] {
+            let (state, source, card) = spell_land_feasibility_board(zone);
+            let now = play_instruction(source, Some(card), CastFromZoneDriver::DuringResolution);
+            assert!(
+                !optional_effect_is_infeasible(&state, &now),
+                "{zone:?}: both faces legal, offered"
+            );
+            let constrained = with_mv_zero_constraint(now.clone());
+            assert!(
+                !optional_effect_is_infeasible(&state, &constrained),
+                "{zone:?}: the spell face is illegal but the land face is legal, offered"
+            );
+
+            let (mut state, source, card) = spell_land_feasibility_board(zone);
+            at_land_allowance(&mut state);
+            let now = play_instruction(source, Some(card), CastFromZoneDriver::DuringResolution);
+            assert!(
+                !optional_effect_is_infeasible(&state, &now),
+                "{zone:?}: at the allowance the spell face alone keeps the offer"
+            );
+            assert!(
+                optional_effect_is_infeasible(&state, &with_mv_zero_constraint(now)),
+                "{zone:?}: CR 305.2b + illegal spell face, no legal face, no offer"
+            );
+
+            let (mut state, source, card) = spell_land_feasibility_board(zone);
+            state.active_player = PlayerId(1);
+            let now = play_instruction(source, Some(card), CastFromZoneDriver::DuringResolution);
+            assert!(
+                optional_effect_is_infeasible(&state, &with_mv_zero_constraint(now)),
+                "{zone:?}: CR 305.3 + illegal spell face, no legal face, no offer"
+            );
+
+            let (mut state, source, card) = spell_land_feasibility_board(zone);
+            let prohibitor = create_object(
+                &mut state,
+                CardId(916),
+                PlayerId(0),
+                "Static Source".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&prohibitor)
+                .unwrap()
+                .static_definitions
+                .push(
+                    crate::types::ability::StaticDefinition::new(
+                        crate::types::statics::StaticMode::Other("CantPlayLand".to_string()),
+                    )
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::default()
+                            .controller(crate::types::ability::ControllerRef::You),
+                    )),
+                );
+            assert!(
+                crate::game::static_abilities::player_has_static_other(
+                    &state,
+                    PlayerId(0),
+                    "CantPlayLand"
+                ),
+                "reach-guard: the prohibition is in force"
+            );
+            let now = play_instruction(source, Some(card), CastFromZoneDriver::DuringResolution);
+            assert!(
+                optional_effect_is_infeasible(&state, &with_mv_zero_constraint(now)),
+                "{zone:?}: CR 101.2 prohibition + illegal spell face, no offer"
+            );
+        }
     }
 
     /// CR 608.2g + CR 701.18b: a MULTI-card Play binding is not played now —
