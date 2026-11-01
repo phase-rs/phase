@@ -149,6 +149,13 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     // replacement when the battle enters the battlefield.
     obj.defense = defense;
     obj.card_types = card_face.card_type.clone();
+    if card_face
+        .card_type
+        .core_types
+        .contains(&crate::types::card_type::CoreType::Conspiracy)
+    {
+        obj.is_conspiracy = true;
+    }
     obj.mana_cost = card_face.mana_cost.clone();
     obj.keywords = keywords.clone();
     let mut abilities = card_face.abilities.clone();
@@ -2539,7 +2546,6 @@ mod tests {
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
-            chosen_names: vec![],
         }
     }
 

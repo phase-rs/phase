@@ -290,10 +290,6 @@ pub struct CardFace {
     /// Used for format legality checks (e.g. PDH commander must have an uncommon printing).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rarities: BTreeSet<Rarity>,
-    /// CR 702.106a / CR 702.106f: Secretly chosen card names for face-down
-    /// hidden-agenda / double-agenda conspiracies in the command zone.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub chosen_names: Vec<String>,
 }
 
 /// Runtime layout discriminant for double-faced cards.

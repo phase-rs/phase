@@ -11,15 +11,19 @@
 //! - Face-down conspiracies are redacted for observers and visible to controllers in viewer projection
 //! - Face-down conspiracies in the command zone can be turned face up as a special action
 //!   during priority (CR 702.106c / CR 116.2j / CR 905.4a)
+//! - The pregame secret agenda prompt validates its names and keeps them private
+//!   (CR 702.106a / CR 702.106f)
 //! - Secretly chosen names (single and double agenda) are transferred to chosen attributes
 //!   and power cost reductions when revealed
 
 use engine::ai_support::legal_actions;
+use engine::game::conspiracy::record_secret_agenda_choices;
 use engine::game::deck_loading::{
     create_command_zone_card_from_card_face, load_deck_into_state, DeckEntry, DeckPayload,
     PlayerDeckPayload,
 };
 use engine::game::derived_views::ClientGameStateRef;
+use engine::game::engine::{apply, start_game_with_starting_player};
 use engine::game::scenario::{GameRunner, P0, P1};
 use engine::game::visibility::{filter_state_for_viewer, HIDDEN_CARD_NAME};
 use engine::types::ability::{
@@ -28,12 +32,15 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
+use engine::types::events::GameEvent;
 use engine::types::format::{DeckSizeRule, FormatConfig, GameFormat};
 use engine::types::game_state::GameState;
 use engine::types::game_state::WaitingFor;
+use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
+use std::sync::Arc;
 
 fn plain_card_face(name: &str) -> CardFace {
     CardFace {
@@ -42,18 +49,17 @@ fn plain_card_face(name: &str) -> CardFace {
     }
 }
 
-fn conspiracy_card_face(name: &str, hidden_agenda: bool, chosen_names: Vec<String>) -> CardFace {
+const BRAGOS_FAVOR_ORACLE: &str = "Hidden agenda (Start the game with this conspiracy face down in the command zone and secretly choose a card name. You may turn this conspiracy face up any time and reveal that name.)\nSpells with the chosen name you cast cost {1} less to cast.";
+const SUMMONERS_BOND_ORACLE: &str = "Double agenda (Start the game with this conspiracy face down in the command zone and secretly choose two different card names. You may turn this conspiracy face up any time and reveal those names.)\nWhenever you cast a creature spell with one of the chosen names, you may search your library for a creature card with the other chosen name, reveal it, put it into your hand, then shuffle.";
+
+fn conspiracy_card_face(name: &str, hidden_agenda: bool) -> CardFace {
     let mut face = CardFace {
         name: name.to_string(),
-        chosen_names,
         ..Default::default()
     };
     face.card_type.core_types.push(CoreType::Conspiracy);
     if hidden_agenda {
-        face.oracle_text = Some(
-            "Hidden agenda (Start the game with this conspiracy face down in the command zone and secretly choose a card name.)\nSpells with the chosen name you cast cost {1} less to cast."
-                .to_string(),
-        );
+        face.oracle_text = Some(BRAGOS_FAVOR_ORACLE.to_string());
         face.static_abilities.push(
             StaticDefinition::new(StaticMode::ModifyCost {
                 mode: CostModifyMode::Reduce,
@@ -72,30 +78,85 @@ fn conspiracy_card_face(name: &str, hidden_agenda: bool, chosen_names: Vec<Strin
     face
 }
 
-fn double_agenda_conspiracy_face(name: &str, chosen_names: Vec<String>) -> CardFace {
+fn summoners_bond_face() -> CardFace {
     let mut face = CardFace {
-        name: name.to_string(),
-        chosen_names,
+        name: "Summoner's Bond".to_string(),
         ..Default::default()
     };
     face.card_type.core_types.push(CoreType::Conspiracy);
-    face.oracle_text = Some(
-        "Double agenda (Start the game with this conspiracy face down in the command zone and secretly choose two card names.)\nSpells with the chosen names you cast cost {1} less to cast."
-            .to_string(),
-    );
-    face.static_abilities.push(
-        StaticDefinition::new(StaticMode::ModifyCost {
-            mode: CostModifyMode::Reduce,
-            amount: ManaCost::generic(1),
-            spell_filter: Some(TargetFilter::HasChosenName),
-            dynamic_count: None,
-            reach: CostReductionReach::SpillsToGeneric,
-        })
-        .affected(TargetFilter::Typed(
-            TypedFilter::card().controller(ControllerRef::You),
-        )),
-    );
+    face.oracle_text = Some(SUMMONERS_BOND_ORACLE.to_string());
     face
+}
+
+fn forty_card_main() -> Vec<DeckEntry> {
+    (0..40)
+        .map(|i| DeckEntry {
+            card: plain_card_face(&format!("Plains {i}")),
+            count: 1,
+        })
+        .collect()
+}
+
+/// Two players with 40-card decks; each player's listed cards sit in the slot
+/// the deck format uses for command-zone cards.
+fn load_limited_decks(state: &mut GameState, p0_cards: Vec<CardFace>, p1_cards: Vec<CardFace>) {
+    state.format_config = FormatConfig::limited_with_command_zone();
+    state.all_card_names = known_card_names();
+    let slot = |cards: Vec<CardFace>| {
+        cards
+            .into_iter()
+            .map(|card| DeckEntry { card, count: 1 })
+            .collect()
+    };
+    let payload = DeckPayload {
+        player: PlayerDeckPayload {
+            main_deck: forty_card_main(),
+            commander: slot(p0_cards),
+            ..Default::default()
+        },
+        opponent: PlayerDeckPayload {
+            main_deck: forty_card_main(),
+            commander: slot(p1_cards),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    load_deck_into_state(state, &payload);
+}
+
+fn known_card_names() -> Arc<[String]> {
+    ["Grizzly Bears", "Runeclaw Bear", "Plains 0"]
+        .map(str::to_string)
+        .into()
+}
+
+/// Setup shortcut for tests about what happens after the pregame prompt, which
+/// `pregame_agenda_prompt_*` below drives through the action path.
+fn choose_names(state: &mut GameState, id: ObjectId, names: &[&str]) {
+    state.all_card_names = known_card_names();
+    record_secret_agenda_choices(
+        state,
+        id,
+        P0,
+        names.iter().map(|name| name.to_string()).collect(),
+    )
+    .expect("valid agenda names");
+}
+
+fn names(names: &[&str]) -> GameAction {
+    GameAction::ChooseSecretAgendaNames {
+        names: names.iter().map(|name| name.to_string()).collect(),
+    }
+}
+
+fn priority_state() -> GameState {
+    let mut state = GameState::new_two_player(7);
+    state.turn_number = 1;
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.phase = Phase::PreCombatMain;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    state
 }
 
 #[test]
@@ -132,46 +193,16 @@ fn limited_format_config_allows_optional_command_zone() {
 #[test]
 fn limited_command_zone_cards_loaded_separately_from_main_deck() {
     let mut state = GameState::new_two_player(7);
-    state.format_config = FormatConfig::limited_with_command_zone();
 
     // 40 main-deck cards + 2 command-zone cards
-    let main_entries: Vec<DeckEntry> = (0..40)
-        .map(|i| DeckEntry {
-            card: plain_card_face(&format!("Plains {i}")),
-            count: 1,
-        })
-        .collect();
-
-    let worldknit_face = conspiracy_card_face("Worldknit", false, vec![]);
-    let brago_face = conspiracy_card_face("Brago's Favor", true, vec!["Grizzly Bears".to_string()]);
-
-    let commander_entries = vec![
-        DeckEntry {
-            card: worldknit_face.clone(),
-            count: 1,
-        },
-        DeckEntry {
-            card: brago_face.clone(),
-            count: 1,
-        },
-    ];
-
-    let p0_payload = PlayerDeckPayload {
-        main_deck: main_entries.clone(),
-        commander: commander_entries,
-        ..Default::default()
-    };
-    let p1_payload = PlayerDeckPayload {
-        main_deck: main_entries,
-        ..Default::default()
-    };
-    let payload = DeckPayload {
-        player: p0_payload,
-        opponent: p1_payload,
-        ..Default::default()
-    };
-
-    load_deck_into_state(&mut state, &payload);
+    load_limited_decks(
+        &mut state,
+        vec![
+            conspiracy_card_face("Worldknit", false),
+            conspiracy_card_face("Brago's Favor", true),
+        ],
+        vec![],
+    );
 
     // CR 905.4: Conspiracies are NOT included in the player's deck.
     // Library must contain all 40 main deck cards (no netting occurred).
@@ -202,6 +233,7 @@ fn limited_command_zone_cards_loaded_separately_from_main_deck() {
         .copied()
         .find(|&id| id != worldknit_id)
         .expect("Brago's Favor present in command zone");
+    choose_names(&mut state, brago_id, &["Grizzly Bears"]);
 
     let worldknit_obj = state.objects.get(&worldknit_id).unwrap();
     let brago_obj = state.objects.get(&brago_id).unwrap();
@@ -268,44 +300,15 @@ fn limited_command_zone_cards_loaded_separately_from_main_deck() {
 
 #[test]
 fn limited_command_zone_turn_hidden_agenda_face_up_special_action() {
-    let mut state = GameState::new_two_player(7);
-    state.format_config = FormatConfig::limited_with_command_zone();
-    state.turn_number = 1;
-    state.active_player = P0;
-    state.priority_player = P0;
-    state.phase = Phase::PreCombatMain;
-    state.waiting_for = WaitingFor::Priority { player: P0 };
-
-    let brago_face = conspiracy_card_face("Brago's Favor", true, vec!["Grizzly Bears".to_string()]);
-    let payload = DeckPayload {
-        player: PlayerDeckPayload {
-            main_deck: (0..40)
-                .map(|i| DeckEntry {
-                    card: plain_card_face(&format!("Plains {i}")),
-                    count: 1,
-                })
-                .collect(),
-            commander: vec![DeckEntry {
-                card: brago_face,
-                count: 1,
-            }],
-            ..Default::default()
-        },
-        opponent: PlayerDeckPayload {
-            main_deck: (0..40)
-                .map(|i| DeckEntry {
-                    card: plain_card_face(&format!("Plains {i}")),
-                    count: 1,
-                })
-                .collect(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    load_deck_into_state(&mut state, &payload);
+    let mut state = priority_state();
+    load_limited_decks(
+        &mut state,
+        vec![conspiracy_card_face("Brago's Favor", true)],
+        vec![],
+    );
 
     let brago_id = state.command_zone[0];
+    choose_names(&mut state, brago_id, &["Grizzly Bears"]);
     assert!(state.objects[&brago_id].face_down);
     assert_eq!(
         state.objects[&brago_id].secret_chosen_names,
@@ -326,11 +329,19 @@ fn limited_command_zone_turn_hidden_agenda_face_up_special_action() {
     );
 
     let mut runner = GameRunner::from_state(state);
-    let result = runner.act(GameAction::TurnFaceUp {
-        object_id: brago_id,
-        x: 0,
-    });
-    assert!(result.is_ok(), "turn face up special action succeeds");
+    let result = runner
+        .act(GameAction::TurnFaceUp {
+            object_id: brago_id,
+            x: 0,
+        })
+        .expect("turn face up special action succeeds");
+
+    // CR 702.106c: turning it face up publicly reveals the chosen name.
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        GameEvent::CardNamed { source_id, name, .. }
+            if *source_id == Some(brago_id) && name == "Grizzly Bears"
+    )));
 
     // Face down status is cleared
     let brago_after = &runner.state().objects[&brago_id];
@@ -355,53 +366,12 @@ fn limited_command_zone_turn_hidden_agenda_face_up_special_action() {
 
 #[test]
 fn limited_command_zone_double_agenda_two_chosen_names() {
-    let mut state = GameState::new_two_player(7);
-    state.format_config = FormatConfig::limited_with_command_zone();
-    state.turn_number = 1;
-    state.active_player = P0;
-    state.priority_player = P0;
-    state.phase = Phase::PreCombatMain;
-    state.waiting_for = WaitingFor::Priority { player: P0 };
-
-    let double_agenda = double_agenda_conspiracy_face(
-        "Double Agenda Conspiracy",
-        vec!["Grizzly Bears".to_string(), "Runeclaw Bear".to_string()],
-    );
-
-    let payload = DeckPayload {
-        player: PlayerDeckPayload {
-            main_deck: (0..40)
-                .map(|i| DeckEntry {
-                    card: plain_card_face(&format!("Plains {i}")),
-                    count: 1,
-                })
-                .collect(),
-            commander: vec![DeckEntry {
-                card: double_agenda,
-                count: 1,
-            }],
-            ..Default::default()
-        },
-        opponent: PlayerDeckPayload {
-            main_deck: (0..40)
-                .map(|i| DeckEntry {
-                    card: plain_card_face(&format!("Plains {i}")),
-                    count: 1,
-                })
-                .collect(),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    load_deck_into_state(&mut state, &payload);
+    let mut state = priority_state();
+    load_limited_decks(&mut state, vec![summoners_bond_face()], vec![]);
 
     let obj_id = state.command_zone[0];
     assert!(state.objects[&obj_id].face_down);
-    assert_eq!(
-        state.objects[&obj_id].secret_chosen_names,
-        vec!["Grizzly Bears".to_string(), "Runeclaw Bear".to_string()]
-    );
+    choose_names(&mut state, obj_id, &["Grizzly Bears", "Runeclaw Bear"]);
     assert!(state.objects[&obj_id].chosen_attributes.is_empty());
 
     let mut runner = GameRunner::from_state(state);
@@ -425,16 +395,12 @@ fn limited_command_zone_double_agenda_two_chosen_names() {
 
 #[test]
 fn limited_command_zone_cost_reduction_with_chosen_name() {
-    let mut state = GameState::new_two_player(7);
+    let mut state = priority_state();
     state.format_config = FormatConfig::limited_with_command_zone();
-    state.turn_number = 1;
-    state.active_player = P0;
-    state.priority_player = P0;
-    state.phase = Phase::PreCombatMain;
-    state.waiting_for = WaitingFor::Priority { player: P0 };
 
-    let brago_face = conspiracy_card_face("Brago's Favor", true, vec!["Grizzly Bears".to_string()]);
+    let brago_face = conspiracy_card_face("Brago's Favor", true);
     let brago_id = create_command_zone_card_from_card_face(&mut state, &brago_face, P0);
+    choose_names(&mut state, brago_id, &["Grizzly Bears"]);
 
     // Forest on battlefield
     let card_id = engine::types::identifiers::CardId(state.next_object_id);
@@ -533,28 +499,17 @@ fn limited_without_command_zone_does_not_place_command_cards() {
     let mut state = GameState::new_two_player(7);
     state.format_config = FormatConfig::limited(); // command_zone: false
 
-    let brago_face = conspiracy_card_face("Brago's Favor", true, vec!["Grizzly Bears".to_string()]);
     let payload = DeckPayload {
         player: PlayerDeckPayload {
-            main_deck: (0..40)
-                .map(|i| DeckEntry {
-                    card: plain_card_face(&format!("Plains {i}")),
-                    count: 1,
-                })
-                .collect(),
+            main_deck: forty_card_main(),
             commander: vec![DeckEntry {
-                card: brago_face,
+                card: conspiracy_card_face("Brago's Favor", true),
                 count: 1,
             }],
             ..Default::default()
         },
         opponent: PlayerDeckPayload {
-            main_deck: (0..40)
-                .map(|i| DeckEntry {
-                    card: plain_card_face(&format!("Plains {i}")),
-                    count: 1,
-                })
-                .collect(),
+            main_deck: forty_card_main(),
             ..Default::default()
         },
         ..Default::default()
@@ -568,4 +523,159 @@ fn limited_without_command_zone_does_not_place_command_cards() {
         "command zone is disabled so no cards are placed"
     );
     assert_eq!(state.players[0].library.len(), 40);
+}
+
+// CR 905.4: only conspiracy cards start the game in a Limited command zone. The
+// non-conspiracy in the slot is the row a pass-everything loader would seat.
+#[test]
+fn limited_command_zone_seats_only_conspiracies() {
+    let mut state = GameState::new_two_player(7);
+    load_limited_decks(
+        &mut state,
+        vec![
+            plain_card_face("Grizzly Bears"),
+            conspiracy_card_face("Worldknit", false),
+        ],
+        vec![],
+    );
+
+    let seated: Vec<&str> = state
+        .command_zone
+        .iter()
+        .map(|id| state.objects[id].name.as_str())
+        .collect();
+    assert_eq!(seated, vec!["Worldknit"]);
+}
+
+// CR 702.106a + CR 702.106f: the production path from deck load to mulligans.
+// P1 holds the double agenda so the opponent's view of it can be compared with
+// P0's view of a hidden agenda, and P0's prompt is proved to come first.
+#[test]
+fn pregame_agenda_prompt_collects_secret_names_for_every_player() {
+    let mut state = GameState::new_two_player(7);
+    load_limited_decks(
+        &mut state,
+        vec![conspiracy_card_face("Brago's Favor", true)],
+        vec![summoners_bond_face()],
+    );
+    let brago_id = state.command_zone[0];
+    let bond_id = state.command_zone[1];
+
+    start_game_with_starting_player(&mut state, P0);
+    assert_eq!(
+        state.waiting_for,
+        WaitingFor::SecretAgendaChoice {
+            player: P0,
+            object_id: brago_id,
+            name_count: 1,
+        },
+        "no mulligan until the agenda is named"
+    );
+
+    let mut runner = GameRunner::from_state(state);
+
+    // Hidden agenda: exactly one real card name.
+    for rejected in [
+        names(&[]),
+        names(&["Grizzly Bears", "Runeclaw Bear"]),
+        names(&["Not A Real Card"]),
+    ] {
+        assert!(runner.act(rejected).is_err());
+        assert!(runner.state().objects[&brago_id]
+            .secret_chosen_names
+            .is_empty());
+    }
+    let answered = runner.act(names(&["Grizzly Bears"])).expect("legal answer");
+    assert!(
+        answered.events.is_empty(),
+        "the secret choice publishes no event: {:?}",
+        answered.events
+    );
+
+    // CR 702.106f: the controller sees two names are required; nobody else does.
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::SecretAgendaChoice {
+            player: P1,
+            object_id: bond_id,
+            name_count: 2,
+        }
+    );
+    assert_eq!(
+        filter_state_for_viewer(runner.state(), P1).waiting_for,
+        runner.state().waiting_for
+    );
+    let p0_view = filter_state_for_viewer(runner.state(), P0);
+    assert_eq!(
+        p0_view.waiting_for,
+        WaitingFor::SecretAgendaChoice {
+            player: P1,
+            object_id: bond_id,
+            name_count: 1,
+        }
+    );
+    assert_eq!(p0_view.objects[&bond_id].agenda_name_count, 0);
+    assert!(
+        p0_view.objects[&bond_id].is_conspiracy,
+        "a face-down conspiracy stays displayable as one"
+    );
+
+    // The AI's offer answers the prompt with two different names.
+    let offered = legal_actions(runner.state());
+    assert!(matches!(
+        offered.as_slice(),
+        [GameAction::ChooseSecretAgendaNames { names }]
+            if names.len() == 2 && names[0] != names[1]
+    ));
+
+    // Double agenda: exactly two different names.
+    for rejected in [
+        names(&["Grizzly Bears"]),
+        names(&["Grizzly Bears", "grizzly bears"]),
+    ] {
+        assert!(runner.act(rejected).is_err());
+        assert!(runner.state().objects[&bond_id]
+            .secret_chosen_names
+            .is_empty());
+    }
+    runner
+        .act(names(&["Grizzly Bears", "Runeclaw Bear"]))
+        .expect("legal answer");
+
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::MulliganDecision { .. }
+        ),
+        "pregame continues once every agenda is named: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().objects[&bond_id].secret_chosen_names,
+        vec!["Grizzly Bears".to_string(), "Runeclaw Bear".to_string()]
+    );
+    for viewer in [Some(P0), None] {
+        let wire = serde_json::to_string(&ClientGameStateRef::wrap(runner.state(), viewer))
+            .expect("wire state serializes");
+        assert!(!wire.contains("Summoner's Bond"), "viewer {viewer:?}");
+        assert!(!wire.contains("Runeclaw Bear"), "viewer {viewer:?}");
+    }
+}
+
+// CR 702.106a: another player can't answer for the seat being asked.
+#[test]
+fn pregame_agenda_prompt_rejects_other_seats() {
+    let mut state = GameState::new_two_player(7);
+    load_limited_decks(
+        &mut state,
+        vec![conspiracy_card_face("Brago's Favor", true)],
+        vec![],
+    );
+    start_game_with_starting_player(&mut state, P0);
+
+    assert!(apply(&mut state, P1, names(&["Grizzly Bears"])).is_err());
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::SecretAgendaChoice { player: P0, .. }
+    ));
 }

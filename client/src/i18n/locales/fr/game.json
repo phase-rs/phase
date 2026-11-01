@@ -2310,6 +2310,8 @@
       "fallback": "Faire un choix"
     },
     "searchSubtitle": "Tapez pour rechercher dans toutes les cartes",
+    "secretAgendaTitle": "Nommez secrètement une carte ({{current}} sur {{total}})",
+    "secretAgendaSubtitle": "Caché jusqu'à ce que vous retourniez cette conspiration face visible",
     "searchPlaceholder": "Rechercher par nom...",
     "noCardsFound": "Aucune carte trouvée",
     "buttonSubtitle": "Sélectionnez une option",

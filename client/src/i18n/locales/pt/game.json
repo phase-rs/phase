@@ -2310,6 +2310,8 @@
       "fallback": "Faça uma Escolha"
     },
     "searchSubtitle": "Digite para buscar em todas as cartas",
+    "secretAgendaTitle": "Nomeie uma carta em segredo ({{current}} de {{total}})",
+    "secretAgendaSubtitle": "Oculto até você virar esta conspiração para cima",
     "searchPlaceholder": "Buscar por nome...",
     "noCardsFound": "Nenhuma carta encontrada",
     "buttonSubtitle": "Selecione uma opção",

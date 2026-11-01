@@ -40,7 +40,7 @@ export function commandZoneConspiracies(gameState: GameState, playerId: PlayerId
     .filter(
       (obj): obj is GameObject =>
         obj != null &&
-        Boolean(obj.card_types?.core_types?.includes("Conspiracy")) &&
+        obj.is_conspiracy === true &&
         obj.owner === playerId &&
         obj.zone === "Command",
     );

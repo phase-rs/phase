@@ -554,6 +554,7 @@ fn resolve_choice(
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::TributeChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. } => {
             // For the actor: pick the "no" option (decline) unless it's the
             // opponent and there's a clearly growth-maximizing yes.

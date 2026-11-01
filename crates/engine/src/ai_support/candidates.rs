@@ -3154,6 +3154,27 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
+        // CR 702.106a / CR 702.106f: Secret agenda names are one atomic answer.
+        WaitingFor::SecretAgendaChoice {
+            player, name_count, ..
+        } => {
+            let mut seen = HashSet::new();
+            let names: Vec<String> = card_name_choice_candidates(state, *player, None)
+                .into_iter()
+                .chain(state.all_card_names.iter().cloned())
+                .filter(|name| seen.insert(name.to_lowercase()))
+                .take(usize::from(*name_count))
+                .collect();
+            if names.len() == usize::from(*name_count) {
+                vec![candidate(
+                    GameAction::ChooseSecretAgendaNames { names },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )]
+            } else {
+                Vec::new()
+            }
+        }
         // CR 702.139a: Companion reveal candidates
         WaitingFor::CompanionReveal {
             player,

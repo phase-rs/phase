@@ -232,6 +232,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesPartition { .. }
         | WaitingFor::SeparatePilesChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::CommanderZoneChoice { .. }
@@ -3228,6 +3229,16 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         }
     }
 
+    // CR 702.106f: You don't reveal that more than one name was secretly chosen,
+    // so every other viewer sees the same one-name prompt for either agenda.
+    if let WaitingFor::SecretAgendaChoice { player, .. } = &state.waiting_for {
+        if !can_view_private_for_player(*player) {
+            if let WaitingFor::SecretAgendaChoice { name_count, .. } = &mut filtered.waiting_for {
+                *name_count = 1;
+            }
+        }
+    }
+
     // CR 603.3b + CR 400.2: Per-controller ordering pass — keep the
     // placement spine visible to everyone (groups, group sizes,
     // controllers, ordered flags) but strip each group's private
@@ -4846,6 +4857,7 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.printed_ref = None;
         obj.foretold = false;
         obj.secret_chosen_names.clear();
+        obj.agenda_name_count = 0;
     }
 }
 
@@ -4865,6 +4877,12 @@ fn reveal_face_down_identity_to_controller(obj: &mut crate::game::game_object::G
         obj.base_name = back_face.name.clone();
         obj.printed_ref = back_face.printed_ref.clone();
         obj.base_printed_ref = back_face.printed_ref.clone();
+        if obj.zone == Zone::Command && obj.is_conspiracy {
+            obj.card_types = back_face.card_types.clone();
+            obj.base_card_types = back_face.card_types.clone();
+            obj.mana_cost = back_face.mana_cost.clone();
+            obj.keywords = back_face.keywords.clone();
+        }
     }
 }
 
@@ -4880,16 +4898,20 @@ fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::G
     // face's warnings), so it must be redacted here for the same reason
     // `back_face` is — it is evidence about the hidden printed text.
     obj.parse_warnings.clear();
-    // CR 708.5 + CR 905.4a: clear runtime ability definitions, chosen attributes,
-    // and secret names so that face-down command-zone conspiracies don't leak
-    // their static/triggered/replacement abilities or secret choices to observers.
-    Arc::make_mut(&mut obj.abilities).clear();
-    obj.trigger_definitions = Default::default();
-    obj.static_definitions = Default::default();
-    obj.replacement_definitions = Default::default();
-    obj.chosen_attributes.clear();
-    obj.secret_chosen_names.clear();
+    // CR 315.5b + CR 702.106f: clear runtime ability definitions, chosen attributes,
+    // secret names, and the agenda's name count for face-down command-zone
+    // conspiracies so they don't leak their abilities or secret choices to observers.
+    // `is_conspiracy` stays: it is the public display classification, not a
+    // characteristic. Battlefield face-down permanents must keep their granted
+    // runtime abilities/replacements.
     if obj.zone == Zone::Command {
+        Arc::make_mut(&mut obj.abilities).clear();
+        obj.trigger_definitions = Default::default();
+        obj.static_definitions = Default::default();
+        obj.replacement_definitions = Default::default();
+        obj.chosen_attributes.clear();
+        obj.secret_chosen_names.clear();
+        obj.agenda_name_count = 0;
         obj.card_types = Default::default();
         obj.mana_cost = Default::default();
         obj.keywords.clear();

@@ -368,6 +368,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::BattleProtectorChoice { .. }
@@ -623,6 +624,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::CommanderZoneChoice { .. }
@@ -5047,6 +5049,7 @@ fn selection_projection(
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::CommanderZoneChoice { .. }
@@ -6330,6 +6333,8 @@ fn project_action_payload(
                 push_value_surface(surfaces, InteractionRoleCode::Harmonize, "decline");
             }
         }
+        // CR 702.106a: the names are secret, so they publish no surface.
+        GameAction::ChooseSecretAgendaNames { .. } => {}
         GameAction::DeclareCompanion { choice } => match choice {
             crate::types::game_state::CompanionDeclaration::Reveal(reveal) => {
                 push_value_surface(surfaces, InteractionRoleCode::Companion, &reveal.name)
@@ -6842,6 +6847,9 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::ChooseRoomDoor { .. } => InteractionActionCode::ChooseRoomDoor,
         GameAction::TapForConvoke { .. } => InteractionActionCode::TapForConvoke,
         GameAction::HarmonizeTap { .. } => InteractionActionCode::HarmonizeTap,
+        GameAction::ChooseSecretAgendaNames { .. } => {
+            InteractionActionCode::ChooseSecretAgendaNames
+        }
         GameAction::DeclareCompanion { .. } => InteractionActionCode::DeclareCompanion,
         GameAction::CompanionToHand => InteractionActionCode::CompanionToHand,
         GameAction::EndContinuousEffect { .. } => InteractionActionCode::EndContinuousEffect,

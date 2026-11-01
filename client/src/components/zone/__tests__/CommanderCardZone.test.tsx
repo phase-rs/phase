@@ -407,6 +407,7 @@ function conspiracyObject(overrides: Partial<GameObject> = {}): GameObject {
     owner: 0,
     controller: 0,
     is_commander: false,
+    is_conspiracy: true,
     card_types: { core_types: ["Conspiracy"], supertypes: [], subtypes: [] },
     zone: "Command",
     face_down: true,
@@ -417,7 +418,7 @@ function conspiracyObject(overrides: Partial<GameObject> = {}): GameObject {
 function turnFaceUpAction(objectId = CONSPIRACY_ID): GameAction {
   return {
     type: "TurnFaceUp",
-    data: { object_id: objectId, x: 0 },
+    data: { object_id: objectId },
   };
 }
 
@@ -456,5 +457,29 @@ describe("ConspiracyCardZone", () => {
 
     expect(dispatchAction).toHaveBeenCalledTimes(1);
     expect(dispatchAction).toHaveBeenCalledWith(action);
+  });
+
+  // CR 315.5b: an opponent's face-down conspiracy reaches the client with no
+  // card types, so the engine's display classification alone keeps it visible.
+  it("shows an opponent's redacted face-down conspiracy in the command dock", () => {
+    const conspiracy = conspiracyObject({
+      owner: 1,
+      controller: 1,
+      name: "Hidden Card",
+      card_types: { core_types: [], supertypes: [], subtypes: [] },
+    });
+    const gameState = makeState(conspiracy);
+    useGameStore.setState({
+      gameMode: "local",
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [],
+      legalActionsByObject: {},
+      spellCosts: {},
+    });
+
+    render(<CommandDock playerId={1} isMirrored />);
+
+    expect(screen.getByRole("img", { name: "Hidden Card" })).toBeInTheDocument();
   });
 });

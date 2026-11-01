@@ -617,7 +617,9 @@ pub(crate) fn handle_turn_face_up(
                     "Turning a conspiracy face up has no X cost".to_string(),
                 ));
             }
-            if !crate::game::conspiracy::turn_hidden_agenda_face_up(state, object_id, player) {
+            if !crate::game::conspiracy::turn_hidden_agenda_face_up(
+                state, object_id, player, events,
+            ) {
                 return Err(EngineError::InvalidAction(
                     "Failed to turn conspiracy face up".to_string(),
                 ));

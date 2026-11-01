@@ -2310,6 +2310,8 @@
       "fallback": "Triff eine Wahl"
     },
     "searchSubtitle": "Tippe, um alle Karten zu durchsuchen",
+    "secretAgendaTitle": "Nenne heimlich eine Karte ({{current}} von {{total}})",
+    "secretAgendaSubtitle": "Verborgen, bis du diese Verschwörung aufdeckst",
     "searchPlaceholder": "Nach Name suchen...",
     "noCardsFound": "Keine Karten gefunden",
     "buttonSubtitle": "Wähle eine Option",

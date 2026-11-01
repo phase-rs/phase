@@ -678,15 +678,10 @@ pub fn create_command_zone_card_from_card_face(
     apply_card_face_to_object(obj, &face);
     obj.is_commander = false;
     obj.controller = owner;
-    if !face.chosen_names.is_empty() {
-        obj.secret_chosen_names = face.chosen_names.clone();
-    }
 
     if crate::game::conspiracy::is_conspiracy(obj) {
         let hidden_agenda = crate::game::conspiracy::card_has_hidden_agenda(&face);
-        if hidden_agenda {
-            obj.back_face = Some(crate::game::printed_cards::snapshot_object_face(obj));
-        }
+        obj.agenda_name_count = crate::game::conspiracy::agenda_name_count(&face);
         crate::game::conspiracy::start_with_conspiracy(state, obj_id, hidden_agenda);
     }
 
@@ -1156,7 +1151,15 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                             create_commander_from_card_face(state, &entry.card, owner);
                         }
                         CommandZonePlacement::NonCommanderLimited => {
-                            create_command_zone_card_from_card_face(state, &entry.card, owner);
+                            // CR 905: only Conspiracy cards start in a Limited command zone.
+                            if entry
+                                .card
+                                .card_type
+                                .core_types
+                                .contains(&crate::types::card_type::CoreType::Conspiracy)
+                            {
+                                create_command_zone_card_from_card_face(state, &entry.card, owner);
+                            }
                         }
                     }
                 }
@@ -1558,7 +1561,6 @@ mod tests {
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
-            chosen_names: vec![],
         }
     }
 
@@ -1612,7 +1614,6 @@ mod tests {
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
-            chosen_names: vec![],
         }
     }
 

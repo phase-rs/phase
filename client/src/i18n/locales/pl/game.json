@@ -2310,6 +2310,8 @@
       "fallback": "Dokonaj wyboru"
     },
     "searchSubtitle": "Pisz, aby przeszukać wszystkie karty",
+    "secretAgendaTitle": "Potajemnie nazwij kartę ({{current}} z {{total}})",
+    "secretAgendaSubtitle": "Ukryte, dopóki nie odwrócisz tego spisku awersem do góry",
     "searchPlaceholder": "Szukaj po nazwie...",
     "noCardsFound": "Nie znaleziono kart",
     "buttonSubtitle": "Wybierz jedną opcję",

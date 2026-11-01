@@ -10559,7 +10559,6 @@ fn build_oracle_face_inner(
         metadata: Default::default(),
         rarities: Default::default(),
         attraction_lights: vec![],
-        chosen_names: vec![],
     };
 
     face.brawl_commander = compute_brawl_commander(mtgjson, &face);

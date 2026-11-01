@@ -46,7 +46,8 @@ describe("commandZoneLeaders", () => {
       id: 6,
       owner: 0,
       is_commander: false,
-      card_types: { core_types: ["Conspiracy"], supertypes: [], subtypes: [] },
+      is_conspiracy: true,
+      card_types: { core_types: [], supertypes: [], subtypes: [] },
       zone: "Command",
     });
     const state = stateWith(

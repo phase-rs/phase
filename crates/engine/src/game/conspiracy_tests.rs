@@ -9,14 +9,15 @@
 //! face-up conspiracy's command-zone continuous statics gather like an emblem's.
 
 use super::conspiracy::{
-    card_has_hidden_agenda, conspiracies_in_command_zone, functions_from_command_zone,
-    is_conspiracy, start_with_conspiracy, turn_hidden_agenda_face_up,
+    agenda_name_count, card_has_hidden_agenda, conspiracies_in_command_zone,
+    functions_from_command_zone, is_conspiracy, start_with_conspiracy, turn_hidden_agenda_face_up,
 };
+use super::filter::{matches_target_filter, FilterContext};
 use super::functioning_abilities::{
     active_static_definitions, active_trigger_definitions, game_functioning_statics,
 };
 use crate::database::synthesis::synthesize_conspiracy;
-use crate::types::ability::{StaticDefinition, TriggerDefinition};
+use crate::types::ability::{StaticDefinition, TargetFilter, TriggerDefinition};
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{GameState, StaticSourceIndex};
@@ -235,15 +236,30 @@ fn turn_hidden_agenda_face_up_reveals_and_is_guarded() {
     start_with_conspiracy(&mut state, id, true);
 
     // An opponent cannot turn it face up.
-    assert!(!turn_hidden_agenda_face_up(&mut state, id, P1));
+    assert!(!turn_hidden_agenda_face_up(
+        &mut state,
+        id,
+        P1,
+        &mut Vec::new()
+    ));
     assert!(state.objects.get(&id).unwrap().face_down);
 
     // The controller can.
-    assert!(turn_hidden_agenda_face_up(&mut state, id, P0));
+    assert!(turn_hidden_agenda_face_up(
+        &mut state,
+        id,
+        P0,
+        &mut Vec::new()
+    ));
     assert!(!state.objects.get(&id).unwrap().face_down);
 
     // Already face up → no-op.
-    assert!(!turn_hidden_agenda_face_up(&mut state, id, P0));
+    assert!(!turn_hidden_agenda_face_up(
+        &mut state,
+        id,
+        P0,
+        &mut Vec::new()
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -366,14 +382,64 @@ fn card_has_hidden_agenda_detects_agenda_text() {
         Some("Double agenda (Start the game with this conspiracy face down...)".to_string());
     assert!(card_has_hidden_agenda(&face));
 
+    assert_eq!(agenda_name_count(&face), 2);
+
     face.oracle_text = Some("At the beginning of your upkeep, draw a card.".to_string());
     assert!(!card_has_hidden_agenda(&face));
+    assert_eq!(agenda_name_count(&face), 0);
+
+    // An agenda is a keyword line, not any mention of the words.
+    face.oracle_text = Some("Reveal your hidden agenda.".to_string());
+    assert_eq!(agenda_name_count(&face), 0);
 
     // Non-conspiracy with "hidden agenda" in text is not a hidden agenda conspiracy
     let mut creature_face = CardFace::default();
     creature_face.card_type.core_types.push(CoreType::Creature);
     creature_face.oracle_text = Some("Hidden agenda".to_string());
     assert!(!card_has_hidden_agenda(&creature_face));
+}
+
+/// CR 315.5b: a face-down conspiracy's printed name, type, and abilities are not
+/// available to anything until it is turned face up, while the internal identity
+/// that reveal and eligibility read survives.
+#[test]
+fn face_down_conspiracy_has_no_characteristics_until_turned_up() {
+    let mut state = GameState::new_two_player(7);
+    let cda = StaticDefinition::new(StaticMode::from_str("Continuous").unwrap());
+    let mut face = synthesized_conspiracy_face(vec![cda], vec![]);
+    face.mana_cost = crate::types::mana::ManaCost::generic(1);
+    let id = create_conspiracy_object(&mut state, "Brago's Favor", &face, P0);
+    start_with_conspiracy(&mut state, id, true);
+
+    let named = TargetFilter::Named {
+        name: "Brago's Favor".to_string(),
+    };
+    let ctx = FilterContext::from_source(&state, id);
+    assert!(!matches_target_filter(&state, id, &named, &ctx));
+
+    let obj = state.objects.get(&id).unwrap();
+    assert!(is_conspiracy(obj), "internal identity survives");
+    assert!(obj.name.is_empty());
+    assert!(obj.card_types.core_types.is_empty());
+    assert!(obj.static_definitions.is_empty());
+    assert_eq!(obj.mana_cost, crate::types::mana::ManaCost::NoCost);
+    assert!(
+        active_static_definitions(&state, obj).next().is_none(),
+        "CR 315.5b: nothing to admit to the layer gather while face down"
+    );
+
+    assert!(turn_hidden_agenda_face_up(
+        &mut state,
+        id,
+        P0,
+        &mut Vec::new()
+    ));
+    let ctx = FilterContext::from_source(&state, id);
+    assert!(matches_target_filter(&state, id, &named, &ctx));
+    let obj = state.objects.get(&id).unwrap();
+    assert_eq!(obj.name, "Brago's Favor");
+    assert!(obj.card_types.core_types.contains(&CoreType::Conspiracy));
+    assert_eq!(obj.static_definitions.len(), 1);
 }
 
 #[test]
@@ -396,7 +462,12 @@ fn face_down_conspiracy_visibility_redacted_for_opponent_revealed_for_controller
     assert_eq!(p1_card.name, crate::game::visibility::HIDDEN_CARD_NAME);
 
     // Turn face up
-    assert!(turn_hidden_agenda_face_up(&mut state, id, P0));
+    assert!(turn_hidden_agenda_face_up(
+        &mut state,
+        id,
+        P0,
+        &mut Vec::new()
+    ));
 
     // Now opponent also sees the card
     let p1_view_after = crate::game::visibility::filter_state_for_viewer(&state, P1);

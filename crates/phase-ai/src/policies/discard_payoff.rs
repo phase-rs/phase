@@ -264,6 +264,7 @@ fn candidate_discards_controller(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::ChooseRoomDoor { .. }
         | GameAction::TapForConvoke { .. }
         | GameAction::HarmonizeTap { .. }
+        | GameAction::ChooseSecretAgendaNames { .. }
         | GameAction::DeclareCompanion { .. }
         | GameAction::CompanionToHand
         | GameAction::DiscoverChoice { .. }

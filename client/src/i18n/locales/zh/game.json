@@ -2003,6 +2003,8 @@
     "numberSubtitle": "输入{{min}}或更大的整数",
     "searchPlaceholder": "按名称搜寻…",
     "searchSubtitle": "输入以搜寻所有牌",
+    "secretAgendaTitle": "秘密指定一个牌名（{{current}}/{{total}}）",
+    "secretAgendaSubtitle": "在你将此阴谋翻为正面之前保持隐藏",
     "title": {
       "basicLandType": "选择基本地类别",
       "cardName": "说出一个牌名",

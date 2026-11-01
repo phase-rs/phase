@@ -439,6 +439,16 @@ pub fn handle_declare_companion(
     Ok(advance_companion_reveal(state, player, events))
 }
 
+/// CR 702.139a + CR 103.5: The pregame step after start-of-game conspiracies are
+/// set: companion reveals if any player has an eligible companion, else mulligans.
+pub(super) fn companion_reveals_or_mulligan(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    check_all_companion_reveals(state)
+        .unwrap_or_else(|| super::mulligan::start_mulligan(state, events))
+}
+
 /// Move to the next player's companion reveal, or start mulligans if all done.
 fn advance_companion_reveal(
     state: &mut GameState,
