@@ -55297,6 +55297,12 @@ fn cast_from_among_the_cards_exiled_this_way_binds_to_exiled_by_source() {
 /// on both sides, so the cast target keeps both gates — never just the first
 /// one a probe matched, which would authorize an exiled artifact that is
 /// neither an instant nor a sorcery.
+///
+/// Shape-only hardening, not a card test: no printed card carries a type gate
+/// on both sides of the anchor. The nearest printed cards each carry one side —
+/// Wand of Wonder the prefix gate ("instant and/or sorcery spells from among
+/// cards exiled this way"), Etali, Primal Conqueror the suffix gate ("from
+/// among the nonland cards exiled this way").
 #[test]
 fn cast_from_among_exiled_this_way_keeps_both_a_prefix_and_a_suffix_type_gate() {
     fn type_leaves(filter: &TargetFilter, out: &mut Vec<TypeFilter>) {
