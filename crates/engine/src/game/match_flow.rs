@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::game::deck_loading::{
-    hydrate_loaded_game_from_card_db, load_deck_into_state, DeckEntry, DeckPayload,
-    PlayerDeckPayload,
+    hydrate_loaded_game_from_card_db, load_next_game_decks, rebind_retained_printings, DeckEntry,
+    DeckPayload, PlayerDeckPayload,
 };
 use crate::types::events::GameEvent;
 use crate::types::format::SideboardPolicy;
@@ -144,64 +144,85 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
 
     // `PlayerDeckPayload`'s deck fields are plain `Vec<DeckEntry>` — deref
     // the Arc then deep-clone so the payload owns its own vec.
-    // Propagate `bracket_tier` so the pool rebuilt by `load_deck_into_state`
+    // Propagate `bracket_tier` so the pool rebuilt by `load_next_game_decks`
     // in the next game carries the same declared tier as the current game.
     //
     // Seats >= 2 are AI players (e.g., cEDH 4-player Bo3). Collect their pools
     // so `bracket_tier = Cedh` is not silently dropped between games.
+    //
+    // CR 100.4 + CR 203.1 + CR 206.1: each seat's retained printing rows are rebound to
+    // the lists it plays next (`rebind_retained_printings`); the record itself is carried
+    // by `load_next_game_decks`.
     let ai_decks = state
         .deck_pools
         .iter()
         .filter(|p| p.player != PlayerId(0) && p.player != PlayerId(1))
-        .map(|p| PlayerDeckPayload {
-            main_deck: (*p.current_main).clone(),
-            sideboard: (*p.current_sideboard).clone(),
-            commander: (*p.current_commander).clone(),
-            // Dedicated companions are rebuilt from their registered external
-            // slot, never from the consumed current offer.
-            companion: (*p.registered_companion).clone(),
-            attraction_deck: Vec::new(),
-            planar_deck: Vec::new(),
-            scheme_deck: (*p.registered_scheme_deck).clone(),
-            contraption_deck: Vec::new(),
-            sticker_sheets: state
-                .players
-                .iter()
-                .find(|player| player.id == p.player)
-                .map(|player| player.sticker_sheets.clone())
-                .unwrap_or_default(),
-            signature_spell: (*p.current_signature_spell).clone(),
-            bracket_tier: p.bracket_tier,
+        .map(|p| {
+            rebind_retained_printings(
+                p,
+                PlayerDeckPayload {
+                    main_deck: (*p.current_main).clone(),
+                    sideboard: (*p.current_sideboard).clone(),
+                    commander: (*p.current_commander).clone(),
+                    // Dedicated companions are rebuilt from their registered external
+                    // slot, never from the consumed current offer.
+                    companion: (*p.registered_companion).clone(),
+                    attraction_deck: Vec::new(),
+                    planar_deck: Vec::new(),
+                    scheme_deck: (*p.registered_scheme_deck).clone(),
+                    contraption_deck: Vec::new(),
+                    sticker_sheets: state
+                        .players
+                        .iter()
+                        .find(|player| player.id == p.player)
+                        .map(|player| player.sticker_sheets.clone())
+                        .unwrap_or_default(),
+                    signature_spell: (*p.current_signature_spell).clone(),
+                    bracket_tier: p.bracket_tier,
+                    printings: Vec::new(),
+                    printing_entry_names: Vec::new(),
+                },
+            )
         })
         .collect();
 
     Ok(DeckPayload {
-        player: PlayerDeckPayload {
-            main_deck: (*p0.current_main).clone(),
-            sideboard: (*p0.current_sideboard).clone(),
-            commander: (*p0.current_commander).clone(),
-            companion: (*p0.registered_companion).clone(),
-            attraction_deck: Vec::new(),
-            planar_deck: (*p0.registered_planar_deck).clone(),
-            scheme_deck: (*p0.registered_scheme_deck).clone(),
-            contraption_deck: Vec::new(),
-            sticker_sheets: state.players[0].sticker_sheets.clone(),
-            signature_spell: (*p0.current_signature_spell).clone(),
-            bracket_tier: p0.bracket_tier,
-        },
-        opponent: PlayerDeckPayload {
-            main_deck: (*p1.current_main).clone(),
-            sideboard: (*p1.current_sideboard).clone(),
-            commander: (*p1.current_commander).clone(),
-            companion: (*p1.registered_companion).clone(),
-            attraction_deck: Vec::new(),
-            planar_deck: Vec::new(),
-            scheme_deck: (*p1.registered_scheme_deck).clone(),
-            contraption_deck: Vec::new(),
-            sticker_sheets: state.players[1].sticker_sheets.clone(),
-            signature_spell: (*p1.current_signature_spell).clone(),
-            bracket_tier: p1.bracket_tier,
-        },
+        player: rebind_retained_printings(
+            p0,
+            PlayerDeckPayload {
+                main_deck: (*p0.current_main).clone(),
+                sideboard: (*p0.current_sideboard).clone(),
+                commander: (*p0.current_commander).clone(),
+                companion: (*p0.registered_companion).clone(),
+                attraction_deck: Vec::new(),
+                planar_deck: (*p0.registered_planar_deck).clone(),
+                scheme_deck: (*p0.registered_scheme_deck).clone(),
+                contraption_deck: Vec::new(),
+                sticker_sheets: state.players[0].sticker_sheets.clone(),
+                signature_spell: (*p0.current_signature_spell).clone(),
+                bracket_tier: p0.bracket_tier,
+                printings: Vec::new(),
+                printing_entry_names: Vec::new(),
+            },
+        ),
+        opponent: rebind_retained_printings(
+            p1,
+            PlayerDeckPayload {
+                main_deck: (*p1.current_main).clone(),
+                sideboard: (*p1.current_sideboard).clone(),
+                commander: (*p1.current_commander).clone(),
+                companion: (*p1.registered_companion).clone(),
+                attraction_deck: Vec::new(),
+                planar_deck: Vec::new(),
+                scheme_deck: (*p1.registered_scheme_deck).clone(),
+                contraption_deck: Vec::new(),
+                sticker_sheets: state.players[1].sticker_sheets.clone(),
+                signature_spell: (*p1.current_signature_spell).clone(),
+                bracket_tier: p1.bracket_tier,
+                printings: Vec::new(),
+                printing_entry_names: Vec::new(),
+            },
+        ),
         ai_decks,
         // cEDH bracket validation ran at game 1 setup; decks haven't
         // changed between games, so re-validation is unnecessary.
@@ -319,6 +340,10 @@ pub fn apply_trusted_match_forfeit(
     // CR 104.1 + CR 723.1: a match forfeit does not go through
     // `elimination::end_game`, so it ends player control itself.
     crate::game::turn_control::end_all_player_control(state);
+    // A trusted match forfeit changes the delivered rules state outside the action boundary
+    // (no `apply` wraps it), and the revision is the clients' staleness key, so the forfeit
+    // advances it itself.
+    crate::game::public_state::bump_state_revision(state);
 
     Ok(vec![GameEvent::GameOver {
         winner: Some(winner),
@@ -478,6 +503,10 @@ fn restart_between_games_with_starting_player(
         state.players.len() as u8,
         state.rng_seed.wrapping_add(state.game_number as u64 + 1),
     );
+    // The next game replaces this one in place (same match, same client session): continue
+    // the replaced state's revision, so no later snapshot repeats one already used.
+    // `start_game_with_starting_player` and the outer action boundary then advance it.
+    next_state.state_revision = state.state_revision;
     // CR 732.2a: the between-games rebuild is a fresh `GameState::new` (loop_detection
     // defaults Off), so adopt the match config through the single authority — a raw
     // `next_state.match_config = …` would copy the struct but leave the runtime
@@ -531,8 +560,8 @@ fn restart_between_games_with_starting_player(
     // never rebuilt.
     next_state.card_db = state.card_db.clone();
 
-    load_deck_into_state(&mut next_state, &payload);
-    // `load_deck_into_state` resets the booster shelf, and the hydration below
+    load_next_game_decks(&mut next_state, &payload, &state.deck_pools);
+    // `load_next_game_decks` (through `load_decks`) resets the booster shelf, and the hydration below
     // stocks one only when it is empty. Carry it for every source, set products
     // and Cube alike, before hydrating so game one's shelf is kept. Whether a
     // game stocks one depends only on the registered deck pools, sideboards
@@ -595,6 +624,7 @@ pub fn handle_choose_play_draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::deck_loading::load_deck_into_state;
     use crate::game::deck_loading::PlayerDeckPayload;
     use crate::game::engine::{apply_as_current, start_game};
     use crate::types::ability::ControlWindow;
@@ -703,11 +733,13 @@ mod tests {
         state.match_config.match_type = MatchType::Bo3;
         state.match_score.p0_wins = 1;
         state.sideboard_submitted = vec![PlayerId(0)];
+        let before = state.state_revision;
 
         let events =
             apply_trusted_match_forfeit(&mut state, PlayerId(0), MatchForfeitCause::MatchConcede)
                 .expect("two-seat Bo3 match concede is trusted");
 
+        assert!(state.state_revision > before);
         assert_eq!(state.match_phase, MatchPhase::Completed);
         assert_eq!(state.match_score.p0_wins, 1);
         assert_eq!(state.match_score.p1_wins, 2);
@@ -1497,6 +1529,71 @@ mod tests {
         );
     }
 
+    /// CR 100.4 + CR 203.1 + CR 206.1: every seat's payload, including an `ai_decks` seat,
+    /// is rebound from that seat's own retained printing record.
+    #[test]
+    fn deck_payload_from_current_pools_rebinds_every_seat_from_its_own_record() {
+        use crate::types::card_printing::{
+            CardPrinting, DeckFaceLookupName, DeckPrinting, DeckPrintingRecord, DeckSection,
+        };
+        use crate::types::display_only::DisplayOnly;
+
+        let mut state = GameState::new_two_player(42);
+        state.deck_pools = (0..3u8)
+            .map(|seat| {
+                let name = format!("P{seat}");
+                let row = DeckPrinting {
+                    section: DeckSection::MainDeck,
+                    name: name.clone(),
+                    count: 2,
+                    printing: CardPrinting {
+                        set_code: format!("seat-{seat}"),
+                        collector_number: "1".to_string(),
+                    },
+                };
+                let lookup =
+                    DeckFaceLookupName::of(DeckSection::MainDeck, &basic_land(&name), name.clone());
+                PlayerDeckPool {
+                    player: PlayerId(seat),
+                    current_main: std::sync::Arc::new(vec![entry(&name, 2)]),
+                    printings: DisplayOnly::new(Some(std::sync::Arc::new(
+                        DeckPrintingRecord::new(vec![row], vec![lookup]),
+                    ))),
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        let payload = deck_payload_from_current_pools(&state)
+            .expect("deck_payload_from_current_pools must succeed with three pools");
+
+        assert_eq!(
+            payload.ai_decks.len(),
+            1,
+            "reach: seat 2 is an ai_decks seat"
+        );
+        for (seat, deck) in [&payload.player, &payload.opponent, &payload.ai_decks[0]]
+            .into_iter()
+            .enumerate()
+        {
+            let name = format!("P{seat}");
+            assert_eq!(
+                deck.printings.len(),
+                1,
+                "seat {seat} gets exactly its own row"
+            );
+            assert_eq!(deck.printings[0].name, name);
+            assert_eq!(deck.printings[0].count, 2);
+            assert_eq!(deck.printings[0].printing.set_code, format!("seat-{seat}"));
+            let bindings: Vec<_> = deck
+                .printing_entry_names
+                .iter()
+                .map(|binding| (binding.section, binding.entry_index, binding.name.as_str()))
+                .collect();
+            assert_eq!(bindings, [(DeckSection::MainDeck, 0, name.as_str())]);
+        }
+    }
+
     /// Game 2 of a Bo3 is a fresh `GameState::new`, which defaults
     /// `interaction_session_id` to `None`. Without an explicit carry, every
     /// interaction surface reports `AuthorityUnbound` from game 2 onward — the
@@ -1528,10 +1625,13 @@ mod tests {
         let session = InteractionSessionId("match-authority-carry".to_string());
         bind_interaction_authority(&mut state, session.clone())
             .expect("game 1 binds authority the way its creator does");
+        state.state_revision = 41;
 
         let mut events = Vec::new();
         handle_choose_play_draw(&mut state, PlayerId(0), true, &mut events)
             .expect("game 2 of the Bo3 must start");
+        assert_eq!(state.match_phase, MatchPhase::InGame);
+        assert!(state.state_revision > 41);
 
         // The rebuild replaces `state` wholesale with a `GameState::new`, so if
         // that constructor ever started binding authority itself the assertion

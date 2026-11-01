@@ -88,7 +88,7 @@ describe("groupAttackers", () => {
       makeObject({ id: 102 }),
     ]);
 
-    const stacks = groupAttackers([200, 103, 101, 102], state);
+    const stacks = groupAttackers([200, 103, 101, 102], state, false);
 
     expect(stacks).toHaveLength(2);
     // Stacks are sorted by their lowest member id.
@@ -104,7 +104,7 @@ describe("groupAttackers", () => {
       makeObject({ id: 1 }),
       makeObject({ id: 9 }),
     ]);
-    const [stack] = groupAttackers([9, 1, 5], state);
+    const [stack] = groupAttackers([9, 1, 5], state, false);
     expect(stack.ids).toEqual([1, 5, 9]);
   });
 
@@ -114,7 +114,7 @@ describe("groupAttackers", () => {
       { "0": 102 },
     );
 
-    const stacks = groupAttackers([101, 102, 103], state);
+    const stacks = groupAttackers([101, 102, 103], state, false);
 
     expect(stacks).toHaveLength(2);
     expect(stacks[0]).toMatchObject({ count: 2, ids: [101, 103] });
@@ -122,7 +122,7 @@ describe("groupAttackers", () => {
   });
 
   it("falls back to singleton stacks (sorted) when state is missing", () => {
-    const stacks = groupAttackers([3, 1, 2], null);
+    const stacks = groupAttackers([3, 1, 2], null, false);
     expect(stacks.map((s) => s.ids)).toEqual([[1], [2], [3]]);
     expect(stacks.every((s) => s.count === 1 && s.representative === null)).toBe(true);
     // The ∞-pile flag defaults false when there is no state to consult.
@@ -147,7 +147,7 @@ describe("groupAttackers", () => {
       [101, 102],
     );
 
-    const stacks = groupAttackers([200, 101, 102], state);
+    const stacks = groupAttackers([200, 101, 102], state, false);
     const goblins = stacks.find((s) => s.name === "Goblin");
     const elf = stacks.find((s) => s.name === "Elf");
 
@@ -165,11 +165,29 @@ describe("groupAttackers", () => {
     const targetsFor = (id: ObjectId): AttackTarget[] =>
       id === 103 ? [P1] : [P1, P2];
 
-    const stacks = groupAttackers([101, 102, 103], state, targetsFor);
+    const stacks = groupAttackers([101, 102, 103], state, false, targetsFor);
 
     expect(stacks).toHaveLength(2);
     expect(stacks[0]).toMatchObject({ name: "Goblin", ids: [101, 102], targets: [P1, P2] });
     expect(stacks[1]).toMatchObject({ name: "Goblin", ids: [103], targets: [P1] });
+  });
+
+  it.each([false, true])("partitions printing before target sets and retains exact member identity (%s)", (enabled) => {
+    const state = makeState([101, 102, 103, 104].map((id) => makeObject({
+      id, printing: { set_code: "own", collector_number: id === 103 ? "2" : "1" },
+      printed_ref: { oracle_id: "goblin-oracle", face_name: "Goblin" },
+    })));
+    const targetsFor = (id: ObjectId): AttackTarget[] => id === 104 ? [P2] : [P1, P2];
+    expect(groupAttackers([104, 103, 102, 101], state, enabled, targetsFor)
+      .map((stack) => [stack.ids, stack.targets])).toEqual(enabled
+      ? [[[101, 102], [P1, P2]], [[103], [P1, P2]], [[104], [P2]]]
+      : [[[101, 102, 103], [P1, P2]], [[104], [P2]]]);
+    for (const object of Object.values(state.objects)) object.printed_ref = null;
+    expect(groupAttackers([104, 103, 102, 101], state, enabled, targetsFor)
+      .map((stack) => [stack.ids, stack.targets]))
+      .toEqual([[[101, 102, 103], [P1, P2]], [[104], [P2]]]);
+    expect(groupAttackers([], state, enabled, targetsFor)).toEqual([]);
+    expect(groupAttackers([103, 101], null, enabled, targetsFor).map((stack) => stack.ids)).toEqual([[101], [103]]);
   });
 });
 

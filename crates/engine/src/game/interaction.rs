@@ -19,8 +19,8 @@ use crate::analysis::decision_template::{
 };
 use crate::types::ability::{
     AggregateFunction, ChoiceType, ChooseFromZoneConstraint, Comparator, CounterCostSelection,
-    DoorLockOp, EffectKind, ObjectProperty, SearchSelectionConstraint, TapCreaturesAggregateStat,
-    TapCreaturesSelectionMode, TargetRef,
+    DoorLockOp, EffectKind, LibraryPosition, ObjectProperty, SearchSelectionConstraint,
+    TapCreaturesAggregateStat, TapCreaturesSelectionMode, TargetRef,
 };
 use crate::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use crate::types::actions::{
@@ -6358,11 +6358,22 @@ fn project_action_payload(
                 push_value_surface(surfaces, InteractionRoleCode::CastChoice, "decline");
             }
         }
-        GameAction::ChooseTopOrBottom { top } => push_value_surface(
-            surfaces,
-            InteractionRoleCode::Placement,
-            if *top { "top" } else { "bottom" },
-        ),
+        GameAction::ChooseTopOrBottom { top } => {
+            // CR 401.7: the "top" branch of "second from the top or on the
+            // bottom" is an Nth-from-the-top slot; the label must say so.
+            let top_label = match &state.waiting_for {
+                WaitingFor::TopOrBottomChoice {
+                    top_position: LibraryPosition::NthFromTop { n },
+                    ..
+                } => format!("position {n} from the top"),
+                _ => "top".to_string(),
+            };
+            push_value_surface(
+                surfaces,
+                InteractionRoleCode::Placement,
+                if *top { top_label.as_str() } else { "bottom" },
+            )
+        }
         GameAction::ChooseMutateMergeSide { side } => push_value_surface(
             surfaces,
             InteractionRoleCode::MergeSide,

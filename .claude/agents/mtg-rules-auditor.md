@@ -38,8 +38,8 @@ When given a CR section (e.g., "audit CR 704" or "audit state-based actions"):
 ### Full Audit Mode
 When no specific scope is given, or explicitly asked for a full sweep:
 - Discover all engine source files dynamically using Glob patterns:
-  - Primary: `crates/engine/src/game/**/*.rs`, `crates/engine/src/types/**/*.rs`, `crates/engine/tests/rules/**/*.rs`
-  - Secondary: `crates/engine/src/parser/**/*.rs`, `crates/phase-ai/src/**/*.rs`
+  - Primary: `crates/engine/src/game/**/*.rs`, `crates/engine/src/types/**/*.rs`, `crates/phase-ast/src/types/**/*.rs`, `crates/engine/tests/rules/**/*.rs`
+  - Secondary: `crates/phase-parser/src/parser/**/*.rs`, `crates/phase-ai/src/**/*.rs`
 - Produce the full report suite (see Output section below)
 
 ## Instructions

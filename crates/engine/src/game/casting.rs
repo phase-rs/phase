@@ -8688,8 +8688,12 @@ fn prepare_casting_variant(
         | CastingVariant::Freerunning
         | CastingVariant::Prowl
         | CastingVariant::JumpStart
-        | CastingVariant::Fuse
         | CastingVariant::Surge => {}
+        CastingVariant::Fuse => {
+            if let Some(object) = transformed_state.objects.get_mut(&object_id) {
+                object.fused_split_spell = true;
+            }
+        }
     }
     let prepared = prepare_spell_cast_announced(
         &transformed_state,
@@ -18206,6 +18210,16 @@ pub fn handle_cast_spell_with_payment_mode(
     if let Some(obj) = state.objects.get(&object_id) {
         if cast_face_choice_offered_from_zone(state, obj) && alternative_spell_layout(obj).is_some()
         {
+            // CR 715.3a + CR 601.2: the prompt offers only faces castable now
+            // (the same authority as its candidate list); with none it would
+            // be a choice with no legal answer, so the cast is refused.
+            if !can_cast_adventure_face_now(state, player, object_id, true)
+                && !can_cast_adventure_face_now(state, player, object_id, false)
+            {
+                return Err(EngineError::InvalidAction(format!(
+                    "Neither face of {object_id:?} can be cast now (CR 715.3a)",
+                )));
+            }
             return Ok(WaitingFor::CastOffer {
                 player,
                 kind: CastOfferKind::Adventure {
@@ -19486,14 +19500,11 @@ fn announce_spell_on_stack(
             super::engine_casting::remember_cast_start(state, prepared.object_id)?;
         }
         state.spell_cast_reversal = Some(std::sync::Arc::new(
-            crate::types::game_state::SpellCastReversal {
-                object_id: prepared.object_id,
+            crate::types::game_state::SpellCastReversal::announced(
+                prepared.object_id,
                 player,
-                journal_start: state.resolved_rules_journal.entries().len(),
-                undo: Vec::new(),
-                cost_mutations: false,
-                library_undo_forbidden: false,
-            },
+                state.resolved_rules_journal.entries().len(),
+            ),
         ));
     }
     // CR 400.7: A new cast announcement is a new casting event — discard any
@@ -21589,6 +21600,18 @@ fn can_cast_prepared_now_with_probe(
         // the action never reaches `legal_actions_full`; the payment step in
         // `casting_costs.rs` is the backstop for a directly submitted `CastSpell`.
         if matches!(cost, AbilityCost::Unimplemented { .. }) {
+            return false;
+        }
+        // CR 601.2b + CR 601.2h: every non-mana leg of a REQUIRED additional
+        // cost (sacrifice, discard, exile, tap…) must be payable as well. The
+        // reducer simulation hides this gap for ordinary spells, but an
+        // Adventure/Omen cast stops at its CR 715.3a face prompt before any
+        // cost is paid, so this predicate is the only gate there (Allure of
+        // Power, My Precious's Adventure, with no creature to sacrifice).
+        // Waterbend is a mana leg settled by the spell's own payment step.
+        if !matches!(cost, AbilityCost::Waterbend { .. })
+            && !cost.is_payable_for_spell(state, player, prepared.object_id)
+        {
             return false;
         }
     }
@@ -26997,17 +27020,6 @@ fn alternative_cost_offer_payable(
     {
         return false;
     }
-    // CR 601.2b + CR 601.2h: a cast whose object carries its own REQUIRED
-    // additional cost pays that cost's declaration before the Defiler prompt,
-    // and that declaration can't see a Defiler's reduction, so the payment
-    // pipeline can't complete a cast that needs the reduction. The offer then
-    // doesn't credit it either: offer and payment agree (an honest gap for that
-    // combination, which no printed card has) rather than offering a cast that
-    // payment refuses.
-    let defiler_creditable = !state
-        .objects
-        .get(&object_id)
-        .is_some_and(|obj| matches!(obj.additional_cost, Some(AdditionalCost::Required(_))));
     target_assignments.iter().any(|targets| {
         let mut pricing = ResolvedAbility::new(Effect::NoOp, targets.clone(), object_id, player);
         if let Some(authority) = authority {
@@ -27033,17 +27045,16 @@ fn alternative_cost_offer_payable(
             // CR 118.3: a zero mana cost is always payable.
             && mana.as_ref().is_none_or(|m| {
                 can_pay_cost_after_auto_tap(state, player, object_id, m)
-                    || (defiler_creditable
-                        && casting_costs::defiler_reduced_cost_alongside(
-                            state,
-                            player,
-                            object_id,
-                            m,
-                            committed_life,
-                        )
-                        .is_some_and(|reduced| {
-                            can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
-                        }))
+                    || casting_costs::defiler_reduced_cost_alongside(
+                        state,
+                        player,
+                        object_id,
+                        m,
+                        committed_life,
+                    )
+                    .is_some_and(|reduced| {
+                        can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
+                    })
             })
     })
 }

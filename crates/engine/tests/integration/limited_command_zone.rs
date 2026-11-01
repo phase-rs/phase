@@ -401,7 +401,7 @@ fn limited_command_zone_cost_reduction_with_chosen_name() {
     state.format_config = FormatConfig::limited_with_command_zone();
 
     let brago_face = conspiracy_card_face("Brago's Favor", true);
-    let brago_id = create_command_zone_card_from_card_face(&mut state, &brago_face, P0);
+    let brago_id = create_command_zone_card_from_card_face(&mut state, &brago_face, None, P0);
     choose_names(&mut state, brago_id, &["Grizzly Bears"]);
 
     // Forest on battlefield

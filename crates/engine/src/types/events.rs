@@ -11,7 +11,9 @@ use super::ability::{
     TypedFilter,
 };
 use super::card::PrintedCardRef;
+use super::card_printing::SharedPrinting;
 use super::card_type::{CardType, CoreType, Supertype};
+use super::display_only::DisplayOnly;
 pub use super::event_kinds::{ActivatedAbilityKind, BendingType, ClashResult, PlayerActionKind};
 use super::game_state::{LKISnapshot, TriggerSourceContext, ZoneChangeRecord};
 use super::identifiers::{
@@ -77,6 +79,11 @@ pub struct LibrarySearchCardView {
     pub zone: Zone,
     pub identity: ObjectIncarnationRef,
     pub card_id: CardId,
+    /// The searched card's printing; card-level, so it covers every face. Display-only:
+    /// CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules or AI path
+    /// reads it. Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
     pub current_face: LibrarySearchCardFaceView,
     pub front_face: LibrarySearchCardFaceView,
     #[serde(default, skip_serializing_if = "Option::is_none")]

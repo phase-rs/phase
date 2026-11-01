@@ -61,7 +61,7 @@ Empty `/tmp/batch.txt` → the quick-win pool for this format is exhausted for t
 
 ### Phase 1.5 — Alternative selector: swallow-warning batching
 
-When the parser-gap-analyzer pool is thin or you want to target a specific *anti-pattern class* (rather than a `parser:*` phrase family), batch by `parse_warnings` instead. The swallow detectors in `crates/engine/src/parser/swallow_check.rs` flag cards where the AST silently dropped Oracle text — `Condition_If`, `DynamicQty`, `Duration_ThisTurn`, `Optional_YouMay`, `Condition_Unless`, `Replacement_Instead`, etc. Each detector is a recognition-without-binding bug class or a detector false positive; use the drilldown report before editing.
+When the parser-gap-analyzer pool is thin or you want to target a specific *anti-pattern class* (rather than a `parser:*` phrase family), batch by `parse_warnings` instead. The swallow detectors in `crates/phase-parser/src/parser/swallow_check.rs` flag cards where the AST silently dropped Oracle text — `Condition_If`, `DynamicQty`, `Duration_ThisTurn`, `Optional_YouMay`, `Condition_Unless`, `Replacement_Instead`, etc. Each detector is a recognition-without-binding bug class or a detector false positive; use the drilldown report before editing.
 
 ```bash
 # Rank exact warning patterns by likely shared fix.
@@ -116,7 +116,7 @@ For each batch:
        client/public/coverage-data.json
    done
    ```
-2. **Find the analogous existing combinator.** Grep `crates/engine/src/parser/oracle_nom/` and the relevant `oracle_*.rs` for a similar phrase already handled. Almost always a `tag()` arm added to an existing `alt()` (per CLAUDE.md's "Compose nom combinators, don't enumerate permutations").
+2. **Find the analogous existing combinator.** Grep `crates/phase-parser/src/parser/oracle_nom/` and the relevant `oracle_*.rs` for a similar phrase already handled. Almost always a `tag()` arm added to an existing `alt()` (per CLAUDE.md's "Compose nom combinators, don't enumerate permutations").
 3. **Skip runtime work.** If no analogous parser combinator exists and the gap needs runtime work (new resolver handler, new event matcher, new CR-grounded behavior), **skip the card**. Don't force runtime work into the velocity loop — that's `unlock-set` territory.
 4. **Edit the whole batch.** One parser file per card (or shared file for related cards). No compile between edits.
 5. **Compile + parser test.**

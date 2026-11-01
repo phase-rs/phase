@@ -120,6 +120,10 @@ pub fn apply_face_down_conspiracy_characteristics(obj: &mut GameObject) {
     obj.base_toughness = None;
     obj.printed_ref = None;
     obj.base_printed_ref = None;
+    // CR 315.5b: the face-down conspiracy has no printed identity, so it forgets the
+    // physical card's printing as well (a turn-up restores the face from `back_face`,
+    // which carries none).
+    obj.conceal_printing();
 }
 
 /// CR 702.106a / CR 702.106f: Validate and record a player's secret choice for a

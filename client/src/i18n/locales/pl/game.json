@@ -2410,6 +2410,7 @@
     "cardFallback": "Karta",
     "title": "Umieść {{name}} na wierzchu lub spodzie biblioteki",
     "top": "Wierzch biblioteki",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Spód biblioteki"
   },
   "mutateMerge": {

@@ -9253,7 +9253,9 @@ fn effect_fields_read_filter_population(
             target, arranger, ..
         } => has_filter(target) || arranger.as_ref().is_some_and(has_filter),
         Effect::ChooseDrawnThisTurnPayOrTopdeck { player, .. } => has_filter(player),
-        Effect::PutOnTopOrBottom { target, chooser } => has_filter(target) || has_filter(chooser),
+        Effect::PutOnTopOrBottom {
+            target, chooser, ..
+        } => has_filter(target) || has_filter(chooser),
         Effect::Goad { target } => has_filter(target),
         Effect::Detain { target } => has_filter(target),
         Effect::SetRoomDoorLock { target, .. } => has_filter(target),
@@ -9664,6 +9666,7 @@ fn protection_target_reads_filter_population(
         | ProtectionTarget::ChosenColor
         | ProtectionTarget::ChosenCardType
         | ProtectionTarget::ChosenPlayer
+        | ProtectionTarget::ChosenCardName
         | ProtectionTarget::Everything
         | ProtectionTarget::FromPlayer(_)
         // A color set (CR 702.16i) names colors, never an object population.
@@ -10369,6 +10372,7 @@ fn static_mode_reads_filter_population(
         | StaticMode::PayLifeAsColoredMana { .. }
         | StaticMode::StepEndUnspentMana { .. }
         | StaticMode::UnspentManaLossCausesLifeLoss
+        | StaticMode::WinFirstCoinFlipSetEachTurn
         | StaticMode::CanAttackWithDefender
         | StaticMode::IgnoreLandwalkForBlocking { .. }
         | StaticMode::CanActivateAbilitiesAsThoughHaste

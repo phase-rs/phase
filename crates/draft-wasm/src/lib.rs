@@ -1147,6 +1147,8 @@ fn submit_deck_inner(
                 seat: 0,
                 main_deck,
                 commanders,
+                // Dedicated local/P2P wrappers remain name-only.
+                printings: Vec::new(),
             },
             None,
         )
@@ -1380,6 +1382,7 @@ fn submit_deck_for_seat_inner(
                 seat,
                 main_deck,
                 commanders,
+                printings: Vec::new(),
             },
             None,
         )
@@ -4227,6 +4230,125 @@ mod create_multiplayer_draft_tests {
         clear_state();
     }
 
+    #[test]
+    fn unglued_set_pool_loads_ten_cards_per_pack_for_draft_and_sealed() {
+        let set_pool_json = r#"{
+            "code": "UGL",
+            "name": "Unglued",
+            "release_date": null,
+            "pack_variants": [
+                {
+                    "contents": [
+                        { "slot": "basic", "count": 1, "choices": [{ "sheet": "basic", "weight": 1 }] },
+                        { "slot": "common", "count": 6, "choices": [{ "sheet": "common", "weight": 1 }] },
+                        { "slot": "rare", "count": 1, "choices": [{ "sheet": "rare", "weight": 1 }] },
+                        { "slot": "uncommon", "count": 2, "choices": [{ "sheet": "uncommon", "weight": 1 }] }
+                    ],
+                    "weight": 3
+                },
+                {
+                    "contents": [
+                        { "slot": "basic", "count": 1, "choices": [{ "sheet": "basic", "weight": 1 }] },
+                        { "slot": "common", "count": 6, "choices": [{ "sheet": "common", "weight": 1 }] },
+                        { "slot": "rare", "count": 1, "choices": [{ "sheet": "rare", "weight": 1 }] },
+                        { "slot": "uncommon", "count": 1, "choices": [{ "sheet": "uncommon", "weight": 1 }] }
+                    ],
+                    "weight": 2
+                }
+            ],
+            "pack_variants_total_weight": 5,
+            "sheets": {
+                "basic": {
+                    "cards": [
+                        { "name": "Forest", "set_code": "UGL", "collector_number": "1", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 1,
+                    "foil": false,
+                    "balance_colors": false
+                },
+                "common": {
+                    "cards": [
+                        { "name": "C1", "set_code": "UGL", "collector_number": "2", "rarity": "common", "weight": 1 },
+                        { "name": "C2", "set_code": "UGL", "collector_number": "3", "rarity": "common", "weight": 1 },
+                        { "name": "C3", "set_code": "UGL", "collector_number": "4", "rarity": "common", "weight": 1 },
+                        { "name": "C4", "set_code": "UGL", "collector_number": "5", "rarity": "common", "weight": 1 },
+                        { "name": "C5", "set_code": "UGL", "collector_number": "6", "rarity": "common", "weight": 1 },
+                        { "name": "C6", "set_code": "UGL", "collector_number": "7", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 6,
+                    "foil": false,
+                    "balance_colors": false
+                },
+                "uncommon": {
+                    "cards": [
+                        { "name": "U1", "set_code": "UGL", "collector_number": "8", "rarity": "uncommon", "weight": 1 },
+                        { "name": "U2", "set_code": "UGL", "collector_number": "9", "rarity": "uncommon", "weight": 1 }
+                    ],
+                    "total_weight": 2,
+                    "foil": false,
+                    "balance_colors": false
+                },
+                "rare": {
+                    "cards": [
+                        { "name": "R1", "set_code": "UGL", "collector_number": "10", "rarity": "rare", "weight": 1 }
+                    ],
+                    "total_weight": 1,
+                    "foil": false,
+                    "balance_colors": false
+                }
+            },
+            "prints": [],
+            "basic_lands": ["Forest"]
+        }"#;
+
+        let pool_input_json = serde_json::json!({
+            "type": "Set",
+            "data": { "set_pool_json": set_pool_json }
+        })
+        .to_string();
+        let seats_json = r#"[
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Human", "player_id": 1, "display_name": "Guest" }
+        ]"#;
+
+        clear_state();
+        let draft_view = create_multiplayer_draft_inner(
+            &pool_input_json,
+            seats_json,
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Unglued draft should start");
+        assert_eq!(draft_view.cards_per_pack, 10);
+        assert_eq!(draft_view.current_pack.expect("current pack").len(), 10);
+
+        clear_state();
+        let sealed_view = create_multiplayer_draft_inner(
+            &pool_input_json,
+            seats_json,
+            3,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Unglued sealed should start");
+        assert_eq!(sealed_view.cards_per_pack, 10);
+        assert_eq!(sealed_view.pool.len(), 60);
+        assert!(sealed_view
+            .sealed_packs
+            .expect("sealed pack boundaries")
+            .iter()
+            .all(|pack| pack.len() == 10));
+
+        clear_state();
+    }
+
     /// One set pool with `code`, three commons, a fixed 3-card booster.
     fn pod_pool_json(code: &str) -> String {
         format!(
@@ -5034,6 +5156,11 @@ mod create_multiplayer_draft_tests {
                 submission.commanders, commanders,
                 "CR 903.3: the designation arrives verbatim and in order"
             );
+            assert!(submission.printings.is_empty());
+            assert!(serde_json::to_value(submission)
+                .unwrap()
+                .get("printings")
+                .is_none());
         });
 
         clear_state();
@@ -5304,6 +5431,11 @@ mod create_multiplayer_draft_tests {
                 .expect("seat 2's submission is keyed by its own player id");
             assert_eq!(seat2.seat, 2);
             assert_eq!(seat2.commanders, seat2_commanders);
+            assert!(seat2.printings.is_empty());
+            assert!(serde_json::to_value(seat2)
+                .unwrap()
+                .get("printings")
+                .is_none());
 
             let seat0 = session
                 .submitted_decks
@@ -5314,6 +5446,11 @@ mod create_multiplayer_draft_tests {
                 seat0.commanders, seat0_commanders,
                 "a later seat's designation must not be attributed to an earlier one"
             );
+            assert!(seat0.printings.is_empty());
+            assert!(serde_json::to_value(seat0)
+                .unwrap()
+                .get("printings")
+                .is_none());
         });
 
         clear_state();

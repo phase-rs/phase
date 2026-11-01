@@ -204,6 +204,7 @@ export function DialogAttachmentCard({ objectId, widthPx, onDismiss }: Props) {
         faceIndex={lookup.faceIndex}
         oracleId={lookup.oracleId}
         faceName={lookup.faceName}
+        ownerPrinting={lookup.ownerPrinting}
         size="normal"
       />
       {isValidTarget && (

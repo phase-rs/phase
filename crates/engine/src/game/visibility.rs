@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::action_rejection::ActionRejection;
+use crate::types::display_only::DisplayOnly;
 use crate::types::events::{GameEvent, LibrarySearchCardFaceView, LibrarySearchCardView};
 use crate::types::game_state::{
     CastOfferKind, GameState, LibraryKnowledgeStamp, PayCostKind, StackEntryKind, WaitingFor,
@@ -383,6 +384,7 @@ pub(crate) fn capture_library_search_card_view(
         zone: object.zone,
         identity: ObjectIncarnationRef::from_object(object),
         card_id: object.card_id,
+        printing: object.printing.clone(),
         current_face,
         front_face,
         back_face,
@@ -3175,6 +3177,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             pool.registered_planar_deck = Arc::new(Vec::new());
             pool.registered_scheme_deck = Arc::new(Vec::new());
             pool.current_scheme_deck = Arc::new(Vec::new());
+            // CR 400.2 + CR 100.4: the record names this seat's library and sideboard
+            // cards, so it leaves with the lists it annotates.
+            pool.printings = DisplayOnly::new(None);
             // CR 905.4a + CR 702.106a: Non-commander formats (such as Limited with
             // command zone for conspiracies) must not leak commander-slot entries
             // to opponents or observers. Any hidden-agenda conspiracies in the
@@ -3965,6 +3970,10 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     Arc::make_mut(&mut obj.base_static_definitions).clear();
     obj.base_color.clear();
     obj.base_printed_ref = None;
+    // CR 400.2 + CR 708.5: the printing identifies the physical card exactly as its name does,
+    // so it leaves with the name, live and base value alike.
+    obj.printing = DisplayOnly::default();
+    obj.base_printing = DisplayOnly::default();
 }
 
 /// The retained event shapes that carry a `ZoneChangeRecord` or a `TriggerSourceContext`:

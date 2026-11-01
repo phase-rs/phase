@@ -12859,6 +12859,7 @@ fn put_on_top_or_bottom_redirect_pauses_before_continuation() {
         Effect::PutOnTopOrBottom {
             target: TargetFilter::Any,
             chooser: TargetFilter::ParentTargetOwner,
+            top_position: Default::default(),
         },
         vec![TargetRef::Object(target)],
         source,
@@ -13053,6 +13054,7 @@ fn r2_effect_zone_moves_stay_synchronous_without_redirects() {
         Effect::PutOnTopOrBottom {
             target: TargetFilter::Any,
             chooser: TargetFilter::ParentTargetOwner,
+            top_position: Default::default(),
         },
         vec![TargetRef::Object(top_target)],
         top_source,

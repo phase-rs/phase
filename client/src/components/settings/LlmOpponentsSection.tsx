@@ -56,7 +56,10 @@ export function LlmOpponentsSection() {
   const catalog = useLlmProviderCatalog();
 
   const usableProfiles = profiles.filter((profile) => isProfileUsable(profile, catalog));
-  const defaultOpponent = usableProfiles.find((profile) => profile.id === defaultOpponentProfileId);
+  const defaultOpponent = profiles.find((profile) => profile.id === defaultOpponentProfileId);
+  const opponentOptions = defaultOpponent && !usableProfiles.some((p) => p.id === defaultOpponent.id)
+    ? [defaultOpponent, ...usableProfiles]
+    : usableProfiles;
 
   return (
     <div className="flex flex-col gap-4">
@@ -107,7 +110,7 @@ export function LlmOpponentsSection() {
           selectedValue={defaultOpponent?.id ?? DEFAULT_OPPONENT_ENGINE}
           items={[
             { value: DEFAULT_OPPONENT_ENGINE, label: t("llm.defaultOpponent.engine") },
-            ...usableProfiles.map((profile) => ({
+            ...opponentOptions.map((profile) => ({
               value: profile.id,
               label: profileLabel(profile, t("llm.unnamed")),
             })),
@@ -400,13 +403,19 @@ function ProfileCard({
         )}
       </div>
 
-      {isProfileUsable(profile, catalog) && (
+      {isDefaultOpponent ? (
         <DefaultOpponentPrompt
           connected={test.status === "ok"}
-          isDefault={isDefaultOpponent}
+          isDefault={true}
           onMakeDefault={onMakeDefaultOpponent}
         />
-      )}
+      ) : isProfileUsable(profile, catalog) ? (
+        <DefaultOpponentPrompt
+          connected={test.status === "ok"}
+          isDefault={false}
+          onMakeDefault={onMakeDefaultOpponent}
+        />
+      ) : null}
     </div>
   );
 }

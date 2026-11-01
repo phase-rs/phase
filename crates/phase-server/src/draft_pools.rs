@@ -258,6 +258,51 @@ mod tests {
         assert!(error.contains("share one MTGJSON pack size"), "{error}");
     }
 
+    #[test]
+    fn loads_unglued_pool_with_mixed_variants_and_resolves_ten_cards_per_pack() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"{{
+                "ugl": {{
+                    "code": "UGL",
+                    "name": "Unglued",
+                    "release_date": null,
+                    "pack_variants": [
+                        {{
+                            "contents": [
+                                {{ "slot": "basic", "count": 1, "choices": [] }},
+                                {{ "slot": "common", "count": 6, "choices": [] }},
+                                {{ "slot": "rare", "count": 1, "choices": [] }},
+                                {{ "slot": "uncommon", "count": 2, "choices": [] }}
+                            ],
+                            "weight": 3
+                        }},
+                        {{
+                            "contents": [
+                                {{ "slot": "basic", "count": 1, "choices": [] }},
+                                {{ "slot": "common", "count": 6, "choices": [] }},
+                                {{ "slot": "rare", "count": 1, "choices": [] }},
+                                {{ "slot": "uncommon", "count": 1, "choices": [] }}
+                            ],
+                            "weight": 2
+                        }}
+                    ],
+                    "pack_variants_total_weight": 5,
+                    "sheets": {{}},
+                    "prints": [],
+                    "basic_lands": []
+                }}
+            }}"#
+        )
+        .unwrap();
+
+        let pools = DraftPools::from_path(file.path()).unwrap();
+        let pool = pools.pool_for_set("UGL").expect("UGL pool present");
+        assert_eq!(pool.cards_per_pack(), Some(10));
+        assert!(pools.generator_for_sequence(&["UGL".to_string()]).is_ok());
+    }
+
     fn two_set_pool_json() -> String {
         let entry = |code: &str| {
             format!(

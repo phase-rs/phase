@@ -3509,7 +3509,11 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
-            WaitingFor::TopOrBottomChoice { player, object_id },
+            WaitingFor::TopOrBottomChoice {
+                player,
+                object_id,
+                top_position,
+            },
             GameAction::ChooseTopOrBottom { top },
         ) => {
             // CR 614.1 + CR 616.1: The chosen object's Library delivery is
@@ -3517,8 +3521,10 @@ pub(super) fn handle_resolution_choice(
             // before its chained resolution tail drains. This legacy waiter does
             // not retain the original ability source; preserve its prior
             // self-anchored attribution for the pipeline request.
+            // CR 401.7 + CR 608.2d: the "top" branch is the effect's `top_position`
+            // (`Top`, or `NthFromTop` for "second from the top or on the bottom").
             let position = if top {
-                LibraryPosition::Top
+                top_position
             } else {
                 LibraryPosition::Bottom
             };
