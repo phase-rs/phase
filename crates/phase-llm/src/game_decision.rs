@@ -12,6 +12,7 @@ use engine::game::visibility::filter_state_for_viewer;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::log::GameLogEntry;
+use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 
 use crate::error::{LlmError, LlmResult};
@@ -101,6 +102,172 @@ pub fn decision_fingerprint(state: &GameState, contract: &AiDecisionContract) ->
             .into_iter()
             .chain(lines.iter().map(String::as_str)),
     )
+}
+
+/// The fingerprint of the viewer-visible information state at the time of a decision.
+///
+/// Captures the meaningful game state visible to the viewer:
+/// - The viewer's identity and exact hand
+/// - Other players' life totals, poison, energy, unspent mana, and hand sizes
+/// - Battlefield permanents: id, card, controller, tapped, attacking, blocking, damage, P/T, counters, attachments
+/// - Stack entries: id, source, controller
+/// - Combat state: attacking/blocking assignments
+/// - Graveyard and exile counts
+/// - The legal candidate options available to the viewer
+///
+/// Deliberately excludes transient priority-pass artifacts:
+/// `state_revision`, `phase` (when no board/combat changes occur), `priority_player`,
+/// and `priority_pass_count`.
+pub fn information_fingerprint(state: &GameState, contract: &AiDecisionContract) -> String {
+    let viewer = contract.semantic_owner;
+    let visible = filter_state_for_viewer(state, viewer);
+    let mut parts: Vec<String> = Vec::new();
+
+    parts.push(format!("viewer:{}", viewer.0));
+    parts.push(format!("turn:{}", visible.turn_number));
+    parts.push(format!("active:{}", visible.active_player.0));
+
+    for p in &visible.players {
+        parts.push(format!(
+            "p{}:life={}:poison={}:energy={}:mana={}:hand_len={}",
+            p.id.0,
+            p.life,
+            p.poison_counters,
+            p.energy,
+            p.mana_pool.total(),
+            p.hand.len()
+        ));
+    }
+
+    if let Some(viewer_player) = visible.players.iter().find(|p| p.id == viewer) {
+        for card_id in &viewer_player.hand {
+            parts.push(format!("hand:{}", card_id.0));
+        }
+    }
+
+    for obj_id in &visible.battlefield {
+        if let Some(obj) = visible.objects.get(obj_id) {
+            let counters_summary: Vec<String> = obj
+                .counters
+                .iter()
+                .map(|(k, v)| format!("{k:?}={v}"))
+                .collect();
+            parts.push(format!(
+                "obj:{}:card={}:ctrl={}:tap={}:dmg={}:pt={:?}/{:?}:counters={:?}:att_to={:?}",
+                obj.id.0,
+                obj.card_id.0,
+                obj.controller.0,
+                obj.tapped,
+                obj.damage_marked,
+                obj.power,
+                obj.toughness,
+                counters_summary,
+                obj.attached_to
+            ));
+        }
+    }
+
+    for entry in &visible.stack {
+        parts.push(format!(
+            "stack:{}:src={}:ctrl={}",
+            entry.id.0, entry.source_id.0, entry.controller.0
+        ));
+    }
+
+    if let Some(combat) = visible.combat.as_ref() {
+        for attacker in &combat.attackers {
+            let blocked = attacker.blocked;
+            parts.push(format!(
+                "att:{}:def={}:target={:?}:blocked={blocked}",
+                attacker.object_id.0, attacker.defending_player.0, attacker.attack_target
+            ));
+        }
+        for (attacker, blockers) in &combat.blocker_assignments {
+            let blocker_ids: Vec<u64> = blockers.iter().map(|b| b.0).collect();
+            parts.push(format!("blockers_of:{}:{blocker_ids:?}", attacker.0));
+        }
+    }
+
+    for p in &visible.players {
+        parts.push(format!(
+            "gy:{}:{}",
+            p.id.0,
+            visible.graveyard_of(p.id).len()
+        ));
+    }
+    parts.push(format!("exile:{}", visible.exile.len()));
+
+    let options = option_lines(state, contract);
+    for opt in &options {
+        parts.push(format!("opt:{opt}"));
+    }
+
+    fingerprint_of(parts.iter().map(String::as_str))
+}
+
+/// Engine-owned memory of prior LLM decisions.
+///
+/// Implements the principle: "LLM decisions should never be reconsidered unless
+/// there is new information."
+///
+/// When an LLM chooses `PassPriority` in a priority window, the `information_fingerprint`
+/// of that position is recorded. When priority returns to the same seat with the same
+/// `information_fingerprint` and `PassPriority` is still a legal option, no new information
+/// exists to justify reconsidering the decision; the seat stands on its previous choice
+/// to pass.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LlmDecisionMemory {
+    last_pass_information: std::collections::HashMap<PlayerId, String>,
+}
+
+impl LlmDecisionMemory {
+    pub fn new() -> Self {
+        Self {
+            last_pass_information: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Record an LLM's selected action for a player.
+    pub fn record_decision(
+        &mut self,
+        player: PlayerId,
+        action: &GameAction,
+        state: &GameState,
+        contract: &AiDecisionContract,
+    ) {
+        if matches!(action, GameAction::PassPriority) {
+            let fp = information_fingerprint(state, contract);
+            self.last_pass_information.insert(player, fp);
+        } else {
+            self.last_pass_information.remove(&player);
+        }
+    }
+
+    /// Check whether a standing pass decision is available without consulting the model.
+    ///
+    /// Returns `true` iff:
+    /// 1. `PassPriority` is a legal candidate in `contract`.
+    /// 2. The player previously chose `PassPriority` under an identical `information_fingerprint`.
+    pub fn standing_pass_available(
+        &self,
+        player: PlayerId,
+        state: &GameState,
+        contract: &AiDecisionContract,
+    ) -> bool {
+        if !contract.contains_action(state, &GameAction::PassPriority) {
+            return false;
+        }
+        let Some(last_fp) = self.last_pass_information.get(&player) else {
+            return false;
+        };
+        let current_fp = information_fingerprint(state, contract);
+        last_fp == &current_fp
+    }
+
+    /// Clear all recorded decision memories (e.g. on new game or game restore).
+    pub fn clear(&mut self) {
+        self.last_pass_information.clear();
+    }
 }
 
 /// Build the prompt for one engine decision.
@@ -1321,5 +1488,112 @@ mod tests {
         assert_eq!(options.history.current_cycle_entries, 0);
         assert!(!options.include_oracle_text);
         assert!(render_options(AiDifficulty::VeryHard).include_oracle_text);
+    }
+
+    #[test]
+    fn information_fingerprint_is_stable_across_transient_phase_and_revision_advances() {
+        let mut state = GameState::new(FormatConfig::modern(), 2, 1);
+        state.phase = Phase::PreCombatMain;
+        state.state_revision = 1;
+        let c = two_option_contract();
+
+        let fp1 = information_fingerprint(&state, &c);
+        let dfp1 = decision_fingerprint(&state, &c);
+
+        // Advance phase and bump state revision without changing board, life, hand, or stack:
+        state.phase = Phase::BeginCombat;
+        state.state_revision = 2;
+        let mut c2 = c.clone();
+        c2.state_revision = 43;
+        let fp2 = information_fingerprint(&state, &c2);
+        let dfp2 = decision_fingerprint(&state, &c2);
+
+        // Information fingerprint is unchanged (no new information):
+        assert_eq!(fp1, fp2);
+        // While decision_fingerprint (the transport staleness guard) changed:
+        assert_ne!(dfp1, dfp2);
+    }
+
+    #[test]
+    fn information_fingerprint_detects_meaningful_game_changes() {
+        let state = GameState::new(FormatConfig::modern(), 2, 1);
+        let c = two_option_contract();
+        let base_fp = information_fingerprint(&state, &c);
+
+        // Life total change:
+        let mut life_changed = state.clone();
+        life_changed.players[0].life -= 2;
+        assert_ne!(base_fp, information_fingerprint(&life_changed, &c));
+
+        // Hand change:
+        let mut hand_changed = state.clone();
+        hand_changed.players[1].hand.push_back(ObjectId(99));
+        assert_ne!(base_fp, information_fingerprint(&hand_changed, &c));
+
+        // Stack change:
+        let mut stack_changed = state.clone();
+        stack_changed
+            .stack
+            .push_back(engine::types::game_state::StackEntry {
+                id: ObjectId(100),
+                source_id: ObjectId(101),
+                controller: PlayerId(0),
+                kind: engine::types::game_state::StackEntryKind::Spell {
+                    card_id: CardId(1),
+                    ability: None,
+                    casting_variant: Default::default(),
+                    actual_mana_spent: 0,
+                },
+            });
+        assert_ne!(base_fp, information_fingerprint(&stack_changed, &c));
+    }
+
+    #[test]
+    fn llm_decision_memory_prevents_reconsideration_without_new_information() {
+        let mut memory = LlmDecisionMemory::new();
+        let player = PlayerId(1);
+        let mut state = GameState::new(FormatConfig::modern(), 2, 1);
+        state.phase = Phase::PreCombatMain;
+        let c = two_option_contract();
+
+        // Initially, no standing pass is available:
+        assert!(!memory.standing_pass_available(player, &state, &c));
+
+        // Record a PassPriority decision:
+        memory.record_decision(player, &GameAction::PassPriority, &state, &c);
+
+        // In the same state, standing pass is available:
+        assert!(memory.standing_pass_available(player, &state, &c));
+
+        // In a new phase with identical board/stack/hand (no new information):
+        state.phase = Phase::BeginCombat;
+        state.state_revision += 1;
+        assert!(memory.standing_pass_available(player, &state, &c));
+
+        // New information arrives (e.g. stack entry):
+        let mut new_info_state = state.clone();
+        new_info_state
+            .stack
+            .push_back(engine::types::game_state::StackEntry {
+                id: ObjectId(100),
+                source_id: ObjectId(101),
+                controller: PlayerId(0),
+                kind: engine::types::game_state::StackEntryKind::Spell {
+                    card_id: CardId(1),
+                    ability: None,
+                    casting_variant: Default::default(),
+                    actual_mana_spent: 0,
+                },
+            });
+        assert!(!memory.standing_pass_available(player, &new_info_state, &c));
+
+        // If non-pass action is chosen, memory is cleared:
+        memory.record_decision(
+            player,
+            &GameAction::ChoosePlayDraw { play_first: true },
+            &state,
+            &c,
+        );
+        assert!(!memory.standing_pass_available(player, &state, &c));
     }
 }

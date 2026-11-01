@@ -5290,6 +5290,8 @@ export interface LlmHttpRequestSpec {
 
 /** Engine output for one LLM decision request, or an engine-authored refusal. */
 export interface LlmDecisionRequestResult {
+  proposal?: AiActionProposal;
+  reasoning?: string;
   fingerprint?: string;
   optionCount?: number;
   /** Characters of prompt the request carries (system + user). */

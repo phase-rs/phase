@@ -627,6 +627,10 @@ thread_local! {
     /// They deliberately do not serialize with `GameState`: a restore/new game
     /// starts a new generation even when the state revision happens to match.
     static AI_PROPOSALS: RefCell<AiProposalRegistry> = RefCell::new(AiProposalRegistry::default());
+    /// Memory of prior LLM decisions per seat, preventing re-deciding pass
+    /// decisions without new information.
+    static LLM_DECISION_MEMORY: RefCell<phase_llm::LlmDecisionMemory> =
+        RefCell::new(phase_llm::LlmDecisionMemory::new());
     /// The local seat's requested hand disclosure for `get_game_state` (the
     /// "Show AI Hand" toggle). A view preference only: the engine decides
     /// whether the seat is entitled to it, and it never touches `GameState`.
@@ -873,6 +877,7 @@ fn clear_ai_session_cache() {
         cache.clear();
         cell.set(cache);
     });
+    LLM_DECISION_MEMORY.with(|cell| cell.borrow_mut().clear());
 }
 
 thread_local! {
@@ -4878,6 +4883,23 @@ pub fn build_llm_decision_request(
         if contract.candidates.is_empty() {
             return Ok(JsValue::NULL);
         }
+        let is_standing_pass = LLM_DECISION_MEMORY.with(|cell| {
+            cell.borrow()
+                .standing_pass_available(semantic_owner, state, &contract)
+        });
+        if is_standing_pass {
+            let actor = contract.authorized_actor;
+            let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
+            return Ok(to_js(&serde_json::json!({
+                "proposal": {
+                    "token": token,
+                    "semanticOwner": semantic_owner.0,
+                    "actor": actor.0,
+                    "action": GameAction::PassPriority,
+                },
+                "reasoning": "Standing pass: no new information since previous pass decision",
+            })));
+        }
         let request = CARD_DB.with(|cell| {
             let db = cell.borrow();
             phase_llm::build_game_decision_prompt(
@@ -4967,6 +4989,10 @@ pub fn get_ai_action_proposal_from_llm_response(
         if !contract.contains_action(state, &selection.action) {
             return Ok(llm_failure(&phase_llm::LlmError::StaleDecision, usage));
         }
+        LLM_DECISION_MEMORY.with(|cell| {
+            cell.borrow_mut()
+                .record_decision(semantic_owner, &selection.action, state, &contract);
+        });
         let actor = contract.authorized_actor;
         let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
         // The reasoning is local diagnostic data bound to the same opaque token.
