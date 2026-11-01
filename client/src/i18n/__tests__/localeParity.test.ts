@@ -75,6 +75,19 @@ const GROUP_BY_LABELS: Record<string, string> = {
   zh: "分组方式",
 };
 
+/** Each locale's own takeback noun, as its `takebackDialog.requestedTitle` uses it. */
+const TAKEBACK_TERMS: Record<string, string> = {
+  de: "Rücknahme",
+  en: "takeback",
+  es: "repetición",
+  fr: "reprise",
+  it: "ripristino",
+  ja: "巻き戻し",
+  pl: "wycofanie",
+  pt: "retrocesso",
+  zh: "悔棋",
+};
+
 const isKnownGap = (ns: string, key: string) =>
   KNOWN_PLACEHOLDER_GAPS.some((g) => g.ns === ns && g.key === key);
 
@@ -301,6 +314,29 @@ describe("locale parity", () => {
     expect([1, 2, 5, 12, 1.5].map((count) => instance.services.pluralResolver.getSuffix("pl", count))).toEqual([
       "_one", "_few", "_many", "_many", "_other",
     ]);
+  });
+
+  it("points_the_p2p_withheld_notice_at_the_takeback_in_the_game_menu", () => {
+    for (const locale of [SOURCE, ...locales]) {
+      const multiplayer = load(locale, "multiplayer.json");
+      const notice = String(multiplayer.p2pStateWithheld).toLowerCase();
+      const term = TAKEBACK_TERMS[locale].toLowerCase();
+      expect(notice, locale).toContain(String(load(locale, "common.json")["gameMenu.menu"]).toLowerCase());
+      expect(notice, locale).toContain(term);
+      expect(String(multiplayer["takebackDialog.requestedTitle"]).toLowerCase(), locale).toContain(term);
+    }
+  });
+
+  it("translates_each_takeback_toast_and_keeps_it_distinct_from_declined", () => {
+    const source = load(SOURCE, "multiplayer.json");
+    for (const locale of locales) {
+      const target = load(locale, "multiplayer.json");
+      for (const key of ["takebackDialog.cancelledToast", "takebackDialog.withdrawnToast"]) {
+        expect(target[key], `${locale}:${key}`).toEqual(expect.any(String));
+        expect(target[key], `${locale}:${key}`).not.toBe(source[key]);
+        expect(target[key], `${locale}:${key}`).not.toBe(target["takebackDialog.declinedToast"]);
+      }
+    }
   });
 
   describe.each(locales)("%s", (locale) => {

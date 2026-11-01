@@ -1,0 +1,68 @@
+---
+source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "ChangeZone",
+        "origin": null,
+        "destination": "Exile",
+        "target": {
+          "type": "Typed",
+          "type_filters": [
+            "Creature"
+          ],
+          "controller": null,
+          "properties": []
+        },
+        "owner_library": false,
+        "enter_transformed": false,
+        "enter_tapped": false,
+        "enters_attacking": false
+      },
+      "cost": null,
+      "sub_ability": {
+        "kind": "Spell",
+        "effect": {
+          "type": "GainLife",
+          "amount": {
+            "type": "Ref",
+            "qty": {
+              "type": "Power",
+              "scope": {
+                "type": "Target"
+              }
+            }
+          },
+          "player": {
+            "type": "ParentTargetController"
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false,
+        "sub_link": "SequentialSibling"
+      },
+      "duration": null,
+      "description": "Exile target creature. Its controller gains life equal to its power.",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

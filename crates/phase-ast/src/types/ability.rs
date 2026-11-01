@@ -18385,6 +18385,8 @@ pub enum SacrificeRequirement {
         comparator: Comparator,
         value: i32,
     },
+    /// CR 701.21a + CR 601.2h: "sacrifice all <filter>" — every eligible permanent the payer controls; a determined set, no selection.
+    All,
 }
 
 impl Default for SacrificeRequirement {
@@ -18401,7 +18403,7 @@ impl SacrificeRequirement {
     pub fn fixed_count(&self) -> Option<u32> {
         match self {
             Self::Count { count } => Some(*count),
-            Self::Aggregate { .. } => None,
+            Self::Aggregate { .. } | Self::All => None,
         }
     }
 
@@ -18605,7 +18607,7 @@ impl serde::Serialize for SacrificeCost {
         st.serialize_field("target", &self.target)?;
         match &self.requirement {
             SacrificeRequirement::Count { count } => st.serialize_field("count", count)?,
-            SacrificeRequirement::Aggregate { .. } => {
+            SacrificeRequirement::Aggregate { .. } | SacrificeRequirement::All => {
                 st.serialize_field("requirement", &self.requirement)?;
             }
         }
@@ -50293,5 +50295,24 @@ mod created_referent_classification_tests {
             kind: ChooseOneOfKind::Ordinary,
         };
         assert!(ordinary_branch.publishes_created_referent());
+    }
+
+    #[test]
+    fn sacrifice_all_requirement_round_trips_and_legacy_count_decodes() {
+        let cost = SacrificeCost::new(TargetFilter::Any, SacrificeRequirement::All);
+        let json = serde_json::to_value(&cost).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({"target": {"type": "Any"}, "requirement": {"requirement": "all"}})
+        );
+        assert_eq!(
+            serde_json::from_value::<SacrificeCost>(json).expect("round trip"),
+            cost
+        );
+
+        let legacy: SacrificeCost =
+            serde_json::from_value(serde_json::json!({"target": {"type": "Any"}, "count": 2}))
+                .expect("legacy decode");
+        assert_eq!(legacy.requirement, SacrificeRequirement::Count { count: 2 });
     }
 }
