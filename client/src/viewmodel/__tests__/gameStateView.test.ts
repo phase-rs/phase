@@ -1287,6 +1287,7 @@ const PARTITION_FIXTURES: Record<
   RepeatDecision: NO_TARGET_REF_LEGAL_SET,
   TopOrBottomChoice: NO_TARGET_REF_LEGAL_SET,
   PopulateChoice: NO_TARGET_REF_LEGAL_SET,
+  SecretAgendaChoice: NO_TARGET_REF_LEGAL_SET,
   CompanionReveal: NO_TARGET_REF_LEGAL_SET,
   ChooseLegend: NO_TARGET_REF_LEGAL_SET,
   CommanderZoneChoice: NO_TARGET_REF_LEGAL_SET,
