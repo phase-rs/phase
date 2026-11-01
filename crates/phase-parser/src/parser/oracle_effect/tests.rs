@@ -45367,6 +45367,117 @@ fn reveal_until_puts_those_cards_to_graveyard() {
     );
 }
 
+/// CR 701.20a: Mind Funeral — "Target opponent reveals cards from the top of their
+/// library until four land cards are revealed. That player puts all cards revealed
+/// this way into their graveyard."
+///
+/// Passive-voice reveal-until with count > 1 ("until four land cards are revealed")
+/// and third-person continuation ("That player puts all cards revealed this way into their graveyard").
+#[test]
+fn reveal_until_passive_count_mind_funeral() {
+    let def = parse_effect_chain(
+        "Target opponent reveals cards from the top of their library until four land cards are revealed. That player puts all cards revealed this way into their graveyard.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        player,
+        filter,
+        count,
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+
+    assert!(
+        matches!(
+            player,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            })
+        ),
+        "expected opponent player filter, got: {player:?}"
+    );
+    assert!(
+        matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter { type_filters, .. })
+                if type_filters.contains(&TypeFilter::Land)
+        ),
+        "expected land filter, got: {filter:?}"
+    );
+    assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+    assert_eq!(*kept_destination, Zone::Graveyard);
+    assert_eq!(*rest_destination, Zone::Graveyard);
+}
+
+/// CR 608.2c / CR 701.20a: Thought Dissector — "{X}, {T}: Target opponent reveals
+/// cards from the top of their library until an artifact card or X cards are revealed,
+/// whichever comes first. If an artifact card is revealed this way, put it onto the
+/// battlefield under your control and sacrifice this artifact. Put the rest of the
+/// revealed cards into that player's graveyard."
+///
+/// Compound stopping conditions ("until an artifact card or X cards are revealed,
+/// whichever comes first") cannot be represented by RevealUntil (which accepts only
+/// a single stopping filter/count and would drop the "or X cards" second condition).
+/// The passive reveal-until parser must reject this compound condition, preserving
+/// the baseline RevealTop fallback without swallowing the conditional follow-up.
+#[test]
+fn reveal_until_passive_compound_stopping_rejected_thought_dissector() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "{X}, {T}: Target opponent reveals cards from the top of their library until an artifact card or X cards are revealed, whichever comes first. If an artifact card is revealed this way, put it onto the battlefield under your control and sacrifice this artifact. Put the rest of the revealed cards into that player's graveyard.",
+        "Thought Dissector",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "expected 1 activated ability");
+    let ability = &parsed.abilities[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+
+    // Positive reach guard: cost is {X}, {T}
+    assert!(
+        matches!(
+            &ability.cost,
+            Some(AbilityCost::Composite { costs }) if costs.len() == 2
+        ),
+        "expected composite cost {{X}}, {{T}}, got {:?}",
+        ability.cost
+    );
+
+    // Compound reveal-until must NOT parse as RevealUntil (which would drop "or X cards")
+    assert!(
+        !matches!(&*ability.effect, Effect::RevealUntil { .. }),
+        "compound reveal-until must not be accepted by single-condition RevealUntil"
+    );
+
+    // Must preserve baseline RevealTop { count: 1, player: Opponent }
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::RevealTop {
+                count: 1,
+                player: TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::Opponent),
+                    ..
+                }),
+            }
+        ),
+        "expected baseline fallback RevealTop {{ count: 1, player: Opponent }}, got {:?}",
+        ability.effect
+    );
+
+    // Coverage honesty: must not report any swallowed clauses (e.g. Swallow:Condition_If)
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "expected no parse warnings, got {:?}",
+        parsed.parse_warnings
+    );
+}
+
 /// CR 701.20a: Treasure Hunt — "then put all cards revealed this way into your hand."
 /// The entire revealed pile goes to hand (kept_destination=Hand, rest_destination=Hand).
 #[test]

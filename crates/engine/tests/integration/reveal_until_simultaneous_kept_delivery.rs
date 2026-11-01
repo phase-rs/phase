@@ -25,7 +25,7 @@ use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -500,6 +500,8 @@ Whenever Raph & Mikey attack, reveal cards from the top of your library until yo
 
 const DESTROY_THE_EVIDENCE: &str = "Destroy target land. Its controller reveals cards from the top of their library until they reveal a land card, then puts those cards into their graveyard.";
 
+const MIND_FUNERAL: &str = "Target opponent reveals cards from the top of their library until four land cards are revealed. That player puts all cards revealed this way into their graveyard.";
+
 const DEVOURER_OF_MEMORY: &str = "Whenever one or more cards are put into your graveyard from your library, this creature gets +1/+1 until end of turn and can't be blocked this turn.\n\
 {1}{U}{B}: Mill a card.";
 
@@ -802,6 +804,173 @@ fn destroy_the_evidence_mills_the_whole_revealed_pile_as_one_event() {
         (devourer_obj.power, devourer_obj.toughness),
         (Some(3), Some(4)),
         "Devourer of Memory must trigger exactly once for the one milled pile"
+    );
+}
+
+/// CR 701.20a + CR 608.2c: Mind Funeral — "Target opponent reveals cards from the
+/// top of their library until four land cards are revealed. That player puts all
+/// cards revealed this way into their graveyard."
+///
+/// Mind Funeral must stop after the 4th land card is revealed (not after 1 land),
+/// and the entire revealed pile — both non-land misses and the 4 revealed lands —
+/// must be put into the target opponent's graveyard, while unrevealed library cards
+/// (including any remaining lands) stay in the library.
+#[test]
+fn mind_funeral_stops_at_four_lands_revealed() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Staged library for target opponent P1:
+    // miss1, land1, miss2, land2, miss3, land3, miss4, land4, filler_land (5th land), filler_spell
+    let miss_one = scenario.add_card_to_library_top(P1, "Grizzly Bears");
+    let land_one = scenario.add_land_to_library_top(P1, "Forest").id();
+    let miss_two = scenario.add_card_to_library_top(P1, "Counterspell");
+    let land_two = scenario.add_land_to_library_top(P1, "Island").id();
+    let miss_three = scenario.add_card_to_library_top(P1, "Lightning Bolt");
+    let land_three = scenario.add_land_to_library_top(P1, "Mountain").id();
+    let miss_four = scenario.add_card_to_library_top(P1, "Giant Growth");
+    let land_four = scenario.add_land_to_library_top(P1, "Swamp").id();
+    let filler_land = scenario.add_land_to_library_top(P1, "Plains").id();
+    let filler_spell = scenario.add_card_to_library_top(P1, "Divination");
+
+    // Mind Funeral in P0's hand with explicit mana cost {1}{U}{B}
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mind Funeral", false, MIND_FUNERAL)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Black],
+        })
+        .id();
+
+    // Fund P0's mana pool with exactly {1}{U}{B}
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    arrange_library_top_first(
+        &mut runner,
+        &[
+            miss_one,
+            land_one,
+            miss_two,
+            land_two,
+            miss_three,
+            land_three,
+            miss_four,
+            land_four,
+            filler_land,
+            filler_spell,
+        ],
+    );
+
+    runner.cast(spell).target_player(P1).resolve();
+    assert_stack_empty_priority(&runner);
+
+    // Assert explicit mana payment occurred
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        0,
+        "P0 paid {{1}}{{U}}{{B}} to cast Mind Funeral"
+    );
+
+    // CR 701.20a: All 4 lands and the 4 non-land misses revealed before/with them
+    // must be in P1's graveyard.
+    for (id, label) in [
+        (miss_one, "first revealed miss"),
+        (land_one, "first revealed land"),
+        (miss_two, "second revealed miss"),
+        (land_two, "second revealed land"),
+        (miss_three, "third revealed miss"),
+        (land_three, "third revealed land"),
+        (miss_four, "fourth revealed miss"),
+        (land_four, "fourth revealed land"),
+    ] {
+        assert_zone(&runner, id, Zone::Graveyard, label);
+        assert!(
+            !runner.state().revealed_cards.contains(&id),
+            "reveal marker must be cleared ({label})"
+        );
+    }
+
+    // Unrevealed cards (the 5th land and the subsequent spell) must remain in P1's library!
+    assert_zone(
+        &runner,
+        filler_land,
+        Zone::Library,
+        "the 5th land remains in library",
+    );
+    assert_zone(
+        &runner,
+        filler_spell,
+        Zone::Library,
+        "the unrevealed spell remains in library",
+    );
+    assert_eq!(
+        runner.state().players[P1.0 as usize].library.len(),
+        2,
+        "only the 2 unrevealed cards remain in P1's library"
+    );
+}
+
+/// CR 701.20a + CR 609.3: When the library is exhausted before 4 lands are found, the loop
+/// terminates with whatever was found and all revealed cards are put into the graveyard.
+/// CR 609.3 ("If an effect attempts to do something impossible, it does only as much
+/// as possible") governs stopping at an empty library with fewer than four lands.
+#[test]
+fn mind_funeral_exhausts_library_when_fewer_than_four_lands() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Staged library for target opponent P1: only 2 lands and 2 non-lands total
+    let miss_one = scenario.add_card_to_library_top(P1, "Grizzly Bears");
+    let land_one = scenario.add_land_to_library_top(P1, "Forest").id();
+    let miss_two = scenario.add_card_to_library_top(P1, "Counterspell");
+    let land_two = scenario.add_land_to_library_top(P1, "Island").id();
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mind Funeral", false, MIND_FUNERAL)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Black],
+        })
+        .id();
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    arrange_library_top_first(&mut runner, &[miss_one, land_one, miss_two, land_two]);
+
+    runner.cast(spell).target_player(P1).resolve();
+    assert_stack_empty_priority(&runner);
+
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+
+    for (id, label) in [
+        (miss_one, "first miss"),
+        (land_one, "first land"),
+        (miss_two, "second miss"),
+        (land_two, "second land"),
+    ] {
+        assert_zone(&runner, id, Zone::Graveyard, label);
+        assert!(!runner.state().revealed_cards.contains(&id));
+    }
+
+    assert!(
+        runner.state().players[P1.0 as usize].library.is_empty(),
+        "P1's library is empty after all cards are revealed and put into graveyard"
     );
 }
 
