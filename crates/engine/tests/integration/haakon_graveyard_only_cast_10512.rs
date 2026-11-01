@@ -987,6 +987,23 @@ fn tinybones_steals(steal_haakon: bool, mana: &[ManaType]) -> TinybonesBoard {
         result.expect("drive Tinybones' attack");
     }
     assert!(cast_tried, "reach: Tinybones' paid-cast offer appeared");
+    // The offering resolution and combat finished: the loop above can also stop
+    // by running out of actions.
+    assert!(
+        r.state().stack.is_empty(),
+        "the stack must resolve; stack = {:?}",
+        r.state().stack
+    );
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must end at a priority window; waiting_for = {:?}",
+        r.state().waiting_for
+    );
+    assert_eq!(
+        r.state().phase,
+        Phase::PostCombatMain,
+        "combat must have finished"
+    );
     TinybonesBoard { r, stolen, offered }
 }
 
