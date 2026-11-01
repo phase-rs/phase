@@ -68,7 +68,22 @@ let capturedHostEventHandler: ((event: unknown) => void) | null = null;
 const commanderSeatDecks = vi.fn<
   (view: DraftPlayerView, localSeat: number) => Promise<CommanderSeatDecks>
 >();
-const sendCommanderLaunches = vi.fn();
+const invitationsEmitted = vi.fn();
+const sendCommanderLaunches = vi.fn(async (
+  _view: DraftPlayerView,
+  _gameId: string,
+  _roomCode: string,
+  decks: CommanderSeatDecks,
+  installEngineSeat: (seat: number, deck: DraftDeckPayload) => Promise<void>,
+  signal: AbortSignal,
+) => {
+  signal.throwIfAborted();
+  for (const { seat, deck } of decks.engineSeatDecks) {
+    await installEngineSeat(seat, deck);
+    signal.throwIfAborted();
+  }
+  invitationsEmitted();
+});
 const boosterPackPoolForGame = vi.fn(async () => null as string[] | null);
 /**
  * The LOCAL-game payload, used only above the P2P seat ceiling.
@@ -691,14 +706,11 @@ describe("multiplayerDraftStore Commander launch", () => {
     expect(useMultiplayerDraftStore.getState().phase).toBe("complete");
 
     expect(sendCommanderLaunches).toHaveBeenCalledTimes(1);
-    const sendOrder = sendCommanderLaunches.mock.invocationCallOrder[0];
-    // THE axis: the launch is dispatched only after the LAST engine seat has
-    // claimed its index. Asserting merely that the send precedes
-    // `startPregameGame` does NOT discriminate this — a launch that sends
-    // BEFORE the mutations satisfies that too, and that ordering is the one
-    // that KICKS A REAL PLAYER: a guest invited early takes
-    // `firstWaitingSeat()` = 1, and the `SetKind` landing on that index
-    // invalidates its token ("Removed from the room by the host").
+    const sendOrder = invitationsEmitted.mock.invocationCallOrder[0];
+    // Wiring check only: the store's installer reaches `applySeatMutation` for
+    // every engine seat, and the game starts after the finalizer resolves.
+    // The fake orders installs before `invitationsEmitted`; the production
+    // ordering proof is commanderRoster R2 and the host finalization tests.
     const mutationOrders = transport.applySeatMutation.mock.invocationCallOrder;
     expect(mutationOrders).toHaveLength(3);
     expect(Math.max(...mutationOrders)).toBeLessThan(sendOrder);
@@ -898,7 +910,7 @@ describe("multiplayerDraftStore Commander launch", () => {
     const store = useMultiplayerDraftStore.getState();
     void store.launchCommanderGame(navigate);
     void store.launchCommanderGame(navigate); // same tick — the double-click
-    await vi.waitFor(() => expect(sendCommanderLaunches).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(invitationsEmitted).toHaveBeenCalledTimes(1));
 
     await store.launchCommanderGame(navigate); // and again, mid-park
 
@@ -1166,7 +1178,7 @@ describe("multiplayerDraftStore Commander launch", () => {
     // parked on `roomFull` — the window Cancel exists for.
     await installCompletedPod(commanderView(4, { humanSeats: [1] }));
     void useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
-    await vi.waitFor(() => expect(sendCommanderLaunches).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(invitationsEmitted).toHaveBeenCalledTimes(1));
 
     // PRECONDITION. `sendCommanderLaunches` is a stub here, so the host's own
     // seat-0 local emit never happens and `commanderLaunch` would never leave
@@ -1345,7 +1357,7 @@ describe("multiplayerDraftStore Commander launch", () => {
     await installCompletedPod(commanderView(4, { humanSeats: [1] }));
     const parked = useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
     // Parked on `roomFull`: seat 1 is a live human the host fake never fills.
-    await vi.waitFor(() => expect(sendCommanderLaunches).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(invitationsEmitted).toHaveBeenCalledTimes(1));
 
     await useMultiplayerDraftStore.getState().leave(false);
     // IMMEDIATE and mechanism-naming, ahead of the await below: leaving must
@@ -1383,7 +1395,7 @@ describe("multiplayerDraftStore Commander launch", () => {
     await installCompletedPod(commanderView(4, { humanSeats: [1] }));
     const parked = useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
     // Parked on `roomFull`: seat 1 is a live human the host fake never fills.
-    await vi.waitFor(() => expect(sendCommanderLaunches).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(invitationsEmitted).toHaveBeenCalledTimes(1));
 
     let releaseTerminate!: () => void;
     transport.terminateGame.mockImplementationOnce(
@@ -1436,7 +1448,7 @@ describe("multiplayerDraftStore Commander launch", () => {
     await installCompletedPod(commanderView(4, { humanSeats: [1] }));
     const parked = useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
     // Parked on `roomFull`: seat 1 is a live human the host fake never fills.
-    await vi.waitFor(() => expect(sendCommanderLaunches).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(invitationsEmitted).toHaveBeenCalledTimes(1));
 
     const leaving = useMultiplayerDraftStore.getState().leave(false);
     let snapshot: Pick<ReturnType<typeof useMultiplayerDraftStore.getState>, "role" | "phase" | "view">;
@@ -1623,7 +1635,7 @@ describe("multiplayerDraftStore Commander launch", () => {
     useMultiplayerDraftStore.setState({ view: secondView });
     commanderSeatDecks.mockResolvedValue(seatDecksFor(secondView, 0));
     const secondLaunch = useMultiplayerDraftStore.getState().launchCommanderGame(navigate);
-    await vi.waitFor(() => expect(sendCommanderLaunches).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(invitationsEmitted).toHaveBeenCalledTimes(2));
 
     let releaseTerminate!: () => void;
     transport.terminateGame.mockImplementationOnce(

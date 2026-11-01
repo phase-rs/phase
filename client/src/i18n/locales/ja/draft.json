@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "ボットの強さ",
+    "pickEnhancements": {
+      "label": "ドラフトのピック強化を備えた内蔵AIを使用する",
+      "hint": "ガイドがあるフォーマット(現在はミラディン、ダークスティール、フィフス・ドーン)では、ボットが文章化されたピック順ガイドに従います。普通以上の難易度で有効です。"
+    },
     "difficultyLevels": {
       "VeryEasy": "とても易しい",
       "Easy": "易しい",
@@ -132,6 +136,12 @@
     "packOrder": "パックの順序",
     "candidateSets": "候補のセット",
     "clearPacks": "クリア",
+    "randomSet": "ランダムなセット",
+    "randomSetHint": "ランダムに選んだ1つのセットで全パックを埋める",
+    "randomPacks": "ランダムなパック",
+    "randomPacksHint": "各パックにそれぞれランダムなセットを割り当てる",
+    "randomCandidates": "ランダムな候補",
+    "randomCandidatesHint": "異なる候補セットをランダムに選ぶ",
     "emptyPacks_one": "各パックのセットを選んでください。標準では{{count}}パックを使います。同じセットでも、複数のセットを組み合わせても遊べます。",
     "emptyPacks_other": "各パックのセットを選んでください。標準では{{count}}パックを使います。同じセットでも、複数のセットを組み合わせても遊べます。",
     "emptyPacksFixed_one": "シールドでは{{count}}パックを使います。各パックのセットを選んでください。同じセットでも、複数のセットでも構いません。",
@@ -156,6 +166,7 @@
     "startSealed": "シールドを開始"
   },
   "pack": {
+    "label": "ドラフトパック",
     "confirmPick": "ピックを確定",
     "selected": "選択中",
     "draftEffects": "ドラフト中の効果：",

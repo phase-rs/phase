@@ -179,6 +179,7 @@
       "exportedTo": "Exportado para {{path}}.",
       "exportRequested": "Exportação solicitada: {{filename}}.",
       "exportFailed": "Não foi possível exportar o estado do jogo.",
+      "exportFailedDetail": "Não foi possível exportar o estado do jogo. {{detail}}",
       "replayExported": "Replay salvo como {{filename}}.",
       "replayExportUnavailable": "Nenhuma gravação de replay disponível para esta partida.",
       "replayExportFailed": "Não foi possível exportar o replay."

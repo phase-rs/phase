@@ -1,0 +1,57 @@
+---
+source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 417
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Unimplemented",
+        "name": "unknown",
+        "description": "Evolve"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": "Evolve",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Regenerate",
+        "target": {
+          "type": "ParentTarget"
+        }
+      },
+      "cost": {
+        "type": "RemoveCounter",
+        "count": 2,
+        "counter_type": {
+          "type": "OfType",
+          "data": "P1P1"
+        },
+        "target": null,
+        "selection": "SingleObject"
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "Remove two +1/+1 counters from ~: Regenerate it.",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

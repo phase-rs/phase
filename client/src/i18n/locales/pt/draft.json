@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Dificuldade dos Bots",
+    "pickEnhancements": {
+      "label": "Usar a IA integrada com melhorias nas escolhas do draft",
+      "hint": "Os bots seguem um guia escrito de ordem de escolha nos formatos que o têm (atualmente Mirrodin, Darksteel e Fifth Dawn). Aplica-se à dificuldade média ou superior."
+    },
     "difficultyLevels": {
       "VeryEasy": "Muito fácil",
       "Easy": "Fácil",
@@ -132,6 +136,12 @@
     "packOrder": "Ordem dos boosters",
     "candidateSets": "Coleções candidatas",
     "clearPacks": "Limpar",
+    "randomSet": "Coleção aleatória",
+    "randomSetHint": "Preencher todos os boosters com uma coleção escolhida ao acaso",
+    "randomPacks": "Boosters aleatórios",
+    "randomPacksHint": "Dar a cada booster a sua própria coleção escolhida ao acaso",
+    "randomCandidates": "Coleções aleatórias",
+    "randomCandidatesHint": "Escolher coleções candidatas distintas ao acaso",
     "emptyPacks_one": "Escolha uma coleção para cada booster. Um draft abre {{count}} booster por padrão — repita uma coleção ou misture várias.",
     "emptyPacks_other": "Escolha uma coleção para cada booster. Um draft abre {{count}} boosters por padrão — repita uma coleção ou misture várias para draftar um bloco.",
     "emptyPacksFixed_one": "O sealed abre exatamente {{count}} booster. Escolha uma coleção para ele.",
@@ -156,6 +166,7 @@
     "startSealed": "Iniciar sealed"
   },
   "pack": {
+    "label": "Booster de draft",
     "confirmPick": "Confirmar Escolha",
     "selected": "Selecionada",
     "draftEffects": "Efeitos do draft:",

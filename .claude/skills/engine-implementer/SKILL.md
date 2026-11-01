@@ -56,6 +56,15 @@ Keep the original requested behavior and acceptance criteria in every handoff. B
 
 A test that reaches the product and reveals wrong behavior calls for a product fix. Required evidence stays required at its due boundary; scheduling it later under Step 5 is not dropping it, a failed check, or grounds for an expansion case. Never report a deferred check as passed.
 
+## Real cards
+
+The engine's job is to execute real cards. This rule binds every role in this pipeline and every skill that links here, in every artifact: plans and charters, addenda, executor and final reports, review findings, PR bodies and review replies.
+
+- Every explanation or justification of engine behavior names the real printed card(s), quotes their verbatim Oracle text from Scryfall or MTGJSON, and cites the CR rule grep-verified in `docs/MagicCompRules.txt`.
+- A test name, a synthetic card or an abstract shape is never the justification. A test is evidence for a claim about a real card, not the authority for it.
+- Every card whose text a test exercises is a real printed card with verbatim Oracle text ([card-test](../card-test/SKILL.md)); a textless filler body is not justification and is exempt. A synthetic card is acceptable only where no printed card exhibits the shape; the test then says so and names the nearest printed card. When no printed card exhibits the shape, first ask whether the behavior is needed at all.
+- Reviewers report a violation as a finding that changes the artifact, never as a note.
+
 ## Run limits
 
 Apply these before every dispatch or verification-tool edit and after every result, across all modes, phases and renamed successor work for the original task.
