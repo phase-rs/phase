@@ -13,6 +13,7 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::PlayerFilter;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -32,6 +33,7 @@ fn activate(source_id: ObjectId) -> GameAction {
     GameAction::ActivateAbility {
         source_id,
         ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
     }
 }
 

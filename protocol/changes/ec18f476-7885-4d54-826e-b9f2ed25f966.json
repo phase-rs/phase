@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Debug actions gain DebugAction::GainLife / LoseLife (Sandbox life changes through the CR 119.3 life events), and a parked replacement records whether its life event came from an action-ingress life change (pending_replacement.unrepresentable_life_change). A previous peer cannot parse the new action tags or the parked-replacement field, so Full and P2P peers move in lockstep."
+}

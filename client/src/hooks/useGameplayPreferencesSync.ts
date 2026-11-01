@@ -31,6 +31,8 @@ type LastSent = {
   generation: number;
   stops?: readonly PhaseStop[];
   mode?: PriorityPassingMode;
+  /** Un-card actions opt-in last sent; absent means the engine default (off). */
+  unCardActions?: boolean;
 };
 
 // Module-scoped so React StrictMode remounts cannot resend preferences for the
@@ -137,6 +139,34 @@ async function drainGameplayPreferenceSync(): Promise<void> {
           && effectivePriorityPassingMode() === mode
         ) {
           lastSent = { ...successfulSendFor(adapter, generation), mode };
+        } else {
+          syncRequested = true;
+        }
+      }
+
+      // Un-card actions (silver-border sets): the engine prompts and offers
+      // nothing to a player who has not opted in, so the opt-in is engine state.
+      // Explicitly synchronize the preference whenever it has not yet been sent
+      // for this session, ensuring a resumed session with un-card actions enabled
+      // honors an off preference.
+      const unCardActions = usePreferencesStore.getState().unCardActionsEnabled;
+      if (unCardActions !== successfulSendFor(adapter, generation).unCardActions) {
+        try {
+          await dispatchActionForGameSession(
+            { type: "UnAction", data: { action: { type: "SetEnabled", data: { enabled: unCardActions } } } },
+            adapter,
+            generation,
+          );
+        } catch {
+          // As above, a rejected dispatch must remain retryable.
+          continue;
+        }
+
+        if (
+          isCurrentSession(adapter, generation)
+          && usePreferencesStore.getState().unCardActionsEnabled === unCardActions
+        ) {
+          lastSent = { ...successfulSendFor(adapter, generation), unCardActions };
         } else {
           syncRequested = true;
         }

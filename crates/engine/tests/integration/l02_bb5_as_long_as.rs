@@ -315,6 +315,7 @@ fn armed_tishana_rider() -> (
         .act(GameAction::ActivateAbility {
             source_id: mawcor,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Mawcor's ability must be accepted");
     runner

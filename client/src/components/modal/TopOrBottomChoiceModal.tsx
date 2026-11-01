@@ -31,6 +31,14 @@ export function TopOrBottomChoiceModalContent({
       ? waitingFor.data.object_id
       : waitingFor.data.card;
   const cardName = objects?.[objectId]?.name ?? t("topOrBottom.cardFallback");
+  // CR 401.7: "second from the top or on the bottom" names a specific position
+  // for the non-bottom branch; a plain top-or-bottom choice omits the field.
+  const topPosition =
+    waitingFor.type === "TopOrBottomChoice" ? waitingFor.data.top_position : undefined;
+  const topLabel =
+    topPosition?.type === "NthFromTop"
+      ? t("topOrBottom.nthFromTop", { n: topPosition.n })
+      : t("topOrBottom.top");
 
   return (
     <ChoiceModal
@@ -38,7 +46,7 @@ export function TopOrBottomChoiceModalContent({
       previewCardName={cardName}
       previewObjectId={objectId}
       options={[
-        { id: "top", label: t("topOrBottom.top") },
+        { id: "top", label: topLabel },
         { id: "bottom", label: t("topOrBottom.bottom") },
       ]}
       onChoose={(id) => {

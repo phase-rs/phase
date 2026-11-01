@@ -5,7 +5,8 @@ import { resolveOracleIdSync } from "../../services/scryfall";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
-import { deduplicateEntries, expandParsedDeck, resolveCommander } from "../../services/deckParser";
+import { resolveCommander } from "../../services/commanderResolution";
+import { deduplicateEntries, expandParsedDeck } from "../../services/deckParser";
 import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
 import {
   STORAGE_KEY_PREFIX,

@@ -6,6 +6,7 @@
 use engine::game::scenario::GameRunner;
 use engine::game::{EntryKind, PlayLocus};
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -149,6 +150,7 @@ fn activation_reaching_investigate_below_its_root_opens_its_own_period() {
         .act(GameAction::ActivateAbility {
             source_id: greyfax,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Greyfax activates");
     while matches!(
@@ -208,6 +210,7 @@ fn activation_reaching_no_token_clears_the_foreign_period() {
         .act(GameAction::ActivateAbility {
             source_id: bloodcaster,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Marshland Bloodcaster activates");
 

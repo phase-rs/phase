@@ -372,7 +372,20 @@ fn web_slinging_truly_unpayable_sacrificial_cost_is_not_offered() {
     )));
 }
 
+/// How the Murder boards' choice-bearing "Exile a card from your graveyard:
+/// Add {B}" sources meet their one graveyard card.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MurderSources {
+    /// Two Swamps and one source: the source's exile completes {1}{B}{B}.
+    One,
+    /// One Swamp and two sources sharing the one card (CR 118.3): only one of
+    /// them can be activated, so {1}{B}{B} can't be completed, though the
+    /// castability gate credits each source on its own.
+    SharedFodder,
+}
+
 fn setup_murder_with_static(
+    sources: MurderSources,
     plain_land_count: usize,
     target_sensitive_static: Option<StaticDefinition>,
 ) -> (GameRunner, ObjectId, ObjectId) {
@@ -387,14 +400,21 @@ fn setup_murder_with_static(
         .id();
     let victim = scenario.add_creature(P1, "Murder Victim", 2, 2).id();
     scenario.add_creature(P1, "Second Legal Target", 1, 1);
-    scenario.add_basic_land(P0, ManaColor::Black);
-    scenario.add_basic_land(P0, ManaColor::Black);
+    let (swamps, source_count) = match sources {
+        MurderSources::One => (2, 1),
+        MurderSources::SharedFodder => (1, 2),
+    };
+    for _ in 0..swamps {
+        scenario.add_basic_land(P0, ManaColor::Black);
+    }
     for _ in 0..plain_land_count {
         scenario.add_basic_land(P0, ManaColor::Blue);
     }
-    scenario
-        .add_creature(P0, "Choice-Bearing Mana Source", 0, 3)
-        .with_ability_definition(interactive_graveyard_mana_ability(ManaColor::Black));
+    for _ in 0..source_count {
+        scenario
+            .add_creature(P0, "Choice-Bearing Mana Source", 0, 3)
+            .with_ability_definition(interactive_graveyard_mana_ability(ManaColor::Black));
+    }
     if let Some(definition) = target_sensitive_static {
         scenario
             .add_creature(P1, "Target-Sensitive Cost Static", 1, 4)
@@ -404,8 +424,11 @@ fn setup_murder_with_static(
     (scenario.build(), murder, victim)
 }
 
-fn setup_murder(plain_land_count: usize) -> (GameRunner, ObjectId, ObjectId) {
-    setup_murder_with_static(plain_land_count, None)
+fn setup_murder(
+    sources: MurderSources,
+    plain_land_count: usize,
+) -> (GameRunner, ObjectId, ObjectId) {
+    setup_murder_with_static(sources, plain_land_count, None)
 }
 
 fn cost_static_with_filter(
@@ -459,9 +482,14 @@ fn auto_cast_action(state: &engine::types::game_state::GameState, spell: ObjectI
     }
 }
 
+/// #9812 (CR 601.2g + CR 605.3a): two Swamps and the choice-bearing source's
+/// exile pay Murder's {1}{B}{B}. The Auto payer can't answer the exile choice,
+/// but the cast is completable, so it is offered; offering leaves the live
+/// state untouched, and the offered action completes through the mana-payment
+/// step and resolves.
 #[test]
-fn ordinary_auto_cast_is_not_offered_when_only_interactive_mana_source_completes_cost() {
-    let (runner, murder, _) = setup_murder(0);
+fn ordinary_auto_cast_is_offered_when_only_interactive_mana_source_completes_cost() {
+    let (mut runner, murder, victim) = setup_murder(MurderSources::One, 0);
     let action = auto_cast_action(runner.state(), murder);
     assert!(
         candidate_actions(runner.state())
@@ -472,33 +500,131 @@ fn ordinary_auto_cast_is_not_offered_when_only_interactive_mana_source_completes
 
     let before = runner.state().clone();
     let before_json = serde_json::to_value(&before).expect("state snapshot must serialize");
-    let mut disposable = GameRunner::from_state(before.clone());
-    disposable
-        .act(action.clone())
-        .expect("the production reducer must reach target selection before payment");
-    assert!(matches!(
-        disposable.state().waiting_for,
-        WaitingFor::TargetSelection { .. }
-    ));
-
     assert!(
-        !legal_actions(runner.state()).contains(&action),
-        "REVERT-PROOF: Auto must not be offered when its payer cannot answer the mana-source choice"
+        legal_actions(runner.state()).contains(&action),
+        "REVERT-PROOF: the cast is completable through the choice-bearing source"
     );
     assert_eq!(
-        runner.state().players[0].mana_pool,
-        before.players[0].mana_pool
+        serde_json::to_value(runner.state()).expect("live state must serialize"),
+        before_json,
+        "the offer's witness runs on scratch copies"
     );
-    assert_eq!(runner.state().battlefield, before.battlefield);
+
+    runner.act(action).expect("the offered cast announces");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ));
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(victim)],
+        })
+        .expect("the target is accepted");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "the Auto payer stops for the source's choice: {:?}",
+        runner.state().waiting_for
+    );
+    let source = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].name == "Choice-Bearing Mana Source")
+        .expect("the source");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the source activates during payment");
+    let WaitingFor::PayCost { choices, .. } = runner.state().waiting_for.clone() else {
+        panic!("the exile choice: {:?}", runner.state().waiting_for)
+    };
+    runner
+        .act(GameAction::SelectCards { cards: choices })
+        .expect("the graveyard card is exiled");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the Swamps finish the payment");
+    assert!(runner.state().stack.iter().any(|entry| entry.id == murder));
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+}
+
+/// CR 118.3 + CR 601.2h: one Swamp and two choice-bearing sources sharing one
+/// graveyard card can't pay {1}{B}{B}, though the castability gate credits
+/// each source on its own. Not offered; offering leaves the live state
+/// untouched; cast anyway, the second source has nothing to exile and the
+/// payment is refused.
+#[test]
+fn ordinary_auto_cast_is_not_offered_when_interactive_sources_share_one_card() {
+    let (runner, murder, victim) = setup_murder(MurderSources::SharedFodder, 0);
+    let action = auto_cast_action(runner.state(), murder);
+    assert!(
+        candidate_actions(runner.state())
+            .iter()
+            .any(|candidate| candidate.action == action),
+        "reach guard: broad generation must expose the cast"
+    );
+    let before = runner.state().clone();
+    let before_json = serde_json::to_value(&before).expect("state snapshot must serialize");
+    assert!(
+        !legal_actions(runner.state()).contains(&action),
+        "REVERT-PROOF: Auto must not be offered when no completion exists"
+    );
     assert_eq!(
         serde_json::to_value(runner.state()).expect("live state must serialize"),
         before_json
+    );
+
+    let mut disposable = GameRunner::from_state(before);
+    disposable.act(action).expect("the cast announces");
+    disposable
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(victim)],
+        })
+        .expect("the target is accepted");
+    assert!(matches!(
+        disposable.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    let sources: Vec<ObjectId> = disposable
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| disposable.state().objects[id].name == "Choice-Bearing Mana Source")
+        .collect();
+    assert_eq!(sources.len(), 2);
+    let activate = |source_id| GameAction::ActivateAbility {
+        source_id,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    };
+    disposable
+        .act(activate(sources[0]))
+        .expect("the first source activates");
+    let WaitingFor::PayCost { choices, .. } = disposable.state().waiting_for.clone() else {
+        panic!("the exile choice: {:?}", disposable.state().waiting_for)
+    };
+    disposable
+        .act(GameAction::SelectCards { cards: choices })
+        .expect("the one graveyard card is exiled");
+    assert!(
+        disposable.act(activate(sources[1])).is_err(),
+        "nothing is left to exile"
+    );
+    assert!(
+        disposable.act(GameAction::PassPriority).is_err(),
+        "Swamp {{B}} + one {{B}} can't pay {{1}}{{B}}{{B}}"
     );
 }
 
 #[test]
 fn ordinary_auto_cast_is_offered_and_completes_with_plain_land() {
-    let (mut runner, murder, victim) = setup_murder(1);
+    let (mut runner, murder, victim) = setup_murder(MurderSources::One, 1);
     let action = auto_cast_action(runner.state(), murder);
     assert!(legal_actions(runner.state()).contains(&action));
 
@@ -532,7 +658,8 @@ fn only_applicable_target_sensitive_cost_statics_defer_strict_auto_payment() {
     ];
 
     for (reason, definition) in irrelevant_statics {
-        let (runner, murder, _) = setup_murder_with_static(0, Some(definition));
+        let (runner, murder, _) =
+            setup_murder_with_static(MurderSources::SharedFodder, 0, Some(definition));
         let action = auto_cast_action(runner.state(), murder);
         assert!(
             candidate_actions(runner.state())
@@ -547,7 +674,8 @@ fn only_applicable_target_sensitive_cost_statics_defer_strict_auto_payment() {
     }
 
     let relevant = target_sensitive_cost_static(ControllerRef::Opponent, None, TypedFilter::card());
-    let (runner, murder, _) = setup_murder_with_static(0, Some(relevant));
+    let (runner, murder, _) =
+        setup_murder_with_static(MurderSources::SharedFodder, 0, Some(relevant));
     let action = auto_cast_action(runner.state(), murder);
     assert!(
         candidate_actions(runner.state())
@@ -563,7 +691,8 @@ fn only_applicable_target_sensitive_cost_statics_defer_strict_auto_payment() {
 
 fn assert_target_independent_composed_filter_offer_pair(label: &str, spell_filter: TargetFilter) {
     let definition = cost_static_with_filter(ControllerRef::Opponent, None, spell_filter.clone());
-    let (runner, murder, _) = setup_murder_with_static(1, Some(definition));
+    let (runner, murder, _) =
+        setup_murder_with_static(MurderSources::SharedFodder, 1, Some(definition));
     let action = auto_cast_action(runner.state(), murder);
     assert!(
         candidate_actions(runner.state())
@@ -594,7 +723,7 @@ fn assert_target_independent_composed_filter_offer_pair(label: &str, spell_filte
 
     let payable_definition = cost_static_with_filter(ControllerRef::Opponent, None, spell_filter);
     let (mut payable, payable_murder, victim) =
-        setup_murder_with_static(2, Some(payable_definition));
+        setup_murder_with_static(MurderSources::One, 2, Some(payable_definition));
     let payable_action = auto_cast_action(payable.state(), payable_murder);
     assert!(
         legal_actions(payable.state()).contains(&payable_action),
@@ -1270,7 +1399,7 @@ fn payable_morph_exact_cast_binds_face_down_three_and_completes() {
     let morph = scenario
         .add_creature_to_hand(P0, "Offer-Probe Morph", 4, 4)
         .with_mana_cost(ManaCost::NoCost)
-        .with_keyword(Keyword::Morph(ManaCost::generic(5)))
+        .with_keyword(Keyword::morph(ManaCost::generic(5)))
         .id();
     scenario.with_mana_pool(
         P0,
@@ -1319,7 +1448,7 @@ fn exile_alt_cost_permission(
         duration: None,
         graveyard_replacement: None,
         enters_with_counter: None,
-        enters_with_modifications: Vec::new(),
+        enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: None,
     }
@@ -1344,9 +1473,13 @@ fn same_state_cast_origins_bind_distinct_pending_objects_and_permissions() {
     scenario.add_creature(P1, "Authority Target A", 2, 2);
     scenario.add_creature(P1, "Authority Target B", 2, 2);
     scenario.add_basic_land(P0, ManaColor::Blue);
-    scenario
-        .add_creature(P0, "Authority Red Choice Source", 0, 3)
-        .with_ability_definition(interactive_graveyard_mana_ability(ManaColor::Red));
+    // Two red choice-bearing sources share one graveyard card (CR 118.3), so
+    // exile_a's {R}{R} permission cost is generated but can't be completed.
+    for _ in 0..2 {
+        scenario
+            .add_creature(P0, "Authority Red Choice Source", 0, 3)
+            .with_ability_definition(interactive_graveyard_mana_ability(ManaColor::Red));
+    }
     scenario.add_spell_to_graveyard(P0, "Authority Red Fodder", true);
     let mut runner = scenario.build();
     engine::game::zones::move_to_zone(runner.state_mut(), exile_a, Zone::Exile, &mut Vec::new());
@@ -1359,7 +1492,7 @@ fn same_state_cast_origins_bind_distinct_pending_objects_and_permissions() {
         .casting_permissions = vec![exile_alt_cost_permission(
         P0,
         ManaCost::Cost {
-            shards: vec![ManaCostShard::Red],
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red],
             generic: 0,
         },
     )];

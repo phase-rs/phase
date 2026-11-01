@@ -55,6 +55,7 @@ fn karplusan_yeti_fight_back_deals_fought_creatures_power() {
         .act(GameAction::ActivateAbility {
             source_id: yeti,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Karplusan Yeti's {T} ability must succeed");
 

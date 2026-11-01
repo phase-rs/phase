@@ -530,10 +530,12 @@ fn counter_target_worth(ctx: &PolicyContext<'_>, entry: &StackEntry) -> f64 {
 /// every stack entry the AI does not control.
 ///
 /// Approximation: the counter's own target filter is not applied (the engine
-/// matcher is not reachable from here), so a counter that can only hit creature
-/// spells still sees a noncreature entry's impact. Accepted — the filter narrows
-/// the set, so this can only over-estimate, and `SelectTarget` still picks
-/// legally.
+/// matcher is not reachable from here), so a counter that can only hit
+/// noncreature spells still sees a creature entry's impact. Accepted — the
+/// filter narrows the set, so this can only over-estimate. Target selection
+/// picks legally, but "legally" can mean the AI's own spell when that is all
+/// the filter reaches; that cast is vetoed in `tactical_gate`
+/// (`counter_reaches_nothing_foreign`), not here.
 fn best_counter_impact(ctx: &PolicyContext<'_>) -> f64 {
     ctx.state
         .stack
@@ -803,6 +805,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -884,6 +887,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -973,10 +977,10 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(0); // any seed: rank/score/probability are seed-invariant here
         let selection = crate::search::choose_action_with_session_diagnostic(
             state,
-            P0,
             &config,
             &mut rng,
             &crate::AiSession::arc_from_game(state),
+            &engine::ai_support::AiDecisionContract::issue(state, P0),
         );
         let receipt = selection
             .receipt
@@ -1049,6 +1053,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1335,7 +1340,7 @@ mod tests {
     #[test]
     fn two_headed_giant_teammate_evasion_target_is_judged_by_the_attacking_teams_authority() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
-        state.phase = Phase::DeclareAttackers;
+        state.phase = Phase::BeginCombat;
         state.active_player = PlayerId(1);
         let source = creature(&mut state, P0, "Source");
         let futile = creature(&mut state, P0, "Futile Teammate Target");
@@ -1369,7 +1374,7 @@ mod tests {
         assert!(matches!(
             effect_timing_verdict(&state, &target_candidate(ready), &AiConfig::default()),
             PolicyVerdict::Score { delta: 0.0, reason }
-                if reason.kind == "effect_timing_no_pair_blockable_evasion_target"
+                if reason.kind == "effect_timing_evasion_target_na"
         ));
     }
 
@@ -1414,6 +1419,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1533,6 +1539,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1592,6 +1599,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1683,6 +1691,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: extra_combat_source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: the extra-combat activation must be legal");
         runner.advance_until_stack_empty();
@@ -1697,6 +1706,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1768,6 +1778,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
 
@@ -1883,6 +1894,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: extra_combat_source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: the extra-combat activation must be legal");
         runner.advance_until_stack_empty();
@@ -2127,7 +2139,7 @@ mod tests {
 
     fn counter_effect() -> Effect {
         Effect::Counter {
-            target: TargetFilter::Any,
+            target: TargetFilter::StackSpell,
             source_rider: None,
             countered_spell_zone: None,
         }
@@ -2159,8 +2171,7 @@ mod tests {
             obj.toughness = Some(toughness);
         }
         let ability = ResolvedAbility::new(effect, targets, source_id, controller);
-        let id = ObjectId(state.next_object_id);
-        state.next_object_id += 1;
+        let id = source_id;
         state.stack.push_back(StackEntry {
             id,
             source_id,

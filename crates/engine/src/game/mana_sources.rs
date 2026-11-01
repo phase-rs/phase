@@ -13,7 +13,8 @@
 //! inline resolution — which is why any irreversible sub-effect (damage,
 //! life loss, sacrifice) disqualifies a source from UI-level undo.
 
-use crate::types::ability::ManaSpendRestriction;
+use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::types::ability::{cost_has_component, ManaSpendRestriction};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ControllerRef,
     CostPaidObjectSnapshot, Effect, ManaProduction, PlayerFilter, QuantityExpr, ResolvedAbility,
@@ -372,29 +373,6 @@ impl ManaSourceOption {
     }
 }
 
-/// Check whether an ability cost includes a tap component.
-/// Matches both `AbilityCost::Tap` and `Composite` costs containing `Tap`.
-/// True when `cost` contains a component satisfying `pred`, checking both a bare
-/// cost and every component of a `Composite`. Single walker behind all
-/// component-presence predicates (`has_tap_component`, `has_untap_component`,
-/// `cost_includes_sacrifice`, `cost_includes_loyalty`).
-///
-/// Walks **one `Composite` level only**: a component nested inside a child
-/// `Composite` is not seen. Sound for presence checks, whose `false` merely
-/// declines a fast path, but never sound for an arity bound — for that use
-/// [`count_leaf_components`], which recurses to the same flattened leaf
-/// multiset the payment path actually pays.
-pub(crate) fn cost_has_component(
-    cost: &Option<AbilityCost>,
-    pred: impl Fn(&AbilityCost) -> bool,
-) -> bool {
-    match cost {
-        Some(AbilityCost::Composite { costs }) => costs.iter().any(&pred),
-        Some(c) => pred(c),
-        None => false,
-    }
-}
-
 pub(crate) fn has_tap_component(cost: &Option<AbilityCost>) -> bool {
     cost_has_component(cost, |c| matches!(c, AbilityCost::Tap))
 }
@@ -461,6 +439,7 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
                 actions.push(GameAction::ActivateAbility {
                     source_id: object_id,
                     ability_index,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 });
             }
         }
@@ -1098,12 +1077,14 @@ pub(crate) fn activate_mana_source_option_with_output(
         debug_assert!(tapped, "preflighted land tap must transition status");
         events.push(GameEvent::permanent_tapped(state, option.object_id, None));
         // CR 305.6 + CR 605.3: tapping a basic land for mana activates its
-        // intrinsic mana ability; observe its triggers at that boundary.
+        // intrinsic mana ability; observe its triggers at that boundary. Its
+        // activation cost is the intrinsic "{T}" (CR 305.6).
         let activation_event = super::casting_targets::emit_ability_activated(
             state,
             player,
             option.object_id,
             crate::types::events::ActivatedAbilityKind::Mana,
+            crate::types::events::BoundActivationCost::basic_land_intrinsic(),
             None,
             crate::types::zones::Zone::Battlefield,
             events,
@@ -1477,6 +1458,25 @@ fn chain_harms_controller_amount(ability: &AbilityDefinition) -> Option<Option<u
     let mut acc = (false, Some(0_u16));
     walk(ability, &mut acc);
     acc.0.then_some(acc.1)
+}
+
+/// CR 605.3b + CR 119.3: True iff resolving this ability makes its controller
+/// gain life — a controller-scoped `GainLife` anywhere in its effect chain
+/// (Pristine Talisman: "{T}: Add {C}. You gain 1 life."). Presence only: the
+/// amount is what actually resolving the ability gains. Visits the same
+/// `sub_ability` / `else_ability` links as [`chain_harms_controller_amount`].
+pub(crate) fn mana_ability_gains_controller_life(ability: &AbilityDefinition) -> bool {
+    fn walk(ability: &AbilityDefinition) -> bool {
+        matches!(
+            *ability.effect,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                ..
+            }
+        ) || ability.sub_ability.as_deref().is_some_and(walk)
+            || ability.else_ability.as_deref().is_some_and(walk)
+    }
+    walk(ability)
 }
 
 /// CR 605.3b: Returns `true` iff the continuation chain (sub_ability /
@@ -1959,10 +1959,7 @@ pub fn display_land_mana_pips(
             }
             // CR 106.7: Dynamically computed from opponent lands.
             ManaProduction::OpponentLandColors { .. } => {
-                let colors: Vec<ManaColor> = opponent_land_color_options(state, controller)
-                    .into_iter()
-                    .filter_map(mana_type_to_color)
-                    .collect();
+                let colors = opponent_land_color_options(state, controller);
                 if !colors.is_empty() {
                     push(&mut pips, ManaPip::OneOfColors(colors));
                 }
@@ -3615,7 +3612,12 @@ fn mana_options_from_production(
                 .collect()
         }
         // CR 106.7: Compute colors dynamically from opponent-controlled lands.
-        ManaProduction::OpponentLandColors { .. } => opponent_land_color_options(state, controller),
+        // CR 106.1a + CR 105.1: the survey returns `ManaColor`, so colorless is
+        // unrepresentable here (cf. `AnyInCommandersColorIdentity` below).
+        ManaProduction::OpponentLandColors { .. } => opponent_land_color_options(state, controller)
+            .iter()
+            .map(mana_color_to_type)
+            .collect(),
         // CR 106.7 + CR 106.1b: Compute the full type set (incl. Colorless)
         // from lands matching `land_filter` (Reflecting Pool class).
         ManaProduction::AnyTypeProduceableBy { land_filter, .. } => {
@@ -3781,10 +3783,17 @@ fn collect_production_colors(
 /// union of mana colors their non-`OpponentLandColors` mana abilities could produce.
 /// `OpponentLandColors` abilities are excluded to prevent infinite recursion when
 /// an opponent also controls a card like Exotic Orchard.
+///
+/// The return type carries the color axis: `ManaColor` has no colorless member
+/// (CR 106.1a + CR 105.1), so "any color that a land an opponent controls could
+/// produce" can never name `{C}` (CR 106.1b makes colorless a type, not a color).
+/// An empty result means no color can be defined, so the ability produces no
+/// mana (CR 106.5 + CR 106.7). Callers needing `ManaType` convert with
+/// [`mana_color_to_type`].
 pub(crate) fn opponent_land_color_options(
     state: &GameState,
     controller: PlayerId,
-) -> Vec<ManaType> {
+) -> Vec<ManaColor> {
     let opponents = super::players::opponents(state, controller);
     let mut options = Vec::new();
     // CR 730.2: iterate `state.battlefield` (the independent-permanent list) so an
@@ -3833,11 +3842,16 @@ pub(crate) fn opponent_land_color_options(
             // would produce, and "you"/"your" on that land means its controller, so
             // evaluate it as the opponent who controls the land (Command Tower reads
             // that opponent's commander), not as the activator surveying it.
-            for mana_type in
-                mana_options_from_production(state, obj.controller, *object_id, produced)
+            // CR 106.1a + CR 105.1: "any color" ranges over the five colors only;
+            // colorless is a mana type (CR 106.1b), not a color, so a surveyed land
+            // that could produce {C} adds no option (Exotic Orchard / Fellwar Stone
+            // rulings).
+            for color in mana_options_from_production(state, obj.controller, *object_id, produced)
+                .into_iter()
+                .filter_map(mana_type_to_color)
             {
-                if !options.contains(&mana_type) {
-                    options.push(mana_type);
+                if !options.contains(&color) {
+                    options.push(color);
                 }
             }
         }
@@ -3863,14 +3877,12 @@ pub(crate) fn opponent_land_color_options(
             )
         });
         if !obj_had_explicit_ability {
-            if let Some(mana_type) = obj
-                .card_types
-                .subtypes
-                .iter()
-                .find_map(|s| super::mana_payment::land_subtype_to_mana_type(s))
-            {
-                if !options.contains(&mana_type) {
-                    options.push(mana_type);
+            // CR 106.1a + CR 105.1: same color-only mapping as the ability loop.
+            if let Some(color) = obj.card_types.subtypes.iter().find_map(|s| {
+                super::mana_payment::land_subtype_to_mana_type(s).and_then(mana_type_to_color)
+            }) {
+                if !options.contains(&color) {
+                    options.push(color);
                 }
             }
         }
@@ -4062,9 +4074,11 @@ pub(crate) fn aura_taps_for_mana_sources_for_land(
 /// 1. The land scope is parameterized via `TargetFilter` rather than hard-coded
 ///    to opponents — so "you control" / "an opponent controls" / future
 ///    "any player controls" variants slot in by passing a different filter.
-/// 2. Returns the full *type* set including `Colorless`, matching CR 106.1b's
-///    definition of "type" (six types) versus "color" (five colors). Reflecting
-///    Pool reads "any **type**", so a Wastes you control contributes `Colorless`.
+/// 2. Returns the full *type* set (`ManaType`, including `Colorless`), matching
+///    CR 106.1b's definition of "type" (six types) versus "color" (five colors),
+///    whereas `opponent_land_color_options` returns `ManaColor` and so can never
+///    hold `Colorless`. Reflecting Pool reads "any **type**", so a Wastes you
+///    control contributes `Colorless`.
 ///
 /// Per CR 106.7 the surveyed lands' mana abilities are inspected for what types
 /// they *could* produce; cost-payability is ignored. Both `OpponentLandColors`
@@ -4593,6 +4607,75 @@ mod tests {
         // nothing pre-resolution.
         let trigger_only = pips_for_production(ManaProduction::TriggerEventManaType);
         assert!(trigger_only.is_empty());
+    }
+
+    /// CR 106.1a + CR 105.1 + CR 106.7: with several opponents the surveyed union
+    /// holds colors only. P1's Wastes could produce {C} (an explicit ability) and
+    /// P2's Island could produce {U} (subtype fallback); the union is `[Blue]`.
+    /// P1's Wastes alone leaves no color, so the result is empty (CR 106.5).
+    #[test]
+    fn opponent_land_color_options_excludes_colorless_across_opponents() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        let wastes = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(1),
+            "Wastes".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&wastes).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+
+        // Only a colorless land: no color can be defined.
+        assert_eq!(
+            mana_options_from_production(
+                &state,
+                PlayerId(1),
+                wastes,
+                &ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+            ),
+            vec![ManaType::Colorless],
+            "reach guard: the surveyed Wastes really could produce {{C}}"
+        );
+        assert_eq!(
+            opponent_land_color_options(&state, PlayerId(0)),
+            Vec::<ManaColor>::new()
+        );
+
+        // A second opponent's Island contributes its color.
+        let island = create_object(
+            &mut state,
+            CardId(911),
+            PlayerId(2),
+            "Island".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&island).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push("Island".to_string());
+        assert_eq!(
+            opponent_land_color_options(&state, PlayerId(0)),
+            vec![ManaColor::Blue]
+        );
     }
 
     #[test]
@@ -6436,6 +6519,49 @@ mod tests {
             .collect();
         assert_eq!(tapped_for_mana.len(), 1);
         assert_eq!(tapped_for_mana[0].as_slice(), &[ManaType::Green]);
+    }
+
+    /// CR 305.6 + CR 602.1a + CR 605.3: tapping a land for its intrinsic
+    /// "{T}: Add [mana symbol]" is a mana activation whose activation cost is
+    /// `{T}`, published on its `AbilityActivated` event.
+    #[test]
+    fn manual_intrinsic_land_tap_publishes_its_tap_activation_cost() {
+        use crate::types::events::{ActivatedAbilityKind, BoundActivationCost};
+        let mut state = GameState::new_two_player(42);
+        let forest = subtype_forest_with_priority(&mut state);
+        assert!(
+            state.objects[&forest].abilities.is_empty(),
+            "fixture must rely on the CR 305.6 intrinsic mana ability"
+        );
+        let action = activatable_mana_actions_for_player(&state, PlayerId(0))
+            .into_iter()
+            .find(|action| matches!(action, GameAction::TapLandForMana { .. }))
+            .expect("the engine exposes the intrinsic land-tap selection");
+
+        let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
+            .expect("the engine-authored manual mana action resolves");
+
+        assert!(state.objects[&forest].tapped, "reach: the Forest is tapped");
+        let activations: Vec<_> = result
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::AbilityActivated {
+                    source_id,
+                    kind,
+                    activation_cost,
+                    ..
+                } if *source_id == forest => Some((*kind, activation_cost.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            activations,
+            vec![(
+                ActivatedAbilityKind::Mana,
+                BoundActivationCost::Cost(Box::new(AbilityCost::Tap))
+            )]
+        );
     }
 
     #[test]

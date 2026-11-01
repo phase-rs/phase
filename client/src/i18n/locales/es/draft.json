@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Dificultad de los bots",
+    "pickEnhancements": {
+      "label": "Usar la IA integrada con mejoras de selección de draft",
+      "hint": "Los bots siguen una guía escrita de orden de selección en los formatos que la tienen (por ahora Mirrodin, Darksteel y Fifth Dawn). Se aplica en dificultad media o superior."
+    },
     "difficultyLevels": {
       "VeryEasy": "Muy fácil",
       "Easy": "Fácil",
@@ -132,6 +136,12 @@
     "packOrder": "Orden de los sobres",
     "candidateSets": "Colecciones candidatas",
     "clearPacks": "Vaciar",
+    "randomSet": "Colección aleatoria",
+    "randomSetHint": "Llenar todos los sobres con una colección elegida al azar",
+    "randomPacks": "Sobres aleatorios",
+    "randomPacksHint": "Dar a cada sobre su propia colección elegida al azar",
+    "randomCandidates": "Colecciones aleatorias",
+    "randomCandidatesHint": "Elegir colecciones candidatas distintas al azar",
     "emptyPacks_one": "Elige una colección para cada sobre. Un draft abre {{count}} sobre por defecto: repite una colección o mezcla varias.",
     "emptyPacks_other": "Elige una colección para cada sobre. Un draft abre {{count}} sobres por defecto: repite una colección o mezcla varias para draftear un bloque.",
     "emptyPacksFixed_one": "El sellado abre exactamente {{count}} sobre. Elige una colección para él.",
@@ -156,6 +166,7 @@
     "startSealed": "Empezar sellado"
   },
   "pack": {
+    "label": "Sobre de draft",
     "confirmPick": "Confirmar elección",
     "selected": "Seleccionada",
     "draftEffects": "Efectos de draft:",

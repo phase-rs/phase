@@ -22,12 +22,16 @@
 //! - Preservation neighbours: Travel Preparations ("each of up to two target"),
 //!   Sweet-Gum Recluse ("each of any number of target"), Swelter (another verb's
 //!   "each of two target").
+//! - Predictive Preparations ({1}{W}): "Put a +1/+1 counter on each of one or
+//!   two target creatures." (+ Flashback {3}{W}, already supported).
 //!
 //! GREEN-AT-BASE LABELLING (phase 11 plan §13.1, §13.3): the `*_LEG` rows and
 //! the three `preservation_*` rows are green at base; every other row is red at
 //! base, where the placement exports no announced target-set spec and only the
 //! first declared object gets counters (or, with X = 0, an undeclared object
-//! gets one).
+//! gets one). The `predictive_preparations_*` rows follow the same labelling:
+//! `offers_creatures_only` is green at base, the rest are red at base (the
+//! placement lowers to Unimplemented `put_counter_tail`).
 
 use engine::game::combat::{validate_blockers_for_player, AttackTarget};
 use engine::game::engine::EngineError;
@@ -58,6 +62,8 @@ const SWEET_GUM_RECLUSE_ORACLE: &str = "Flash\nCascade\nReach\nWhen this creatur
 
 const SWELTER_ORACLE: &str = "Swelter deals 2 damage to each of two target creatures.";
 
+const PREDICTIVE_PREPARATIONS_ORACLE: &str = "Put a +1/+1 counter on each of one or two target creatures.\nFlashback {3}{W} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+
 const FOREST_ORACLE: &str = "({T}: Add {G}.)";
 
 const DECAYED_COUNTER: CounterType = CounterType::Keyword(KeywordKind::Decayed);
@@ -87,6 +93,25 @@ fn add_thrive(scenario: &mut GameScenario) -> ObjectId {
     scenario
         .add_spell_to_hand_from_oracle(P0, "Thrive", false, THRIVE_ORACLE)
         .with_mana_cost(x_green_cost())
+        .id()
+}
+
+fn pp_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::White],
+        generic: 1,
+    }
+}
+
+fn add_predictive_preparations(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Predictive Preparations",
+            false,
+            PREDICTIVE_PREPARATIONS_ORACLE,
+        )
+        .with_mana_cost(pp_cost())
         .id()
 }
 
@@ -555,6 +580,161 @@ fn argothian_uprooting_offers_lands_you_control_only() {
         .expect("choosing an own Forest in the same slot must be accepted");
 }
 
+/// Q2-PP-2. Predictive Preparations, two declared creatures: each gets one
+/// +1/+1 counter; the undeclared creature, the opponent's creature and the
+/// source get none. RED AT BASE (Unimplemented put_counter_tail).
+#[test]
+fn predictive_preparations_two_targets_counters_each_declared_only() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let c1 = scenario.add_vanilla(P0, 2, 2);
+    let c2 = scenario.add_vanilla(P0, 2, 2);
+    let c3 = scenario.add_vanilla(P0, 2, 2);
+    let opp = scenario.add_vanilla(P1, 2, 2);
+    let spell = add_predictive_preparations(&mut scenario);
+    scenario.with_mana_pool(P0, floating_mana(2, ManaType::White));
+    let mut runner = scenario.build();
+
+    runner
+        .cast(spell)
+        .target_objects(&[c1, c2])
+        .try_resolve()
+        .expect("Predictive Preparations must be cast and resolve");
+
+    for (id, name) in [(c1, "c1"), (c2, "c2")] {
+        assert_eq!(
+            counters(&runner, id, CounterType::Plus1Plus1),
+            1,
+            "{name} was declared and must get one +1/+1 counter"
+        );
+    }
+    for (id, name) in [
+        (c3, "c3"),
+        (opp, "opponent creature"),
+        (spell, "Predictive Preparations"),
+    ] {
+        assert_eq!(
+            counters(&runner, id, CounterType::Plus1Plus1),
+            0,
+            "{name} was not declared and must get no counter"
+        );
+    }
+}
+
+/// Q2-PP-ILL (CR 608.2b). Predictive Preparations; the first declared target
+/// leaves the battlefield before resolution, and the other declared target
+/// still gets its counter. Reach guard: Q2-PP-2. RED AT BASE (c2 gets none).
+#[test]
+fn predictive_preparations_first_declared_target_illegal_still_counters_the_other() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let c1 = scenario.add_vanilla(P0, 2, 2);
+    let c2 = scenario.add_vanilla(P0, 2, 2);
+    let c3 = scenario.add_vanilla(P0, 2, 2);
+    let spell = add_predictive_preparations(&mut scenario);
+    scenario.with_mana_pool(P0, floating_mana(2, ManaType::White));
+    let mut runner = scenario.build();
+
+    let mut commit = runner.cast(spell).target_objects(&[c1, c2]).commit();
+    let mut events = Vec::new();
+    move_to_zone(commit.state_mut(), c1, Zone::Graveyard, &mut events);
+    commit
+        .try_resolve()
+        .expect("Predictive Preparations must resolve with one legal target left");
+
+    assert_eq!(
+        counters(&runner, c2, CounterType::Plus1Plus1),
+        1,
+        "CR 608.2b: c2 is still a legal target and gets its counter"
+    );
+    assert_eq!(
+        counters(&runner, c3, CounterType::Plus1Plus1),
+        0,
+        "c3 was not declared"
+    );
+    // The graveyard holds c1's new object and the resolved spell.
+    assert_graveyard_counterless(&runner, P0);
+}
+
+/// Q2-PP-DUP (CR 115.3 analogue). Predictive Preparations, the same creature
+/// submitted for both slots: the second `ChooseTarget` is refused. Reach
+/// guard: Q2-PP-2. RED AT BASE (one slot, so the repeat is never asked for and
+/// the cast resolves).
+#[test]
+fn predictive_preparations_refuses_the_same_creature_for_two_slots() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let c1 = scenario.add_vanilla(P0, 2, 2);
+    let _c2 = scenario.add_vanilla(P0, 2, 2);
+    let spell = add_predictive_preparations(&mut scenario);
+    scenario.with_mana_pool(P0, floating_mana(2, ManaType::White));
+    let mut runner = scenario.build();
+
+    let result = runner.cast(spell).target_objects(&[c1, c1]).try_resolve();
+
+    assert!(
+        matches!(result, Err(EngineError::InvalidAction(_))),
+        "CR 115.3: the repeated target must be refused, got {:?}",
+        result.map(|_| ())
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "the second slot must still be waiting for a target, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Q2-PP-LEG (C-4). Predictive Preparations: a Forest is not offered and
+/// submitting it is refused; submitting a creature in the same slot is
+/// accepted. GREEN AT BASE (the slot's creature filter is unchanged by this
+/// change).
+#[test]
+fn predictive_preparations_offers_creatures_only() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let c1 = scenario.add_vanilla(P0, 2, 2);
+    let _c2 = scenario.add_vanilla(P0, 2, 2);
+    let land = add_forest(&mut scenario, P0);
+    let spell = add_predictive_preparations(&mut scenario);
+    scenario.with_mana_pool(P0, floating_mana(2, ManaType::White));
+    let mut runner = scenario.build();
+
+    cast_from_hand(&mut runner, spell);
+    let offered = match &runner.state().waiting_for {
+        WaitingFor::TargetSelection {
+            target_slots,
+            selection,
+            ..
+        } => target_slots[selection.current_slot].legal_targets.clone(),
+        other => panic!("expected a target prompt, got {other:?}"),
+    };
+
+    assert!(
+        offered.contains(&TargetRef::Object(c1)),
+        "reach: c1 is offered: {offered:?}"
+    );
+    assert!(
+        !offered.contains(&TargetRef::Object(land)),
+        "C-4: the Forest is not offered: {offered:?}"
+    );
+    assert!(
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(land))
+            })
+            .is_err(),
+        "C-4: choosing the Forest must be refused"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(c1)),
+        })
+        .expect("choosing c1 in the same slot must be accepted");
+}
+
 /// Q2-RAK-2. Rot-Curse Rakshasa's renew from the graveyard at sorcery speed,
 /// X = 2: both declared creatures get a decayed counter and so gain decayed
 /// (CR 122.1b); the undeclared creature gets none, and the source is exiled as
@@ -643,6 +823,7 @@ fn rot_curse_rakshasa_first_declared_target_illegal_still_decays_the_other() {
         .act(GameAction::ActivateAbility {
             source_id: rakshasa,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("renew must be activatable from the graveyard at sorcery speed");
     choose_x_then_offered(&mut runner, 2);
@@ -694,6 +875,7 @@ fn rot_curse_rakshasa_renew_offers_creatures_only() {
         .act(GameAction::ActivateAbility {
             source_id: rakshasa,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("renew must be activatable from the graveyard at sorcery speed");
     let offered = choose_x_then_offered(&mut runner, 1);

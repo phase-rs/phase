@@ -27,13 +27,20 @@ import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MyDecks } from "../components/menu/MyDecks";
-import { ACTIVE_DECK_KEY, loadActiveDeck, loadSavedDeck, touchDeckPlayed } from "../constants/storage";
-import { formatSuppliesDeck } from "../data/formatRegistry";
+import {
+  ACTIVE_DECK_KEY,
+  loadActiveDeck,
+  loadActiveDeckBracket,
+  loadSavedDeck,
+  touchDeckPlayed,
+} from "../constants/storage";
+import { formatSuppliesDeck, isPlanechaseFamilyFormat } from "../data/formatRegistry";
 import { DEFAULT_PILE_SOURCE, pileSeatDeck, pileSourceParam } from "../services/pileSource";
 import { withSavedDeckLibraryOrSkip } from "../services/savedDeckTransaction";
 import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
 import { evaluateDeckCompatibility } from "../services/deckCompatibility";
 import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
+import { bracketToEngineTier } from "../types/bracketEstimate";
 import type { ActionableBotLink, BotLink, HostSeed, LiveCheck, MultiplayerView } from "./multiplayerPageState";
 import {
   classifyCompatResult,
@@ -71,6 +78,7 @@ import {
 import { assertNever } from "../utils/assertNever";
 import { useGameStore, saveActiveGame } from "../stores/gameStore";
 import { useCardDataStore } from "../stores/cardDataStore";
+import { AI_DECK_RANDOM } from "../stores/preferencesStore";
 import { useEffectiveOffline } from "../stores/connectivityStore";
 import type { HostSettings } from "../components/lobby/HostSetup";
 
@@ -449,7 +457,7 @@ function MultiplayerPageContent({
   const expandDeck = useCallback(() => {
     const deck = loadActiveDeck();
     if (!deck) return null;
-    return expandParsedDeck(deck);
+    return { ...expandParsedDeck(deck), bracket_tier: bracketToEngineTier(loadActiveDeckBracket()) };
   }, []);
 
   // A supplied-deck format never reads the active deck: the host submits the pile seat's deck.
@@ -656,14 +664,19 @@ function MultiplayerPageContent({
         const aiSeatIndexes = new Set(action.settings.aiSeats.map((seat) => seat.seatIndex));
         const allOpponentsAreAi =
           opponentCount > 0
-          && action.settings.formatConfig.format !== "Planechase"
+          && !isPlanechaseFamilyFormat(action.settings.formatConfig.format)
           && Array.from({ length: opponentCount }, (_, i) => i + 1)
             .every((seatIndex) => aiSeatIndexes.has(seatIndex));
         if (allOpponentsAreAi) {
           const sortedAiSeats = [...action.settings.aiSeats]
             .sort((a, b) => a.seatIndex - b.seatIndex);
+          // The seat snapshot is what the local start reads: `deckId` is the
+          // seat's selection (a catalog id, or null for Random), so the host
+          // form's per-seat deck (or Random) wins over the single-player
+          // preferences and Random is drawn by the local start itself.
           const aiSeats = sortedAiSeats.map((seat) => ({
             difficulty: seat.difficulty,
+            deckId: seat.deckId && seat.deckId !== AI_DECK_RANDOM ? seat.deckId : null,
             deckName: seat.deckName,
           }));
           const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";

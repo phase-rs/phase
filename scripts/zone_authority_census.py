@@ -129,22 +129,37 @@ MEMBERSHIP_PRESERVING_CALLEES = {"shuffle_vector"}
 FAMILIES = (("mover", MOVERS), ("container", CONTAINERS), ("zone-assign", ZONE_ASSIGN))
 
 FN_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:const\s+)?(?:unsafe\s+)?fn\s+(\w+)")
-INLINE_TEST_MOD = re.compile(r"^\s*(?:pub\s+)?mod\s+\w+\s*\{")
 
-# `#[cfg(test)]`, but also compound predicates like
-# `#[cfg(all(test, target_arch = "wasm32"))]` (engine-wasm gates its tests that
-# way). `test` must appear as a bare token: `feature = "test-support"` is a
-# production cfg, and `not(test)` is production-only code.
-CFG_ATTR = re.compile(r"^\s*#\[cfg\((?P<pred>.*)\)\]\s*$")
-BARE_TEST = re.compile(r'(?<![\w"-])test(?![\w"-])')
+# A conservative implication check: only a bare test or all(..., test, ...)
+# demonstrably requires the test configuration. any/not/unknown stay production.
+CFG_ATTR = re.compile(r"^\s*#\s*!?\s*\[\s*cfg\s*\((?P<pred>.*)\)\s*\]\s*$", re.S)
+
+
+def cfg_requires_test(pred: str) -> bool:
+    pred = pred.strip()
+    if pred == "test":
+        return True
+    m = re.fullmatch(r"all\s*\((.*)\)", pred, re.S)
+    if not m:
+        return False
+    depth = 0
+    start = 0
+    parts = []
+    for i, ch in enumerate(m.group(1)):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(m.group(1)[start:i])
+            start = i + 1
+    parts.append(m.group(1)[start:])
+    return any(cfg_requires_test(part) for part in parts)
 
 
 def is_cfg_test_attr(line: str) -> bool:
-    m = CFG_ATTR.match(line)
-    if not m:
-        return False
-    pred = m.group("pred")
-    return bool(BARE_TEST.search(pred)) and "not(" not in pred
+    m = CFG_ATTR.fullmatch(line)
+    return bool(m and cfg_requires_test(m.group("pred")))
 
 
 # A non-raw literal: `"..."` (with a `b`/`c` prefix, which is part of the token),
@@ -445,68 +460,152 @@ def borrow_hits(code: str) -> int:
     return n
 
 
-def iter_production_lines(rel: str, lines: list[str]):
-    """Yield `(index, raw, code, enclosing_fn)` for every PRODUCTION line.
+def non_test_code(rel: str, lines: list[str]) -> list[str]:
+    """Strip noncode, then blank test-only attributed items, preserving lines.
 
-    This is the scanner, split out from the classifier: strings and comments
-    stripped, inline `#[cfg(test)]` mod bodies skipped by brace depth, enclosing
-    fn tracked, `CensusError` on desync. WHAT counts as a hit is the caller's
-    business; WHERE production code lives is this function's.
-
-    Split out because the Draw-replacement census
-    (`draw_replacement_census.py`) needs exactly this notion of "production
-    engine code" and nothing else. A second copy of it would be a second
-    definition of production code, free to drift -- and its bugs would be
-    silent in both directions (test code scanned as production, production
-    skipped as test).
-
-    NOTE for callers: `code` has string literals REMOVED (raw strings included),
-    because brace counting must not see a `{` inside a literal. A pattern that
-    needs a literal (e.g. matching `"Draw" => ReplacementEvent::Draw`) will never
-    fire against `code`. Rewrite the pattern to key on the code around the
-    literal, or match `raw` and accept that comments are then in scope.
+    Attributes can stack and span lines. Item boundaries are balanced code
+    delimiters, not braces in strings or the first semicolon in a const block.
+    Unknown cfg predicates remain production. The literal lexer is unchanged.
     """
+    state = ScanState()
+    codes = []
+    for raw in lines:
+        code, state = strip_noncode(raw, state)
+        codes.append(code)
+    source = "\n".join(codes)
+    tokens = list(re.finditer(r"\w+|[^\s]", source))
+    pairs = {}
+    stack = []
+    for n, token in enumerate(tokens):
+        value = token.group()
+        if value in ("(", "[", "{"):
+            stack.append((value, n))
+        elif value in (")", "]", "}"):
+            if not stack or stack[-1][0] != {")": "(", "]": "[", "}": "{"}[value]:
+                raise CensusError(f"{rel}: delimiter tracking desynced at {token.start()}")
+            _, opened = stack.pop()
+            pairs[opened] = n
+    if stack:
+        raise CensusError(f"{rel}: unclosed code delimiter")
+    removed = []
+    n = 0
+    while n < len(tokens):
+        if tokens[n].group() != "#":
+            n += 1
+            continue
+        start = n
+        required = False
+        inner = False
+        while n < len(tokens) and tokens[n].group() == "#":
+            attr_start = n
+            n += 1
+            is_inner = n < len(tokens) and tokens[n].group() == "!"
+            if is_inner:
+                n += 1
+            if n >= len(tokens) or tokens[n].group() != "[":
+                break
+            end = pairs[n]
+            attr = source[tokens[attr_start].start():tokens[end].end()]
+            requires = is_cfg_test_attr(attr)
+            required |= requires
+            inner |= is_inner and requires
+            n = end + 1
+        if inner:
+            # An inner cfg applies to the enclosing module/file. At file scope
+            # it excludes everything; inline module test cfgs are also safe to
+            # blank to their containing body's end.
+            containing = [b for a, b in pairs.items()
+                          if tokens[a].group() == "{" and a < start < b]
+            end = min(containing) if containing else len(tokens)
+            removed.append((tokens[start].start(),
+                            tokens[end].start() if containing else len(source)))
+            n = end
+            continue
+        if not required:
+            continue
+        # const fn is body-terminated; const/static/use/type items need ';'.
+        head = n
+        if head < len(tokens) and tokens[head].group() == "pub":
+            head += 1
+            if head < len(tokens) and tokens[head].group() == "(":
+                head = pairs[head] + 1
+        while head < len(tokens) and tokens[head].group() in ("async", "unsafe", "default", "auto"):
+            head += 1
+        prefix = [t.group() for t in tokens[head:head + 3]]
+        if not prefix or prefix[0] not in (
+            "fn", "impl", "struct", "enum", "union", "trait", "mod",
+            "const", "static", "use", "type", "extern",
+        ) or (prefix[0] == "const" and len(prefix) > 1 and prefix[1] == "{"):
+            # Fields, variants, arms and statements are not item headers. Keep
+            # unsupported positions as production rather than erasing siblings.
+            continue
+        semicolon_item = bool(prefix[0] in ("const", "static", "use", "type")
+                              and not (prefix[0] == "const" and "fn" in prefix[:3]))
+        containing = [b for a, b in pairs.items() if a < start < b]
+        limit = min(containing) if containing else len(tokens)
+        terminated = False
+        angles = 0
+        while n < limit:
+            value = tokens[n].group()
+            if value == "<" and not semicolon_item:
+                angles += 1
+            elif value == ">" and angles and tokens[n - 1].group() not in ("-", "="):
+                angles -= 1
+            if value == ";" and angles == 0:
+                n += 1
+                terminated = True
+                break
+            if value in ("(", "[", "{"):
+                end = pairs[n]
+                n = end + 1
+                if value == "{" and not semicolon_item and angles == 0:
+                    terminated = True
+                    break
+            else:
+                n += 1
+        if terminated:
+            removed.append((tokens[start].start(), tokens[n - 1].end()))
+    chars = list(source)
+    for start, end in removed:
+        for i in range(start, end):
+            if chars[i] != "\n":
+                chars[i] = " "
+    return "".join(chars).split("\n")
+
+
+def _iter_legacy_production_lines(rel: str, lines: list[str]):
+    """Frozen pre-residue population contract for the existing authority censuses.
+
+    Deliberately retains the original line-oriented predicate/module behavior.
+    Those consumers have committed census contracts; Gate H must opt in below.
+    Both paths share the unchanged literal/comment lexer.
+    """
+    cfg_attr = re.compile(r"^\s*#\[cfg\((?P<pred>.*)\)\]\s*$")
+    bare_test = re.compile(r'(?<![\w"-])test(?![\w"-])')
+    inline_test_mod = re.compile(r"^\s*(?:pub\s+)?mod\s+\w+\s*\{")
     current_fn = "<module>"
-    skip_until_depth: int | None = None
+    skip_until_depth = None
     depth = 0
     pending_cfg_test = False
     state = ScanState()
-
     for i, raw in enumerate(lines):
         code, state = strip_noncode(raw, state)
-
-        # Track an inline `#[cfg(test)] mod foo { .. }` body and skip it whole.
-        # A naive "first #[cfg(test)] wins" is wrong: engine.rs has 10 and
-        # synthesis.rs has 75, nearly all `#[cfg(test)] mod foo;` *declarations*
-        # of outlined files, which are excluded by name instead.
-        #
-        # Keyed on `code`, never `raw`, so a `#[cfg(test)]` QUOTED inside a raw
-        # string is text and cannot arm the skip. Belt-and-braces: the `code.strip()`
-        # clear below already saves this today, because a raw-string terminator
-        # always leaves at least a `;` behind. That is a coincidence of the
-        # terminator's punctuation, not a property anyone declared -- and a
-        # structural decision taken on unstripped text is exactly the bug this
-        # function exists to prevent.
         if skip_until_depth is None:
-            if is_cfg_test_attr(code):
+            attr = cfg_attr.match(code)
+            if attr and bare_test.search(attr.group("pred")) and "not(" not in attr.group("pred"):
                 pending_cfg_test = True
             elif pending_cfg_test:
-                if INLINE_TEST_MOD.match(code):
+                if inline_test_mod.match(code):
                     skip_until_depth = depth
                     depth += code.count("{") - code.count("}")
                     continue
                 if code.strip():
                     pending_cfg_test = False
-
         opened = code.count("{")
         closed = code.count("}")
-
         if skip_until_depth is not None:
             depth += opened - closed
             if depth < skip_until_depth:
-                # The mod closed more braces than it opened: brace tracking has
-                # desynced, so every downstream classification in this file is
-                # untrustworthy. Fail loudly rather than under-report.
                 raise CensusError(
                     f"{rel}:{i + 1}: brace tracking desynced leaving a "
                     f"#[cfg(test)] mod (depth {depth} < {skip_until_depth})"
@@ -514,13 +613,32 @@ def iter_production_lines(rel: str, lines: list[str]):
             if depth == skip_until_depth:
                 skip_until_depth = None
             continue
-
         m = FN_DECL.match(code)
         if m:
             current_fn = m.group(1)
-
         depth += opened - closed
+        yield i, raw, code, current_fn
 
+
+def iter_production_lines(rel: str, lines: list[str], *, skip_cfg_test_items: bool = False):
+    """Yield `(index, raw, code, enclosing_fn)` with original line indices.
+
+    Default preserves the pre-residue authority-census population exactly.
+    Gate H explicitly opts into conservative test-requiring item exclusion.
+    Both modes omit literals from `code`; literal-aware consumers use `raw`.
+    """
+    if not skip_cfg_test_items:
+        yield from _iter_legacy_production_lines(rel, lines)
+        return
+    current_fn = "<module>"
+    for i, (raw, code) in enumerate(zip(lines, non_test_code(rel, lines))):
+        if not code.strip() and raw.strip():
+            # Do not expose erased test-only source through `raw` to consumers
+            # that match literal content. Blank/noncode-only lines have no hits.
+            continue
+        m = FN_DECL.match(code)
+        if m:
+            current_fn = m.group(1)
         yield i, raw, code, current_fn
 
 

@@ -1,11 +1,13 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::game_state::RandomDraw;
 use rand::seq::SliceRandom;
 
+use crate::game::effects::change_zone::publish_finalized_owner_library_subjects;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
-    ResolvedAbility, TargetChoiceTiming, TargetFilter,
+    Effect, EffectError, EffectKind, LibraryPosition, QuantityExpr, ResolvedAbility,
+    TargetChoiceTiming, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -56,46 +58,45 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (position, target_filter, count_expr) = match &ability.effect {
+    let (position, target_filter, count_expr, arranger_filter) = match &ability.effect {
         Effect::PutAtLibraryPosition {
             position,
             target,
             count,
-        } => (position.clone(), target.clone(), count.clone()),
+            arranger,
+        } => (
+            position.clone(),
+            target.clone(),
+            count.clone(),
+            arranger.clone(),
+        ),
         _ => (
             LibraryPosition::Top,
             TargetFilter::None,
             QuantityExpr::Fixed { value: 1 },
+            None,
         ),
     };
 
-    // CR 401.5 + CR 608.2c (issue #1365): This Dig-tail seam is the one place
-    // "put up to one of them on top … the rest on the bottom" can land with
-    // `target: ParentTarget` and no selection — when the Dig it follows looked
-    // at an empty library. There is nothing to place, and that must NOT fall
-    // back to `resolved_targets`'s generic self-fallback (below), which would
-    // otherwise move the Dig's own source (e.g. a reanimated Thassa's Oracle)
-    // into the library it just found empty, corrupting devotion and
-    // library-count reads for any trailing win condition.
+    // CR 608.2c + CR 609.3: A missing ParentTarget referent supplies nothing
+    // to place. For example, a Dig looking at an empty library must not move
+    // its own source through `resolved_targets`'s generic self-fallback.
     //
-    // `ability.parent_target_missing_reason` is a typed, per-ability signal
-    // stamped ONLY by `effects::apply_parent_chain_context`, when this ability
-    // is handed off as a Dig's immediate sub_ability or, still target-less,
-    // down the chain that Dig heads — never read from raw global state here.
-    // So every OTHER `ParentTarget` consumer (Avenging Angel's LTB
-    // self-return, etc.) keeps its ordinary self-fallback regardless of an
-    // unrelated Dig anywhere else in the same resolution, including a second,
-    // later `PutAtLibraryPosition` call.
-    let dig_found_nothing_for_parent_target = matches!(target_filter, TargetFilter::ParentTarget)
+    // The typed per-ability signal is stamped at a parent->child hand-off
+    // (see `ResolvedAbility::parent_target_missing_reason`) and travels through
+    // targetless hops. Ordinary search finalize overwrites it with that search's
+    // result. Fresh unrelated LTB self-returns retain None and their source
+    // fallback regardless of an unrelated producer's transient global relay.
+    let missing_parent_target = matches!(target_filter, TargetFilter::ParentTarget)
         && ability.targets.is_empty()
-        && ability.parent_target_missing_reason == Some(ParentTargetMissingReason::Dig);
+        && ability.parent_target_missing_reason.is_some();
 
     // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch
     // (`resolved_targets`). `SelfRef` always resolves to the source object;
     // `None` / `ParentTarget` fall back to the source only when
     // `ability.targets` is empty (the LTB self-return shape — Avenging Angel).
     // This is the post-#323 SelfRef short-circuit applied uniformly.
-    let effective_targets = if dig_found_nothing_for_parent_target {
+    let effective_targets = if missing_parent_target {
         Vec::new()
     } else {
         crate::game::targeting::resolved_targets(ability, &target_filter, state)
@@ -349,16 +350,18 @@ pub fn resolve(
     // conjuncts are a strict superset of these two, so the fanout behaviour is
     // preserved rather than changed. That helper is left in place for its other
     // callers (`grep -rn is_per_opponent_target_fanout crates/engine/src/`).
-    let expected = if ability.multi_target.is_some()
-        && ability.target_choice_timing == TargetChoiceTiming::Stack
-    {
+    let announced_target_set =
+        ability.multi_target.is_some() && ability.target_choice_timing == TargetChoiceTiming::Stack;
+    let expected = if announced_target_set {
         collected_targets.len()
     } else {
         expected
     };
 
     if collected_targets.is_empty() {
-        if expected == 0 {
+        // CR 608.2c + CR 609.3: An absent ParentTarget supplies no object to
+        // position, but this instruction still completes before the next one.
+        if expected == 0 || missing_parent_target {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::PutAtLibraryPosition,
                 source_id: ability.source_id,
@@ -499,10 +502,11 @@ pub fn resolve(
         return Ok(());
     }
 
-    // `count` carries the cardinality of the placement. For multi-card
-    // placement, CR 401.4 lets the owner arrange cards put into the same
-    // library position. The runtime uses target/selection order for "in any
-    // order" effects; linked-exile bottom cleanup randomizes separately below.
+    // `count` carries the cardinality of the placement. CR 401.4 lets the owner
+    // arrange cards put into the same library position: a forwarded selection
+    // (a resolution-time pick or an ordered search) is placed in its chooser's
+    // order, an announced target set opens its owners' arrangement below, and
+    // linked-exile bottom cleanup is randomized here.
     let mut randomized_targets;
     let to_place = if expected == 0 {
         // CR 701.13a: Both the bare (`ExiledBySource`) and And-composed (Jodah's
@@ -536,6 +540,50 @@ pub fn resolve(
         },
         other => other,
     };
+    // Whether the owner can arrange a group placed at this position.
+    // `BeneathTop` is not: `EffectZoneChoice` delivery normalizes it to `Top`
+    // and no announced multi-target `BeneathTop` producer exists (Unexpectedly
+    // Absent is single-target). `RandomWithinTop` is a random placement, not an
+    // arrangement.
+    let position_can_be_arranged = match &position {
+        LibraryPosition::Top | LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. } => true,
+        LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => false,
+    };
+    // CR 401.4 + CR 601.2c + CR 608.2d: an announced target set arrives in the
+    // caster's announcement order, which is not an arrangement; the owner of two
+    // or more cards put into one position of their library orders them as the
+    // effect is applied (CR 101.4 APNAP across owners), unless the instruction
+    // itself names who orders them (CR 101.1: "… in any order" in the
+    // controller's instruction). One card per owner has nothing to arrange and
+    // is delivered below. A linked-exile pool is a resolution-time scan, not the
+    // announcement. Resolution-time selections and ordered searches already
+    // carry the chooser's own arrangement and never announce a target set.
+    if announced_target_set
+        && !target_filter.references_exiled_by_source()
+        && position_can_be_arranged
+    {
+        let owner_batches = super::change_zone::group_object_ids_by_owner_apnap(state, to_place);
+        if owner_batches.iter().any(|(_, cards)| cards.len() >= 2) {
+            // CR 401.4 + CR 101.1 + CR 608.2c + CR 608.2d: the arranger the
+            // instruction names is determined now, at resolution, and snapshotted
+            // onto each owner's batch. A named arranger that resolves to no player
+            // leaves the owner default standing; that fallback is unreachable for
+            // every current producer, whose `Controller` always resolves.
+            let arranger = arranger_filter
+                .as_ref()
+                .and_then(|filter| super::resolve_player_for_context_ref(state, ability, filter));
+            super::change_zone::open_owner_library_arrangement(
+                state,
+                owner_batches,
+                arranger,
+                ability.source_id,
+                position,
+                false,
+                ability.duration.clone(),
+            );
+            return Ok(());
+        }
+    }
     // CR 701.24a + CR 401.4: Top placement is reversed at request construction so the
     // selected order remains top-to-bottom after sequential delivery; every
     // other position preserves selection order. `move_objects_simultaneously`
@@ -559,6 +607,15 @@ pub fn resolve(
     } else {
         Vec::new()
     };
+    // CR 400.3 + CR 701.24c: Publish each moved object's owner as a library
+    // shuffle subject so a chained `Shuffle { target: ScopedPlayer }` with
+    // `TrackedSetPossessor` fans over every affected owner — e.g. Elixir of
+    // Immortality, where the artifact's owner differs from the graveyard
+    // cards' owner. Published BEFORE the move so the owners bind before
+    // replacement effects can redirect them; a no-op unless a downstream owner
+    // library shuffle consumer exists (tracked_set_publication_mode).
+    publish_finalized_owner_library_subjects(state, ability, &collected_targets);
+
     zone_pipeline::move_objects_simultaneously_then(
         state,
         requests,
@@ -598,12 +655,131 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        Effect, FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        Effect, FilterProp, ParentTargetMissingReason, ResolvedAbility, TargetFilter, TargetRef,
+        TypeFilter, TypedFilter,
     };
     use crate::types::game_state::{ExileLink, ExileLinkKind};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    /// CR 608.2c + CR 609.3: Every missing producer result suppresses only
+    /// empty ParentTarget placement; explicit targets and SelfRef still move.
+    #[test]
+    fn missing_referent_placement_guards_only_empty_parent_target() {
+        for reason in [
+            ParentTargetMissingReason::Dig,
+            ParentTargetMissingReason::ChooseFromZone,
+            ParentTargetMissingReason::RevealHandChoice,
+            ParentTargetMissingReason::ExileTop,
+            ParentTargetMissingReason::RevealUntil,
+            ParentTargetMissingReason::SearchLibrary,
+        ] {
+            for (filter, own_target) in [
+                (TargetFilter::ParentTarget, false),
+                (TargetFilter::ParentTarget, true),
+                (TargetFilter::SelfRef, false),
+            ] {
+                let mut state = GameState::new_two_player(7);
+                let source = create_object(
+                    &mut state,
+                    CardId(1),
+                    PlayerId(1),
+                    "Owner-relative source".into(),
+                    Zone::Graveyard,
+                );
+                let own = create_object(
+                    &mut state,
+                    CardId(2),
+                    PlayerId(0),
+                    "Explicit target".into(),
+                    Zone::Exile,
+                );
+                let moves_source = filter == TargetFilter::SelfRef;
+                let mut ability = ResolvedAbility::new(
+                    Effect::PutAtLibraryPosition {
+                        target: filter,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        position: LibraryPosition::Top,
+                        arranger: None,
+                    },
+                    if own_target {
+                        vec![TargetRef::Object(own)]
+                    } else {
+                        vec![]
+                    },
+                    source,
+                    PlayerId(0),
+                );
+                ability.parent_target_missing_reason = Some(reason);
+                let mut events = Vec::new();
+                resolve(&mut state, &ability, &mut events).unwrap();
+                assert_eq!(
+                    state.objects[&source].zone,
+                    if moves_source {
+                        Zone::Library
+                    } else {
+                        Zone::Graveyard
+                    }
+                );
+                assert_eq!(
+                    state.objects[&own].zone,
+                    if own_target {
+                        Zone::Library
+                    } else {
+                        Zone::Exile
+                    }
+                );
+                if moves_source {
+                    assert_eq!(state.players[1].library.front(), Some(&source));
+                }
+                assert!(events.iter().any(|e| matches!(
+                    e,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::PutAtLibraryPosition,
+                        ..
+                    }
+                )));
+            }
+        }
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Unrelated owner-relative return".into(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&source).unwrap().controller = PlayerId(0);
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+        let ability = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+                arranger: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(ability.parent_target_missing_reason, None);
+        assert_eq!(state.objects[&source].owner, PlayerId(1));
+        assert_eq!(state.objects[&source].controller, PlayerId(0));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.objects[&source].zone, Zone::Library);
+        assert_eq!(state.players[1].library.front(), Some(&source));
+        assert!(state.players[0].library.is_empty());
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::PutAtLibraryPosition,
+                source_id,
+                ..
+            } if *source_id == source
+        )));
+    }
 
     #[test]
     fn test_resolve_puts_card_on_top_of_library() {
@@ -630,6 +806,7 @@ mod tests {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![TargetRef::Object(id2)],
             ObjectId(100),
@@ -676,6 +853,7 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             // Simulate chain target propagation from a parent that targeted
             // `other`. SelfRef must override and put the source on top.
@@ -732,6 +910,7 @@ mod tests {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![TargetRef::Object(id2)],
             ObjectId(100),
@@ -780,6 +959,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Bottom,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -834,6 +1014,7 @@ mod tests {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![
                 TargetRef::Object(third),
@@ -867,6 +1048,7 @@ mod tests {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -911,6 +1093,7 @@ mod tests {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Bottom,
+                arranger: None,
             },
             vec![TargetRef::Object(id1)],
             ObjectId(100),
@@ -946,6 +1129,7 @@ mod tests {
                 target: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             obj_id,
@@ -960,8 +1144,8 @@ mod tests {
     }
 
     /// Issue #1365 follow-up: this resolver must consult
-    /// `ability.parent_target_missing_reason` (a typed field stamped ONLY by
-    /// `effects::apply_parent_chain_context` at a real Dig->child hand-off),
+    /// `ability.parent_target_missing_reason` (a typed field stamped at a
+    /// parent->child hand-off (see `ResolvedAbility::parent_target_missing_reason`)),
     /// never `state.last_parent_target_missing_reason` directly. A freshly
     /// built `ResolvedAbility` (as in any ordinary LTB self-return trigger)
     /// never goes through that hand-off, so its field stays `None` no matter
@@ -986,6 +1170,7 @@ mod tests {
                 target: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             obj_id,
@@ -1018,6 +1203,7 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             obj_id,
@@ -1047,6 +1233,7 @@ mod tests {
                 target: TargetFilter::None,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             obj_id,
@@ -1093,6 +1280,7 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![TargetRef::Object(propagated_target)],
             obj_id,
@@ -1143,6 +1331,7 @@ mod tests {
                 target: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
         )));
         state
@@ -1200,6 +1389,7 @@ mod tests {
                 target: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
         )));
         state
@@ -1274,6 +1464,7 @@ mod tests {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::NthFromTop { n: 3 },
+                arranger: None,
             },
             vec![TargetRef::Object(id4)],
             ObjectId(100),
@@ -1331,6 +1522,7 @@ mod tests {
                 }),
                 count: QuantityExpr::Fixed { value: 2 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![], // No targets — resolution-time selection
             ObjectId(100),
@@ -1430,6 +1622,7 @@ mod tests {
                 },
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Bottom,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -1517,6 +1710,7 @@ mod tests {
                 },
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Bottom,
+                arranger: None,
             },
             vec![],
             source,
@@ -1605,6 +1799,7 @@ mod tests {
                 target: TargetFilter::TrackedSet { id: set_id },
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Bottom,
+                arranger: None,
             },
             vec![],
             ObjectId(100),

@@ -87,7 +87,7 @@ fn offered(runner: &GameRunner, source: ObjectId) -> bool {
         actions.iter().any(|action| {
             matches!(
                 action,
-                GameAction::ActivateAbility { source_id, ability_index: 0 } if *source_id == source
+                GameAction::ActivateAbility { source_id, ability_index: 0, .. } if *source_id == source
             )
         })
     })
@@ -151,6 +151,7 @@ fn targeted_pending_cost_is_fixed_before_first_mana_ability() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activation reaches target announcement");
     let WaitingFor::TargetSelection { pending_cast, .. } = &mut runner.state_mut().waiting_for
@@ -210,7 +211,8 @@ fn offer_and_direct_activation_refuse_unpayable_locked_cost() {
     assert!(runner
         .act(GameAction::ActivateAbility {
             source_id: source,
-            ability_index: 0
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto
         })
         .is_err());
     assert_eq!(runner.state().players[P0.0 as usize].life, 3);
@@ -226,6 +228,7 @@ fn offer_and_direct_activation_refuse_unpayable_locked_cost() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("funded activation reaches target selection");
     assert!(lands.iter().all(|id| !funded.state().objects[id].tapped));
@@ -370,6 +373,7 @@ fn positive_half_life_cost_is_refused_when_players_cannot_pay_life() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto
         })
         .is_err());
     assert_eq!(runner.state().players[P0.0 as usize].life, 7);
@@ -406,6 +410,7 @@ fn positive_half_life_cost_is_refused_when_life_cannot_change() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto
         })
         .is_err());
     assert_eq!(runner.state().players[P0.0 as usize].life, 7);

@@ -11,6 +11,7 @@
 //!    must live in the engine (`game/cost_payability.rs`), not in
 //!    `legal_actions` / AI / frontend pre-filtering.
 
+use engine::game::cost_payability::AbilityCostPayability;
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCost, AdditionalCost, SacrificeCost, TargetFilter, TypeFilter, TypedFilter,
@@ -76,7 +77,7 @@ fn harrow_sacrifice_land_unpayable_with_no_lands_cr_601_2h() {
     let dummy_source = ObjectId(0);
 
     assert!(
-        !sacrifice_a_land().is_payable(&state, P0, dummy_source),
+        !sacrifice_a_land().is_payable_for_spell(&state, P0, dummy_source),
         "Sacrifice-a-land must be unpayable when controller has no lands on the battlefield"
     );
 }
@@ -102,7 +103,7 @@ fn harrow_sacrifice_land_payable_with_a_forest_cr_601_2h() {
     }
 
     assert!(
-        sacrifice_a_land().is_payable(&state, P0, ObjectId(0)),
+        sacrifice_a_land().is_payable_for_spell(&state, P0, ObjectId(0)),
         "Sacrifice-a-land must be payable when controller has at least one land"
     );
 }

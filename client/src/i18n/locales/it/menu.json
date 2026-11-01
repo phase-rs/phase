@@ -135,7 +135,19 @@
       "precon": "Precon"
     },
     "brain": "Controllato da",
-    "brainEngine": "IA del motore"
+    "brainEngine": "IA del motore",
+    "poolBracketConflict": "Nessuno degli {{selected}} mazzi selezionati è legale con i filtri attuali, quindi gli avversari casuali pescano da tutti gli {{total}} mazzi."
+  },
+  "randomPool": {
+    "titleHuman": "Il tuo pool casuale",
+    "titleAi": "Pool casuale dell'IA",
+    "hint": "Deseleziona cartelle o mazzi per rimuoverli dalle scelte casuali.",
+    "count": "{{selected}} di {{total}}",
+    "emptyWarning": "Tutto è escluso, quindi Casuale pesca da tutti gli {{total}} mazzi.",
+    "reset": "Reimposta",
+    "precons": "Precon",
+    "playable": "{{playable}} giocabili",
+    "nonePlayable": "Nessuno degli {{selected}} mazzi selezionati è legale con i filtri attuali, quindi Casuale pesca da tutti gli {{total}} mazzi."
   },
   "feedManager": {
     "title": "Gestisci feed",
@@ -298,7 +310,8 @@
     "sectionStarred": "Preferiti",
     "sectionUnfiled": "Senza cartella",
     "collapseAll": "Comprimi tutto",
-    "expandAll": "Espandi tutto"
+    "expandAll": "Espandi tutto",
+    "poolBracketConflict": "Nessuno degli {{selected}} mazzi selezionati è legale con i filtri attuali, quindi il tuo mazzo casuale sarà pescato da tutti gli {{total}} mazzi."
   },
   "subscriptions": {
     "emptyTitle": "Nessuna iscrizione ai feed",

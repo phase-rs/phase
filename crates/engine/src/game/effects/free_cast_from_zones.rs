@@ -15,6 +15,12 @@ pub(crate) struct FreeCastWindowRequest {
     pub(crate) zones: Vec<Zone>,
     pub(crate) graveyard_replacement:
         Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+    /// CR 608.2c + CR 611.2a: the gains-modifications rider snapshotted from a
+    /// converting `CastFromZone` (Strago and Relm). It threads into every
+    /// cast's `ResolutionCastRequest` (the elected-permission application
+    /// point) and into the re-offer carrier, so each cast of the window
+    /// receives it exactly once. Empty for every window without a rider.
+    pub(crate) enters_with_modifications: crate::types::ability::PendingEntersModifications,
     pub(crate) face_policy: crate::types::ability::ResolutionCastFacePolicy,
 }
 
@@ -25,7 +31,11 @@ pub(crate) struct FreeCastWindowRequest {
 ///
 /// The cleanup retains the window's re-offer authority, while the request
 /// itself deliberately carries no graveyard rider: `FreeCastOfferRemaining`
-/// installs that one rider after the cast finalizes.
+/// installs that one rider after the cast finalizes. The gains-modifications
+/// rider is the opposite: it rides the request into the elected permission
+/// (its only application point) AND the success action, so every remaining
+/// cast of the window receives it (CR 608.2c).
+#[allow(clippy::too_many_arguments)] // one parameter per serialized window field; the pause state is the shape authority
 pub(in crate::game) fn free_cast_window_resolution_request(
     controller: PlayerId,
     remaining_casts: Option<u8>,
@@ -33,6 +43,7 @@ pub(in crate::game) fn free_cast_window_resolution_request(
     face_policy: crate::types::ability::ResolutionCastFacePolicy,
     zones: Vec<Zone>,
     graveyard_replacement: Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+    enters_with_modifications: crate::types::ability::PendingEntersModifications,
     member_pool: Vec<ObjectId>,
 ) -> crate::game::casting::ResolutionCastRequest {
     let cleanup = crate::types::ability::ResolutionCastCleanup {
@@ -49,15 +60,25 @@ pub(in crate::game) fn free_cast_window_resolution_request(
                 face_policy: Box::new(face_policy.clone()),
                 zones,
                 graveyard_replacement,
+                enters_with_modifications: enters_with_modifications.clone(),
                 member_pool,
             },
         delayed_trigger_receipts: Vec::new(),
+        // CR 603.2h: a free-cast window is never a CR 603.2h indicated instruction:
+        // the lowering guard admits only a single-card `DuringResolution`
+        // `CastFromZone`, so a `ResolutionWindow` driver and a `FreeCastFromZones`
+        // node strict-fail.
+        indicated_action: None,
     };
     crate::game::casting::ResolutionCastRequest {
         face_policy,
         cast_transformed: false,
         cleanup,
         graveyard_replacement: None,
+        // CR 608.2c + CR 611.2c: the gains rider rides the request into the
+        // elected `ExileWithAltCost` permission, whose finalize application is
+        // the only point it is applied.
+        enters_with_modifications,
         cost: crate::types::ability::ResolutionCastCost::Free,
     }
 }
@@ -119,6 +140,12 @@ pub fn resolve(
             max_total_mv,
             zones,
             graveyard_replacement,
+            // A directly parsed `FreeCastFromZones` keeps a following rider as
+            // a sequential sibling rather than a sub-ability, so the
+            // chain-metadata skip does not claim it and no rider reaches these
+            // casts (BF-P2-9); the effect also carries no rider field (BF-P2-8).
+            // Only the `CastFromZone` conversions snapshot one.
+            enters_with_modifications: Default::default(),
             face_policy,
         },
         events,
@@ -139,6 +166,7 @@ pub(crate) fn resolve_with_face_policy(
         max_total_mv,
         zones,
         graveyard_replacement,
+        enters_with_modifications,
         face_policy,
     } = request;
 
@@ -190,6 +218,7 @@ pub(crate) fn resolve_with_face_policy(
         face_policy.clone(),
         zones.clone(),
         graveyard_replacement.clone(),
+        enters_with_modifications.clone(),
         member_pool.clone(),
     );
     let candidates = eligible_candidates(state, &zones, max_total_mv, &member_pool, &cast_request);
@@ -223,6 +252,7 @@ pub(crate) fn resolve_with_face_policy(
             zones,
             graveyard_replacement,
             member_pool,
+            enters_with_modifications,
         },
     };
 
@@ -411,6 +441,9 @@ fn member_pool_filter(filter: &TargetFilter) -> TargetFilter {
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — nothing to rewrite,
+        // identity like the neighboring anchors.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
@@ -419,6 +452,7 @@ fn member_pool_filter(filter: &TargetFilter) -> TargetFilter {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -483,6 +517,7 @@ mod tests {
             face_policy,
             zones.to_vec(),
             None,
+            Default::default(),
             member_pool.to_vec(),
         );
         eligible_candidates(state, zones, max_total_mv, member_pool, &request)
@@ -1047,6 +1082,94 @@ mod tests {
             other => panic!("expected FreeCastWindow, got {other:?}"),
         }
     }
+
+    /// CR 608.2c + CR 611.2a: a `CastFromZone` conversion's gains-modifications
+    /// rider is carried by the window request into the serialized pause state,
+    /// so the accept and every re-offer can hand it to each cast of the
+    /// window. Reverting the pause-state pass-through opens the window with an
+    /// empty rider.
+    #[test]
+    fn window_request_threads_the_gains_rider_into_the_pause_state() {
+        use crate::types::ability::ContinuousModification;
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(1);
+        let source = create_object(
+            &mut state,
+            CardId(9000),
+            PlayerId(0),
+            "Rider Window Source".to_string(),
+            Zone::Stack,
+        );
+        let instant = add_card(
+            &mut state,
+            PlayerId(0),
+            Zone::Graveyard,
+            CoreType::Instant,
+            2,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::FreeCastFromZones {
+                count: Some(1),
+                max_total_mv: None,
+                filter: instant_sorcery_filter(),
+                zones: vec![Zone::Graveyard],
+                graveyard_replacement: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let rider = crate::types::ability::PendingEntersModifications {
+            modifications: vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }],
+            cast_filter: None,
+        };
+        let mut events = Vec::new();
+        resolve_with_face_policy(
+            &mut state,
+            &ability,
+            FreeCastWindowRequest {
+                count: Some(1),
+                max_total_mv: None,
+                zones: vec![Zone::Graveyard],
+                graveyard_replacement: None,
+                enters_with_modifications: rider.clone(),
+                face_policy: test_face_policy(instant_sorcery_filter(), source, PlayerId(0)),
+            },
+            &mut events,
+        )
+        .unwrap();
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                kind:
+                    CastOfferKind::FreeCastWindow {
+                        candidates,
+                        enters_with_modifications,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(candidates, &vec![instant], "reach guard: the window opened");
+                assert_eq!(
+                    enters_with_modifications, &rider,
+                    "the request's rider must reach the serialized pause state"
+                );
+            }
+            other => panic!("expected FreeCastWindow, got {other:?}"),
+        }
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::AddPendingEntersModifications,
+                    ..
+                }
+            )),
+            "the rider is metadata and must never resolve standalone"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1090,6 +1213,7 @@ mod dandan_read_sweep_tests {
             face_policy,
             vec![Zone::Graveyard],
             None,
+            Default::default(),
             Vec::new(),
         );
 

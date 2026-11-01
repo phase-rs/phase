@@ -1,6 +1,7 @@
 /* eslint-disable react-refresh/only-export-components */
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 import type {
   AttachTarget,
@@ -101,16 +102,17 @@ function CounterPicker({
   setCount,
   hint,
 }: CounterPickerProps) {
+  const { t } = useTranslation("game");
   return (
     <>
-      <FieldRow label="Counter Type">
+      <FieldRow label={t("sandboxTools.counterType")}>
         <SelectInput
           value={counterType}
           onChange={setCounterType}
           options={COUNTER_OPTIONS}
         />
       </FieldRow>
-      <FieldRow label="Counters">
+      <FieldRow label={t("sandboxTools.counters")}>
         <NumberInput value={count} onChange={setCount} />
       </FieldRow>
       {hint && (
@@ -228,13 +230,13 @@ function CreateCardForm({ onDispatch }: Props) {
 
   return (
     <>
-      <FieldRow label="Card Name">
+      <FieldRow label={t("sandboxTools.cardName")}>
         <CardNameAutocomplete value={cardName} onChange={setCardName} placeholder="Lightning Bolt" />
       </FieldRow>
-      <FieldRow label="Owner">
+      <FieldRow label={t("sandboxTools.owner")}>
         <PlayerSelect value={owner} onChange={setOwner} />
       </FieldRow>
-      <FieldRow label="Zone">
+      <FieldRow label={t("sandboxTools.zone")}>
         <SelectInput value={zone} onChange={setZone} options={ZONES} />
       </FieldRow>
       <FieldRow label={t("debugCreate.copies")}>
@@ -243,7 +245,7 @@ function CreateCardForm({ onDispatch }: Props) {
       {showAttachPicker && (
         <>
           {info.canTargetPlayer && info.canTargetObject && (
-            <FieldRow label="Host Kind">
+            <FieldRow label={t("sandboxTools.hostKind")}>
               <SelectInput
                 value={targetKind}
                 onChange={setTargetKind}
@@ -256,12 +258,12 @@ function CreateCardForm({ onDispatch }: Props) {
               value={targetObjectId}
               onChange={setTargetObjectId}
               filter={info.objectFilter}
-              label="Attach To"
-              placeholder="Pick a host…"
+              label={t("sandboxTools.attachTo")}
+              placeholder={t("sandboxTools.pickHost")}
             />
           )}
           {targetKind === "Player" && (
-            <FieldRow label="Attach To">
+            <FieldRow label={t("sandboxTools.attachTo")}>
               <PlayerSelect value={targetPlayerId} onChange={setTargetPlayerId} />
             </FieldRow>
           )}
@@ -269,14 +271,14 @@ function CreateCardForm({ onDispatch }: Props) {
       )}
       {zone === "Battlefield" && (
         <FieldRow label="">
-          <CheckboxInput checked={runEtb} onChange={setRunEtb} label="Run ETB effects" />
+          <CheckboxInput checked={runEtb} onChange={setRunEtb} label={t("sandboxTools.runEtb")} />
         </FieldRow>
       )}
       <FieldRow label="">
         <CheckboxInput
           checked={nonlegendary}
           onChange={setNonlegendary}
-          label="Make nonlegendary"
+          label={t("sandboxTools.nonlegendary")}
         />
       </FieldRow>
       {zone === "Battlefield" && (
@@ -306,7 +308,7 @@ function CreateCardForm({ onDispatch }: Props) {
         }
         disabled={!cardName.trim() || !hasHost}
       >
-        Create Card
+        {t("sandboxTools.createCard")}
       </SubmitButton>
     </>
   );
@@ -315,27 +317,28 @@ function CreateCardForm({ onDispatch }: Props) {
 // Stable header text per `TokenCategory`. The engine ships category as
 // pure data (variant tag); the FE maps it to display copy here. Sort key is
 // used to order groups in the dropdown.
-const CATEGORY_LABELS: { key: string; label: string; sort: number }[] = [
-  { key: "PredefinedArtifact", label: "Artifact tokens (with abilities)", sort: 0 },
-  { key: "Creature", label: "Creature tokens", sort: 1 },
-  { key: "Aura", label: "Auras / Roles / Curses", sort: 2 },
-  { key: "Equipment", label: "Equipment tokens", sort: 3 },
-  { key: "Vehicle", label: "Vehicle tokens", sort: 4 },
-  { key: "Enchantment", label: "Enchantment tokens", sort: 5 },
-  { key: "Land", label: "Land tokens", sort: 6 },
-  { key: "Planeswalker", label: "Planeswalker tokens", sort: 7 },
-  { key: "Artifact", label: "Other artifact tokens", sort: 8 },
-];
+const CATEGORY_LABELS = [
+  { key: "PredefinedArtifact", label: "artifactTokens", sort: 0 },
+  { key: "Creature", label: "creatureTokens", sort: 1 },
+  { key: "Aura", label: "auraTokens", sort: 2 },
+  { key: "Equipment", label: "equipmentTokens", sort: 3 },
+  { key: "Vehicle", label: "vehicleTokens", sort: 4 },
+  { key: "Enchantment", label: "enchantmentTokens", sort: 5 },
+  { key: "Land", label: "landTokens", sort: 6 },
+  { key: "Planeswalker", label: "planeswalkerTokens", sort: 7 },
+  { key: "Artifact", label: "otherArtifactTokens", sort: 8 },
+] as const;
 
 function categoryKey(c: TokenCategory): string {
   return typeof c === "string" ? c : "PredefinedArtifact";
 }
 
-function categoryLabel(c: TokenCategory): string {
+function categoryLabel(c: TokenCategory, t: TFunction<"game">): string {
   if (typeof c !== "string") {
-    return `${c.PredefinedArtifact.kind} tokens`;
+    return t("sandboxTools.predefinedTokens", { kind: c.PredefinedArtifact.kind });
   }
-  return CATEGORY_LABELS.find((x) => x.key === c)?.label ?? c;
+  const category = CATEGORY_LABELS.find((x) => x.key === c);
+  return category ? t(`sandboxTools.${category.label}`) : c;
 }
 
 // Parameterized keywords (Ward, Protection, Annihilator) serialize as
@@ -541,7 +544,7 @@ function CatalogTokenForm({ onDispatch }: Props) {
     selectedPreset.body.core_types.includes("Creature") &&
     (sourceDefinedPt ? powerOverride === 0 && toughnessOverride === 0 : selectedPreset.body.power === 0 && selectedPreset.body.toughness === 0) &&
     !counterRescues
-      ? "0/0 creature dies to state-based actions — add +1/+1 counters to keep it alive (CR 704.5f)."
+      ? t("sandboxTools.zeroToughnessHint")
       : undefined;
 
   const handleSubmit = () => {
@@ -562,28 +565,28 @@ function CatalogTokenForm({ onDispatch }: Props) {
   if (loadError) {
     return (
       <div className="px-2 py-3 text-xs text-red-400">
-        Failed to load token catalog: {loadError}
+        {t("sandboxTools.tokenLoadFailed", { error: loadError })}
       </div>
     );
   }
   if (!presets) {
-    return <div className="px-2 py-3 text-xs text-gray-500">Loading token catalog…</div>;
+    return <div className="px-2 py-3 text-xs text-gray-500">{t("sandboxTools.loadingTokens")}</div>;
   }
 
   return (
     <>
-      <FieldRow label="Owner">
+      <FieldRow label={t("sandboxTools.owner")}>
         <PlayerSelect value={owner} onChange={setOwner} />
       </FieldRow>
-      <FieldRow label="Search">
-        <TextInput value={search} onChange={setSearch} placeholder="Token, source card, set" />
+      <FieldRow label={t("sandboxTools.search")}>
+        <TextInput value={search} onChange={setSearch} placeholder={t("sandboxTools.searchTokens")} />
       </FieldRow>
       <FieldRow label={t("debugCreate.copies")}>
         <NumberInput value={count} onChange={setCount} min={0} />
       </FieldRow>
       <div className="mb-2 max-h-64 overflow-y-auto rounded border border-gray-800 bg-gray-950/40 p-1">
         {orderedGroups.length === 0 && (
-          <div className="px-2 py-2 text-xs text-gray-500">No presets match.</div>
+          <div className="px-2 py-2 text-xs text-gray-500">{t("sandboxTools.noTokenPresets")}</div>
         )}
         {orderedGroups.map((key) => {
           const items = grouped.get(key) ?? [];
@@ -591,7 +594,7 @@ function CatalogTokenForm({ onDispatch }: Props) {
           return (
             <div key={key} className="mb-2">
               <div className="px-1 pb-1 font-mono text-[10px] uppercase tracking-wider text-gray-500">
-                {sample !== undefined ? categoryLabel(sample) : key}
+                {sample !== undefined ? categoryLabel(sample, t) : key}
               </div>
               {items.map((p) => (
                 <button
@@ -609,7 +612,7 @@ function CatalogTokenForm({ onDispatch }: Props) {
                     <span>{presetSummary(p)}</span>
                     {p.fidelity === "PartialMissingAbilities" && (
                       <span className="ml-1 rounded border border-amber-500/40 bg-amber-500/10 px-1 text-[9px] text-amber-300">
-                        body only
+                        {t("sandboxTools.bodyOnly")}
                       </span>
                     )}
                   </span>
@@ -657,10 +660,10 @@ function CatalogTokenForm({ onDispatch }: Props) {
         </>
       )}
       <FieldRow label="">
-        <CheckboxInput checked={runEtb} onChange={setRunEtb} label="Run ETB effects" />
+        <CheckboxInput checked={runEtb} onChange={setRunEtb} label={t("sandboxTools.runEtb")} />
       </FieldRow>
       <SubmitButton onClick={handleSubmit} disabled={!selectedId || !hasRequiredPt}>
-        Create Selected Token
+        {t("sandboxTools.createSelectedToken")}
       </SubmitButton>
     </>
   );
@@ -734,27 +737,27 @@ function CustomTokenForm({ onDispatch }: Props) {
   const counterRescues = counterType === "P1P1" && counterCount > 0;
   const survivalHint =
     coreTypes.includes("Creature") && power === 0 && toughness === 0 && !counterRescues
-      ? "0/0 creature dies to state-based actions — add +1/+1 counters to keep it alive (CR 704.5f)."
+      ? t("sandboxTools.zeroToughnessHint")
       : undefined;
 
   return (
     <>
-      <FieldRow label="Name">
-        <CardNameAutocomplete value={name} onChange={setName} placeholder="Token" />
+      <FieldRow label={t("sandboxTools.name")}>
+        <CardNameAutocomplete value={name} onChange={setName} placeholder={t("sandboxTools.token")} />
       </FieldRow>
-      <FieldRow label="Owner">
+      <FieldRow label={t("sandboxTools.owner")}>
         <PlayerSelect value={owner} onChange={setOwner} />
       </FieldRow>
       <FieldRow label={t("debugCreate.copies")}>
         <NumberInput value={count} onChange={setCount} min={0} />
       </FieldRow>
-      <FieldRow label="Power">
+      <FieldRow label={t("sandboxTools.power")}>
         <NumberInput value={power} onChange={setPower} />
       </FieldRow>
-      <FieldRow label="Toughness">
+      <FieldRow label={t("sandboxTools.toughness")}>
         <NumberInput value={toughness} onChange={setToughness} />
       </FieldRow>
-      <FieldRow label="Types">
+      <FieldRow label={t("sandboxTools.types")}>
         <div className="flex flex-wrap gap-1">
           {CORE_TYPES.map((ct) => (
             <CheckboxInput
@@ -766,10 +769,10 @@ function CustomTokenForm({ onDispatch }: Props) {
           ))}
         </div>
       </FieldRow>
-      <FieldRow label="Subtypes">
-        <TextInput value={subtypesText} onChange={setSubtypesText} placeholder="Human, Soldier" />
+      <FieldRow label={t("sandboxTools.subtypes")}>
+        <TextInput value={subtypesText} onChange={setSubtypesText} placeholder={t("sandboxTools.subtypesExample")} />
       </FieldRow>
-      <FieldRow label="Colors">
+      <FieldRow label={t("sandboxTools.colors")}>
         <div className="flex flex-wrap gap-1">
           {MANA_COLORS.map((c) => (
             <button
@@ -788,8 +791,8 @@ function CustomTokenForm({ onDispatch }: Props) {
           ))}
         </div>
       </FieldRow>
-      <FieldRow label="Keywords">
-        <TextInput value={keywordsText} onChange={setKeywordsText} placeholder="Flying, Haste" />
+      <FieldRow label={t("sandboxTools.keywords")}>
+        <TextInput value={keywordsText} onChange={setKeywordsText} placeholder={t("sandboxTools.keywordsExample")} />
       </FieldRow>
       <CounterPicker
         counterType={counterType}
@@ -799,9 +802,9 @@ function CustomTokenForm({ onDispatch }: Props) {
         hint={survivalHint}
       />
       <FieldRow label="">
-        <CheckboxInput checked={runEtb} onChange={setRunEtb} label="Run ETB effects" />
+        <CheckboxInput checked={runEtb} onChange={setRunEtb} label={t("sandboxTools.runEtb")} />
       </FieldRow>
-      <SubmitButton onClick={handleSubmit}>Create Custom Token</SubmitButton>
+      <SubmitButton onClick={handleSubmit}>{t("sandboxTools.createCustomToken")}</SubmitButton>
     </>
   );
 }
@@ -825,10 +828,10 @@ function CopyPermanentForm({ onDispatch }: Props) {
         // Copies are made of permanents; restrict the picker to the battlefield
         // so the list isn't cluttered with hand/library/graveyard objects.
         filter={(obj) => obj.zone === "Battlefield"}
-        label="Copy Of"
-        placeholder="Pick a permanent…"
+        label={t("sandboxTools.copyOf")}
+        placeholder={t("sandboxTools.pickPermanent")}
       />
-      <FieldRow label="Owner">
+      <FieldRow label={t("sandboxTools.owner")}>
         <PlayerSelect value={owner} onChange={setOwner} />
       </FieldRow>
       <FieldRow label={t("debugCreate.copies")}>
@@ -838,7 +841,7 @@ function CopyPermanentForm({ onDispatch }: Props) {
         <CheckboxInput
           checked={nonlegendary}
           onChange={setNonlegendary}
-          label="Make nonlegendary"
+          label={t("sandboxTools.nonlegendary")}
         />
       </FieldRow>
       <SubmitButton
@@ -851,13 +854,14 @@ function CopyPermanentForm({ onDispatch }: Props) {
         }}
         disabled={sourceId == null}
       >
-        Create Copy
+        {t("sandboxTools.createCopy")}
       </SubmitButton>
     </>
   );
 }
 
 export function DebugCreateActions({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const { expanded, toggle } = useAccordion();
   // `Debug::CreateCard` resolves a card NAME, which needs a `CardDatabase` at
   // action-handling time. Only the WASM layer holds one: `engine-wasm/src/lib.rs`
@@ -881,28 +885,24 @@ export function DebugCreateActions({ onDispatch }: Props) {
 
   return (
     <div>
-      <AccordionItem label="Create Card" expanded={expanded === "card"} onToggle={() => toggle("card")}>
+      <AccordionItem label={t("sandboxTools.createCard")} expanded={expanded === "card"} onToggle={() => toggle("card")}>
         {canCreateCardByName ? (
           <CreateCardForm onDispatch={onDispatch} />
         ) : (
-          /* Named rather than hidden, matching the checkpoint-restore notice:
-             the capability is genuinely absent here and a silently missing
-             accordion body reads as a bug. Hardcoded rather than `t()`-wrapped
-             — `client/src/i18n/README.md` lists dev/debug strings under
-             "Never wrap with t()". */
+          /* Named rather than hidden: a missing capability must stay visible
+             to players using the sandbox tools. */
           <p className="px-2 py-3 text-xs text-gray-600">
-            Spawning a card by name needs the in-browser engine. The token forms
-            below work on this connection.
+            {t("sandboxTools.cardCreationUnavailable")}
           </p>
         )}
       </AccordionItem>
-      <AccordionItem label="Create Token (Catalog)" expanded={expanded === "token-catalog"} onToggle={() => toggle("token-catalog")}>
+      <AccordionItem label={t("sandboxTools.createCatalogToken")} expanded={expanded === "token-catalog"} onToggle={() => toggle("token-catalog")}>
         <CatalogTokenForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Create Token (Custom)" expanded={expanded === "token-custom"} onToggle={() => toggle("token-custom")}>
+      <AccordionItem label={t("sandboxTools.customToken")} expanded={expanded === "token-custom"} onToggle={() => toggle("token-custom")}>
         <CustomTokenForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Copy Permanent" expanded={expanded === "copy"} onToggle={() => toggle("copy")}>
+      <AccordionItem label={t("sandboxTools.copyPermanent")} expanded={expanded === "copy"} onToggle={() => toggle("copy")}>
         <CopyPermanentForm onDispatch={onDispatch} />
       </AccordionItem>
     </div>

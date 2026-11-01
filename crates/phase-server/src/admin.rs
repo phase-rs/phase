@@ -237,7 +237,7 @@ mod tests {
     use lobby_broker::{Broker, BrokerEnv};
     use server_core::draft_session::DraftSessionManager;
     use server_core::session::SessionManager;
-    use tokio::sync::{mpsc, Mutex};
+    use tokio::sync::Mutex;
 
     use crate::{draft_pools, persistence, AppState, PlayerId, ServerContext, ServerMode};
 
@@ -256,6 +256,9 @@ mod tests {
 
     fn draft_config() -> DraftConfig {
         DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
@@ -319,7 +322,7 @@ mod tests {
             draft_code
         };
 
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = crate::socket_mailbox::channel();
         state.connections.lock().await.insert(
             draft_code.clone(),
             HashMap::from([(PlayerId(0), tx.clone())]),
@@ -364,7 +367,7 @@ mod tests {
         assert!(state.lobby.lock().await.lobby_mut().has_game(&draft_code));
         let snapshot = {
             let mut drafts = state.draft_sessions.lock().await;
-            drafts.handle_disconnect(&draft_code, 0);
+            drafts.handle_disconnect(&draft_code, 0, std::time::Instant::now());
             assert!(drafts.reconnect.is_disconnected(&draft_code, PlayerId(0)));
             drafts.sessions[&draft_code].to_persisted()
         };
@@ -431,7 +434,7 @@ mod tests {
                 let (b, _, _) = drafts.create_draft(draft_config(), "Host".to_string());
                 let (c, _, _) = drafts.create_draft(draft_config(), "Host".to_string());
                 drafts.reconnect.grace_period = std::time::Duration::ZERO;
-                drafts.handle_disconnect(&c, 0);
+                drafts.handle_disconnect(&c, 0, std::time::Instant::now());
                 (a, b, c)
             };
             let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();

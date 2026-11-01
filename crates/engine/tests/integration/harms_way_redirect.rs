@@ -606,6 +606,7 @@ fn zhalfirin_crusader_redirects_one_damage_to_any_target() {
         .act(GameAction::ActivateAbility {
             source_id: crusader,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activation reaches target selection");
     let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {

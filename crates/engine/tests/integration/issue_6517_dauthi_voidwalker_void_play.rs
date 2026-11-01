@@ -171,6 +171,7 @@ fn a_sole_void_card_still_prompts_and_plays_for_free() {
         .act(GameAction::ActivateAbility {
             source_id: walker,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the {T}+sacrifice ability must succeed");
     let pick_seen = drive_activation(&mut runner, walker, &[orc], orc);
@@ -233,6 +234,7 @@ fn with_two_void_cards_the_pick_is_offered_and_the_choice_plays_free() {
         .act(GameAction::ActivateAbility {
             source_id: walker,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the {T}+sacrifice ability must succeed");
     let pick_seen = drive_activation(&mut runner, walker, &[orc, grunt], orc);
@@ -292,6 +294,7 @@ fn a_later_opponents_card_is_offered_in_three_player() {
         .act(GameAction::ActivateAbility {
             source_id: walker,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the {T}+sacrifice ability must succeed");
     let pick_seen = drive_activation(&mut runner, walker, &[far_orc], far_orc);

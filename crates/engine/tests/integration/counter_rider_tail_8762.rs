@@ -22,8 +22,8 @@
 //!    to its owner's graveyard (CR 701.6a), unstamped and without the
 //!    permission.
 //!
-//! Corpus (`client/public/card-data.json`): 20 counter heads carry the exile
-//! rider, 6 of them a tail — Spelljack, Thranduil's Decree, Kheru Spellsnatcher
+//! Corpus (`client/public/card-data.json`) at #8762: the exile-rider counter
+//! heads with a tail were Spelljack, Thranduil's Decree, Kheru Spellsnatcher
 //! (`CastFromZone`, one family in two modes), No Escape (`Scry`), Delay (`GenericEffect`),
 //! Devious Cover-Up (`ChangeZone` → `Shuffle`). The first four change here; Delay's
 //! tail and its rider's time counters are issue #8795

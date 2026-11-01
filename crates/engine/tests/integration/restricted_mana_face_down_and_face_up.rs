@@ -23,8 +23,8 @@
 //!   branch), the door-unlock half (`OnlyForSpecialAction(UnlockDoor)`), and the
 //!   turn-face-up half (`OnlyForSpecialAction(TurnFaceUp)`, Overgrown Zealot) all
 //!   reach `spend_for` through real production sites — `can_pay_for_spell` /
-//!   `pay_cost_*` for casts, and `pay_special_action_mana_cost` for both door
-//!   unlock (CR 116.2m) and turn-face-up (CR 116.2b, emitted by the
+//!   `pay_cost_*` for casts, and `pay_special_action_mana_cost_with_resume` for
+//!   both door unlock (CR 116.2m) and turn-face-up (CR 116.2b, emitted by the
 //!   `GameAction::TurnFaceUp` handler after `game::morph::turn_face_up_prepare`
 //!   derives the morph/disguise/manifest cost) — so the `spend_for` assertion
 //!   exercises the same `ManaRestriction::allows` decision a full `apply()`

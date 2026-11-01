@@ -5,8 +5,13 @@
 //! never substitutes the broader slot target list for the engine's current
 //! legal-target set.
 
+use std::ops::ControlFlow;
+
 use crate::game::combat_damage::{assess_combat_impact, CombatImpact};
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
+use crate::types::ability_visit::visit_ability_def;
+use crate::types::actions::GameAction;
 use crate::types::game_state::{
     GameState, TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
 };
@@ -143,6 +148,69 @@ pub fn combat_withdrawal_fact_for_current_target(
         blocker_controller,
         impact: assess_combat_impact(state, attacker, blocker),
     })
+}
+
+/// Necessary-condition filter for "activating this ability can open an exact
+/// combat-withdrawal target selection".
+///
+/// A `false` answer proves that applying `action` to `state` cannot leave the
+/// game in a target selection that [`combat_withdrawal_fact_for_current_target`]
+/// accepts, because that facade requires a `RemoveFromCombat` effect in the
+/// announced ability and no ability of the source object carries one. A `true`
+/// answer proves nothing: the caller must still simulate the activation.
+///
+/// The filter never guesses. It answers `true` (fall open) whenever the
+/// structural question cannot be decided from the source object's own lists:
+///
+/// - `action` is not `GameAction::ActivateAbility`;
+/// - the game is not waiting on `WaitingFor::Priority`, the only state in which
+///   the activation is known to bind a definition of the source object;
+/// - the source object is missing;
+/// - a layer flush is pending, so the live `abilities` list may be out of step
+///   with what the reducer will bind;
+/// - `ability_index` is at or past the source's `abilities` list, where the
+///   reducer resolves the definition from runtime-synthesized grants that are
+///   stored in no list scanned here.
+///
+/// Otherwise it scans every definition in `base_abilities` and `abilities`
+/// (not only the indexed one, which is deliberately conservative) through
+/// [`visit_ability_def`], which also walks sub-abilities, else-branches, modes
+/// and costs.
+pub fn activation_may_yield_combat_withdrawal(state: &GameState, action: &GameAction) -> bool {
+    let GameAction::ActivateAbility {
+        source_id,
+        ability_index,
+        ..
+    } = action
+    else {
+        return true;
+    };
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return true;
+    }
+    let Some(source) = state.objects.get(source_id) else {
+        return true;
+    };
+    if state.layers_dirty.is_dirty() {
+        return true;
+    }
+    if *ability_index >= source.abilities.len() {
+        return true;
+    }
+    source
+        .base_abilities
+        .iter()
+        .chain(source.abilities.iter())
+        .any(|def| {
+            visit_ability_def(def, &mut |effect| {
+                if matches!(effect, Effect::RemoveFromCombat { .. }) {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .is_break()
+        })
 }
 
 fn is_single_current_target_selection(
@@ -547,6 +615,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("activation reaches target selection");
@@ -568,6 +637,158 @@ mod tests {
         assert!(
             matches!(first, Some(CombatWithdrawalFact::CombatPair { .. })),
             "real engine prompt binds the selected target"
+        );
+    }
+
+    /// A draw effect: the shape used for "no withdrawal anywhere" definitions.
+    fn draw_effect() -> Effect {
+        Effect::Draw {
+            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    }
+
+    /// A direct remove-from-combat effect on a typed creature target.
+    fn removal_effect() -> Effect {
+        Effect::RemoveFromCombat {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        }
+    }
+
+    /// Build a clean-layer priority state whose source carries `abilities` as
+    /// its live list and `base_abilities` as its printed list.
+    fn precondition_state(
+        abilities: Vec<AbilityDefinition>,
+        base_abilities: Vec<AbilityDefinition>,
+    ) -> (GameState, ObjectId) {
+        let (mut state, source, _, _) = combat_state();
+        let source_object = state.objects.get_mut(&source).expect("source exists");
+        source_object.abilities = Arc::new(abilities);
+        source_object.base_abilities = Arc::new(base_abilities);
+        state.waiting_for = WaitingFor::Priority { player: ACTOR };
+        state.priority_player = ACTOR;
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
+        (state, source)
+    }
+
+    /// The activation of the source's first ability.
+    fn activate_first(source: ObjectId) -> GameAction {
+        GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        }
+    }
+
+    /// With no `RemoveFromCombat` in any ability of the source the filter proves
+    /// the activation cannot open a withdrawal prompt, and the real reducer
+    /// agrees: the simulated activation yields no exact withdrawal fact.
+    #[test]
+    fn precondition_rejects_an_activation_without_any_removal_effect() {
+        let draw = AbilityDefinition::new(AbilityKind::Activated, draw_effect());
+        let (state, source) = precondition_state(vec![draw.clone()], vec![draw]);
+
+        assert!(!activation_may_yield_combat_withdrawal(
+            &state,
+            &activate_first(source)
+        ));
+
+        let mut simulated = state.clone();
+        apply_as_current_for_simulation(&mut simulated, activate_first(source))
+            .expect("reach-guard: the draw activation applies");
+        assert!(
+            !matches!(simulated.waiting_for, WaitingFor::TargetSelection { .. }),
+            "a draw activation opens no target selection, so no fact can exist"
+        );
+    }
+
+    /// The filter answers "may" for every placement of the removal effect that
+    /// the fact facade can read: direct, nested in a sub-ability, and present
+    /// only in the printed list.
+    #[test]
+    fn precondition_accepts_direct_nested_and_printed_only_removal() {
+        let draw = AbilityDefinition::new(AbilityKind::Activated, draw_effect());
+        let direct = AbilityDefinition::new(AbilityKind::Activated, removal_effect());
+        let nested = AbilityDefinition::new(AbilityKind::Activated, draw_effect()).sub_ability(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::RemoveFromCombat {
+                    target: TargetFilter::ParentTarget,
+                },
+            ),
+        );
+
+        let (state, source) = precondition_state(vec![direct.clone()], vec![direct.clone()]);
+        assert!(activation_may_yield_combat_withdrawal(
+            &state,
+            &activate_first(source)
+        ));
+
+        let (state, source) = precondition_state(vec![nested.clone()], vec![nested]);
+        assert!(activation_may_yield_combat_withdrawal(
+            &state,
+            &activate_first(source)
+        ));
+
+        let (state, source) = precondition_state(vec![draw], vec![direct]);
+        assert!(
+            activation_may_yield_combat_withdrawal(&state, &activate_first(source)),
+            "a removal present only in base_abilities must still answer may"
+        );
+    }
+
+    /// Every undecidable case falls open. Each arm starts from the state the
+    /// rejecting test uses, so the `true` answer is caused by the single
+    /// perturbation and not by a removal effect.
+    #[test]
+    fn precondition_falls_open_when_the_structure_cannot_be_decided() {
+        let draw = AbilityDefinition::new(AbilityKind::Activated, draw_effect());
+        let fixture = || precondition_state(vec![draw.clone()], vec![draw.clone()]);
+
+        let (state, source) = fixture();
+        assert!(
+            !activation_may_yield_combat_withdrawal(&state, &activate_first(source)),
+            "reach-guard: the unperturbed fixture is rejected"
+        );
+
+        let (mut state, source) = fixture();
+        state.objects.remove(&source);
+        assert!(
+            activation_may_yield_combat_withdrawal(&state, &activate_first(source)),
+            "missing source"
+        );
+
+        let (mut state, source) = fixture();
+        state.layers_dirty.mark_full();
+        assert!(
+            activation_may_yield_combat_withdrawal(&state, &activate_first(source)),
+            "dirty layers"
+        );
+
+        let (state, source) = fixture();
+        assert!(
+            activation_may_yield_combat_withdrawal(
+                &state,
+                &GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 1,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                },
+            ),
+            "index past the abilities list"
+        );
+
+        let (mut state, source) = fixture();
+        install_target_selection(&mut state, source, direct_removal(source), Vec::new());
+        assert!(
+            activation_may_yield_combat_withdrawal(&state, &activate_first(source)),
+            "non-priority state"
+        );
+
+        let (state, _) = fixture();
+        assert!(
+            activation_may_yield_combat_withdrawal(&state, &GameAction::PassPriority),
+            "non-activation action"
         );
     }
 }

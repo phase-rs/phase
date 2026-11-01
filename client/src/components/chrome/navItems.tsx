@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import type { ComponentType } from "react";
 
 import {
@@ -14,7 +15,7 @@ export interface NavItem {
   /** Destination route. */
   path: string;
   /** i18n key under the `menu` namespace, e.g. `nav.home`. */
-  labelKey: string;
+  labelKey: ParseKeys<"menu">;
   Icon: ComponentType<{ className?: string }>;
   /** Route prefixes that should light this item up (besides `path`). */
   match: (pathname: string) => boolean;

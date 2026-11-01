@@ -14,7 +14,9 @@ use engine::types::counter::CounterType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 
-use crate::features::plus_one_counters::{ability_places_plus_one_counter, MULLIGAN_FLOOR};
+use crate::features::plus_one_counters::{
+    ability_creates_token_with_plus_one_counters, ability_places_plus_one_counter, MULLIGAN_FLOOR,
+};
 use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
@@ -52,6 +54,7 @@ impl MulliganPolicy for PlusOneCountersMulligan {
         let mut land_count: i64 = 0;
         let mut cheap_creature_count: i64 = 0;
         let mut generator_in_hand: i64 = 0;
+        let mut token_with_counters_in_hand: i64 = 0;
         let mut payoff_in_hand: i64 = 0;
 
         for &oid in hand {
@@ -80,6 +83,13 @@ impl MulliganPolicy for PlusOneCountersMulligan {
             // Structural walk for generators — re-classify the live ability.
             if obj.abilities.iter().any(ability_places_plus_one_counter) {
                 generator_in_hand += 1;
+            }
+            if obj
+                .abilities
+                .iter()
+                .any(ability_creates_token_with_plus_one_counters)
+            {
+                token_with_counters_in_hand += 1;
             }
 
             // Cheap creature (≤ 3 mana value) that can receive counters.
@@ -113,7 +123,11 @@ impl MulliganPolicy for PlusOneCountersMulligan {
         }
 
         // No generator and no payoff — committed deck is stuck without either.
-        if generator_in_hand == 0 && payoff_in_hand == 0 {
+        // CR 122.6 + CR 122.6a: a card that creates a token with +1/+1 counters,
+        // in either representation, is a counter source, so a hand holding one
+        // is not "no sources"; it is not a generator onto existing creatures,
+        // so it earns neither generator bonus above.
+        if generator_in_hand == 0 && token_with_counters_in_hand == 0 && payoff_in_hand == 0 {
             return MulliganScore::Score {
                 delta: -1.2,
                 reason: PolicyReason::new("p1p1_no_sources_no_payoffs")
@@ -384,5 +398,109 @@ mod tests {
             }
             _ => panic!("expected opt-out Score"),
         }
+    }
+
+    // ─── token with counters (CR 122.6 + CR 122.6a) ───────────────────────────
+
+    use crate::policies::tests::created_token_placement_parity::{
+        declarative_token_with_counters, imperative_token_then_placement, x_quantity,
+    };
+    use engine::types::ability::SubAbilityLink;
+
+    fn hand_with_spell(ability: Option<AbilityDefinition>) -> (GameState, Vec<ObjectId>) {
+        let (mut state, mut hand) = make_hand(vec![Card::Land, Card::Land]);
+        if let Some(ability) = ability {
+            let oid = create_object(
+                &mut state,
+                CardId(3900),
+                AI,
+                "Fractal Summoning".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&oid).expect("just created");
+            obj.card_types = CardType {
+                supertypes: Vec::new(),
+                core_types: vec![CoreType::Sorcery],
+                subtypes: Vec::new(),
+            };
+            obj.mana_cost = ManaCost::generic(2);
+            Arc::make_mut(&mut obj.abilities).push(ability);
+            hand.push(oid);
+        }
+        (state, hand)
+    }
+
+    fn evaluate(hand: &[ObjectId], state: &GameState) -> (f64, &'static str) {
+        let features = features_with_commitment(0.9, vec![]);
+        match PlusOneCountersMulligan.evaluate(
+            hand,
+            state,
+            &features,
+            &plan(),
+            TurnOrder::OnPlay,
+            0,
+        ) {
+            MulliganScore::Score { delta, reason } => (delta, reason.kind),
+            _ => panic!("expected Score"),
+        }
+    }
+
+    /// A hand whose only +1/+1 card makes a token with +1/+1 counters holds a
+    /// counter source, so it is not "no sources"; the counters go on the new
+    /// token rather than a creature already on the battlefield, so neither
+    /// generator bonus applies. Same verdict in both representations.
+    #[test]
+    fn token_with_counters_hand_defers_to_baseline_in_both_representations() {
+        let shapes = [
+            declarative_token_with_counters(
+                AbilityKind::Spell,
+                (0, 0),
+                CounterType::Plus1Plus1,
+                x_quantity(),
+            ),
+            imperative_token_then_placement(
+                AbilityKind::Spell,
+                SubAbilityLink::ContinuationStep,
+                (0, 0),
+                CounterType::Plus1Plus1,
+                x_quantity(),
+            ),
+            imperative_token_then_placement(
+                AbilityKind::Spell,
+                SubAbilityLink::SequentialSibling,
+                (1, 1),
+                CounterType::Plus1Plus1,
+                QuantityExpr::Fixed { value: 1 },
+            ),
+        ];
+        for ability in shapes {
+            let (state, hand) = hand_with_spell(Some(ability));
+            assert_eq!(evaluate(&hand, &state), (0.0, "p1p1_defer_to_baseline"));
+        }
+    }
+
+    /// Reach guards on the same two-land hand: no +1/+1 card at all is still
+    /// "no sources", and a real generator still earns the generator bonus.
+    #[test]
+    fn no_source_and_generator_hands_keep_their_verdicts() {
+        let (state, hand) = hand_with_spell(None);
+        assert_eq!(
+            evaluate(&hand, &state),
+            (-1.2, "p1p1_no_sources_no_payoffs")
+        );
+
+        let generator = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(engine::types::ability::TypedFilter::creature()),
+            },
+        );
+        let (state, hand) = hand_with_spell(Some(generator));
+        assert_eq!(
+            evaluate(&hand, &state),
+            (0.8, "p1p1_keepable_generator_lands")
+        );
     }
 }

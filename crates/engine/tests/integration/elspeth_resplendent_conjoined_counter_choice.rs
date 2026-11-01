@@ -43,6 +43,7 @@ fn plus_one_choosing(chosen: &str) -> std::collections::HashMap<CounterType, u32
         .act(GameAction::ActivateAbility {
             source_id: elspeth,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the +1 is activatable");
 
@@ -213,6 +214,7 @@ fn both_counters_reach_the_watcher_as_one_placement() {
             .act(GameAction::ActivateAbility {
                 source_id: elspeth,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .expect("the +1 is activatable"),
     );
@@ -328,6 +330,7 @@ fn elspeth_plus_one_with_no_target_places_nothing() {
         .act(GameAction::ActivateAbility {
             source_id: elspeth,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the +1 is activatable");
     if matches!(

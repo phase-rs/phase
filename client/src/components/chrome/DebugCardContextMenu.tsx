@@ -159,6 +159,7 @@ function DebugCardContextMenuInner({
   onClose: () => void;
   anchorRef?: RefObject<HTMLElement | null>;
 }) {
+  const { t } = useTranslation("game");
   const ref = useRef<HTMLDivElement | null>(null);
   const fallbackAnchorRef = useRef<HTMLElement | null>(null);
   const liveObject = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -360,7 +361,7 @@ function DebugCardContextMenuInner({
         id={headerId}
         className="truncate border-b border-gray-800 px-3 py-1.5 font-mono text-xs font-semibold text-gray-300"
       >
-        {obj.name || `Object ${objectId}`}
+        {obj.name || t("sandboxTools.objectFallback", { id: objectId })}
         {obj.class_level != null && (
           <span className="ml-1 text-amber-400">Lv.{obj.class_level}</span>
         )}
@@ -389,12 +390,12 @@ function DebugCardContextMenuInner({
       {onBattlefield && (
         <div className="border-b border-gray-800 py-0.5">
           <MenuItem
-            label={obj.tapped ? "Untap" : "Tap"}
+            label={obj.tapped ? t("sandboxTools.untap") : t("sandboxTools.tap")}
             onClick={() => dispatchDebug({ type: "SetTapped", data: { object_id: objectId, tapped: !obj.tapped } })}
           />
           {isCreature && (
             <MenuItem
-              label={hasSummoningSickness ? "Remove Summoning Sickness" : "Give Summoning Sickness"}
+              label={hasSummoningSickness ? t("sandboxTools.removeSickness") : t("sandboxTools.giveSickness")}
               onClick={() =>
                 dispatchDebug({ type: "SetSummoningSickness", data: { object_id: objectId, sick: !hasSummoningSickness } })
               }
@@ -402,13 +403,13 @@ function DebugCardContextMenuInner({
           )}
           {/* Transform / Flip / Face Down */}
           <MenuItem
-            label={obj.transformed ? "Un-transform" : "Transform"}
+            label={obj.transformed ? t("sandboxTools.untransform") : t("sandboxTools.transform")}
             onClick={() =>
               dispatchDebug({ type: "SetFaceState", data: { object_id: objectId, transformed: !obj.transformed } })
             }
           />
           <MenuItem
-            label={obj.face_down ? "Turn Face Up" : "Turn Face Down"}
+            label={obj.face_down ? t("sandboxTools.turnFaceUp") : t("sandboxTools.turnFaceDown")}
             onClick={() =>
               dispatchDebug({ type: "SetFaceState", data: { object_id: objectId, face_down: !obj.face_down } })
             }
@@ -472,7 +473,7 @@ function DebugCardContextMenuInner({
       {onBattlefield && (
         <div className="border-b border-gray-800 py-0.5">
           <MenuItem
-            label="Sacrifice"
+            label={t("sandboxTools.sacrifice")}
             onClick={() => dispatchDebug({ type: "Sacrifice", data: { object_id: objectId } })}
           />
         </div>
@@ -481,7 +482,7 @@ function DebugCardContextMenuInner({
       {/* Destructive action */}
       <div className="py-0.5">
         <MenuItem
-          label="Remove"
+          label={t("sandboxTools.remove")}
           danger
           onClick={() => dispatchDebug({ type: "RemoveObject", data: { object_id: objectId } })}
         />
@@ -607,7 +608,7 @@ function ZoneSubmenu({
   const [runEtb, setRunEtb] = useState(false);
 
   return (
-    <Submenu label="Zone" badge={currentZone} {...chrome}>
+    <Submenu label={t("sandboxTools.zone")} badge={currentZone} {...chrome}>
       <button
         role="menuitemcheckbox"
         type="button"
@@ -625,12 +626,12 @@ function ZoneSubmenu({
         zone === "Library" ? (
           <div key={zone}>
             <MenuItem
-              label="Library (top)"
+              label={t("sandboxTools.libraryTop")}
               onClick={() => onSelectZone(zone, runEtb, { type: "Top" })}
               compact
             />
             <MenuItem
-              label="Library (bottom)"
+              label={t("sandboxTools.libraryBottom")}
               onClick={() => onSelectZone(zone, runEtb, { type: "Bottom" })}
               compact
             />
@@ -661,8 +662,9 @@ function ControllerSubmenu({
   onDispatch: (action: DebugAction) => Promise<void>;
   chrome: SubmenuChrome;
 }) {
+  const { t } = useTranslation("game");
   return (
-    <Submenu label="Controller" badge={`P${currentController}`} {...chrome}>
+    <Submenu label={t("sandboxTools.controller")} badge={`P${currentController}`} {...chrome}>
       {players
         .filter((p) => p.id !== currentController)
         .map((p) => (
@@ -731,6 +733,7 @@ function PowerToughnessInput({
   currentToughness: number | null;
   onSet: (power: number | null, toughness: number | null) => void;
 }) {
+  const { t } = useTranslation("game");
   const [editing, setEditing] = useState(false);
   const [power, setPower] = useState(String(currentPower ?? 0));
   const [toughness, setToughness] = useState(String(currentToughness ?? 0));
@@ -743,7 +746,7 @@ function PowerToughnessInput({
         onClick={() => setEditing(true)}
         className="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-gray-300 transition-colors hover:bg-white/10"
       >
-        <span>Set Base P/T</span>
+        <span>{t("sandboxTools.setBasePT")}</span>
         <span className="font-mono text-[10px] text-gray-600">
           {currentPower ?? "?"}/{currentToughness ?? "?"}
         </span>
@@ -784,7 +787,7 @@ function PowerToughnessInput({
         onClick={() => onSet(parseInt(power) || 0, parseInt(toughness) || 0)}
         className="rounded bg-cyan-800/50 px-1.5 py-0.5 text-[10px] text-cyan-300 transition-colors hover:bg-cyan-700/50"
       >
-        Set
+        {t("sandboxTools.set")}
       </button>
     </div>
   );
@@ -801,11 +804,12 @@ function KeywordSubmenu({
   onDispatch: (action: DebugAction) => Promise<void>;
   chrome: SubmenuChrome;
 }) {
+  const { t } = useTranslation("game");
   const stringKeywords = currentKeywords.filter((k): k is string => typeof k === "string");
 
   return (
     <Submenu
-      label="Keywords"
+      label={t("sandboxTools.keywords")}
       badge={stringKeywords.length > 0 ? stringKeywords.length : ""}
       {...chrome}
     >

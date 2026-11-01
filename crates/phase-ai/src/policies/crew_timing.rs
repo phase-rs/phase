@@ -184,9 +184,13 @@ fn crew_subset_has_exact_combat_use(
     if apply_as_current_for_simulation(&mut replay, subset.clone()).is_err() {
         return false;
     }
-    resolve_all_fast_forward(&mut replay, actor, 1, |_, _| {
+    if resolve_all_fast_forward(&mut replay, actor, 1, |_, _| {
         ResolveAllCallbackDecision::Action(GameAction::PassPriority)
-    });
+    })
+    .is_err()
+    {
+        return false;
+    }
 
     // CR 508.1: A Vehicle can be declared as an attacker only before attackers
     // are declared, including priority in its controller's begin-combat step.
@@ -219,6 +223,7 @@ mod tests {
     use crate::context::AiContext;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::effects::counter;
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect, ResolvedAbility,
@@ -374,7 +379,8 @@ mod tests {
             .expect("engine accepts its listed crew subset");
         resolve_all_fast_forward(&mut replay, AI, 1, |_, _| {
             ResolveAllCallbackDecision::Action(GameAction::PassPriority)
-        });
+        })
+        .expect("the fixture's crew resolution is representable");
         assert!(get_valid_attacker_ids(&replay).contains(&vehicle));
     }
 
@@ -452,7 +458,8 @@ mod tests {
         // transient UEOT AddType(Creature) effect). ──
         resolve_all_fast_forward(&mut state, AI, 1, |_, _| {
             ResolveAllCallbackDecision::Action(GameAction::PassPriority)
-        });
+        })
+        .expect("the fixture's crew resolution is representable");
         assert!(
             engine::game::engine::crew_resolved_this_turn_contains(&state, vehicle),
             "reach-guard: resolving the crew recorded the resolved-crew marker"
@@ -642,12 +649,14 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: vehicle,
                 ability_index,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("the self-animate activated ability must be announced and pushed to the stack");
         resolve_all_fast_forward(&mut state, AI, 1, |_, _| {
             ResolveAllCallbackDecision::Action(GameAction::PassPriority)
-        });
+        })
+        .expect("the fixture's crew resolution is representable");
 
         // (a) reach-guard: the generic install produced EXACTLY the transient
         // shape the round-2 shape-matcher keyed on — had `crew_payoff_live`

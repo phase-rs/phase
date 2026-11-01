@@ -1843,6 +1843,7 @@ fn stated_duration_yields_to_the_permanent_sentinel() {
         .act(GameAction::ActivateAbility {
             source_id: gecko,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Mondo Gecko");
     // Drive the announced cost and the printed colour choice explicitly. §G1

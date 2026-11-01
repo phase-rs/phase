@@ -64,7 +64,16 @@ fn pass_priority_until_combat(runner: &mut GameRunner) {
 
 #[test]
 fn recruit_discard_with_a_sibling_etb_trigger_records_its_own_result() {
-    let mut runner = GameRunner::from_state(load_state());
+    // CR 611.2e: this committed capture predates the onset record and holds no ability node of
+    // an onset-admitting kind, so the production admission accepts it unmarked (deliberately not
+    // routed through `record_captured_onsets`) and records it as onset-recorded.
+    let restored = load_state();
+    assert_eq!(
+        restored.ability_onset_record,
+        engine::types::game_state::AbilityOnsetRecord::Recorded,
+        "an onset-free pre-onset capture is admitted and becomes Recorded"
+    );
+    let mut runner = GameRunner::from_state(restored);
     let tokens_before = token_count(runner.state());
     let graveyard_before = graveyard_count(runner.state(), P0);
 

@@ -9,6 +9,14 @@
 //! [`directory`] shares that same no-I/O constraint: it is the server-directory
 //! contract both shells (and, later, the client's TypeScript mirror) apply.
 
+mod protocol_versions {
+    include!(concat!(env!("OUT_DIR"), "/protocol_versions.rs"));
+}
+
+#[cfg(test)]
+#[path = "../build.rs"]
+mod protocol_registry;
+
 pub mod broker;
 pub mod directory;
 pub mod env;

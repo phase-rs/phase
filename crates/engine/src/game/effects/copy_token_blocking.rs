@@ -2,6 +2,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::{combat, targeting};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter,
+    TokenAttackDestination,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -63,6 +64,7 @@ pub fn resolve(
             owner: owner.clone(),
             source_filter: Some(TargetFilter::SpecificObject { id: attacker_id }),
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],

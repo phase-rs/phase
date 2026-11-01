@@ -1,7 +1,9 @@
+import type { ParseKeys } from "i18next";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 
+import { isAiDifficulty } from "../../../constants/ai";
 import { ACTIVE_DECK_KEY, isRandomDeckSelection } from "../../../constants/storage";
 import { MenuShell } from "../MenuShell";
 import { MenuActionTile, type MenuTileTone } from "../MenuActionTile";
@@ -25,8 +27,8 @@ interface ActionDef {
   tone: MenuTileTone;
   icon: string;
   motif: TileMotif;
-  titleKey: string;
-  descKey: string;
+  titleKey: ParseKeys<"menu">;
+  descKey: ParseKeys<"menu">;
   gated: boolean;
 }
 const ACTIONS: ActionDef[] = [
@@ -77,7 +79,7 @@ function ResumeHero() {
   // turn it is, and your own life — never bare unlabeled numbers.
   const modeLabel = match ? t(`home.dashboard.mode.${match.mode}`) : "";
   const difficultyLabel =
-    match && match.mode === "ai" && match.difficulty
+    match && match.mode === "ai" && isAiDifficulty(match.difficulty)
       ? t(`aiDifficulty.levels.${match.difficulty}`)
       : null;
   // GameFormat is PascalCase ("PauperCommander"); space compound names for display.

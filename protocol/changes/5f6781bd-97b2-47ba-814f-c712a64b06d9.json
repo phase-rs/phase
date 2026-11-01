@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Exert paid as a cost records CreatureExerted with origin and player (CR 701.43); ExertChoice binds a required permission and typed remaining costs, attack_permission receipts link only their own payoff, and definitions carry attack_cost_condition / SourceExertedThisTurn. Older peers would silently lose exert provenance."
+}

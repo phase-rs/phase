@@ -1917,3 +1917,104 @@ fn calibrated_blast_hit_stays_revealed_while_its_reflexive_pauses() {
     assert!(!runner.state().holds_stack_bound_reveal(hit));
     assert!(runner.state().stack_bound_reveals.is_empty());
 }
+
+const FUNERAL_CHARM: &str = "Choose one —\n• Target player discards a card.\n• Target creature gets +2/-1 until end of turn.\n• Target creature gains swampwalk until end of turn.";
+
+/// Exact Yuna's Whistle reveals a 2-mana creature into an otherwise empty
+/// hand; with the reflexive on the stack targeting P0's battlefield Bear, P1
+/// casts Funeral Charm's discard mode on P0 (`respond`), or nobody responds.
+/// Returns the runner after the stack empties, the Bear and the hit.
+fn whistle_hit_then_discard(respond: bool) -> (GameRunner, ObjectId, ObjectId) {
+    let Fixture {
+        mut runner,
+        spell,
+        bear,
+        library,
+        extras,
+        ..
+    } = fixture_with(
+        "Yuna's Whistle",
+        YUNAS_WHISTLE,
+        true,
+        &[
+            LibCard::Land("Forest"),
+            LibCard::Creature("Library Bears", ManaCost::generic(2)),
+        ],
+        &[(P1, "Funeral Charm", FUNERAL_CHARM)],
+    );
+    let bear = bear.unwrap();
+    let hit = library[1];
+    runner.cast(spell).commit();
+    assert!(pass_until_prompt_or_empty(&mut runner), "reflexive prompt");
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        1,
+        "reach guard: the hit is P0's only card in hand"
+    );
+    assert_eq!(zone(runner.state(), hit), Zone::Hand, "reach guard");
+    choose(&mut runner, TargetRef::Object(bear));
+    assert_eq!(
+        reflexive_entries(runner.state()).len(),
+        1,
+        "reach guard: the reflexive is on the stack"
+    );
+    let reflexive = runner
+        .state()
+        .stack
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { ability, .. } => Some(ability.clone()),
+            _ => None,
+        })
+        .expect("the reflexive stack entry");
+    assert!(
+        format!("{:?}", reflexive.condition).contains("RevealUntilMatched"),
+        "reach guard: the reflexive carries the reveal-until-hit guard: {:?}",
+        reflexive.condition
+    );
+    assert_eq!(
+        reflexive
+            .effect_context_object
+            .as_ref()
+            .map(|snapshot| snapshot.object_id),
+        Some(hit),
+        "reach guard: the reflexive carries the hit's snapshot for X"
+    );
+    if respond {
+        runner.act(GameAction::PassPriority).unwrap();
+        runner
+            .cast(extras[0])
+            .modes(&[0])
+            .target_player(P0)
+            .commit();
+        pass_until_prompt_or_empty(&mut runner);
+        assert_eq!(
+            zone(runner.state(), hit),
+            Zone::Graveyard,
+            "reach guard: Funeral Charm discarded the hit before the reflexive resolved"
+        );
+    } else {
+        pass_until_prompt_or_empty(&mut runner);
+    }
+    assert!(runner.state().stack.is_empty());
+    (runner, bear, hit)
+}
+
+/// CR 603.12: the reveal already happened when the reflexive triggered, so
+/// discarding the revealed card in response neither undoes the trigger nor
+/// changes X.
+#[test]
+fn discarding_the_hit_in_response_keeps_the_reflexive_and_its_x() {
+    let (runner, bear, _) = whistle_hit_then_discard(true);
+    // CR 608.2h: the revealed card is no longer where the effect expected it,
+    // so X uses its last known information (mana value 2).
+    assert_eq!(p1p1(runner.state(), bear), 2);
+}
+
+/// Control: the same board with no response.
+#[test]
+fn the_unanswered_reflexive_puts_the_revealed_mana_value_on_the_bear() {
+    let (runner, bear, hit) = whistle_hit_then_discard(false);
+    assert_eq!(zone(runner.state(), hit), Zone::Hand);
+    assert_eq!(p1p1(runner.state(), bear), 2);
+}

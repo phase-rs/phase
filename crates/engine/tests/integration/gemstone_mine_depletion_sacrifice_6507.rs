@@ -70,6 +70,7 @@ fn activate_and_choose_green(runner: &mut engine::game::scenario::GameRunner, la
         .act(GameAction::ActivateAbility {
             source_id: land,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Gemstone Mine's mana ability must be payable while a mining counter remains");
     // CR 605.3b: the mana ability resolves immediately after the color choice —
@@ -162,6 +163,7 @@ fn peat_bog_last_depletion_counter_sacrifices() {
         .act(GameAction::ActivateAbility {
             source_id: land,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Peat Bog's mana ability must be payable while a depletion counter remains");
 

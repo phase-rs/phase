@@ -288,7 +288,7 @@ mod tests {
         // context ref via its final `is_context_ref()` guard, so the controller's
         // creature choice is never declared as a target (hexproof is irrelevant).
         assert!(
-            crate::game::triggers::extract_target_filter_from_effect(&Effect::BlightEffect {
+            crate::types::ability::extract_target_filter_from_effect(&Effect::BlightEffect {
                 count: 1,
                 player: TargetFilter::Controller,
             })

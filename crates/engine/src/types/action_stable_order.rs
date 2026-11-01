@@ -109,15 +109,19 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
         GameAction::ActivateAbility {
             source_id: a0,
             ability_index: a1,
+            payment_mode: a2,
         } => {
             let GameAction::ActivateAbility {
                 source_id: b0,
                 ability_index: b1,
+                payment_mode: b2,
             } = b
             else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
-            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+            cmp_val(a0, b0)
+                .then_with(|| cmp_val(a1, b1))
+                .then_with(|| cmp_val(a2, b2))
         }
         GameAction::DeclareAttackers {
             attacks: a0,
@@ -1013,6 +1017,12 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             cmp_val(a0, b0)
         }
+        GameAction::UnAction { action: a0 } => {
+            let GameAction::UnAction { action: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
         GameAction::SetTriggerOrderTemplate { op: a0 } => {
             let GameAction::SetTriggerOrderTemplate { op: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
@@ -1256,14 +1266,18 @@ fn debug_action_rank(a: &DebugAction) -> u16 {
         DebugAction::GrantKeyword { .. } => 18,
         DebugAction::RemoveKeyword { .. } => 19,
         DebugAction::SetLife { .. } => 20,
-        DebugAction::ModifyPlayerCounters { .. } => 21,
-        DebugAction::ModifyEnergy { .. } => 22,
-        DebugAction::AddMana { .. } => 23,
-        DebugAction::SetInfiniteMana { .. } => 24,
-        DebugAction::SetPhase { .. } => 25,
-        DebugAction::RunStateBasedActions => 26,
-        DebugAction::CreateToken { .. } => 27,
-        DebugAction::CreateTokenCopy { .. } => 28,
+        DebugAction::GainLife { .. } => 21,
+        DebugAction::LoseLife { .. } => 22,
+        DebugAction::ModifyPlayerCounters { .. } => 23,
+        DebugAction::ModifyEnergy { .. } => 24,
+        DebugAction::GivePlayerCounters { .. } => 25,
+        DebugAction::GiveEnergy { .. } => 26,
+        DebugAction::AddMana { .. } => 27,
+        DebugAction::SetInfiniteMana { .. } => 28,
+        DebugAction::SetPhase { .. } => 29,
+        DebugAction::RunStateBasedActions => 30,
+        DebugAction::CreateToken { .. } => 31,
+        DebugAction::CreateTokenCopy { .. } => 32,
     }
 }
 
@@ -1550,6 +1564,32 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
             };
             cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
         }
+        DebugAction::GainLife {
+            player_id: a0,
+            amount: a1,
+        } => {
+            let DebugAction::GainLife {
+                player_id: b0,
+                amount: b1,
+            } = b
+            else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+        }
+        DebugAction::LoseLife {
+            player_id: a0,
+            amount: a1,
+        } => {
+            let DebugAction::LoseLife {
+                player_id: b0,
+                amount: b1,
+            } = b
+            else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+        }
         DebugAction::ModifyPlayerCounters {
             player_id: a0,
             counter_kind: a1,
@@ -1574,6 +1614,36 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
             let DebugAction::ModifyEnergy {
                 player_id: b0,
                 delta: b1,
+            } = b
+            else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+        }
+        DebugAction::GivePlayerCounters {
+            player_id: a0,
+            counter_kind: a1,
+            count: a2,
+        } => {
+            let DebugAction::GivePlayerCounters {
+                player_id: b0,
+                counter_kind: b1,
+                count: b2,
+            } = b
+            else {
+                unreachable!("cmp_debug_action_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+                .then_with(|| cmp_val(a1, b1))
+                .then_with(|| cmp_val(a2, b2))
+        }
+        DebugAction::GiveEnergy {
+            player_id: a0,
+            count: a1,
+        } => {
+            let DebugAction::GiveEnergy {
+                player_id: b0,
+                count: b1,
             } = b
             else {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
@@ -1761,8 +1831,8 @@ mod tests {
         MayTriggerAutoChoiceOp, PrecastCopyShortcutResponse, ResolveAllConsentDecision,
     };
     use crate::types::game_state::{
-        EndEffectGroupId, MayTriggerAutoChoiceKey, MayTriggerAutoChoiceSelector, MayTriggerOrigin,
-        ReplacementAutoChoiceId,
+        CastPaymentMode, EndEffectGroupId, MayTriggerAutoChoiceKey, MayTriggerAutoChoiceSelector,
+        MayTriggerOrigin, ReplacementAutoChoiceId,
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::mana::{ManaCost, ManaCostShard};
@@ -1788,6 +1858,53 @@ mod tests {
     fn assert_distinct_order(a: GameAction, b: GameAction) {
         assert_ne!(a.cmp_stable(&b), Ordering::Equal);
         assert_eq!(a.cmp_stable(&b), b.cmp_stable(&a).reverse());
+    }
+
+    fn activation(source: u64, ability_index: usize, payment_mode: CastPaymentMode) -> GameAction {
+        GameAction::ActivateAbility {
+            source_id: ObjectId(source),
+            ability_index,
+            payment_mode,
+        }
+    }
+
+    /// An activation's payment mode is part of its payload: the Auto and Manual
+    /// siblings of one ability are distinct actions with a total, antisymmetric
+    /// order, compared after the source and ability index.
+    #[test]
+    fn activate_ability_orders_its_payment_mode_after_source_and_index() {
+        let modes = [
+            CastPaymentMode::Auto,
+            CastPaymentMode::AutoExceptSacrificialMana,
+            CastPaymentMode::Manual,
+        ];
+        for (i, a) in modes.iter().enumerate() {
+            for b in modes.iter().skip(i + 1) {
+                assert_distinct_order(activation(3, 1, *a), activation(3, 1, *b));
+            }
+            assert_eq!(
+                activation(3, 1, *a).cmp_stable(&activation(3, 1, *a)),
+                Ordering::Equal,
+                "an identical activation payload compares equal"
+            );
+        }
+        // Source and ability index still take precedence over the mode.
+        assert_eq!(
+            activation(3, 1, CastPaymentMode::Manual).cmp_stable(&activation(
+                4,
+                0,
+                CastPaymentMode::Auto
+            )),
+            Ordering::Less
+        );
+        assert_eq!(
+            activation(3, 0, CastPaymentMode::Manual).cmp_stable(&activation(
+                3,
+                1,
+                CastPaymentMode::Auto
+            )),
+            Ordering::Less
+        );
     }
 
     #[test]

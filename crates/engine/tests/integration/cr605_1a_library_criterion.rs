@@ -134,6 +134,7 @@ fn chromatic_sphere_waits_on_the_stack_before_producing() {
         .act(GameAction::ActivateAbility {
             source_id: sphere,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation accepted");
     for _ in 0..4 {

@@ -44,6 +44,7 @@ use engine::types::ability::{AbilityKind, TargetRef, TriggerDefinitionOccurrence
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -216,6 +217,7 @@ fn activate_to_priority(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the activation must be accepted");
     for _ in 0..16 {
