@@ -7103,13 +7103,14 @@ impl PeriodGrowth {
             axis.unbounded_mark_kind() == res::UnboundedMarkKind::DeferredAccrual
                 && crate::types::game_state::LoopCollapseAxis::from_resource_axis(*axis).is_none()
         });
-        // CR 732.2c + CR 119.3 + CR 810.9 + CR 810.9a: the driven cycle changed a player's life
-        // other than by a gain stored whole on that player's own field: a loss, a change the
-        // spread stored on a teammate, a change an `i32` limit held back, or a shared total's
-        // change its unreadable counters cannot attribute. The lump carries per-player gains
-        // read off the fields, so it would credit, net or drop that change, where performing the
-        // cycles stores and counts each change as it happens. A spill can be the take's only
-        // life change, so this is read whatever the take batches.
+        // CR 732.2c + CR 119.3 + CR 810.9 + CR 810.9a: some player's net life change in the
+        // driven cycle is not a gain, or nothing, stored whole on that player's own field: a net
+        // loss, a change the spread stored on a teammate, a change an `i32` limit held back, or a
+        // shared total's change its unreadable counters cannot attribute. The lump carries
+        // per-player gains read off the fields, so it would credit or drop that change, where
+        // performing the cycles stores each change as it happens. A cycle that also loses life
+        // but nets a gain on its player's own field is batched at its net. A spill can be the
+        // take's only life change, so this is read whatever the take batches.
         let life_not_stored_as_gains = !self.life_not_stored_as_gains.is_empty();
         // CR 732.2c + CR 119.3: one of this take's `n` cycles would carry a total its life
         // changes touch, or a gaining player's own field, past an `i32` limit, which holds a
@@ -8451,10 +8452,11 @@ fn current_period_counter_growth(
 /// gain alone when a per-turn counter fell or ends at `u32::MAX`). The
 /// batched δ source for the life axis, which a marked take applies at the take, at the accepted
 /// count (CR 732.2c). Empty when no player gains across the period; a total held at `i32::MAX`
-/// throughout gains the rules amount its counters read. A take whose cycle's life is not gains
-/// stored whole on their players' own fields, one of whose cycles would pass an `i32` limit, or
-/// that would batch life beside a `Tokens` or `Counters` item, is not batched: the take performs
-/// the period instead (`PeriodGrowth::collapse_is_replay`).
+/// throughout gains the rules amount its counters read. A take in whose cycle some player's net
+/// life change is not a gain, or nothing, stored whole on its own field, one of whose cycles
+/// would pass an `i32` limit, or that would batch life beside a `Tokens` or `Counters` item, is
+/// not batched: the take performs the period instead (`PeriodGrowth::collapse_is_replay`). A
+/// period that also loses life is batched at its net.
 /// Only reached in the UNOBSERVED batched route (the firewall gates it).
 fn current_period_life_growth(before: &GameState, after: &GameState) -> Vec<(PlayerId, u32)> {
     crate::analysis::resource::grown_life_deltas(before, after)

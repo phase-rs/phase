@@ -2614,8 +2614,10 @@ impl ResourceVector {
     /// player individually") decides which member carries that change, never its sign or its
     /// size, so a bounded entry has its total's sign or is 0. In a two-member team (CR 810.1)
     /// whose counters sum to `t`, the members' entries still sum to `t`; where a limit held the
-    /// total back, or in the Archenemy Commander heroes' three-member total (CR 904.13b), each
-    /// member carries at most `t`.
+    /// total back, each member carries at most `t`. In the Archenemy Commander heroes'
+    /// three-member total (CR 904.13b) neither need hold: a member whose counter change equals
+    /// its stored change keeps that change, so where another member lost life one member's gain
+    /// can exceed `t` and the entries can sum to more than `t`.
     ///
     /// Where no entry of `self` is negative, no entry of the result is, and a total that grows
     /// keeps a positive entry, except a total that fails closed, which keeps none: where its
