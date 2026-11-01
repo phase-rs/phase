@@ -366,6 +366,30 @@ describe("Discard cost modal", () => {
     expect(screen.queryByText(/battlefield/i)).not.toBeInTheDocument();
   });
 
+  it("describes library bottom placement without saying top of your library", () => {
+    setWaitingFor(
+      buildEffectZoneChoiceWaitingFor({
+        player: 0,
+        cards: [],
+        count: 1,
+        min_count: 0,
+        up_to: false,
+        source_id: 1,
+        effect_kind: "PutAtLibraryPosition",
+        zone: "Hand",
+        library_position: { type: "Bottom" },
+      }),
+    );
+
+    render(<CardChoiceModal />);
+
+    expect(screen.getByText("Put on Library")).toBeInTheDocument();
+    expect(
+      screen.getByText("Choose 1 card to put on the bottom of your library"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/top of your library/i)).not.toBeInTheDocument();
+  });
+
   it("describes exile selection without falling back to battlefield", () => {
     setWaitingFor(
       buildEffectZoneChoiceWaitingFor({
@@ -675,6 +699,37 @@ describe("Discard cost modal", () => {
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "SelectCards",
       data: { cards: [11, 10] },
+    });
+  });
+
+  it("shows bottomdeck order and dispatches selected cards for bottom placement", () => {
+    setWaitingFor(
+      buildEffectZoneChoiceWaitingFor({
+        player: 0,
+        cards: [10],
+        count: 1,
+        min_count: 0,
+        up_to: false,
+        source_id: 1,
+        effect_kind: "PutAtLibraryPosition",
+        zone: "Hand",
+        library_position: { type: "Bottom" },
+      }),
+      {
+        10: makeObject(10, "Component Card"),
+      },
+    );
+
+    render(<CardChoiceModal />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Component Card/i }));
+
+    expect(screen.getByText("Bottom")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Put on bottom (Bottom)" }));
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [10] },
     });
   });
 

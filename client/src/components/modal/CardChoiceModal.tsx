@@ -1356,7 +1356,11 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
 
   if (!objects) return null;
 
-  const isTopdeck = data.effect_kind === "PutAtLibraryPosition";
+  const isLibraryPosition = data.effect_kind === "PutAtLibraryPosition";
+  const isBottomdeck =
+    isLibraryPosition && data.library_position?.type === "Bottom";
+  const isTopdeck = isLibraryPosition && !isBottomdeck;
+  const isLibraryOrder = isTopdeck || isBottomdeck;
   const mode: EffectZoneMode = isTapUntapChoice
     ? data.effect_kind === "Untap"
       ? "Untap"
@@ -1367,17 +1371,21 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
       ? "Cast"
     : isSacrifice
       ? "Sacrifice"
-      : isTopdeck
-        ? "Topdeck"
-        : data.destination === "Hand"
-          ? "Hand"
-          : data.destination === "Exile"
-            ? "Exile"
-            : "Battlefield";
+      : isBottomdeck
+        ? "Bottomdeck"
+        : isTopdeck
+          ? "Topdeck"
+          : data.destination === "Hand"
+            ? "Hand"
+            : data.destination === "Exile"
+              ? "Exile"
+              : "Battlefield";
   const visualClasses = EFFECT_ZONE_VISUAL_CLASSES[mode];
-  const selectedOrder = isTopdeck ? Array.from(selected) : [];
+  const selectedOrder = isLibraryOrder ? Array.from(selected) : [];
   const selectedOrderLabels = selectedOrder.map((_, index) =>
-    formatTopdeckOrderLabel(index, t),
+    isBottomdeck
+      ? formatBottomdeckOrderLabel(index, t)
+      : formatTopdeckOrderLabel(index, t),
   );
   const isReady = isUpTo
     ? selected.size >= minCount && selected.size <= data.count
@@ -1398,10 +1406,14 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
         ? t("cardChoice.effectZone.labelPutOnTop", {
             order: selectedOrderLabels.join(" -> "),
           })
-        : t(EFFECT_ZONE_ACTION_LABEL_KEYS[mode], {
-            selected: selected.size,
-            count: data.count,
-          });
+        : isBottomdeck && selectedOrderLabels.length > 0
+          ? t("cardChoice.effectZone.labelPutOnBottom", {
+              order: selectedOrderLabels.join(" -> "),
+            })
+          : t(EFFECT_ZONE_ACTION_LABEL_KEYS[mode], {
+              selected: selected.size,
+              count: data.count,
+            });
 
   return (
     <ChoiceOverlay
@@ -1422,8 +1434,10 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
           const isSelected = selected.has(id);
           const selectedIndex = selectedOrder.indexOf(id);
           const badgeLabel =
-            isTopdeck && selectedIndex >= 0
-              ? formatTopdeckOrderLabel(selectedIndex, t)
+            isLibraryOrder && selectedIndex >= 0
+              ? isBottomdeck
+                ? formatBottomdeckOrderLabel(selectedIndex, t)
+                : formatTopdeckOrderLabel(selectedIndex, t)
               : t(EFFECT_ZONE_BADGE_KEYS[mode]);
           return (
             <motion.button
@@ -1468,6 +1482,23 @@ function formatTopdeckOrderLabel(index: number, t: TFunction<"game">): string {
   switch (index) {
     case 0:
       return t("cardChoice.effectZone.orderTop");
+    case 1:
+      return t("cardChoice.effectZone.orderSecond");
+    case 2:
+      return t("cardChoice.effectZone.orderThird");
+    case 3:
+      return t("cardChoice.effectZone.orderFourth");
+    case 4:
+      return t("cardChoice.effectZone.orderFifth");
+    default:
+      return t("cardChoice.effectZone.orderPosition", { position: index + 1 });
+  }
+}
+
+function formatBottomdeckOrderLabel(index: number, t: TFunction<"game">): string {
+  switch (index) {
+    case 0:
+      return t("cardChoice.effectZone.orderBottom");
     case 1:
       return t("cardChoice.effectZone.orderSecond");
     case 2:

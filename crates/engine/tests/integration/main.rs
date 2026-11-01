@@ -34,6 +34,7 @@ mod akroan_horse;
 mod alchemists_gift_pump_modal_keyword_choice;
 mod all_player_library_wheel;
 mod alternative_cost_defiler_offers;
+mod amass_the_components;
 mod ambitious_augmenter;
 mod ambuscade_one_sided_fight_anaphoric;
 mod amphin_mutineer_regression;

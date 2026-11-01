@@ -114,6 +114,7 @@ export function searchChoiceAllowsPartialFind(data: SearchChoice["data"]): boole
 export type EffectZoneMode =
   | "Sacrifice"
   | "Topdeck"
+  | "Bottomdeck"
   | "Hand"
   | "Exile"
   | "Battlefield"
@@ -132,6 +133,11 @@ export const EFFECT_ZONE_VISUAL_CLASSES: Record<
     badge: "bg-red-500/90",
   },
   Topdeck: {
+    ring: "ring-sky-300/80",
+    overlay: "bg-sky-500/20",
+    badge: "bg-sky-500/90",
+  },
+  Bottomdeck: {
     ring: "ring-sky-300/80",
     overlay: "bg-sky-500/20",
     badge: "bg-sky-500/90",
@@ -176,6 +182,7 @@ export const EFFECT_ZONE_VISUAL_CLASSES: Record<
 export const EFFECT_ZONE_ACTION_LABEL_KEYS: Record<EffectZoneMode, string> = {
   Sacrifice: "cardChoice.effectZone.labelConfirm",
   Topdeck: "cardChoice.effectZone.labelTop",
+  Bottomdeck: "cardChoice.effectZone.labelBottom",
   Hand: "cardChoice.effectZone.labelReturn",
   Exile: "cardChoice.effectZone.labelExile",
   Battlefield: "cardChoice.effectZone.labelPut",
@@ -188,6 +195,7 @@ export const EFFECT_ZONE_ACTION_LABEL_KEYS: Record<EffectZoneMode, string> = {
 export const EFFECT_ZONE_BADGE_KEYS: Record<EffectZoneMode, string> = {
   Sacrifice: "cardChoice.badges.sacrifice",
   Topdeck: "cardChoice.badges.put",
+  Bottomdeck: "cardChoice.badges.put",
   Hand: "cardChoice.badges.return",
   Exile: "cardChoice.badges.exile",
   Battlefield: "cardChoice.badges.put",
