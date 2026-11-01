@@ -1065,15 +1065,8 @@ fn remaining_damage_chain_nodes_keep_latched_trigger_source_across_pause() {
         .id();
 
     // 4. Swords to Plowshares to exile the original Volatile Rig before Clone is destroyed.
-    const EXILE_ORACLE: &str = "Exile target creature.";
-    let swords = scenario
-        .add_spell_to_hand_from_oracle(P0, "Swords to Plowshares", false, EXILE_ORACLE)
-        .as_instant()
-        .with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::White],
-            generic: 0,
-        })
-        .id();
+    let db = crate::support::shared_card_db().expect("card db");
+    let swords = scenario.add_real_card(P0, "Swords to Plowshares", Zone::Hand, db);
 
     // 5. Murder in P0's hand to destroy the Clone.
     let murder = scenario
@@ -1140,6 +1133,12 @@ fn remaining_damage_chain_nodes_keep_latched_trigger_source_across_pause() {
         Zone::Exile,
         "original Rig exiled so its own dies trigger never fires"
     );
+    // Swords' second instruction: the Rig's controller (P1) gains life equal to its power (4).
+    assert_eq!(
+        runner.state().players[1].life,
+        24,
+        "P1 gains 4 life from Swords to Plowshares"
+    );
 
     // 3. P0 casts Murder targeting the Clone.
     runner.state_mut().active_player = P0;
@@ -1190,12 +1189,12 @@ fn remaining_damage_chain_nodes_keep_latched_trigger_source_across_pause() {
 
     // With Halo naming Volatile Rig:
     // - P0 (protected) stays at 20 (latched trigger source LKI retains name "Volatile Rig").
-    // - P1 (unprotected) takes 4 damage (20 -> 16), proving the continuation ran.
+    // - P1 (unprotected) takes 4 damage (24 -> 20), proving the continuation ran.
     assert_eq!(runner.state().players[0].life, 20, "P0 life must remain 20");
     assert_eq!(
         runner.state().players[1].life,
-        16,
-        "P1 life must be 16 proving continuation ran"
+        20,
+        "P1 life must be 20 proving continuation ran"
     );
 }
 
