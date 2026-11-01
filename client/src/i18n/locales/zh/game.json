@@ -2641,6 +2641,7 @@
   "topOrBottom": {
     "bottom": "牌库底",
     "cardFallback": "牌",
+    "nthFromTop": "Position {{n}} from the top of library",
     "title": "将{{name}}置于牌库顶或牌库底",
     "top": "牌库顶"
   },
