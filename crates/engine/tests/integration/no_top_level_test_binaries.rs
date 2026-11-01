@@ -148,7 +148,10 @@ fn every_integration_file_is_registered_in_exactly_one_shard_root() {
     let dir = engine_dir().join("tests").join("integration");
     let manifest = std::fs::read_to_string(engine_dir().join("Cargo.toml"))
         .expect("read crates/engine/Cargo.toml");
-    let read = |name: &str| std::fs::read_to_string(dir.join(name)).expect("read integration file");
+    let read = |name: &str| {
+        let path = dir.join(name);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"))
+    };
     let roots: BTreeMap<String, String> = shard_roots(&manifest)
         .into_iter()
         .map(|root| (root.clone(), read(&root)))
@@ -193,7 +196,7 @@ fn the_registration_census_flags_every_offense_class() {
     };
     let roots = map(&[
         ("main.rs", "#[path = \"../../src/x.rs\"]\nmod x;\npub mod support;\nmod a;\nmod twice;"),
-        ("shard_2.rs", "pub mod support;\n#[cfg(feature = \"f\")]\nmod b;\nmod twice;\n#[path = \"../../src/x.rs\"]\nmod x;"),
+        ("shard_2.rs", "pub mod support;\n#[cfg(feature = \"f\")]\nmod b;\nmod twice;\n#[path = \"../../src/x.rs\"]\n#[cfg(test)]\nmod x;"),
     ]);
     let clean = map(&[("support.rs", "pub fn s() {}"), ("a.rs", ""), ("b.rs", "")]);
     assert_eq!(

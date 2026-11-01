@@ -1,8 +1,9 @@
-//! The `integration_5` test target: one fixed shard of the engine integration suite. It holds the
-//! test modules named from `reflexive_body_token_referent` onward (byte order) that share no
-//! `crate::<module>` reference with another test module and have no insta snapshot. `main.rs` (the
-//! `integration` target) holds every other module. `no_top_level_test_binaries` enforces that each
-//! file here is registered in exactly one shard root.
+//! The `integration_5` test target: one fixed shard of the engine integration suite. New test
+//! modules named from `reflexive_body_token_referent` onward (byte order) register here. `main.rs`
+//! (the `integration` target) holds every module that uses, or is used by, another test module
+//! other than `support` through `crate::<module>`, and every module with an insta snapshot; it may
+//! also hold modules from this range. `no_top_level_test_binaries` enforces that each file here is
+//! registered in exactly one shard root.
 
 pub mod support;
 
