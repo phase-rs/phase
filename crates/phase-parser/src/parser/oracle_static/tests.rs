@@ -34390,7 +34390,7 @@ fn attached_subject_they_hasnt_dealt_damage_yet_stays_unrecognized() {
                         def.condition,
                         Some(StaticCondition::Not {
                             condition: Box::new(StaticCondition::SourceHasDealtDamage {
-                                kind: filter.clone(),
+                                kind: *filter,
                             }),
                         }),
                         "{line}"
