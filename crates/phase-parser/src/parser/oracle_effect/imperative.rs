@@ -4927,6 +4927,16 @@ pub(super) fn is_standalone_object_choice_clause(fragment: &str) -> bool {
     parse_battlefield_object_choice_core(rest, rest_lower, &mut throwaway).is_some()
 }
 
+fn is_you_controlled_target(target: &TargetFilter) -> bool {
+    matches!(
+        target,
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            ..
+        })
+    )
+}
+
 pub(super) fn parse_choose_ast(
     text: &str,
     lower: &str,
@@ -5087,12 +5097,14 @@ pub(super) fn parse_choose_ast(
             let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
             // CR 115.10a + CR 608.2d: only a fully parsed, untargeted object
-            // choice establishes that the object is chosen during resolution.
+            // choice under your control establishes resolution timing. A
+            // third-party choice may have had its targeted subject stripped.
             // Random selections must not become controller-choice prompts.
             if remainder.trim().is_empty()
                 && !ctx.choice_quantifier_stripped
                 && ctx.target_selection_mode == TargetSelectionMode::Chosen
                 && !nom_primitives::scan_contains(rest_lower, "target ")
+                && is_you_controlled_target(&target)
                 && !target.is_context_ref()
                 && !target.denotes_player_target()
             {

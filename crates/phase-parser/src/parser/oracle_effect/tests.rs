@@ -78391,6 +78391,52 @@ fn bare_choose_printed_cards_use_resolution_timing() {
     assert_eq!(copy.target_choice_timing, TargetChoiceTiming::Stack);
 }
 
+/// SHAPE: stripping a targeted opponent subject must not retime its player slot.
+#[test]
+fn bare_choose_third_party_printed_choices_keep_stack_timing() {
+    let target =
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetOpponent));
+    for (name, text) in [
+        (
+            "Imperial Edict",
+            "Target opponent chooses a creature they control.",
+        ),
+        (
+            "Sakashima's Will mode 1",
+            "Target opponent chooses a creature they control. You gain control of it.",
+        ),
+    ] {
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        let head = &ir.clauses[0];
+        assert_eq!(
+            head.parsed.effect,
+            Effect::TargetOnly {
+                target: target.clone(),
+            },
+            "{name}: the creature retains its targeted-opponent controller"
+        );
+        assert_eq!(head.declared_target_choice_timing, None, "{name}");
+
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(
+            def.effect.as_ref(),
+            &Effect::TargetOnly {
+                target: target.clone(),
+            },
+            "{name}: the player target must survive lowering"
+        );
+        assert!(
+            crate::types::ability::effect_references_target_player(&def.effect),
+            "{name}: the companion player target must remain declared"
+        );
+        assert_eq!(
+            def.target_choice_timing,
+            TargetChoiceTiming::Stack,
+            "{name}"
+        );
+    }
+}
+
 /// SHAPE: a partially parsed object phrase cannot establish resolution timing.
 #[test]
 fn bare_choose_partial_object_phrase_keeps_stack_timing() {
