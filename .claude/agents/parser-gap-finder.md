@@ -111,7 +111,7 @@ Coverage: [current coverage %]
 | `crates/phase-parser/src/parser/oracle_effect/mod.rs` | Pre-dispatch patterns, `parse_effect_clause` |
 | `crates/phase-parser/src/parser/oracle_effect/subject.rs` | Subject stripping, `PREDICATE_VERBS`, `starts_with_subject_prefix` |
 | `crates/phase-parser/src/parser/oracle_nom/primitives.rs` | Shared nom combinators (numbers, mana, colors, P/T, counters) |
-| `crates/phase-parser/src/parser/oracle_nom/error.rs` | `parse_or_unimplemented` error boundary, `OracleResult` type |
+| `crates/phase-parser/src/parser/oracle_nom/error.rs` | Error boundary, `OracleResult` type |
 | `crates/engine/src/game/gap_analysis.rs` | Regroups gaps by typed diagnosis (`GapClass`, `analyze_gaps`) |
 | `crates/engine/src/game/coverage.rs` | Coverage types and semantic audit pipeline (`audit_semantic`, `SemanticFinding`) |
 

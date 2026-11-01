@@ -59,7 +59,7 @@ ProposedEvent::ZoneChange {
 
 Other variants: `Damage`, `Draw`, `LifeGain`, `LifeLoss`, `Discard`, `Destroy`, `Sacrifice`, `Tap`, `Untap`, `AddCounter`, `RemoveCounter`, `CreateToken`.
 
-### `ReplacementEvent` — `crates/engine/src/types/replacements.rs`
+### `ReplacementEvent` — `crates/phase-ast/src/types/replacements.rs`
 
 Enum of interceptable event types. Add a new variant here when the event being replaced doesn't match any existing type.
 
@@ -109,7 +109,7 @@ ReplacementResult::Execute(modified_event) → caller processes the event
 
 ### Phase 1 — Type Definition
 
-- [ ] **`crates/engine/src/types/replacements.rs` — `ReplacementEvent` enum** (if new event type)
+- [ ] **`crates/phase-ast/src/types/replacements.rs` — `ReplacementEvent` enum** (if new event type)
   Add a variant for the event being intercepted. Skip if an existing variant fits.
 
 - [ ] **`crates/phase-ast/src/types/ability.rs` — `ReplacementCondition` enum** (if new condition)
@@ -128,7 +128,7 @@ ReplacementResult::Execute(modified_event) → caller processes the event
 - [ ] **`crates/phase-parser/src/parser/oracle_replacement.rs` — parsing function**
   Write a parser that recognizes the Oracle text pattern and returns `Option<ReplacementDefinition>`.
 
-  Entry point: `parse_replacement(text: &str) -> Option<ReplacementDefinition>` — called from the main Oracle parser.
+  Entry point: `parse_replacement_line(text: &str, card_name: &str) -> Option<ReplacementDefinition>` — called from the main Oracle parser.
 
   Follow existing patterns:
   - `parse_shock_land()` — Optional mode with accept/decline AbilityDefinitions
@@ -273,7 +273,7 @@ rg -q "enum ProposedEvent" crates/engine/src/types/proposed_event.rs && \
 rg -q "fn parse_shock_land" crates/phase-parser/src/parser/oracle_replacement.rs && \
 rg -q "enum ClauseDisposition" crates/phase-parser/src/parser/oracle_ir/effect_chain.rs && \
 rg -q "enum ReplaceMeaningKind" crates/phase-parser/src/parser/oracle_ir/effect_chain.rs && \
-rg -q "else_ability" crates/engine/src/types/ability.rs && \
+rg -q "else_ability" crates/phase-ast/src/types/ability.rs && \
 echo "✓ add-replacement-effect skill references valid" || \
 echo "✗ STALE — update skill references"
 ```

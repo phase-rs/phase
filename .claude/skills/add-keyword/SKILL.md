@@ -254,7 +254,7 @@ rg -q "fn parse_router_keyword_fragment" crates/phase-parser/src/parser/oracle_k
 rg -q "enum KeywordRemainderPolicy" crates/phase-parser/src/parser/oracle_keyword.rs && \
 rg -q "fn is_keyword_cost_line" crates/phase-parser/src/parser/oracle_keyword.rs && \
 rg -q "ROUTER_KEYWORD_CASES" crates/phase-parser/src/parser/oracle_keyword.rs && \
-rg -q "AddKeyword" crates/engine/src/types/ability.rs && \
+rg -q "AddKeyword" crates/phase-ast/src/types/ability.rs && \
 echo "✓ add-keyword skill references valid" || \
 echo "✗ STALE — update skill references"
 ```
