@@ -343,6 +343,35 @@ mod tests {
     }
 
     #[test]
+    fn color_inference_deduplicates_overlapping_lands() {
+        let cards = [
+            "Island",
+            "Snow-Covered Island",
+            "Hallowed Fountain",
+            "Plains",
+        ]
+        .map(|name| DeckEntry {
+            count: 4,
+            name: name.to_string(),
+        });
+        let mut colors = infer_colors(&cards);
+        colors.sort();
+
+        assert_eq!(colors, ["U", "W"]);
+    }
+
+    #[test]
+    fn color_inference_without_recognized_lands_is_empty() {
+        assert!(infer_colors(&[]).is_empty());
+
+        let cards = ["Wastes", "Unrecognized card"].map(|name| DeckEntry {
+            count: 1,
+            name: name.to_string(),
+        });
+        assert!(infer_colors(&cards).is_empty());
+    }
+
+    #[test]
     fn companion_section_sets_name_and_stays_out_of_main() {
         let text = "4 Lightning Bolt\n20 Mountain\nCompanion\n1 Lurrus of the Dream-Den\nSideboard\n1 Lurrus of the Dream-Den\n2 Wear // Tear";
         let mut main = Vec::new();

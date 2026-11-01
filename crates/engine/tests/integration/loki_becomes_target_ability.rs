@@ -8,9 +8,9 @@
 //! permanent, which emits `GameEvent::BecomesTarget` with the ability as source.
 //! That matches Loki's `valid_source = StackAbility { controller: Some(You) }`
 //! and `valid_card = Typed(Permanent ∧ InZone(Battlefield))`, so Loki draws — but
-//! the `TriggerConstraint::OncePerTurn` limiter caps it at one draw per turn
-//! (CR 603.2h) and resets at the turn boundary (turns.rs clears
-//! `triggers_fired_this_turn`).
+//! the `TriggerConstraint::OncePerTurn { spent_by: Triggering }` limiter caps it
+//! at one draw per turn (CR 603.2: triggering spends the limit) and resets at the
+//! turn boundary (turns.rs clears `triggers_fired_this_turn`).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::AbilityKind;

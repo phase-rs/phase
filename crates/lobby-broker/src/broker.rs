@@ -19,8 +19,8 @@ use tracing::{debug, info, warn};
 use crate::env::BrokerEnv;
 use crate::lobby::{ExpiryConsumption, LobbyManager, LobbyRegistration, RegisterGameRequest};
 use crate::protocol::{
-    code_in_use_message, LobbyClientMessage, LobbyServerMessage, ServerErrorCode, ServerMode,
-    TournamentRequestId, TournamentView,
+    code_in_use_message, LobbyClientMessage, LobbyGame, LobbyServerMessage, ServerErrorCode,
+    ServerMode, TournamentRequestId, TournamentView,
 };
 use crate::reservation_auth::{
     consume_owned_reservation, release_owned_reservation, ReservationConsume, ReservationRelease,
@@ -145,6 +145,15 @@ pub struct ConnState {
     pub joined_tournaments: Vec<String>,
 }
 
+impl ConnState {
+    /// The accepted hello's build, `""` before a hello.
+    fn hello_build_commit(&self) -> &str {
+        self.client_hello
+            .as_ref()
+            .map_or("", |h| h.build_commit.as_str())
+    }
+}
+
 /// A side effect the shell must perform after a broker call. **Order within a
 /// returned `Vec<Outbound>` is significant** and must be preserved.
 #[derive(Debug, Clone, PartialEq)]
@@ -211,6 +220,81 @@ pub fn check_build_commit(host_commit: &str, guest_commit: &str) -> BuildCommitC
     } else {
         BuildCommitCheck::Allow
     }
+}
+
+/// Whether a subscriber on `viewer_build_commit` may see `game`: the join gate's answer.
+pub fn lobby_row_visible_to(game: &LobbyGame, viewer_build_commit: &str) -> bool {
+    check_build_commit(&game.host_build_commit, viewer_build_commit) == BuildCommitCheck::Allow
+}
+
+/// A row delta's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowDelta {
+    Added,
+    Updated,
+}
+
+/// What one subscriber receives for a row delta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowDelivery {
+    Deliver,
+    Withhold,
+    /// Send the row's `LobbyGameRemoved` instead.
+    Retract,
+}
+
+pub fn row_delivery(delta: RowDelta, game: &LobbyGame, viewer_build_commit: &str) -> RowDelivery {
+    match (lobby_row_visible_to(game, viewer_build_commit), delta) {
+        (true, _) => RowDelivery::Deliver,
+        (false, RowDelta::Added) => RowDelivery::Withhold,
+        // The viewer may hold a copy listed before the host re-stamped its build.
+        (false, RowDelta::Updated) => RowDelivery::Retract,
+    }
+}
+
+/// `msg` as a subscriber on `viewer_build_commit` receives it, or `None`.
+pub fn lobby_frame_for_viewer(
+    msg: &LobbyServerMessage,
+    viewer_build_commit: &str,
+) -> Option<LobbyServerMessage> {
+    let (delta, game) = match msg {
+        LobbyServerMessage::LobbyGameAdded { game } => (RowDelta::Added, game),
+        LobbyServerMessage::LobbyGameUpdated { game } => (RowDelta::Updated, game),
+        LobbyServerMessage::ServerHello { .. }
+        | LobbyServerMessage::GameCreated { .. }
+        | LobbyServerMessage::Error { .. }
+        | LobbyServerMessage::LobbyUpdate { .. }
+        | LobbyServerMessage::LobbyGameRemoved { .. }
+        | LobbyServerMessage::PlayerCount { .. }
+        | LobbyServerMessage::PasswordRequired { .. }
+        | LobbyServerMessage::JoinTargetInfo { .. }
+        | LobbyServerMessage::Pong { .. }
+        | LobbyServerMessage::PeerInfo { .. }
+        | LobbyServerMessage::TournamentCreated { .. }
+        | LobbyServerMessage::TournamentJoined { .. }
+        | LobbyServerMessage::TournamentUpdate { .. }
+        | LobbyServerMessage::TournamentRemoved { .. }
+        | LobbyServerMessage::TournamentListUpdate { .. }
+        | LobbyServerMessage::TournamentActionAck { .. }
+        | LobbyServerMessage::TournamentActionRejected { .. }
+        | LobbyServerMessage::TournamentCredentialRenewed { .. } => return Some(msg.clone()),
+    };
+    match row_delivery(delta, game, viewer_build_commit) {
+        RowDelivery::Deliver => Some(msg.clone()),
+        RowDelivery::Withhold => None,
+        RowDelivery::Retract => Some(LobbyServerMessage::LobbyGameRemoved {
+            game_code: game.game_code.clone(),
+        }),
+    }
+}
+
+/// [`lobby_frame_for_viewer`] over a serialized frame; an unparsable frame is sent unchanged.
+pub fn lobby_frame_json_for_viewer(frame_json: &str, viewer_build_commit: &str) -> Option<String> {
+    let Ok(msg) = serde_json::from_str::<LobbyServerMessage>(frame_json) else {
+        return Some(frame_json.to_string());
+    };
+    lobby_frame_for_viewer(&msg, viewer_build_commit)
+        .map(|frame| serde_json::to_string(&frame).expect("a lobby frame serializes"))
 }
 
 /// The matchmaking broker. Wraps the pure [`LobbyManager`]; all broker dispatch
@@ -423,6 +507,37 @@ impl Broker {
             .map(crate::protocol::TournamentView::from)
     }
 
+    /// The heartbeat timestamp echo, independent of listing presence refresh.
+    /// Both broker dispatch and shells with a separate refresh task use this
+    /// constructor, so answering a heartbeat never needs a fabricated connection.
+    #[must_use]
+    pub fn heartbeat_reply(timestamp: u64) -> LobbyServerMessage {
+        LobbyServerMessage::Pong { timestamp }
+    }
+    /// The reply to a frame that needs no broker state and has no side effects,
+    /// or `None` when the frame must go through [`Broker::handle`].
+    ///
+    /// Takes no `self`, so a shell can answer without taking the lock that
+    /// guards the broker. Today that is a `Ping` from a connection that does
+    /// not host a listing: a host's frame must also refresh its listing's
+    /// liveness clock (see the prelude of [`Broker::handle`]), which needs the
+    /// broker, so a hosting connection always yields `None`. The reply is a
+    /// point reply to the sender, hence a bare [`LobbyServerMessage`] rather
+    /// than an [`Outbound`] list. [`Broker::handle`] answers through this same
+    /// function, so the reply has exactly one definition.
+    #[must_use]
+    pub fn stateless_reply(
+        conn: &ConnState,
+        msg: &LobbyClientMessage,
+    ) -> Option<LobbyServerMessage> {
+        match msg {
+            LobbyClientMessage::Ping { timestamp } if conn.host_game.is_none() => {
+                Some(Self::heartbeat_reply(*timestamp))
+            }
+            _ => None,
+        }
+    }
+
     /// Single entry for client frames. Returns the ordered side effects the
     /// shell must perform. The error helper keeps the many reject paths terse.
     pub fn handle(
@@ -431,6 +546,12 @@ impl Broker {
         msg: LobbyClientMessage,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
+        // Frames answerable without broker state (an unhosted Ping) never
+        // reach the liveness refresh, the guard or the dispatch below: none of
+        // them has anything to do for such a frame.
+        if let Some(reply) = Self::stateless_reply(conn, &msg) {
+            return vec![Outbound::ToSelf(reply)];
+        }
         // Any frame from the socket that owns the current listing is proof its
         // host is alive, so it refreshes the listing's liveness clock. Scoped
         // by identity, so a stale stamp cannot extend a reclaimer's listing;
@@ -473,7 +594,13 @@ impl Broker {
             LobbyClientMessage::SubscribeLobby => {
                 debug!("lobby subscription");
                 conn.subscribed = true;
-                let games = self.lobby.public_games();
+                let viewer = conn.hello_build_commit();
+                let games: Vec<LobbyGame> = self
+                    .lobby
+                    .public_games()
+                    .into_iter()
+                    .filter(|game| lobby_row_visible_to(game, viewer))
+                    .collect();
                 debug!(games = games.len(), "sending lobby state");
                 // The tournament list rides the same initial push as the game
                 // list, so a freshly-subscribed client has both without a
@@ -554,8 +681,10 @@ impl Broker {
                 env,
             ),
 
+            // Reached only by a hosting connection (an unhosted Ping is
+            // answered by `stateless_reply` above), after its liveness refresh.
             LobbyClientMessage::Ping { timestamp } => {
-                vec![Outbound::ToSelf(LobbyServerMessage::Pong { timestamp })]
+                vec![Outbound::ToSelf(Self::heartbeat_reply(timestamp))]
             }
 
             LobbyClientMessage::UpdateLobbyMetadata {
@@ -981,11 +1110,7 @@ impl Broker {
             return vec![error("You are already hosting this game")];
         }
 
-        let guest_commit = conn
-            .client_hello
-            .as_ref()
-            .map(|h| h.build_commit.as_str())
-            .unwrap_or("");
+        let guest_commit = conn.hello_build_commit();
         let host_commit = self.lobby.host_build_commit(&game_code).unwrap_or("");
         if let BuildCommitCheck::Reject { host, guest } =
             check_build_commit(host_commit, guest_commit)
@@ -1083,11 +1208,7 @@ impl Broker {
         }
 
         // --- build-commit + password gates, then snapshot ---
-        let guest_commit = conn
-            .client_hello
-            .as_ref()
-            .map(|h| h.build_commit.as_str())
-            .unwrap_or("");
+        let guest_commit = conn.hello_build_commit();
         let host_commit = self.lobby.host_build_commit(&game_code).unwrap_or("");
         if let BuildCommitCheck::Reject { host, guest } =
             check_build_commit(host_commit, guest_commit)
@@ -1850,11 +1971,15 @@ mod tests {
     }
 
     fn hello(conn: &mut ConnState, broker: &mut Broker, env: &FakeEnv) {
+        hello_as(conn, broker, env, "abc");
+    }
+
+    fn hello_as(conn: &mut ConnState, broker: &mut Broker, env: &FakeEnv, build: &str) {
         broker.handle(
             conn,
             LobbyClientMessage::ClientHello {
                 client_version: "0.1.0".into(),
-                build_commit: "abc".into(),
+                build_commit: build.into(),
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(crate::protocol::LOBBY_PROTOCOL_VERSION),
             },
@@ -2579,6 +2704,143 @@ mod tests {
         assert!(broker.lobby_mut().public_game(&first_code).is_some());
     }
 
+    /// The sorted codes of the `LobbyUpdate` snapshot a subscriber on `build` is sent.
+    fn snapshot_codes(broker: &mut Broker, env: &FakeEnv, build: &str) -> Vec<String> {
+        let mut conn = ConnState::default();
+        hello_as(&mut conn, broker, env, build);
+        let out = broker.handle(&mut conn, LobbyClientMessage::SubscribeLobby, env);
+        let mut codes: Vec<String> = out
+            .iter()
+            .find_map(|o| match o {
+                Outbound::ToSelf(LobbyServerMessage::LobbyUpdate { games }) => {
+                    Some(games.iter().map(|g| g.game_code.clone()).collect())
+                }
+                _ => None,
+            })
+            .expect("LobbyUpdate present");
+        codes.sort();
+        codes
+    }
+
+    #[test]
+    fn subscribe_snapshot_lists_only_rows_the_subscriber_can_join() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut codes = Vec::new();
+        for build in ["abc", "xyz", ""] {
+            let mut host = ConnState::default();
+            hello_as(&mut host, &mut broker, &env, build);
+            codes.push(game_code_of(&create(&mut host, &mut broker, &env)));
+        }
+        let (abc, xyz, empty) = (codes[0].clone(), codes[1].clone(), codes[2].clone());
+
+        assert_eq!(
+            snapshot_codes(&mut broker, &env, ""),
+            [abc.clone(), xyz, empty.clone()]
+        );
+        assert_eq!(snapshot_codes(&mut broker, &env, "abc"), [abc, empty]);
+    }
+
+    fn row(build: &str) -> LobbyGame {
+        LobbyGame {
+            game_code: "ROW1".into(),
+            host_name: "Host".into(),
+            created_at: 0,
+            has_password: false,
+            host_version: String::new(),
+            host_build_commit: build.into(),
+            current_players: 1,
+            max_players: 2,
+            format: None,
+            room_name: None,
+            is_p2p: true,
+            is_sandbox: false,
+            is_ranked: false,
+            draft_metadata: None,
+        }
+    }
+
+    #[test]
+    fn lobby_row_visibility_is_the_join_gate() {
+        assert!(lobby_row_visible_to(&row("abc"), "abc"));
+        assert!(!lobby_row_visible_to(&row("abc"), "xyz"));
+        assert!(lobby_row_visible_to(&row(""), "xyz"));
+        assert!(lobby_row_visible_to(&row("abc"), ""));
+    }
+
+    #[test]
+    fn row_delivery_withholds_added_and_retracts_updated() {
+        let game = row("abc");
+        assert_eq!(
+            row_delivery(RowDelta::Added, &game, "abc"),
+            RowDelivery::Deliver
+        );
+        assert_eq!(
+            row_delivery(RowDelta::Updated, &game, "abc"),
+            RowDelivery::Deliver
+        );
+        assert_eq!(
+            row_delivery(RowDelta::Added, &game, "xyz"),
+            RowDelivery::Withhold
+        );
+        assert_eq!(
+            row_delivery(RowDelta::Updated, &game, "xyz"),
+            RowDelivery::Retract
+        );
+    }
+
+    #[test]
+    fn lobby_frame_for_viewer_projects_only_row_frames() {
+        let added = LobbyServerMessage::LobbyGameAdded { game: row("abc") };
+        let updated = LobbyServerMessage::LobbyGameUpdated { game: row("abc") };
+        let removed = LobbyServerMessage::LobbyGameRemoved {
+            game_code: "ROW1".into(),
+        };
+
+        assert_eq!(lobby_frame_for_viewer(&added, "abc"), Some(added.clone()));
+        assert_eq!(
+            lobby_frame_for_viewer(&updated, "abc"),
+            Some(updated.clone())
+        );
+        assert_eq!(lobby_frame_for_viewer(&added, "xyz"), None);
+        assert_eq!(
+            lobby_frame_for_viewer(&updated, "xyz"),
+            Some(removed.clone())
+        );
+        for other in [
+            removed,
+            LobbyServerMessage::PlayerCount { count: 3 },
+            LobbyServerMessage::TournamentListUpdate {
+                tournaments: vec![],
+            },
+        ] {
+            assert_eq!(lobby_frame_for_viewer(&other, "xyz"), Some(other.clone()));
+        }
+    }
+
+    #[test]
+    fn lobby_frame_json_for_viewer_round_trips_frames() {
+        let added = LobbyServerMessage::LobbyGameAdded { game: row("abc") };
+        let updated = LobbyServerMessage::LobbyGameUpdated { game: row("abc") };
+        let parse = |json: Option<String>| -> LobbyServerMessage {
+            serde_json::from_str(&json.expect("a frame")).expect("a lobby frame")
+        };
+
+        let json = serde_json::to_string(&added).unwrap();
+        assert_eq!(parse(lobby_frame_json_for_viewer(&json, "abc")), added);
+        let json = serde_json::to_string(&updated).unwrap();
+        assert_eq!(
+            parse(lobby_frame_json_for_viewer(&json, "xyz")),
+            LobbyServerMessage::LobbyGameRemoved {
+                game_code: "ROW1".into()
+            }
+        );
+        assert_eq!(
+            lobby_frame_json_for_viewer("not json", "xyz").as_deref(),
+            Some("not json")
+        );
+    }
+
     #[test]
     fn subscribe_emits_add_then_update_then_tournaments_then_count() {
         let env = FakeEnv::new();
@@ -3251,6 +3513,49 @@ mod tests {
         assert_eq!(
             out.as_slice(),
             [Outbound::ToSelf(LobbyServerMessage::Pong { timestamp: 7 })]
+        );
+    }
+
+    #[test]
+    fn stateless_reply_answers_an_unhosted_ping_and_nothing_else() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+
+        // A connection that hosts no listing is answered without the broker.
+        let guest = ConnState::default();
+        assert_eq!(
+            Broker::stateless_reply(&guest, &LobbyClientMessage::Ping { timestamp: 9 }),
+            Some(LobbyServerMessage::Pong { timestamp: 9 })
+        );
+        // The reply is the one `handle` produces for the same frame.
+        let mut guest_conn = ConnState::default();
+        assert_eq!(
+            broker.handle(
+                &mut guest_conn,
+                LobbyClientMessage::Ping { timestamp: 9 },
+                &env
+            ),
+            [Outbound::ToSelf(LobbyServerMessage::Pong { timestamp: 9 })]
+        );
+
+        // A hosting connection's Ping must reach `handle` to refresh liveness.
+        let mut host = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        create(&mut host, &mut broker, &env);
+        assert!(host.host_game.is_some());
+        assert_eq!(
+            Broker::stateless_reply(&host, &LobbyClientMessage::Ping { timestamp: 9 }),
+            None
+        );
+
+        // Any other frame needs the broker, hosting or not.
+        assert_eq!(
+            Broker::stateless_reply(&guest, &LobbyClientMessage::SubscribeLobby),
+            None
+        );
+        assert_eq!(
+            Broker::stateless_reply(&host, &LobbyClientMessage::SubscribeLobby),
+            None
         );
     }
 

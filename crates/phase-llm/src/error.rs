@@ -25,6 +25,11 @@ pub enum LlmError {
     UndecodableChoice { detail: String },
     /// The model named an option outside the engine-issued domain.
     ChoiceOutOfRange { choice: i64, option_count: usize },
+    /// The configured provider cannot be asked this particular decision, as
+    /// opposed to the endpoint being misconfigured: a typed Choice needs 2 to
+    /// 255 options, so a forced move (one option) or an enormous domain has no
+    /// question to pose. The caller takes the heuristic for this decision.
+    UnsupportedDecision { detail: String },
     /// The decision the request was built for is no longer the decision the
     /// engine is waiting on. An ordinary race, not a failure of the model.
     StaleDecision,
@@ -49,6 +54,9 @@ impl fmt::Display for LlmError {
                 f,
                 "LLM chose option {choice}, outside the {option_count} options offered"
             ),
+            LlmError::UnsupportedDecision { detail } => {
+                write!(f, "this decision cannot be put to the provider: {detail}")
+            }
             LlmError::StaleDecision => {
                 write!(f, "the decision this LLM request was built for has changed")
             }

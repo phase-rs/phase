@@ -179,6 +179,7 @@
       "exportedTo": "Wyeksportowano do {{path}}.",
       "exportRequested": "Zażądano eksportu: {{filename}}.",
       "exportFailed": "Nie można wyeksportować stanu gry.",
+      "exportFailedDetail": "Nie można wyeksportować stanu gry. {{detail}}",
       "replayExported": "Powtórka zapisana jako {{filename}}.",
       "replayExportUnavailable": "Brak dostępnego nagrania powtórki dla tej rozgrywki.",
       "replayExportFailed": "Nie udało się wyeksportować powtórki."
@@ -285,7 +286,9 @@
     "loading": "Ładowanie..."
   },
   "turnBanner": {
-    "turn": "Tura {{number}}"
+    "turn": "Tura {{number}}",
+    "yourTurn": "Twoja tura",
+    "opponentTurn": "Tura: {{name}}"
   },
   "diceRoll": {
     "rollingForFirst": "Rzut o pierwszego gracza",
@@ -303,7 +306,8 @@
     "lostCoinFlip": "{{name}} przegrywa rzut monetą",
     "turnOrder": "Kolejność tur",
     "turnOrderItem": "Tura {{turn}}: {{name}}",
-    "youTakeTurn": "Rozgrywasz turę {{turn}}"
+    "youTakeTurn": "Rozgrywasz turę {{turn}}",
+    "ignoredDie": "Zignorowany"
   },
   "chrome": {
     "back": "Wstecz",

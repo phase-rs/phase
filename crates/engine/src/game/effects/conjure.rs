@@ -9,6 +9,7 @@ use crate::types::ability::{
 use crate::types::card::CardFace;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::game_state::RandomDraw;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -328,14 +329,14 @@ fn place_conjured_in_library(
     if conjured.is_empty() {
         return;
     }
-    let Some(pidx) = state.players.iter().position(|p| p.id == owner) else {
+    if !state.players.iter().any(|p| p.id == owner) {
         return;
-    };
+    }
     // The recipient's existing library, with the just-conjured copies (currently at
     // the bottom in creation order) removed, so index math and the random window
     // treat the copies as being *inserted* among the existing cards.
-    let mut rest: Vec<ObjectId> = state.players[pidx]
-        .library
+    let mut rest: Vec<ObjectId> = state
+        .library_of(owner)
         .iter()
         .copied()
         .filter(|id| !conjured.contains(id))
@@ -378,7 +379,11 @@ fn place_conjured_in_library(
                 // `window` is the final top-N size; `head.len() + 1` is the
                 // slots available after this insert. Delegates to the single
                 // authority so zone-pipeline exhaustiveness arms stay identical.
-                let slot = zones::random_top_slot_index(&mut state.rng, window, head.len() + 1);
+                let slot = zones::random_top_slot_index(
+                    state.rng.draw(RandomDraw::Placement),
+                    window,
+                    head.len() + 1,
+                );
                 head.insert(slot, id);
             }
             head.extend(tail);
@@ -387,7 +392,7 @@ fn place_conjured_in_library(
     };
 
     // allow-raw-zone: in-library reorder of just-conjured cards, not a zone event.
-    state.players[pidx].library = final_library.into_iter().collect();
+    *state.library_of_mut(owner) = final_library.into_iter().collect();
 }
 
 #[cfg(test)]

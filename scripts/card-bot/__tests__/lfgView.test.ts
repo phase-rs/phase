@@ -5,6 +5,7 @@ import { ButtonStyle, ComponentType, MessageFlags } from "../discord";
 import { findFormat, FORMATS } from "../formats";
 import type { Lfg } from "../lfg";
 import {
+  BUILD_COLORS,
   customId,
   desktopLink,
   guestLink,
@@ -34,6 +35,7 @@ function lfg(overrides: Partial<Lfg> = {}): Lfg {
     mode: "p2p",
     build: "release",
     server: null,
+    description: null,
     state: "ready",
     code: CODE,
     touchedMs: 0,
@@ -256,6 +258,15 @@ describe("custom_id", () => {
 });
 
 describe("public post", () => {
+  test("shows optional game details on open and ready posts", () => {
+    const details = "Bracket 3 — bring upgraded precons";
+    for (const state of ["open", "ready"] as const) {
+      const post = renderLfg(lfg({ state, description: details }));
+      expect(post.embeds[0].description).toContain(`**Details**\n${details}`);
+    }
+    expect(renderLfg(lfg()).embeds[0].description).not.toContain("**Details**");
+  });
+
   test("a ready post never contains the code, lists every seat, and has no fields", () => {
     const l = lfg();
     const post = renderLfg(l);
@@ -264,7 +275,7 @@ describe("public post", () => {
     expect(JSON.stringify(post)).not.toContain(CODE);
 
     const [embed] = post.embeds;
-    expect(embed.title).toBe("LFG · Commander");
+    expect(embed.title).toBe("LFG · Commander · RELEASE");
     expect(embed.description).toContain("Players 2/4");
     for (const id of l.seated) expect(embed.description).toContain(`<@${id}>`);
     expect(embed.description).toContain("<@111> (host)");
@@ -282,6 +293,16 @@ describe("public post", () => {
     ]);
   });
 
+  test("the title tag and color name the build", () => {
+    const release = renderLfg(lfg({ build: "release" })).embeds[0];
+    const preview = renderLfg(lfg({ build: "preview" })).embeds[0];
+    expect(release.title).toBe("LFG · Commander · RELEASE");
+    expect(preview.title).toBe("LFG · Commander · PREVIEW");
+    expect(release.color).toBe(BUILD_COLORS.release);
+    expect(preview.color).toBe(BUILD_COLORS.preview);
+    expect(release.color).not.toBe(preview.color);
+  });
+
   test("open: Join / Leave / Start and the idle footer", () => {
     const post = renderLfg(lfg({ state: "open", code: null, seated: ["111"] }));
     expect(post.embeds[0].footer?.text).toBe("Expires after 30 min idle");
@@ -293,6 +314,16 @@ describe("public post", () => {
       { type: ComponentType.BUTTON, style: ButtonStyle.SUCCESS, label: "Start", custom_id: customId("start", ID) },
     ]);
     expect(post.allowed_mentions).toEqual({ parse: [] });
+  });
+
+  test("only the create post allows its selected format role to notify members", () => {
+    const l = lfg({ state: "open", code: null, seated: ["111"] });
+    const created = renderLfg(l, "123456789");
+    expect(created.content).toBe("<@&123456789>");
+    expect(created.allowed_mentions).toEqual({ roles: ["123456789"] });
+    const updated = renderLfg(l);
+    expect(updated.content).toBeUndefined();
+    expect(updated.allowed_mentions).toEqual({ parse: [] });
   });
 
   test("server mode names the server; cancelled and expired have no components", () => {

@@ -116,7 +116,7 @@
 //! this one normally does. To actually see it:
 //!
 //! ```text
-//! cargo test -p phase-engine --test integration -- --nocapture \
+//! cargo test -p phase-engine --test 'integration*' -- --nocapture \
 //!     --exact game_state_stack_high_water::four_player_commander_action_stack_high_water
 //! cargo nextest run -p phase-engine --success-output immediate -E 'test(stack_high_water)'
 //! ```

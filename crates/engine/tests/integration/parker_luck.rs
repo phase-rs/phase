@@ -28,7 +28,8 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};
 use engine::types::ability::{
-    AbilityDefinition, Effect, ObjectScope, QuantityExpr, QuantityRef, TargetRef,
+    AbilityDefinition, ControllerRef, Effect, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
+    TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
@@ -119,24 +120,18 @@ fn parker_luck_lose_parses_to_other_revealed_card_mana_value() {
     );
 }
 
-/// §6.5 HONEST-RED PIN, deepened by #6965. This test previously asserted that KD's
-/// reveal parsed to a `RevealTop` root and only its lose clause was gapped. That root
-/// parsed solely because the subject `you and target opponent each` fell open to
-/// `RevealTop { player: Any }` — a filter that matches unconditionally, i.e. the exact
-/// unsound binding #6965 removes. The old assertion named that filter in its own doc
-/// comment, so it was pinning the fail-open, not surviving it.
+/// §6.5 HONEST-RED PIN, deepened by #6965 and the coordinated player set. "you and
+/// target opponent each reveal the top card of your library" binds through a
+/// `TargetOnly { opponent }` head over ONE `RevealTop` scoped to
+/// `AnyOf[Controller, TargetPlayer]`: exactly the caster and the declared opponent
+/// reveal (`PlayerFilter::Opponent` would make EVERY opponent reveal in
+/// multiplayer, and the pre-#6965 `RevealTop { player: Any }` matched anyone).
 ///
-/// `target opponent` is a TARGETED player, and no `PlayerFilter` names one:
-/// `PlayerFilter::Opponent` would make EVERY opponent reveal in multiplayer. So the
-/// subject now fails closed and the whole trigger is an honest `unbound_subject` gap,
-/// which is strictly more truthful than a reveal bound to "anyone". The lose clause is
-/// unreachable behind it, so this no longer goes through `lose_node`.
-///
-/// Forward-red: whoever teaches the parser to bind a targeted player (giving KD a real
-/// `RevealTop` again) will red this test, which is the intended prompt to revisit the
-/// §2.6 lose gate that the old assertion guarded.
+/// Sentences 2–3 ("You each …") have no coordinated antecedent the parser carries
+/// across a sentence, so they stay honest `unbound_subject` gaps and the card stays
+/// unsupported.
 #[test]
-fn keen_duelist_targeted_opponent_subject_fails_closed() {
+fn keen_duelist_binds_its_first_sentence_and_stays_unsupported() {
     let parsed = parse_keen_duelist();
     let root = parsed.triggers[0]
         .execute
@@ -146,24 +141,47 @@ fn keen_duelist_targeted_opponent_subject_fails_closed() {
         root.multi_target.is_none(),
         "reach-guard: Keen Duelist's single-subject reveal carries no multi_target"
     );
-    let Effect::Unimplemented { name, description } = &*root.effect else {
-        panic!(
-            "`you and target opponent each ...` must fail closed rather than bind a \
-             reveal to an unconditional filter, got {:?}",
-            root.effect
-        );
-    };
     assert_eq!(
-        name, "unbound_subject",
-        "the gap must name the SUBJECT as the unbound part — a different name means the \
-         clause failed somewhere else and this test stopped covering the fail-closed path"
+        *root.effect,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+        },
+        "the head declares the targeted opponent"
     );
+    let reveal = root.sub_ability.as_deref().expect("the coordinated reveal");
     assert!(
-        description
-            .as_deref()
-            .is_some_and(|text| text.contains("target opponent")),
-        "reach-guard: the gap must quote the targeting conjunct that caused it, got {description:?}"
+        matches!(&*reveal.effect, Effect::RevealTop { .. }),
+        "the body reveals, got {:?}",
+        reveal.effect
     );
+    assert_eq!(
+        reveal.player_scope,
+        Some(PlayerFilter::AnyOf {
+            filters: vec![PlayerFilter::Controller, PlayerFilter::TargetPlayer],
+        }),
+        "exactly the caster and the targeted opponent reveal"
+    );
+    let gaps: Vec<&AbilityDefinition> =
+        std::iter::successors(reveal.sub_ability.as_deref(), |link| {
+            link.sub_ability.as_deref()
+        })
+        .collect();
+    assert_eq!(gaps.len(), 2, "sentences 2 and 3 follow the reveal");
+    for gap in gaps {
+        let Effect::Unimplemented { name, description } = &*gap.effect else {
+            panic!(
+                "a \"You each\" sentence must stay a gap, got {:?}",
+                gap.effect
+            );
+        };
+        assert_eq!(name, "unbound_subject");
+        assert!(
+            description
+                .as_deref()
+                .is_some_and(|text| text.contains("You each")),
+            "reach-guard: the gap quotes its own subject, got {description:?}"
+        );
+    }
 }
 
 /// §6.2 ISOLATION: the new combinator does not shadow the bare possessive path —

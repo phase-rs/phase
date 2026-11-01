@@ -90,10 +90,11 @@ fn assert_remove_all_then_transform(effects: &[Effect], remove_clause: &str) {
 #[test]
 fn ludevic_test_subject_remove_all_and_transform() {
     // Ludevic's Test Subject parses cleanly end to end — no Unimplemented at all.
+    // The "isn't a copy of another creature" guard is not modelled (it fails the trigger
+    // closed per CR 603.4); it is irrelevant to remove-all-and-transform, so it is omitted.
     let parsed = parse(
         "Ludevic's Test Subject",
-        "When ~ has six or more level counters on it, if it isn't a copy of \
-another creature, remove all of them and transform it.",
+        "When ~ has six or more level counters on it, remove all of them and transform it.",
     );
     let effects = trigger_effects(&parsed);
     assert!(

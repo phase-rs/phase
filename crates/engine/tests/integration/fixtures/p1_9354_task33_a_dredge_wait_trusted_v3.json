@@ -1,0 +1,1032 @@
+{
+  "precast_shortcut_runtime": {
+    "materializing": false,
+    "must_diverge": null,
+    "next_epoch": 0,
+    "offer": null,
+    "suppressed_cast": null
+  },
+  "state": {
+    "active_player": 0,
+    "all_creature_types": [],
+    "allows_cancel_cast": false,
+    "alt_cost_grant_permissions_used": [],
+    "attacked_defenders_this_turn": {},
+    "attacking_creatures_this_turn": {},
+    "battlefield": [
+      5
+    ],
+    "cancelled_casts": [],
+    "cards_discarded_this_turn_by_player": {},
+    "combat": null,
+    "combat_phase_skip_next_turn": [
+      {
+        "active": false,
+        "pending": 0
+      },
+      {
+        "active": false,
+        "pending": 0
+      }
+    ],
+    "command_zone": [],
+    "commander_cast_count": {},
+    "commander_damage": [],
+    "creature_attacked_defenders_this_turn": {},
+    "creature_blocked_attackers_this_turn": [],
+    "creatures_attacked_this_turn": [],
+    "creatures_blocked_this_turn": [],
+    "crew_activated_this_turn": [],
+    "crew_resolved_this_turn": [],
+    "current_combat_attacker_restriction": null,
+    "current_combat_attacker_restriction_source": null,
+    "current_starting_player": 0,
+    "damage_dealt_this_turn": [],
+    "day_night": null,
+    "debug_mode": true,
+    "debug_permitted": [],
+    "deck_pools": [],
+    "delayed_triggers": [],
+    "eliminated_players": [],
+    "exerted_this_turn": [],
+    "exile": [],
+    "exile_cast_permissions_used": [],
+    "exile_links": [],
+    "exile_play_permissions_used": [],
+    "exile_play_single_use_consumed": [],
+    "extra_loyalty_activations_this_turn": {},
+    "extra_phase_resume": [],
+    "extra_phases": [],
+    "extra_turn_sequence_anchor": null,
+    "extra_turns": [],
+    "format_config": {
+      "allow_debug_actions": false,
+      "command_zone": false,
+      "commander_damage_threshold": null,
+      "deck_size": {
+        "data": 60,
+        "type": "Minimum"
+      },
+      "default_deck_copy_limit": {
+        "data": 4,
+        "type": "UpTo"
+      },
+      "format": "Standard",
+      "max_players": 2,
+      "min_players": 2,
+      "range_of_influence": null,
+      "sideboard_policy": {
+        "data": 15,
+        "type": "Limited"
+      },
+      "singleton": false,
+      "starting_life": 20,
+      "supplies_fixed_deck": false,
+      "team_based": false,
+      "uses_commander": false
+    },
+    "game_number": 1,
+    "graveyard_cast_permissions_used": [],
+    "graveyard_cast_permissions_used_per_type": [],
+    "hand_cast_free_permissions_used": [],
+    "has_pending_cast": false,
+    "lands_played_this_turn": 0,
+    "lands_played_this_turn_by_player": {},
+    "last_vote_ballots": [],
+    "loop_detection": {
+      "type": "Off"
+    },
+    "loyalty_abilities_activated_this_turn": {},
+    "mana_spent_on_spells_this_turn": {},
+    "match_config": {
+      "match_type": "Bo1"
+    },
+    "match_phase": "InGame",
+    "match_score": {
+      "draws": 0,
+      "p0_wins": 0,
+      "p1_wins": 0
+    },
+    "max_lands_per_turn": 1,
+    "modal_modes_chosen_this_game": [],
+    "modal_modes_chosen_this_turn": [],
+    "next_continuous_effect_id": 1,
+    "next_delayed_trigger_instance": 1,
+    "next_delayed_trigger_token": 1,
+    "next_end_effect_group_id": 1,
+    "next_extra_phase_id": 1,
+    "next_game_chooser": null,
+    "next_logical_zone_change_group_id": 1,
+    "next_object_id": 7,
+    "next_pip_id": 1,
+    "next_resolution_cast_offer_id": 1,
+    "next_resolve_all_consent_epoch": 1,
+    "next_timestamp": 2,
+    "next_tracked_set_id": 1,
+    "objects": {
+      "1": {
+        "abilities": [],
+        "attached_to": null,
+        "attachments": [],
+        "base_color": [],
+        "base_controller": 0,
+        "base_keywords": [],
+        "base_name": "A library card 0",
+        "base_power": null,
+        "base_toughness": null,
+        "card_id": 1,
+        "card_types": {
+          "core_types": [],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "color": [],
+        "controller": 0,
+        "counters": {},
+        "damage_marked": 0,
+        "dealt_deathtouch_damage": false,
+        "entered_battlefield_turn": null,
+        "face_down": false,
+        "flipped": false,
+        "id": 1,
+        "keywords": [],
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 0,
+          "shards": [],
+          "type": "Cost"
+        },
+        "name": "A library card 0",
+        "owner": 0,
+        "power": null,
+        "replacement_definitions": [],
+        "static_definitions": [],
+        "tapped": false,
+        "timestamp": 0,
+        "toughness": null,
+        "transformed": false,
+        "trigger_definitions": [],
+        "zone": "Library"
+      },
+      "2": {
+        "abilities": [],
+        "attached_to": null,
+        "attachments": [],
+        "base_color": [],
+        "base_controller": 0,
+        "base_keywords": [],
+        "base_name": "A library card 1",
+        "base_power": null,
+        "base_toughness": null,
+        "card_id": 2,
+        "card_types": {
+          "core_types": [],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "color": [],
+        "controller": 0,
+        "counters": {},
+        "damage_marked": 0,
+        "dealt_deathtouch_damage": false,
+        "entered_battlefield_turn": null,
+        "face_down": false,
+        "flipped": false,
+        "id": 2,
+        "keywords": [],
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 0,
+          "shards": [],
+          "type": "Cost"
+        },
+        "name": "A library card 1",
+        "owner": 0,
+        "power": null,
+        "replacement_definitions": [],
+        "static_definitions": [],
+        "tapped": false,
+        "timestamp": 0,
+        "toughness": null,
+        "transformed": false,
+        "trigger_definitions": [],
+        "zone": "Library"
+      },
+      "3": {
+        "abilities": [],
+        "attached_to": null,
+        "attachments": [],
+        "base_color": [],
+        "base_controller": 0,
+        "base_keywords": [],
+        "base_name": "A library card 2",
+        "base_power": null,
+        "base_toughness": null,
+        "card_id": 3,
+        "card_types": {
+          "core_types": [],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "color": [],
+        "controller": 0,
+        "counters": {},
+        "damage_marked": 0,
+        "dealt_deathtouch_damage": false,
+        "entered_battlefield_turn": null,
+        "face_down": false,
+        "flipped": false,
+        "id": 3,
+        "keywords": [],
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 0,
+          "shards": [],
+          "type": "Cost"
+        },
+        "name": "A library card 2",
+        "owner": 0,
+        "power": null,
+        "replacement_definitions": [],
+        "static_definitions": [],
+        "tapped": false,
+        "timestamp": 0,
+        "toughness": null,
+        "transformed": false,
+        "trigger_definitions": [],
+        "zone": "Library"
+      },
+      "4": {
+        "abilities": [],
+        "attached_to": null,
+        "attachments": [],
+        "base_color": [],
+        "base_controller": 0,
+        "base_keywords": [],
+        "base_name": "A library card 3",
+        "base_power": null,
+        "base_toughness": null,
+        "card_id": 4,
+        "card_types": {
+          "core_types": [],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "color": [],
+        "controller": 0,
+        "counters": {},
+        "damage_marked": 0,
+        "dealt_deathtouch_damage": false,
+        "entered_battlefield_turn": null,
+        "face_down": false,
+        "flipped": false,
+        "id": 4,
+        "keywords": [],
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 0,
+          "shards": [],
+          "type": "Cost"
+        },
+        "name": "A library card 3",
+        "owner": 0,
+        "power": null,
+        "replacement_definitions": [],
+        "static_definitions": [],
+        "tapped": false,
+        "timestamp": 0,
+        "toughness": null,
+        "transformed": false,
+        "trigger_definitions": [],
+        "zone": "Library"
+      },
+      "5": {
+        "abilities": [],
+        "attached_to": null,
+        "attachments": [],
+        "base_card_types": {
+          "core_types": [
+            "Creature"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "base_characteristics_initialized": true,
+        "base_color": [],
+        "base_controller": 0,
+        "base_keywords": [],
+        "base_name": "Blood Scrivener",
+        "base_power": 2,
+        "base_replacement_definitions": [
+          {
+            "condition": {
+              "comparator": "EQ",
+              "lhs": {
+                "qty": {
+                  "player": {
+                    "type": "Controller"
+                  },
+                  "type": "HandSize"
+                },
+                "type": "Ref"
+              },
+              "rhs": {
+                "type": "Fixed",
+                "value": 0
+              },
+              "type": "OnlyIfQuantity"
+            },
+            "description": "If you would draw a card while you have no cards in hand, instead you draw two cards and you lose 1 life.",
+            "draw_scope": "IndividualDraw",
+            "event": "Draw",
+            "execute": {
+              "condition": null,
+              "cost": null,
+              "description": null,
+              "duration": null,
+              "effect": {
+                "count": {
+                  "type": "Fixed",
+                  "value": 2
+                },
+                "target": {
+                  "type": "Controller"
+                },
+                "type": "Draw"
+              },
+              "forward_result": false,
+              "kind": "Spell",
+              "optional": false,
+              "optional_targeting": false,
+              "sub_ability": {
+                "condition": null,
+                "cost": null,
+                "description": null,
+                "duration": null,
+                "effect": {
+                  "amount": {
+                    "type": "Fixed",
+                    "value": 1
+                  },
+                  "target": {
+                    "type": "Controller"
+                  },
+                  "type": "LoseLife"
+                },
+                "forward_result": false,
+                "kind": "Spell",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+              },
+              "target_prompt": null
+            },
+            "mode": {
+              "type": "Mandatory"
+            },
+            "valid_card": null
+          }
+        ],
+        "base_toughness": 1,
+        "card_id": 5,
+        "card_types": {
+          "core_types": [
+            "Creature"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "color": [],
+        "controller": 0,
+        "counters": {},
+        "damage_marked": 0,
+        "dealt_deathtouch_damage": false,
+        "entered_battlefield_turn": 1,
+        "face_down": false,
+        "flipped": false,
+        "id": 5,
+        "keywords": [],
+        "layer_base_power": 2,
+        "layer_base_toughness": 1,
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 0,
+          "shards": [],
+          "type": "Cost"
+        },
+        "name": "Blood Scrivener",
+        "owner": 0,
+        "power": 2,
+        "replacement_definitions": [
+          {
+            "condition": {
+              "comparator": "EQ",
+              "lhs": {
+                "qty": {
+                  "player": {
+                    "type": "Controller"
+                  },
+                  "type": "HandSize"
+                },
+                "type": "Ref"
+              },
+              "rhs": {
+                "type": "Fixed",
+                "value": 0
+              },
+              "type": "OnlyIfQuantity"
+            },
+            "description": "If you would draw a card while you have no cards in hand, instead you draw two cards and you lose 1 life.",
+            "draw_scope": "IndividualDraw",
+            "event": "Draw",
+            "execute": {
+              "condition": null,
+              "cost": null,
+              "description": null,
+              "duration": null,
+              "effect": {
+                "count": {
+                  "type": "Fixed",
+                  "value": 2
+                },
+                "target": {
+                  "type": "Controller"
+                },
+                "type": "Draw"
+              },
+              "forward_result": false,
+              "kind": "Spell",
+              "optional": false,
+              "optional_targeting": false,
+              "sub_ability": {
+                "condition": null,
+                "cost": null,
+                "description": null,
+                "duration": null,
+                "effect": {
+                  "amount": {
+                    "type": "Fixed",
+                    "value": 1
+                  },
+                  "target": {
+                    "type": "Controller"
+                  },
+                  "type": "LoseLife"
+                },
+                "forward_result": false,
+                "kind": "Spell",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+              },
+              "target_prompt": null
+            },
+            "mode": {
+              "type": "Mandatory"
+            },
+            "valid_card": null
+          }
+        ],
+        "static_definitions": [],
+        "tapped": false,
+        "timestamp": 1,
+        "toughness": 1,
+        "transformed": false,
+        "trigger_definitions": [],
+        "zone": "Battlefield"
+      },
+      "6": {
+        "abilities": [],
+        "attached_to": null,
+        "attachments": [],
+        "base_card_types": {
+          "core_types": [
+            "Creature"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "base_characteristics_initialized": true,
+        "base_color": [],
+        "base_controller": 0,
+        "base_keywords": [
+          {
+            "Dredge": 2
+          }
+        ],
+        "base_name": "Test Dredger",
+        "base_power": 1,
+        "base_replacement_definitions": [
+          {
+            "active_zones": [
+              "Graveyard"
+            ],
+            "condition": null,
+            "description": "CR 702.52a: Dredge — instead of drawing, you may mill 2 cards and return this card from your graveyard to your hand.",
+            "draw_scope": "IndividualDraw",
+            "event": "Draw",
+            "execute": {
+              "condition": null,
+              "cost": null,
+              "description": null,
+              "duration": null,
+              "effect": {
+                "count": {
+                  "type": "Fixed",
+                  "value": 2
+                },
+                "destination": "Graveyard",
+                "target": {
+                  "type": "Controller"
+                },
+                "type": "Mill"
+              },
+              "forward_result": false,
+              "kind": "Spell",
+              "optional": false,
+              "optional_targeting": false,
+              "sub_ability": {
+                "condition": null,
+                "cost": null,
+                "description": null,
+                "duration": null,
+                "effect": {
+                  "destination": "Hand",
+                  "enter_tapped": false,
+                  "enter_transformed": false,
+                  "enters_attacking": false,
+                  "origin": "Graveyard",
+                  "owner_library": false,
+                  "target": {
+                    "type": "SelfRef"
+                  },
+                  "type": "ChangeZone"
+                },
+                "forward_result": false,
+                "kind": "Spell",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+              },
+              "target_prompt": null
+            },
+            "mode": {
+              "decline": null,
+              "type": "Optional"
+            },
+            "valid_card": null
+          }
+        ],
+        "base_toughness": 1,
+        "card_id": 6,
+        "card_types": {
+          "core_types": [
+            "Creature"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "color": [],
+        "controller": 0,
+        "counters": {},
+        "damage_marked": 0,
+        "dealt_deathtouch_damage": false,
+        "entered_battlefield_turn": null,
+        "face_down": false,
+        "flipped": false,
+        "id": 6,
+        "keywords": [
+          {
+            "Dredge": 2
+          }
+        ],
+        "layer_base_power": 1,
+        "layer_base_toughness": 1,
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 0,
+          "shards": [],
+          "type": "Cost"
+        },
+        "name": "Test Dredger",
+        "owner": 0,
+        "power": 1,
+        "replacement_definitions": [
+          {
+            "active_zones": [
+              "Graveyard"
+            ],
+            "condition": null,
+            "description": "CR 702.52a: Dredge — instead of drawing, you may mill 2 cards and return this card from your graveyard to your hand.",
+            "draw_scope": "IndividualDraw",
+            "event": "Draw",
+            "execute": {
+              "condition": null,
+              "cost": null,
+              "description": null,
+              "duration": null,
+              "effect": {
+                "count": {
+                  "type": "Fixed",
+                  "value": 2
+                },
+                "destination": "Graveyard",
+                "target": {
+                  "type": "Controller"
+                },
+                "type": "Mill"
+              },
+              "forward_result": false,
+              "kind": "Spell",
+              "optional": false,
+              "optional_targeting": false,
+              "sub_ability": {
+                "condition": null,
+                "cost": null,
+                "description": null,
+                "duration": null,
+                "effect": {
+                  "destination": "Hand",
+                  "enter_tapped": false,
+                  "enter_transformed": false,
+                  "enters_attacking": false,
+                  "origin": "Graveyard",
+                  "owner_library": false,
+                  "target": {
+                    "type": "SelfRef"
+                  },
+                  "type": "ChangeZone"
+                },
+                "forward_result": false,
+                "kind": "Spell",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+              },
+              "target_prompt": null
+            },
+            "mode": {
+              "decline": null,
+              "type": "Optional"
+            },
+            "valid_card": null
+          }
+        ],
+        "static_definitions": [],
+        "tapped": false,
+        "timestamp": 0,
+        "toughness": 1,
+        "transformed": false,
+        "trigger_definitions": [],
+        "zone": "Graveyard"
+      }
+    },
+    "pending_replacement": {
+      "candidates": [
+        {
+          "index": 0,
+          "source": 6
+        }
+      ],
+      "choice_player": 0,
+      "depth": 1,
+      "excess_recipient": null,
+      "exile_controller": null,
+      "exile_duration": null,
+      "exile_tracking": "None",
+      "is_optional": true,
+      "library_placement": null,
+      "lifelink_bonus": 0,
+      "proposed": {
+        "Draw": {
+          "applied": [
+            {
+              "index": 0,
+              "source": 5,
+              "type": "Object"
+            }
+          ],
+          "count": 2,
+          "player_id": 0
+        }
+      }
+    },
+    "pending_trigger": null,
+    "phase": "PreCombatMain",
+    "players": [
+      {
+        "attraction_deck": [],
+        "bending_types_this_turn": [],
+        "can_look_at_top_of_library": false,
+        "cards_drawn_this_step": 0,
+        "cards_drawn_this_turn": 0,
+        "commander_color_identity": [],
+        "contraption_crank_sprocket": 3,
+        "contraption_deck": [],
+        "crimes_committed_this_turn": 0,
+        "descended_this_turn": false,
+        "drew_from_empty_library": false,
+        "energy": 0,
+        "graveyard": [
+          6
+        ],
+        "hand": [],
+        "has_drawn_this_turn": false,
+        "id": 0,
+        "is_eliminated": false,
+        "lands_played_this_turn": 0,
+        "library": [
+          4,
+          3,
+          2,
+          1
+        ],
+        "life": 20,
+        "life_gained_this_turn": 0,
+        "life_lost_last_turn": 0,
+        "life_lost_this_turn": 0,
+        "mana_pool": {
+          "mana": []
+        },
+        "poison_counters": 0,
+        "speed_trigger_used_this_turn": false,
+        "status": {
+          "type": "Active"
+        },
+        "turns_taken": 0
+      },
+      {
+        "attraction_deck": [],
+        "bending_types_this_turn": [],
+        "can_look_at_top_of_library": false,
+        "cards_drawn_this_step": 0,
+        "cards_drawn_this_turn": 0,
+        "commander_color_identity": [],
+        "contraption_crank_sprocket": 3,
+        "contraption_deck": [],
+        "crimes_committed_this_turn": 0,
+        "descended_this_turn": false,
+        "drew_from_empty_library": false,
+        "energy": 0,
+        "graveyard": [],
+        "hand": [],
+        "has_drawn_this_turn": false,
+        "id": 1,
+        "is_eliminated": false,
+        "lands_played_this_turn": 0,
+        "library": [],
+        "life": 20,
+        "life_gained_this_turn": 0,
+        "life_lost_last_turn": 0,
+        "life_lost_this_turn": 0,
+        "mana_pool": {
+          "mana": []
+        },
+        "poison_counters": 0,
+        "speed_trigger_used_this_turn": false,
+        "status": {
+          "type": "Active"
+        },
+        "turns_taken": 0
+      }
+    ],
+    "players_attacked_this_step": [],
+    "players_attacked_this_turn": [],
+    "players_who_created_token_this_turn": [],
+    "players_who_discarded_card_this_turn": [],
+    "players_who_sacrificed_artifact_this_turn": [],
+    "players_who_searched_library_this_turn": [],
+    "priority_pass_count": 0,
+    "priority_passes": [],
+    "priority_player": 0,
+    "public_revealed_cards": [],
+    "resolution_frames": {
+      "frames": [
+        {
+          "data": {
+            "drains": [
+              {
+                "applied": [
+                  {
+                    "index": 0,
+                    "source": 5,
+                    "type": "Object"
+                  }
+                ],
+                "controller": 0,
+                "event_source": null,
+                "event_target": {
+                  "Player": 0
+                },
+                "source": 5,
+                "status": {
+                  "Ready": {
+                    "ability": {
+                      "condition": null,
+                      "cost": null,
+                      "description": null,
+                      "duration": null,
+                      "effect": {
+                        "amount": {
+                          "type": "Fixed",
+                          "value": 1
+                        },
+                        "target": {
+                          "type": "Controller"
+                        },
+                        "type": "LoseLife"
+                      },
+                      "forward_result": false,
+                      "kind": "Spell",
+                      "optional": false,
+                      "optional_targeting": false,
+                      "sub_ability": null,
+                      "target_prompt": null
+                    },
+                    "kind": "Template"
+                  }
+                }
+              }
+            ]
+          },
+          "type": "PostReplacement"
+        },
+        {
+          "data": {
+            "draw_sequences": {
+              "frames": [
+                {
+                  "accumulated": 0,
+                  "applied": [],
+                  "frame_id": 0,
+                  "origin": "Plain",
+                  "player": 0,
+                  "remaining": 0
+                }
+              ],
+              "next_frame_id": 1
+            }
+          },
+          "type": "MultiDraw"
+        }
+      ],
+      "last_post_replacement_frame_id": 0,
+      "next_discard_frame_id": 0,
+      "next_draw_sequence_frame_id": 1
+    },
+    "resolution_state_version": 3,
+    "resolved_rules_journal": {
+      "entries": [
+        {
+          "node": {
+            "Proposal": 0
+          },
+          "ordinal": 0
+        },
+        {
+          "command": {
+            "FrameTransition": {
+              "cause": {
+                "Proposal": 0
+              },
+              "transition": {
+                "InsertParentOfActive": {
+                  "frame": {
+                    "data": {
+                      "drains": [
+                        {
+                          "applied": [
+                            {
+                              "index": 0,
+                              "source": 5,
+                              "type": "Object"
+                            }
+                          ],
+                          "controller": 0,
+                          "event_source": null,
+                          "event_target": {
+                            "Player": 0
+                          },
+                          "source": 5,
+                          "status": {
+                            "Ready": {
+                              "ability": {
+                                "condition": null,
+                                "cost": null,
+                                "description": null,
+                                "duration": null,
+                                "effect": {
+                                  "amount": {
+                                    "type": "Fixed",
+                                    "value": 1
+                                  },
+                                  "target": {
+                                    "type": "Controller"
+                                  },
+                                  "type": "LoseLife"
+                                },
+                                "forward_result": false,
+                                "kind": "Spell",
+                                "optional": false,
+                                "optional_targeting": false,
+                                "sub_ability": null,
+                                "target_prompt": null
+                              },
+                              "kind": "Template"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "type": "PostReplacement"
+                  }
+                }
+              }
+            }
+          },
+          "node": {
+            "Proposal": 0
+          },
+          "ordinal": 1
+        }
+      ],
+      "next_command_ordinal": 2,
+      "next_settlement_node_ordinal": 1,
+      "nodes": [
+        {
+          "identity": {
+            "Proposal": 0
+          },
+          "journal_ordinals": [
+            0,
+            1
+          ],
+          "kind": "Proposal",
+          "ordinal": 0
+        }
+      ],
+      "produced_mana": [],
+      "spent_mana": []
+    },
+    "revealed_cards": [],
+    "ring_bearer": {},
+    "ring_level": {},
+    "rng_seed": 42,
+    "rng_word_pos": 0,
+    "scheduled_turn_controls": [],
+    "seat_order": [
+      0,
+      1
+    ],
+    "sideboard_submitted": [],
+    "spells_cast_last_turn": null,
+    "spells_cast_this_game": {},
+    "spells_cast_this_game_by_player": {},
+    "spells_cast_this_turn": 0,
+    "spells_cast_this_turn_by_player": {},
+    "stack": [],
+    "steps_to_skip": [
+      {},
+      {}
+    ],
+    "top_of_library_cast_permissions_used": [],
+    "tracked_object_sets": {},
+    "transient_continuous_effects": [],
+    "triggers_fired_this_game": [],
+    "triggers_fired_this_turn": [],
+    "triggers_fired_this_turn_per_opponent": [],
+    "turn_direction": "Normal",
+    "turn_number": 2,
+    "turns_to_skip": [
+      0,
+      0
+    ],
+    "waiting_for": {
+      "data": {
+        "candidate_count": 2,
+        "candidates": [
+          {
+            "description": "Accept",
+            "source_id": 6,
+            "source_name": "Test Dredger"
+          },
+          {
+            "description": "Decline",
+            "source_id": 6,
+            "source_name": "Test Dredger"
+          }
+        ],
+        "kind": {
+          "type": "OptionalBranch"
+        },
+        "last_applied_decides": false,
+        "player": 0
+      },
+      "type": "ReplacementChoice"
+    }
+  }
+}

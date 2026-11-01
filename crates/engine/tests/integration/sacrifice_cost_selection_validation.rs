@@ -161,6 +161,7 @@ fn public_concession_refuses_stale_sacrifice_before_any_payment() {
                 .act(GameAction::ActivateAbility {
                     source_id: source,
                     ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
                 })
                 .unwrap();
             assert!(prompt(&runner, (1, 1)).contains(&fodder));
@@ -184,13 +185,17 @@ fn public_concession_refuses_stale_sacrifice_before_any_payment() {
                 assert_ne!(runner.state().objects[&aura].zone, Zone::Battlefield);
                 assert_eq!(runner.state().objects[&fodder].controller, p2);
                 assert!(prompt(&runner, (1, 1)).contains(&fodder));
-                assert!(
-                    !find_eligible_sacrifice_targets(runner.state(), P0, source, &filter)
-                        .contains(&fodder)
-                );
+                assert!(!find_eligible_sacrifice_targets(
+                    runner.state(),
+                    P0,
+                    source,
+                    None,
+                    &filter
+                )
+                .contains(&fodder));
             } else {
                 assert!(
-                    find_eligible_sacrifice_targets(runner.state(), P0, source, &filter)
+                    find_eligible_sacrifice_targets(runner.state(), P0, source, None, &filter)
                         .contains(&fodder)
                 );
             }
@@ -258,6 +263,7 @@ fn unselected_advertised_control_loss_keeps_lawful_full_selection() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
     let advertised = prompt(&runner, (1, 1));
@@ -269,7 +275,7 @@ fn unselected_advertised_control_loss_keeps_lawful_full_selection() {
     )
     .unwrap();
     assert_eq!(prompt(&runner, (1, 1)), advertised);
-    let live = find_eligible_sacrifice_targets(runner.state(), P0, source, &filter);
+    let live = find_eligible_sacrifice_targets(runner.state(), P0, source, None, &filter);
     assert!(live.contains(&retained) && !live.contains(&lost));
     let before = serde_json::to_value(runner.state()).unwrap();
     assert!(matches!(
@@ -307,6 +313,7 @@ fn selected_sacrifice_preserves_bound_zero_fixed_and_variable_counts() {
                 .act(GameAction::ActivateAbility {
                     source_id: source,
                     ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
                 })
                 .unwrap();
             let bounds = if count == u32::MAX {
@@ -367,7 +374,8 @@ fn selected_sacrifice_preserves_bound_zero_fixed_and_variable_counts() {
     assert!(runner
         .act(GameAction::ActivateAbility {
             source_id: source,
-            ability_index: 0
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto
         })
         .is_err());
     assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
@@ -417,6 +425,7 @@ fn current_sacrifice_leaf_and_selected_oneof_pay_in_order() {
                     .act(GameAction::ActivateAbility {
                         source_id: source,
                         ability_index: 0,
+                        payment_mode: CastPaymentMode::Auto,
                     })
                     .unwrap();
                 if oneof {
@@ -519,6 +528,7 @@ fn real_spell_additional_cost_and_keyword_costs_pay_exact_reductions() {
             runner.state(),
             P0,
             spell,
+            None,
             &TypedFilter::creature().subtype("Spirit".into()).into()
         )
         .contains(&fodder));
@@ -618,6 +628,7 @@ fn normal_and_replacement_sacrifice_settle_once_and_survive_checked_restore() {
                     .act(GameAction::ActivateAbility {
                         source_id: source,
                         ability_index: 0,
+                        payment_mode: CastPaymentMode::Auto,
                     })
                     .unwrap()
                     .events;
@@ -745,6 +756,7 @@ fn fixed_mana_source_loss_identity_positive_controls() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         let advertised = prompt(&runner, (1, 1));
@@ -807,6 +819,7 @@ fn x_mana_activation_pays_both_selected_sacrifices() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
     assert!(matches!(
@@ -961,6 +974,7 @@ fn selected_keyword_sacrifice_revalidates_its_current_quality() {
                 runner.state(),
                 P0,
                 spell,
+                None,
                 &TypedFilter::creature().subtype("Spirit".into()).into()
             )
             .contains(&fodder));
@@ -1032,7 +1046,7 @@ fn selected_keyword_sacrifice_revalidates_its_current_quality() {
                 obj.base_card_types = obj.card_types.clone();
             }
             assert_eq!(
-                find_eligible_sacrifice_targets(runner.state(), P0, spell, &filter)
+                find_eligible_sacrifice_targets(runner.state(), P0, spell, None, &filter)
                     .contains(&fodder),
                 eligible
             );
@@ -1124,7 +1138,7 @@ fn additional_variable_sacrifice_keeps_announced_bound_after_control_loss() {
             )
             .unwrap();
             assert_eq!(prompt(&runner, (2, 2)), advertised);
-            let live = find_eligible_sacrifice_targets(runner.state(), P0, spell, &filter);
+            let live = find_eligible_sacrifice_targets(runner.state(), P0, spell, None, &filter);
             assert!(live.contains(&retained) && !live.contains(&lost));
             refuse_unchanged(&mut runner, P0, vec![retained]);
             let before = serde_json::to_value(runner.state()).unwrap();

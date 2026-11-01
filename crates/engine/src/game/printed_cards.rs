@@ -20,11 +20,12 @@ use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef, Print
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::format::GameFormat;
-use crate::types::game_state::{GameState, MeldPairRecord};
+use crate::types::game_state::{GameState, MeldPairRecord, OutsideGameFaces, StackEntryKind};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::replacements::ReplacementEvent;
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 use std::collections::HashMap;
 use std::ops::ControlFlow;
@@ -278,6 +279,8 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
             card_face.attraction_lights.clone()
         };
     }
+    // Face install rewrites the printed base: restore the derived art baseline.
+    obj.restore_token_art_baseline();
 }
 
 pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &CardFace) {
@@ -379,6 +382,8 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     // directions matter and both are this one line: a back face the parser could
     // not fully read starts gating here, and transforming back off it stops.
     obj.parse_warnings = back_face.parse_warnings;
+    // Face swap rewrites the printed base: restore the derived art baseline.
+    obj.restore_token_art_baseline();
 }
 
 /// CR 400.7 + CR 712.8a (#7565): swap the object's live face with its stored
@@ -447,10 +452,33 @@ fn intrinsic_saga_lore_counter(card_types: &CardType) -> Option<(CounterType, u3
     }
 }
 
+/// CR 306.5b + CR 310.4b: loyalty/defense a face enters with. A Saga's
+/// CR 714.3a lore counter is NOT seeded here — it is the Saga face's own
+/// replacement (`parse_saga_chapters`), which the pipeline applies through
+/// CR 614.12.
+///
+/// `printed_loyalty` is authoritative when present: in particular, an
+/// explicit printed X must remain zero outside the resolving-spell path.
+/// Older serialized objects and lightweight engine constructors predate that
+/// provenance field, but their fixed `loyalty` baseline is still the printed
+/// loyalty number required by CR 306.5b.
+pub fn intrinsic_face_entry_counters(
+    printed_loyalty: Option<PrintedLoyalty>,
+    fallback_loyalty: Option<u32>,
+    resolving_spell_x: Option<u32>,
+    defense: Option<u32>,
+) -> Vec<(CounterType, u32)> {
+    let loyalty = printed_loyalty
+        .map(|value| value.entry_counter_count(resolving_spell_x))
+        .or(fallback_loyalty);
+    intrinsic_face_counters(loyalty, defense)
+}
+
 /// CR 306.5b + CR 310.4b + CR 714.3a: Intrinsic counters for the face a
 /// permanent will have on entry — loyalty/defense from the entering face plus
-/// the Saga lore counter when the entering face is a Saga (CR 712.14a
-/// transformed entry reads the back face here before the physical swap).
+/// the Saga lore counter when the entering face is a Saga (an "enters as a
+/// copy" entry reads the copied face's values here; a transformed entry uses
+/// [`intrinsic_face_entry_counters`] instead, see CR 614.12).
 pub fn intrinsic_entry_counters_for_face(
     printed_loyalty: Option<PrintedLoyalty>,
     fallback_loyalty: Option<u32>,
@@ -458,15 +486,12 @@ pub fn intrinsic_entry_counters_for_face(
     defense: Option<u32>,
     card_types: &CardType,
 ) -> Vec<(CounterType, u32)> {
-    // `printed_loyalty` is authoritative when present: in particular, an
-    // explicit printed X must remain zero outside the resolving-spell path.
-    // Older serialized objects and lightweight engine constructors predate that
-    // provenance field, but their fixed `loyalty` baseline is still the printed
-    // loyalty number required by CR 306.5b.
-    let loyalty = printed_loyalty
-        .map(|value| value.entry_counter_count(resolving_spell_x))
-        .or(fallback_loyalty);
-    let mut counters = intrinsic_face_counters(loyalty, defense);
+    let mut counters = intrinsic_face_entry_counters(
+        printed_loyalty,
+        fallback_loyalty,
+        resolving_spell_x,
+        defense,
+    );
     if let Some(lore) = intrinsic_saga_lore_counter(card_types) {
         counters.push(lore);
     }
@@ -600,10 +625,65 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
             .iter()
             .any(|s| s == "Room")
             .then(|| crate::game::room::own_room_halves(obj)),
+        prepare_face: copiable_prepare_face(obj),
         // CR 707.9b exceptions are folded in by `compute_current_copiable_values`,
         // never by the printed form.
         name_origin: Default::default(),
     }
+}
+
+/// CR 722.2a + CR 722.2b: the prepare spell an object's copiable values carry —
+/// the single capture authority for `CopiableValues::prepare_face`.
+///
+/// CR 708.2: a face-down object has only the characteristics its face-down
+/// rule lists, so it has no prepare spell to copy. Otherwise the stored face is
+/// captured only when it is a prepare spell (`LayoutKind::Prepare`): a
+/// Transform/Modal/Meld back face is not a copiable value of the face that is
+/// up (CR 707.8), and an Adventure/Omen/Flip face is not a prepare spell.
+pub(crate) fn copiable_prepare_face(obj: &GameObject) -> Option<Arc<BackFaceData>> {
+    if obj.face_down {
+        return None;
+    }
+    // The object's OWN stored face: an intrinsic snapshot stays independent of
+    // Layer 1 (a copy effect folds over it in `compute_current_copiable_values`,
+    // which replaces the whole value set including `prepare_face`).
+    obj.back_face
+        .as_ref()
+        .filter(|face| is_prepare_spell_face(face))
+        .map(|face| Arc::new(face.clone()))
+}
+
+/// CR 722.2a: whether a stored face is a prepare spell (as opposed to a
+/// Transform/Modal/Meld back face or an Adventure/Omen/Flip face).
+pub(crate) fn is_prepare_spell_face(face: &BackFaceData) -> bool {
+    matches!(face.layout_kind, Some(LayoutKind::Prepare))
+}
+
+/// CR 722.2b + CR 707.2 + CR 613.1a: the prepare spell this object has right
+/// now — the single read authority for "does it have a prepare spell, and what
+/// is it". While a Layer-1 copy effect applies, the copy's copiable values
+/// replace the object's own (so a Clone of a preparation creature has the
+/// prepare spell, and a preparation creature that copies something else has
+/// none); otherwise it is the stored prepare face.
+pub(crate) fn effective_prepare_face(obj: &GameObject) -> Option<&BackFaceData> {
+    if obj.layer1_copy_effect.is_some() {
+        return obj.copied_prepare_face.as_deref();
+    }
+    obj.back_face
+        .as_ref()
+        .filter(|face| is_prepare_spell_face(face))
+}
+
+/// CR 722.2b: the prepare spell a database card face's printed card carries —
+/// the sibling-face lookup for producers that hold only a `CardFace` (a
+/// format-pool draw), where no battlefield object exists to read it from.
+pub(crate) fn printed_prepare_face(
+    db: &CardDatabase,
+    face: &CardFace,
+) -> Option<Arc<BackFaceData>> {
+    back_face_for_card_face(db, face)
+        .filter(is_prepare_spell_face)
+        .map(Arc::new)
 }
 
 /// CR 707.2 / CR 707.2b: copiable values are the object's printed/defining
@@ -697,7 +777,10 @@ pub(crate) fn is_runtime_non_copiable_replacement(def: &ReplacementDefinition) -
 /// Also used by `CreateTokenCopyFromPool` (Momir Basic) to build copiable values
 /// for a creature card chosen from the format pool, which exists only as a
 /// `CardFace` (no battlefield object to read via `compute_current_copiable_values`).
-pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValues {
+pub(crate) fn copiable_values_from_face(
+    result_face: &CardFace,
+    prepare_face: Option<Arc<BackFaceData>>,
+) -> CopiableValues {
     let printed_ref = printed_ref_from_face(result_face);
     CopiableValues {
         name: result_face.name.clone(),
@@ -730,6 +813,11 @@ pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValue
         replacement_definitions: Arc::new(result_face.replacements.clone()),
         // A format-pool face is never a Room half pair.
         room_halves: None,
+        // CR 722.2b: a lone `CardFace` carries no sibling face, so the producer
+        // that knows the printed card supplies its prepare spell (a format-pool
+        // draw via `printed_prepare_face`; a meld result is not a preparation
+        // card and passes `None`).
+        prepare_face,
         name_origin: Default::default(),
         static_definitions: Arc::new(result_face.static_abilities.clone()),
     }
@@ -822,6 +910,11 @@ pub fn apply_copiable_values(
     // CR 709.5b + CR 707.2: carry the copied Room half data. Layer-derived —
     // the Step-1 seed clears it, so it expires with this copy effect.
     obj.copied_room_halves = values.room_halves.clone();
+    // CR 722.2b + CR 707.2: the prepare spell is a copiable value, so a Layer-1
+    // copy of a preparation creature gains it (and a copy of anything else
+    // loses it). Layer-derived, not written into the stored `back_face`;
+    // `effective_prepare_face` selects between the two.
+    obj.copied_prepare_face = values.prepare_face.clone();
     // CR 707.9b + CR 707.3 + CR 613.1a: EVERY applied copy assigns the name
     // origin — a later ordinary copy therefore resets an earlier exception,
     // and a chained copy of an exception-named copy keeps the folded
@@ -894,6 +987,14 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
                 mana_cost: right.mana_cost.clone(),
                 ..Default::default()
             });
+    }
+    // CR 722.2b + CR 707.2: a materialized copy of an object with a prepare
+    // spell (a token copy, a conjured duplicate) has that prepare spell too, so
+    // it can become prepared (CR 722.3a) and its CR 722.3c copy takes the
+    // prepare spell's characteristics. Mutually exclusive with the Room branch
+    // above: a Room is not a preparation card.
+    if let Some(prepare_face) = &values.prepare_face {
+        obj.back_face = Some(BackFaceData::clone(prepare_face));
     }
     // CR 707.9b: a folded name EXCEPTION is part of the materialized base —
     // the Step-1 seed restores the runtime marker from this every pass.
@@ -1079,7 +1180,7 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
 // The reusable visitor this file's TODO asked for now exists:
 // `crate::types::ability_visit`. `game/coverage.rs` is still NOT migrated — its
 // pass builds `ParsedItem` trees rather than yielding `Effect`s, and
-// `coverage::ability_tree_any` is deliberately narrower (it has a `_ => {}`
+// `types::ability_visit::ability_tree_any` is deliberately narrower (it has a `_ => {}`
 // wildcard); broadening it would change the coverage report. See the
 // `types::ability_visit` module doc.
 // ---------------------------------------------------------------------------
@@ -1093,12 +1194,30 @@ struct OutsideGameSeeds {
     digital: Vec<String>,
 }
 
-impl OutsideGameSeeds {
-    /// Move into `out` the seed legs a game in `format` can actually reach.
-    fn drain_admitted_by(self, format: GameFormat, out: &mut Vec<String>) {
-        out.extend(self.meld);
+/// Which legs of [`OutsideGameSeeds`] a game can reach.
+#[derive(Clone, Copy)]
+enum OutsideGameLegs {
+    Paper,
+    PaperAndDigital,
+}
+
+impl OutsideGameLegs {
+    fn of(format: GameFormat) -> Self {
         if format.admits_digital_only_cards() {
-            out.extend(self.digital);
+            OutsideGameLegs::PaperAndDigital
+        } else {
+            OutsideGameLegs::Paper
+        }
+    }
+}
+
+impl OutsideGameSeeds {
+    /// Move into `out` the seed legs `legs` admits.
+    fn drain_admitted_by(self, legs: OutsideGameLegs, out: &mut Vec<String>) {
+        out.extend(self.meld);
+        match legs {
+            OutsideGameLegs::Paper => {}
+            OutsideGameLegs::PaperAndDigital => out.extend(self.digital),
         }
     }
 }
@@ -1234,9 +1353,20 @@ pub(crate) fn build_conjure_registry(
     state: &GameState,
     db: &CardDatabase,
 ) -> (HashMap<String, CardFace>, Vec<String>) {
-    let format = state.format_config.format;
+    let legs = OutsideGameLegs::of(state.format_config.format);
     let mut pending = Vec::new();
-    collect_seed_conjure_names(state, db).drain_admitted_by(format, &mut pending);
+    collect_seed_conjure_names(state, db).drain_admitted_by(legs, &mut pending);
+    resolve_outside_game_closure(pending, legs, db)
+}
+
+/// Resolve `pending` outside-the-game names, and every name their faces reach
+/// under `legs`, to a fixpoint. Returns the resolved faces keyed as the Conjure
+/// and meld resolvers look them up, plus every admitted name encountered.
+fn resolve_outside_game_closure(
+    mut pending: Vec<String>,
+    legs: OutsideGameLegs,
+    db: &CardDatabase,
+) -> (HashMap<String, CardFace>, Vec<String>) {
     // Fed only from `pending`, so a gated-out name can never reach the debug
     // safety net in `rehydrate_card_db_metadata` or `card_subset.rs`'s universe.
     let mut all_collected = pending.clone();
@@ -1257,12 +1387,66 @@ pub(crate) fn build_conjure_registry(
         let before = pending.len();
         let mut seeds = OutsideGameSeeds::default();
         collect_conjure_names_from_face(face, &mut seeds);
-        seeds.drain_admitted_by(format, &mut pending);
+        seeds.drain_admitted_by(legs, &mut pending);
         all_collected.extend_from_slice(&pending[before..]);
         registry.insert(key, face.clone());
     }
 
     (registry, all_collected)
+}
+
+/// Faces from outside the game `face` can reach, resolved for both sides of
+/// the digital-only format gate. A card entering mid-game carries these so its
+/// entry can extend the game's registry without consulting the database.
+pub fn outside_game_faces_for(face: &CardFace, db: &CardDatabase) -> OutsideGameFaces {
+    let closure = |legs| {
+        let mut seeds = OutsideGameSeeds::default();
+        collect_conjure_names_from_face(face, &mut seeds);
+        let mut pending = Vec::new();
+        seeds.drain_admitted_by(legs, &mut pending);
+        resolve_outside_game_closure(pending, legs, db).0
+    };
+    let paper = closure(OutsideGameLegs::Paper);
+    let sorted = |faces: HashMap<String, CardFace>| {
+        let mut faces: Vec<(String, CardFace)> = faces.into_iter().collect();
+        faces.sort_by(|(a, _), (b, _)| a.cmp(b));
+        faces.into_iter().map(|(_, face)| face).collect::<Vec<_>>()
+    };
+    let digital = closure(OutsideGameLegs::PaperAndDigital)
+        .into_iter()
+        .filter(|(key, _)| !paper.contains_key(key))
+        .collect();
+    OutsideGameFaces {
+        paper: sorted(paper),
+        digital: sorted(digital),
+    }
+}
+
+/// CR 701.42a: add the outside-the-game faces a card entering mid-game can
+/// reach — its meld pair's combined back — to `card_face_registry`, under this
+/// game's digital-only format gate, exactly as if it had started in the game.
+pub fn extend_card_face_registry(state: &mut GameState, faces: &OutsideGameFaces) {
+    let digital: &[CardFace] = match OutsideGameLegs::of(state.format_config.format) {
+        OutsideGameLegs::Paper => &[],
+        OutsideGameLegs::PaperAndDigital => &faces.digital,
+    };
+    let missing: Vec<&CardFace> = faces
+        .paper
+        .iter()
+        .chain(digital)
+        .filter(|face| {
+            !state
+                .card_face_registry
+                .contains_key(&face.name.to_lowercase())
+        })
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let registry = Arc::make_mut(&mut state.card_face_registry);
+    for face in missing {
+        registry.insert(face.name.to_lowercase(), face.clone());
+    }
 }
 
 /// CR 712 / CR 715 / CR 722: Build the other printed face for a face-complete
@@ -1614,6 +1798,7 @@ fn collect_meld_effects_from_ability<'a>(
 /// Does not finalize public state or flush layers.
 fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) -> (bool, bool) {
     let object_ids: Vec<_> = state.objects.keys().copied().collect();
+    let mut refreshed_ids = Vec::new();
     let mut changed_any = false;
     let mut changed_battlefield = false;
 
@@ -1630,7 +1815,25 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
             continue;
         };
 
-        let zone = state.objects[&object_id].zone;
+        let object = &state.objects[&object_id];
+        let zone = object.zone;
+        let canonical = StaticDefinition::new(StaticMode::CantBeCountered);
+        // CR 112.1 + CR 611.2c: the paid rules modification belongs to this
+        // actual spell, including its parked resolving carrier, until Stack exit.
+        let cast_prohibition = (zone == Zone::Stack
+            && state.stack.iter().chain(state.resolving_stack_entry.iter()).any(|entry| {
+                entry.id == object_id && entry.source_id == object_id
+                    && matches!(entry.kind, StackEntryKind::Spell { card_id, .. } if card_id == object.card_id)
+            })
+            && !object.base_static_definitions.contains(&canonical))
+            .then(|| object.static_definitions.iter_all().find(|definition| **definition == canonical).cloned())
+            .flatten();
+        // CR 718.3b + CR 718.4 + CR 601.2a: a saved prototype form is live only
+        // for the spell (including one still being cast, which is on the stack)
+        // and the permanent it becomes; in every other zone the card has only
+        // its normal characteristics.
+        let in_prototype_lifetime = matches!(zone, Zone::Stack | Zone::Battlefield)
+            || crate::game::casting::is_spell_being_cast(state, object_id);
         if let Some(obj) = state.objects.get_mut(&object_id) {
             let is_face_down_battlefield = obj.face_down && obj.zone == Zone::Battlefield;
 
@@ -1656,6 +1859,15 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
                 obj.base_printed_ref = obj.printed_ref.clone();
             } else {
                 apply_card_face_to_object(obj, &card_face);
+                if in_prototype_lifetime {
+                    refreshed_ids.push(object_id);
+                } else if obj.prototype_form.is_some() {
+                    // CR 718.4 + CR 400.7: a form still carried off the stack
+                    // and battlefield (a state saved while replay left it in
+                    // place) is expired; drop it so a later normal cast cannot
+                    // revive it.
+                    crate::game::casting::clear_prototype_form(obj);
+                }
                 // CR 702.103b: Rehydration re-stamps printed characteristics from
                 // card-data.json, which clobbers the synthesized Aura subtype while
                 // `bestow_form` remains set (issue #3253). Re-apply the bestow
@@ -1748,6 +1960,15 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
             }
 
             populate_back_face_if_dfc(obj, db, &card_face);
+            if let Some(prohibition) = cast_prohibition {
+                if !obj
+                    .static_definitions
+                    .iter_all()
+                    .any(|definition| *definition == prohibition)
+                {
+                    obj.static_definitions.push(prohibition);
+                }
+            }
         }
 
         changed_any = true;
@@ -1756,6 +1977,10 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
         }
     }
 
+    // CR 718.3b: Printed base refresh must retain the saved alternative
+    // characteristics of a prototyped spell or the permanent it becomes; the
+    // batch holds only objects inside that lifetime (CR 718.4).
+    super::layers::apply_prototype_characteristics(state, refreshed_ids);
     (changed_any, changed_battlefield)
 }
 
@@ -1862,6 +2087,8 @@ pub fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::PrototypeFormState;
+    use crate::types::ability::ChooseOneOfKind;
     use crate::types::format::FormatConfig;
 
     /// CR 611.2c + CR 613.1 (issue #8485, round-5 HIGH-1): a transform ROUND TRIP
@@ -2828,6 +3055,239 @@ mod tests {
         );
     }
 
+    /// A battlefield creature whose stored other face is `face`.
+    fn creature_with_stored_face(face: Option<BackFaceData>) -> GameObject {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Front Face".to_string(),
+            Zone::Battlefield,
+        );
+        obj.base_card_types.core_types.push(CoreType::Creature);
+        obj.back_face = face;
+        obj
+    }
+
+    /// An instant face stored with `layout_kind`.
+    fn stored_instant_face(layout_kind: Option<LayoutKind>) -> BackFaceData {
+        BackFaceData {
+            name: "Inset Spell".to_string(),
+            card_types: CardType {
+                core_types: vec![CoreType::Instant],
+                ..CardType::default()
+            },
+            mana_cost: ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue],
+            },
+            color: vec![ManaColor::Blue],
+            layout_kind,
+            ..BackFaceData::default()
+        }
+    }
+
+    /// CR 722.2b + CR 707.8 + CR 708.2: the capture carries only a prepare
+    /// spell, and only for a face-up object; the base install writes it back.
+    #[test]
+    fn copiable_prepare_face_ignores_non_prepare_back_faces() {
+        let prepare = stored_instant_face(Some(LayoutKind::Prepare));
+        let captured = intrinsic_copiable_values(&creature_with_stored_face(Some(prepare.clone())))
+            .prepare_face
+            .expect("CR 722.2b: a prepare spell is a copiable value");
+        assert_eq!(*captured, prepare);
+
+        // CR 707.8: the other face of a double-faced permanent is not a copiable
+        // value of the face that is up; the remaining layouts are not prepare
+        // spells; a stored face without a layout is not one either.
+        for layout_kind in [
+            Some(LayoutKind::Transform),
+            Some(LayoutKind::Modal),
+            Some(LayoutKind::Meld),
+            Some(LayoutKind::Adventure),
+            Some(LayoutKind::Omen),
+            Some(LayoutKind::Flip),
+            Some(LayoutKind::Split),
+            Some(LayoutKind::Single),
+            None,
+        ] {
+            let obj = creature_with_stored_face(Some(stored_instant_face(layout_kind)));
+            assert_eq!(
+                intrinsic_copiable_values(&obj).prepare_face,
+                None,
+                "{layout_kind:?} must not be captured as a prepare spell"
+            );
+        }
+        assert_eq!(
+            intrinsic_copiable_values(&creature_with_stored_face(None)).prepare_face,
+            None
+        );
+
+        // CR 708.2: a face-down object has no prepare spell.
+        let mut face_down = creature_with_stored_face(Some(prepare.clone()));
+        face_down.face_down = true;
+        assert_eq!(intrinsic_copiable_values(&face_down).prepare_face, None);
+
+        // The base install gives a fresh object the captured prepare spell ...
+        let values = intrinsic_copiable_values(&creature_with_stored_face(Some(prepare.clone())));
+        let mut copy = GameObject::new(
+            ObjectId(2),
+            CardId(0),
+            PlayerId(0),
+            "Copy".to_string(),
+            Zone::Battlefield,
+        );
+        install_copiable_values_as_base(&mut copy, &values);
+        assert_eq!(copy.back_face.as_ref(), Some(&prepare));
+        // ... and a copy of a creature without one stays without one.
+        let mut plain_copy = GameObject::new(
+            ObjectId(3),
+            CardId(0),
+            PlayerId(0),
+            "Plain Copy".to_string(),
+            Zone::Battlefield,
+        );
+        install_copiable_values_as_base(
+            &mut plain_copy,
+            &intrinsic_copiable_values(&creature_with_stored_face(None)),
+        );
+        assert_eq!(plain_copy.back_face, None);
+    }
+
+    /// CR 722.2b + CR 707.2 + CR 613.1a: a Layer-1 copy carries the prepare
+    /// spell — gained from a preparation source, lost when the copy source has
+    /// none, preserved across a copy of a copy, and inert once the copy effect
+    /// no longer applies.
+    #[test]
+    fn layer1_copy_carries_the_prepare_spell() {
+        let prepare = stored_instant_face(Some(LayoutKind::Prepare));
+        let copy_effect = crate::types::ability::CopyEffectInstanceRef {
+            continuous_effect_id: 3,
+            modification_index: 0,
+        };
+        // What the layer system does around `apply_copiable_values`.
+        let apply = |recipient: &mut GameObject, values: &CopiableValues| {
+            apply_copiable_values(recipient, values, copy_effect);
+            recipient.layer1_copy_effect = Some(copy_effect);
+        };
+
+        let preparation = creature_with_stored_face(Some(prepare.clone()));
+        let preparation_values = intrinsic_copiable_values(&preparation);
+
+        // Gain: a Clone with no stored prepare face copies a preparation creature.
+        let mut clone = creature_with_stored_face(None);
+        assert_eq!(effective_prepare_face(&clone), None);
+        apply(&mut clone, &preparation_values);
+        assert_eq!(effective_prepare_face(&clone), Some(&prepare));
+        assert_eq!(
+            clone.back_face, None,
+            "layer-derived, not written to the stored face"
+        );
+
+        // The intrinsic snapshot stays independent of Layer 1: the clone's own
+        // printed form has no prepare spell. (Copy of a copy folds through
+        // `compute_current_copiable_values`; see the Codie Clone integration
+        // test.)
+        assert_eq!(intrinsic_copiable_values(&clone).prepare_face, None);
+
+        // Lose: a preparation creature that copies a plain creature has none.
+        let mut copies_plain = creature_with_stored_face(Some(prepare.clone()));
+        apply(
+            &mut copies_plain,
+            &intrinsic_copiable_values(&creature_with_stored_face(None)),
+        );
+        assert_eq!(effective_prepare_face(&copies_plain), None);
+
+        // Expiry: with no copy effect applying, the stored face governs again.
+        clone.layer1_copy_effect = None;
+        clone.copied_prepare_face = None;
+        assert_eq!(effective_prepare_face(&clone), None);
+        assert_eq!(effective_prepare_face(&preparation), Some(&prepare));
+    }
+
+    /// CR 722.2b: a format-pool draw (Momir Basic) builds its copiable values
+    /// from a lone `CardFace`; the printed card's sibling prepare spell rides
+    /// along, and only a prepare spell does.
+    #[test]
+    fn format_pool_face_carries_its_printed_prepare_spell() {
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 1,
+        };
+        let front = test_face(
+            "Emeritus of Truce",
+            "prepare-oracle-id",
+            vec![CoreType::Creature],
+            cost.clone(),
+        );
+        let back = test_face(
+            "Swords to Plowshares",
+            "prepare-oracle-id",
+            vec![CoreType::Sorcery],
+            cost.clone(),
+        );
+        let plain = test_face(
+            "Grizzly Bears",
+            "plain-oracle-id",
+            vec![CoreType::Creature],
+            cost,
+        );
+
+        let mut front_json = serde_json::to_value(&front).unwrap();
+        front_json["layout"] = serde_json::json!("prepare");
+        let mut back_json = serde_json::to_value(&back).unwrap();
+        back_json["layout"] = serde_json::json!("prepare");
+        let export = serde_json::json!({
+            "emeritus of truce": front_json,
+            "swords to plowshares": back_json,
+            "grizzly bears": serde_json::to_value(&plain).unwrap(),
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+
+        let front = db.get_face_by_name("Emeritus of Truce").unwrap();
+        let prepare =
+            printed_prepare_face(&db, front).expect("preparation card has a prepare spell");
+        assert_eq!(prepare.name, "Swords to Plowshares");
+        assert!(is_prepare_spell_face(&prepare));
+        let values = copiable_values_from_face(front, Some(prepare.clone()));
+        assert_eq!(values.prepare_face, Some(prepare));
+
+        let plain = db.get_face_by_name("Grizzly Bears").unwrap();
+        assert_eq!(printed_prepare_face(&db, plain), None);
+        assert_eq!(copiable_values_from_face(plain, None).prepare_face, None);
+    }
+
+    /// The field is additive serialized state: absent from a snapshot without a
+    /// prepare spell (byte-compatible with earlier saves), defaulted to `None`
+    /// when missing, and round-tripped when present.
+    #[test]
+    fn copiable_prepare_face_serde_is_additive() {
+        let plain = intrinsic_copiable_values(&creature_with_stored_face(None));
+        let json = serde_json::to_value(&plain).expect("serialize copiable values");
+        assert!(
+            json.get("prepare_face").is_none(),
+            "no prepare_face key without a prepare spell"
+        );
+        assert!(
+            json.get("room_halves").is_none(),
+            "reach guard: the sibling skip-when-None field is absent too"
+        );
+        let back: CopiableValues =
+            serde_json::from_value(json).expect("a payload without the key deserializes");
+        assert_eq!(back.prepare_face, None);
+        assert_eq!(back, plain);
+
+        let prepared = intrinsic_copiable_values(&creature_with_stored_face(Some(
+            stored_instant_face(Some(LayoutKind::Prepare)),
+        )));
+        let json = serde_json::to_value(&prepared).expect("serialize copiable values");
+        assert!(json.get("prepare_face").is_some());
+        let back: CopiableValues =
+            serde_json::from_value(json).expect("the prepare spell round-trips");
+        assert_eq!(back, prepared);
+    }
+
     /// CR 712.12: MDFC land face selection requires `LayoutKind::Modal` on the back
     /// face. When loading from the export path (card-data.json), the `layout` field
     /// in the export entry must be propagated through the layout_index so that
@@ -3123,6 +3583,236 @@ mod tests {
             crate::game::combat::get_valid_blocker_ids(&state).contains(&object_id),
             "rehydrated face-down battlefield permanents must be legal blocker candidates"
         );
+    }
+
+    #[test]
+    fn cast_prohibition_restore_prototype_refresh_excludes_token_face_down_and_missing_faces() {
+        let mut face = test_face(
+            "Form isolation",
+            "form-isolation",
+            vec![CoreType::Creature],
+            ManaCost::Cost {
+                generic: 7,
+                shards: vec![],
+            },
+        );
+        face.power = Some(PtValue::Fixed(4));
+        face.toughness = Some(PtValue::Fixed(3));
+        let db =
+            CardDatabase::from_json_str(&serde_json::json!({ "form isolation": face }).to_string())
+                .unwrap();
+        let form = PrototypeFormState {
+            mana_cost: ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            },
+            power: 2,
+            toughness: 1,
+            colors: vec![ManaColor::Blue],
+        };
+        let mut state = GameState::new_two_player(42);
+        let mut ids = Vec::new();
+        for _ in 0..6 {
+            ids.push(create_object_from_card_face(
+                &mut state,
+                db.get_face_by_name("Form isolation").unwrap(),
+                PlayerId(0),
+            ));
+        }
+        let [ordinary, token, face_down, missing_ref, missing_face, expired] = ids.as_slice()
+        else {
+            unreachable!()
+        };
+        for id in &ids {
+            let object = state.objects.get_mut(id).unwrap();
+            object.prototype_form = Some(form.clone());
+            object.name = "stale display".to_string();
+            object.power = Some(77);
+        }
+        // CR 718.3b: the ordinary positive is a permanent inside the form's
+        // lifetime; `expired` stays in the library, outside it (CR 718.4).
+        state.objects.get_mut(ordinary).unwrap().zone = Zone::Battlefield;
+        {
+            let object = state.objects.get_mut(token).unwrap();
+            object.is_token = true;
+            object.zone = Zone::Battlefield;
+            object.base_printed_ref = None;
+            object.power = Some(6);
+            object.toughness = Some(8);
+        }
+        {
+            let object = state.objects.get_mut(face_down).unwrap();
+            object.zone = Zone::Battlefield;
+            object.face_down = true;
+            object.back_face = Some(snapshot_object_face(object));
+        }
+        state.objects.get_mut(missing_ref).unwrap().printed_ref = None;
+        state
+            .objects
+            .get_mut(missing_face)
+            .unwrap()
+            .printed_ref
+            .as_mut()
+            .unwrap()
+            .oracle_id = "missing-face".to_string();
+        // Bounded branch isolation before the existing finalizer: saved markers
+        // on tokens/face-down objects deliberately distinguish exclusion from
+        // this new ordinary-refresh batch. Public valid-form lifecycles are
+        // covered independently through Raw/Trusted and Immediate/Defer.
+        rehydrate_game_from_card_db_with_finalization(
+            &mut state,
+            &db,
+            CardDbRehydrationFinalization::Defer,
+        );
+        assert_eq!(state.objects[ordinary].name, "Form isolation");
+        assert_eq!(
+            (
+                state.objects[ordinary].power,
+                state.objects[ordinary].toughness
+            ),
+            (Some(2), Some(1))
+        );
+        assert_eq!(state.objects[ordinary].mana_cost, form.mana_cost);
+        assert_eq!(state.objects[ordinary].color, form.colors);
+        assert_eq!(state.objects[ordinary].base_power, Some(4));
+        assert_eq!(state.objects[ordinary].prototype_form, Some(form.clone()));
+        // CR 718.4: outside the stack and battlefield the refreshed card keeps
+        // only its normal characteristics, and the expired form is dropped.
+        assert_eq!(
+            state.objects[expired].name, "Form isolation",
+            "expired-form card really refreshed"
+        );
+        assert_eq!(
+            (
+                state.objects[expired].power,
+                state.objects[expired].toughness
+            ),
+            (Some(4), Some(3))
+        );
+        assert_eq!(
+            state.objects[expired].mana_cost,
+            ManaCost::Cost {
+                generic: 7,
+                shards: vec![],
+            }
+        );
+        assert!(state.objects[expired].color.is_empty());
+        assert_eq!(state.objects[expired].prototype_form, None);
+        assert_eq!(
+            (state.objects[token].power, state.objects[token].toughness),
+            (Some(6), Some(8))
+        );
+        assert_eq!(state.objects[token].name, "stale display");
+        assert_eq!(
+            state.objects[token].base_printed_ref,
+            state.objects[token].printed_ref
+        );
+        assert!(
+            state.objects[token].base_printed_ref.is_some(),
+            "token display refresh really executed"
+        );
+        assert_eq!(
+            (
+                state.objects[face_down].power,
+                state.objects[face_down].toughness
+            ),
+            (Some(2), Some(2))
+        );
+        assert_eq!(
+            state.objects[face_down].back_face.as_ref().unwrap().name,
+            "Form isolation",
+            "hidden printed face really refreshed"
+        );
+        for id in [missing_ref, missing_face] {
+            assert_eq!(state.objects[id].name, "stale display");
+            assert_eq!(state.objects[id].power, Some(77));
+        }
+    }
+
+    #[test]
+    fn cast_prohibition_restore_two_sources_and_actual_resolution_carrier_transfer() {
+        let face = test_face(
+            "Paired source",
+            "paired-source",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let db =
+            CardDatabase::from_json_str(&serde_json::json!({ "paired source": face }).to_string())
+                .unwrap();
+        let canonical = StaticDefinition::new(StaticMode::CantBeCountered);
+        let mut state = GameState::new_two_player(42);
+        let mut ids = Vec::new();
+        // Bounded identity fixture: no printed paused-Proxy ability is claimed.
+        // Each independent current object has its own matching Spell entry.
+        for _ in 0..2 {
+            let id = create_object_from_card_face(
+                &mut state,
+                db.get_face_by_name("Paired source").unwrap(),
+                PlayerId(0),
+            );
+            super::super::zones::remove_from_zone(&mut state, id, Zone::Library, PlayerId(0));
+            let object = state.objects.get_mut(&id).unwrap();
+            object.zone = Zone::Stack;
+            object.name = "stale display".to_string();
+            object.static_definitions.push(canonical.clone());
+            state.stack.push_back(crate::types::game_state::StackEntry {
+                id,
+                source_id: id,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: object.card_id,
+                    ability: None,
+                    casting_variant: crate::types::game_state::CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+            ids.push(id);
+        }
+        let parked = state.stack.pop_back().unwrap();
+        super::super::stack::begin_resolving_stack_entry(&mut state, parked, None)
+            .expect("one actual resolution carrier transfer");
+        for _ in 0..2 {
+            rehydrate_game_from_card_db_with_finalization(
+                &mut state,
+                &db,
+                CardDbRehydrationFinalization::Defer,
+            );
+            for id in &ids {
+                assert_eq!(state.objects[id].name, "Paired source");
+                assert_eq!(
+                    state.objects[id]
+                        .static_definitions
+                        .iter_all()
+                        .filter(|definition| **definition == canonical)
+                        .count(),
+                    1
+                );
+                assert!(!state.objects[id]
+                    .base_static_definitions
+                    .contains(&canonical));
+            }
+        }
+        // A valid other source must not authorize a cross-wired carrier.
+        state.resolving_stack_entry.as_mut().unwrap().source_id = ids[0];
+        rehydrate_game_from_card_db_with_finalization(
+            &mut state,
+            &db,
+            CardDbRehydrationFinalization::Defer,
+        );
+        assert_eq!(
+            state.objects[&ids[0]]
+                .static_definitions
+                .iter_all()
+                .filter(|definition| **definition == canonical)
+                .count(),
+            1
+        );
+        assert!(!state.objects[&ids[1]]
+            .static_definitions
+            .iter_all()
+            .any(|definition| *definition == canonical));
+        assert_eq!(state.objects[&ids[1]].name, "Paired source");
     }
 
     fn test_class_face(name: &str, oracle_id: &str) -> CardFace {
@@ -3445,6 +4135,89 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         rehydrate_game_from_card_db(&mut state, &db);
         assert_eq!(state.meld_pair_registry.as_ref(), &registry);
+    }
+
+    /// CR 701.42b + CR 712.4: MTGJSON publishes a meld pair as three single-face
+    /// groups (two fronts, one shared combined back). Loaded through the real
+    /// parser, that shape must still yield the canonical pair — this is the
+    /// production data shape, not a hand-built `meld` layout fixture.
+    #[test]
+    fn mtgjson_meld_shape_builds_canonical_meld_pair_registry_entry() {
+        let face =
+            |name: &str, face_name: &str, side: &str, oracle: &str, fields: serde_json::Value| {
+                let mut json = serde_json::json!({
+                    "name": name,
+                    "faceName": face_name,
+                    "side": side,
+                    "layout": "meld",
+                    "colors": ["W"],
+                    "colorIdentity": ["W"],
+                    "types": ["Creature"],
+                    "subtypes": ["Angel", "Horror"],
+                    "supertypes": ["Legendary"],
+                    "type": "Legendary Creature — Angel Horror",
+                    "identifiers": { "scryfallOracleId": oracle }
+                });
+                json.as_object_mut()
+                    .unwrap()
+                    .extend(fields.as_object().unwrap().clone());
+                json
+            };
+        let atomic = serde_json::json!({ "data": {
+            "Gisela, the Broken Blade // Brisela, Voice of Nightmares": [face(
+                "Gisela, the Broken Blade // Brisela, Voice of Nightmares",
+                "Gisela, the Broken Blade",
+                "a",
+                "gisela-oracle",
+                serde_json::json!({
+                    "manaCost": "{2}{W}{W}",
+                    "manaValue": 4.0,
+                    "power": "4",
+                    "toughness": "3",
+                    "text": "Flying, first strike, lifelink\nAt the beginning of your end step, if you both own and control Gisela and a creature named Bruna, the Fading Light, exile them, then meld them into Brisela, Voice of Nightmares."
+                }),
+            )],
+            "Bruna, the Fading Light // Brisela, Voice of Nightmares": [face(
+                "Bruna, the Fading Light // Brisela, Voice of Nightmares",
+                "Bruna, the Fading Light",
+                "a",
+                "bruna-oracle",
+                serde_json::json!({
+                    "manaCost": "{5}{W}{W}",
+                    "manaValue": 7.0,
+                    "power": "5",
+                    "toughness": "7",
+                    "text": "When you cast this spell, you may return target Angel or Human creature card from your graveyard to the battlefield.\nFlying, vigilance\n(Melds with Gisela, the Broken Blade.)"
+                }),
+            )],
+            "Brisela, Voice of Nightmares": [face(
+                "Brisela, Voice of Nightmares",
+                "Brisela, Voice of Nightmares",
+                "b",
+                "brisela-oracle",
+                serde_json::json!({
+                    "manaValue": 0.0,
+                    "power": "9",
+                    "toughness": "10",
+                    "subtypes": ["Eldrazi", "Angel"],
+                    "type": "Legendary Creature — Eldrazi Angel",
+                    "text": "Flying, first strike, vigilance, lifelink\nYour opponents can't cast spells with mana value 3 or less."
+                }),
+            )],
+        }});
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, atomic.to_string().as_bytes()).unwrap();
+        let db = CardDatabase::from_mtgjson(file.path()).expect("MTGJSON meld shape loads");
+
+        let key = meld_pair_key("Gisela, the Broken Blade", "Bruna, the Fading Light");
+        assert_eq!(
+            build_meld_pair_registry(&db).get(&key),
+            Some(&MeldPairRecord {
+                source: "Gisela, the Broken Blade".to_string(),
+                partner: "Bruna, the Fading Light".to_string(),
+                result: "Brisela, Voice of Nightmares".to_string(),
+            })
+        );
     }
 
     fn conjure_ability(target_name: &str, destination: Zone) -> AbilityDefinition {
@@ -3907,17 +4680,39 @@ mod tests {
         };
         walk_effect(&delayed, &mut names);
 
-        let flip = Effect::FlipCoin {
-            win_effect: Some(Box::new(conjure_ability("flip_win", Zone::Hand))),
-            lose_effect: Some(Box::new(conjure_ability("flip_lose", Zone::Hand))),
-            flipper: crate::types::ability::TargetFilter::Controller,
-        };
-        walk_effect(&flip, &mut names);
+        // `FlipCoins` carries both branches in every run mode; walk each mode's pair.
+        for (run, win, lose) in [
+            (
+                crate::types::ability::CoinFlipRun::single(),
+                "flip_win",
+                "flip_lose",
+            ),
+            (
+                crate::types::ability::CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 2 },
+                },
+                "flips_win",
+                "flips_lose",
+            ),
+            (
+                crate::types::ability::CoinFlipRun::UntilLoss,
+                "until_loss_win",
+                "until_loss_lose",
+            ),
+        ] {
+            let flips = Effect::FlipCoins {
+                flips: run,
+                win_effect: Some(Box::new(conjure_ability(win, Zone::Hand))),
+                lose_effect: Some(Box::new(conjure_ability(lose, Zone::Hand))),
+                flipper: crate::types::ability::TargetFilter::Controller,
+            };
+            walk_effect(&flips, &mut names);
+        }
 
-        let until_lose = Effect::FlipCoinUntilLose {
-            win_effect: Box::new(conjure_ability("until_lose", Zone::Hand)),
+        let contest = Effect::ExileTopCardContest {
+            winner_effect: Box::new(conjure_ability("contest_winner", Zone::Hand)),
         };
-        walk_effect(&until_lose, &mut names);
+        walk_effect(&contest, &mut names);
 
         let roll = Effect::RollDie {
             count: QuantityExpr::Fixed { value: 1 },
@@ -3934,6 +4729,7 @@ mod tests {
         let choose_one = Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches: vec![conjure_ability("choose_one", Zone::Hand)],
+            kind: ChooseOneOfKind::Ordinary,
         };
         walk_effect(&choose_one, &mut names);
 
@@ -3984,6 +4780,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![token_static],
             enter_with_counters: vec![],
@@ -4016,6 +4813,7 @@ mod tests {
             target: TargetFilter::Any,
             source_rider: Some(CounterSourceRider::LosesAbilities {
                 static_def: Box::new(counter_static),
+                source_filter: None,
                 duration: Box::new(crate::types::ability::Duration::UntilHostLeavesPlay),
             }),
             countered_spell_zone: None,
@@ -4127,7 +4925,11 @@ mod tests {
             "delayed",
             "flip_win",
             "flip_lose",
-            "until_lose",
+            "flips_win",
+            "flips_lose",
+            "until_loss_win",
+            "until_loss_lose",
+            "contest_winner",
             "roll",
             "choose_one",
             "trigger",
@@ -4280,7 +5082,12 @@ mod tests {
 
         let obj = state.objects.get(&aura_id).unwrap();
         assert_eq!(obj.zone, Zone::Battlefield);
-        assert_eq!(obj.bestow_form, Some(BestowFormState));
+        assert_eq!(
+            obj.bestow_form,
+            Some(BestowFormState {
+                removed_creature_subtypes: vec!["Insect".into(), "Monk".into()],
+            })
+        );
         assert!(
             obj.card_types.subtypes.iter().any(|s| s == "Aura"),
             "live subtypes must include Aura after rehydrate, got {:?}",
@@ -4295,6 +5102,9 @@ mod tests {
             !obj.card_types.core_types.contains(&CoreType::Creature),
             "bestowed object must not keep Creature core type"
         );
+        // CR 205.1a: a bestowed Aura is not a creature, so it has no creature types.
+        assert_eq!(obj.card_types.subtypes, vec!["Aura".to_string()]);
+        assert_eq!(obj.base_card_types.subtypes, vec!["Aura".to_string()]);
     }
 
     /// A graveyard object whose live face is the BACK half and whose stashed

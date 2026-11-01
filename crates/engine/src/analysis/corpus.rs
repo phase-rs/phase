@@ -1,4 +1,4 @@
-//! Shared combo-corpus harness: the 54-row acceptance corpus + the bespoke driver
+//! Shared combo-corpus harness: the acceptance corpus + the bespoke driver
 //! toolkit, parameterized on a `&CardDatabase` so BOTH the `#[cfg(test)]`
 //! acceptance suite (`corpus_tests`) and the `combo-verify` CLI drive ONE shared
 //! implementation. Gated `#[cfg(any(test, feature = "combo-verify"))]`, so it is
@@ -29,11 +29,11 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 // ===========================================================================
-// Data layer: the 54-row corpus.
+// Data layer: the corpus.
 // ===========================================================================
 
 /// One row of the acceptance corpus: a combo, its documented unbounded resource
-/// family, the expected [`WinKind`], and (for the 4 card-gated combos) the card
+/// family, the expected [`WinKind`], and (for a card-gated combo) the card
 /// whose completion unblocks it.
 ///
 /// Fields are `pub(crate)` so the `#[cfg(test)]` meta-tests can read them
@@ -89,9 +89,10 @@ pub enum ResourceFamily {
 /// measured structural classes (no bespoke driver on the current in-place model).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeferralBucket {
-    /// Tokens / blink / persist / undying / recur engines: a permanent that
-    /// dies/blinks/bounces and returns gets a FRESH `ObjectId` each cycle, so the
-    /// id-keyed per-object loop equality sees a different board.
+    /// Tokens / blink / persist / undying / recur engines: every cycle makes a new
+    /// object. A token mint (CR 111.1) allocates a fresh `ObjectId`; a permanent that
+    /// leaves the battlefield and returns is a new object (CR 400.7) that the zone
+    /// mover keeps under its storage `ObjectId` with a new incarnation.
     ObjectReentry,
     /// Extra-turn / extra-combat re-entry: each cycle advances `turn_number` /
     /// combat count, so the loop point is a different turn/phase — not board-
@@ -105,12 +106,12 @@ pub enum DeferralBucket {
     Other,
 }
 
-/// The full 54-row acceptance corpus: 3 driving combos + the 51 card-disjoint
-/// corpus combos. The 4 `gated_on`-nonempty rows correspond to the cards with
-/// Unimplemented parts; the 37 `deferral`-nonempty rows are the non-driven,
+/// The full acceptance corpus: the driving combos + the card-disjoint corpus
+/// combos. The `gated_on`-nonempty rows correspond to the cards with
+/// Unimplemented parts; the `deferral`-nonempty rows are the non-driven,
 /// non-gated combos with a measured structural deferral reason.
 pub(crate) const CORPUS: &[ComboRow] = &[
-    // ---- 3 driving combos ----
+    // ---- driving combos ----
     ComboRow {
         name: "Heliod, Sun-Crowned + Walking Ballista",
         cards: &["Heliod, Sun-Crowned", "Walking Ballista"],
@@ -143,14 +144,14 @@ pub(crate) const CORPUS: &[ComboRow] = &[
         gated_on: Some("Doc Aurlock, Grizzled Genius"),
         deferral: None,
     },
-    // ---- 50 corpus combos (§12) ----
+    // ---- corpus combos (§12) ----
     ComboRow {
         name: "Basalt Monolith + Rings of Brighthearth",
         cards: &["Basalt Monolith", "Rings of Brighthearth"],
         family: ResourceFamily::Mana,
         win_kind: WinKind::Advantage,
         gated_on: None,
-        deferral: Some(DeferralBucket::Other),
+        deferral: None,
     },
     ComboRow {
         name: "Grim Monolith + Power Artifact",
@@ -446,7 +447,7 @@ pub(crate) const CORPUS: &[ComboRow] = &[
         family: ResourceFamily::Engine,
         win_kind: WinKind::Advantage,
         gated_on: None,
-        deferral: Some(DeferralBucket::ObjectReentry),
+        deferral: None,
     },
     ComboRow {
         name: "Tidespout Tyrant + Sol Ring",
@@ -494,7 +495,7 @@ pub(crate) const CORPUS: &[ComboRow] = &[
         family: ResourceFamily::Death,
         win_kind: WinKind::LethalDamage,
         gated_on: None,
-        deferral: Some(DeferralBucket::ObjectReentry),
+        deferral: None,
     },
     ComboRow {
         name: "Karmic Guide + Reveillark + Viscera Seer",
@@ -565,8 +566,87 @@ pub(crate) const CORPUS: &[ComboRow] = &[
         cards: &["Helm of Obedience", "Rest in Peace"],
         family: ResourceFamily::Mill,
         win_kind: WinKind::Decking,
+        gated_on: Some("Helm of Obedience"),
+        deferral: None,
+    },
+    ComboRow {
+        name: "Food Chain + Squee, the Immortal",
+        cards: &["Food Chain", "Squee, the Immortal"],
+        family: ResourceFamily::Engine,
+        win_kind: WinKind::Advantage,
         gated_on: None,
-        deferral: Some(DeferralBucket::Other),
+        deferral: None,
+    },
+    ComboRow {
+        name: "Phyrexian Altar + Gravecrawler + Altar of the Brood",
+        cards: &["Phyrexian Altar", "Gravecrawler", "Altar of the Brood"],
+        family: ResourceFamily::Mill,
+        win_kind: WinKind::Advantage,
+        gated_on: None,
+        deferral: None,
+    },
+    ComboRow {
+        name: "Phyrexian Altar + Gravecrawler + Zulaport Cutthroat",
+        cards: &["Phyrexian Altar", "Gravecrawler", "Zulaport Cutthroat"],
+        family: ResourceFamily::Drain,
+        win_kind: WinKind::LethalDamage,
+        gated_on: None,
+        deferral: None,
+    },
+    ComboRow {
+        name: "Grove of the Burnwillows + Tainted Remedy + Marvin, Murderous Mimic + Pili-Pala + Nature's Revolt",
+        cards: &[
+            "Grove of the Burnwillows",
+            "Tainted Remedy",
+            "Marvin, Murderous Mimic",
+            "Pili-Pala",
+            "Nature's Revolt",
+        ],
+        family: ResourceFamily::Drain,
+        win_kind: WinKind::LethalDamage,
+        gated_on: None,
+        deferral: None,
+    },
+    ComboRow {
+        name: "Hellkite Charger + Bear Umbra",
+        cards: &["Hellkite Charger", "Bear Umbra"],
+        family: ResourceFamily::Drain,
+        win_kind: WinKind::LethalDamage,
+        gated_on: None,
+        deferral: None,
+    },
+    ComboRow {
+        name: "Najeela, the Blade-Blossom + Urtet, Remnant of Memnarch + Sinister Monolith",
+        cards: &[
+            "Najeela, the Blade-Blossom",
+            "Urtet, Remnant of Memnarch",
+            "Sinister Monolith",
+        ],
+        family: ResourceFamily::Drain,
+        win_kind: WinKind::LethalDamage,
+        gated_on: None,
+        deferral: None,
+    },
+    ComboRow {
+        name: "Archaeomancer + Mnemonic Wall + Time Warp + Ghostly Flicker",
+        cards: &[
+            "Archaeomancer",
+            "Mnemonic Wall",
+            "Time Warp",
+            "Ghostly Flicker",
+        ],
+        family: ResourceFamily::Turns,
+        win_kind: WinKind::Advantage,
+        gated_on: None,
+        deferral: None,
+    },
+    ComboRow {
+        name: "Displacer Kitten + Blazing Firesinger",
+        cards: &["Displacer Kitten", "Blazing Firesinger"],
+        family: ResourceFamily::Mana,
+        win_kind: WinKind::Advantage,
+        gated_on: None,
+        deferral: None,
     },
 ];
 
@@ -651,7 +731,7 @@ pub enum RowStatus {
     },
     /// Driver ran but produced no/mismatched confirmation — a regression.
     Failed { detail: String },
-    /// Card-gated on an unimplemented card (the 4 gated rows).
+    /// Card-gated on an unimplemented card (a `gated_on`-nonempty row).
     Gated { card: &'static str },
     /// Testable but no driver yet (measured structural bucket).
     Deferred { bucket: DeferralBucket },
@@ -679,13 +759,14 @@ pub(crate) enum ComboDriver {
     PrecastShortcut,
 }
 
-/// Static map `idx -> driver` for the 13 confirmable rows. The single source of
+/// Static map `idx -> driver` for the confirmable rows. The single source of
 /// truth for "which rows are driven" (the `#[cfg(test)]` meta/partition tests read
 /// it, so adding a driver here is automatically reflected — no hand-listed index
 /// array to drift).
 pub(crate) const DRIVERS: &[(usize, ComboDriver)] = &[
     (0, ComboDriver::Offline(drive_offline_heliod_ballista)),
     (1, ComboDriver::Offline(drive_offline_kilo_freed_relic)),
+    (3, ComboDriver::Offline(drive_offline_basalt_rings)),
     (4, ComboDriver::Offline(drive_offline_grim_power)),
     (6, ComboDriver::Offline(drive_offline_devoted_vizier)),
     (9, ComboDriver::Offline(drive_offline_bloom_freed)),
@@ -696,7 +777,20 @@ pub(crate) const DRIVERS: &[(usize, ComboDriver)] = &[
     (17, ComboDriver::LiveDrain),
     (18, ComboDriver::LiveDrain),
     (22, ComboDriver::PrecastShortcut),
+    (40, ComboDriver::Offline(drive_food_chain_scourge_offer)),
+    (45, ComboDriver::Offline(drive_altar_blood_artist_offer)),
     (50, ComboDriver::Offline(drive_offline_spike_archangel)),
+    (54, ComboDriver::Offline(drive_food_chain_squee_offer)),
+    (55, ComboDriver::Offline(drive_altar_brood_offer)),
+    (56, ComboDriver::Offline(drive_altar_zulaport_offer)),
+    (57, ComboDriver::Offline(drive_grove_marvin_offer)),
+    (58, ComboDriver::Offline(drive_charger_umbra_offer)),
+    (59, ComboDriver::Offline(drive_najeela_urtet_offer)),
+    (
+        60,
+        ComboDriver::Offline(drive_archaeomancer_time_warp_offer),
+    ),
+    (61, ComboDriver::Offline(drive_kitten_firesinger_offer)),
 ];
 
 /// Number of rows in the corpus.
@@ -719,7 +813,7 @@ pub fn row(idx: usize) -> &'static ComboRow {
 pub(crate) fn classify_status(row: &ComboRow, outcome: Option<LoopCertificate>) -> RowStatus {
     match outcome {
         Some(cert)
-            if cert.win_kind == row.win_kind
+            if cert.win_kind == Some(row.win_kind)
                 && cert
                     .unbounded
                     .iter()
@@ -727,7 +821,7 @@ pub(crate) fn classify_status(row: &ComboRow, outcome: Option<LoopCertificate>) 
         {
             RowStatus::Confirmed {
                 unbounded: cert.unbounded,
-                win_kind: cert.win_kind,
+                win_kind: row.win_kind,
             }
         }
         Some(cert) => RowStatus::Failed {
@@ -1184,6 +1278,7 @@ pub(crate) fn activate_and_resolve(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         })
         .is_err()
     {
@@ -1544,6 +1639,7 @@ fn drive_ballista_ping(probe: &mut LoopProbe, ballista: ObjectId, ability_index:
         .act(GameAction::ActivateAbility {
             source_id: ballista,
             ability_index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Ballista remove-counter ability");
     // The ability targets "any target"; choose the opponent.
@@ -1617,6 +1713,106 @@ pub(crate) fn drive_offline_grim_power(db: &CardDatabase) -> Option<LoopCertific
             activate_and_resolve(probe, grim, tap_idx, None);
         }
     })
+}
+
+/// BASALT MONOLITH + RINGS OF BRIGHTHEARTH — infinite colorless mana. Basalt Monolith ("{T}:
+/// Add {C}{C}{C}." / "{3}: Untap this artifact.") taps for {C}{C}{C}, then activates its untap;
+/// Rings of Brighthearth ("Whenever you activate an ability, if it isn't a mana ability, you may
+/// pay {2}. If you do, copy that ability. You may choose new targets for the copy.") copies it
+/// (CR 707.10). The copy resolves first and untaps Monolith, which taps again while the original
+/// waits on the stack (CR 605.3a: a mana ability is activated whenever its controller has
+/// priority), and the original then untaps it once more. A steady cycle starts and ends with
+/// Monolith tapped: two taps for {C}x6 in, {3} + {2} out, +{C} net.
+pub(crate) fn drive_offline_basalt_rings(db: &CardDatabase) -> Option<LoopCertificate> {
+    drive_basalt_rings(db, true)
+}
+
+/// [`drive_offline_basalt_rings`] answering Rings' "you may pay {2}" with `copy`. Declining
+/// leaves one tap per {3} untap, so no loop stands.
+pub(crate) fn drive_basalt_rings(db: &CardDatabase, copy: bool) -> Option<LoopCertificate> {
+    let (board, cycle) = basalt_rings_board(db)?;
+    run_combo(board, |probe| {
+        let _ = cycle.run(probe, copy);
+    })
+}
+
+/// The Basalt Monolith + Rings of Brighthearth board and the cycle that drives it.
+pub(crate) fn basalt_rings_board(db: &CardDatabase) -> Option<(ComboBoard, BasaltRingsCycle)> {
+    let board = build_board(db, CORPUS[3].cards)?;
+    let monolith = board.ids[0];
+    let untap_idx = ability_index_where(board.runner.state(), monolith, is_untap_effect)?;
+    let tap_idx = ability_index_where(board.runner.state(), monolith, is_mana_effect)?;
+    Some((
+        board,
+        BasaltRingsCycle {
+            monolith,
+            untap_idx,
+            tap_idx,
+        },
+    ))
+}
+
+/// One Basalt Monolith + Rings of Brighthearth cycle: tap Monolith if it is untapped, activate
+/// its untap, answer Rings' "you may pay {2}", and tap Monolith whenever it is untapped while P0
+/// holds priority, until the stack is empty.
+pub(crate) struct BasaltRingsCycle {
+    pub(crate) monolith: ObjectId,
+    untap_idx: usize,
+    tap_idx: usize,
+}
+
+impl BasaltRingsCycle {
+    /// Drives one cycle, answering Rings' prompt with `copy`. `Some(answered)` when the cycle
+    /// reached an empty-stack priority window, `answered` saying whether Rings' prompt came;
+    /// `None` when an action was refused or an unexpected prompt appeared.
+    pub(crate) fn run(&self, probe: &mut LoopProbe, copy: bool) -> Option<bool> {
+        let tapped = |probe: &LoopProbe| {
+            probe
+                .runner()
+                .state()
+                .objects
+                .get(&self.monolith)
+                .is_some_and(|object| object.tapped)
+        };
+        let activate = |probe: &mut LoopProbe, ability_index: usize| {
+            probe
+                .act(GameAction::ActivateAbility {
+                    source_id: self.monolith,
+                    ability_index,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                })
+                .ok()
+        };
+        if !tapped(probe) {
+            activate(probe, self.tap_idx)?;
+        }
+        activate(probe, self.untap_idx)?;
+        let mut answered = false;
+        for _ in 0..32 {
+            let state = probe.runner().state();
+            let action = match &state.waiting_for {
+                // CR 605.3a: tap the untapped Monolith for mana whenever P0 holds priority,
+                // including between the copy and the original untap resolving.
+                WaitingFor::Priority { .. } if !tapped(probe) => {
+                    activate(probe, self.tap_idx)?;
+                    continue;
+                }
+                WaitingFor::Priority { .. } if state.stack.is_empty() => return Some(answered),
+                WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+                    GameAction::PassPriority
+                }
+                // Rings' "you may pay {2}": accepting copies the untap.
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    answered = true;
+                    GameAction::DecideOptionalEffect { accept: copy }
+                }
+                WaitingFor::CopyRetarget { .. } => GameAction::KeepAllCopyTargets,
+                _ => return None,
+            };
+            probe.act(action).ok()?;
+        }
+        None
+    }
 }
 
 /// #47 SPIKE FEEDER + ARCHANGEL OF THUNE — infinite +1/+1 counters + life. Spike
@@ -2212,6 +2408,513 @@ pub(crate) fn first_gameover_beat(trace: &[BeatTrace]) -> Option<(usize, PlayerI
             winner: Some(winner),
         } => Some((t.beat, winner)),
         _ => None,
+    })
+}
+
+/// The certificate of the loop shortcut the engine offers at `runner`'s current state.
+pub(crate) fn offered_certificate(runner: &GameRunner) -> Option<LoopCertificate> {
+    match &runner.state().waiting_for {
+        WaitingFor::LoopShortcut { certificate, .. } => Some(certificate.clone()),
+        _ => None,
+    }
+}
+
+/// CR 405.5: passes until the stack is empty or the engine offers the loop, answering each
+/// trigger's target prompt with `trigger_target`; the offer's certificate, if one stands.
+fn settle_to_offer(
+    runner: &mut GameRunner,
+    trigger_target: Option<&TargetRef>,
+) -> Result<Option<LoopCertificate>, crate::game::engine::EngineError> {
+    for _ in 0..16 {
+        if let Some(certificate) = offered_certificate(runner) {
+            return Ok(Some(certificate));
+        }
+        let action = match (&runner.state().waiting_for, trigger_target) {
+            (WaitingFor::TriggerTargetSelection { .. }, Some(target)) => GameAction::ChooseTarget {
+                target: Some(target.clone()),
+            },
+            _ if runner.state().stack.is_empty() => break,
+            _ => GameAction::PassPriority,
+        };
+        runner.act(action)?;
+    }
+    Ok(offered_certificate(runner))
+}
+
+/// CR 732.2a: `outlet` paying its mana-ability cost with `creature`, which its own text lets be
+/// cast from where that cost put it, then that cast, cycle by cycle through `apply()` on a
+/// four-seat board with `beside` until the engine offers the loop; the offer's certificate.
+/// `trigger_target` answers a payoff trigger's target (CR 117.1a: the cast waits for the stack
+/// to empty).
+fn drive_mana_outlet_offer(
+    db: &CardDatabase,
+    outlet: &str,
+    beside: &[&str],
+    creature: &str,
+    land: &str,
+    color: ManaType,
+    trigger_target: Option<TargetRef>,
+) -> Option<LoopCertificate> {
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let outlet = scenario.add_real_card(P0, outlet, Zone::Battlefield, db);
+    for card in beside {
+        scenario.add_real_card(P0, card, Zone::Battlefield, db);
+    }
+    let creature = scenario.add_real_card(P0, creature, Zone::Battlefield, db);
+    for seat in 0..4 {
+        for _ in 0..8 {
+            scenario.add_real_card(PlayerId(seat), land, Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = crate::types::game_state::LoopDetectionMode::Interactive;
+    for _ in 0..4 {
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: outlet,
+                ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            })
+            .ok()?;
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![creature],
+            })
+            .ok()?;
+        runner
+            .act(GameAction::ChooseManaColor {
+                choice: crate::types::game_state::ManaChoice::SingleColor(color),
+                count: 1,
+            })
+            .ok()?;
+        if let Some(certificate) = settle_to_offer(&mut runner, trigger_target.as_ref()).ok()? {
+            return Some(certificate);
+        }
+        let card_id = runner.state().objects.get(&creature)?.card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: creature,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: Default::default(),
+            })
+            .ok()?;
+        if let Some(certificate) = settle_to_offer(&mut runner, trigger_target.as_ref()).ok()? {
+            return Some(certificate);
+        }
+    }
+    None
+}
+
+/// C1: Eternal Scourge ("You may cast this card from exile. …").
+pub(crate) fn drive_food_chain_scourge_offer(db: &CardDatabase) -> Option<LoopCertificate> {
+    drive_mana_outlet_offer(
+        db,
+        "Food Chain",
+        &[],
+        "Eternal Scourge",
+        "Swamp",
+        ManaType::Black,
+        None,
+    )
+}
+
+/// C2: Squee, the Immortal ("You may cast this card from your graveyard or from exile.").
+pub(crate) fn drive_food_chain_squee_offer(db: &CardDatabase) -> Option<LoopCertificate> {
+    drive_mana_outlet_offer(
+        db,
+        "Food Chain",
+        &[],
+        "Squee, the Immortal",
+        "Mountain",
+        ManaType::Red,
+        None,
+    )
+}
+
+/// Phyrexian Altar ("Sacrifice a creature: Add one mana of any color.") sacrificing Gravecrawler,
+/// cast back from the graveyard beside the Zombie Walking Corpse, while Altar of the Brood
+/// ("Whenever another permanent you control enters, each opponent mills a card.") mills each
+/// opponent once a cycle.
+pub(crate) fn drive_altar_brood_offer(db: &CardDatabase) -> Option<LoopCertificate> {
+    drive_mana_outlet_offer(
+        db,
+        "Phyrexian Altar",
+        &["Altar of the Brood", "Walking Corpse"],
+        "Gravecrawler",
+        "Swamp",
+        ManaType::Black,
+        None,
+    )
+}
+
+/// Phyrexian Altar sacrificing Gravecrawler beside Walking Corpse, while Blood Artist ("Whenever
+/// this creature or another creature dies, target player loses 1 life and you gain 1 life.")
+/// drains P1 once a cycle.
+pub(crate) fn drive_altar_blood_artist_offer(db: &CardDatabase) -> Option<LoopCertificate> {
+    drive_mana_outlet_offer(
+        db,
+        "Phyrexian Altar",
+        &["Blood Artist", "Walking Corpse"],
+        "Gravecrawler",
+        "Swamp",
+        ManaType::Black,
+        Some(TargetRef::Player(P1)),
+    )
+}
+
+/// Phyrexian Altar sacrificing Gravecrawler beside Walking Corpse, while Zulaport Cutthroat
+/// ("Whenever this creature or another creature you control dies, each opponent loses 1 life and
+/// you gain 1 life.") drains every opponent once a cycle.
+pub(crate) fn drive_altar_zulaport_offer(db: &CardDatabase) -> Option<LoopCertificate> {
+    drive_mana_outlet_offer(
+        db,
+        "Phyrexian Altar",
+        &["Zulaport Cutthroat", "Walking Corpse"],
+        "Gravecrawler",
+        "Swamp",
+        ManaType::Black,
+        None,
+    )
+}
+
+/// Grove of the Burnwillows ("{T}: Add {R} or {G}. Each opponent gains 1 life.") is a creature
+/// under Nature's Revolt ("All lands are 2/2 creatures that are still lands."), so Marvin,
+/// Murderous Mimic ("Marvin has all activated abilities of creatures you control that don't have
+/// the same name as this creature.") has its abilities and Pili-Pala's ("{2}, {Q}: Add one mana of
+/// any color."), while Tainted Remedy ("If an opponent would gain life, that player loses that
+/// much life instead.") turns each opponent's gain into a loss: one Mountain's {R} floats, then
+/// Marvin taps and untaps, cycle by cycle on a four-seat board, until the engine offers the loop.
+pub(crate) fn drive_grove_marvin_offer(db: &CardDatabase) -> Option<LoopCertificate> {
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let marvin = scenario.add_real_card(P0, "Marvin, Murderous Mimic", Zone::Battlefield, db);
+    let pili_pala = scenario.add_real_card(P0, "Pili-Pala", Zone::Battlefield, db);
+    for card in [
+        "Grove of the Burnwillows",
+        "Tainted Remedy",
+        "Nature's Revolt",
+    ] {
+        scenario.add_real_card(P0, card, Zone::Battlefield, db);
+    }
+    let mountain = scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    for seat in 0..4 {
+        for _ in 0..8 {
+            scenario.add_real_card(PlayerId(seat), "Mountain", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = crate::types::game_state::LoopDetectionMode::Interactive;
+    // CR 302.6 + CR 107.6: Marvin and Pili-Pala have been under P0's control since P0's turn began.
+    let turn = runner.state().turn_number;
+    for creature in [marvin, pili_pala] {
+        let object = runner.state_mut().objects.get_mut(&creature)?;
+        object.summoning_sick = false;
+        object.entered_battlefield_turn = Some(turn.saturating_sub(1));
+    }
+    let described = |runner: &GameRunner, text: &str| {
+        runner.state().objects[&marvin]
+            .abilities
+            .iter()
+            .position(|a| a.description.as_deref().is_some_and(|d| d.contains(text)))
+    };
+    let activate = |runner: &mut GameRunner, source_id: ObjectId, ability_index: usize| {
+        runner.act(GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        })?;
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ) {
+            runner.act(GameAction::ChooseManaColor {
+                choice: crate::types::game_state::ManaChoice::SingleColor(ManaType::Red),
+                count: 1,
+            })?;
+        }
+        Ok::<_, crate::game::engine::EngineError>(offered_certificate(runner))
+    };
+    activate(&mut runner, mountain, 0).ok()?;
+    // CR 613.1f: Marvin has the abilities it copies once the continuous effects are applied.
+    let tap = described(&runner, "Add {R} or {G}")?;
+    let untap = described(&runner, "{2}, {Q}")?;
+    for _ in 0..5 {
+        for ability in [tap, untap] {
+            if let Some(certificate) = activate(&mut runner, marvin, ability).ok()? {
+                return Some(certificate);
+            }
+        }
+    }
+    None
+}
+
+/// CR 732.2a: answers every prompt with `answer` until the engine offers the loop; the offer's
+/// certificate, if one stands within `beats` actions.
+fn answer_to_offer(
+    runner: &mut GameRunner,
+    beats: usize,
+    answer: impl Fn(&GameState) -> GameAction,
+) -> Option<LoopCertificate> {
+    for _ in 0..beats {
+        if let Some(certificate) = offered_certificate(runner) {
+            return Some(certificate);
+        }
+        let action = answer(runner.state());
+        runner.act(action).ok()?;
+    }
+    offered_certificate(runner)
+}
+
+/// No attack, no block, triggers in the order put, and every other priority passed.
+fn pass_or_decline(state: &GameState) -> GameAction {
+    match &state.waiting_for {
+        WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+            attacks: vec![],
+            bands: vec![],
+        },
+        WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+            assignments: vec![],
+        },
+        WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+            order: (0..triggers.len()).collect(),
+        },
+        _ => GameAction::PassPriority,
+    }
+}
+
+fn named_on(state: &GameState, ids: &im::Vector<ObjectId>, name: &str) -> Option<ObjectId> {
+    ids.iter()
+        .copied()
+        .find(|id| state.objects[id].name == name)
+}
+
+/// CR 500.8: Hellkite Charger ("Whenever this creature attacks, you may pay {5}{R}{R}. If you do,
+/// untap all attacking creatures and after this phase, there is an additional combat phase.")
+/// wearing Bear Umbra, whose granted attack trigger untaps the seven Mountains that pay it,
+/// attacks each combat until the engine offers the period.
+pub(crate) fn drive_charger_umbra_offer(db: &CardDatabase) -> Option<LoopCertificate> {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P1, 30);
+    let charger = scenario.add_real_card(P0, "Hellkite Charger", Zone::Battlefield, db);
+    for _ in 0..7 {
+        scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = crate::types::game_state::LoopDetectionMode::Interactive;
+    let umbra = install_on_battlefield(runner.state_mut(), db, "Bear Umbra", P0)?;
+    crate::game::effects::attach::attach_to(runner.state_mut(), umbra, charger);
+    answer_to_offer(&mut runner, 2000, |state| match &state.waiting_for {
+        // The paying trigger resolves after Umbra's untap, so the untapped Mountains pay it.
+        WaitingFor::OrderTriggers { triggers, .. } => {
+            let mut order: Vec<usize> = (0..triggers.len()).collect();
+            order.sort_by_key(|&at| !triggers[at].description.contains("pay"));
+            GameAction::OrderTriggers { order }
+        }
+        WaitingFor::OptionalEffectChoice { .. } => {
+            GameAction::DecideOptionalEffect { accept: true }
+        }
+        WaitingFor::DeclareAttackers { player, .. } if *player == P0 => {
+            GameAction::DeclareAttackers {
+                attacks: vec![(charger, crate::game::combat::AttackTarget::Player(P1))],
+                bands: vec![],
+            }
+        }
+        _ => pass_or_decline(state),
+    })
+}
+
+/// CR 500.8 + CR 302.6: Najeela, the Blade-Blossom's "{W}{U}{B}{R}{G}: ... After this phase, there
+/// is an additional combat phase. Activate only during combat.", paid by five Myr that Urtet,
+/// Remnant of Memnarch untaps at each beginning of combat, while Sinister Monolith drains P1 there.
+pub(crate) fn drive_najeela_urtet_offer(db: &CardDatabase) -> Option<LoopCertificate> {
+    const MYR: [&str; 5] = [
+        "Gold Myr",
+        "Silver Myr",
+        "Leaden Myr",
+        "Iron Myr",
+        "Copper Myr",
+    ];
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P1, 20);
+    let najeela = scenario.add_real_card(P0, "Najeela, the Blade-Blossom", Zone::Battlefield, db);
+    for card in ["Urtet, Remnant of Memnarch", "Sinister Monolith"] {
+        scenario.add_real_card(P0, card, Zone::Battlefield, db);
+    }
+    let myr: Vec<ObjectId> = MYR
+        .iter()
+        .map(|name| scenario.add_real_card(P0, name, Zone::Battlefield, db))
+        .collect();
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = crate::types::game_state::LoopDetectionMode::Interactive;
+    // CR 302.6: the Myr have been under P0's control since P0's turn began.
+    let turn = runner.state().turn_number;
+    for id in &myr {
+        let object = runner.state_mut().objects.get_mut(id)?;
+        object.summoning_sick = false;
+        object.entered_battlefield_turn = Some(turn.saturating_sub(1));
+    }
+    let activated = |state: &GameState, id: ObjectId, mana: bool| {
+        state.objects[&id].abilities.iter().position(|a| {
+            a.kind == crate::types::ability::AbilityKind::Activated
+                && crate::game::mana_abilities::is_mana_ability(a) == mana
+        })
+    };
+    answer_to_offer(&mut runner, 2000, |state| match &state.waiting_for {
+        WaitingFor::Priority { player }
+            if *player == P0 && state.phase == Phase::BeginCombat && state.stack.is_empty() =>
+        {
+            let untapped = myr.iter().copied().find(|id| !state.objects[id].tapped);
+            let source = untapped.or((state.players[0].mana_pool.total() >= 5).then_some(najeela));
+            source
+                .and_then(|source| {
+                    Some(GameAction::ActivateAbility {
+                        source_id: source,
+                        ability_index: activated(state, source, untapped.is_some())?,
+                        payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                    })
+                })
+                .unwrap_or(GameAction::PassPriority)
+        }
+        _ => pass_or_decline(state),
+    })
+}
+
+/// CR 500.7: Time Warp on its caster each precombat main, with Ghostly Flicker blinking
+/// Archaeomancer (returning Time Warp) and Mnemonic Wall (returning Flicker), on eight Islands.
+pub(crate) fn drive_archaeomancer_time_warp_offer(db: &CardDatabase) -> Option<LoopCertificate> {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island"; 25]);
+    scenario.with_library_top(P1, &["Island"; 25]);
+    for card in ["Archaeomancer", "Mnemonic Wall"]
+        .into_iter()
+        .chain(["Island"; 8])
+    {
+        scenario.add_real_card(P0, card, Zone::Battlefield, db);
+    }
+    scenario.add_real_card(P0, "Time Warp", Zone::Hand, db);
+    scenario.add_real_card(P0, "Ghostly Flicker", Zone::Hand, db);
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = crate::types::game_state::LoopDetectionMode::Interactive;
+    answer_to_offer(&mut runner, 4000, |state| {
+        let player = &state.players[0];
+        let islands = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].name == "Island" && !state.objects[id].tapped)
+            .count();
+        let named = |ids: &im::Vector<ObjectId>, name: &str| named_on(state, ids, name);
+        match &state.waiting_for {
+            WaitingFor::Priority { player: seat }
+                if *seat == P0
+                    && state.active_player == P0
+                    && state.phase == Phase::PreCombatMain
+                    && state.stack.is_empty() =>
+            {
+                let warp = named(&player.hand, "Time Warp").filter(|_| islands >= 8);
+                let flicker = named(&player.hand, "Ghostly Flicker")
+                    .filter(|_| islands >= 3 && named(&player.graveyard, "Time Warp").is_some());
+                warp.or(flicker)
+                    .map_or(GameAction::PassPriority, |spell| GameAction::CastSpell {
+                        object_id: spell,
+                        card_id: state.objects[&spell].card_id,
+                        targets: vec![],
+                        payment_mode: Default::default(),
+                    })
+            }
+            WaitingFor::TargetSelection { target_slots, .. } => {
+                let mut targets: Vec<TargetRef> = Vec::new();
+                for slot in target_slots {
+                    let pick = slot
+                        .legal_targets
+                        .iter()
+                        .find(|target| **target == TargetRef::Player(P0))
+                        .or_else(|| {
+                            slot.legal_targets.iter().find(|target| {
+                                matches!(target, TargetRef::Object(id)
+                                    if matches!(state.objects[id].name.as_str(), "Archaeomancer" | "Mnemonic Wall"))
+                                    && !targets.contains(target)
+                            })
+                        })
+                        .cloned();
+                    targets.extend(pick);
+                }
+                GameAction::SelectTargets { targets }
+            }
+            WaitingFor::TriggerTargetSelection {
+                target_slots,
+                source_id,
+                ..
+            } => {
+                let wanted = match source_id.map(|id| state.objects[&id].name.as_str()) {
+                    Some("Archaeomancer") => "Time Warp",
+                    _ => "Ghostly Flicker",
+                };
+                GameAction::SelectTargets {
+                    targets: target_slots
+                        .iter()
+                        .filter_map(|slot| {
+                            slot.legal_targets
+                                .iter()
+                                .find(|target| matches!(target, TargetRef::Object(id) if state.objects[id].name == wanted))
+                                .cloned()
+                        })
+                        .collect(),
+                }
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            _ => pass_or_decline(state),
+        }
+    })
+}
+
+/// CR 722.3c + CR 603.2 + CR 400.7: Blazing Firesinger ("This creature enters prepared.") casts
+/// its prepared Seething Song copy ("Add {R}{R}{R}{R}{R}.") for {2}{R}, and Displacer Kitten
+/// ("Whenever you cast a noncreature spell, exile up to one target nonland permanent you control,
+/// then return that card to the battlefield under its owner's control.") blinks Firesinger, which
+/// re-enters prepared as a new object with a new copy in exile, cycle by cycle until the engine
+/// offers the loop. Firesinger is cast from hand onto six Mountains, so it enters prepared through
+/// its own replacement.
+pub(crate) fn drive_kitten_firesinger_offer(db: &CardDatabase) -> Option<LoopCertificate> {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Displacer Kitten", Zone::Battlefield, db);
+    let firesinger = scenario.add_real_card(P0, "Blazing Firesinger", Zone::Hand, db);
+    for _ in 0..6 {
+        scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = crate::types::game_state::LoopDetectionMode::Interactive;
+    let card_id = runner.state().objects.get(&firesinger)?.card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: firesinger,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: Default::default(),
+        })
+        .ok()?;
+    answer_to_offer(&mut runner, 400, |state| match &state.waiting_for {
+        WaitingFor::Priority { player }
+            if *player == P0
+                && state.stack.is_empty()
+                && state
+                    .objects
+                    .get(&firesinger)
+                    .is_some_and(|object| object.prepared.is_some()) =>
+        {
+            GameAction::CastPreparedCopy { source: firesinger }
+        }
+        WaitingFor::TriggerTargetSelection { .. } => GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(firesinger)),
+        },
+        _ => pass_or_decline(state),
     })
 }
 

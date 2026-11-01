@@ -483,6 +483,7 @@ fn meld_renamed_non_meld_partner_is_noop() {
             condition: None,
             duration_subject: None,
             end_permission: None,
+            granting_object: None,
             duration_event_source: None,
             source_name: String::new(),
         });
@@ -648,6 +649,17 @@ fn assert_redirected_exile_pair_melds(redirects: &[(&str, Zone)]) {
         state.objects[&source].merged_components,
         vec![source, partner]
     );
+    // CR 701.42a: the absorbed partner is part of the melded permanent, so it
+    // must not linger in whichever zone list the redirected exile left it in.
+    assert_eq!(state.objects[&partner].zone, Zone::Battlefield);
+    assert!(!state.battlefield.contains(&partner));
+    assert!(!state.exile.contains(&partner));
+    assert!(!state.command_zone.contains(&partner));
+    assert!(state.players.iter().all(|player| {
+        !player.graveyard.contains(&partner)
+            && !player.hand.contains(&partner)
+            && !player.library.contains(&partner)
+    }));
     for (name, destination) in redirects {
         if *destination == Zone::Battlefield {
             assert!(!events.iter().any(|event| matches!(
@@ -1672,6 +1684,7 @@ fn mishra_production_meld_entry_attack_destination_matrix() {
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{ChosenAttribute, EntryAttackDestination, PermanentEntryMode};
     use crate::types::actions::GameAction;
+    use crate::types::counter::CounterType;
 
     const MISHRA: &str = "Whenever you attack, each opponent loses X life and you gain X life, \
         where X is the number of attacking creatures. If Mishra, Claimed by Gix and a creature \
@@ -1720,25 +1733,25 @@ fn mishra_production_meld_entry_attack_destination_matrix() {
         let mut sc = GameScenario::new();
         let mishra = sc.add_creature(P0, "Mishra, Claimed by Gix", 3, 5).id();
         let engine = sc.add_creature(P0, "Phyrexian Dragon Engine", 2, 2).id();
-        let planeswalker = sc.add_creature(P1, "Defending Planeswalker", 1, 1).id();
+        let planeswalker = sc
+            .add_creature(P1, "Defending Planeswalker", 1, 1)
+            .as_planeswalker_with_loyalty("Test", 5)
+            .id();
         let battle = sc.add_creature(P0, "Protected Battle", 1, 1).id();
 
-        {
-            let object = sc.state.objects.get_mut(&planeswalker).unwrap();
-            object.card_types.core_types.clear();
-            object.card_types.core_types.push(CoreType::Planeswalker);
-            object.base_card_types.core_types.clear();
-            object
-                .base_card_types
-                .core_types
-                .push(CoreType::Planeswalker);
-        }
         {
             let object = sc.state.objects.get_mut(&battle).unwrap();
             object.card_types.core_types.clear();
             object.card_types.core_types.push(CoreType::Battle);
             object.base_card_types.core_types.clear();
             object.base_card_types.core_types.push(CoreType::Battle);
+            object.power = None;
+            object.toughness = None;
+            object.base_power = None;
+            object.base_toughness = None;
+            object.defense = Some(5);
+            object.base_defense = Some(5);
+            object.counters.insert(CounterType::Defense, 5);
         }
         sc.state
             .objects
@@ -1795,6 +1808,11 @@ fn mishra_production_meld_entry_attack_destination_matrix() {
             AttackTarget::Battle(_) => AttackTarget::Battle(battle),
             player => player,
         };
+        let expected_pin = crate::game::combat::bind_attack_target(runner.state(), destination);
+        assert_eq!(
+            expected_pin.is_some(),
+            !matches!(destination, AttackTarget::Player(_))
+        );
         let result = runner
             .act(GameAction::ChooseEntryAttackTarget {
                 target: destination,
@@ -1832,6 +1850,67 @@ fn mishra_production_meld_entry_attack_destination_matrix() {
             Some(P1),
             "ETB observers must see the result already attacking"
         );
+        // CR 506.3 + CR 508.4: the entry record also holds the declared
+        // destination itself, not the player it collapses to.
+        assert_eq!(
+            entry_record.combat_status.attack_target,
+            Some(destination),
+            "the entry snapshot latches the chosen destination kind"
+        );
+        if let Some(pin) = expected_pin {
+            let object = &runner.state().objects[&pin.object_id];
+            assert_eq!(object.zone, Zone::Battlefield);
+            assert_eq!(object.incarnation, pin.incarnation);
+            assert!(!object.is_phased_out());
+            match destination {
+                AttackTarget::Planeswalker(_) => {
+                    assert_eq!(object.base_loyalty, Some(5));
+                    assert_eq!(object.loyalty, Some(5));
+                    assert_eq!(object.counters[&CounterType::Loyalty], 5);
+                }
+                AttackTarget::Battle(_) => {
+                    assert_eq!(object.base_defense, Some(5));
+                    assert_eq!(object.defense, Some(5));
+                    assert_eq!(object.counters[&CounterType::Defense], 5);
+                }
+                AttackTarget::Player(_) => unreachable!("players have no permanent pin"),
+            }
+            assert_eq!(
+                crate::game::combat::bind_attack_target(runner.state(), destination),
+                Some(pin)
+            );
+        }
+        assert_eq!(
+            entry_record.combat_status.attack_target_identity,
+            expected_pin
+        );
+        assert_eq!(
+            runner
+                .state()
+                .combat
+                .as_ref()
+                .unwrap()
+                .attacked_permanents
+                .get(&mishra)
+                .copied(),
+            expected_pin
+        );
+        assert_eq!(
+            entry_record.combat_status.attack_target.is_some(),
+            entry_record.combat_status.defending_player.is_some(),
+            "attack_target is Some exactly when defending_player is"
+        );
+        // The refreshed `zone_changes_this_turn` row carries the same latch.
+        let row = runner
+            .state()
+            .zone_changes_this_turn
+            .iter()
+            .rev()
+            .find(|row| row.object_id == mishra && row.to_zone == Zone::Battlefield)
+            .expect("the meld entry leaves a zone-change row");
+        assert_eq!(row.combat_status.attack_target, Some(destination));
+        assert_eq!(row.combat_status.attack_target_identity, expected_pin);
+        assert_eq!(row.combat_status.defending_player, Some(P1));
     }
 
     let (mut runner, mishra, _engine, planeswalker, _battle) = setup(effect);
@@ -1862,6 +1941,25 @@ fn mishra_production_meld_entry_attack_destination_matrix() {
         .events
         .iter()
         .any(|event| matches!(event, GameEvent::AttackersDeclared { .. })));
+    // CR 508.4a: a stale destination leaves the entrant not attacking, so the
+    // entry snapshot latches neither a defending player nor an attack target.
+    let stale_record = result
+        .events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                record,
+                ..
+            } if *object_id == mishra => Some(record.as_ref()),
+            _ => None,
+        })
+        .expect("the stale-destination entry still emits its snapshot");
+    assert!(!stale_record.combat_status.attacking);
+    assert_eq!(stale_record.combat_status.defending_player, None);
+    assert_eq!(stale_record.combat_status.attack_target, None);
+    assert_eq!(stale_record.combat_status.attack_target_identity, None);
 }
 
 /// CR 508.4 + CR 701.42: when the defending opponent is the only legal
@@ -1975,6 +2073,10 @@ fn mishra_single_defender_auto_target_enters_attacking() {
     let entry_record = entry_record.expect("meld entry emits its authoritative snapshot");
     assert!(entry_record.combat_status.attacking);
     assert_eq!(entry_record.combat_status.defending_player, Some(P1));
+    assert_eq!(
+        entry_record.combat_status.attack_target,
+        Some(AttackTarget::Player(P1))
+    );
 }
 
 /// CR 614.12a + CR 707.9 + CR 508.4: an as-enters copy choice is finalized
@@ -2105,6 +2207,7 @@ fn mishra_copy_as_enters_noncreature_is_not_attacking() {
     let record = record.expect("the realized entry snapshot is emitted after the copy choice");
     assert_eq!(record.name, "Powerstone Relic");
     assert!(!record.combat_status.attacking);
+    assert_eq!(record.combat_status.attack_target, None);
 }
 
 /// CR 613.1b + CR 508.4: a layer-2 control effect that starts applying only
@@ -2218,6 +2321,10 @@ fn mishra_final_controller_owns_attack_destination_choice() {
     assert_eq!(record.controller, PlayerId(1));
     assert!(record.combat_status.attacking);
     assert_eq!(record.combat_status.defending_player, Some(PlayerId(3)));
+    assert_eq!(
+        record.combat_status.attack_target,
+        Some(AttackTarget::Player(PlayerId(3)))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2501,4 +2608,47 @@ fn meld_resolves_under_a_format_that_forbids_digital_only_cards() {
             .contains_key(&CONJURED_NAME.to_lowercase()),
         "the digital leg on the same face is gated out"
     );
+}
+
+/// CR 701.42a: a meld card that enters mid-game (a debug spawn) brings its
+/// combined back into the game's registry, exactly as a card that started in the
+/// game would; its digital-only conjure target still follows the format gate.
+#[test]
+fn mid_game_entry_extends_the_registry_under_the_format_gate() {
+    use crate::game::printed_cards::{extend_card_face_registry, outside_game_faces_for};
+    use crate::types::format::{FormatConfig, GameFormat};
+    use crate::types::game_state::GameState;
+
+    let db = meld_layout_export_db();
+    let source = db
+        .get_face_by_name("Gisela, the Broken Blade")
+        .expect("the fixture has the meld source");
+    let faces = outside_game_faces_for(source, &db);
+    let names = |faces: &[CardFace]| {
+        faces
+            .iter()
+            .map(|face| face.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&faces.paper), [RESULT_NAME]);
+    assert_eq!(names(&faces.digital), [CONJURED_NAME]);
+
+    for (format, admits_digital) in [(GameFormat::Standard, false), (GameFormat::Historic, true)] {
+        let config = FormatConfig::for_format(format).expect("built-in format");
+        let mut state = GameState::new(config, 2, 42);
+        extend_card_face_registry(&mut state, &faces);
+        assert!(
+            state
+                .card_face_registry
+                .contains_key(&RESULT_NAME.to_lowercase()),
+            "{format:?}: meld is a paper keyword action, so its result is always reachable"
+        );
+        assert_eq!(
+            state
+                .card_face_registry
+                .contains_key(&CONJURED_NAME.to_lowercase()),
+            admits_digital,
+            "{format:?}: the conjure target follows the digital-only gate"
+        );
+    }
 }

@@ -117,6 +117,8 @@
     "coverageThresholdHint": "Escludi i mazzi sotto questa soglia di supporto del motore",
     "bracket": "Bracket",
     "bracketHint": "L'IA casuale sceglie da questi bracket. I mazzi senza etichetta sono esclusi durante il filtraggio.",
+    "bracketPoolEmpty": "Nessun mazzo corrisponde ai bracket selezionati. L'IA casuale sceglierà tra tutti i mazzi legali.",
+    "cedhPoolEmpty": "Nessun mazzo bracket 5 disponibile. Non è possibile assegnare mazzi all'IA casuale.",
     "opponentLabel": "Avversario {{number}}",
     "deck": "Mazzo",
     "difficulty": "Difficoltà",
@@ -133,7 +135,19 @@
       "precon": "Precon"
     },
     "brain": "Controllato da",
-    "brainEngine": "IA del motore"
+    "brainEngine": "IA del motore",
+    "poolBracketConflict": "Nessuno degli {{selected}} mazzi selezionati è legale con i filtri attuali, quindi gli avversari casuali pescano da tutti gli {{total}} mazzi."
+  },
+  "randomPool": {
+    "titleHuman": "Il tuo pool casuale",
+    "titleAi": "Pool casuale dell'IA",
+    "hint": "Deseleziona cartelle o mazzi per rimuoverli dalle scelte casuali.",
+    "count": "{{selected}} di {{total}}",
+    "emptyWarning": "Tutto è escluso, quindi Casuale pesca da tutti gli {{total}} mazzi.",
+    "reset": "Reimposta",
+    "precons": "Precon",
+    "playable": "{{playable}} giocabili",
+    "nonePlayable": "Nessuno degli {{selected}} mazzi selezionati è legale con i filtri attuali, quindi Casuale pesca da tutti gli {{total}} mazzi."
   },
   "feedManager": {
     "title": "Gestisci feed",
@@ -296,7 +310,8 @@
     "sectionStarred": "Preferiti",
     "sectionUnfiled": "Senza cartella",
     "collapseAll": "Comprimi tutto",
-    "expandAll": "Espandi tutto"
+    "expandAll": "Espandi tutto",
+    "poolBracketConflict": "Nessuno degli {{selected}} mazzi selezionati è legale con i filtri attuali, quindi il tuo mazzo casuale sarà pescato da tutti gli {{total}} mazzi."
   },
   "subscriptions": {
     "emptyTitle": "Nessuna iscrizione ai feed",
@@ -362,5 +377,9 @@
       "ai": "AI",
       "multiplayer": "Multiplayer"
     }
+  },
+  "pileSource": {
+    "label": "Mazzo",
+    "default": "Mazzo predefinito"
   }
 }

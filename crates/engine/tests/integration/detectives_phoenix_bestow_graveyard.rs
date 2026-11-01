@@ -229,7 +229,7 @@ fn detectives_phoenix_bestow_cast_from_graveyard_resolves_as_aura() {
 
     // CR 601.2g: the {R} mana sub-cost was spent (pool emptied).
     assert!(
-        runner.state().players[0].mana_pool.mana.is_empty(),
+        runner.state().players[0].mana_pool.is_empty(),
         "the {{R}} bestow mana sub-cost must have been spent from the pool"
     );
 }

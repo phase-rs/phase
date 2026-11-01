@@ -37,7 +37,9 @@
     "approve": "Approuver",
     "decline": "Refuser",
     "cancel": "Annuler la demande",
-    "declinedToast": "Demande de reprise refusée"
+    "declinedToast": "Demande de reprise refusée",
+    "cancelledToast": "Demande de reprise annulée",
+    "withdrawnToast": "Demande de reprise retirée : un joueur a quitté la partie"
   },
   "connectionDot": {
     "connected": "Connecté",
@@ -128,7 +130,6 @@
     "waitTimeJustNow": "à l'instant",
     "waitTimeMinutes": "il y a {{count}} min",
     "waitTimeHours": "il y a {{count}} h",
-    "buildMismatchTitle": "L'hôte est en {{version}} ({{commit}}) — votre version est différente. Actualisez pour mettre à jour.",
     "gameFull": "Cette partie est complète.",
     "youAreHosting": "Vous hébergez cette partie.",
     "hosting": "Hébergement",
@@ -286,7 +287,8 @@
     "botGameNotice": "Vous hébergez la partie Discord {{code}}. La connexion et la confidentialité sont fixées par la publication Discord.",
     "botSeedIgnored": "Certains paramètres de la publication Discord ne peuvent pas être utilisés ici — vérifiez le format et le nombre de joueurs.",
     "botP2PNotice": "Votre appareil exécute la partie. Gardez l’application ouverte et restez connecté.",
-    "botServerNotice": "Un serveur dédié exécute la partie. Il peut ralentir ou se déconnecter."
+    "botServerNotice": "Un serveur dédié exécute la partie. Il peut ralentir ou se déconnecter.",
+    "poolBracketConflict": "Aucun des {{selected}} decks sélectionnés n'est légal avec les filtres actuels, les adversaires aléatoires utiliseront les {{total}} decks."
   },
   "page": {
     "deckRejected": "Le deck a été refusé par l'hôte.",
@@ -302,11 +304,9 @@
     "joinErrorCantJoinTitle": "Impossible de rejoindre cette salle",
     "titleLobby": "Rejoignez ou hébergez une table.",
     "titleHostSetup": "Configurez votre table.",
-    "titleDraftLobby": "Pod de draft",
     "titleDeckSelect": "Choisissez un deck.",
     "descriptionLobby": "Parcourez les tables disponibles, rejoignez par code ou hébergez un nouveau match.",
     "descriptionHostSetup": "Ajustez le format, la confidentialité et le timing avant d'ouvrir la salle.",
-    "descriptionDraftLobby": "En attente que des joueurs rejoignent le pod de draft.",
     "descriptionDeckSelectFormat": "Choisissez un deck pour {{format}}.",
     "descriptionDeckSelect": "Choisissez le deck que vous voulez amener en ligne.",
     "offlineUnavailableTitle": "Le multijoueur n’est pas disponible hors ligne.",
@@ -334,15 +334,6 @@
     "updateFailedMessage": "Actualisez pour obtenir la dernière version, ou continuez avec celle-ci. Les joueurs sur des versions différentes ne peuvent pas rejoindre la même partie.",
     "continueAnyway": "Continuer quand même"
   },
-  "draftLobbyPanel": {
-    "draftPod": "Pod de draft",
-    "connecting": "Connexion au pod de draft...",
-    "connectionFailed": "Échec de la connexion.",
-    "playersJoined": "{{joined}}/{{total}} joueurs ont rejoint",
-    "seat": "Siège {{number}}",
-    "draftInProgress": "Draft en cours. La vue du draft s'ouvrira automatiquement.",
-    "leaveDraft": "Quitter le draft"
-  },
   "deckLegalityChip": {
     "checking": "Vérification du deck pour {{format}}…",
     "checkingLegality": "Vérification de la légalité du deck…",
@@ -363,5 +354,11 @@
   "deepLink": {
     "gameInProgressTitle": "Partie en cours",
     "gameInProgressBody": "Terminez ou quittez votre partie en cours, puis rouvrez le lien."
+  },
+  "p2pStateWithheld": "L'état de la partie après cette action est trop volumineux pour être envoyé, ce plateau n'est donc pas à jour. Un joueur peut demander une reprise de la dernière action depuis le menu de la partie pour continuer (pour une boucle, exécutez-la avec un nombre plus petit).",
+  "terminalRecovery": {
+    "finalViewsUnpublished": "La concession a atteint un état final Full, mais les vues finales natives n’ont pas pu être publiées.",
+    "concedeUnreconciled": "Impossible de rapprocher le résultat de la concession ; le siège reste verrouillé.",
+    "receiptUnsent": "L’accusé de réception durable du résultat final n’a pas pu être envoyé ; en attente d’une nouvelle livraison"
   }
 }

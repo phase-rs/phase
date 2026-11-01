@@ -1,0 +1,311 @@
+{
+  "type": "ChooseDungeon",
+  "data": {
+    "player": 0,
+    "options": [
+      {
+        "dungeon": "LostMineOfPhandelver",
+        "name": "Lost Mine of Phandelver",
+        "entry_room": {
+          "index": 0,
+          "name": "Cave Entrance",
+          "text": "Scry 1."
+        },
+        "card": {
+          "oracle_id": "5c446a7f-0301-4343-b0df-146cf2db605b",
+          "scryfall_id": "59b11ff8-f118-4978-87dd-509dc0c8c932",
+          "face_name": "Lost Mine of Phandelver"
+        },
+        "rooms": [
+          {
+            "index": 0,
+            "name": "Cave Entrance",
+            "text": "Scry 1.",
+            "next_rooms": [
+              1,
+              2
+            ],
+            "marker": {
+              "x_permille": 500,
+              "y_permille": 215
+            }
+          },
+          {
+            "index": 1,
+            "name": "Goblin Lair",
+            "text": "Create a 1/1 red Goblin creature token.",
+            "next_rooms": [
+              3,
+              4
+            ],
+            "marker": {
+              "x_permille": 310,
+              "y_permille": 390
+            }
+          },
+          {
+            "index": 2,
+            "name": "Mine Tunnels",
+            "text": "Create a Treasure token.",
+            "next_rooms": [
+              4,
+              5
+            ],
+            "marker": {
+              "x_permille": 690,
+              "y_permille": 390
+            }
+          },
+          {
+            "index": 3,
+            "name": "Storeroom",
+            "text": "Put a +1/+1 counter on target creature.",
+            "next_rooms": [
+              6
+            ],
+            "marker": {
+              "x_permille": 180,
+              "y_permille": 610
+            }
+          },
+          {
+            "index": 4,
+            "name": "Dark Pool",
+            "text": "Each opponent loses 1 life and you gain 1 life.",
+            "next_rooms": [
+              6
+            ],
+            "marker": {
+              "x_permille": 500,
+              "y_permille": 610
+            }
+          },
+          {
+            "index": 5,
+            "name": "Fungi Cavern",
+            "text": "Target creature gets -4/-0 until your next turn.",
+            "next_rooms": [
+              6
+            ],
+            "marker": {
+              "x_permille": 810,
+              "y_permille": 610
+            }
+          },
+          {
+            "index": 6,
+            "name": "Temple of Dumathoin",
+            "text": "Draw a card.",
+            "next_rooms": [],
+            "marker": {
+              "x_permille": 500,
+              "y_permille": 800
+            }
+          }
+        ],
+        "room_count": 7
+      },
+      {
+        "dungeon": "DungeonOfTheMadMage",
+        "name": "Dungeon of the Mad Mage",
+        "entry_room": {
+          "index": 0,
+          "name": "Yawning Portal",
+          "text": "You gain 1 life."
+        },
+        "card": {
+          "oracle_id": "30d0398c-bf5a-4b30-936f-afdb5a109b4b",
+          "scryfall_id": "6f509dbe-6ec7-4438-ab36-e20be46c9922",
+          "face_name": "Dungeon of the Mad Mage"
+        },
+        "rooms": [
+          {
+            "index": 0,
+            "name": "Yawning Portal",
+            "text": "You gain 1 life.",
+            "next_rooms": [
+              1
+            ],
+            "marker": {
+              "x_permille": 500,
+              "y_permille": 184
+            }
+          },
+          {
+            "index": 1,
+            "name": "Dungeon Level",
+            "text": "Scry 1.",
+            "next_rooms": [
+              2,
+              3
+            ],
+            "marker": {
+              "x_permille": 500,
+              "y_permille": 259
+            }
+          },
+          {
+            "index": 2,
+            "name": "Goblin Bazaar",
+            "text": "Create a Treasure token.",
+            "next_rooms": [
+              4
+            ],
+            "marker": {
+              "x_permille": 290,
+              "y_permille": 376
+            }
+          },
+          {
+            "index": 3,
+            "name": "Twisted Caverns",
+            "text": "Target creature can't attack until your next turn.",
+            "next_rooms": [
+              4
+            ],
+            "marker": {
+              "x_permille": 715,
+              "y_permille": 376
+            }
+          },
+          {
+            "index": 4,
+            "name": "Lost Level",
+            "text": "Scry 2.",
+            "next_rooms": [
+              5,
+              6
+            ],
+            "marker": {
+              "x_permille": 500,
+              "y_permille": 494
+            }
+          },
+          {
+            "index": 5,
+            "name": "Runestone Caverns",
+            "text": "Exile the top two cards of your library. You may play them.",
+            "next_rooms": [
+              7
+            ],
+            "marker": {
+              "x_permille": 290,
+              "y_permille": 606
+            }
+          },
+          {
+            "index": 6,
+            "name": "Muiral's Graveyard",
+            "text": "Create two 1/1 black Skeleton creature tokens.",
+            "next_rooms": [
+              7
+            ],
+            "marker": {
+              "x_permille": 715,
+              "y_permille": 606
+            }
+          },
+          {
+            "index": 7,
+            "name": "Deep Mines",
+            "text": "Scry 3.",
+            "next_rooms": [
+              8
+            ],
+            "marker": {
+              "x_permille": 500,
+              "y_permille": 723
+            }
+          },
+          {
+            "index": 8,
+            "name": "Mad Wizard's Lair",
+            "text": "Draw three cards and reveal them. You may cast one of them without paying its mana cost.",
+            "next_rooms": [],
+            "marker": {
+              "x_permille": 500,
+              "y_permille": 814
+            }
+          }
+        ],
+        "room_count": 9
+      },
+      {
+        "dungeon": "TombOfAnnihilation",
+        "name": "Tomb of Annihilation",
+        "entry_room": {
+          "index": 0,
+          "name": "Trapped Entry",
+          "text": "Each player loses 1 life."
+        },
+        "card": {
+          "oracle_id": "d2ea2605-0ca0-4782-851d-e706bd0114e4",
+          "scryfall_id": "70b284bd-7a8f-4b60-8238-f746bdc5b236",
+          "face_name": "Tomb of Annihilation"
+        },
+        "rooms": [
+          {
+            "index": 0,
+            "name": "Trapped Entry",
+            "text": "Each player loses 1 life.",
+            "next_rooms": [
+              1,
+              2
+            ],
+            "marker": {
+              "x_permille": 500,
+              "y_permille": 220
+            }
+          },
+          {
+            "index": 1,
+            "name": "Veils of Fear",
+            "text": "Each player loses 2 life unless they discard a card.",
+            "next_rooms": [
+              3
+            ],
+            "marker": {
+              "x_permille": 290,
+              "y_permille": 400
+            }
+          },
+          {
+            "index": 2,
+            "name": "Oubliette",
+            "text": "Discard a card and sacrifice a creature, an artifact, and a land.",
+            "next_rooms": [
+              4
+            ],
+            "marker": {
+              "x_permille": 720,
+              "y_permille": 480
+            }
+          },
+          {
+            "index": 3,
+            "name": "Sandfall Cell",
+            "text": "Each player loses 2 life unless they sacrifice a creature, artifact, or land of their choice.",
+            "next_rooms": [
+              4
+            ],
+            "marker": {
+              "x_permille": 290,
+              "y_permille": 580
+            }
+          },
+          {
+            "index": 4,
+            "name": "Cradle of the Death God",
+            "text": "Create The Atropal, a legendary 4/4 black God Horror creature token with deathtouch.",
+            "next_rooms": [],
+            "marker": {
+              "x_permille": 500,
+              "y_permille": 775
+            }
+          }
+        ],
+        "room_count": 5
+      }
+    ]
+  }
+}

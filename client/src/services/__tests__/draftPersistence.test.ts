@@ -17,6 +17,7 @@ vi.mock("idb-keyval", () => ({
 
 import {
   clearActiveDraftPod,
+  clearActiveDraftPodFor,
   clearActiveDraftPodIfCurrent,
   clearActiveDraftGuest,
   clearActiveDraftGuestIfCurrent,
@@ -504,6 +505,32 @@ describe("draftPersistence", () => {
       clearActiveDraftPodIfCurrent(older);
 
       expect(loadActiveDraftPod()).toMatchObject({ id: "new-draft", roomCode: "FGHJK" });
+    });
+
+    it("clears the active host locator only while it names the given pod", () => {
+      const meta = (id: string, updatedAt: number) => ({
+        id,
+        roomCode: "ABCDE",
+        kind: "Premier" as const,
+        podSize: 8,
+        hostDisplayName: "Alice",
+        tournamentFormat: "Swiss" as const,
+        podPolicy: "Competitive" as const,
+        phase: "drafting" as const,
+        pickCount: 1,
+        updatedAt,
+      });
+      saveActiveDraftPod(meta("newer-pod", Date.now()));
+      clearActiveDraftPodFor("left-pod");
+      expect(loadActiveDraftPod()).toMatchObject({ id: "newer-pod" });
+
+      clearActiveDraftPodFor("newer-pod");
+      expect(inspectActiveDraftPod()).toEqual({ type: "absent" });
+
+      saveActiveDraftPod(meta("left-pod", 1));
+      expect(inspectActiveDraftPod()).toMatchObject({ type: "invalid", capture: { id: "left-pod" } });
+      clearActiveDraftPodFor("left-pod");
+      expect(inspectActiveDraftPod()).toEqual({ type: "absent" });
     });
 
     it("classifies only live snapshot states as host-resumable", () => {

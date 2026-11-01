@@ -90,6 +90,7 @@ function renderOverflow(options: {
     <BoardInteractionContext.Provider
       value={{
         activatableObjectIds: options.activatableObjectIds ?? new Set(),
+        blockableAttackerIds: new Set(),
         boardChoiceObjectIds: options.boardChoiceObjectIds ?? new Set(),
         committedAttackerIds: options.committedAttackerIds ?? new Set(),
         incomingAttackerCounts: new Map(),

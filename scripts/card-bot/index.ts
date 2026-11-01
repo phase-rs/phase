@@ -4,7 +4,7 @@
 // verify the Ed25519 signature, then:
 //   • PING            → PONG
 //   • /card           → defer, then follow up with the parse embed
-//   • /lfg            → post the LFG publicly (or refuse ephemerally), synchronously
+//   • /lfg            → post the LFG publicly (or refuse ephemerally)
 //   • autocomplete    → /lfg: eligible dedicated servers; otherwise card names
 //                       from the (warm) default build
 //   • button          → /lfg Join / Leave / Start / Get my link, and the game
@@ -12,7 +12,7 @@
 //
 // Deferring /card guarantees we never hit Discord's 3s response window, even on
 // a cold preview load or a slow Scryfall call. /lfg needs only in-memory and
-// sqlite state, so it answers directly.
+// sqlite state plus one cached guild-role lookup, so it answers directly.
 
 import {
   DEFAULT_BUILD,
@@ -34,6 +34,7 @@ import {
   type Interaction,
   InteractionType,
   ResponseType,
+  botMessageApi,
   botThreadApi,
   createFollowupMessage,
   editOriginalResponse,
@@ -50,6 +51,8 @@ import {
   lfgComponent,
 } from "./lfgInteractions";
 import { parseCustomId } from "./lfgView";
+import { LfgRoleCache } from "./lfgRoles";
+import { LOBBY_POLL_INTERVAL_MS, type LobbyMirrorDeps, LobbyPostStore, syncLobbyPosts } from "./lobbyMirror";
 import type { Embed } from "./render";
 import {
   renderCardEmbed,
@@ -241,6 +244,7 @@ if (import.meta.main) {
   servers.start();
   const botToken = discord.tokenIfSet();
   const threads = botToken === undefined ? null : botThreadApi(botToken);
+  const roles = botToken === undefined ? null : new LfgRoleCache(discord.guildId(), botToken);
   const store = new LfgStore(LFG_DB_PATH);
   const deps: InteractionDeps = {
     publicKey: discord.publicKey(),
@@ -251,6 +255,7 @@ if (import.meta.main) {
       followup: createFollowupMessage,
       editOriginal: editOriginalResponse,
       threads,
+      roles,
     },
   };
   if (threads !== null) {
@@ -259,6 +264,34 @@ if (import.meta.main) {
         console.error("[lfg] thread sweep failed:", err),
       );
     }, THREAD_SWEEP_INTERVAL_MS);
+  }
+
+  const lobbyChannelId = discord.lobbyChannelId();
+  const mirror: LobbyMirrorDeps | null =
+    botToken === undefined || lobbyChannelId === undefined
+      ? null
+      : {
+          posts: new LobbyPostStore(LFG_DB_PATH),
+          messages: botMessageApi(botToken),
+          channelId: lobbyChannelId,
+          fetchFn: fetch,
+          readable: new Map(),
+          now: Date.now,
+        };
+  if (mirror !== null) {
+    // A pass can outlast the interval (Discord rate limits); one never overlaps the last.
+    let syncing = false;
+    const syncLobby = () => {
+      if (syncing) return;
+      syncing = true;
+      void syncLobbyPosts(mirror)
+        .catch((err) => console.error("[lobby-mirror] pass failed:", err))
+        .finally(() => {
+          syncing = false;
+        });
+    };
+    syncLobby();
+    setInterval(syncLobby, LOBBY_POLL_INTERVAL_MS);
   }
 
   Bun.serve({
@@ -276,6 +309,6 @@ if (import.meta.main) {
   });
 
   console.log(
-    `card-bot listening on :${PORT} (default build: ${DEFAULT_BUILD}, game threads: ${threads === null ? "off, no CARD_BOT_TOKEN" : "on"})`,
+    `card-bot listening on :${PORT} (default build: ${DEFAULT_BUILD}, game threads: ${threads === null ? "off, no CARD_BOT_TOKEN" : "on"}, lobby mirror: ${mirror === null ? "off" : `on (channel ${mirror.channelId})`})`,
   );
 }

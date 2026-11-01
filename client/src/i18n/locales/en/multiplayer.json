@@ -37,7 +37,9 @@
     "approve": "Approve",
     "decline": "Decline",
     "cancel": "Cancel request",
-    "declinedToast": "Takeback request declined"
+    "declinedToast": "Takeback request declined",
+    "cancelledToast": "Takeback request cancelled",
+    "withdrawnToast": "Takeback request withdrawn: a player left the game"
   },
   "connectionDot": {
     "connected": "Connected",
@@ -128,7 +130,6 @@
     "waitTimeJustNow": "just now",
     "waitTimeMinutes": "{{count}}m ago",
     "waitTimeHours": "{{count}}h ago",
-    "buildMismatchTitle": "Host is on {{version}} ({{commit}}) — your build is different. Refresh to update.",
     "gameFull": "This game is full.",
     "youAreHosting": "You are hosting this game.",
     "hosting": "Hosting",
@@ -286,7 +287,8 @@
     "botGameNotice": "Hosting Discord game {{code}}. Connection and privacy come from the Discord post.",
     "botSeedIgnored": "Some settings from the Discord post couldn't be used here — check the format and player count.",
     "botP2PNotice": "Your device runs the game. Keep the app open and stay connected.",
-    "botServerNotice": "A dedicated server runs the game. It may slow down or go offline."
+    "botServerNotice": "A dedicated server runs the game. It may slow down or go offline.",
+    "poolBracketConflict": "None of the {{selected}} selected decks are legal under the current filters, so Random seats draw from all {{total}} decks."
   },
   "page": {
     "deckRejected": "Deck was rejected by the host.",
@@ -302,11 +304,9 @@
     "joinErrorCantJoinTitle": "Can't join this room",
     "titleLobby": "Join or host a table.",
     "titleHostSetup": "Set up your table.",
-    "titleDraftLobby": "Draft Pod",
     "titleDeckSelect": "Choose a deck.",
     "descriptionLobby": "Browse available tables, join by code, or host a new match.",
     "descriptionHostSetup": "Adjust format, privacy, and timing before opening the room.",
-    "descriptionDraftLobby": "Waiting for players to join the draft pod.",
     "descriptionDeckSelectFormat": "Pick a deck for {{format}}.",
     "descriptionDeckSelect": "Pick the deck you want to bring online.",
     "offlineUnavailableTitle": "Multiplayer is unavailable while offline.",
@@ -334,15 +334,6 @@
     "updateFailedMessage": "Refresh to get the latest version, or continue on this one. Players on different versions can't join the same game.",
     "continueAnyway": "Continue anyway"
   },
-  "draftLobbyPanel": {
-    "draftPod": "Draft Pod",
-    "connecting": "Connecting to draft pod...",
-    "connectionFailed": "Connection failed.",
-    "playersJoined": "{{joined}}/{{total}} players joined",
-    "seat": "Seat {{number}}",
-    "draftInProgress": "Draft in progress. The draft view will open automatically.",
-    "leaveDraft": "Leave Draft"
-  },
   "deckLegalityChip": {
     "checking": "Checking deck against {{format}}…",
     "checkingLegality": "Checking deck legality…",
@@ -363,5 +354,11 @@
   "deepLink": {
     "gameInProgressTitle": "Game in progress",
     "gameInProgressBody": "Finish or leave your current game, then open the link again."
+  },
+  "p2pStateWithheld": "The game state after this action is too large to send, so this board is out of date. A player can request a takeback of the last action from the game menu to continue (for a loop, take it with a smaller count).",
+  "terminalRecovery": {
+    "finalViewsUnpublished": "Concede reached a Full terminal state, but the native final views could not be published.",
+    "concedeUnreconciled": "Could not reconcile the Concede outcome; the seat remains fenced.",
+    "receiptUnsent": "The durable terminal receipt could not be sent; waiting for redelivery"
   }
 }

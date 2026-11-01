@@ -303,6 +303,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             GameEvent::PermanentTapped {
                 object_id,
                 caused_by,
+                ..
             } => {
                 mark_public_state_object_dirty(state, *object_id);
                 if let Some(cause) = caused_by {
@@ -317,7 +318,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // CR 701.43a: exerting adds a CantUntap transient (which sets
             // layers_dirty → Gate 1); mark the exerted object directly so its
             // display reflects the exert even on the layers-clean path.
-            GameEvent::CreatureExerted { object_id }
+            GameEvent::CreatureExerted { object_id, .. }
             | GameEvent::Foretold { object_id, .. }
             | GameEvent::BecameForetold { object_id } => {
                 mark_public_state_object_dirty(state, *object_id);
@@ -364,6 +365,17 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // display surface as mutate, but it is a distinct game event.
             GameEvent::Augmented { merged_id, .. } => {
                 mark_object_dirty_with_mana(state, *merged_id);
+                mark_battlefield_display_dirty(state);
+            }
+            // CR 701.42a: the melded permanent now presents its combined back
+            // face, and its partner card became its second component.
+            GameEvent::Melded {
+                object_id,
+                partner_id,
+                ..
+            } => {
+                mark_object_dirty_with_mana(state, *object_id);
+                mark_object_dirty_with_mana(state, *partner_id);
                 mark_battlefield_display_dirty(state);
             }
             GameEvent::CounterAdded { object_id, .. }
@@ -433,7 +445,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 mark_public_state_object_dirty(state, *object_id);
                 mark_public_state_player_dirty(state, *player_id);
             }
-            GameEvent::CreatureDestroyed { object_id } => {
+            GameEvent::CreatureDestroyed { object_id, .. } => {
                 // Paired `ZoneChanged` to graveyard handles battlefield display.
                 mark_public_state_object_dirty(state, *object_id);
             }
@@ -507,6 +519,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::GameOver { .. }
             // CR 732.2: a halted-resolution notification dirties no display state.
             | GameEvent::ResolutionHalted { .. }
+            | GameEvent::ShortcutRepetition { .. }
             | GameEvent::SpellCountered { .. }
             | GameEvent::EffectResolved { .. }
             | GameEvent::Unattached { .. }
@@ -542,7 +555,13 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::CaseSolved { .. }
             | GameEvent::ClassLevelGained { .. }
             | GameEvent::DieRolled { .. }
+            // CR 706.6: an ignored roll carries no public-state delta either —
+            // it is rendered from the structured event log, not derived state.
+            | GameEvent::DieRollIgnored { .. }
             | GameEvent::CoinFlipped { .. }
+            | GameEvent::UnTellPerformed { .. }
+            | GameEvent::PhraseSaid { .. }
+            | GameEvent::GotchaSaid { .. }
             // CR 103.1: starting-player contest carries no public-state delta;
             // it is rendered from the structured event log, not derived state.
             | GameEvent::StartingPlayerContest { .. }
@@ -569,7 +588,10 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::KeywordAbilityActivated { .. }
             | GameEvent::CreatureExploited { .. }
             | GameEvent::Clash { .. }
+            | GameEvent::PhysicalContestStarted { .. }
+            | GameEvent::PhysicalContestResolved { .. }
             | GameEvent::VoteCast { .. }
+            | GameEvent::CardNamed { .. }
             | GameEvent::VoteResolved { .. }
             | GameEvent::PowerToughnessChanged { .. }
             | GameEvent::CascadeMissed { .. }
@@ -640,6 +662,7 @@ mod tests {
                 block_requirements: Default::default(),
                 blocker_constraints: Default::default(),
                 must_be_blocked_targets: Default::default(),
+                block_capacities: Default::default(),
             }),
             Some(Phase::DeclareBlockers),
         );
@@ -706,6 +729,13 @@ mod tests {
             step_bound_phase(&WaitingFor::ExertChoice {
                 player: PlayerId(0),
                 attacker: ObjectId(1),
+                permission: crate::types::ability::TriggerDefinitionRef {
+                    source: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(1), 0),
+                    occurrence: crate::types::ability::TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: crate::types::ability::TriggerBaseSetInstanceRef::INITIAL,
+                        printed_index: 0,
+                    },
+                },
                 remaining: Vec::new(),
             }),
             None,
@@ -915,6 +945,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],

@@ -16,8 +16,8 @@ const mocks = vi.hoisted(() => ({
     role: null as "host" | "guest" | null,
     phase: "idle",
     roomCode: null as string | null,
-    hostDraft: vi.fn<(config: unknown) => Promise<boolean>>(async () => true),
-    joinDraft: vi.fn<(config: unknown) => Promise<boolean>>(async () => true),
+    hostDraft: vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "opened" })),
+    joinDraft: vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "opened" })),
   },
   // Shaped like the real store's source model: `configuredBackupEndpoint`
   // reads `hostingServer`, so a mock still carrying `serverAddress` would
@@ -83,6 +83,7 @@ vi.mock("../../adapter/draft-adapter", async (importOriginal) => ({
 }));
 
 import { useDraftPodStore } from "../draftPodStore";
+import type { DraftSessionOpenOutcome } from "../multiplayerDraftStore";
 import { useConnectivityStore } from "../connectivityStore";
 
 const activeMeta = {
@@ -122,8 +123,8 @@ describe("draftPodStore", () => {
     mocks.multiplayerState.role = null;
     mocks.multiplayerState.phase = "idle";
     mocks.multiplayerState.roomCode = null;
-    mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
-    mocks.multiplayerState.joinDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
+    mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "opened" }));
+    mocks.multiplayerState.joinDraft = vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "opened" }));
     mocks.multiplayerConfig.hostingServer = "wss://phase.example/ws";
     mocks.multiplayerConfig.displayName = "";
     mocks.multiplayerConfig.lastPodListingPublic = null;
@@ -891,7 +892,7 @@ describe("draftPodStore", () => {
     it("does not report recovery as resumed when host initialization fails", async () => {
       mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
       mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
-      mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => false);
+      mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "failed", error: null }));
 
       await expect(useDraftPodStore.getState().resumeHostedPod({ routeToken: 4 })).resolves.toBe("invalid");
       expect(mocks.clearActiveDraftPodIfCurrent).not.toHaveBeenCalled();
@@ -1112,6 +1113,128 @@ describe("draftPodStore", () => {
       expect(mocks.multiplayerConfig.resolveP2PBroker).not.toHaveBeenCalled();
       expect(mocks.openBrokerClient).not.toHaveBeenCalled();
     });
+
+    describe("automatic entry never replaces a session this tab holds", () => {
+      const heldPhases = [
+        "connecting", "lobby", "drafting", "deckbuilding", "pairing",
+        "matchInProgress", "roundComplete", "complete", "kicked", "hostLeft",
+      ] as const;
+      const presentRecord = () => {
+        mocks.inspectActiveDraftPod.mockReturnValue({ type: "present", meta: activeMeta, capture: { id: activeMeta.id, roomCode: activeMeta.roomCode, updatedAt: activeMeta.updatedAt } });
+        mocks.loadDraftHostSession.mockResolvedValue(persistedSession);
+      };
+
+      it.each(heldPhases.map((phase) => [phase] as const))(
+        "yields to a held guest in %s",
+        async (phase) => {
+          presentRecord();
+          mocks.multiplayerState.role = "guest";
+          mocks.multiplayerState.phase = phase;
+
+          const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 20 });
+
+          expect(outcome).toBe("superseded");
+          expect(mocks.inspectActiveDraftPod).not.toHaveBeenCalled();
+          expect(mocks.loadDraftHostSession).not.toHaveBeenCalled();
+          expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+          expect(mocks.clearActiveDraftPodIfCurrent).not.toHaveBeenCalled();
+          expect(useDraftPodStore.getState().configError).toBeNull();
+        },
+      );
+
+      it("yields to a held host of a different room", async () => {
+        presentRecord();
+        mocks.multiplayerState.role = "host";
+        mocks.multiplayerState.phase = "lobby";
+        mocks.multiplayerState.roomCode = "ZZZZZ";
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 21 });
+
+        expect(outcome).toBe("superseded");
+        expect(mocks.loadDraftHostSession).not.toHaveBeenCalled();
+        expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      });
+
+      it("yields to a held host with no room code yet", async () => {
+        presentRecord();
+        mocks.multiplayerState.role = "host";
+        mocks.multiplayerState.phase = "connecting";
+        mocks.multiplayerState.roomCode = null;
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 22 });
+
+        expect(outcome).toBe("superseded");
+        expect(mocks.loadDraftHostSession).not.toHaveBeenCalled();
+        expect(mocks.multiplayerState.hostDraft).not.toHaveBeenCalled();
+      });
+
+      it("yields to a held host even with no saved record, rather than reporting absent", async () => {
+        mocks.multiplayerState.role = "host";
+        mocks.multiplayerState.phase = "connecting";
+        mocks.multiplayerState.roomCode = null;
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 23 });
+
+        expect(outcome).toBe("superseded");
+        expect(mocks.inspectActiveDraftPod).not.toHaveBeenCalled();
+      });
+
+      it("still switches a held guest on explicit host entry", async () => {
+        presentRecord();
+        mocks.multiplayerState.role = "guest";
+        mocks.multiplayerState.phase = "lobby";
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "host", routeToken: 24 });
+
+        expect(outcome).toBe("resumed");
+        expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      });
+
+      it("a guest in error does not yield", async () => {
+        presentRecord();
+        mocks.multiplayerState.role = "guest";
+        mocks.multiplayerState.phase = "error";
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 25 });
+
+        expect(outcome).toBe("resumed");
+        expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      });
+
+      it("nothing held does not yield", async () => {
+        presentRecord();
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 26 });
+
+        expect(outcome).toBe("resumed");
+        expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      });
+
+      it("reports a superseded hosting attempt as superseded", async () => {
+        presentRecord();
+        mocks.multiplayerState.hostDraft.mockResolvedValueOnce({ status: "superseded" });
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 27 });
+
+        expect(outcome).toBe("superseded");
+        expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      });
+
+      // `startMatch` writes `phase: "matchInProgress"` after awaiting adapter
+      // setup without checking the session still exists, so a `leave`/`reset`
+      // mid-await can leave `role: null` next to that phase. That combination
+      // must not yield: nothing is held.
+      it("does not yield when a stale matchInProgress phase is left with no role", async () => {
+        presentRecord();
+        mocks.multiplayerState.role = null;
+        mocks.multiplayerState.phase = "matchInProgress";
+
+        const outcome = await useDraftPodStore.getState().resumeHostedPod({ entry: "auto", silent: true, routeToken: 27 });
+
+        expect(outcome).toBe("resumed");
+        expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      });
+    });
   });
 
   describe("createPod (cube branch)", () => {
@@ -1211,8 +1334,8 @@ describe("draftPodStore", () => {
       expect((dispatched as { backupEndpoint?: string }).backupEndpoint).toBe("https://phase.example");
     });
 
-    it("surfaces a current false host result for cube creation", async () => {
-      mocks.multiplayerState.hostDraft.mockResolvedValueOnce(false);
+    it("surfaces a current failed host result for cube creation", async () => {
+      mocks.multiplayerState.hostDraft.mockResolvedValueOnce({ status: "failed", error: null });
       useDraftPodStore.setState({
         poolMode: "cube",
         cubeForm: {
@@ -1233,6 +1356,28 @@ describe("draftPodStore", () => {
 
       expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
       expect(useDraftPodStore.getState().configError).toBe("Unable to host draft pod");
+    });
+    it("surfaces the failed host attempt's own error for cube creation", async () => {
+      mocks.multiplayerState.hostDraft.mockResolvedValueOnce({ status: "failed", error: "Host signaling failed" });
+      useDraftPodStore.setState({
+        poolMode: "cube",
+        cubeForm: {
+          cubeName: "Test Cube",
+          cubeListText: "1 Lightning Bolt\n",
+          settings: {
+            pod_size: 2,
+            pack_count: 1,
+            cards_per_pack: 2,
+            min_deck_size: 4,
+            addable_cards: { policy: "StandardBasics", custom: [] },
+          },
+        },
+        hostDisplayName: "Host",
+      });
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(useDraftPodStore.getState().configError).toBe("Host signaling failed");
     });
   });
 
@@ -2031,18 +2176,32 @@ describe("draftPodStore", () => {
       [
         "hosting fails",
         () => {
-          mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => false);
+          mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "failed", error: null }));
         },
         "Unable to host draft pod",
       ],
       [
         "hosting throws",
         () => {
-          mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<boolean>>(async () => {
+          mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => {
             throw new Error("boom");
           });
         },
         "boom",
+      ],
+      [
+        "hosting fails with its own error",
+        () => {
+          mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "failed", error: "Host signaling failed" }));
+        },
+        "Host signaling failed",
+      ],
+      [
+        "hosting is superseded",
+        () => {
+          mocks.multiplayerState.hostDraft = vi.fn<(config: unknown) => Promise<DraftSessionOpenOutcome>>(async () => ({ status: "superseded" }));
+        },
+        null,
       ],
     ] as const)("closes the lobby connection when hosting does not start (%s)", async (_label, arrange, message) => {
       stubPools(["TST"]);
@@ -2288,8 +2447,8 @@ describe("draftPodStore", () => {
       expect(useDraftPodStore.getState()).toMatchObject({ loadingPool: false, configError: "offline.startUnavailable" });
     });
 
-    it("maps a current false host result to offline after set-pool creation", async () => {
-      let resolveHost!: (value: boolean) => void;
+    it("maps a current failed host result to offline after set-pool creation", async () => {
+      let resolveHost!: (value: DraftSessionOpenOutcome) => void;
       vi.stubGlobal("__DRAFT_POOLS_URL__", "/draft-pools.json");
       vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ tst: { code: "TST" } }) })));
       mocks.multiplayerState.hostDraft.mockImplementationOnce(() => new Promise((resolve) => {
@@ -2300,14 +2459,14 @@ describe("draftPodStore", () => {
       const creating = useDraftPodStore.getState().createPod();
       await vi.waitFor(() => expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce());
       useConnectivityStore.setState({ forcedOffline: true });
-      resolveHost(false);
+      resolveHost({ status: "failed", error: null });
 
       await creating;
       expect(useDraftPodStore.getState().configError).toBe("offline.startUnavailable");
     });
 
-    it("maps a current false guest join result to offline", async () => {
-      let resolveJoin!: (value: boolean) => void;
+    it("maps a current failed guest join result to offline", async () => {
+      let resolveJoin!: (value: DraftSessionOpenOutcome) => void;
       mocks.multiplayerState.joinDraft.mockImplementationOnce(() => new Promise((resolve) => {
         resolveJoin = resolve;
       }));
@@ -2316,10 +2475,38 @@ describe("draftPodStore", () => {
       const joining = useDraftPodStore.getState().joinPod();
       await vi.waitFor(() => expect(mocks.multiplayerState.joinDraft).toHaveBeenCalledOnce());
       useConnectivityStore.setState({ browserOnline: false });
-      resolveJoin(false);
+      resolveJoin({ status: "failed", error: null });
 
       await joining;
       expect(useDraftPodStore.getState().configError).toBe("offline.startUnavailable");
+    });
+
+    it("does not report a superseded guest join as offline", async () => {
+      let resolveJoin!: (value: DraftSessionOpenOutcome) => void;
+      mocks.multiplayerState.joinDraft.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveJoin = resolve;
+      }));
+      useDraftPodStore.setState({ joinCode: "ABCDE", guestDisplayName: "Alice" });
+
+      const joining = useDraftPodStore.getState().joinPod();
+      await vi.waitFor(() => expect(mocks.multiplayerState.joinDraft).toHaveBeenCalledOnce());
+      useConnectivityStore.setState({ browserOnline: false });
+      resolveJoin({ status: "superseded" });
+
+      await joining;
+      expect(useDraftPodStore.getState().configError).toBeNull();
+    });
+
+    it("does not report a superseded host as a hosting failure", async () => {
+      vi.stubGlobal("__DRAFT_POOLS_URL__", "/draft-pools.json");
+      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ tst: { code: "TST" } }) })));
+      mocks.multiplayerState.hostDraft.mockResolvedValueOnce({ status: "superseded" });
+      configureSetPod();
+
+      await useDraftPodStore.getState().createPod();
+
+      expect(mocks.multiplayerState.hostDraft).toHaveBeenCalledOnce();
+      expect(useDraftPodStore.getState().configError).toBeNull();
     });
 
     it("retires a stale pool spinner when a newer public orchestration starts", async () => {
@@ -2397,7 +2584,7 @@ describe("draftPodStore", () => {
         resolveProcedure = resolve;
         rejectProcedure = reject;
       }));
-      let resolveJoin!: (value: boolean) => void;
+      let resolveJoin!: (value: DraftSessionOpenOutcome) => void;
       mocks.multiplayerState.joinDraft.mockImplementationOnce(() => new Promise((resolve) => {
         resolveJoin = resolve;
       }));
@@ -2410,7 +2597,7 @@ describe("draftPodStore", () => {
       await vi.waitFor(() => expect(mocks.multiplayerState.joinDraft).toHaveBeenCalledOnce());
 
       useConnectivityStore.setState({ forcedOffline: true });
-      resolveJoin(false);
+      resolveJoin({ status: "failed", error: null });
       await joining;
       const newerOffline = useDraftPodStore.getState();
       expect(newerOffline).toMatchObject({

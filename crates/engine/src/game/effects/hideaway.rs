@@ -45,11 +45,15 @@ pub fn resolve(
             _ => continue,
         }
         // CR 406.3 + CR 608.2c: the conceal's controller was instructed to look,
-        // and with no grantee the source's controller may too (CR 702.75a).
+        // and with no grantee the source's controller may too (CR 702.75a). A
+        // grantee that names no player records no look link for the card.
         let grant = match grantee {
-            Some(grantee) => LookGrant::Player {
-                player: grant_permission::resolve_grantee(state, ability, *grantee, obj_id),
-            },
+            Some(grantee) => {
+                match grant_permission::resolve_grantee(state, ability, *grantee, obj_id) {
+                    Some(player) => LookGrant::Player { player },
+                    None => continue,
+                }
+            }
             None => LookGrant::SourceController,
         };
         crate::game::exile_links::push_look_link(

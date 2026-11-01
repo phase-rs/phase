@@ -2,7 +2,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameAction, GameObject } from "../../../adapter/types.ts";
+import type { GameAction, GameObject, WaitingFor } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
@@ -54,12 +54,13 @@ const LAND_ID = 500;
 
 /** A child under the real provider — the consumer whose read is being proved. */
 function AffordanceProbe() {
-  const { activatableObjectIds, manaTappableObjectIds } = useBoardInteractionState();
+  const { activatableObjectIds, manaTappableObjectIds, blockableAttackerIds } = useBoardInteractionState();
   return (
     <div
       data-testid="affordance-probe"
       data-activatable={[...activatableObjectIds].sort((a, b) => a - b).join(",")}
       data-mana={[...manaTappableObjectIds].sort((a, b) => a - b).join(",")}
+      data-blockable={[...blockableAttackerIds].sort((a, b) => a - b).join(",")}
     />
   );
 }
@@ -205,5 +206,52 @@ describe("GameBoard publishes the shared activation affordances to its consumers
     const probe = screen.getByTestId("affordance-probe");
     expect(probe.getAttribute("data-activatable")).toBe("");
     expect(probe.getAttribute("data-mana")).toBe("");
+  });
+
+  // CR 509.1a: `combat.rs::get_valid_block_targets_for_player` keeps only
+  // attackers this defender's blockers may legally block, so the union of the prompt's
+  // `valid_block_targets` values is already seat-scoped. Attacker 999 is a
+  // real `combat.attackers` entry (aimed at a different opponent) that
+  // appears in no `valid_block_targets` value, so it must be absent from the
+  // published set even though it is a live attacker this turn.
+  it("publishes blockableAttackerIds as the union of valid_block_targets, excluding an attacker aimed elsewhere", () => {
+    const waitingFor: WaitingFor = {
+      type: "DeclareBlockers",
+      data: {
+        player: 0,
+        valid_blocker_ids: [AURA_ID],
+        valid_block_targets: { [AURA_ID]: [1, 2] },
+      },
+    };
+    useGameStore.setState({
+      gameState: {
+        ...useGameStore.getState().gameState!,
+        waiting_for: waitingFor,
+        combat: {
+          attackers: [
+            { object_id: 1, defending_player: 0, attack_target: { type: "Player", data: 0 } },
+            { object_id: 2, defending_player: 0, attack_target: { type: "Player", data: 0 } },
+            { object_id: 999, defending_player: 1, attack_target: { type: "Player", data: 1 } },
+          ],
+          blocker_assignments: {},
+          blocker_to_attacker: {},
+          blockers_declared_by: [],
+          pending_blocker_declaration_events: [],
+          damage_assignments: {},
+          first_strike_done: false,
+          damage_step_index: null,
+          pending_damage: [],
+          regular_damage_done: false,
+        },
+      },
+      waitingFor,
+    });
+
+    render(
+      <GameBoard effectiveMultiplayerBoardLayout="focused" oppHud={<div />} playerHud={<div />} />,
+    );
+
+    const probe = screen.getByTestId("affordance-probe");
+    expect(probe.getAttribute("data-blockable")).toBe("1,2");
   });
 });

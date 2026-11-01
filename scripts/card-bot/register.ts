@@ -6,7 +6,8 @@
 
 import { BUILDS, discord, LFG_DEFAULT_BUILD } from "./config";
 import { OptionType, registerGuildCommands } from "./discord";
-import { FORMATS, MAX_SEATS } from "./formats";
+import { MAX_SEATS } from "./formats";
+import { LFG_FORMAT_OPTION } from "./lfgInteractions";
 
 const cardCommand = {
   name: "card",
@@ -37,13 +38,7 @@ const lfgCommand = {
   name: "lfg",
   description: "Find players for a phase.rs multiplayer game",
   options: [
-    {
-      type: OptionType.STRING,
-      name: "format",
-      description: "Game format",
-      required: true,
-      choices: FORMATS.map((f) => ({ name: f.label, value: f.format })),
-    },
+    LFG_FORMAT_OPTION,
     {
       type: OptionType.INTEGER,
       name: "seats",
@@ -51,6 +46,13 @@ const lfgCommand = {
       required: false,
       min_value: 2,
       max_value: MAX_SEATS,
+    },
+    {
+      type: OptionType.STRING,
+      name: "description",
+      description: "Game details, e.g. Commander bracket, power level, or deck preferences",
+      required: false,
+      max_length: 500,
     },
     {
       type: OptionType.STRING,

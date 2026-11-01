@@ -16,6 +16,13 @@ interface Props {
    *  Every value rendered here is engine-authored (CR 309.4); this component
    *  positions and styles them and computes nothing about the game. */
   view: DungeonRoomView;
+  /** Announce every room and its effect to assistive tech, not just the
+   *  marked room. The dungeon-choice prompt sets this: the markers are
+   *  `aria-hidden` and the card alt names only the dungeon, so without the
+   *  list a screen-reader user cannot compare rooms while choosing. The HUD
+   *  badge leaves it off — there the marked room is the announcement and the
+   *  full list would be noise on every hover. */
+  announceAllRooms?: boolean;
 }
 
 const ANCHOR_GAP_PX = 10;
@@ -45,7 +52,7 @@ const CARD_ASPECT = 680 / 488;
  * `pointer-events-none` — it is hoverable so the pointer can travel from the
  * badge into the card without dismissing it.
  */
-export function DungeonMapPopover({ anchorEl, view, panelRef }: Props) {
+export function DungeonMapPopover({ anchorEl, view, panelRef, announceAllRooms }: Props) {
   const { t } = useTranslation("game");
   const [pos, setPos] = useState<{
     left: number;
@@ -161,6 +168,20 @@ export function DungeonMapPopover({ anchorEl, view, panelRef }: Props) {
           <p className="mt-2 max-w-[340px] text-[11px] leading-snug text-slate-300">
             {view.room.text}
           </p>
+        ) : null}
+
+        {/* The spoken equivalent of the floor plan: every room's name and
+            printed effect, in card order, from the engine projection. No
+            heading or chrome strings — the items are self-describing, so
+            this adds no i18n keys. */}
+        {announceAllRooms ? (
+          <ul className="sr-only">
+            {view.rooms.map((node) => (
+              <li key={node.index}>
+                {node.name} — {node.text}
+              </li>
+            ))}
+          </ul>
         ) : null}
       </div>
     </div>,

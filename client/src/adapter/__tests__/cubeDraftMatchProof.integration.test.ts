@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import initDraft from "@wasm/draft";
 import initEngine, {
-  get_game_state, get_legal_actions_js, initialize_game, load_card_database as loadEngineCards,
+  export_game_state_json, get_legal_actions_js, initialize_game, load_card_database as loadEngineCards,
 } from "@wasm/engine";
 
 import fixture from "../../test/fixtures/draftMatchProof.json";
@@ -66,8 +66,8 @@ async function draftTwenty(adapter: DraftAdapter, minimum: number): Promise<Draf
 }
 
 function installedDecks(): string[][] {
-  const envelope = get_game_state() as Record<string, unknown>;
-  const state = (envelope.state ?? envelope) as Record<string, unknown>;
+  const envelope = JSON.parse(export_game_state_json()) as { state: Record<string, unknown> };
+  const state = envelope.state;
   const players = state.players as Array<{ library: unknown[]; hand: unknown[] }>;
   const objects = state.objects as Record<string, { name: string }> | Map<unknown, { name: string }>;
   return players.map(({ library, hand }) => [...library, ...hand].map((id) => {

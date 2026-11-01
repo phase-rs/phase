@@ -1,6 +1,6 @@
 use crate::game::effects::destroy::{self, DestroyOutcome};
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
-use crate::game::targeting;
+use crate::game::targeting::{self, TriggeringSpell};
 use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
     CounterSourceRider, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
@@ -26,8 +26,8 @@ use crate::types::zones::Zone;
 ///
 /// CR 701.6 + CR 608.2c: If the effect carries a `source_rider`, it runs as a
 /// follow-up instruction acting on the countered ability's source permanent —
-/// only when an *ability* (not a spell) was countered (CR 110.1 / CR 701.8a: a
-/// spell is not a permanent). `CounterSourceRider::LosesAbilities` registers a
+/// only when an *ability* (not a spell) was countered (CR 110.1 (a permanent is on the battlefield) + CR 113.1c (a stack ability is an object whose source can be a permanent): a
+/// spell is not a permanent, and neither is an ability on the stack). `CounterSourceRider::LosesAbilities` registers a
 /// continuous "loses all abilities for as long as ~" static (Tidebinder);
 /// `CounterSourceRider::Destroy` destroys the permanent (Teferi's Response,
 /// Green Slime).
@@ -69,8 +69,8 @@ pub fn resolve(
 
     // CR 701.6 + CR 608.2c: When an *ability* is countered (not a spell), carry
     // its source permanent and the rider out of the loop so the follow-up
-    // instruction runs after EffectResolved (see CR 110.1 / CR 701.8a: a
-    // countered spell is not a permanent, so no rider fires for spells).
+    // instruction runs after EffectResolved (see CR 110.1 (a permanent is on the battlefield) + CR 113.1c (a stack ability is an object whose source can be a permanent):
+    // a countered spell is not a permanent, so no rider fires for spells).
     let mut countered_ability_source: Option<ObjectId> = None;
 
     for target in targets {
@@ -107,9 +107,7 @@ pub fn resolve(
                 continue;
             }
 
-            // Remove from stack — search by both id (spells) and source_id (abilities).
-            // Use rposition to match the most recently pushed entry.
-            let stack_idx = countered_stack_index(state, obj_id);
+            let stack_idx = countered_stack_index(state, ability, obj_id);
             if let Some(idx) = stack_idx {
                 // CR 701.6a: the removal IS the counter, so it goes through the
                 // single CR 405.2 removal authority, which journals it and drops
@@ -244,8 +242,8 @@ pub fn resolve(
                         | ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(()),
                     }
                 } else {
-                    // CR 110.1 / CR 701.8a: An ability was countered, so its
-                    // source is a permanent the rider can act on. Defer the
+                    // CR 110.1 (a permanent is on the battlefield) + CR 113.1c (a stack ability is an object whose source can be a permanent): An ability was
+                    // countered, so its source is a permanent the rider can act on. Defer the
                     // rider to the post-loop block so EffectResolved precedes
                     // any WaitingFor a replacement choice may set.
                     countered_ability_source = Some(source_permanent_id);
@@ -270,15 +268,32 @@ pub fn resolve(
             // countered ability's source permanent (Tishana's Tidebinder).
             Some(CounterSourceRider::LosesAbilities {
                 static_def,
+                source_filter,
                 duration,
             }) => {
-                apply_source_static(
-                    state,
-                    ability.source_id,
-                    source_permanent_id,
-                    &static_def,
-                    *duration,
-                );
+                // CR 608.2c + CR 109.2 + CR 608.2h: the printed type condition
+                // ("an ability of an artifact, creature, or planeswalker") is
+                // asked of the countered ability's SOURCE permanent — not the
+                // rider's host — against its current characteristics. A land or
+                // enchantment source fails it and is left untouched. `None` is
+                // the untyped "a permanent's ability" reading.
+                let source_qualifies = source_filter.as_deref().is_none_or(|filter| {
+                    crate::game::filter::matches_target_filter(
+                        state,
+                        source_permanent_id,
+                        filter,
+                        &crate::game::filter::FilterContext::from_ability(ability),
+                    )
+                });
+                if source_qualifies {
+                    apply_source_static(
+                        state,
+                        ability.source_id,
+                        source_permanent_id,
+                        &static_def,
+                        *duration,
+                    );
+                }
             }
             // CR 701.8: Destroy the countered ability's source permanent
             // (Teferi's Response, Green Slime) through the shared guarded path
@@ -306,33 +321,89 @@ pub fn resolve(
     Ok(())
 }
 
-/// The stack entry `resolve` removes for a countered `obj_id`: the most recently
-/// pushed entry whose id (a spell) or source (an ability) is `obj_id`.
-pub(super) fn countered_stack_index(state: &GameState, obj_id: ObjectId) -> Option<usize> {
-    state
-        .stack
-        .iter()
-        .rposition(|e| e.id == obj_id || e.source_id == obj_id)
+/// CR 701.6a + CR 113.7a: the stack entry `resolve` removes for the countered
+/// referent `obj_id`: the entry whose id is `obj_id`. An entry that only has
+/// `obj_id` as its source, such as a spell's own cast trigger, is a different
+/// stack object and is not matched, except when the counter's
+/// `counter_trigger_event` is a `BecomesTarget` event (ward).
+pub(super) fn countered_stack_index(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    obj_id: ObjectId,
+) -> Option<usize> {
+    match counter_trigger_event(state, ability) {
+        // CR 702.21a: see `event_countered_referent`'s `BecomesTarget` arm.
+        Some((GameEvent::BecomesTarget { .. }, _)) => state
+            .stack
+            .iter()
+            .rposition(|e| e.id == obj_id || e.source_id == obj_id),
+        _ => state.stack.iter().rposition(|e| e.id == obj_id),
+    }
+}
+
+/// CR 608.2k: the trigger event a `Counter { TriggeringSource | ParentTarget }`
+/// reads "that spell" / "that ability" from, with the object that event names.
+fn counter_trigger_event<'a>(
+    state: &'a GameState,
+    ability: &ResolvedAbility,
+) -> Option<(&'a GameEvent, ObjectId)> {
+    let Effect::Counter {
+        target: TargetFilter::TriggeringSource | TargetFilter::ParentTarget,
+        ..
+    } = &ability.effect
+    else {
+        return None;
+    };
+    let event = state.current_trigger_event.as_ref()?;
+    Some((event, targeting::extract_source_from_event(event)?))
 }
 
 /// CR 701.6a: the spells or abilities a `Counter` node counters. Shared by
 /// `resolve` and `stack_reach`, so a pending node is read with the resolver's
 /// own binding.
 pub(super) fn countered_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
-    match &ability.effect {
-        Effect::Counter { target, .. } if matches!(target, TargetFilter::ParentTarget) => {
-            let event_target = targeting::resolve_event_context_target(
-                state,
-                &TargetFilter::TriggeringSource,
-                ability.source_id,
-            );
-            match event_target {
-                Some(target) => vec![target],
-                None => targeting::resolved_targets(ability, target, state),
-            }
-        }
-        Effect::Counter { target, .. } => targeting::resolved_targets(ability, target, state),
-        _ => ability.targets.clone(),
+    let Effect::Counter { target, .. } = &ability.effect else {
+        return ability.targets.clone();
+    };
+    // CR 608.2k: "that spell" / "that ability" is identified through the
+    // trigger event.
+    if let Some((event, object_id)) = counter_trigger_event(state, ability) {
+        return event_countered_referent(state, event, object_id)
+            .map(TargetRef::Object)
+            .into_iter()
+            .collect();
+    }
+    targeting::resolved_targets(ability, target, state)
+}
+
+/// CR 608.2k + CR 701.6a: the referent a trigger's "that spell" / "that
+/// ability" counters, given `object_id`, the object its trigger `event` names.
+/// `None` counters nothing.
+fn event_countered_referent(
+    state: &GameState,
+    event: &GameEvent,
+    object_id: ObjectId,
+) -> Option<ObjectId> {
+    let on_stack = |id: ObjectId| state.stack.iter().any(|e| e.id == id).then_some(id);
+    match event {
+        // CR 601.2i + CR 400.7: the spell as it was cast; once it left the
+        // stack, or was cast again, it is not "that spell".
+        GameEvent::SpellCast { .. } => match targeting::triggering_spell(state) {
+            Some(TriggeringSpell::OnStack(entry)) => Some(entry.id),
+            Some(TriggeringSpell::Departed(_) | TriggeringSpell::Gone) | None => None,
+        },
+        // CR 702.21a: the event names a targeting spell by its id and a
+        // targeting ability by its source, and not which entry targeted;
+        // `countered_stack_index` matches this referent against both.
+        GameEvent::BecomesTarget { .. } => Some(object_id),
+        // CR 113.7: the event names the object that moved.
+        GameEvent::ZoneChanged { .. } => state
+            .stack
+            .iter()
+            .rev()
+            .find(|e| e.source_id == object_id)
+            .map(|e| e.id),
+        _ => on_stack(object_id),
     }
 }
 
@@ -405,8 +476,7 @@ pub fn resolve_all(
 
         // CR 405.2: Look up the stack entry by its own id only. The
         // `matching` set was populated from `entry.id`, so a `source_id`
-        // fallback (used in the single-target resolver to bridge a target's
-        // ObjectId to its parent permanent) would match the wrong entry
+        // fallback would match the wrong entry
         // when several stack entries share a `source_id` (e.g., two
         // activated abilities of the same permanent).
         let stack_idx = state.stack.iter().position(|e| e.id == obj_id);
@@ -911,6 +981,7 @@ mod tests {
                 },
                 source_rider: Some(CounterSourceRider::LosesAbilities {
                     static_def: Box::new(source_static),
+                    source_filter: None,
                     duration: Box::new(Duration::UntilHostLeavesPlay),
                 }),
                 countered_spell_zone: None,
@@ -1018,6 +1089,7 @@ mod tests {
                 },
                 source_rider: Some(CounterSourceRider::LosesAbilities {
                     static_def: Box::new(source_static),
+                    source_filter: None,
                     // Non-default sentinel: the resolver must thread THIS value.
                     duration: Box::new(Duration::UntilEndOfTurn),
                 }),
@@ -1086,6 +1158,7 @@ mod tests {
                 target: TargetFilter::Any,
                 source_rider: Some(CounterSourceRider::LosesAbilities {
                     static_def: Box::new(source_static),
+                    source_filter: None,
                     duration: Box::new(Duration::UntilHostLeavesPlay),
                 }),
                 countered_spell_zone: None,
@@ -1188,8 +1261,84 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, GameEvent::CreatureDestroyed { object_id } if *object_id == source_permanent)),
+                .any(|e| matches!(e, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == source_permanent)),
             "a destroy event should fire for the source permanent"
+        );
+    }
+
+    /// CR 701.8 + CR 109.2: the Destroy rider ("if a permanent's ability is
+    /// countered this way") carries no type gate, so it destroys a LAND source
+    /// too — only the typed Tidebinder-class rider
+    /// (`LosesAbilities::source_filter`) restricts by type.
+    #[test]
+    fn counter_ability_destroy_rider_still_destroys_a_land_source() {
+        let mut state = GameState::new_two_player(42);
+        let source_permanent = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Source Land".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source_permanent).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let counter_source = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Green Slime".to_string(),
+            Zone::Battlefield,
+        );
+        let ability_on_stack = ObjectId(999);
+        state.stack.push_back(StackEntry {
+            id: ability_on_stack,
+            source_id: source_permanent,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source_permanent,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Unimplemented {
+                        name: "Dummy".to_string(),
+                        description: None,
+                    },
+                    vec![],
+                    source_permanent,
+                    PlayerId(1),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        let counter_ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None,
+                    kind: None,
+                },
+                source_rider: Some(CounterSourceRider::Destroy),
+                countered_spell_zone: None,
+            },
+            vec![TargetRef::Object(ability_on_stack)],
+            counter_source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &counter_ability, &mut events).unwrap();
+
+        assert!(state.stack.is_empty(), "reach-guard: ability countered");
+        assert!(
+            !state.battlefield.contains(&source_permanent),
+            "the untyped Destroy rider must still destroy a land source"
         );
     }
 

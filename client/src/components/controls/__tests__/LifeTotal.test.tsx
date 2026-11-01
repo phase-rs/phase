@@ -6,7 +6,7 @@ import {
   GROUPED_DAMAGE_FLURRY_IMPACT_DELAY_MS,
   type AnimationStep,
 } from "../../../animation/types.ts";
-import { useAnimationStore } from "../../../stores/animationStore.ts";
+import { type QueuedStep, useAnimationStore } from "../../../stores/animationStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
@@ -21,9 +21,10 @@ function setLife(playerId: number, life: number) {
 }
 
 // A combat step that damages `playerId` for `amount` (LifeChanged + DamageDealt).
-function combatDamageStep(playerId: number, amount: number): AnimationStep {
+function combatDamageStep(playerId: number, amount: number): QueuedStep {
   return {
     duration: 900,
+    snapshotSeq: 1,
     effects: [
       {
         event: { type: "LifeChanged", data: { player_id: playerId, amount } },
@@ -45,9 +46,10 @@ function combatDamageStep(playerId: number, amount: number): AnimationStep {
   };
 }
 
-function groupedDamageStep(playerId: number, lifeAmount?: number, lifePlayerId = playerId): AnimationStep {
+function groupedDamageStep(playerId: number, lifeAmount?: number, lifePlayerId = playerId): QueuedStep {
   return {
     duration: 900,
+    snapshotSeq: 1,
     effects: [
       {
         event: {
@@ -140,6 +142,35 @@ describe("LifeTotal", () => {
     });
 
     expect(screen.getByText("20")).toBeInTheDocument();
+  });
+
+  it("renders the engine's unbounded life as ∞ and still flashes a life change", () => {
+    useGameStore.setState({
+      gameState: buildGameState({ derived: { life_magnitude: { 1: "Unbounded" } } }),
+    });
+    render(
+      <>
+        <LifeTotal playerId={0} hideLabel />
+        <LifeTotal playerId={1} hideLabel />
+      </>,
+    );
+
+    const readout = screen.getByText("∞");
+    expect(readout).toHaveAttribute("title", "Unbounded life (∞)");
+    expect(readout).toHaveAttribute("aria-label", "Unbounded life (∞)");
+    expect(readout).toHaveClass("text-green-400");
+    expect(screen.getByText("20")).not.toHaveAttribute("title");
+
+    act(() => {
+      useAnimationStore.setState({
+        activeStep: {
+          duration: 300,
+          snapshotSeq: 1,
+          effects: [{ event: { type: "LifeChanged", data: { player_id: 1, amount: 3 } }, duration: 300 }],
+        },
+      });
+    });
+    expect(screen.getByText("∞")).toHaveClass("bg-green-500/30");
   });
 
   it("does not derive a lifelink gain from a grouped flurry display event", () => {

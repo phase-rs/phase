@@ -38,6 +38,7 @@ export interface Lfg {
   mode: LfgMode;
   build: Build;
   server: { url: string; name: string } | null;
+  description: string | null;
   state: LfgState;
   code: string | null;
   touchedMs: number;
@@ -58,6 +59,7 @@ export interface NewLfg {
   mode: LfgMode;
   build: Build;
   server: { url: string; name: string } | null;
+  description: string | null;
 }
 
 export type Refusal =
@@ -110,6 +112,7 @@ CREATE TABLE IF NOT EXISTS lfg (
   build       TEXT NOT NULL CHECK (build IN ('release','preview')),
   server_url  TEXT,
   server_name TEXT,
+  description TEXT,
   state       TEXT NOT NULL CHECK (state IN ('open','ready','cancelled','expired')),
   code        TEXT,
   touched_ms  INTEGER NOT NULL,
@@ -135,6 +138,7 @@ interface LfgRow {
   build: Build;
   server_url: string | null;
   server_name: string | null;
+  description: string | null;
   state: LfgState;
   code: string | null;
   touched_ms: number;
@@ -145,6 +149,7 @@ interface LfgRow {
 /** Columns added after the first release, so an existing database gains them in
  *  place (CREATE TABLE IF NOT EXISTS never alters a table that exists). */
 const ADDED_COLUMNS: readonly { name: string; type: string }[] = [
+  { name: "description", type: "TEXT" },
   { name: "thread_id", type: "TEXT" },
   /** When the game was ended (End game, time-out, or a failed setup). */
   { name: "thread_end_ms", type: "INTEGER" },
@@ -217,9 +222,9 @@ export class LfgStore {
       this.db
         .query(
           `INSERT INTO lfg (id, guild_id, creator_id, format, seats, mode, build,
-                            server_url, server_name, state, code, touched_ms)
+                            server_url, server_name, description, state, code, touched_ms)
            VALUES ($id, $guildId, $creatorId, $format, $seats, $mode, $build,
-                   $serverUrl, $serverName, 'open', NULL, $now)`,
+                   $serverUrl, $serverName, $description, 'open', NULL, $now)`,
         )
         .run({
           id,
@@ -231,6 +236,7 @@ export class LfgStore {
           build: input.build,
           serverUrl: input.server?.url ?? null,
           serverName: input.server?.name ?? null,
+          description: input.description,
           now,
         });
       this.insertSeat(id, input.creatorId, now);
@@ -408,6 +414,7 @@ export class LfgStore {
       build: row.build,
       server:
         row.server_url === null ? null : { url: row.server_url, name: row.server_name ?? row.server_url },
+      description: row.description,
       state: row.state,
       code: row.code,
       touchedMs: row.touched_ms,

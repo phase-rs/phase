@@ -13,11 +13,12 @@ import {
   invokerId,
   jsonResponse,
   MessageFlags,
+  OptionType,
   ResponseType,
   stringOption,
   type ThreadApi,
 } from "./discord";
-import { defaultSeats, findFormat, type LfgMode, seatCap } from "./formats";
+import { defaultSeats, findFormat, FORMATS, type LfgFormat, type LfgMode, seatCap } from "./formats";
 import type { Lfg, LfgStore, Outcome } from "./lfg";
 import {
   type LfgAction,
@@ -44,6 +45,8 @@ export interface LfgDeps {
   editOriginal: (appId: string, token: string, body: unknown) => Promise<void>;
   /** Game threads, or null when the bot runs without its token (no threads). */
   threads: ThreadApi | null;
+  /** Resolves the opt-in format role from Discord's guild role list. */
+  roles: { resolve(guildId: string, format: LfgFormat): Promise<string | undefined> } | null;
 }
 
 /** Wait before closing a thread whose End game click is being answered, so the
@@ -53,6 +56,16 @@ const THREAD_CLOSE_DELAY_MS = 1000;
 /** Discord caps autocomplete at 25 choices, each name at 100 chars. */
 const MAX_AUTOCOMPLETE_CHOICES = 25;
 const MAX_CHOICE_NAME_LENGTH = 100;
+const MAX_DESCRIPTION_LENGTH = 500;
+
+/** Discord caps static `choices` at 25, so the registry-sized format list is served by autocomplete. */
+export const LFG_FORMAT_OPTION = {
+  type: OptionType.STRING,
+  name: "format",
+  description: "Game format",
+  required: true,
+  autocomplete: true,
+} as const;
 
 /** A reply only the invoker sees. */
 function ephemeral(content: string): Response {
@@ -80,7 +93,7 @@ function resolveMode(modeOption: string | undefined, serverOption: string | unde
 }
 
 /** `/lfg`: validates the request and posts the public LFG, or refuses ephemerally. */
-export function lfgCommand(i: CommandInteraction, deps: LfgDeps): Response {
+export async function lfgCommand(i: CommandInteraction, deps: LfgDeps): Promise<Response> {
   const guildId = i.guild_id;
   const userId = invokerId(i);
   if (guildId === undefined || userId === undefined) {
@@ -97,7 +110,12 @@ export function lfgCommand(i: CommandInteraction, deps: LfgDeps): Response {
   }
 
   const format = findFormat(stringOption(options, "format") ?? "");
-  if (format === undefined) return ephemeral("Unknown format.");
+  if (format === undefined) return ephemeral("Unknown format. Pick one from the suggestions.");
+
+  const description = stringOption(options, "description")?.trim() || null;
+  if (description !== null && description.length > MAX_DESCRIPTION_LENGTH) {
+    return ephemeral(`Description must be ${MAX_DESCRIPTION_LENGTH} characters or fewer.`);
+  }
 
   const cap = seatCap(format, mode);
   const seats = integerOption(options, "seats") ?? defaultSeats(format, mode);
@@ -128,14 +146,15 @@ export function lfgCommand(i: CommandInteraction, deps: LfgDeps): Response {
   }
 
   const result = deps.store.create(
-    { guildId, creatorId: userId, format, seats, mode, build, server },
+    { guildId, creatorId: userId, format, seats, mode, build, server, description },
     deps.now(),
   );
   if (result.kind === "refused") return ephemeral(refusalText(result.reason, format));
   console.log(`[lfg] create id=${result.lfg.id} format=${format.format} mode=${mode} build=${build}`);
+  const roleId = await deps.roles?.resolve(guildId, format);
   return jsonResponse({
     type: ResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-    data: renderLfg(result.lfg),
+    data: renderLfg(result.lfg, roleId),
   });
 }
 
@@ -306,16 +325,39 @@ export async function closeThreads(store: LfgStore, threads: ThreadApi, now: num
   }
 }
 
-/** `/lfg server:` suggestions: the build's eligible servers, from the cache only. */
+/** Formats whose label or key starts with the query, then those containing it (each tier in
+ *  registry order), capped at Discord's autocomplete limit; an empty query lists the first entries. */
+export function suggestFormats(
+  query: string,
+  registry: readonly LfgFormat[] = FORMATS,
+): Array<{ name: string; value: string }> {
+  const q = normalizeQuery(query);
+  const haystacks = (f: LfgFormat) => [f.label.toLowerCase(), f.format.toLowerCase()];
+  const prefix = registry.filter((f) => haystacks(f).some((h) => h.startsWith(q)));
+  const contains = registry.filter((f) => !prefix.includes(f) && haystacks(f).some((h) => h.includes(q)));
+  return [...prefix, ...contains].slice(0, MAX_AUTOCOMPLETE_CHOICES).map((f) => ({
+    name: f.label.slice(0, MAX_CHOICE_NAME_LENGTH),
+    value: f.format,
+  }));
+}
+
+function normalizeQuery(value: string | number | boolean | undefined): string {
+  return (typeof value === "string" ? value : "").trim().toLowerCase();
+}
+
+/** `/lfg format:` suggestions from the registry, and `/lfg server:` suggestions: the build's
+ *  eligible servers, from the cache only. */
 export function lfgAutocomplete(i: CommandInteraction, deps: LfgDeps): Response {
   const options = i.data.options;
   const focused = options?.find((o) => o.focused);
   let choices: Array<{ name: string; value: string }> = [];
-  if (focused?.name === "server") {
+  if (focused?.name === "format") {
+    choices = suggestFormats(stringOption(options, "format") ?? "");
+  } else if (focused?.name === "server") {
     const availability = deps.servers.get(lfgBuild(stringOption(options, "build")));
     // A pre-10 build refuses every /lfg, so it offers no servers either.
     if (availability !== null && brokerSupportsBotGames(availability.broker)) {
-      const q = (typeof focused.value === "string" ? focused.value : "").trim().toLowerCase();
+      const q = normalizeQuery(focused.value);
       choices = eligibleServers(availability.broker, availability.servers)
         .filter((r) => r.name.toLowerCase().includes(q) || r.url.toLowerCase().includes(q))
         .slice(0, MAX_AUTOCOMPLETE_CHOICES)

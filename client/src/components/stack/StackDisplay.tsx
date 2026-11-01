@@ -265,7 +265,7 @@ export function StackDisplay({
             </button>
           )}
 
-          <div className="pointer-events-auto relative h-full overflow-hidden rounded-[10px] border border-white/10 bg-gray-950/96 shadow-[0_16px_36px_rgba(0,0,0,0.45)]">
+          <div className="pointer-events-auto relative h-full overflow-hidden rounded-[10px] border border-white/10 bg-gray-950/40 shadow-[0_16px_36px_rgba(0,0,0,0.25)] backdrop-blur-sm">
             <div className="flex h-9 items-center justify-between border-b border-white/10 px-3">
               <div className="flex items-center gap-2">
                 <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-gray-400">

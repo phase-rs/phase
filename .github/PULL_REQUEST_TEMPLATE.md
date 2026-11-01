@@ -69,12 +69,12 @@ None.
 ## Scope Expansion
 
 None.
-<!-- Describe any change that crosses the issue/card's stated scope. -->
+<!-- Describe any change that crosses the issue/card's stated scope: the item it closes and why leaving it would ship the defect. -->
 
 ## Validation Failures
 
 None.
-<!-- Replace with the unresolved validation failure and its evidence. -->
+<!-- Replace with each unresolved validation failure or shipped residual finding, with its evidence and follow-up. -->
 
 ## CI Failures
 

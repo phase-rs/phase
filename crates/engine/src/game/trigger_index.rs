@@ -1,4 +1,4 @@
-//! CR 603.2 + CR 603.6a + CR 611.2e: `TriggerIndex` — battlefield-scoped
+//! CR 603.2 + CR 603.6a: `TriggerIndex` — battlefield-scoped
 //! candidate pre-filter for `collect_pending_triggers`. Replaces a full
 //! battlefield scan with an event-keyed lookup so trigger-firing cost scales
 //! with the number of *relevant* triggers, not with `|battlefield|`.
@@ -25,9 +25,9 @@
 //! # Authority
 //!
 //! The authoritative correctness path is the rebuild at the end of
-//! `evaluate_layers` (CR 611.2e): every continuous-effect-driven mutation of
-//! `obj.trigger_definitions` (sliver lords, Changeling, Bramble Sovereign,
-//! suppress-triggers statics) flows through the layer pipeline, and
+//! `evaluate_layers`: every continuous-effect-driven mutation of
+//! `obj.trigger_definitions` (sliver lords, Changeling) flows through the
+//! layer pipeline, and
 //! `collect_pending_triggers` flushes pending layers before reading the index.
 //! The `move_to_zone` incremental hooks are best-effort optimization between
 //! layer flushes — they are NOT the safety net.
@@ -61,7 +61,7 @@ use smallvec::SmallVec;
 use crate::types::ability::{EffectKind, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, TriggerIndex};
+use crate::types::game_state::{DerivedIndexReadiness, GameState, TriggerIndex};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::triggers::{TriggerEventKey, TriggerMode};
@@ -118,7 +118,7 @@ fn narrow_core_type(filter: &Option<TargetFilter>) -> Option<CoreType> {
 /// dynamic emit a single `None` so the caller routes them to `unclassified`.
 /// `StateCondition` and `Unknown(_)` return an EMPTY result *and* the caller
 /// must NOT push such objects to `unclassified` — state triggers run through
-/// the dedicated `check_state_triggers` path, never event-driven dispatch.
+/// the dedicated `collect_state_triggers` path, never event-driven dispatch.
 ///
 /// Returns `(keys, route_to_unclassified)`:
 /// - non-empty keys → object goes into each bucket
@@ -178,7 +178,9 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         // permanents are rare and the dedicated event keeps the consult cost
         // bounded.
         TriggerMode::Evolved => return (keys, true),
-        TriggerMode::ChangesController => push(TriggerEventKey::ChangesController),
+        // Un-card Gotcha: consumes the dedicated `GameEvent::GotchaSaid`; rare, so unclassified.
+        TriggerMode::GotchaSaid => return (keys, true),
+        TriggerMode::ChangesController { .. } => push(TriggerEventKey::ChangesController),
         TriggerMode::LeavesBattlefield => push(TriggerEventKey::LeaveBattlefield(narrow)),
 
         // --- Damage family ---
@@ -467,10 +469,14 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::ElementalBend => push(TriggerEventKey::Bending),
 
         // CR 603.8: state triggers are processed by the dedicated
-        // `check_state_triggers` path, NOT by event-driven dispatch. The
+        // `collect_state_triggers` path, NOT by event-driven dispatch. The
         // matcher dispatch returns `None` for them. Skip entirely — neither
         // a key nor unclassified routing.
         TriggerMode::StateCondition => return (SmallVec::new(), false),
+        // CR 904.9: resolved by the scan hook
+        // (`archenemy::resolve_pending_as_set_in_motion_choices`), never
+        // through event-driven dispatch. Neither a key nor unclassified.
+        TriggerMode::AsSetInMotion => return (SmallVec::new(), false),
         // No matcher registered; never fires through events.
         TriggerMode::Unknown(_) => return (SmallVec::new(), false),
     }
@@ -495,7 +501,11 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::GameStarted
         | GameEvent::HiddenSearchViewed { .. }
         | GameEvent::ExtraTurnCreated { .. }
-        | GameEvent::ResolutionHalted { .. } => {}
+        | GameEvent::ResolutionHalted { .. }
+        | GameEvent::ShortcutRepetition { .. }
+        // Contests are adapted physical minigames with no triggered-ability keys.
+        | GameEvent::PhysicalContestStarted { .. }
+        | GameEvent::PhysicalContestResolved { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
@@ -626,6 +636,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         // in the `unclassified` bucket. No key of its own.
         GameEvent::SagaChapterAbilityResolved { .. } => {}
         GameEvent::Evolved { .. } => {}
+        GameEvent::UnTellPerformed { .. }
+        | GameEvent::PhraseSaid { .. }
+        | GameEvent::GotchaSaid { .. } => {}
         GameEvent::ObjectIntensified { .. } => {}
         GameEvent::CounterRemoved { .. } => push(TriggerEventKey::CounterRemoved),
         GameEvent::TokenCreated { .. } | GameEvent::ObjectConjured { .. } => {
@@ -696,6 +709,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::DieRolled { .. } | GameEvent::CoinFlipped { .. } => {
             push(TriggerEventKey::DieOrCoin);
         }
+        // CR 706.6: an ignored (dropped) die is display-only, never a rules
+        // roll — "whenever you roll a die" must not see it, so no key.
+        GameEvent::DieRollIgnored { .. } => {}
         GameEvent::RingTemptsYou { .. } => push(TriggerEventKey::PlayerActionPerformed),
         GameEvent::RoomEntered { .. } | GameEvent::DungeonCompleted { .. } => {
             push(TriggerEventKey::DungeonOrClassOrCase);
@@ -725,6 +741,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         // Unstable Host/Augment combine is a distinct mechanic and has no
         // dedicated trigger mode today.
         GameEvent::Augmented { .. } => {}
+        // CR 701.42a: no printed card triggers on melding; the melded
+        // permanent's entry is indexed through its `ZoneChanged` event.
+        GameEvent::Melded { .. } => {}
         GameEvent::Firebend { .. }
         | GameEvent::Airbend { .. }
         | GameEvent::Earthbend { .. }
@@ -744,6 +763,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         }
         GameEvent::PowerToughnessChanged { .. } => {}
         GameEvent::CascadeMissed { .. }
+        | GameEvent::CardNamed { .. }
         | GameEvent::CardPredicateGuessMade { .. }
         | GameEvent::DebugActionUsed { .. }
         | GameEvent::DebugPermissionGranted { .. }
@@ -834,9 +854,11 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::EndCombatPhase
         | EffectKind::Populate
         | EffectKind::Clash
+        | EffectKind::PhysicalContest
         | EffectKind::Behold
         | EffectKind::Vote
         | EffectKind::SeparateIntoPiles
+        | EffectKind::ExileTopCardContest
         | EffectKind::SwitchPT
         | EffectKind::CopySpell
         | EffectKind::EpicCopy
@@ -886,6 +908,10 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::BecomeUnprepared
         | EffectKind::SetClassLevel
         | EffectKind::CreateDelayedTrigger
+        // Digital-only Alchemy (no CR entry): no production
+        // `EffectResolved`-dispatching matcher watches for boon
+        // installation, so `CreateBoon` resolving emits no trigger key.
+        | EffectKind::CreateBoon
         | EffectKind::AddTargetReplacement
         | EffectKind::AddRestriction
         | EffectKind::ReduceNextSpellCost
@@ -906,15 +932,14 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::LoseTheGame
         | EffectKind::WinTheGame
         | EffectKind::RollDie
-        | EffectKind::FlipCoin
         | EffectKind::FlipCoins
-        | EffectKind::FlipCoinUntilLose
         | EffectKind::RingTemptsYou
         | EffectKind::VentureIntoDungeon
         | EffectKind::VentureInto
         | EffectKind::TakeTheInitiative
         | EffectKind::ArrangePlanarDeckTop
         | EffectKind::Planeswalk
+        | EffectKind::AbandonScheme
         | EffectKind::ChaosEnsues
         // Redistribute emits LifeChanged handled by that event's own arm; no
         // EffectResolved-dispatching matcher. No-op here.
@@ -927,6 +952,9 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ChooseFromZone
         | EffectKind::RememberCard
         | EffectKind::NoteManaSpent
+        // Digital-only Alchemy (no CR entry): noting a number emits no
+        // `EffectResolved` at all, so no matcher dispatches on it.
+        | EffectKind::NoteNumber
         | EffectKind::ChooseObjectsIntoTrackedSet
         // CR 608.2d + CR 122.1: counter-kind choice / consume — the actual
         // counter placement fires `GameEvent::CounterAdded`, so no matcher
@@ -969,6 +997,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::SkipNextStep
         | EffectKind::AdditionalPhase
         | EffectKind::Double
+        | EffectKind::ModifyAnnouncedX
         | EffectKind::RuntimeHandled
         | EffectKind::Learn
         | EffectKind::Forage
@@ -1135,10 +1164,9 @@ impl TriggerIndex {
         }
     }
 
-    /// CR 603.6a + CR 611.2e: Rebuild from scratch by scanning every phased-in
+    /// Rebuild from scratch by scanning every phased-in
     /// battlefield permanent and re-deriving its keys via
-    /// `keys_from_trigger_def`. Called at the end of `evaluate_layers` and
-    /// lazily on first consult after deserialize.
+    /// `keys_from_trigger_def`.
     pub fn rebuild_from_battlefield(state: &mut GameState) {
         let mut fresh = TriggerIndex::default();
         // CR 702.26: phased-out permanents don't trigger.
@@ -1158,20 +1186,25 @@ impl TriggerIndex {
                 fresh.add(obj_id, &defs, synthetic);
             }
         }
+        fresh.readiness = DerivedIndexReadiness::Built;
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_trigger_index_rebuild();
         state.trigger_index = fresh;
     }
 }
 
-/// CR 603.2 + CR 611.2e: Ensure the serde-skipped candidate index is available
-/// before a consult. The layer pipeline remains the authoritative rebuild path
-/// for live granted and removed definitions; this only restores the empty
-/// derived index after deserialize when battlefield state is already present.
+/// CR 603.2: Ensure the serde-skipped candidate index has been
+/// populated by a full battlefield scan before a consult. Rebuilds only an
+/// `Unbuilt` index (fresh from `Default`, as after deserialize), and only
+/// while the battlefield is non-empty. A `Built` index is not rebuilt here
+/// even when its buckets are empty because no permanent carries a trigger.
+/// The layer pipeline remains the authoritative rebuild path for live
+/// granted and removed definitions.
 pub fn ensure_ready(state: &mut GameState) {
-    if state.trigger_index.by_key.is_empty()
-        && state.trigger_index.unclassified.is_empty()
-        && !state.battlefield.is_empty()
-    {
-        TriggerIndex::rebuild_from_battlefield(state);
+    match state.trigger_index.readiness {
+        DerivedIndexReadiness::Built => {}
+        DerivedIndexReadiness::Unbuilt if state.battlefield.is_empty() => {}
+        DerivedIndexReadiness::Unbuilt => TriggerIndex::rebuild_from_battlefield(state),
     }
 }
 
@@ -1229,10 +1262,9 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
                     .and_then(|obj| (obj.zone != Zone::Battlefield).then_some((*id, obj.zone)))
             })
             .collect();
-        // `stale` and `event` are reported as SEPARATE fields. A consult reached
-        // via the batch-safety probe in `observers_are_batch_safe` carries a
-        // synthetic probe event that has nothing to do with the stale object;
-        // conflating them would misdirect the first person to hit this.
+        // `stale` and `event` are reported as SEPARATE fields: the consulted
+        // event says nothing about why an object went stale, and conflating
+        // them would misdirect the first person to hit this.
         debug_assert!(
             stale.is_empty(),
             "TriggerIndex holds off-battlefield candidates (CR 113.6): \
@@ -1243,8 +1275,7 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
         let Some(obj) = state.objects.get(id) else {
             // Absent objects are RETAINED, preserving the previous `is_none_or`
             // semantics exactly: the production candidate loop already
-            // `continue`s on a missing object, `observers_are_batch_safe`'s
-            // inertness check does the same, and `DebugAction::RemoveObject`
+            // `continue`s on a missing object, and `DebugAction::RemoveObject`
             // deletes an object without an index removal — so dropping here
             // would change no behavior while breaking existing fixtures.
             return true;
@@ -1607,6 +1638,42 @@ mod tests {
             candidates_for_event(&restored, &event).as_slice(),
             &[object_id],
             "the first post-deserialize inline-mana consult must restore its candidate"
+        );
+    }
+
+    /// CR 603.2: a consult while the battlefield is empty has nothing to scan,
+    /// so it must not mark the index as populated; the first consult after a
+    /// permanent arrives still has to restore it.
+    #[test]
+    fn ensure_ready_defers_build_while_battlefield_is_empty() {
+        let mut state = GameState::new_two_player(42);
+
+        ensure_ready(&mut state);
+        assert_eq!(
+            state.trigger_index.readiness,
+            DerivedIndexReadiness::Unbuilt,
+            "a consult over an empty battlefield must leave the index unbuilt"
+        );
+
+        let object_id = ObjectId(80);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(80),
+            PlayerId(0),
+            "Late Mana Trigger".to_string(),
+            Zone::Battlefield,
+        );
+        object.base_trigger_definitions =
+            std::sync::Arc::new(vec![TriggerDefinition::new(TriggerMode::TapsForMana)]);
+        object.materialize_base_trigger_definitions();
+        state.objects.insert(object_id, object);
+        state.battlefield.push_back(object_id);
+
+        ensure_ready(&mut state);
+        assert_eq!(
+            candidates_for_event(&state, &tapped_for_mana_event()).as_slice(),
+            &[object_id],
+            "the first consult after a permanent arrives must index it"
         );
     }
 

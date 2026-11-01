@@ -22,10 +22,9 @@
 
 use engine::game::scenario::{CastOutcome, GameScenario, P0, P1};
 use engine::types::events::GameEvent;
+use engine::types::game_state::GameRng;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 /// Verbatim Oracle text, including the printed em-dash result rows.
 const FARIDEHS_FIREBALL: &str = "Farideh's Fireball deals 5 damage to target creature or planeswalker. Roll a d20.\n1\u{2014}9 | Farideh's Fireball deals 2 damage to each player.\n10\u{2014}20 | Farideh's Fireball deals 2 damage to each opponent.";
@@ -50,7 +49,7 @@ fn cast_fireball(seed: u64) -> (CastOutcome, ObjectId) {
     let state = committed.state_mut();
     state.rng_seed = seed;
     state.rng_word_pos = 0;
-    state.rng = ChaCha20Rng::seed_from_u64(seed);
+    state.rng = GameRng::seed_from_u64(seed);
     (committed.resolve(), victim)
 }
 

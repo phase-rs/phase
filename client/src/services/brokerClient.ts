@@ -36,7 +36,12 @@ function withValidatedFormatConfig<T extends { format_config?: FormatConfig | nu
   info: T,
 ): T {
   if (info.format_config == null) return info;
-  if (isFormatConfigShape(info.format_config)) return info;
+  // The shape guard names required fields but never rejects unknown ones,
+  // so frames minted when the removed experimental-dungeons flag still
+  // existed keep validating with the stale key ignored.
+  if (isFormatConfigShape(info.format_config)) {
+    return info;
+  }
   console.warn(
     "[broker] dropping a malformed format_config from a lobby frame; "
       + "the room's format will be treated as unknown",

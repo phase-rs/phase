@@ -77,6 +77,12 @@ path = "src/bin/legal_actions_bench.rs"
 test = false
 
 [[bin]]
+name = "mana-board-bench"
+path = "src/bin/mana_board_bench.rs"
+required-features = ["scenario-benches"]
+test = false
+
+[[bin]]
 name = "combat-priority-bench"
 path = "src/bin/combat_priority_bench.rs"
 required-features = ["scenario-benches"]

@@ -31,7 +31,6 @@ interface GameBoardProps {
   effectiveMultiplayerBoardLayout: MultiplayerBoardLayout;
   oppHud?: React.ReactNode;
   playerHud?: React.ReactNode;
-  showOpponentCards?: boolean;
   onKickPlayer?: (playerId: PlayerId) => void;
   onViewZone?: (
     zone: "graveyard" | "exile" | "library",
@@ -44,7 +43,6 @@ export const GameBoard = memo(function GameBoard({
   effectiveMultiplayerBoardLayout,
   oppHud,
   playerHud,
-  showOpponentCards = false,
   onKickPlayer,
   onViewZone = () => {},
 }: GameBoardProps) {
@@ -105,6 +103,7 @@ export const GameBoard = memo(function GameBoard({
     );
     const validTargetObjectIds = new Set<number>();
     const validAttackerIds = new Set<number>();
+    const blockableAttackerIds = new Set<number>();
     const boardChoiceObjectIds = new Set<number>();
     const selectableSacrificeObjectIds = new Set<number>();
     const selectableManaCostCreatureIds = new Set<number>();
@@ -151,6 +150,18 @@ export const GameBoard = memo(function GameBoard({
       }
     }
 
+    // CR 509.1a: combat.rs::get_valid_block_targets_for_player keeps only
+    // attackers this defender's blockers may legally block, so the union of
+    // every value here is already seat-scoped — an attacker aimed at another
+    // opponent never appears in this player's own DeclareBlockers prompt.
+    if (waitingFor?.type === "DeclareBlockers") {
+      for (const attackerIds of Object.values(waitingFor.data.valid_block_targets)) {
+        for (const objectId of attackerIds) {
+          blockableAttackerIds.add(objectId);
+        }
+      }
+    }
+
     for (const objectId of getWaitingForObjectChoiceIds(waitingFor)) {
       validTargetObjectIds.add(objectId);
     }
@@ -162,7 +173,7 @@ export const GameBoard = memo(function GameBoard({
       }
     }
 
-    const boardChoice = getBoardChoiceView(waitingFor, gameState?.objects);
+    const boardChoice = getBoardChoiceView(waitingFor, gameState?.objects, gameState?.allows_cancel_cast);
     if (boardChoice && canActForWaitingState) {
       for (const objectId of boardChoice.objectIds) {
         boardChoiceObjectIds.add(objectId);
@@ -184,6 +195,7 @@ export const GameBoard = memo(function GameBoard({
     if (!gameState?.objects) {
       return {
         ...affordances,
+        blockableAttackerIds,
         boardChoiceObjectIds,
         committedAttackerIds,
         incomingAttackerCounts,
@@ -197,6 +209,7 @@ export const GameBoard = memo(function GameBoard({
 
     return {
       ...affordances,
+      blockableAttackerIds,
       boardChoiceObjectIds,
       committedAttackerIds,
       incomingAttackerCounts,
@@ -258,7 +271,6 @@ export const GameBoard = memo(function GameBoard({
                       opponentBattlefieldViews.get(opponentId)
                       ?? buildPlayerBattlefieldView(gameState, opponentId)
                     }
-                    showCards={showOpponentCards}
                     onKickPlayer={onKickPlayer}
                     onViewZone={onViewZone}
                   />

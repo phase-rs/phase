@@ -37,7 +37,9 @@
     "approve": "Aprobar",
     "decline": "Rechazar",
     "cancel": "Cancelar solicitud",
-    "declinedToast": "Solicitud de repetición rechazada"
+    "declinedToast": "Solicitud de repetición rechazada",
+    "cancelledToast": "Solicitud de repetición cancelada",
+    "withdrawnToast": "Solicitud de repetición retirada: un jugador abandonó la partida"
   },
   "connectionDot": {
     "connected": "Conectado",
@@ -128,7 +130,6 @@
     "waitTimeJustNow": "ahora mismo",
     "waitTimeMinutes": "hace {{count}}m",
     "waitTimeHours": "hace {{count}}h",
-    "buildMismatchTitle": "El anfitrión usa la versión {{version}} ({{commit}}) — tu versión es diferente. Actualiza para ponerte al día.",
     "gameFull": "Esta partida está llena.",
     "youAreHosting": "Estás alojando esta partida.",
     "hosting": "Alojando",
@@ -286,7 +287,8 @@
     "botGameNotice": "Organizando la partida de Discord {{code}}. La conexión y la privacidad las define la publicación de Discord.",
     "botSeedIgnored": "Algunos ajustes de la publicación de Discord no se pueden usar aquí — revisa el formato y el número de jugadores.",
     "botP2PNotice": "Tu dispositivo ejecuta la partida. Mantén la aplicación abierta y conectada.",
-    "botServerNotice": "Un servidor dedicado ejecuta la partida. Puede ralentizarse o desconectarse."
+    "botServerNotice": "Un servidor dedicado ejecuta la partida. Puede ralentizarse o desconectarse.",
+    "poolBracketConflict": "Ninguno de los {{selected}} mazos elegidos es legal con los filtros actuales, así que los rivales aleatorios eligen entre los {{total}} mazos."
   },
   "page": {
     "deckRejected": "El anfitrión rechazó el mazo.",
@@ -302,11 +304,9 @@
     "joinErrorCantJoinTitle": "No se puede unir a esta sala",
     "titleLobby": "Únete o hospeda una mesa.",
     "titleHostSetup": "Configura tu mesa.",
-    "titleDraftLobby": "Pod de draft",
     "titleDeckSelect": "Elige un mazo.",
     "descriptionLobby": "Explora las mesas disponibles, únete por código o hospeda una nueva partida.",
     "descriptionHostSetup": "Ajusta el formato, la privacidad y el tiempo antes de abrir la sala.",
-    "descriptionDraftLobby": "Esperando a que los jugadores se unan al pod de draft.",
     "descriptionDeckSelectFormat": "Elige un mazo para {{format}}.",
     "descriptionDeckSelect": "Elige el mazo que quieres llevar en línea.",
     "offlineUnavailableTitle": "El multijugador no está disponible sin conexión.",
@@ -334,15 +334,6 @@
     "updateFailedMessage": "Actualiza para obtener la última versión o continúa con esta. Los jugadores con versiones distintas no pueden unirse a la misma partida.",
     "continueAnyway": "Continuar de todos modos"
   },
-  "draftLobbyPanel": {
-    "draftPod": "Pod de draft",
-    "connecting": "Conectando al pod de draft...",
-    "connectionFailed": "La conexión falló.",
-    "playersJoined": "{{joined}}/{{total}} jugadores se han unido",
-    "seat": "Asiento {{number}}",
-    "draftInProgress": "Draft en curso. La vista del draft se abrirá automáticamente.",
-    "leaveDraft": "Salir del draft"
-  },
   "deckLegalityChip": {
     "checking": "Comprobando el mazo contra {{format}}…",
     "checkingLegality": "Comprobando la legalidad del mazo…",
@@ -363,5 +354,11 @@
   "deepLink": {
     "gameInProgressTitle": "Partida en curso",
     "gameInProgressBody": "Termina o abandona tu partida actual y vuelve a abrir el enlace."
+  },
+  "p2pStateWithheld": "El estado de la partida tras esta acción es demasiado grande para enviarlo, así que este tablero está desactualizado. Un jugador puede solicitar una repetición de la última acción desde el menú de la partida para continuar (en un bucle, ejecútalo con un número menor).",
+  "terminalRecovery": {
+    "finalViewsUnpublished": "La concesión alcanzó un estado final Full, pero no se pudieron publicar las vistas finales nativas.",
+    "concedeUnreconciled": "No se pudo conciliar el resultado de la concesión; el asiento sigue bloqueado.",
+    "receiptUnsent": "No se pudo enviar el acuse de recibo duradero del resultado final; esperando una nueva entrega"
   }
 }
