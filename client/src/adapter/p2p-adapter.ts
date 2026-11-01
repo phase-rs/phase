@@ -296,7 +296,7 @@ class NativeP2PBridge {
    * that seat had been sent when it arrived has been fanned out. */
   private pendingSeatNotices: Array<{
     playerId: PlayerId;
-    client: WebSocketAdapter;
+    session: object | undefined;
     revision: number;
     event: TakebackEvent;
   }> = [];
@@ -317,6 +317,8 @@ class NativeP2PBridge {
     private readonly onFault: (fault: { id: number; revision: number; message: string }) => Promise<void>,
     private readonly onHostTerminalDelivery: (revision: number) => Promise<void>,
     private readonly onSeatNotice: (playerId: PlayerId, event: TakebackEvent) => Promise<void>,
+    /** The guest session a seat's notice is addressed to; `undefined` for the host seat. */
+    private readonly seatSession: (playerId: PlayerId) => object | undefined,
     private readonly resumeSession?: NativeP2PServerSession,
   ) {}
 
@@ -710,7 +712,12 @@ class NativeP2PBridge {
       ) {
         const playerId = client.playerId;
         if (this.disposed || playerId === null) return;
-        this.pendingSeatNotices.push({ playerId, client, revision: this.seatRevision(playerId), event });
+        this.pendingSeatNotices.push({
+          playerId,
+          session: this.seatSession(playerId),
+          revision: this.seatRevision(playerId),
+          event,
+        });
         this.enqueueSeatNoticeBarrier();
         return;
       }
@@ -817,13 +824,13 @@ class NativeP2PBridge {
   }
 
   /** A seat's notice follows the state it was sent before it, as on that seat's socket.
-   * A notice dies with its attachment: the server replays a still-open vote over the next one. */
+   * A notice dies with its guest session: the server replays a still-open vote to the next one. */
   private async releaseSeatNoticesThroughDeliveredRevision(): Promise<void> {
     const released = this.pendingSeatNotices.filter((notice) => notice.revision <= this.deliveredRevision);
     if (released.length === 0) return;
     this.pendingSeatNotices = this.pendingSeatNotices.filter((notice) => notice.revision > this.deliveredRevision);
     for (const notice of released) {
-      if (this.clients.get(notice.playerId) !== notice.client) continue;
+      if (this.seatSession(notice.playerId) !== notice.session) continue;
       await this.onSeatNotice(notice.playerId, notice.event);
     }
   }
@@ -1834,6 +1841,8 @@ export class P2PHostAdapter implements EngineAdapter {
         (fault) => this.enqueueDelivery(() => this.handleNativeAiDriverFault(fault)),
         (revision) => this.enqueueDelivery(() => this.commitWithheldHostTerminal(revision)),
         (pid, event) => this.enqueueDelivery(() => this.handleNativeSeatNotice(pid, event)),
+        // A returning guest's replay arrives over its new loopback before its session is promoted.
+        (pid) => this.guestSessions.get(pid) ?? this.pendingReconnectSessions.get(pid),
         nativeResume,
       );
     }

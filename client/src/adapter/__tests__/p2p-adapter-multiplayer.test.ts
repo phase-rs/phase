@@ -11888,6 +11888,55 @@ describe("P2P takeback transport", () => {
     },
   );
 
+  it("N4c: a held native notice reaches a still-connected seat whose loopback a concession reconcile replaced", async () => {
+    const t = await nativeTable();
+    try {
+      const [s0, s1, s2] = AuditSocket.sockets;
+      const bridge = (t.adapter as unknown as {
+        nativeBridge: { reconcileConcede: (playerId: number) => Promise<unknown> };
+      }).nativeBridge;
+      t.stateUpdate(s0, 2, remoteState("revision 2"));
+      t.stateUpdate(s1, 2, remoteState("revision 2"));
+      await flushPromises(20);
+      const p1Mark = t.p1.sent.length;
+      s1.frame("TakebackResolved", { resolution: "cancelled", resolved_by: 0 });
+      s0.frame("TakebackResolved", { resolution: "cancelled", resolved_by: 0 });
+      const reconciling = bridge.reconcileConcede(1);
+      await t.reattachSeat(3, 2, remoteState("revision 2"));
+      await reconciling;
+      expect(s1.readyState).toBe(3);
+      t.stateUpdate(s2, 2, remoteState("revision 2"));
+      await vi.waitFor(() => expect(t.events).toContainEqual({ type: "takebackResolved", resolution: "cancelled", resolvedBy: 0 }));
+      await vi.waitFor(async () => expect(await framesAfter(t.p1, p1Mark)).toContainEqual(
+        expect.objectContaining({ type: "takeback_resolved", resolution: "cancelled", resolvedBy: 0 }),
+      ));
+    } finally { t.adapter.dispose(); }
+  });
+
+  it("N4d: a returning native seat hears a vote replay held behind a revision it reattached at", async () => {
+    const t = await nativeTable();
+    try {
+      const [s0, s1, s2] = AuditSocket.sockets;
+      const token = await playerToken(t.p1);
+      t.stateUpdate(s0, 2, remoteState("revision 2"));
+      t.stateUpdate(s1, 2, remoteState("revision 2"));
+      await flushPromises(20);
+      t.p1.simulateClose();
+      await vi.waitFor(() => expect(s1.readyState).toBe(3));
+      const reconnecting = joinGuest(t.emitConnection, { type: "reconnect", playerToken: token });
+      const returned = await t.reattachSeat(3, 2, remoteState("revision 2"));
+      returned.frame("TakebackRequested", { requester: 0, requester_name: "Host", voters: [1, 2] });
+      const back = await reconnecting;
+      await vi.waitFor(async () => expect(typesOf(await back.getSentMessages())).toContain("reconnect_ack"));
+      await flushPromises(40);
+      expect(typesOf(await back.getSentMessages())).not.toContain("takeback_requested");
+      t.stateUpdate(s2, 2, remoteState("revision 2"));
+      await vi.waitFor(async () => expect(await back.getSentMessages()).toContainEqual(expect.objectContaining({
+        type: "takeback_requested", requester: 0, requesterName: "Host", voters: [1, 2],
+      })));
+    } finally { t.adapter.dispose(); }
+  });
+
   it("N5: a native approval restores a closed state-based loser, holds it away from the server, and replays the next vote", async () => {
     const t = await nativeTable();
     try {
