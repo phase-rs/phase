@@ -290,3 +290,4 @@ mod resolution_progress_contract;
 
 mod risky_move_gain_control_trigger;
 mod token_attack_destination;
+mod token_copy_back_face_up_dfc_10467;

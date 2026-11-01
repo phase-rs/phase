@@ -19,7 +19,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::proposed_event::{
-    CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
+    CopyTokenSpec, DoubleFacedCopy, EtbTapState, ProposedEvent, TokenCharacteristics,
 };
 use crate::types::resolution::ChildStackDepth;
 use crate::types::resolved_commands::{
@@ -282,6 +282,7 @@ pub fn resolve(
                 // CR 608.2h + CR 707.9b: carry the donor incarnation Step 1
                 // bound so donor-referential exceptions halve donor values.
                 donor: Some(source.incarnation),
+                double_faced: source.double_faced,
             }),
         });
     }
@@ -313,6 +314,10 @@ pub(crate) struct CopySource {
     pub(crate) incarnation: ObjectIncarnationRef,
     pub(crate) values: CopiableValues,
     pub(crate) display: DisplayIdentity,
+    /// CR 707.8a: the double-faced shape a token copy of this source takes.
+    /// `None` for a single-faced source and for a last-known source (the exit
+    /// snapshot records no other face).
+    pub(crate) double_faced: Option<DoubleFacedCopy>,
 }
 
 impl CopySource {
@@ -325,6 +330,7 @@ impl CopySource {
             incarnation: ObjectIncarnationRef::from_object(source),
             values,
             display: source.display_identity(),
+            double_faced: crate::game::transform::double_faced_copy_of(source),
         })
     }
 
@@ -356,6 +362,7 @@ impl CopySource {
                 token_image_ref,
                 token_art: None,
             },
+            double_faced: None,
         })
     }
 }
@@ -745,6 +752,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         source_id,
         controller,
         donor,
+        double_faced,
     } = copy;
     let name = values.name.clone();
     // CR 508.4: a resume carries the earlier ids so they are republished, but a
@@ -816,6 +824,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 source_id,
                 controller,
                 donor,
+                double_faced: double_faced.clone(),
             });
             // CR 707.9b/9c: this seam only runs when every exception is
             // stampable onto copiable values before entry, so the body is
@@ -947,6 +956,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             source_id,
             controller,
             donor,
+            double_faced: double_faced.clone(),
         });
         // CR 707.9: unlike the liminal seam, this one applies its exceptions
         // AFTER the birth through `apply_token_modifications`, which is pausable,
@@ -2401,6 +2411,7 @@ mod tests {
             source_id,
             controller: PlayerId(0),
             donor: None,
+            double_faced: None,
         };
         let mut events = Vec::new();
         let status = apply_copy_token_after_replacement(
@@ -2517,6 +2528,7 @@ mod tests {
             source_id,
             controller: PlayerId(0),
             donor: None,
+            double_faced: None,
         }
     }
 

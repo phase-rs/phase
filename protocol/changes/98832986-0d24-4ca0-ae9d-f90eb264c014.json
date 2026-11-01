@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CopyTokenSpec (in-flight token-copy state, serialized in parked pending effects and replacement payloads) gains the optional double_faced member (DoubleFacedCopy { other_face, orientation }) so a token copy of a double-faced permanent or card is a double-faced token that enters with the copied face up (CR 707.8a). An older peer silently drops the field and mints a single-faced, front-face-up token, losing the behaviour; Full and P2P peers move in lockstep. Lobby, draft and directory surfaces are unchanged."
+}

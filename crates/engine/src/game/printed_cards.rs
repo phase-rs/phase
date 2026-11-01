@@ -686,6 +686,30 @@ pub(crate) fn printed_prepare_face(
         .map(Arc::new)
 }
 
+/// CR 707.8a: the double-faced shape of a token copy of a double-faced CARD that
+/// is not on the battlefield — "the resulting token is a double-faced token that
+/// has both a front face and a back face", entering front face up since a card
+/// outside the battlefield has only its front face (CR 712.8a). The sibling-face
+/// lookup for producers holding only a `CardFace` (a format-pool draw), the
+/// double-faced counterpart of [`printed_prepare_face`]. `None` for a
+/// single-faced card and for meld cards (CR 712.4c, CR 712.9).
+pub(crate) fn printed_double_faced_copy(
+    db: &CardDatabase,
+    face: &CardFace,
+) -> Option<crate::types::proposed_event::DoubleFacedCopy> {
+    back_face_for_card_face(db, face)
+        .filter(|other| {
+            matches!(
+                other.layout_kind,
+                Some(LayoutKind::Transform | LayoutKind::Modal)
+            )
+        })
+        .map(|other| crate::types::proposed_event::DoubleFacedCopy {
+            other_face: Box::new(other),
+            orientation: crate::types::proposed_event::DoubleFacedOrientation::FrontUp,
+        })
+}
+
 /// CR 707.2 / CR 707.2b: copiable values are the object's printed/defining
 /// characteristics, NOT resolved continuous effects installed by other
 /// permanents (CR 611.2b "for as long as you control ~" locks). A

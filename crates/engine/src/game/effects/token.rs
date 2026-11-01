@@ -2061,6 +2061,24 @@ pub(crate) fn materialize_token_copy_body(
     values.static_definitions = Arc::new(cda_pruning.definitions);
     apply_copiable_values_to_liminal_object(object, &values, &copy.display);
 
+    // CR 707.8a: a token copy of a double-faced permanent or card is a
+    // double-faced token with both faces, entering with its back face up when the
+    // copied permanent had its back face up. `values` above is the face that is
+    // up (CR 707.8); the other face rides in `back_face`, exactly as a transformed
+    // double-faced permanent stores it. Setting `transformed` here is the entry
+    // orientation, not a transform (CR 712.14a), so no `Transformed` event or
+    // transformation-count bump follows. The single seam for the live and the
+    // CR 733 replay birth, so both materialize the same token.
+    if let Some(double_faced) = &copy.double_faced {
+        object.back_face = Some((*double_faced.other_face).clone());
+        // Mirror the source's orientation flag: a modal double-faced permanent
+        // shows its back face through `modal_back_face` (it is never
+        // "transformed", CR 712.8f), a transforming one through `transformed`.
+        use crate::types::proposed_event::DoubleFacedOrientation;
+        object.modal_back_face = double_faced.orientation == DoubleFacedOrientation::ModalBack;
+        object.transformed = double_faced.orientation == DoubleFacedOrientation::TransformedBack;
+    }
+
     // CR 707.9a + CR 702: "except it has [keyword]" — grant additional keywords
     // on top of the copied characteristics. Twinflame's haste copies are the
     // canonical case. Idempotent under repeats.
@@ -9456,6 +9474,7 @@ mod tests {
                     controller: PlayerId(0),
                     // Liminal resume carries values only; empty mods are stamp-proof.
                     donor: None,
+                    double_faced: None,
                 })),
                 spec_resume: None,
                 enter_tapped: EtbTapState::Unspecified,

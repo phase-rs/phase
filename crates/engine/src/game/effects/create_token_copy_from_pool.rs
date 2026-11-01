@@ -24,7 +24,8 @@ use crate::game::effects::token_copy::drive_copy_token_batches;
 use crate::game::filter::matches_target_filter_against_face;
 use crate::game::game_object::{DisplayIdentity, DisplaySource};
 use crate::game::printed_cards::{
-    copiable_values_from_face, printed_prepare_face, printed_ref_from_face,
+    copiable_values_from_face, printed_double_faced_copy, printed_prepare_face,
+    printed_ref_from_face,
 };
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{Comparator, EffectError, EffectKind, ResolvedAbility};
@@ -164,6 +165,9 @@ pub fn resolve(
             controller: ability.controller,
             // Pool-drawn values name no donor object; empty mods are stamp-proof.
             donor: None,
+            // CR 707.8a: a double-faced card drawn from the pool makes a
+            // double-faced token, front face up (CR 712.8a).
+            double_faced: printed_double_faced_copy(&db, &face),
         }),
     });
 

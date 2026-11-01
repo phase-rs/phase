@@ -160,6 +160,7 @@ fn printed_card_copy_token_spec() -> CopyTokenSpec {
         controller: PlayerId(0),
         // Synthetic spec: no donor in scope (serde shape fixture only).
         donor: None,
+        double_faced: None,
     }
 }
 
