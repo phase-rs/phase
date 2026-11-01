@@ -201,24 +201,40 @@ fn runed_halo_prevents_combat_damage_from_named_card() {
 #[test]
 fn runed_halo_prevents_noncombat_damage_from_named_card() {
     let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
     let halo = scenario
-        .add_enchantment_from_oracle(P0, "Runed Halo", RUNED_HALO_ORACLE)
+        .add_spell_to_hand_from_oracle(P0, "Runed Halo", false, RUNED_HALO_ORACLE)
+        .as_enchantment()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+            generic: 0,
+        })
         .id();
+    scenario.add_land_from_oracle(P0, "Plains 1", "{T}: Add {W}.");
+    scenario.add_land_from_oracle(P0, "Plains 2", "{T}: Add {W}.");
+    scenario.with_library_top(P0, &["Draw Step Filler"]);
 
     let bear = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
     let giant = scenario.add_creature(P1, "Hill Giant", 3, 3).id();
 
     let mut runner = scenario.build();
 
+    let card_id = runner.state().objects[&halo].card_id;
     runner
-        .state_mut()
-        .objects
-        .get_mut(&halo)
-        .unwrap()
-        .chosen_attributes
-        .push(engine::types::ability::ChosenAttribute::CardName(
-            "Grizzly Bears".to_string(),
-        ));
+        .act(GameAction::CastSpell {
+            object_id: halo,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Runed Halo must succeed");
+    runner.advance_until_stack_empty();
+    runner.state_mut().all_card_names = std::sync::Arc::from(["Grizzly Bears".to_string()]);
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Grizzly Bears".to_string(),
+        })
+        .expect("choosing card name must succeed");
 
     // 1. Damage from Grizzly Bears to P0 is prevented.
     let mut events = Vec::new();
