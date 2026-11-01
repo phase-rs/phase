@@ -16907,6 +16907,7 @@ mod issue_4548_full_create_tests {
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(

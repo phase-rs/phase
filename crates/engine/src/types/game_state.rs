@@ -34994,6 +34994,7 @@ impl GameState {
                 lki,
                 card_id: _,
                 printed_ref: _,
+                printing: _,
                 is_token: _,
                 face_down: _,
                 mana_cost: _,
