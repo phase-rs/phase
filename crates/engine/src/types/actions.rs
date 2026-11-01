@@ -794,6 +794,13 @@ pub enum GameAction {
     SetMayTriggerAutoChoice {
         op: MayTriggerAutoChoiceOp,
     },
+    /// Un-card actions (Unglued/Unhinged/Unstable/Unfinity silver-border cards):
+    /// opt in or out, perform a gesture from the Un-actions menu, or call
+    /// "Gotcha!". Legal in any `WaitingFor` state and actor-scoped, like the
+    /// preference actions — a gesture never changes game progression by itself.
+    UnAction {
+        action: super::un_actions::UnAction,
+    },
     /// CR 603.3b: Update the acting player's saved trigger-ordering templates.
     /// Legal in any WaitingFor state and routed to the acting player (who may only
     /// mutate their own templates), mirroring `SetMayTriggerAutoChoice`. Pure
@@ -2053,6 +2060,9 @@ impl GameAction {
                 | GameAction::SetPriorityYield { .. }
                 | GameAction::SetMayTriggerAutoChoice { .. }
                 | GameAction::SetReplacementAutoChoice { .. }
+                | GameAction::UnAction {
+                    action: super::un_actions::UnAction::SetEnabled { .. },
+                }
                 | GameAction::SetTriggerOrderTemplate { .. }
                 | GameAction::ReorderHand { .. }
         )
@@ -2078,6 +2088,7 @@ impl GameAction {
                 GameAction::Debug(_)
                     | GameAction::GrantDebugPermission { .. }
                     | GameAction::RevokeDebugPermission { .. }
+                    | GameAction::UnAction { .. }
             )
     }
 
@@ -2192,6 +2203,7 @@ impl GameAction {
             | Self::CancelAutoPass
             | Self::SetPhaseStops { .. }
             | Self::SetPriorityPassingMode { .. }
+            | Self::UnAction { .. }
             | Self::SetTriggerOrderTemplate { .. }
             | Self::ChooseCountersToRemove { .. }
             | Self::SubmitPayAmount { .. }
@@ -2553,6 +2565,7 @@ impl GameAction {
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
                 | GameAction::SetReplacementAutoChoice { .. }
+            | GameAction::UnAction { .. }
             | GameAction::SetTriggerOrderTemplate { .. }
             | GameAction::AssignCombatDamage { .. }
             | GameAction::AssignBlockerDamage { .. }

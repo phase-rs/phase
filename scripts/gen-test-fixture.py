@@ -10,9 +10,9 @@ multi-face cards keep their back faces) into a small committed fixture that
 `tests::integration::support::shared_card_db` loads instead.
 
 Scans the integration tests under `crates/engine/tests`, source-side test
-modules under `crates/engine/src`, source files that load the same fixture
-through `crate::test_support::shared_card_db`, and Phase AI tests that load the
-fixture directly.
+modules under `crates/engine/src` and `crates/phase-parser/src`, source files
+that load the same fixture through `crate::test_support::shared_card_db`, and
+Phase AI tests that load the fixture directly.
 
 Re-run after adding a test that references a new card:
 
@@ -33,6 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 EXPORT_PATH = REPO_ROOT / "client/public/card-data.json"
 TESTS_DIR = REPO_ROOT / "crates/engine/tests"
 SRC_DIR = REPO_ROOT / "crates/engine/src"
+PARSER_SRC_DIR = REPO_ROOT / "crates/phase-parser/src"
 FIXTURE_PATH = REPO_ROOT / "crates/engine/tests/fixtures/integration_cards.json.gz"
 
 # This fixture must exercise Witherbloom Apprentice and Sakashima of a
@@ -62,12 +63,13 @@ STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
 def src_fixture_files() -> list[Path]:
     """Source files whose test card-name literals should be fixture-backed."""
     files = {path for path in ALWAYS_SCAN_SRC_FILES if path.exists()}
-    files.update(SRC_DIR.rglob("*tests.rs"))
+    for root in (SRC_DIR, PARSER_SRC_DIR):
+        files.update(root.rglob("*tests.rs"))
 
-    for rs in SRC_DIR.rglob("*.rs"):
-        text = rs.read_text(encoding="utf-8", errors="ignore")
-        if "shared_card_db" in text:
-            files.add(rs)
+        for rs in root.rglob("*.rs"):
+            text = rs.read_text(encoding="utf-8", errors="ignore")
+            if "shared_card_db" in text:
+                files.add(rs)
 
     return sorted(files)
 

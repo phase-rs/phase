@@ -2272,9 +2272,34 @@ struct JournalIndex {
     latest_producer: im::HashMap<ObjectId, usize>,
     delayed_by_token: im::HashMap<DelayedTriggerToken, im::Vector<usize>>,
     delayed_by_instance: im::HashMap<DelayedTriggerInstanceId, im::Vector<usize>>,
+    player_leave_moves: im::HashSet<PlayerLeaveMove>,
+}
+
+/// CR 800.4a: a zone change caused by a player leaving the game. A log event carries no
+/// incarnation, so the turn zone-change index tells repeated identical moves apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PlayerLeaveMove {
+    pub object_id: ObjectId,
+    pub from: Zone,
+    pub to: Zone,
+    pub turn_zone_change_index: usize,
 }
 
 impl JournalIndex {
+    fn record_entry(&mut self, position: usize, entry: &ResolvedCommandJournalEntry) {
+        self.record_delayed_install(position, entry);
+        if let Some(ResolvedRulesCommand::ZoneChange(command)) = &entry.command {
+            if matches!(command.cause, RulesExecutionNodeRef::PlayerLeave(_)) {
+                self.player_leave_moves.insert(PlayerLeaveMove {
+                    object_id: command.object.object_id,
+                    from: command.from,
+                    to: command.to,
+                    turn_zone_change_index: command.turn_zone_change_index,
+                });
+            }
+        }
+    }
+
     fn record_delayed_install(&mut self, position: usize, entry: &ResolvedCommandJournalEntry) {
         if let Some(origin) = delayed_install_origin(entry) {
             self.delayed_by_token
@@ -2383,6 +2408,11 @@ impl ResolvedRulesJournal {
     /// boundary has truncated the journal under a caller's earlier length.
     pub fn entries_since(&self, start: usize) -> im::Vector<ResolvedCommandJournalEntry> {
         self.entries.skip(start.min(self.entries.len()))
+    }
+
+    /// CR 800.4a: whether this turn's journal records `key` as caused by a player leaving.
+    pub fn records_player_leave_move(&self, key: &PlayerLeaveMove) -> bool {
+        self.index.player_leave_moves.contains(key)
     }
 
     pub fn has_produced_pip(&self, pip: ManaPipId) -> bool {
@@ -2969,8 +2999,7 @@ impl ResolvedRulesJournal {
             node,
             command: Some(command),
         };
-        self.index
-            .record_delayed_install(self.entries.len(), &entry);
+        self.index.record_entry(self.entries.len(), &entry);
         self.entries.push_back(entry);
         self.nodes[node_index].journal_ordinals.push(ordinal);
         Ok(ordinal)
@@ -3055,7 +3084,7 @@ impl ResolvedRulesJournal {
             index.spent.entry(record.unit.pip_id).or_insert(position);
         }
         for (position, entry) in self.entries.iter().enumerate() {
-            index.record_delayed_install(position, entry);
+            index.record_entry(position, entry);
         }
         self.index = index;
     }
@@ -4726,5 +4755,67 @@ mod tests {
         let reloaded: GameState =
             serde_json::from_str(&serde_json::to_string(live).unwrap()).expect("the state reloads");
         assert_index_answers_as_the_scan("reloaded", &reloaded.resolved_rules_journal);
+    }
+
+    /// A hidden-origin Library → Exile move of one object under `cause`.
+    fn sweep_move(
+        cause: RulesExecutionNodeRef,
+        incarnation: u64,
+        turn_zone_change_index: usize,
+    ) -> ResolvedZoneChangeCommand {
+        let owner = PlayerId(1);
+        let mut record =
+            ZoneChangeRecord::test_minimal(ObjectId(5), Some(Zone::Library), Zone::Exile);
+        record.owner = owner;
+        record.arrival.owner = owner;
+        record.turn_zone_change_index = turn_zone_change_index;
+        ResolvedZoneChangeCommand {
+            object: ObjectIncarnationRef::of(ObjectId(5), incarnation),
+            resulting_incarnation: incarnation + 1,
+            from: Zone::Library,
+            to: Zone::Exile,
+            destination_position: 0,
+            owner,
+            rebound_from: None,
+            entry_timestamp: None,
+            retained_sticker_timestamps: None,
+            turn_zone_change_index,
+            zone_change_record: record,
+            cause,
+        }
+    }
+
+    /// CR 800.4a: the index holds exactly the zone changes a player leaving caused, survives a
+    /// reload, and starts empty.
+    #[test]
+    fn player_leave_move_index_tracks_leave_caused_zone_changes() {
+        let key = |turn_zone_change_index| PlayerLeaveMove {
+            object_id: ObjectId(5),
+            from: Zone::Library,
+            to: Zone::Exile,
+            turn_zone_change_index,
+        };
+        let mut journal = ResolvedRulesJournal::default();
+        let leave = journal.begin_player_leave().unwrap();
+        journal.record_zone_change(sweep_move(leave, 1, 0)).unwrap();
+        let proposal = journal.begin_proposal().unwrap();
+        journal
+            .record_zone_change(sweep_move(proposal, 2, 1))
+            .unwrap();
+        let assert_leave_only = |label: &str, journal: &ResolvedRulesJournal| {
+            assert!(
+                journal.records_player_leave_move(&key(0)),
+                "{label}: the leave-caused move is indexed"
+            );
+            assert!(
+                !journal.records_player_leave_move(&key(1)),
+                "{label}: the proposal-caused move is not"
+            );
+        };
+        assert_leave_only("live", &journal);
+        let reloaded: ResolvedRulesJournal =
+            serde_json::from_value(serde_json::to_value(&journal).unwrap()).unwrap();
+        assert_leave_only("reloaded", &reloaded);
+        assert!(!ResolvedRulesJournal::default().records_player_leave_move(&key(0)));
     }
 }

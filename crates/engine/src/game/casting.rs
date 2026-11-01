@@ -8,8 +8,9 @@ use crate::types::ability::{
     CostObjectCount, CostPaidObjectSnapshot, CostReduction, CounterCostSelection, Duration, Effect,
     EffectKind, FilterProp, GameRestriction, ModalSelectionCondition, NameStickerSet, ObjectScope,
     ParsedCondition, PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef,
-    ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope, StaticCondition, StaticDefinition,
-    SubAbilityLink, TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope, SacrificeCost,
+    SacrificeRequirement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::actions::{AlternativeCastDecision, GameAction};
 use crate::types::card::LayoutKind;
@@ -1877,7 +1878,7 @@ fn can_pay_escape_additional_cost(
     let Some((_, residual)) = super::keywords::effective_escape_data(state, escape_obj_id) else {
         return false;
     };
-    residual.is_payable(state, player, escape_obj_id)
+    residual.is_payable_for_spell(state, player, escape_obj_id)
 }
 
 /// CR 702.180: Check if an object has the Harmonize keyword. Off-zone-aware so a
@@ -3395,6 +3396,9 @@ fn matches_via_origin_scoped_branch(
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — resolved per affected
+        // member at install, never this match's referent.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
@@ -14691,10 +14695,81 @@ impl ResolutionSpellFaceLegality {
     pub(crate) const fn count(self) -> u8 {
         self.front as u8 + self.back as u8
     }
+}
 
-    pub(crate) const fn only_back(self) -> bool {
-        !self.front && self.back
+/// What electing one face of a card does during resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolutionFaceAction {
+    /// CR 608.2g + CR 712.11b: the elected spell face is cast while the
+    /// instructing effect resolves.
+    Cast,
+    /// CR 712.12 + CR 305.2a: the elected land face is played while the
+    /// instructing effect resolves, counting against the land allowance.
+    PlayLand,
+}
+
+/// The legal faces of a card under one frozen resolution-time policy, and what
+/// electing each one does. `None` means the face may not be elected. Spell
+/// faces come from [`ResolutionSpellFaceLegality`]; a land face is admitted
+/// only by [`resolution_land_face_admission`] (CR 701.18b + CR 712.12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolutionFaceLegality {
+    pub(crate) front: Option<ResolutionFaceAction>,
+    pub(crate) back: Option<ResolutionFaceAction>,
+}
+
+impl ResolutionFaceLegality {
+    pub(crate) const fn count(self) -> u8 {
+        self.front.is_some() as u8 + self.back.is_some() as u8
     }
+
+    /// The face named by the wire bool on `GameAction::ChooseModalFace`.
+    pub(crate) const fn face(self, back_face: bool) -> Option<ResolutionFaceAction> {
+        if back_face {
+            self.back
+        } else {
+            self.front
+        }
+    }
+
+    fn from_faces(spell: ResolutionSpellFaceLegality, land_back: bool) -> Self {
+        // A spell//land back face is never a spell face:
+        // `resolution_spell_face_choice_available` excludes land faces.
+        debug_assert!(!(spell.back && land_back));
+        Self {
+            front: spell.front.then_some(ResolutionFaceAction::Cast),
+            back: if spell.back {
+                Some(ResolutionFaceAction::Cast)
+            } else if land_back {
+                Some(ResolutionFaceAction::PlayLand)
+            } else {
+                None
+            },
+        }
+    }
+}
+
+/// CR 701.18b + CR 712.12: whether a resolution-owned election under `policy`
+/// may elect `object_id`'s land back face. To *play* a card is to cast it or
+/// play it as a land, so only a Play instruction admits a land face (a Cast
+/// instruction never does, CR 601.2). The face choice must still be open, and
+/// the land face must be legal to play now
+/// ([`super::engine::resolution_back_land_face_play_is_legal`]: modal land back
+/// face, the player's turn, no prohibition, allowance open). The single
+/// land-face authority read by initiation, legal actions, and the
+/// `ChooseModalFace` reducer.
+pub(crate) fn resolution_land_face_admission(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+) -> bool {
+    policy.play_mode.is_play()
+        && state
+            .objects
+            .get(&object_id)
+            .is_some_and(|obj| !obj.cast_face_committed)
+        && super::engine::resolution_back_land_face_play_is_legal(state, player, object_id)
 }
 
 /// Immutable starting point for prospective resolution casts.  A resolution
@@ -14727,6 +14802,21 @@ impl ResolutionCastProjection {
         #[cfg(test)]
         let _target_depth = ResolutionCastProjectionTargetDepthGuard::enter();
         resolution_spell_face_legality_from_baseline(&self.baseline, player, object_id, request)
+    }
+
+    /// Every legal face of `object_id` under `request`: the spell faces
+    /// projected through the exact temporary permission, plus the land face
+    /// when the request's policy admits one (CR 701.18b + CR 712.12).
+    pub(in crate::game) fn face_legality(
+        &self,
+        player: PlayerId,
+        object_id: ObjectId,
+        request: &ResolutionCastRequest,
+    ) -> ResolutionFaceLegality {
+        ResolutionFaceLegality::from_faces(
+            self.spell_face_legality(player, object_id, request),
+            resolution_land_face_admission(&self.baseline, player, object_id, &request.face_policy),
+        )
     }
 
     /// Candidate-level reads (such as a free-cast window's MV budget) must use
@@ -15041,23 +15131,39 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
     legality
 }
 
-/// Public-to-the-engine indexed form for an already-issued modal choice.  The
-/// legal-action projector must read the same exact permission and frozen policy
-/// that the eventual reducer will consume.
-pub(crate) fn resolution_spell_face_legality_for_current_permission(
+/// Every legal face of a card under the exact temporary permission selected
+/// for this resolution election: its spell faces (CR 712.11b-c) plus, under a
+/// Play policy, its land face (CR 701.18b + CR 712.12).
+fn resolution_face_legality_for_permission(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
     policy: &crate::types::ability::ResolutionCastFacePolicy,
     permission_index: CastingPermissionIndex,
-) -> ResolutionSpellFaceLegality {
-    resolution_spell_face_legality_for_permission(
-        state,
-        player,
-        object_id,
-        policy,
-        permission_index,
+) -> ResolutionFaceLegality {
+    ResolutionFaceLegality::from_faces(
+        resolution_spell_face_legality_for_permission(
+            state,
+            player,
+            object_id,
+            policy,
+            permission_index,
+        ),
+        resolution_land_face_admission(state, player, object_id, policy),
     )
+}
+
+/// Public-to-the-engine indexed form for an already-issued modal choice.  The
+/// legal-action projector must read the same exact permission and frozen policy
+/// that the eventual reducer will consume.
+pub(crate) fn resolution_face_legality_for_current_permission(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+    permission_index: CastingPermissionIndex,
+) -> ResolutionFaceLegality {
+    resolution_face_legality_for_permission(state, player, object_id, policy, permission_index)
 }
 
 /// The resolution-time permission is appended immediately before its face
@@ -17429,6 +17535,16 @@ pub(super) enum ResolutionCastInitiation {
     Rejected(Box<crate::types::ability::ResolutionCastCleanup>),
 }
 
+/// The outcomes of beginning a resolution-owned face election.  `Cast` is a
+/// spell-face election (or its rejection); `PlayLandFace` is the CR 712.12
+/// land face as the only legal face under a Play policy (CR 701.18b).  The
+/// temporary permission has already been removed in that case: the caller
+/// plays the land face with the returned cleanup as its authority.
+pub(super) enum ResolutionElectionInitiation {
+    Cast(ResolutionCastInitiation),
+    PlayLandFace(Box<crate::types::ability::ResolutionCastCleanup>),
+}
+
 /// The one temporary permission that owns an in-flight resolution cast.  Both
 /// the real cast and a prospective clone install it through
 /// [`install_resolution_cast_permission`], so a candidate is checked against
@@ -17587,13 +17703,38 @@ pub(super) fn initiate_cast_during_resolution(
     request: ResolutionCastRequest,
     events: &mut Vec<GameEvent>,
 ) -> Result<ResolutionCastInitiation, EngineError> {
+    match initiate_resolution_election(state, player, hit_card, request, events)? {
+        ResolutionElectionInitiation::Cast(initiation) => Ok(initiation),
+        // CR 701.18b + CR 601.2: only a Play instruction can play a land; a
+        // Cast instruction never does.
+        // `resolution_land_face_admission` requires a Play policy, so this is
+        // a typed refusal for a mis-built request rather than a reachable arm.
+        ResolutionElectionInitiation::PlayLandFace(_) => Err(EngineError::InvalidAction(
+            "a Cast resolution policy cannot elect a land face".to_string(),
+        )),
+    }
+}
+
+/// CR 608.2g + CR 712.11b + CR 701.18b + CR 712.12: begin a resolution-owned
+/// face election for `hit_card` under `request`.  The exact temporary
+/// permission is installed first, then every legal face is read through it
+/// ([`resolution_face_legality_for_permission`]).  No legal face rejects the
+/// election; two open `ModalFaceChoice`; one spell face is cast at once; the
+/// land face alone (a Play policy only) is returned for the caller to play.
+pub(super) fn initiate_resolution_election(
+    state: &mut GameState,
+    player: PlayerId,
+    hit_card: ObjectId,
+    request: ResolutionCastRequest,
+    events: &mut Vec<GameEvent>,
+) -> Result<ResolutionElectionInitiation, EngineError> {
     let cleanup_for_rejection = request.cleanup.clone();
     let ResolutionCastPermission {
         index: casting_permission_index,
         payment_mode,
         additional_cost,
     } = install_resolution_cast_permission(state, player, hit_card, &request)?;
-    let legality = resolution_spell_face_legality_for_permission(
+    let legality = resolution_face_legality_for_permission(
         state,
         player,
         hit_card,
@@ -17607,9 +17748,9 @@ pub(super) fn initiate_cast_during_resolution(
             .expect("resolution cast card remains present")
             .casting_permissions
             .remove(casting_permission_index.0);
-        return Ok(ResolutionCastInitiation::Rejected(Box::new(
-            cleanup_for_rejection,
-        )));
+        return Ok(ResolutionElectionInitiation::Cast(
+            ResolutionCastInitiation::Rejected(Box::new(cleanup_for_rejection)),
+        ));
     }
 
     let has_face_election = state
@@ -17617,14 +17758,30 @@ pub(super) fn initiate_cast_during_resolution(
         .get(&hit_card)
         .is_some_and(resolution_spell_face_choice_available);
     if legality.count() == 2 {
-        return Ok(ResolutionCastInitiation::WaitingFor(Box::new(
-            WaitingFor::ModalFaceChoice {
+        return Ok(ResolutionElectionInitiation::Cast(
+            ResolutionCastInitiation::WaitingFor(Box::new(WaitingFor::ModalFaceChoice {
                 player,
                 object_id: hit_card,
                 card_id: state.objects[&hit_card].card_id,
                 payment_mode,
                 resolution_additional_cost: additional_cost.clone(),
-            },
+            })),
+        ));
+    }
+
+    // CR 712.12: the land face is the only legal face. Electing it is no
+    // player decision; the temporary cast permission is not the authority for
+    // a land play, so remove it and hand its cleanup to the caller, which
+    // plays the land face during resolution (CR 305.2a).
+    if legality.front.is_none() && legality.back == Some(ResolutionFaceAction::PlayLand) {
+        state
+            .objects
+            .get_mut(&hit_card)
+            .expect("resolution election card remains present")
+            .casting_permissions
+            .remove(casting_permission_index.0);
+        return Ok(ResolutionElectionInitiation::PlayLandFace(Box::new(
+            cleanup_for_rejection,
         )));
     }
 
@@ -17637,7 +17794,7 @@ pub(super) fn initiate_cast_during_resolution(
             .objects
             .get_mut(&hit_card)
             .expect("resolution cast card remains present");
-        if legality.only_back() {
+        if legality.back == Some(ResolutionFaceAction::Cast) {
             simulate_chosen_split_spell_back_face(object);
             object.modal_back_face = true;
         }
@@ -17659,7 +17816,11 @@ pub(super) fn initiate_cast_during_resolution(
             state.objects.insert(hit_card, object);
         }
     }
-    result.map(|waiting_for| ResolutionCastInitiation::WaitingFor(Box::new(waiting_for)))
+    result.map(|waiting_for| {
+        ResolutionElectionInitiation::Cast(ResolutionCastInitiation::WaitingFor(Box::new(
+            waiting_for,
+        )))
+    })
 }
 
 /// CR 712.11c / CR 709.3a: check the already-elected face's characteristics
@@ -17954,7 +18115,7 @@ fn evoke_cast_choice_eligibility(
     });
     let evoke_non_mana_affordable = evoke_non_mana_part
         .as_ref()
-        .is_none_or(|cost| cost.is_payable(state, player, object_id));
+        .is_none_or(|cost| cost.is_payable_for_spell(state, player, object_id));
 
     Some(EvokeCastChoiceEligibility {
         offer: EvokeCastChoiceOffer {
@@ -19316,7 +19477,7 @@ fn announce_spell_on_stack(
 ) -> Result<(), EngineError> {
     // CR 601.2 + CR 733.1: the action boundary records sparse inverse edits
     // for this cast; the declaration retains only its identity and journal mark.
-    if state.spell_cast_reversal.is_none() {
+    if state.spell_cast_reversal.is_none() && !super::engine_casting::in_confirmed_take() {
         // CR 608.2g + CR 733.1: only the elected resolution-owned permission
         // can have consumed a parent choice inside this input. Other casts use
         // the existing action boundary directly, without serializing a prefix.
@@ -21354,7 +21515,7 @@ fn can_cast_prepared_now_with_probe(
         if let Some(FlashbackCost::NonMana(ref cost)) =
             super::keywords::effective_flashback_cost(state, prepared.object_id)
         {
-            if !cost.is_payable(state, player, prepared.object_id) {
+            if !cost.is_payable_for_spell(state, player, prepared.object_id) {
                 return false;
             }
         }
@@ -21412,7 +21573,10 @@ fn can_cast_prepared_now_with_probe(
             _ => None,
         };
         if let Some(extra) = static_extra {
-            if !extra.cost.is_payable(state, player, prepared.object_id) {
+            if !extra
+                .cost
+                .is_payable_for_spell(state, player, prepared.object_id)
+            {
                 return false;
             }
         }
@@ -25331,15 +25495,16 @@ pub(super) fn find_waterbend_cost(cost: &AbilityCost) -> Option<&ManaCost> {
     }
 }
 
-/// Walk a cost tree and return the first non-SelfRef sacrifice `(count, filter)`
-/// found, if any. The `count` is honored so multi-permanent sacrifice costs
-/// ("Sacrifice two creatures:") are modeled correctly.
-pub(super) fn find_non_self_sacrifice_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+/// Walk a cost tree and return the first non-SelfRef, non-aggregate sacrifice
+/// leg found, if any.
+pub(super) fn find_non_self_sacrifice_cost(cost: &AbilityCost) -> Option<&SacrificeCost> {
     match cost {
-        AbilityCost::Sacrifice(cost) if !matches!(cost.target, TargetFilter::SelfRef) => cost
-            .requirement
-            .fixed_count()
-            .map(|count| (count, &cost.target)),
+        AbilityCost::Sacrifice(cost)
+            if !matches!(cost.target, TargetFilter::SelfRef)
+                && !cost.requirement.is_aggregate() =>
+        {
+            Some(cost)
+        }
         AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_sacrifice_cost),
         _ => None,
     }
@@ -25364,21 +25529,21 @@ pub(super) enum RemovalKind {
 /// per-kind walker after mana payment.
 pub(super) fn find_non_self_battlefield_removal_cost(
     cost: &AbilityCost,
-) -> Option<(u32, &TargetFilter, RemovalKind)> {
-    if let Some((n, f)) = find_non_self_sacrifice_cost(cost) {
-        return Some((n, f, RemovalKind::Sacrifice));
+) -> Option<(&TargetFilter, RemovalKind)> {
+    if let Some(sacrifice) = find_non_self_sacrifice_cost(cost) {
+        return Some((&sacrifice.target, RemovalKind::Sacrifice));
     }
-    if let Some((n, f)) = find_battlefield_exile_cost(cost) {
-        return Some((n, f, RemovalKind::Exile));
+    if let Some((_, f)) = find_battlefield_exile_cost(cost) {
+        return Some((f, RemovalKind::Exile));
     }
-    if let Some((n, Some(f))) = find_return_to_hand_cost(cost) {
+    if let Some((_, Some(f))) = find_return_to_hand_cost(cost) {
         // Mirror the Sacrifice/Exile SelfRef exclusion: a self-bounce is the
         // source's own removal, not a board-shrinking non-mana leg in the
         // CR 601.2h ordering sense. Recognizing it would let the lone witness
         // remove the source and false-REJECT a self-bounce whose mana leg the
         // source itself feeds.
         if !matches!(f, TargetFilter::SelfRef) {
-            return Some((n, f, RemovalKind::ReturnToHand));
+            return Some((f, RemovalKind::ReturnToHand));
         }
     }
     None
@@ -25732,7 +25897,7 @@ pub(super) fn remove_selected_non_self_sacrifice_cost(cost: AbilityCost) -> Opti
     match cost {
         AbilityCost::Sacrifice(sacrifice)
             if !matches!(sacrifice.target, TargetFilter::SelfRef)
-                && sacrifice.requirement.fixed_count().is_some() =>
+                && !sacrifice.requirement.is_aggregate() =>
         {
             None
         }
@@ -26334,19 +26499,42 @@ pub(super) fn remove_selected_return_to_hand_cost(cost: AbilityCost) -> Option<A
 pub(super) fn split_return_to_hand_cost_legs(
     cost: AbilityCost,
 ) -> (Option<AbilityCost>, Option<AbilityCost>) {
+    let (returns, automatic) = partition_cost_legs(cost, |cost| {
+        matches!(cost, AbilityCost::ReturnToHand { .. })
+    });
+    (automatic, returns)
+}
+
+/// CR 107.5 + CR 107.6 + CR 601.2h: splits an activation residual into the
+/// source's own {T}/{Q} legs, which can be paid only while the source is still
+/// a permanent, and every other leg, for a payment that removes the source.
+pub(super) fn split_source_tap_cost_legs(
+    cost: AbilityCost,
+) -> (Option<AbilityCost>, Option<AbilityCost>) {
+    partition_cost_legs(cost, |cost| {
+        matches!(cost, AbilityCost::Tap | AbilityCost::Untap)
+    })
+}
+
+/// Partitions the legs reachable through `Composite` into `(matching, rest)`,
+/// each in its original order.
+fn partition_cost_legs(
+    cost: AbilityCost,
+    is_match: impl Fn(&AbilityCost) -> bool + Copy,
+) -> (Option<AbilityCost>, Option<AbilityCost>) {
     match cost {
-        cost @ AbilityCost::ReturnToHand { .. } => (None, Some(cost)),
         AbilityCost::Composite { costs } => {
-            let mut automatic = Vec::new();
-            let mut returns = Vec::new();
+            let mut matching = Vec::new();
+            let mut rest = Vec::new();
             for cost in costs {
-                let (automatic_leg, return_leg) = split_return_to_hand_cost_legs(cost);
-                automatic.extend(automatic_leg);
-                returns.extend(return_leg);
+                let (matching_leg, rest_leg) = partition_cost_legs(cost, is_match);
+                matching.extend(matching_leg);
+                rest.extend(rest_leg);
             }
-            (combine_cost_legs(automatic), combine_cost_legs(returns))
+            (combine_cost_legs(matching), combine_cost_legs(rest))
         }
-        cost => (Some(cost), None),
+        cost if is_match(&cost) => (Some(cost), None),
+        cost => (None, Some(cost)),
     }
 }
 
@@ -26820,7 +27008,7 @@ fn alternative_cost_offer_payable(
     let state = terms_state.as_ref().unwrap_or(state);
     if !residual
         .as_ref()
-        .is_none_or(|cost| cost.is_payable(state, player, object_id))
+        .is_none_or(|cost| cost.is_payable_for_spell(state, player, object_id))
     {
         return false;
     }
@@ -26856,7 +27044,7 @@ fn alternative_cost_offer_payable(
             // required-cost flow applies; the combined life is priced above.
             && imposed
                 .as_ref()
-                .is_none_or(|cost| cost.is_payable(state, player, object_id))
+                .is_none_or(|cost| cost.is_payable_for_spell(state, player, object_id))
             // CR 118.3: a zero mana cost is always payable.
             && mana.as_ref().is_none_or(|m| {
                 can_pay_cost_after_auto_tap(state, player, object_id, m)
@@ -27111,44 +27299,121 @@ pub(crate) fn find_eligible_sacrifice_targets_for_scope(
     filter: &TargetFilter,
     scope: Option<&super::costs::PaymentScope>,
 ) -> Vec<ObjectId> {
-    let is_turn_face_up = matches!(scope, Some(super::costs::PaymentScope::TurnFaceUp { .. }));
     state
         .battlefield
         .iter()
         .copied()
         .filter(|&id| {
-            let Some(obj) = state.objects.get(&id) else {
-                return false;
-            };
-            if obj.controller != player {
-                return false;
-            }
-            // CR 702.37e: the permanent being turned face up is not excluded — the rule
-            // only requires paying the morph cost, so a face-down permanent matching the
-            // cost's filter may pay it with itself unless the cost says "another", which
-            // the filter carries.
-            // CR 701.21a: A permanent with "can't be sacrificed" cannot be sacrificed
-            // for any cost regardless of payment scope (e.g. Assault Suit).
-            if super::static_abilities::object_has_static_other(state, id, "CantBeSacrificed") {
-                return false;
-            }
-            if !is_turn_face_up
-                && super::static_abilities::player_cant_sacrifice_as_cost(state, player, id)
-            {
-                return false;
-            }
-            // CR 109.5 + CR 113.8: An activated cost's “you” refers to its activator.
-            // CR 118.12a: An instructed player may pay a normalized "unless" cost.
-            // The selected cost's payer remains authoritative if its source leaves play.
-            super::filter::matches_target_filter(
-                state,
-                id,
-                filter,
-                &super::filter::FilterContext::from_source_with_controller(source_id, player)
-                    .with_granting_object(granting_object),
-            )
+            is_sacrifice_cost_candidate(state, player, source_id, granting_object, filter, id)
+                && may_sacrifice_for_cost(state, player, id, scope)
         })
         .collect()
+}
+
+/// CR 601.2h + CR 118.3: the determined set of a "sacrifice all <filter>" cost (every candidate), or None when any member can't be sacrificed; partial payment is not allowed.
+pub(crate) fn find_determined_sacrifice_set(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    filter: &TargetFilter,
+) -> Option<Vec<ObjectId>> {
+    let set: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            is_sacrifice_cost_candidate(state, player, source_id, granting_object, filter, id)
+        })
+        .collect();
+    set.iter()
+        .all(|&id| may_sacrifice_for_cost(state, player, id, None))
+        .then_some(set)
+}
+
+/// CR 404.3 + CR 701.21a: the members of a determined sacrifice set the payer arranges — the
+/// cards it owns; a token is not a card (CR 111.1). Another owner's cards keep set order (owner
+/// arrangement: #10508).
+pub(crate) fn payer_arranged_sacrifice_members(
+    state: &GameState,
+    player: PlayerId,
+    set: &[ObjectId],
+) -> Vec<ObjectId> {
+    set.iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.owner == player && !obj.is_token)
+        })
+        .collect()
+}
+
+/// CR 404.3 + CR 601.2h: `set` in sacrifice order — the payer's `arrangement` of its own cards,
+/// then every other member. Refuses an arrangement that is not exactly those cards.
+pub(crate) fn arrange_determined_sacrifice_set(
+    state: &GameState,
+    player: PlayerId,
+    set: Vec<ObjectId>,
+    arrangement: &[ObjectId],
+) -> Result<Vec<ObjectId>, EngineError> {
+    let arranged = payer_arranged_sacrifice_members(state, player, &set);
+    if arrangement.len() != arranged.len()
+        || arrangement.iter().any(|id| !arranged.contains(id))
+        || super::mana_abilities::contains_duplicate_object_id(arrangement)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "The arrangement must order every card of the determined sacrifice set you own"
+                .to_string(),
+        ));
+    }
+    let mut ordered = arrangement.to_vec();
+    ordered.extend(set.into_iter().filter(|id| !arranged.contains(id)));
+    Ok(ordered)
+}
+
+fn is_sacrifice_cost_candidate(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    filter: &TargetFilter,
+    id: ObjectId,
+) -> bool {
+    state
+        .objects
+        .get(&id)
+        .is_some_and(|obj| obj.controller == player)
+        // CR 109.5 + CR 113.8: An activated cost's “you” refers to its activator.
+        // CR 118.12a: An instructed player may pay a normalized "unless" cost.
+        // The selected cost's payer remains authoritative if its source leaves play.
+        && super::filter::matches_target_filter(
+            state,
+            id,
+            filter,
+            &super::filter::FilterContext::from_source_with_controller(source_id, player)
+                .with_granting_object(granting_object),
+        )
+}
+
+fn may_sacrifice_for_cost(
+    state: &GameState,
+    player: PlayerId,
+    id: ObjectId,
+    scope: Option<&super::costs::PaymentScope>,
+) -> bool {
+    // CR 702.37e: the permanent being turned face up is not excluded — the rule
+    // only requires paying the morph cost, so a face-down permanent matching the
+    // cost's filter may pay it with itself unless the cost says "another", which
+    // the filter carries.
+    // CR 701.21a: A permanent with "can't be sacrificed" cannot be sacrificed
+    // for any cost regardless of payment scope (e.g. Assault Suit).
+    if super::static_abilities::object_has_static_other(state, id, "CantBeSacrificed") {
+        return false;
+    }
+    matches!(scope, Some(super::costs::PaymentScope::TurnFaceUp { .. }))
+        || !super::static_abilities::player_cant_sacrifice_as_cost(state, player, id)
 }
 
 pub fn find_eligible_sacrifice_targets(
@@ -27191,6 +27456,12 @@ pub(crate) fn can_pay_ability_cost_now(
     ability_index: Option<usize>,
     life: &ActivationLifeWindow,
 ) -> bool {
+    // Un-card: reject SayPhrase costs (including inside Composite/OneOf) for
+    // players who have not opted in, before the dry run reaches the payment
+    // authority. Uses the shared helper to handle all cost shapes uniformly.
+    if super::un_actions::cost_requires_unavailable_speech(state, player, cost) {
+        return false;
+    }
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
     payable_with_mana_ability_window_life(state, player, source_id, cost, life, |state, cost| {
         super::costs::can_pay(
@@ -28191,8 +28462,9 @@ pub(crate) fn activation_verdict(
                 Ok(TargetSlotBuildOutcome::RequiresChosenX) => {
                     ability_def.cost.as_ref().is_some_and(|cost| {
                         casting_costs::extract_x_mana_cost(cost).is_some()
-                            || find_non_self_sacrifice_cost(cost)
-                                .is_some_and(|(count, _)| count == u32::MAX)
+                            || find_non_self_sacrifice_cost(cost).is_some_and(|c| {
+                                c.requirement == SacrificeRequirement::count(u32::MAX)
+                            })
                             || casting_costs::activation_cost_needs_x_choice(&resolved, cost)
                     })
                 }
@@ -28377,7 +28649,9 @@ mod starting_life_board_state_tests {
         }
         for (id, baseline) in [(PlayerId(0), 40), (PlayerId(1), 20)] {
             assert_eq!(
-                state.format_config.starting_life_total_for_player(id),
+                state
+                    .format_config
+                    .starting_life_total_for_player(id, state.players.len()),
                 baseline
             );
             assert!(!ability_condition_is_board_state_evaluable(&condition(
@@ -30682,7 +30956,7 @@ fn activate_with_cost_carrier(
                 {
                     return Ok(waiting_for);
                 }
-                if pending_interactive.deferred_random_discard_cost.is_some() {
+                if pending_interactive.deferred_hand_discard_cost.is_some() {
                     return casting_costs::finish_pending_cost_or_cast(
                         state,
                         player,
@@ -31995,6 +32269,8 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::Speed { player }
         | QuantityRef::LifeGainedThisTurn { player }
         | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::CardsDrawnLastTurn { player }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
         | QuantityRef::LandsPlayedThisTurn { player, .. }
         | QuantityRef::PlayerChosenNumber { player }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
@@ -32183,7 +32459,7 @@ fn player_filter_reads_chosen_target(filter: &PlayerFilter, read: TargetRead) ->
         PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ParentObjectTargetOwner
         | PlayerFilter::TargetPlayer => true,
-        PlayerFilter::AllExcept { exclude } => player_filter_reads_chosen_target(exclude, read),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_reads_chosen_target(exclude, read),
         PlayerFilter::AnyOf { filters } => filters
             .iter()
             .any(|f| player_filter_reads_chosen_target(f, read)),
@@ -32332,6 +32608,9 @@ fn target_filter_reads_chosen_target(filter: &TargetFilter, read: TargetRead) ->
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — resolved per affected
+        // member at install, never a declared target of this activation.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -32960,10 +33239,13 @@ pub enum ActivationCostGuardSite {
     /// `finish_counter_cost_payment`, the counter-cost tail shared by the
     /// selected handlers and the deferred-removal resume.
     CounterCostTail = 8,
+    /// `handle_sacrifice_for_cost`'s source tap/untap leg, paid before a
+    /// sacrifice that includes the source.
+    SacrificeSource = 9,
 }
 
 impl ActivationCostGuardSite {
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = 10;
 }
 
 /// CR 601.2f + CR 601.2h: an activation's cost is paid only after its total is

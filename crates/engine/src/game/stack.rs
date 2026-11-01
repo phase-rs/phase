@@ -3257,7 +3257,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                             // mark the battlefield object transformed without
                             // swapping faces again. Casting-variant-specific, so
                             // it stays caller-side (the pipeline tail only knows
-                            // the generic `enter_transformed` face-swap).
+                            // the generic `enter_transformed` face-swap). This
+                            // entry is not a CR 701.27a transform, so it emits
+                            // no `GameEvent::Transformed`.
                             if matches!(
                                 casting_variant,
                                 CastingVariant::MoreThanMeetsTheEye | CastingVariant::Disturb
@@ -3272,7 +3274,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                                 }
                                 if marked {
                                     crate::game::layers::mark_layers_full(state);
-                                    events.push(GameEvent::Transformed { object_id });
                                 }
                             }
                         }

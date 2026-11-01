@@ -6,6 +6,7 @@ import type { FormatConfig, FormatGroup, GameFormat, LoopDetectionMode, MatchTyp
 import {
   formatMetadata,
   formatSuppliesDeck,
+  isPlanechaseFamilyFormat,
   isSetupFormat,
   SETUP_FORMATS,
 } from "../data/formatRegistry";
@@ -210,7 +211,7 @@ export function GameSetupPage() {
 
   const handleStartAI = () => {
     if (!formatConfig) return;
-    if (formatConfig.format === "Planechase") return;
+    if (isPlanechaseFamilyFormat(formatConfig.format)) return;
     // Fixed-deck formats (Momir's Madness) supply the deck automatically, so an
     // active deck is not required to start.
     const suppliesDeck = formatSuppliesDeck(formatConfig.format);
@@ -267,7 +268,7 @@ export function GameSetupPage() {
   // AI seats automatically (the engine synthesizes them), so the deck-selection
   // and AI-deck-availability gates do not apply.
   const suppliesDeck = selectedFormat ? formatSuppliesDeck(selectedFormat) : false;
-  const formatSupportsAi = selectedFormat !== "Planechase";
+  const formatSupportsAi = !isPlanechaseFamilyFormat(selectedFormat);
   const noDeckSelected = !suppliesDeck && !activeDeckName;
   const deckBlockedForSelectedFormat =
     !suppliesDeck && !isRandomDeckSelection(activeDeckName) && selectedCompat?.selected_format_compatible === false;

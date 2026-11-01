@@ -896,7 +896,7 @@ fn skirk_volcanist_turn_face_up_sacrifice_replacement_pause() {
 #[test]
 fn turn_face_up_cost_move_resumes_after_mandatory_child_drains() {
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ChoiceType, Effect, TargetSelectionMode,
+        AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, TargetSelectionMode,
     };
     use engine::types::replacements::ReplacementEvent;
     use engine::types::{ReplacementDefinition, TargetFilter};
@@ -962,6 +962,7 @@ fn turn_face_up_cost_move_resumes_after_mandatory_child_drains() {
             AbilityKind::Spell,
             Effect::Choose {
                 choice_type: ChoiceType::OddOrEven,
+                chooser: ControllerRef::You,
                 persist: false,
                 selection: TargetSelectionMode::Chosen,
             },
@@ -1202,8 +1203,8 @@ fn zombie_cutthroat_deferred_life_cost_child_drain_before_flip() {
 #[test]
 fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ChoiceType, Effect, ReplacementDefinition, TargetFilter,
-        TargetRef, TargetSelectionMode,
+        AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, ReplacementDefinition,
+        TargetFilter, TargetRef, TargetSelectionMode,
     };
     use engine::types::game_state::PendingCostMoveResume;
     use engine::types::replacements::ReplacementEvent;
@@ -1275,6 +1276,7 @@ fn turn_face_up_sacrifice_cost_preserves_delivery_children_until_drain() {
             AbilityKind::Spell,
             Effect::Choose {
                 choice_type: ChoiceType::OddOrEven,
+                chooser: ControllerRef::You,
                 persist: false,
                 selection: TargetSelectionMode::Chosen,
             },
@@ -2717,8 +2719,8 @@ const SAFFI_ERIKSDOTTER_ORACLE: &str =
 #[test]
 fn turn_face_up_sacrifice_cost_preserves_delayed_triggers_across_child_pause() {
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ChoiceType, Effect, ReplacementDefinition, TargetFilter,
-        TargetSelectionMode,
+        AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, ReplacementDefinition,
+        TargetFilter, TargetSelectionMode,
     };
     use engine::types::game_state::PendingCostMoveResume;
     use engine::types::replacements::ReplacementEvent;
@@ -2805,6 +2807,7 @@ fn turn_face_up_sacrifice_cost_preserves_delayed_triggers_across_child_pause() {
             AbilityKind::Spell,
             Effect::Choose {
                 choice_type: ChoiceType::OddOrEven,
+                chooser: ControllerRef::You,
                 persist: false,
                 selection: TargetSelectionMode::Chosen,
             },

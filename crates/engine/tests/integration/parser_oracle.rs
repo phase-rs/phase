@@ -13,7 +13,6 @@ use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
-use engine::types::zones::Zone;
 
 /// Build a single-face `CardFace` from an oracle `text` through the real
 /// synthesis path (`build_oracle_face`), so coverage checks recurse into
@@ -535,14 +534,10 @@ fn vizier_of_remedies_parses_to_single_counter_replacement() {
     );
 }
 
-/// CR 610.3: Realm Razer's LTB return carries an entry modifier ("return the
-/// exiled cards to the battlefield TAPPED") that the automatic
-/// `ExileLink::UntilSourceLeaves` return path can't apply — it performs a
-/// plain, unmodified zone move. `trigger_is_ltb_return` must reject a return
-/// trigger with any entry modifier, so `detect_etb_exile_ltb_return` never
-/// stamps `Duration::UntilHostLeavesPlay` on the ETB — correctly excluded
-/// rather than silently dropping the tapped rider. Because that leaves Realm
-/// Razer with no working return path, the unsupported return must be VISIBLE to
+/// CR 607.2a: Realm Razer's LTB return carries an entry modifier ("return the
+/// exiled cards to the battlefield TAPPED") the emitted `ExiledBySource` return
+/// can't carry, so the pair is `ModifierUnsupported`: the LTB is not rewritten
+/// and the unsupported return must be VISIBLE to
 /// the coverage tooling (an `Effect::unimplemented("modifier_bearing_linked_return")`
 /// marker on the LTB trigger) rather than the card showing as falsely
 /// supported. Oracle text verbatim from Scryfall (2026-07). Caught in review of
@@ -558,20 +553,25 @@ fn mass_exile_ltb_return_with_entry_modifier_is_not_paired() {
     let name = "Realm Razer";
     let result = parse(oracle, name, &[], &["Creature"], &[]);
 
-    let etb = result
+    let ltb = result
         .triggers
         .iter()
-        .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
-        .unwrap_or_else(|| panic!("{name} must have an ETB trigger"));
-
-    let execute = etb
+        .find(|t| t.mode == TriggerMode::LeavesBattlefield)
+        .unwrap_or_else(|| panic!("{name} must have an LTB trigger"));
+    let ltb_effect = &ltb
         .execute
         .as_deref()
-        .unwrap_or_else(|| panic!("{name} ETB must have execute"));
-    assert_eq!(
-        execute.duration, None,
-        "{name}: mass-exile ETB must NOT be stamped UntilHostLeavesPlay — its LTB return has a \
-         tapped modifier the automatic return path can't carry"
+        .unwrap_or_else(|| panic!("{name} LTB must have execute"))
+        .effect;
+    assert!(
+        matches!(
+            &**ltb_effect,
+            Effect::ChangeZone {
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            }
+        ),
+        "{name}: the modifier-bearing LTB return must not be rewritten, got {ltb_effect:?}"
     );
 
     // Coverage-honesty gate (the maintainer's explicit ask, #6055): the
@@ -789,7 +789,7 @@ fn census_variant_names(body: &str) -> Vec<String> {
 /// it.
 #[test]
 fn render_net_effect_carrier_census() {
-    const EFFECT_VARIANT_PIN: usize = 237;
+    const EFFECT_VARIANT_PIN: usize = 238;
     /// `(enum header, pinned variant count, the ONE variant the net destructures)`.
     const PAYLOAD_ENUM_PINS: &[(&str, usize, &str)] = &[
         ("pub enum CastingPermission {", 8, "ExileWithAltCost"),
@@ -826,7 +826,8 @@ fn render_net_effect_carrier_census() {
         "Vote",
     ];
 
-    let ability_src = crate::source_census::code_lines(include_str!("../../src/types/ability.rs"));
+    let ability_src =
+        crate::source_census::code_lines(include_str!("../../../phase-ast/src/types/ability.rs"));
     let variants = census_variant_names(census_body(&ability_src, "pub enum Effect {"));
     assert!(
         variants.len() > 200 && variants.iter().any(|v| v == "GenericEffect"),
@@ -843,7 +844,8 @@ fn render_net_effect_carrier_census() {
          RENDER_DESCEND, then bump this pin."
     );
 
-    let mana_src = crate::source_census::code_lines(include_str!("../../src/types/mana.rs"));
+    let mana_src =
+        crate::source_census::code_lines(include_str!("../../../phase-ast/src/types/mana.rs"));
     for (header, pin, destructured) in PAYLOAD_ENUM_PINS.iter().copied().chain([(
         "pub enum ManaSpellGrant {",
         4usize,
@@ -872,7 +874,9 @@ fn render_net_effect_carrier_census() {
         );
     }
 
-    let oracle_src = crate::source_census::code_lines(include_str!("../../src/parser/oracle.rs"));
+    let oracle_src = crate::source_census::code_lines(include_str!(
+        "../../../phase-parser/src/parser/oracle.rs"
+    ));
     let net = census_body(&oracle_src, "fn render_effect_descriptions(");
     let mut arms: Vec<String> = Vec::new();
     for (i, _) in net.match_indices("Effect::") {

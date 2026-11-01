@@ -857,6 +857,18 @@ impl RwProfile {
         self.reads_player_fused = self.reads_player_fused.union(o.reads_player_fused);
     }
 
+    /// CR 405: whether the resolution reads the stack's shape, or anything it cannot classify.
+    pub(crate) fn reads_stack(&self) -> bool {
+        [
+            self.reads_src,
+            self.reads_board,
+            self.reads_player,
+            self.reads_frozen,
+        ]
+        .iter()
+        .any(|kinds| kinds.stack_shape || kinds.other)
+    }
+
     /// CR 603.3b T1 (§1.2): the resolution function never consults the source
     /// binding — no source read, no self write, no source-referential frozen
     /// read. Fail-closed (the walk routes source predicates into `reads_src` /
@@ -1554,6 +1566,10 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // CR 108.3 + CR 508.1d: owner-of-each-affected-member anchor — resolves
+        // per affected member (existing external objects), never the source,
+        // event object, or a creation.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => WriteScope::External,
     }
 }
@@ -2110,6 +2126,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::CostPaidObjectMatchesFilter { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::RevealedHasCardType { .. }
@@ -2369,6 +2386,8 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
@@ -2427,7 +2446,10 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
         PlayerFilter::PlayerAttribute { attr, value, .. } => {
             legacy_quantity_ref(attr) || legacy_quantity_expr(value)
         }
-        PlayerFilter::AllExcept { exclude } => legacy_player_filter(exclude),
+        PlayerFilter::AllExcept {
+            exclude,
+            relation: _,
+        } => legacy_player_filter(exclude),
         PlayerFilter::AnyOf { filters } => filters.iter().any(legacy_player_filter),
         // The damage-source narrowing is a nested object population.
         PlayerFilter::OpponentDealtDamage { source, .. } => {
@@ -2579,6 +2601,9 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // Brand-new anchor (post-freeze): not one of the 12 frozen
+        // event-context tags.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -2850,6 +2875,11 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::DefendingPlayer
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // CR 108.3: owner-partition-commutative among identical members — same
+        // rationale as `Owner` above: each member's owner-slice is disjoint
+        // and the per-member graft aggregate is order-free, so no
+        // member-bound refusal is needed.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -3895,6 +3925,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptionsFromRollDifference
@@ -6351,6 +6382,7 @@ fn rw_effect(
         | Effect::RingTemptsYou
         | Effect::TimeTravel
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::VentureIntoDungeon
         | Effect::SolveCase => (ext_write(StateKind::Other), None),
         // CR 725.1 + CR 725.3: the designation write, plus the chosen-target
@@ -6514,11 +6546,16 @@ fn rw_effect(
         // (`chosen_attributes`) that a later resolution reads ⇒ member-bound; a
         // resolution-local choice (`persist: false`) leaves no cross-member binding
         // (slithermuse's `Choose{Opponent, persist:false}`).
-        Effect::Choose { persist, .. } => {
+        Effect::Choose { persist, chooser, .. } => {
             let mut p = RwProfile::empty();
             if *persist {
                 p.bind_per_member();
             }
+            // CR 608.2d + CR 109.4: the chooser is read at resolution (who is
+            // prompted). Controller / declared-target reads are
+            // sibling-immutable (empty); per-source refs resolve through the
+            // shared `rw_controller_ref` authority.
+            p.merge(rw_controller_ref(chooser));
             (p, None)
         }
         Effect::SwapChosenLabels {
@@ -7004,10 +7041,12 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         | QuantityRef::LifeGainedThisTurn { player: _ }
         | QuantityRef::DamageDealtThisTurn { .. } => reads_player_of(StateKind::JournalLife),
         QuantityRef::CardsDrawnThisTurn { player: _ }
+        | QuantityRef::CardsDrawnLastTurn { player: _ }
         | QuantityRef::CardsDiscardedThisTurn { .. } => reads_player_of(StateKind::JournalCards),
         QuantityRef::SpellsCastThisTurn { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { player: _ }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. } => reads_player_of(StateKind::JournalCast),
@@ -7129,6 +7168,17 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         // CR 705.2: reads resolution-local `state.resolution_coin_flip` — a live
         // in-resolution signal, same read-bucket as `EventOutcomeWon`.
         AbilityCondition::CoinFlipOutcome { result: _ } => reads_event_live(),
+        // CR 607.2d + CR 608.2c: reads the named-choice continuation
+        // (`named_label_this_resolution`), written by the preceding `Choose {
+        // Labeled }` head's bind — NOT the source's persisted
+        // `ChosenAttribute::Label` history the `StaticCondition` /
+        // `TriggerCondition` mirrors read. Still `RwProfile::empty()`: the
+        // write→read is intra-chain (same resolving ability, CR 608.2c
+        // in-order steps), and the same-event gate orders DISTINCT abilities
+        // — no other ability writes this resolution's label. An event-live
+        // read would spuriously pair against every event-object writer
+        // (damage, counters).
+        AbilityCondition::ChosenLabelIs { label: _ } => RwProfile::empty(),
         // Both `AbilityUseCountThisTurn` tallies read a per-turn journal keyed
         // by this ability's own `(source_id, ability_index)` — the same read
         // bucket for `Resolved` (`ability_resolutions_this_turn`) and
@@ -7626,6 +7676,10 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // CR 108.3: owner-of-each-affected-member anchor — a read-free
+        // selector here (mirrors `Owner`); the member-bound bit is added by
+        // the trailing `member_bound_target_filter` union below.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => RwProfile::empty(),
     };
     // CR 603.10a (PR-6.75 c5): a member-bound referent used as a read carrier
@@ -7686,7 +7740,10 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
             p.merge(rw_quantity_expr(value));
             p
         }
-        PlayerFilter::AllExcept { exclude } => rw_player_filter(exclude),
+        PlayerFilter::AllExcept {
+            exclude,
+            relation: _,
+        } => rw_player_filter(exclude),
         PlayerFilter::AnyOf { filters } => {
             let mut p = RwProfile::empty();
             for f in filters {
@@ -8732,6 +8789,7 @@ mod tests {
     #[test]
     fn b7_choose_persist_member_bound() {
         let choose = |persist: bool| Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::opponent(),
             persist,
             selection: TargetSelectionMode::default(),

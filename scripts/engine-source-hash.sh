@@ -15,10 +15,11 @@
 # into it (see .github/workflows/ci.yml "Parse-detail diff").
 #
 # The fingerprint covers exactly the inputs that determine parse output and
-# mirrors the cardgen-cache key (ci.yml): the engine source tree, the engine
-# data dir (`crates/engine/data/**` — e.g. oracle-subtypes.json is `include_str!`d
+# mirrors the cardgen-cache key (`.github/actions/cardgen-cache-key`): the engine, phase-ast and
+# phase-parser source trees, the data dir (`crates/phase-ast/data/**`; `crates/engine/data/**`
+# before the phase-ast split — e.g. oracle-subtypes.json is `include_str!`d
 # into the parser, known-tokens.toml is embedded via build.rs → OUT_DIR), the
-# engine build script (`build.rs`), the engine crate manifest, and the lockfile
+# build script (`build.rs`), the three crate manifests, and the lockfile
 # (dep pins like nom affect parsing).
 #
 # Implemented with `git ls-tree -r` rather than `hashFiles`/working-tree hashing
@@ -43,6 +44,12 @@ git ls-tree --full-tree -r "$sha" -- \
   crates/engine/data \
   crates/engine/build.rs \
   crates/engine/Cargo.toml \
+  crates/phase-ast/src \
+  crates/phase-ast/data \
+  crates/phase-ast/build.rs \
+  crates/phase-ast/Cargo.toml \
+  crates/phase-parser/src \
+  crates/phase-parser/Cargo.toml \
   Cargo.lock \
   | sha256sum \
   | cut -c1-16

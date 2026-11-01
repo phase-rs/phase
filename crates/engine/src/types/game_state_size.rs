@@ -67,6 +67,16 @@
 //! are already boxed, so nothing large went inline; the ceiling moved to
 //! 14,352.next_multiple_of(256) + 256 = 14,848.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc at 14,864 B when the
+//! scheme-support branch merged main's tracked-set member origins
+//! (`tracked_set_member_origins`, an `im::HashMap`, 24 B inline) alongside
+//! the branch's own named-label scratch (`named_label_this_resolution`,
+//! `Option<String>`, 24 B inline): each side was green alone under 14,848,
+//! and the union crossed it by 16 B. Neither field is a large
+//! rarely-populated one — both are ordinary 24 B fields, and the origins
+//! map is already heap-shared — so the ceiling moves to
+//! 14,864.next_multiple_of(256) + 256 = 15,360.
+//!
 //! Base `GameState` on x86_64-pc-windows-msvc measured 14,336 B at
 //! `nightly-2026-04-19`, exactly at the ceiling of that time. The attacked-player referent
 //! work adds `attack_target: Option<AttackTarget>` to `ZoneChangeCombatStatus`
@@ -90,10 +100,11 @@
 //! ceiling.
 //!
 //! `GameState` re-measured on x86_64-unknown-linux-gnu (`nightly-2026-04-19`) at
-//! 14,880 B when the loop shortcut's ∞ mark gained `unbounded_rising`, a 24 B map
-//! populated only while a mark stands — not a large rarely-populated field, and
-//! boxing it saves 16 B and stays over; the ceiling moved to
-//! 14,880.next_multiple_of(256) + 256 = 15,360.
+//! 14,896 B with the tracked-set member origins (`tracked_set_member_origins`,
+//! 24 B), the loop-detection held window and decision tally (`loop_detect_held`,
+//! 8 B, and `loop_decision_tally`, 40 B) and the loop shortcut's rising ∞ axes
+//! (`unbounded_rising`, 24 B); none of those fields is a large rarely-populated
+//! one, so the ceiling is 14,896.next_multiple_of(256) + 256 = 15,360.
 //!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.

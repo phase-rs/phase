@@ -818,6 +818,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::DeclaredPlayer { .. } => "declared player".to_string(),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
         TargetFilter::ParentTargetOwner => "parent target's owner".into(),
+        TargetFilter::AffectedObjectOwner => "each affected object's owner".into(),
         TargetFilter::SourceChosenPlayer => "source's chosen player".into(),
         TargetFilter::PostReplacementSourceController => {
             "prevented event source's controller".into()
@@ -2071,6 +2072,15 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CardsDrawnThisTurn { player } => {
             format!("cards drawn this turn ({})", fmt_player_scope(player))
         }
+        QuantityRef::CardsDrawnLastTurn { player } => {
+            format!("cards drawn last turn ({})", fmt_player_scope(player))
+        }
+        QuantityRef::OpponentSpellsCastSinceLastTurn { player } => {
+            format!(
+                "opponent spells cast since last turn ({})",
+                fmt_player_scope(player)
+            )
+        }
         QuantityRef::BattlefieldEntriesThisTurn { player, filter } => format!(
             "battlefield entries this turn ({}, {})",
             fmt_target(filter),
@@ -2325,9 +2335,15 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::All => "each player",
         // CR 109.4: `AllExcept` is a recursive carrier — the excluded player is
         // itself a `PlayerFilter`, so two different exclusions must not render
-        // identically.
-        PlayerFilter::AllExcept { exclude } => {
-            return format!("each player other than {}", fmt_player_filter(exclude));
+        // identically. The base population (`relation`) renders too, so the
+        // all-players and opponents readings stay distinct.
+        PlayerFilter::AllExcept { exclude, relation } => {
+            let who = match relation {
+                PlayerRelation::Controller => "you",
+                PlayerRelation::Opponent => "each opponent",
+                PlayerRelation::All => "each player",
+            };
+            return format!("{who} other than {}", fmt_player_filter(exclude));
         }
         // CR 102.1: `AnyOf` is a recursive carrier too — two different unions
         // must not render identically, so each member is rendered.
@@ -3579,11 +3595,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Choose {
             choice_type,
             persist,
+            chooser,
             ..
         } => {
             d.push(("choice".into(), fmt_choice_type(choice_type)));
             if *persist {
                 d.push(("persist".into(), "yes".into()));
+            }
+            if !chooser.is_you() {
+                d.push(("chooser".into(), format!("{chooser:?}")));
             }
         }
         Effect::OpponentGuess { guesser, subject } => {
@@ -4534,6 +4554,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
@@ -4815,6 +4836,7 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
             CoinFlipResult::Won => "you won the flip".into(),
             CoinFlipResult::Lost => "you lost the flip".into(),
         },
+        AbilityCondition::ChosenLabelIs { label } => format!("chosen label is {label}"),
         AbilityCondition::WhenYouDo => "when you do".into(),
         AbilityCondition::WasCast { zone } => match zone {
             Some(z) => format!("cast from {}", fmt_zone(z)),
@@ -8136,7 +8158,7 @@ fn check_trigger(
         );
     }
     // CR 603.8: StateCondition triggers are handled by the priority pipeline
-    // (check_state_triggers), not the event-based trigger registry. They are supported.
+    // (collect_state_triggers), not the event-based trigger registry. They are supported.
     if !trigger_mode_is_supported(&trigger.mode, trigger_registry) {
         let label = format!("Trigger:{}", trigger.mode);
         if !missing.contains(&label) {
@@ -8147,7 +8169,7 @@ fn check_trigger(
 
 /// Whether a printed (battlefield) trigger mode can fire: recognised, and either
 /// in the event-trigger registry or a CR 603.8 state trigger (handled by the
-/// priority pipeline's `check_state_triggers`). Delayed triggers use the
+/// priority pipeline's `collect_state_triggers`). Delayed triggers use the
 /// stricter `delayed_trigger_mode_is_supported`.
 fn trigger_mode_is_supported(
     mode: &TriggerMode,
@@ -10510,7 +10532,8 @@ fn extract_ability_condition_features(
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. }
-        | AbilityCondition::ScopedPlayerMatches { .. } => {}
+        | AbilityCondition::ScopedPlayerMatches { .. }
+        | AbilityCondition::ChosenLabelIs { .. } => {}
     }
 }
 
@@ -10742,6 +10765,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         },
         AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
         AbilityCondition::CoinFlipOutcome { .. } => ("CoinFlipOutcome", Handled),
+        AbilityCondition::ChosenLabelIs { .. } => ("ChosenLabelIs", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
         // ponytail: coverage tag key intentionally stays "CastFromZone" (decoupled
         // from the renamed variant) to keep coverage-data byte-stable across the
@@ -10840,7 +10864,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::Or { .. } => ("Or", Handled),
         // CR 608.2c: Logical negation — handled by evaluate_condition (effects/mod.rs).
         AbilityCondition::Not { .. } => ("Not", Handled),
-        // CR 730.2a: Daybound/Nightbound ETB initialization — handled by evaluate_condition.
+        // CR 702.145d + CR 731.1: Daybound/Nightbound ETB initialization — handled by evaluate_condition.
         AbilityCondition::DayNightIsNeither => ("DayNightIsNeither", Handled),
         // CR 731.1: Day/night designation check — handled by evaluate_condition.
         AbilityCondition::DayNightIs { .. } => ("DayNightIs", Handled),
@@ -11148,6 +11172,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::BendTypesThisTurn => ("BendTypesThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
+        QuantityRef::CardsDrawnLastTurn { .. } => ("CardsDrawnLastTurn", Handled),
+        QuantityRef::OpponentSpellsCastSinceLastTurn { .. } => {
+            ("OpponentSpellsCastSinceLastTurn", Handled)
+        }
         // CR 608.2i: `Handled` only when the entry-record matcher can actually evaluate the
         // filter of this look-back read. `battlefield_entry_matches_filter` fails closed on
         // props the entry snapshot never captured (game/restrictions.rs), so such a card would
@@ -15964,12 +15992,21 @@ mod tests {
                 "except controller",
                 &PlayerFilter::AllExcept {
                     exclude: Box::new(PlayerFilter::Controller),
+                    relation: PlayerRelation::All,
                 },
             ),
             (
                 "except defending player",
                 &PlayerFilter::AllExcept {
                     exclude: Box::new(PlayerFilter::DefendingPlayer),
+                    relation: PlayerRelation::All,
+                },
+            ),
+            (
+                "opponents except controller",
+                &PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::Controller),
+                    relation: PlayerRelation::Opponent,
                 },
             ),
         ]);

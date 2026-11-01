@@ -1,5 +1,5 @@
-//! Spark Double preserves its printed entry counter while applying a copied
-//! as-enters choice.
+//! Entry-counter composition and copied as-enters choices for ordinary copiers
+//! and Feldon's liminal copy tokens, including ordering and completion boundaries.
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::TargetRef;
@@ -967,4 +967,756 @@ fn spark_double_counter_completion_replays_copied_targeted_trigger() {
     assert_eq!(copy.zone, Zone::Battlefield);
     assert_eq!(copy.name, "Man-o'-War");
     assert_eq!(copy.counters.get(&CounterType::Plus1Plus1), Some(&4));
+}
+
+mod feldon_tokens {
+    use super::*;
+    use engine::types::events::GameEvent;
+    use engine::types::keywords::Keyword;
+    use engine::types::mana::{ManaType, ManaUnit};
+    use engine::types::player::PlayerId;
+
+    const FELDON: &str = "{2}{R}, {T}: Create a token that's a copy of target creature card in your graveyard, except it's an artifact in addition to its other types. It gains haste. Sacrifice it at the beginning of the next end step.";
+    const JACE: &str = "+2: Each player draws a card.\n−1: Target player draws a card.\n−10: Target player mills twenty cards.";
+
+    fn setup() -> (GameScenario, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario.with_library_top(P1, &["Forest", "Island", "Swamp", "Mountain"]);
+        scenario.with_mana_pool(
+            P0,
+            (0..12)
+                .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let feldon = scenario
+            .add_creature_from_oracle(P0, "Feldon of the Third Path", 2, 3, FELDON)
+            .as_legendary()
+            .id();
+        (scenario, feldon)
+    }
+
+    fn graveyard_copier(scenario: &mut GameScenario, clever: bool) -> ObjectId {
+        let (name, oracle) = if clever {
+            ("Clever Impersonator", CLEVER_IMPERSONATOR)
+        } else {
+            ("Spark Double", SPARK_DOUBLE)
+        };
+        scenario
+            .add_creature_to_graveyard(P0, name, 0, 0)
+            .from_oracle_text(oracle)
+            .id()
+    }
+
+    fn donor_jace(scenario: &mut GameScenario, owner: PlayerId) -> ObjectId {
+        scenario
+            .add_planeswalker_from_oracle(owner, "Jace Beleren", "Jace", 3, JACE)
+            .as_planeswalker_with_loyalty("Jace", 3)
+            .as_legendary()
+            .id()
+    }
+
+    fn stage_loyalty(runner: &mut GameRunner, donor: ObjectId, current: u32) {
+        let object = runner.state_mut().objects.get_mut(&donor).unwrap();
+        object.counters.insert(CounterType::Loyalty, current);
+        object.loyalty = Some(current);
+    }
+
+    fn choose_copy(runner: &mut GameRunner, donor: ObjectId) -> (ObjectId, Vec<GameEvent>) {
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "required token copy offer, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(candidates.len(), 2, "copy offer includes explicit decline");
+        let entrant = runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .unwrap()
+            .proposed
+            .affected_object_id()
+            .expect("copy replacement identifies the entering token");
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == entrant)
+            .expect("entrant's copy replacement is offered");
+        let mut events = runner
+            .act(GameAction::ChooseReplacement { index })
+            .unwrap()
+            .events;
+        let WaitingFor::CopyTargetChoice {
+            player,
+            source_id,
+            valid_targets,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "required token donor choice, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*source_id, entrant);
+        assert!(valid_targets.contains(&donor), "selected donor is offered");
+        events.extend(
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(donor)),
+                })
+                .unwrap()
+                .events,
+        );
+        (entrant, events)
+    }
+
+    fn activate_copy(
+        runner: &mut GameRunner,
+        feldon: ObjectId,
+        card: ObjectId,
+        donor: ObjectId,
+    ) -> ObjectId {
+        assert!(!runner.state().objects[&feldon].tapped);
+        runner.activate(feldon, 0).target_object(card).resolve();
+        assert!(
+            runner.state().objects[&feldon].tapped,
+            "activation paid its tap cost"
+        );
+        choose_copy(runner, donor).0
+    }
+
+    fn assert_loyalty(runner: &GameRunner, token: ObjectId, name: &str, expected: u32) {
+        let entered = runner
+            .state()
+            .objects
+            .get(&token)
+            .expect("copied token survives");
+        assert_eq!(entered.zone, Zone::Battlefield);
+        assert!(entered.is_token);
+        assert_eq!(entered.name, name);
+        // CR 306.5b + CR 707.2: printed loyalty, not the donor's current counters.
+        // CR 306.5c: cached loyalty equals the resulting loyalty-counter count.
+        assert_eq!(
+            (
+                entered.counters.get(&CounterType::Loyalty).copied(),
+                entered.loyalty
+            ),
+            (Some(expected), Some(expected)),
+            "printed intrinsic loyalty and copy exceptions share the entry placement"
+        );
+    }
+
+    fn assert_token_entry_complete(runner: &mut GameRunner) {
+        runner.advance_until_stack_empty();
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "token entry did not reach priority: {:?}",
+            runner.state().waiting_for
+        );
+        assert!(runner.state().stack.is_empty());
+        assert!(
+            runner.state().resolution_stack.is_empty(),
+            "token entry stranded a resolution frame"
+        );
+        // A completed activated-ability carrier may remain cached until the next
+        // action's ingress retirement. Empty instruction frames plus the concrete
+        // haste and delayed-sacrifice assertions below prove Feldon's completion.
+    }
+
+    fn finish_and_sacrifice(runner: &mut GameRunner, tokens: &[ObjectId], donors: &[ObjectId]) {
+        assert_token_entry_complete(runner);
+        for token in tokens {
+            // CR 608.2c: Feldon's later instruction applies to every created token.
+            assert!(runner.state().objects[token].has_keyword(&Keyword::Haste));
+        }
+        runner.advance_to_end_step();
+        assert_eq!(runner.state().phase, Phase::End);
+        assert_token_entry_complete(runner);
+        for token in tokens {
+            // CR 603.7c + CR 704.5d: delayed sacrifice follows the created permanent,
+            // even when it is a planeswalker; the departed token ceases to exist.
+            assert!(
+                !runner.state().objects.contains_key(token),
+                "delayed sacrifice removes {token:?}"
+            );
+        }
+        for donor in donors {
+            assert_eq!(runner.state().objects[donor].zone, Zone::Battlefield);
+        }
+    }
+
+    #[test]
+    fn t1_spark_token_uses_printed_loyalty_and_completes_feldon() {
+        let (mut scenario, feldon) = setup();
+        let donor = donor_jace(&mut scenario, P0);
+        let card = graveyard_copier(&mut scenario, false);
+        let mut runner = scenario.build();
+        stage_loyalty(&mut runner, donor, 9);
+        let token = activate_copy(&mut runner, feldon, card, donor);
+        assert_loyalty(&runner, token, "Jace Beleren", 4);
+        assert_eq!(
+            runner.state().objects[&donor]
+                .counters
+                .get(&CounterType::Loyalty),
+            Some(&9)
+        );
+        finish_and_sacrifice(&mut runner, &[token], &[donor]);
+    }
+
+    #[test]
+    fn t2_clever_token_gets_intrinsic_loyalty_from_opponents_donor() {
+        let (mut scenario, feldon) = setup();
+        let donor = donor_jace(&mut scenario, P1);
+        let card = graveyard_copier(&mut scenario, true);
+        let mut runner = scenario.build();
+        stage_loyalty(&mut runner, donor, 9);
+        let token = activate_copy(&mut runner, feldon, card, donor);
+        assert_loyalty(&runner, token, "Jace Beleren", 3);
+        assert_eq!(
+            runner.state().objects[&donor]
+                .counters
+                .get(&CounterType::Loyalty),
+            Some(&9)
+        );
+        finish_and_sacrifice(&mut runner, &[token], &[donor]);
+    }
+
+    fn restore(runner: GameRunner) -> GameRunner {
+        use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization};
+        let wire =
+            serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+        let state = serde_json::from_value::<PersistedGameState>(wire)
+            .unwrap()
+            .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+            .unwrap()
+            .finalize_after_rehydration(|_| Ok(()))
+            .unwrap();
+        GameRunner::from_state(state)
+    }
+
+    fn choose_token_counter_order(
+        runner: &mut GameRunner,
+        token: ObjectId,
+        source: ObjectId,
+    ) -> Vec<GameEvent> {
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "required token counter order, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .unwrap()
+                .proposed
+                .affected_object_id(),
+            Some(token)
+        );
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == source)
+            .expect("requested counter replacement is offered");
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .unwrap()
+            .events
+    }
+
+    fn assert_entry_publication(runner: &GameRunner, token: ObjectId, events: &[GameEvent]) {
+        // CR 111.1 + CR 614.12a: each realized token enters once after its entry choices.
+        // Check publication/bookkeeping, not downstream observer collection.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event, GameEvent::ZoneChanged { object_id, record, to: Zone::Battlefield, .. }
+                        if *object_id == token && record.object_id == token
+                ))
+                .count(),
+            1,
+            "exactly one battlefield-entry event for {token:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event, GameEvent::TokenCreated { object_id, .. } if *object_id == token
+                ))
+                .count(),
+            1,
+            "exactly one token-created event for {token:?}"
+        );
+        assert_eq!(
+            runner
+                .state()
+                .zone_changes_this_turn
+                .iter()
+                .filter(|record| record.object_id == token && record.to_zone == Zone::Battlefield)
+                .count(),
+            1,
+            "exactly one battlefield-arrival zone ledger row for {token:?}"
+        );
+        assert_eq!(
+            runner
+                .state()
+                .battlefield_entries_this_turn
+                .iter()
+                .filter(|record| record.object_id == token)
+                .count(),
+            1,
+            "exactly one battlefield-entry ledger row for {token:?}"
+        );
+    }
+
+    fn ordered_loyalty_batch(persist: bool) {
+        let (mut scenario, feldon) = setup();
+        let donor = donor_jace(&mut scenario, P0);
+        let card = graveyard_copier(&mut scenario, false);
+        let laezel = scenario
+            .add_creature_from_oracle(P0, "Lae'zel, Vlaakith's Champion", 3, 3, LAEZEL)
+            .as_legendary()
+            .id();
+        let season = scenario
+            .add_enchantment_from_oracle(P0, "Doubling Season", SEASON)
+            .id();
+        let mut runner = scenario.build();
+        stage_loyalty(&mut runner, donor, 9);
+        let mut events = runner
+            .activate(feldon, 0)
+            .target_object(card)
+            .resolve()
+            .events()
+            .to_vec();
+        assert!(
+            runner.state().objects[&feldon].tapped,
+            "activation paid its tap cost"
+        );
+        let (first, copy_events) = choose_copy(&mut runner, donor);
+        events.extend(copy_events);
+        if persist {
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { player: P0, .. }
+            ));
+            runner = restore(runner);
+        }
+        // CR 616.1 + CR 616.1f: (printed 3 + Spark 1 + Lae'zel 1) × 2.
+        events.extend(choose_token_counter_order(&mut runner, first, laezel));
+        assert_loyalty(&runner, first, "Jace Beleren", 10);
+        let (second, copy_events) = choose_copy(&mut runner, donor);
+        events.extend(copy_events);
+        assert_ne!(first, second, "Season creates two distinct entrants");
+        if persist {
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { player: P0, .. }
+            ));
+            runner = restore(runner);
+        }
+        // CR 616.1 + CR 616.1f: (printed 3 + Spark 1) × 2 + Lae'zel 1.
+        events.extend(choose_token_counter_order(&mut runner, second, season));
+        assert_loyalty(&runner, second, "Jace Beleren", 9);
+        assert_token_entry_complete(&mut runner);
+        assert_entry_publication(&runner, first, &events);
+        assert_entry_publication(&runner, second, &events);
+        assert_eq!(
+            runner.state().objects[&donor]
+                .counters
+                .get(&CounterType::Loyalty),
+            Some(&9)
+        );
+        finish_and_sacrifice(&mut runner, &[first, second], &[donor, feldon]);
+    }
+
+    #[test]
+    fn t4_opposite_counter_orders_publish_and_finish_both_tokens_once() {
+        ordered_loyalty_batch(false);
+    }
+
+    #[test]
+    fn p1_both_counter_pauses_survive_persisted_restore() {
+        ordered_loyalty_batch(true);
+    }
+
+    #[test]
+    fn t8_triskelion_self_counters_and_spark_share_one_scales_application() {
+        let (mut scenario, feldon) = setup();
+        let donor = scenario
+            .add_creature_from_oracle(P0, "Triskelion", 1, 1, TRISKELION)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Construct"])
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Hardened Scales", SCALES);
+        let card = graveyard_copier(&mut scenario, false);
+        let mut runner = scenario.build();
+        let token = activate_copy(&mut runner, feldon, card, donor);
+        let entered = &runner.state().objects[&token];
+        assert_eq!(entered.name, "Triskelion");
+        assert!(entered.is_token);
+        assert_eq!(entered.zone, Zone::Battlefield);
+        // CR 614.12 + CR 614.1c + CR 122.6 + CR 614.5:
+        // copied Triskelion 3 + Spark 1, then Scales once, is five counters.
+        assert_eq!(entered.counters.get(&CounterType::Plus1Plus1), Some(&5));
+        finish_and_sacrifice(&mut runner, &[token], &[donor]);
+    }
+
+    #[test]
+    fn t3_laezel_modifies_intrinsic_and_exception_loyalty_once() {
+        let (mut scenario, feldon) = setup();
+        let donor = donor_jace(&mut scenario, P0);
+        scenario
+            .add_creature_from_oracle(P0, "Lae'zel, Vlaakith's Champion", 3, 3, LAEZEL)
+            .as_legendary();
+        let card = graveyard_copier(&mut scenario, false);
+        let mut runner = scenario.build();
+        stage_loyalty(&mut runner, donor, 9);
+        let token = activate_copy(&mut runner, feldon, card, donor);
+        // CR 614.1c + CR 122.6 + CR 614.5: one merged (3 + 1) + 1 placement.
+        assert_loyalty(&runner, token, "Jace Beleren", 5);
+        finish_and_sacrifice(&mut runner, &[token], &[donor]);
+    }
+
+    fn choose_color(runner: &mut GameRunner, token: ObjectId, color: &str) {
+        let WaitingFor::NamedChoice {
+            player,
+            source,
+            options,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "entry color must precede the next token, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(
+            source.as_ref().unwrap().prompt.identity.reference.object_id,
+            token
+        );
+        let choice = options
+            .iter()
+            .find(|option| option.eq_ignore_ascii_case(color))
+            .unwrap()
+            .clone();
+        runner.act(GameAction::ChooseOption { choice }).unwrap();
+    }
+
+    #[test]
+    fn t7_counter_witness_finishes_each_color_before_the_next_token() {
+        let (mut scenario, feldon) = setup();
+        let donor = scenario
+            .add_creature_from_oracle(P0, "Painter's Servant", 1, 3, PAINTERS_SERVANT)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Scarecrow"])
+            .id();
+        let laezel = scenario
+            .add_creature_from_oracle(P0, "Lae'zel, Vlaakith's Champion", 3, 3, LAEZEL)
+            .as_legendary()
+            .id();
+        let season = scenario
+            .add_enchantment_from_oracle(P0, "Doubling Season", SEASON)
+            .id();
+        let card = graveyard_copier(&mut scenario, false);
+        let mut runner = scenario.build();
+        let first = activate_copy(&mut runner, feldon, card, donor);
+        choose_counter_replacement(&mut runner, laezel);
+        // CR 614.12a + CR 616.1: settle this entrant's required color before publication/batch resume.
+        choose_color(&mut runner, first, "blue");
+        let (second, _) = choose_copy(&mut runner, donor);
+        assert_ne!(first, second);
+        choose_counter_replacement(&mut runner, season);
+        choose_color(&mut runner, second, "red");
+        runner.advance_until_stack_empty();
+        // CR 608.2c: both created tokens receive Feldon's rider before priority.
+        assert!(
+            runner.state().objects[&second].has_keyword(&Keyword::Haste),
+            "second token must receive Feldon's haste before entry completion"
+        );
+        assert!(
+            runner.state().objects[&first].has_keyword(&Keyword::Haste),
+            "first token must receive Feldon's haste before entry completion"
+        );
+        assert_token_entry_complete(&mut runner);
+        for (token, color, counters) in [(first, ManaColor::Blue, 4), (second, ManaColor::Red, 3)] {
+            let entered = &runner.state().objects[&token];
+            assert_eq!(entered.name, "Painter's Servant");
+            assert_eq!(entered.chosen_color(), Some(color));
+            assert_eq!(
+                entered.counters.get(&CounterType::Plus1Plus1),
+                Some(&counters)
+            );
+        }
+        finish_and_sacrifice(&mut runner, &[first, second], &[donor]);
+    }
+
+    #[test]
+    fn t5a_decline_enters_and_dies_once_without_a_copy() {
+        let (mut scenario, feldon) = setup();
+        let donor = donor_jace(&mut scenario, P0);
+        let card = graveyard_copier(&mut scenario, false);
+        scenario.add_artifact_from_oracle(
+            P0,
+            "Altar of the Brood",
+            "Whenever another permanent you control enters, each opponent mills a card.",
+        );
+        let mut runner = scenario.build();
+        let library: Vec<_> = runner.state().players[1]
+            .library
+            .iter()
+            .take(2)
+            .copied()
+            .collect();
+        runner.activate(feldon, 0).target_object(card).resolve();
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("decline requires the optional token-copy offer");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(candidates.len(), 2);
+        let token = runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .unwrap()
+            .proposed
+            .affected_object_id()
+            .unwrap();
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.source_id == token));
+        runner
+            .act(GameAction::ChooseReplacement { index: 1 })
+            .unwrap();
+        assert_token_entry_complete(&mut runner);
+        // CR 704.5f + CR 704.5d: the uncopied 0/0 enters, dies, and ceases to exist.
+        assert!(!runner.state().objects.contains_key(&token));
+        // CR 603.6a: its single entry is still observed.
+        assert_eq!(runner.state().objects[&library[0]].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&library[1]].zone, Zone::Library);
+        assert_eq!(runner.state().objects[&donor].zone, Zone::Battlefield);
+    }
+
+    fn announce_feldon(runner: &mut GameRunner, feldon: ObjectId, card: ObjectId) {
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: feldon,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { player: P0, .. }
+            ),
+            "Feldon offers the two graveyard targets: {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(card)),
+            })
+            .unwrap();
+        // Pool-funded activation can finish payment here or expose its payment window.
+        if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "activation is committed before the response"
+        );
+        assert!(runner.state().objects[&feldon].tapped);
+    }
+
+    fn murder(scenario: &mut GameScenario) -> ObjectId {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+            .id()
+    }
+
+    #[test]
+    fn t5b_source_removed_leaves_no_legal_spark_copy_source() {
+        let (mut scenario, feldon) = setup();
+        let opposing_donor = donor_jace(&mut scenario, P1);
+        let card = graveyard_copier(&mut scenario, false);
+        graveyard_copier(&mut scenario, false);
+        let response = murder(&mut scenario);
+        scenario.add_artifact_from_oracle(
+            P0,
+            "Altar of the Brood",
+            "Whenever another permanent you control enters, each opponent mills a card.",
+        );
+        let mut runner = scenario.build();
+        let library: Vec<_> = runner.state().players[1]
+            .library
+            .iter()
+            .take(2)
+            .copied()
+            .collect();
+        announce_feldon(&mut runner, feldon, card);
+        runner.cast(response).target_object(feldon).resolve();
+        // CR 113.7a: the activation still creates its token after Feldon leaves.
+        assert_eq!(runner.state().objects[&feldon].zone, Zone::Graveyard);
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(runner.state().objects[&library[0]].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&library[1]].zone, Zone::Library);
+        assert_eq!(
+            runner.state().objects[&opposing_donor].zone,
+            Zone::Battlefield
+        );
+        assert!(!runner
+            .state()
+            .objects
+            .values()
+            .any(|object| object.is_token));
+    }
+
+    #[test]
+    fn r_source_left_still_copies_and_finishes_feldon() {
+        let (mut scenario, feldon) = setup();
+        let donor = donor_jace(&mut scenario, P0);
+        let card = graveyard_copier(&mut scenario, false);
+        graveyard_copier(&mut scenario, false);
+        let response = murder(&mut scenario);
+        let mut runner = scenario.build();
+        announce_feldon(&mut runner, feldon, card);
+        runner.cast(response).target_object(feldon).resolve();
+        assert_eq!(runner.state().objects[&feldon].zone, Zone::Graveyard);
+        // CR 113.7a: the independent activation may still create and copy a token.
+        let (token, _) = choose_copy(&mut runner, donor);
+        assert_loyalty(&runner, token, "Jace Beleren", 4);
+        finish_and_sacrifice(&mut runner, &[token], &[donor]);
+    }
+
+    #[test]
+    fn r_target_exiled_prevents_creation_and_cremate_draws() {
+        let (mut scenario, feldon) = setup();
+        let donor = donor_jace(&mut scenario, P0);
+        let card = graveyard_copier(&mut scenario, false);
+        graveyard_copier(&mut scenario, false);
+        let response = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Cremate",
+                true,
+                "Exile target card from a graveyard.\nDraw a card.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let drawn = runner.state().players[0].library[0];
+        announce_feldon(&mut runner, feldon, card);
+        runner.cast(response).target_object(card).resolve();
+        assert_eq!(runner.state().objects[&card].zone, Zone::Exile);
+        assert_eq!(runner.state().objects[&drawn].zone, Zone::Hand);
+        assert_token_entry_complete(&mut runner);
+        // CR 608.2b: the sole target is illegal, so Feldon creates no tokens.
+        assert!(!runner
+            .state()
+            .objects
+            .values()
+            .any(|object| object.is_token));
+        assert_eq!(runner.state().objects[&donor].zone, Zone::Battlefield);
+    }
+
+    #[test]
+    fn t6_fresh_batches_bind_their_own_donor_and_created_token() {
+        const CHANDRA: &str = "+1: Exile the top card of your library. You may cast that card. If you don't, Chandra deals 2 damage to each opponent.\n+1: Add {R}{R}.\n−3: Chandra deals 4 damage to target creature.\n−7: You get an emblem with \"Whenever you cast a spell, this emblem deals 5 damage to any target.\"";
+        let (mut scenario, feldon) = setup();
+        let jace = donor_jace(&mut scenario, P0);
+        let chandra = scenario
+            .add_planeswalker_from_oracle(P0, "Chandra, Torch of Defiance", "Chandra", 4, CHANDRA)
+            .as_planeswalker_with_loyalty("Chandra", 4)
+            .as_legendary()
+            .id();
+        let first_card = graveyard_copier(&mut scenario, false);
+        let second_card = graveyard_copier(&mut scenario, false);
+        let twiddle = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Twiddle",
+                true,
+                "You may tap or untap target artifact, creature, or land.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        stage_loyalty(&mut runner, jace, 9);
+        stage_loyalty(&mut runner, chandra, 11);
+        let first = activate_copy(&mut runner, feldon, first_card, jace);
+        assert_loyalty(&runner, first, "Jace Beleren", 4);
+        assert_token_entry_complete(&mut runner);
+        runner
+            .cast(twiddle)
+            .target_object(feldon)
+            .commit()
+            .stop_at_optional()
+            .resolve();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ));
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        let WaitingFor::ChooseOneOfBranch {
+            player,
+            source_id,
+            branches,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "Twiddle must offer tap or untap, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*source_id, twiddle);
+        let index = branches
+            .iter()
+            .position(|branch| branch.description.as_deref() == Some("untap"))
+            .unwrap();
+        // CR 608.2d: explicitly choose untap, making the second tap-cost activation legal.
+        runner.act(GameAction::ChooseBranch { index }).unwrap();
+        assert_token_entry_complete(&mut runner);
+        assert!(!runner.state().objects[&feldon].tapped);
+        let second = activate_copy(&mut runner, feldon, second_card, chandra);
+        assert_ne!(first, second);
+        assert_loyalty(&runner, second, "Chandra, Torch of Defiance", 5);
+        assert_eq!(
+            runner.state().objects[&jace]
+                .counters
+                .get(&CounterType::Loyalty),
+            Some(&9)
+        );
+        assert_eq!(
+            runner.state().objects[&chandra]
+                .counters
+                .get(&CounterType::Loyalty),
+            Some(&11)
+        );
+        finish_and_sacrifice(&mut runner, &[first, second], &[jace, chandra, feldon]);
+    }
 }
