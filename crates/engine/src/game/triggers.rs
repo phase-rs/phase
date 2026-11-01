@@ -9443,27 +9443,7 @@ pub(crate) fn park_observer_triggers_if_paused(
     events: &mut Vec<GameEvent>,
     slice_start: usize,
 ) {
-    if triggered_mana_sidecar_owns_local_collection(state) {
-        return;
-    }
-    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        return;
-    }
-    // CR 601.2h + CR 602.2b + CR 603.3: under a live announcement these events
-    // wait in its carrier; only the span it does not own is parked here.
-    let owned = super::announcement_triggers::take_inline_trigger_span(state, events, slice_start);
-    // CR 603.2c: logical zone-change owners can queue observers without claiming
-    // the consumed ledger; honor their queued contexts as collection witnesses.
-    let candidates = filter_already_collected_trigger_events_from(
-        state,
-        &events[..owned.end],
-        slice_start,
-        &state.consumed_before_priority_trigger_events,
-    );
-    let trigger_events = paused_observer_trigger_events(state, candidates);
-    if !trigger_events.is_empty() {
-        collect_triggers_into_deferred(state, &trigger_events);
-    }
+    park_observer_triggers_if_paused_matching(state, events, slice_start, |_| true);
 }
 
 /// CR 603.2 + CR 603.6a + CR 616.1f: Preserve observers of completed battlefield
@@ -9476,24 +9456,7 @@ pub(crate) fn park_entry_observer_triggers_if_paused(
     events: &mut Vec<GameEvent>,
     slice_start: usize,
 ) {
-    if triggered_mana_sidecar_owns_local_collection(state) {
-        return;
-    }
-    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        return;
-    }
-    // CR 601.2h + CR 602.2b + CR 603.3: under a live announcement these events
-    // wait in its carrier; only the span it does not own is parked here.
-    let owned = super::announcement_triggers::take_inline_trigger_span(state, events, slice_start);
-    // CR 603.2c: honor consumed events and queued zone-change witnesses before
-    // restricting the unclaimed candidates to this entry-only collector.
-    let mut candidates = filter_already_collected_trigger_events_from(
-        state,
-        &events[..owned.end],
-        slice_start,
-        &state.consumed_before_priority_trigger_events,
-    );
-    candidates.retain(|event| {
+    park_observer_triggers_if_paused_matching(state, events, slice_start, |event| {
         matches!(
             event,
             GameEvent::ZoneChanged {
@@ -9502,6 +9465,38 @@ pub(crate) fn park_entry_observer_triggers_if_paused(
             }
         )
     });
+}
+
+fn park_observer_triggers_if_paused_matching(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+    keep: impl Fn(&GameEvent) -> bool,
+) {
+    if triggered_mana_sidecar_owns_local_collection(state) {
+        return;
+    }
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+    // A resumed simultaneous move can hand back a buffer the batch drain has
+    // already taken into its pending frame, leaving events shorter than the
+    // anchor captured before the answer ran (zone_pipeline::drain_pending_batch_deliveries).
+    if slice_start >= events.len() {
+        return;
+    }
+    // CR 601.2h + CR 602.2b + CR 603.3: under a live announcement these events
+    // wait in its carrier; only the span it does not own is parked here.
+    let owned = super::announcement_triggers::take_inline_trigger_span(state, events, slice_start);
+    // CR 603.2c: logical zone-change owners can queue observers without claiming
+    // the consumed ledger; honor their queued contexts as collection witnesses.
+    let mut candidates = filter_already_collected_trigger_events_from(
+        state,
+        &events[..owned.end.min(events.len())],
+        slice_start,
+        &state.consumed_before_priority_trigger_events,
+    );
+    candidates.retain(keep);
     let trigger_events = paused_observer_trigger_events(state, candidates);
     if !trigger_events.is_empty() {
         collect_triggers_into_deferred(state, &trigger_events);
