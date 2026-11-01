@@ -11711,6 +11711,8 @@ fn trigger_returned_to_your_hand() {
     assert_eq!(def.destination, Some(Zone::Hand));
     // Owner constraint is on valid_card, not valid_target.
     assert!(def.valid_target.is_none());
+    let subject = assert_owner_scoped(&def.valid_card, ControllerRef::You);
+    assert_eq!(subject.controller, None);
 }
 
 #[test]
@@ -25441,13 +25443,23 @@ fn trigger_self_put_into_exile_from_battlefield() {
     );
 }
 
-/// CR 400.3 + CR 608.2c (fail-closed): a third-person destination possessive
-/// with a union origin has no printed consumer, so the head stays unsupported
-/// rather than binding "that player" to the departure controller. The nearest
-/// printed union, Oglor, Devoted Assistant, has an owner-compatible "your" head;
-/// keep it as the positive control for this synthetic shape.
+/// CR 400.3 + CR 608.2c: opponent-qualified union against an opponent-owned destination (synthetic: no printed card has this shape; nearest printed card Oglor, Devoted Assistant, the You+You mirror). The bare-ellipsis second disjunct inherits the head's Opponent qualifier, so the union is uniformly opponent-owned and consistent with the destination.
 #[test]
 fn trigger_put_into_opponent_graveyard_from_opponent_library_or_hand_union() {
+    let def = parse_trigger_line(
+        "Whenever a creature card is put into an opponent's graveyard from an opponent's library or hand, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, None);
+    assert_eq!(def.origin_zones, vec![Zone::Library, Zone::Hand]);
+    assert_eq!(def.destination, Some(Zone::Graveyard));
+    // CR 400.3 + CR 109.5: the union must not disturb the graveyard-possessive scope.
+    assert_owner_scoped(&def.valid_card, ControllerRef::Opponent);
+}
+
+#[test]
+fn trigger_put_into_your_graveyard_union_keeps_oglor_positive_control() {
     let accepted = parse_trigger_line(
         "Whenever a creature card is put into your graveyard from your library or hand, it perpetually gains \"When this card leaves your graveyard, create a tapped 2/2 black Zombie creature token.\"",
         "Oglor, Devoted Assistant",
@@ -25456,16 +25468,6 @@ fn trigger_put_into_opponent_graveyard_from_opponent_library_or_hand_union() {
     assert_eq!(accepted.origin, None);
     assert_eq!(accepted.origin_zones, vec![Zone::Library, Zone::Hand]);
     assert_eq!(accepted.destination, Some(Zone::Graveyard));
-
-    let unsupported = parse_trigger_line(
-        "Whenever a creature card is put into an opponent's graveyard from an opponent's library or hand, draw a card.",
-        "Some Card",
-    );
-    assert!(
-        matches!(unsupported.mode, TriggerMode::Unknown(_)),
-        "third-person destination plus union must fail closed, got {:?}",
-        unsupported.mode
-    );
 }
 
 /// CR 109.5 + CR 400.3 (fail-closed): an opponent-qualified union against an
@@ -25845,6 +25847,10 @@ fn trigger_one_or_more_cards_put_into_a_players_library_from_anywhere() {
     assert_eq!(def.origin, None);
     assert_eq!(def.destination, Some(Zone::Library));
     assert!(def.batched);
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(TypedFilter::card()))
+    );
     assert!(
         def.valid_target.is_none(),
         "a player's library must not add a target filter"

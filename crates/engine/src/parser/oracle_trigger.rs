@@ -22803,9 +22803,9 @@ fn parse_cast_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
     alt((
         // CR 603.6c: bare "anywhere" → no origin restriction.
         value(None, tag("anywhere")),
-        // Hand — every possessive form maps to Zone::Hand. CR 400.3 +
-        // CR 608.2c: "their" names the caster introduced by the condition;
-        // the possessive does not narrow the zone selection itself.
+        // Hand — every possessive form maps to Zone::Hand. CR 608.2c:
+        // "their" names the caster introduced by the condition; the possessive
+        // does not narrow the zone selection itself.
         value(Some(Zone::Hand), tag("your hand")),
         value(Some(Zone::Hand), tag("their hand")),
         value(Some(Zone::Hand), tag("an opponent's hand")),
@@ -22982,6 +22982,10 @@ fn parse_disjunctive_zone_change_condition(condition: &str) -> Option<Vec<ZoneCh
 /// ignores for ChangesZone, so the trigger fired for any card going to any
 /// graveyard. `valid_target` carries the same possessive for the parse-details
 /// display only; `match_changes_zone` does not read it.
+///
+/// Explicit single-zone exclusions retain the complete qualified subject on a
+/// `ZoneChangeClause`; inclusion unions and multi-zone exclusion complements use
+/// `origin_zones`. The batched builder uses the same carriers and head grammar.
 fn try_parse_put_into_graveyard(
     subject: &TargetFilter,
     rest: &str,
@@ -23056,8 +23060,9 @@ fn parse_graveyard_possessive(input: &str) -> OracleResult<'_, Option<PlayerRela
 }
 
 /// CR 400.3 + CR 608.2c: destination possessives select an owner's zone.
-/// CR 109.5: "your" selects the source controller; third-person possessives
-/// select the named opponent or any player without changing subject control.
+/// CR 109.5: "your" selects the source controller.
+/// CR 400.3 + CR 608.2c: third-person possessives select the named opponent or
+/// any player without changing subject control.
 fn graveyard_owner_scope(possessive: Option<PlayerRelation>) -> Option<ControllerRef> {
     match possessive {
         None | Some(PlayerRelation::All) => None,
@@ -23079,8 +23084,8 @@ fn scope_to_destination_owner(subject: TargetFilter, owner: Option<ControllerRef
 }
 
 /// CR 603.6c + CR 400.3 + CR 608.2c: shared, fully consumed graveyard head.
-/// Retain absent origin separately from explicit Anywhere. Third-person union
-/// antecedents remain unsupported rather than becoming controller-bound.
+/// Retain absent origin separately from explicit Anywhere. Accepted unions use
+/// the same qualifier gate for construction and destination-owner anaphor proof.
 fn put_into_graveyard_head(
     input: &str,
 ) -> OracleResult<'_, (Option<PlayerRelation>, Option<OriginConstraint>)> {
@@ -23095,10 +23100,7 @@ fn put_into_graveyard_head(
         let origin = if zones.is_empty() {
             origin.map_or(OriginConstraint::Any, OriginConstraint::Equals)
         } else {
-            if matches!(
-                possessive,
-                Some(PlayerRelation::Opponent | PlayerRelation::All)
-            ) || !union_qualifier_consistent_with_destination(
+            if !union_qualifier_consistent_with_destination(
                 qualifier,
                 graveyard_owner_scope(possessive),
             ) {
@@ -23559,6 +23561,8 @@ fn try_parse_put_into_exile_from(
 
 /// Parse "whenever one or more [type] cards are put into [your] graveyard from [your library]".
 /// CR 603.2c: "One or more" triggers fire once per batch of simultaneous events.
+/// The shared head's exclusion clauses retain Card, subtype, and destination
+/// ownership predicates, just as the singular builder does.
 fn try_parse_one_or_more_put_into_graveyard(
     lower: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {

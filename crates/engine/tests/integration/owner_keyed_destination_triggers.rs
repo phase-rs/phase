@@ -1,7 +1,11 @@
 //! Real-card runtime tests for owner-keyed destination-zone triggers (CR 400.3, CR 108.2b, CR 110.1).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{Effect, OriginConstraint, TargetFilter, TargetRef};
+use engine::parser::oracle::parse_oracle_text;
+use engine::types::ability::{
+    ControllerRef, Effect, FilterProp, OriginConstraint, QuantityExpr, TargetFilter, TargetRef,
+    TriggerDefinition, TypeFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
@@ -10,12 +14,20 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 // Verbatim Oracle text independently read from data/mtgjson/AtomicCards.json.
 const BLOODCHIEF: &str = "At the beginning of each end step, if an opponent lost 2 or more life this turn, you may put a quest counter on this enchantment. (Damage causes loss of life.)\nWhenever a card is put into an opponent's graveyard from anywhere, if this enchantment has three or more quest counters on it, you may have that player lose 2 life. If you do, you gain 2 life.";
 const MURDER: &str = "Destroy target creature.";
 const DISENCHANT: &str = "Destroy target artifact or enchantment.";
+const DISA: &str = "Whenever a Lhurgoyf permanent card is put into your graveyard from anywhere other than the battlefield, put it onto the battlefield.\nWhenever one or more creatures you control deal combat damage to a player, create a Tarmogoyf token.";
+// Synthetic: C8 found no printed third-person union. Oglor supplies the union;
+// Patron of the Nezumi supplies "that player" as the graveyard owner's anaphor.
+const UNION_OWNER_OBSERVER: &str = "Whenever a creature card is put into a player's graveyard from the battlefield or a library, that player loses 1 life.";
+// Synthetic: no printed batched-exclusion consumer. Disa supplies the exclusion;
+// Robot Domination supplies the typed "one or more ... cards" batching.
+const BATCHED_EXCLUSION_OBSERVER: &str = "Whenever one or more Lhurgoyf permanent cards are put into your graveyard from anywhere other than the battlefield, draw a card.";
 
 fn trigger_instances(state: &GameState) -> usize {
     state
@@ -109,6 +121,10 @@ fn life(runner: &GameRunner, player: PlayerId) -> i32 {
 fn assert_settled(runner: &GameRunner) {
     assert!(runner.state().stack.is_empty());
     assert_eq!(trigger_instances(runner.state()), 0);
+    assert!(runner.state().pending_trigger.is_none());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(runner.state().pending_resolution_completion.is_none());
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "{:?}",
@@ -1638,13 +1654,10 @@ fn v11_devourer_mill_pumps_but_token_death_does_not() {
     }
 }
 
-/// S1/S2 SHAPE: no printed consumer exists for these forms. Reject through the
-/// public document parser; nearest printed heads remain executable.
+/// S1 SHAPE: no printed qualified-library consumer exists. The nearest printed
+/// unqualified Dutiful head remains executable through the public parser.
 #[test]
-fn strict_qualified_library_and_third_person_union_heads_stay_unsupported() {
-    use engine::parser::oracle::parse_oracle_text;
-    use engine::types::triggers::TriggerMode;
-
+fn s1_qualified_library_heads_stay_unsupported() {
     for (name, oracle) in [
         ("Dutiful Knowledge Seeker", DUTIFUL),
         ("Patron of the Nezumi", PATRON),
@@ -1662,7 +1675,6 @@ fn strict_qualified_library_and_third_person_union_heads_stay_unsupported() {
     for oracle in [
         "Whenever one or more cards are put into your library from anywhere, put a +1/+1 counter on this creature.",
         "Whenever one or more cards are put into an opponent's library from anywhere, put a +1/+1 counter on this creature.",
-        "Whenever a creature card is put into an opponent's graveyard from their library or hand, that player loses 1 life.",
     ] {
         let parsed = parse_oracle_text(oracle, "Unsupported nearest printed head", &[], &[], &[]);
         assert_eq!(parsed.triggers.len(), 1, "{oracle}: {parsed:?}");
@@ -2516,5 +2528,507 @@ fn v1_zodiac_cannot_return_a_later_graveyard_incarnation() {
                 Zone::Hand
             }
         );
+    }
+}
+
+fn assert_typed_subject(
+    subject: &Option<TargetFilter>,
+    types: &[TypeFilter],
+    owner: Option<ControllerRef>,
+) {
+    let Some(TargetFilter::Typed(typed)) = subject else {
+        panic!("expected a typed subject, got {subject:?}");
+    };
+    for ty in types {
+        assert!(
+            typed.type_filters.iter().any(|actual| match (actual, ty) {
+                (TypeFilter::Subtype(actual), TypeFilter::Subtype(expected)) => {
+                    actual.eq_ignore_ascii_case(expected)
+                }
+                _ => actual == ty,
+            }),
+            "{ty:?}: {typed:?}"
+        );
+    }
+    assert_eq!(typed.controller, None, "no destination-derived controller");
+    let owners: Vec<_> = typed
+        .properties
+        .iter()
+        .filter_map(|prop| match prop {
+            FilterProp::Owned { controller } => Some(controller.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(owners, owner.into_iter().collect::<Vec<_>>());
+}
+
+fn assert_owner_loss_body(trigger: &TriggerDefinition) {
+    let execute = trigger.execute.as_deref().expect("executable trigger body");
+    assert_eq!(
+        execute.effect.as_ref(),
+        &Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: Some(TargetFilter::ParentTargetOwner),
+        }
+    );
+}
+
+/// S2 SHAPE (synthetic): Oglor's union and Patron's owner anaphor compose.
+/// CR 400.3 + CR 608.2c: accepted complete heads bind the destination owner.
+#[test]
+fn s2_shared_union_heads_preserve_acceptance_and_owner_binding() {
+    for (oracle, owner, batched) in [
+        (
+            "Whenever a creature card is put into an opponent's graveyard from their library or hand, that player loses 1 life.",
+            Some(ControllerRef::Opponent),
+            false,
+        ),
+        (
+            "Whenever a creature card is put into a player's graveyard from a library or hand, that player loses 1 life.",
+            None,
+            false,
+        ),
+        (
+            "Whenever one or more creature cards are put into an opponent's graveyard from an opponent's library or hand, that player loses 1 life.",
+            Some(ControllerRef::Opponent),
+            true,
+        ),
+    ] {
+        let parsed = parse_oracle_text(oracle, "Synthetic union observer", &[], &[], &[]);
+        assert_eq!(parsed.triggers.len(), 1, "{parsed:?}");
+        let trigger = &parsed.triggers[0];
+        assert_eq!(
+            trigger.mode,
+            if batched { TriggerMode::ChangesZoneAll } else { TriggerMode::ChangesZone }
+        );
+        assert_eq!(trigger.batched, batched);
+        assert_eq!(trigger.origin, None);
+        assert_eq!(trigger.origin_zones, vec![Zone::Library, Zone::Hand]);
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert_typed_subject(&trigger.valid_card, &[TypeFilter::Creature, TypeFilter::Card], owner);
+        assert_owner_loss_body(trigger);
+    }
+    for oracle in [
+        "Whenever a creature card is put into your graveyard from an opponent's library or hand, that player loses 1 life.",
+        "Whenever a creature card is put into an opponent's graveyard from your library or their hand, that player loses 1 life.",
+        "Whenever a creature card is put into a player's graveyard from their library or hand, that player loses 1 life.",
+        "Whenever a creature card is put into an opponent's graveyard from their library or hand with a leftover tail, that player loses 1 life.",
+    ] {
+        let parsed = parse_oracle_text(oracle, "Synthetic inconsistent union", &[], &[], &[]);
+        assert_eq!(parsed.triggers.len(), 1, "{parsed:?}");
+        assert!(matches!(parsed.triggers[0].mode, TriggerMode::Unknown(_)), "{parsed:?}");
+    }
+    for oracle in [
+        "Whenever a creature card is put into your graveyard from your library or hand, that player loses 1 life.",
+        "Whenever a creature card is put into a graveyard from a library or hand, that player loses 1 life.",
+    ] {
+        let parsed = parse_oracle_text(oracle, "Synthetic no third-person antecedent", &[], &[], &[]);
+        let trigger = &parsed.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+        let Effect::LoseLife { target, .. } = trigger.execute.as_ref().unwrap().effect.as_ref() else {
+            panic!("expected executable life loss: {trigger:?}");
+        };
+        assert_ne!(target.as_ref(), Some(&TargetFilter::ParentTargetOwner));
+    }
+}
+
+/// S2r SHAPE is deliberately separate from the public-action recipient witness.
+#[test]
+fn s2r_union_owner_observer_shape() {
+    let parsed = parse_oracle_text(
+        UNION_OWNER_OBSERVER,
+        "Synthetic union owner observer",
+        &[],
+        &[],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 1);
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(trigger.origin, None);
+    assert_eq!(trigger.origin_zones, vec![Zone::Battlefield, Zone::Library]);
+    assert_eq!(trigger.destination, Some(Zone::Graveyard));
+    assert_typed_subject(
+        &trigger.valid_card,
+        &[TypeFilter::Creature, TypeFilter::Card],
+        None,
+    );
+    assert_owner_loss_body(trigger);
+}
+
+/// S2r synthetic runtime: nearest printed Oglor supplies the union and Patron
+/// supplies "that player loses 1 life"; no printed exact third-person union exists.
+#[test]
+fn s2r_union_owner_binding_uses_destination_owner_not_departure_controller() {
+    let p2 = PlayerId(2);
+    for origin in [Zone::Battlefield, Zone::Library, Zone::Hand] {
+        let mut s = GameScenario::new_n_player(3, 7);
+        s.at_phase(Phase::PreCombatMain);
+        let observer = s
+            .add_enchantment_from_oracle(P0, "Synthetic union owner observer", UNION_OWNER_OBSERVER)
+            .id();
+        let victim = match origin {
+            Zone::Battlefield => s
+                .add_creature(P1, "Borrowed creature", 2, 2)
+                .controlled_by(p2)
+                .id(),
+            Zone::Library => s.add_card_to_library_top(P1, "Milled creature"),
+            Zone::Hand => s.add_card_to_hand(P1, "Discarded creature"),
+            _ => unreachable!(),
+        };
+        let companion = match origin {
+            Zone::Library => Some(s.add_land_to_library_top(P1, "Milled land").id()),
+            Zone::Hand => Some(s.add_card_to_hand(P1, "Discarded land")),
+            _ => None,
+        };
+        let murder = s
+            .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+            .id();
+        let rot = s
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Mind Rot",
+                false,
+                "Target player discards two cards.",
+            )
+            .id();
+        let stone = s.add_artifact_from_oracle(P0, "Millstone", MILLSTONE).id();
+        s.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, stone, false, vec![]); 2],
+        );
+        let mut runner = s.build();
+        if origin != Zone::Battlefield {
+            stage_library_creature(&mut runner, victim);
+        }
+        if origin == Zone::Hand {
+            let land = runner
+                .state_mut()
+                .objects
+                .get_mut(&companion.unwrap())
+                .unwrap();
+            land.card_types.core_types = vec![CoreType::Land];
+            land.base_card_types = land.card_types.clone();
+        }
+        assert_settled(&runner);
+        assert_eq!(runner.state().objects[&observer].controller, P0);
+        let before = (life(&runner, P0), life(&runner, P1), life(&runner, p2));
+        match origin {
+            Zone::Battlefield => {
+                assert_eq!(
+                    (
+                        runner.state().objects[&victim].owner,
+                        runner.state().objects[&victim].controller
+                    ),
+                    (P1, p2)
+                );
+                cast_until_resolved(&mut runner, murder, &[victim]);
+            }
+            Zone::Library => activate_millstone_until_resolved(&mut runner, stone, P1),
+            Zone::Hand => cast_player_until_resolved(&mut runner, rot, P1),
+            _ => unreachable!(),
+        }
+        assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&victim].owner, P1);
+        if let Some(companion) = companion {
+            assert_eq!(runner.state().objects[&companion].zone, Zone::Graveyard);
+        }
+        let qualifies = origin != Zone::Hand;
+        assert_eq!(
+            trigger_instances(runner.state()),
+            usize::from(qualifies),
+            "{origin:?}"
+        );
+        drain_to_optional_or_priority(&mut runner);
+        assert_settled(&runner);
+        // CR 400.3 + CR 608.2c: "that player" is P1, not event controller P2.
+        assert_eq!(
+            (
+                life(&runner, P0) - before.0,
+                life(&runner, P1) - before.1,
+                life(&runner, p2) - before.2
+            ),
+            (0, if qualifies { -1 } else { 0 }, 0),
+            "{origin:?}"
+        );
+    }
+}
+
+fn assert_exclusion_subject(trigger: &TriggerDefinition, mode: TriggerMode) {
+    assert_eq!(trigger.mode, mode);
+    assert_eq!(trigger.batched, mode == TriggerMode::ChangesZoneAll);
+    assert_eq!(trigger.valid_card, None);
+    assert_eq!(trigger.zone_change_clauses.len(), 1);
+    let clause = &trigger.zone_change_clauses[0];
+    assert_eq!(
+        clause.origin,
+        OriginConstraint::NotEquals(Zone::Battlefield)
+    );
+    assert_eq!(clause.destination, Some(Zone::Graveyard));
+    assert_typed_subject(
+        &clause.valid_card,
+        &[
+            TypeFilter::Permanent,
+            TypeFilter::Subtype("lhurgoyf".into()),
+            TypeFilter::Card,
+        ],
+        Some(ControllerRef::You),
+    );
+}
+
+/// V12 SHAPE: inspect Disa's first ability, not its unrelated combat-token body.
+#[test]
+fn v12_disa_singular_exclusion_preserves_complete_subject() {
+    let parsed = parse_oracle_text(DISA, "Disa the Restless", &[], &[], &[]);
+    assert_eq!(parsed.triggers.len(), 2, "complete Oracle text: {parsed:?}");
+    let trigger = &parsed.triggers[0];
+    assert_exclusion_subject(trigger, TriggerMode::ChangesZone);
+    assert!(
+        matches!(
+            trigger.execute.as_ref().unwrap().effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "{trigger:?}"
+    );
+}
+
+/// V12: full-Oracle Disa returns only the owned Lhurgoyf card that was milled.
+/// CR 400.7e + CR 110.2a: find that arrival object and put it under P0's control.
+#[test]
+fn v12_disa_mill_returns_only_owned_lhurgoyf_and_excludes_battlefield() {
+    for (owner, lhurgoyf, origin) in [
+        (P0, true, Zone::Library),
+        (P1, true, Zone::Library),
+        (P0, false, Zone::Library),
+        (P0, true, Zone::Battlefield),
+    ] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        s.add_creature_from_oracle(P0, "Disa the Restless", 5, 6, DISA);
+        let unrelated = s
+            .add_creature_to_graveyard(P0, "Unrelated Lhurgoyf", 2, 2)
+            .with_subtypes(vec!["Lhurgoyf"])
+            .id();
+        let victim = if origin == Zone::Battlefield {
+            s.add_creature(owner, "Moved Lhurgoyf", 2, 2)
+                .with_subtypes(vec!["Lhurgoyf"])
+                .id()
+        } else {
+            s.add_card_to_library_top(owner, "Moved creature")
+        };
+        let land = s.add_land_to_library_top(owner, "Milled land").id();
+        let stone = s.add_artifact_from_oracle(P0, "Millstone", MILLSTONE).id();
+        let murder = s
+            .add_spell_to_hand_from_oracle(P1, "Murder", true, MURDER)
+            .id();
+        s.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, stone, false, vec![]); 2],
+        );
+        let mut runner = s.build();
+        if origin == Zone::Library {
+            stage_library_creature(&mut runner, victim);
+            let object = runner.state_mut().objects.get_mut(&victim).unwrap();
+            object.power = Some(2);
+            object.toughness = Some(2);
+            object.base_power = Some(2);
+            object.base_toughness = Some(2);
+            if lhurgoyf {
+                let object = runner.state_mut().objects.get_mut(&victim).unwrap();
+                object.card_types.subtypes.push("Lhurgoyf".into());
+                object.base_card_types = object.card_types.clone();
+            }
+        }
+        assert_settled(&runner);
+        if origin == Zone::Library {
+            activate_millstone_until_resolved(&mut runner, stone, owner);
+            assert_eq!(runner.state().objects[&land].zone, Zone::Graveyard);
+        } else {
+            cast_until_resolved(&mut runner, murder, &[victim]);
+        }
+        assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&victim].owner, owner);
+        let qualifies = owner == P0 && lhurgoyf && origin == Zone::Library;
+        // CR 603.2 + CR 603.6c: exactly the non-battlefield owned subject qualifies.
+        assert_eq!(
+            trigger_instances(runner.state()),
+            usize::from(qualifies),
+            "{owner:?}/{lhurgoyf}/{origin:?}"
+        );
+        drain_to_optional_or_priority(&mut runner);
+        assert_settled(&runner);
+        assert_eq!(
+            runner.state().objects[&victim].zone,
+            if qualifies {
+                Zone::Battlefield
+            } else {
+                Zone::Graveyard
+            }
+        );
+        if qualifies {
+            assert_eq!(runner.state().objects[&victim].controller, P0);
+        }
+        assert_eq!(runner.state().objects[&unrelated].zone, Zone::Graveyard);
+        if origin == Zone::Library {
+            assert_eq!(runner.state().objects[&land].zone, Zone::Graveyard);
+        }
+    }
+}
+
+/// S3 SHAPE (synthetic): Disa's exclusion composes with Robot's typed batching.
+#[test]
+fn s3_batched_exclusion_and_shared_exclusion_lists_preserve_subjects() {
+    for (name, oracle) in [
+        ("Disa the Restless", DISA),
+        ("Robot Domination", "Whenever one or more creature cards are put into your graveyard from anywhere, you draw a card, lose 1 life, and put a plan counter on this enchantment.\nWhen the third plan counter is put on this enchantment, sacrifice it and create three 2/2 colorless Robot Villain artifact creature tokens."),
+    ] {
+        let parsed = parse_oracle_text(oracle, name, &[], &[], &[]);
+        assert!(matches!(parsed.triggers[0].mode, TriggerMode::ChangesZone | TriggerMode::ChangesZoneAll), "{parsed:?}");
+    }
+    let parsed = parse_oracle_text(
+        BATCHED_EXCLUSION_OBSERVER,
+        "Synthetic batched exclusion observer",
+        &[],
+        &[],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 1);
+    assert_exclusion_subject(&parsed.triggers[0], TriggerMode::ChangesZoneAll);
+    assert!(matches!(
+        parsed.triggers[0].execute.as_ref().unwrap().effect.as_ref(),
+        Effect::Draw { .. }
+    ));
+    for subject in [
+        "a Lhurgoyf permanent card is",
+        "one or more Lhurgoyf permanent cards are",
+    ] {
+        let oracle = format!("Whenever {subject} put into your graveyard from anywhere other than the battlefield or your library, draw a card.");
+        let parsed = parse_oracle_text(&oracle, "Synthetic exclusion list observer", &[], &[], &[]);
+        let trigger = &parsed.triggers[0];
+        assert_eq!(
+            trigger.mode,
+            if subject == "a Lhurgoyf permanent card is" {
+                TriggerMode::ChangesZone
+            } else {
+                TriggerMode::ChangesZoneAll
+            }
+        );
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert_eq!(trigger.origin, None);
+        assert!(!trigger.origin_zones.contains(&Zone::Battlefield));
+        assert!(!trigger.origin_zones.contains(&Zone::Library));
+        assert!(trigger.origin_zones.contains(&Zone::Hand));
+        assert_typed_subject(
+            &trigger.valid_card,
+            &[
+                TypeFilter::Permanent,
+                TypeFilter::Subtype("lhurgoyf".into()),
+                TypeFilter::Card,
+            ],
+            Some(ControllerRef::You),
+        );
+        let malformed = oracle.replace(", draw", " with a leftover tail, draw");
+        let rejected = parse_oracle_text(
+            &malformed,
+            "Synthetic exclusion list observer",
+            &[],
+            &[],
+            &[],
+        );
+        assert!(
+            matches!(rejected.triggers[0].mode, TriggerMode::Unknown(_)),
+            "{rejected:?}"
+        );
+    }
+}
+
+/// S3 synthetic runtime: no printed batched exclusion exists; nearest Disa and
+/// Robot Domination supply the exclusion and typed batching respectively.
+#[test]
+fn s3_batched_exclusion_draws_once_for_two_cards_and_rejects_siblings() {
+    for (owner, lhurgoyf, origin) in [
+        (P0, true, Zone::Library),
+        (P0, true, Zone::Battlefield),
+        (P1, true, Zone::Library),
+        (P0, false, Zone::Library),
+    ] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        s.add_enchantment_from_oracle(
+            P0,
+            "Synthetic batched exclusion observer",
+            BATCHED_EXCLUSION_OBSERVER,
+        );
+        let drawn = s.add_card_to_library_top(P0, "Distinguishable drawn card");
+        let a = s.add_card_to_library_top(owner, "Milled A");
+        let b = s.add_card_to_library_top(owner, "Milled B");
+        let dying = s
+            .add_creature(owner, "Dying Lhurgoyf", 2, 2)
+            .with_subtypes(vec!["Lhurgoyf"])
+            .id();
+        let murder = s
+            .add_spell_to_hand_from_oracle(P1, "Murder", true, MURDER)
+            .id();
+        let stone = s.add_artifact_from_oracle(P0, "Millstone", MILLSTONE).id();
+        s.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, stone, false, vec![]); 2],
+        );
+        let mut runner = s.build();
+        for id in [a, b] {
+            stage_library_creature(&mut runner, id);
+            if lhurgoyf {
+                let object = runner.state_mut().objects.get_mut(&id).unwrap();
+                object.card_types.subtypes.push("Lhurgoyf".into());
+                object.base_card_types = object.card_types.clone();
+            }
+        }
+        assert_settled(&runner);
+        let hand_before = runner
+            .state()
+            .players
+            .iter()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .hand
+            .clone();
+        if origin == Zone::Library {
+            activate_millstone_until_resolved(&mut runner, stone, owner);
+            for id in [a, b] {
+                assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
+            }
+        } else {
+            cast_until_resolved(&mut runner, murder, &[dying]);
+            assert_eq!(runner.state().objects[&dying].zone, Zone::Graveyard);
+        }
+        let qualifies = owner == P0 && lhurgoyf && origin == Zone::Library;
+        // CR 603.2c: one logical batch produces one trigger, not two.
+        assert_eq!(
+            trigger_instances(runner.state()),
+            usize::from(qualifies),
+            "{owner:?}/{lhurgoyf}/{origin:?}"
+        );
+        drain_to_optional_or_priority(&mut runner);
+        assert_settled(&runner);
+        let hand_after = &runner
+            .state()
+            .players
+            .iter()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .hand;
+        if qualifies {
+            assert_eq!(runner.state().objects[&drawn].zone, Zone::Hand);
+            assert_eq!(hand_after.len(), hand_before.len() + 1);
+            for id in [a, b] {
+                assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
+            }
+        } else {
+            assert_eq!(hand_after, &hand_before);
+        }
     }
 }
