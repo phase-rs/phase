@@ -131,17 +131,23 @@ it("retains desktop app-version and updater reachability", async () => {
 });
 
 it.each([
-  { compact: false, preview: true, origin: "https://preview.phase-rs.dev", shown: true },
-  { compact: true, preview: true, origin: "https://preview.phase-rs.dev", shown: true },
-  { compact: false, preview: false, origin: "https://preview.phase-rs.dev", shown: false },
-  { compact: true, preview: false, origin: "https://preview.phase-rs.dev", shown: false },
-  { compact: false, preview: true, origin: "https://phase-rs.dev", shown: false },
-  { compact: true, preview: true, origin: "https://phase-rs.dev", shown: false },
+  { compact: false, preview: true, origin: "https://preview.phase-rs.dev", shown: true, canCheckForUpdates: false },
+  { compact: true, preview: true, origin: "https://preview.phase-rs.dev", shown: true, canCheckForUpdates: false },
+  { compact: true, preview: true, origin: "https://preview.phase-rs.dev", shown: true, canCheckForUpdates: true },
+  { compact: false, preview: false, origin: "https://preview.phase-rs.dev", shown: false, canCheckForUpdates: false },
+  { compact: true, preview: false, origin: "https://preview.phase-rs.dev", shown: false, canCheckForUpdates: false },
+  { compact: true, preview: false, origin: "https://preview.phase-rs.dev", shown: false, canCheckForUpdates: true },
+  { compact: false, preview: true, origin: "https://phase-rs.dev", shown: false, canCheckForUpdates: false },
+  { compact: true, preview: true, origin: "https://phase-rs.dev", shown: false, canCheckForUpdates: false },
+  { compact: true, preview: true, origin: "https://phase-rs.dev", shown: false, canCheckForUpdates: true },
 ])(
-  "shows the build hash only on preview builds at the preview origin (compact=$compact, preview=$preview, origin=$origin)",
-  ({ compact, preview, origin, shown }) => {
+  "shows the build hash only on preview builds at the preview origin (compact=$compact, preview=$preview, origin=$origin, canCheckForUpdates=$canCheckForUpdates)",
+  ({ compact, preview, origin, shown, canCheckForUpdates }) => {
     vi.stubGlobal("__IS_PREVIEW_BUILD__", preview);
     setOrigin(origin);
+    if (canCheckForUpdates) {
+      mocks.tauri.mockReturnValue(false);
+    }
     render(<BuildBadge compact={compact} inline />);
     expect(screen.getByText(`v${__APP_VERSION__}`)).toBeInTheDocument();
     if (shown) expect(screen.getByText(__BUILD_HASH__)).toBeInTheDocument();
@@ -152,6 +158,16 @@ it.each([
         "href",
         shown ? `${__GIT_REPO_URL__}/commit/${__BUILD_HASH__}` : __GIT_REPO_URL__,
       );
+    } else if (canCheckForUpdates) {
+      const button = screen.getByRole("button", { name: "buildBadge.checkForUpdates" });
+      expect(button).toBeInTheDocument();
+      if (shown) {
+        expect(button).toHaveTextContent(__BUILD_HASH__);
+      } else {
+        expect(button).not.toHaveTextContent(__BUILD_HASH__);
+      }
+    } else {
+      expect(screen.queryByRole("button", { name: "buildBadge.checkForUpdates" })).not.toBeInTheDocument();
     }
   },
 );
