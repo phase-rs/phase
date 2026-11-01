@@ -1084,7 +1084,26 @@ fn a_frozen_v78_mode_choice_keeps_its_announcement_fold() {
         "v78 folded the {{1}}-less at announcement"
     );
 
-    let mut runner = restore_json(json);
+    // CR 611.2e: the frozen capture predates the onset record and holds Breya's printed
+    // onset-admitting ability nodes, so the production admission refuses its bytes as-is.
+    assert!(
+        value["state"]
+            .get(engine::types::game_state::ABILITY_ONSET_RECORD_FIELD)
+            .is_none(),
+        "reach guard: the frozen capture carries no onset record"
+    );
+    let refusal = serde_json::from_str::<PersistedGameState>(json)
+        .expect_err("a pre-onset capture holding onset-admitting nodes is refused")
+        .to_string();
+    assert!(
+        refusal.starts_with("RESTORE_INCOMPATIBLE_PRE_ENTRY_ONSET:"),
+        "{refusal}"
+    );
+
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    let mut runner = restore_json(&engine::types::game_state::record_captured_onsets_json(
+        json,
+    ));
     let find = |runner: &GameRunner, name: &str| {
         runner
             .state()

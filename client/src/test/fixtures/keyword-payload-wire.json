@@ -350,11 +350,14 @@
     },
     {
       "Morph": {
-        "generic": 2,
-        "shards": [
-          "Red"
-        ],
-        "type": "Cost"
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
       }
     },
     {
@@ -576,11 +579,14 @@
     },
     {
       "Entwine": {
-        "generic": 2,
-        "shards": [
-          "Red"
-        ],
-        "type": "Cost"
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
       }
     },
     {
@@ -1083,12 +1089,36 @@
       }
     },
     {
+      "Entwine": {
+        "data": {
+          "generic": 2,
+          "shards": [
+            "Red"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
       "Disguise": {
         "generic": 1,
         "shards": [
           "WhiteBlue"
         ],
         "type": "Cost"
+      }
+    },
+    {
+      "Morph": {
+        "data": {
+          "generic": 2,
+          "shards": [
+            "Red"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
       }
     },
     {

@@ -2,6 +2,7 @@
 //! battlefield-departure event that created them.
 
 use engine::ai_support::legal_actions;
+use engine::game::combat::AttackTarget;
 use engine::game::coverage::card_face_gaps;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -432,6 +433,219 @@ fn delayed_put_its_counters_on_target_creature() {
             "reanimate={reanimate}: CR 122.8 copies the departed creature's three +1/+1 counters"
         );
     }
+}
+
+const ATTACK_DELAYED_PUT_ITS: &str = "This creature enters with an oil counter on it.\nWhenever this creature attacks, at the beginning of the next end step, put its counters on target creature you control.";
+const BATTLEGROWTH: &str = "Put a +1/+1 counter on target creature.";
+const CLOUDSHIFT: &str = "Exile target creature you control, then return that card to the battlefield under your control.";
+
+/// The carrier attacks, so its attack trigger creates the end-step delayed
+/// trigger; in the postcombat main phase Battlegrowth grows the carrier after
+/// that trigger captured it and, when `flicker`, Cloudshift then returns it as
+/// a new object carrying only its own enters-with oil counter. Returns the
+/// runner after the delayed trigger resolved, the recipient, and the carrier's
+/// counters as it last existed before the flicker.
+fn attack_put_its_board(
+    flicker: bool,
+) -> (
+    GameRunner,
+    ObjectId,
+    std::collections::HashMap<CounterType, u32>,
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    seed_libraries(&mut scenario);
+    let carrier = scenario
+        .add_creature_from_oracle(P0, "Counter Carrier", 2, 2, ATTACK_DELAYED_PUT_ITS)
+        .id();
+    let recipient = scenario.add_creature(P0, "Recipient", 2, 2).id();
+    scenario.with_counter(carrier, CounterType::Plus1Plus1, 3);
+    let growth = scenario
+        .add_spell_to_hand_from_oracle(P0, "Battlegrowth", true, BATTLEGROWTH)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let cloudshift = scenario
+        .add_spell_to_hand_from_oracle(P0, "Cloudshift", true, CLOUDSHIFT)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(carrier, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("declare the carrier as an attacker");
+    for _ in 0..400 {
+        let state = runner.state();
+        if state.phase == Phase::PostCombatMain
+            && state.stack.is_empty()
+            && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        let action = match &state.waiting_for {
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("unexpected prompt during combat: {other:?}"),
+        };
+        runner.act(action).expect("advance through combat");
+    }
+    assert_eq!(runner.state().phase, Phase::PostCombatMain);
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "reach-guard: the attack trigger created the end-step delayed trigger"
+    );
+
+    let outcome = runner.cast(growth).target_object(carrier).resolve();
+    assert_eq!(
+        outcome.counters(carrier, CounterType::Plus1Plus1),
+        4,
+        "reach-guard: the carrier grew after the delayed trigger captured it"
+    );
+    let last_known = runner.state().objects[&carrier].counters.clone();
+    if flicker {
+        let before = runner.state().objects[&carrier].incarnation;
+        let outcome = runner.cast(cloudshift).target_object(carrier).resolve();
+        assert_eq!(outcome.zone_of(carrier), Zone::Battlefield);
+        let returned = &runner.state().objects[&carrier];
+        assert_ne!(
+            returned.incarnation, before,
+            "the returned carrier is a new object"
+        );
+        assert_eq!(
+            counter(returned, CounterType::Generic("oil".to_string())),
+            1,
+            "reach-guard: the returned carrier enters with its own oil counter"
+        );
+        assert_eq!(counter(returned, CounterType::Plus1Plus1), 0);
+    }
+    resolve_delayed_targeting(&mut runner, recipient);
+    (runner, recipient, last_known)
+}
+
+/// CR 122.8 + CR 608.2h + CR 400.7: the carrier is flickered after its
+/// delayed trigger was created. The carrier that returns is a new object, so
+/// "its counters" are the counters the attacking carrier had when it left —
+/// including the counter it gained after the trigger captured it — not the
+/// returned object's own oil counter.
+#[test]
+fn delayed_put_its_counters_reads_flickered_source_last_known_counters() {
+    let (runner, recipient, last_known) = attack_put_its_board(true);
+    let recipient = &runner.state().objects[&recipient];
+    assert_eq!(
+        counter(recipient, CounterType::Plus1Plus1),
+        4,
+        "the recipient gets the departed carrier's four +1/+1 counters"
+    );
+    assert_eq!(
+        recipient.counters, last_known,
+        "the recipient gets exactly the departed carrier's counters, none of the returned object's"
+    );
+}
+
+/// CR 608.2h: an unmoved carrier is still the object the delayed trigger
+/// captured, so its current counters — including one gained after the
+/// capture — are the ones put on the recipient.
+#[test]
+fn delayed_put_its_counters_reads_unmoved_source_current_counters() {
+    let (runner, recipient, last_known) = attack_put_its_board(false);
+    let recipient = &runner.state().objects[&recipient];
+    assert_eq!(counter(recipient, CounterType::Plus1Plus1), 4);
+    assert_eq!(recipient.counters, last_known);
+}
+
+const ENTERS_PUT_ITS: &str =
+    "When this creature enters, put its counters on target creature you control.";
+
+const ZOMBIFY: &str = "Return target creature card from your graveyard to the battlefield.";
+
+/// CR 608.2h + CR 400.7: the carrier dies holding +1/+1 counters and is
+/// returned from the graveyard, and its enters trigger captures the carrier
+/// that returned — a new object with no counters. That source is still the
+/// exact object in its expected zone, so "its counters" are its own current
+/// (zero) counters, never the died carrier's counters the same-id LKI cache
+/// still holds this step.
+#[test]
+fn put_its_counters_reads_current_returned_source_not_same_id_lki() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    seed_libraries(&mut scenario);
+    let carrier = scenario
+        .add_creature_from_oracle(P0, "Counter Carrier", 2, 2, ENTERS_PUT_ITS)
+        .id();
+    let recipient = scenario.add_creature(P0, "Recipient", 2, 2).id();
+    scenario.with_counter(carrier, CounterType::Plus1Plus1, 3);
+    let vindicate = scenario
+        .add_spell_to_hand_from_oracle(P0, "Vindicate", false, VINDICATE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let zombify = scenario
+        .add_spell_to_hand_from_oracle(P0, "Zombify", false, ZOMBIFY)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    let before = runner.state().objects[&carrier].incarnation;
+    let outcome = runner.cast(vindicate).target_object(carrier).resolve();
+    assert_eq!(outcome.zone_of(carrier), Zone::Graveyard);
+    let outcome = runner
+        .cast(zombify)
+        // Zombify's graveyard slot can only take the carrier; the recipient is
+        // listed first so the enters trigger's "target creature you control"
+        // slot, which the returned carrier could also fill, takes it.
+        .target_objects(&[recipient, carrier])
+        .resolve();
+
+    assert_eq!(outcome.zone_of(carrier), Zone::Battlefield);
+    assert!(
+        outcome.events().iter().any(|event| matches!(
+            event,
+            engine::types::events::GameEvent::BecomesTarget {
+                target: TargetRef::Object(target),
+                source_id,
+                ..
+            } if *target == recipient && *source_id == carrier
+        )),
+        "reach-guard: the returned carrier's enters trigger targets the recipient"
+    );
+    assert!(
+        outcome.events().iter().any(|event| matches!(
+            event,
+            engine::types::events::GameEvent::EffectResolved {
+                kind: engine::types::ability::EffectKind::MoveCounters,
+                source_id,
+                ..
+            } if *source_id == carrier
+        )),
+        "reach-guard: the returned carrier's enters trigger resolved its counter clause"
+    );
+    let state = runner.state();
+    let returned = &state.objects[&carrier];
+    assert_ne!(
+        returned.incarnation, before,
+        "the returned carrier is a new object"
+    );
+    assert!(
+        returned.counters.is_empty(),
+        "reach-guard: the returned carrier has no counters of its own"
+    );
+    assert_eq!(
+        state.lki_cache[&carrier]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied(),
+        Some(3),
+        "reach-guard: the same-id LKI cache still holds the departed carrier's counters"
+    );
+    assert!(
+        state.objects[&recipient].counters.is_empty(),
+        "the recipient gets exactly the returned carrier's own (zero) counters"
+    );
 }
 
 #[test]

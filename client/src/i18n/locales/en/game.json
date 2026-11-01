@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Host","waiting":"Waiting","value":"{{ms}} ms","description":"Round-trip latency to the host. A missing reply does not disconnect the game."},
+  "playerLatency": {
+    "host": "Host",
+    "waiting": "Waiting",
+    "value": "{{ms}} ms",
+    "description": "Round-trip latency to the host. A missing reply does not disconnect the game."
+  },
   "abilityBlock": {
     "badge": "Blocked",
     "cantBeActivated": "This ability can't be activated",
@@ -27,6 +32,7 @@
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
+    "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
@@ -573,6 +579,10 @@
     "initiativeTooltip": "Has the Initiative — ventures into Undercity at start of upkeep",
     "cityBlessing": "City's Blessing",
     "cityBlessingTooltip": "City's Blessing — controls ten or more permanents (Ascend)",
+    "day": "Day",
+    "dayTooltip": "It is day — permanents enter daybound; if a player casts no spells during their own turn, it becomes night next turn",
+    "night": "Night",
+    "nightTooltip": "It is night — permanents enter nightbound; if a player casts two or more spells during their own turn, it becomes day next turn",
     "enduringStory": "Enduring Story",
     "enduringStoryTooltip": "Enduring Story — gained by controlling a Storied permanent and three or more artifacts, legendary permanents, and/or Sagas; lasts for the rest of the game",
     "dungeonAriaLabel": "Venturing in {{name}}, {{roomName}}, room {{room}} of {{total}}",
@@ -869,7 +879,7 @@
     "targetingLabel": "Targeting {{label}}",
     "titleTargets": "Targets: {{targets}}",
     "titlePaid": "Paid: {{paid}}",
-    "titleContext": "Context: {{context}}",
+    "titleContext": "Context: {{items}}",
     "revealedCards": "Revealed: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} mana",
@@ -908,6 +918,8 @@
     "chooseCreatureTokenToPopulate": "Choose a creature token to populate",
     "chooseReturnAsAuraTarget": "Choose a permanent to enchant",
     "chooseTokenHost": "Choose a host for the token",
+    "chooseOneHighlighted": "Choose one of the highlighted options",
+    "chooseUpToOneHighlighted": "Choose up to one of the highlighted options",
     "tapUntappedCreatures_one": "Tap {{count}} untapped creature",
     "tapUntappedCreatures_other": "Tap {{count}} untapped creatures",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -1367,7 +1379,8 @@
     "passwordPrompt": "This room requires a password:",
     "toasts": {
       "connectionFailed": "Connection failed. Retry or change server in Settings.",
-      "eliminatedSpectating": "You have been eliminated. Now spectating."
+      "eliminatedSpectating": "You have been eliminated. Now spectating.",
+      "retainedTerminalUnreadable": "Retained terminal delivery could not be read"
     },
     "resumeReset": {
       "appUpdated": "The app was updated and your saved game is incompatible with the new version.",
@@ -1583,6 +1596,7 @@
     "effectZone": {
       "titleSacrifice": "Sacrifice",
       "titleTopdeck": "Put on Library",
+      "titleBottomdeck": "Put on Library",
       "titleBattlefield": "Put onto Battlefield",
       "titleHand": "Return",
       "titleExile": "Exile",
@@ -1602,6 +1616,12 @@
       "subtitleTopdeckUpTo_other": "Choose up to {{count}} cards to put on top of your library",
       "subtitleTopdeckRange_one": "Choose {{min}}-{{count}} card to put on top of your library",
       "subtitleTopdeckRange_other": "Choose {{min}}-{{count}} cards to put on top of your library",
+      "subtitleBottomdeckExact_one": "Choose {{count}} card to put on the bottom of your library",
+      "subtitleBottomdeckExact_other": "Choose {{count}} cards to put on the bottom of your library",
+      "subtitleBottomdeckUpTo_one": "Choose up to {{count}} card to put on the bottom of your library",
+      "subtitleBottomdeckUpTo_other": "Choose up to {{count}} cards to put on the bottom of your library",
+      "subtitleBottomdeckRange_one": "Choose {{min}}-{{count}} card to put on the bottom of your library",
+      "subtitleBottomdeckRange_other": "Choose {{min}}-{{count}} cards to put on the bottom of your library",
       "subtitleBattlefieldExact_one": "Choose {{count}} card to put onto the battlefield",
       "subtitleBattlefieldExact_other": "Choose {{count}} cards to put onto the battlefield",
       "subtitleBattlefieldUpTo_one": "Choose up to {{count}} card to put onto the battlefield",
@@ -1647,14 +1667,17 @@
       "labelSkip": "Skip",
       "labelDecline": "Decline",
       "labelPutOnTop": "Put on top ({{order}})",
+      "labelPutOnBottom": "Put on bottom ({{order}})",
       "labelConfirm": "Confirm ({{selected}}/{{count}})",
       "labelTop": "Top ({{selected}}/{{count}})",
+      "labelBottom": "Bottom ({{selected}}/{{count}})",
       "labelPut": "Put ({{selected}}/{{count}})",
       "labelReturn": "Return ({{selected}}/{{count}})",
       "labelExile": "Exile ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "labelCast": "Cast ({{selected}}/{{count}})",
       "orderTop": "Top",
+      "orderBottom": "Bottom",
       "orderSecond": "2nd",
       "orderThird": "3rd",
       "orderFourth": "4th",
@@ -2370,6 +2393,22 @@
     "selfManaValue": "its mana value",
     "manaCostReduced": "its mana cost reduced by {{reduction}}",
     "spliceOnto": "onto {{subtype}} {{cost}}",
+    "sacrificeArtifact_few": "Sacrifice {{count}} artifacts",
+    "sacrificeArtifact_many": "Sacrifice {{count}} artifacts",
+    "sacrificeArtifact_one": "Sacrifice an artifact",
+    "sacrificeArtifact_other": "Sacrifice {{count}} artifacts",
+    "sacrificeCreature_few": "Sacrifice {{count}} creatures",
+    "sacrificeCreature_many": "Sacrifice {{count}} creatures",
+    "sacrificeCreature_one": "Sacrifice a creature",
+    "sacrificeCreature_other": "Sacrifice {{count}} creatures",
+    "sacrificeLand_few": "Sacrifice {{count}} lands",
+    "sacrificeLand_many": "Sacrifice {{count}} lands",
+    "sacrificeLand_one": "Sacrifice a land",
+    "sacrificeLand_other": "Sacrifice {{count}} lands",
+    "sacrificePermanent_few": "Sacrifice {{count}} permanents",
+    "sacrificePermanent_many": "Sacrifice {{count}} permanents",
+    "sacrificePermanent_one": "Sacrifice a permanent",
+    "sacrificePermanent_other": "Sacrifice {{count}} permanents",
     "wardDiscardAtRandom_few": "discard {{count}} cards at random",
     "wardDiscardAtRandom_many": "discard {{count}} cards at random",
     "wardDiscardAtRandom_one": "discard a card at random",
@@ -2516,6 +2555,7 @@
     "triggerFallback": "Trigger {{number}}"
   },
   "costReductionOrder": {
+    "announcedHybrids": "Announced hybrid payments",
     "eyebrow": "Cost Reduction Order",
     "title": "Order Your Cost Reductions",
     "subtitle": "These reductions lock in a different total depending on the order you apply them (CR 601.2f). The top of this list is applied first.",
@@ -2706,6 +2746,9 @@
     "player": "Player",
     "life": "Life",
     "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
     "count": "Count",
     "drawCards": "Draw Cards",
     "mill": "Mill",
@@ -2721,6 +2764,8 @@
     "delta": "Delta",
     "modifyCounters": "Modify Counters",
     "modifyEnergy": "Modify Energy",
+    "givePlayerCounters": "Give Counters",
+    "giveEnergy": "Give Energy",
     "browseDescription": "Opens a modal of your library in randomized order. Click a card to move it to any zone, or use the quick Battlefield / Hand buttons.",
     "browseLibrary": "Browse Library",
     "infiniteMana": "Infinite Mana",
@@ -2873,6 +2918,36 @@
       "winner": "{{name}} won the contest.",
       "tie": "It's a tie — nothing happens.",
       "cancelled": "The contest was cancelled — nothing happens."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

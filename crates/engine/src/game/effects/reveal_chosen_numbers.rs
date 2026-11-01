@@ -1,4 +1,4 @@
-use crate::types::ability::{Effect, EffectError, EffectKind, PlayerFilter, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
@@ -70,10 +70,4 @@ pub fn resolve(
         subject: None,
     });
     Ok(())
-}
-
-/// The default population when a card does not name one. "Reveal those numbers"
-/// with no subject means every player who chose (CR 101.4).
-pub(crate) fn default_players() -> PlayerFilter {
-    PlayerFilter::All
 }

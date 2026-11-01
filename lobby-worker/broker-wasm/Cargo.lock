@@ -186,7 +186,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "lobby-broker"
-version = "0.117.0"
+version = "0.119.0"
 dependencies = [
  "phase-engine",
  "serde",
@@ -238,13 +238,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "phase-ast"
+version = "0.119.0"
+dependencies = [
+ "im",
+ "nom",
+ "serde",
+ "serde_ignored",
+ "serde_json",
+ "strum",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "phase-engine"
-version = "0.117.0"
+version = "0.119.0"
 dependencies = [
  "im",
  "indexmap",
  "nom",
  "petgraph",
+ "phase-ast",
+ "phase-parser",
  "rand",
  "rand_chacha",
  "rustc-hash",
@@ -259,6 +275,20 @@ dependencies = [
  "toml",
  "tracing",
  "web-time",
+]
+
+[[package]]
+name = "phase-parser"
+version = "0.119.0"
+dependencies = [
+ "nom",
+ "phase-ast",
+ "serde",
+ "serde_json",
+ "sha2",
+ "strum",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

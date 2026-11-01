@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use engine::game::engine::{apply, apply_interaction};
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::layers::mark_layers_full;
 use engine::game::public_state::sync_waiting_for;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};

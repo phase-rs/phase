@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CostResume and DeferredLifeCostResume gain TurnFaceUp, PendingCostMoveResume gains TurnFaceUpCostMove, and Keyword::Morph supports non-mana MorphCost. Older full-game and P2P readers cannot decode the new tags."
+}

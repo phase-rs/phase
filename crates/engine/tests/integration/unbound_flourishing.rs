@@ -36,7 +36,8 @@ use engine::types::card::PrintedLoyalty;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, ConvokeMode, GameState, PayCostKind, StackEntryKind, WaitingFor,
+    CastPaymentMode, ConvokeMode, GameState, PayCostKind, PayableResource, StackEntryKind,
+    WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -860,6 +861,21 @@ fn unbound_triggers_on_an_x_mana_ability_and_copies_nothing() {
             payment_mode: CastPaymentMode::Auto,
         },
     );
+    // CR 107.3a + CR 605.3: X in the mana ability's activation cost is announced first.
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::PayAmountChoice {
+                resource: PayableResource::ManaGeneric { .. },
+                source_id,
+                pending_mana_ability: Some(_),
+                ..
+            } if *source_id == rockets
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    act(&mut runner, GameAction::SubmitPayAmount { amount: 0 });
     let WaitingFor::OrderTriggers { triggers, .. } = &runner.state().waiting_for else {
         panic!(
             "Rockets' dies trigger and Unbound's trigger wait together: {:?}",

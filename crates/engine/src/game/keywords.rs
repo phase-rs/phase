@@ -414,6 +414,29 @@ pub(crate) fn resolve_keyword_mana_cost(
     }
 }
 
+/// CR 118.6 + CR 202.1b: "An ability can also have an unpayable cost if its cost
+/// is based on the mana cost of an object with no mana cost." True when `cost` is
+/// a placeholder bound to the recipient's MANA COST (`SelfManaCost`,
+/// `SelfManaCostReduced`) and the recipient has none, so the concretized
+/// `ManaCost::NoCost` would otherwise read as "pay nothing" on the activated-
+/// ability payment path. `SelfManaValue` is excluded: a no-mana-cost object's
+/// mana value is 0 (CR 202.3a), which is a payable {0}.
+pub(crate) fn self_mana_cost_is_unpayable(
+    state: &GameState,
+    object_id: ObjectId,
+    cost: &ManaCost,
+) -> bool {
+    match cost {
+        ManaCost::SelfManaCost | ManaCost::SelfManaCostReduced { .. } => matches!(
+            resolve_keyword_mana_cost(state, object_id, cost),
+            ManaCost::NoCost
+        ),
+        // A concrete cost is payable as written; `SelfManaValue` concretizes to
+        // the recipient's mana value, which is 0 for a no-mana-cost object.
+        ManaCost::NoCost | ManaCost::Cost { .. } | ManaCost::SelfManaValue => false,
+    }
+}
+
 /// CR 601.2f + CR 602.1a: Resolve `SelfManaCost` / `SelfManaValue` placeholders
 /// anywhere in an `AbilityCost` tree before affordability or payment. The mana
 /// payment path treats those placeholders as free, so every payable cost must
@@ -485,21 +508,24 @@ pub(crate) fn concretize_encore_mana_value_in_ability_cost(
     }
 }
 
-/// CR 702.97a / CR 702.128a / CR 702.129a / CR 702.141a + CR 602.1a: Resolve a
-/// `ManaCost::SelfManaCost` or `ManaCost::SelfManaValue` payload carried by a
-/// granted graveyard activated keyword to the recipient card's concrete mana
-/// sub-cost. Encore / Scavenge / Embalm / Eternalize are graveyard *activated*
-/// abilities whose mana sub-cost is paid through `AbilityCost::Mana`, and that
-/// payment path treats self-referential placeholders as free — so they must be
-/// concretized before the activated ability is synthesized. Non-self-referential
-/// keywords (printed Embalm `{3}{W}`, Encore `{5}`, or any other keyword) pass
-/// through unchanged.
+/// CR 702.84a / CR 702.97a / CR 702.128a / CR 702.129a / CR 702.141a + CR 602.1a:
+/// Resolve a `ManaCost::SelfManaCost` or `ManaCost::SelfManaValue` payload
+/// carried by a granted graveyard activated keyword to the recipient card's
+/// concrete mana sub-cost. Unearth / Encore / Scavenge / Embalm / Eternalize are
+/// graveyard *activated* abilities whose mana sub-cost is paid through
+/// `AbilityCost::Mana`, and that payment path treats self-referential
+/// placeholders as free — so they must be concretized before the activated
+/// ability is synthesized. Non-self-referential keywords (printed Embalm
+/// `{3}{W}`, Encore `{5}`, or any other keyword) pass through unchanged.
 pub fn resolve_self_cost_graveyard_activated_keyword(
     state: &GameState,
     object_id: ObjectId,
     keyword: &Keyword,
 ) -> Keyword {
     match keyword {
+        Keyword::Unearth(cost) => {
+            Keyword::Unearth(resolve_keyword_mana_cost(state, object_id, cost))
+        }
         Keyword::Encore(cost) => Keyword::Encore(resolve_keyword_mana_cost(state, object_id, cost)),
         Keyword::Scavenge(cost) => {
             Keyword::Scavenge(resolve_keyword_mana_cost(state, object_id, cost))

@@ -1,0 +1,1464 @@
+//! Unified parsing context for pronoun and reference resolution.
+//!
+//! Flat superset of the former effect-chain and nom ParseContext structs.
+//! All parser branches import from this single location (Phase 50, D-01).
+
+use super::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_nom::target::{ControllerPhrase, ControllerSubject, PlayerAnaphor};
+use crate::types::ability::{
+    ChosenGroupId, ControllerRef, CostCategory, Duration, MultiTargetSpec, ObjectScope,
+    PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetChoiceTiming, TargetFilter,
+    TargetSelectionMode, ZoneChoiceCandidateSource,
+};
+use crate::types::card_type::CoreType;
+use crate::types::zones::Zone;
+
+/// The players an anaphoric controller phrase can bind to, read from the parse
+/// context (`ParseContext::player_antecedents`) or supplied by a named seed.
+/// `None` means no antecedent is in scope.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PlayerAntecedents {
+    /// CR 608.2c + CR 115.1a: the player the effect chain itself declared, the
+    /// nearer antecedent of "that player" than `third_person`.
+    pub declared_that_player: Option<ControllerRef>,
+    /// CR 608.2c: the chain-declared player "they" names, set only when the
+    /// chain declared exactly one player; the nearer antecedent of "they" than
+    /// `third_person`.
+    pub declared_they: Option<ControllerRef>,
+    /// The referent of "that player" / "they" when no chain-declared rung above applies.
+    pub third_person: Option<ControllerRef>,
+    /// The referent of "its controller" / "their controller".
+    pub object_controller: Option<ControllerRef>,
+}
+
+impl PlayerAntecedents {
+    /// CR 109.5 + CR 608.2c: inside a "for each" iteration body, "they" is the
+    /// iterating player unless the context already introduced one. Permanent
+    /// seed: `ScopedPlayer` falls back to the source controller at runtime when
+    /// no iteration is active. A chain-declared player is not an antecedent
+    /// here.
+    pub(crate) fn for_each_iteration(ctx: &ParseContext) -> Self {
+        PlayerAntecedents {
+            third_person: ctx
+                .relative_player_scope
+                .clone()
+                .or(Some(ControllerRef::ScopedPlayer)),
+            object_controller: ctx.player_antecedents().object_controller,
+            ..Default::default()
+        }
+    }
+
+    /// CR 109.5: a context-free "for each" body, where "they" is the iterating
+    /// player. Permanent seed.
+    pub(crate) fn for_each_iteration_unscoped() -> Self {
+        PlayerAntecedents {
+            third_person: Some(ControllerRef::ScopedPlayer),
+            ..Default::default()
+        }
+    }
+
+    /// CR 109.4 + CR 115.1: in "the number of basic land types among lands they
+    /// control", "they" is a target player, not an iterating one. Permanent
+    /// seed.
+    pub(crate) fn basic_land_type_count() -> Self {
+        PlayerAntecedents {
+            third_person: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        }
+    }
+}
+
+/// The single binder for a parsed controller phrase. A direct phrase names its
+/// own player; an anaphor binds to its antecedent, and with none in scope the
+/// result is `None` (fail closed). Tense does not affect the binding.
+pub(crate) fn bind_controller_phrase(
+    phrase: &ControllerPhrase,
+    antecedents: &PlayerAntecedents,
+) -> Option<ControllerRef> {
+    match &phrase.subject {
+        ControllerSubject::Direct(controller) => Some(controller.clone()),
+        // CR 608.2c: "that player" / "they" refer to a player introduced
+        // earlier in the ability; one the chain itself declared is nearer.
+        ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer) => antecedents
+            .declared_that_player
+            .clone()
+            .or_else(|| antecedents.third_person.clone()),
+        ControllerSubject::Anaphoric(PlayerAnaphor::They) => antecedents
+            .declared_they
+            .clone()
+            .or_else(|| antecedents.third_person.clone()),
+        ControllerSubject::Anaphoric(PlayerAnaphor::ItsController) => {
+            antecedents.object_controller.clone()
+        }
+    }
+}
+
+/// Parser-only lookahead for token body clauses split across adjacent sentences.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenPtFollowup {
+    PowerToughness { power: PtValue, toughness: PtValue },
+}
+
+/// Parser-internal scope flag: whether the trigger CONDITION currently being
+/// parsed is a printed (card-text) trigger or a DELAYED trigger created from a
+/// resolving effect chain. This is parser scaffolding, not a rule implementation,
+/// so it carries no CR annotation. Anaphoric subjects that only bind as delayed
+/// back-references to the creating ability — the gendered pronoun "he"/"she" (→
+/// `SelfRef`) and the plural set "those creatures"/"any of those creatures" (→
+/// `ParentTarget`) — are recognized ONLY under `Delayed`, so a standalone printed
+/// trigger that happens to contain those words stays coverage-honest (`Unknown`)
+/// instead of binding its source to `Any`. A typed scope rather than a bare bool
+/// per the codebase's "typed enum over bool" convention.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TriggerConditionScope {
+    /// A trigger printed on the card. Delayed-only anaphoric subjects stay `Unknown`.
+    #[default]
+    Printed,
+    /// A delayed trigger condition created from a resolving effect chain
+    /// (set by `try_parse_whenever_this_turn`).
+    Delayed,
+}
+
+/// CR 105.4: whether THIS parse can supply the `Effect::Choose(Color)` that a
+/// printed "of the color of your choice" object-filter qualifier needs.
+///
+/// CONTAINMENT, stated honestly: `ChainBound` is WRITTEN at exactly one
+/// struct-literal line (the effect-chain chunk context in
+/// `oracle_effect/mod.rs`), but `ParseContext` derives `Clone`, so the value is
+/// INHERITED by every context cloned from that one. A clone-derived context
+/// whose result is merged back with `*ctx = ..` propagates its
+/// `pending_printed_color_choice` correctly; a throwaway clone DISCARDS it,
+/// which would stamp `FilterProp::IsChosenColor` with no injected chooser — a
+/// fail-closed, match-NOTHING filter with no `Effect::Unimplemented` and
+/// therefore no coverage signal.
+///
+/// RULE, both halves — the same two hazards `pending_damage_multi_target`
+/// documents below:
+///   1. A clone-derived `ParseContext` that is NOT merged back with `*ctx = ..`
+///      must reset this field to `Unbound` at construction. Use
+///      [`ParseContext::clone_throwaway`] rather than `.clone()` at those sites —
+///      it is the named, greppable spelling of this half of the rule, and the
+///      plain `.clone()` that remains is then a positive signal that the site
+///      really does merge back.
+///   2. A speculative sub-parse that runs against the REAL `&mut ctx` and can
+///      abandon its result must clear `pending_printed_color_choice` on the
+///      abandonment path — otherwise the surviving context carries a pending
+///      choice for a clause that was never emitted, and the chain gets a
+///      spurious colour prompt with no `IsChosenColor` anywhere. The
+///      alternative, and the shape already used elsewhere in this file's
+///      neighbourhood, is to run against a clone and commit with
+///      `*ctx = tentative_ctx` only on success.
+///
+///      AUDIT, so the next reader inherits it rather than re-deriving it: one
+///      site structurally matches this half — `parse_leading_subject_application`
+///      (`oracle_effect/subject.rs`), which is called with the real `chunk_ctx`
+///      and can abandon its result. It is UNREACHABLE for this hazard: it
+///      extracts the SUBJECT phrase, and the printed qualifier is only ever
+///      consumed off an object filter in predicate position (no card in the pool
+///      prints "of the color of your choice" in subject position). Left unedited
+///      deliberately; revisit if a subject-position printed qualifier ever
+///      appears. No other site runs a speculative sub-parse against the real
+///      `&mut ctx` while this gate is `ChainBound`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ChosenColorQualifierScope {
+    /// Default, and the value every `ParseContext::default()` carries — which
+    /// is every `parse_type_phrase_folding` call site, by construction of the wrapper
+    /// in `oracle_target.rs`. The printed form must NOT be consumed here.
+    #[default]
+    Unbound,
+    /// An effect-chain chunk parse. This is the SINGLE context that both opens
+    /// this channel and reads `pending_printed_color_choice` back
+    /// (`oracle_effect/mod.rs`: the chunk-ctx literal and the chunk loop's
+    /// `.push()` sites), so "consumed" and "supplied" are one decision made in
+    /// one place. Phrased by role rather than by count so it cannot go stale
+    /// when the loop grows another emit arm.
+    ChainBound,
+}
+
+/// CR 608.2c + CR 608.2d: The nearest EARLIER single-card zone-choice
+/// partition in this same effect chain, and where its candidate pile came
+/// from.
+///
+/// A clause of the shape `Effect::ChooseFromZone { count: 1, zone: Exile,
+/// selection: Chosen, .. }` splits a pile into a chosen half and an unchosen
+/// complement, which is what lets the very next instruction say "the other".
+/// Which binding that complement lowers to depends on the pile's PROVENANCE,
+/// so the provenance — not a yes/no flag — is what this carries: a bare bool
+/// would collapse "no prior partition at all" and "a prior partition from a
+/// different [`ZoneChoiceCandidateSource`]" into the same `false`, and a
+/// newly added candidate source would then be silently indistinguishable from
+/// the one shape this gate is keyed to.
+///
+/// `None` means the chain has no earlier single-card exile partition at all
+/// (including the case where its nearest zone choice is some other shape).
+/// Consumers must match the carried source EXPLICITLY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriorZoneChoicePartition {
+    /// The `candidate_source` of that `ChooseFromZone` clause — i.e. where the
+    /// partitioned pile came from (`CostPaidObjects` for Coin of Fate's
+    /// cost-exiled pair, `Legacy` for Wake to Slaughter's, …).
+    pub candidate_source: ZoneChoiceCandidateSource,
+}
+
+/// Parser-only provenance: the enclosing trigger body is resolving a PROVEN
+/// zone-change event, and the pair it pins.
+///
+// CR 603.10 + CR 400.7 + CR 122.2: a trigger-body past-tense predicate ("… if
+// it had a death counter on it") reads the zone-change event object's
+// last-known information, because CR 122.2 makes the counters cease to exist
+// the moment the object changes zones. Only a trigger head whose shape PROVES
+// the pair (today: the dies head, battlefield → graveyard) may establish it.
+//
+/// SAFE BY CONTRACT, NOT BY `Clone`. Ordinary `Clone` PRESERVES this value,
+/// because `ParseContext` has an established clone-and-commit idiom: a
+/// speculative parse clones the context, and on success writes it back with
+/// `*ctx = <derived>` (`try_parse_radiance_color_fanout_damage`'s
+/// `tentative_ctx`, the `body_ctx`/`candidate_ctx` token paths). A `Clone` that
+/// silently dropped state would make every one of those commits erase the
+/// enclosing trigger's authority — the same defect
+/// [`ParseContext::clone_throwaway`] was written to avoid for
+/// `ChosenColorQualifierScope`.
+///
+/// Entering an INDEPENDENT body is therefore spelled by NAME, never implied by
+/// a clone: [`ParseContext::clone_for_independent_body`] for a body that is kept
+/// (a CR 603.12 reflexive trigger, a CR 603.1 nested printed trigger line), and
+/// [`ParseContext::clone_throwaway`] for a sub-parse whose context is discarded
+/// (a speculative probe, a branch alternative). Both reset this field; a plain
+/// `.clone()` continues the same body.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TriggerZoneChangeProvenance(Option<(Zone, Zone)>);
+
+impl TriggerZoneChangeProvenance {
+    /// No enclosing zone-change authority.
+    pub(crate) fn none() -> Self {
+        Self(None)
+    }
+
+    /// The enclosing trigger head PROVED this origin → destination pair.
+    pub(crate) fn established(origin: Zone, destination: Zone) -> Self {
+        Self(Some((origin, destination)))
+    }
+
+    /// The proven `(origin, destination)` pair, or `None` when this parse has no
+    /// enclosing zone-change authority.
+    pub(crate) fn as_pair(&self) -> Option<(Zone, Zone)> {
+        self.0
+    }
+}
+
+/// CR 608.2c + CR 115.1: what a bare card-set aggregate surface (the
+/// demonstrative "those cards" shape) binds to in this chunk — either a
+/// chain-set cause or the ability's own chosen targets. A typed two-leaf
+/// binding rather than a bare `TrackedAnaphorSource`, which under-expresses
+/// the referent axis (a target-set referent is not a chain-set cause).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BareCardAggregateBinding {
+    /// A chain-set cause (mill, discard, sacrifice, …).
+    ChainSet(crate::types::ability::TrackedAnaphorSource),
+    /// The ability's own chosen targets (`TargetedObjects { slot: None }`).
+    AbilityTargets,
+}
+
+/// CR 601.2c + CR 608.2c: the target slots announced by the earlier clauses of
+/// an effect chain, for resolving a demonstrative ("that creature") to the
+/// declared slot it names. Only the stable prefix is numbered: once a clause
+/// announces a variable number of targets ("up to one target …", "any number
+/// of target …"), a declined slot would renumber every later declared slot at
+/// runtime, so that clause's slots and every later slot are recorded without
+/// an index — they still take part in ambiguity checks but cannot be bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeclaredSlotRegistry {
+    /// A clause shape whose declared numbering this walk cannot reproduce
+    /// (multi-slot effects, else-branches, …). Nothing binds.
+    Indeterminate,
+    /// Every announced slot of the earlier clauses, in declared order.
+    Known(Vec<DeclaredSlotEntry>),
+}
+
+impl Default for DeclaredSlotRegistry {
+    fn default() -> Self {
+        DeclaredSlotRegistry::Known(Vec::new())
+    }
+}
+
+/// One announced target slot of an earlier clause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredSlotEntry {
+    /// The declared-slot index (the `declared_targets_in_chain` numbering),
+    /// `None` past the stable prefix.
+    pub index: Option<usize>,
+    /// The slot's target filter, matched against a demonstrative's noun.
+    pub filter: TargetFilter,
+}
+
+/// CR 700.2: the body a [`ParseContext`] parses — a whole ability, or one mode
+/// of a modal spell or ability.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BodyScope {
+    #[default]
+    WholeAbility,
+    ModalMode,
+}
+
+/// CR 608.2k: the object a trigger condition introduces for its body's bare
+/// object pronouns, where the pinned `TargetFilter` is ambiguous on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionObjectAntecedent {
+    /// CR 509.3c: the attacker of a bare "<creature> becomes blocked" condition.
+    BlockedAttacker,
+}
+
+/// Unified parsing context — threaded through all parser branches for
+/// pronoun/reference resolution ("it", "that creature", "that many").
+///
+/// Callers set only the fields they need; all fields are Default-able (D-02).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParseContext {
+    /// The current subject (resolved target — "it", "that creature").
+    pub subject: Option<TargetFilter>,
+    /// Card name for self-reference (~) normalization.
+    pub card_name: Option<String>,
+    /// CR 707.9a + CR 603.1: Index of the printed trigger whose body is being
+    /// parsed. Consumed by BecomeCopy "has this ability" arm.
+    pub current_trigger_index: Option<usize>,
+    /// CR 707.9a + CR 602.1: Index of the printed activated ability whose
+    /// effect is being parsed. Consumed by BecomeCopy "has this ability" arm
+    /// inside activated abilities (Thespian's Stage, Cytoshape, …).
+    pub current_ability_index: Option<usize>,
+    /// CR 701.21a + CR 608.2k: The actor performing the effect ("you", "an opponent").
+    pub actor: Option<ControllerRef>,
+    /// Resolved quantity reference ("that many", "that much").
+    #[allow(dead_code)] // Retained for future nom combinator consumers (D-02).
+    pub quantity_ref: Option<QuantityRef>,
+    /// Whether we are inside a trigger effect (enables event context refs).
+    ///
+    /// Consumed by `oracle_replacement::parse_oneshot_target_source_prevent`
+    /// (the Awe Strike one-shot target-source prevention branch), which
+    /// rejects the "that creature" anaphor inside a trigger body: there "that
+    /// creature" is an event-context anaphor resolved by the trigger machinery,
+    /// not a target-source capture (Impulsive Maneuvers keeps its fall-through).
+    /// A declared "target creature" subject inside a trigger body fails closed
+    /// to `Unimplemented` (Ria Ivor's shield is not yet supported).
+    pub in_trigger: bool,
+    /// Contextual source for the exact bare aggregate surface "those cards".
+    /// Set per effect-chain chunk from the nearest typed producer, or from a
+    /// proven trigger subject batch when no compatible chain producer wins.
+    /// A two-leaf binding (never a bare `TrackedAnaphorSource`, which
+    /// under-expresses the referent axis): a chain-set cause or the ability's
+    /// own targets (CR 608.2c + CR 115.1).
+    pub bare_card_aggregate_source: Option<BareCardAggregateBinding>,
+    /// CR 611.2a: the durational scope the clause currently being lowered stated
+    /// at a printed position the clause BODY can no longer see, because the
+    /// positional strip seams peel it before the body parser runs.
+    ///
+    /// Both printed positions are peeled: a leading "Until end of turn, …" by
+    /// `strip_leading_duration` (either the chunk expansion in
+    /// `sequence::expand_leading_duration_chunks` or the dispatch in
+    /// `parse_effect_clause_inner`), and a trailing "… this turn" by
+    /// `strip_trailing_duration` in `lower_imperative_clause`. MEASURED, not
+    /// assumed: Locke, Treasure Hunter ("Until end of turn, you may cast a spell
+    /// from among those cards") and Chiss-Goria, Forge Tyrant ("… from among them
+    /// this turn") reach the `from among` mechanism decision as
+    /// `"a spell from among those cards"` and `"an artifact spell from among them"`
+    /// — byte-identical to the NO-duration siblings Nathan Drake and Sanwell,
+    /// whose CR 608.2g resolution window must not become a lingering permission.
+    /// The fact is therefore unavailable in the fragment at any position, and the
+    /// only honest channel is to carry it.
+    ///
+    /// Third printed position, for completeness: a duration stated MID-clause
+    /// ("… from among them this turn without paying their mana costs" — Ral,
+    /// Leyline Prodigy) is never peeled and is read straight off the fragment by
+    /// `oracle_effect::clause_states_a_duration`. This field is the other two.
+    ///
+    /// LIFECYCLE — save/restore, never set/clear. Each strip seam swaps its own
+    /// value in around the body parse and restores the previous one afterwards,
+    /// and a seam that peeled nothing leaves the enclosing value intact (a
+    /// trailing seam that found no duration must not clobber the leading one its
+    /// own caller set). A set/clear lifecycle would fail OPEN: a duration stated
+    /// by clause N could promote a capped clause N+1 that states none, granting a
+    /// lingering permission the card never printed. `a_stated_duration_does_not_leak_into_the_next_clause`
+    /// is the pin.
+    ///
+    /// Consumed by `oracle_effect::from_among_batch_cast_driver` to promote a
+    /// paid, duration-scoped, capped-at-one `from among` batch grant to the
+    /// `GrantCastingPermission { PlayFromExile { single_use: true } }` shape.
+    pub stated_clause_duration: Option<Duration>,
+    /// CR 608.2c + CR 400.7: the REST-partition destination zone of the
+    /// nearest preceding `Effect::Dig` in this chain whose kept and rest
+    /// destinations differ (a genuine reveal/split, e.g. Dihada, Binder of
+    /// Wills's "... into your hand and the rest into your graveyard").
+    /// `None` when no such split precedes this chunk, INCLUDING when the
+    /// nearest tracked-set producer is a single-pile mover (`ChangeZoneAll`,
+    /// `Destroy`, `Mill`, ...) with no complementary kept partition to
+    /// disambiguate from (Pinnacle Starcage's "put each card exiled with this
+    /// artifact into its owner's graveyard, then create ... for each card put
+    /// into a graveyard this way" — every exiled card lands in the SAME
+    /// graveyard pile, so the bare `TrackedSetSize` default is already
+    /// correct there). Set per effect-chain chunk from a lookback over
+    /// `builder.clauses()`, mirroring `bare_card_aggregate_source`. Consumed
+    /// by the Token "for each" dispatch (`oracle_effect::mod::try_parse_for_each_effect`)
+    /// to bind a bare "card put into a/your/their graveyard this way" count to
+    /// the dedicated `PutIntoGraveyard` cause only when a real Dig split
+    /// actually precedes it.
+    pub nearest_dig_rest_zone: Option<crate::types::zones::Zone>,
+    /// Whether we are inside a replacement effect.
+    #[allow(dead_code)] // Retained for future nom combinator consumers (D-02).
+    pub in_replacement: bool,
+    /// Parser-internal scope: whether the trigger CONDITION being parsed is printed
+    /// card text or a DELAYED trigger created from a resolving effect chain. Gates
+    /// delayed-only anaphoric subject resolution; see [`TriggerConditionScope`].
+    pub trigger_condition_scope: TriggerConditionScope,
+    /// CR 608.2k + CR 601.2a: Event object that bare object pronouns in the
+    /// current trigger body ("it", "them") should bind to. Spell-cast triggers
+    /// set this to `TriggeringSource` so "Whenever you cast a spell, put it ..."
+    /// moves the spell on the stack, not the trigger source or a parent target.
+    pub object_pronoun_ref: Option<TargetFilter>,
+    /// CR 509.3c + CR 608.2k: what `object_pronoun_ref` names, when the pinned
+    /// `TargetFilter` alone doesn't say it. `ParentTarget` is also the ordinary
+    /// "it" of a spell's earlier target; under a bare "becomes blocked" trigger
+    /// condition it is the blocked attacker, which some slots (a damage source)
+    /// cannot express. Set only together with the matching pin.
+    pub condition_object_antecedent: Option<ConditionObjectAntecedent>,
+    /// CR 608.2c (rules of English — number agreement) + CR 608.2k + CR 406.6:
+    /// Antecedent for bare PLURAL object pronouns ("them"/"themselves") in the
+    /// current trigger body, introduced by a plural noun phrase in the trigger's
+    /// intervening-if ("if there are cards exiled with ~, put THEM …" → the
+    /// linked-exile pool). Deliberately separate from the singular
+    /// `object_pronoun_ref`: a plural antecedent must never capture a singular
+    /// "it", whose antecedent is the nearer chained object (River Song's Diary:
+    /// "choose one of them at random. You may cast IT" — "it" is the chosen card,
+    /// not the pool).
+    pub plural_object_pronoun_ref: Option<TargetFilter>,
+    /// CR 608.2k: Antecedent for a singular DEMONSTRATIVE ("that creature" /
+    /// "that permanent" / "that card" / "that token") in the current trigger
+    /// body. Deliberately separate from — and narrower than —
+    /// `object_pronoun_ref`, on the same principle that separates
+    /// `plural_object_pronoun_ref` from it: which references may capture a given
+    /// antecedent is a property of the surface grammar, not of the antecedent.
+    ///
+    /// Set only for the damage-RECIPIENT provenance (a demonstrative names an
+    /// object the condition acted upon), by
+    /// `oracle_trigger::trigger_demonstrative_object_ref_for_condition`. The
+    /// spell-cast provenance is excluded: "exile THAT CARD ... instead of putting
+    /// it into your graveyard as it resolves" is a replacement clause whose
+    /// demonstrative belongs to its own grammar.
+    pub demonstrative_object_ref: Option<TargetFilter>,
+    /// Accumulated diagnostics for the current card parse (Phase 52, D-07).
+    /// Replaces thread-local oracle_warnings accumulator.
+    pub diagnostics: Vec<OracleDiagnostic>,
+    /// CR 109.4 + CR 115.1: Relative-player scope for "that player controls"
+    /// resolution inside trigger effects. Replaces thread-local oracle_target_scope.
+    pub relative_player_scope: Option<ControllerRef>,
+    /// CR 608.2c + CR 109.4: Transient per-chunk `player_scope` lifted from a
+    /// subject the clause cannot carry. Two writers:
+    /// - `lower_subject_predicate_ast`, for a subject-predicate whose EFFECT
+    ///   carries no player field (the fieldless `Effect::Investigate` —
+    ///   Declaration in Stone's "That player investigates"), which
+    ///   `inject_subject_target` would otherwise drop silently;
+    /// - `bind_coordinated_player_set`, for the root of a coordinated body with
+    ///   no `TargetOnly` head ("you and that player each …"), whose
+    ///   `ParsedEffectClause` has no `player_scope` field.
+    ///
+    /// The effect-chain loop folds it into the chunk's `player_scope` local (→
+    /// `ClauseIr.player_scope` → `AbilityDefinition.player_scope`) so resolution
+    /// fans the effect out to the scoped players rather than the caster. The
+    /// chunk loop can parse a chunk's clause more than once with the live ctx,
+    /// so a writer that finds an equal value treats it as its own earlier
+    /// parse; the coordinated writer declines to the unbound gap on a different
+    /// value. Set and consumed within a single chunk parse; never serialized.
+    pub pending_player_scope: Option<PlayerFilter>,
+    /// CR 608.2c + CR 701.16a: Transient per-chunk `repeat_for` lifted from a
+    /// fieldless-effect subject-predicate that carries a "for each <filter> …
+    /// this way" SUFFIX count (Declaration in Stone's "investigate for each
+    /// nontoken creature exiled this way"). `Effect::Investigate` has no count
+    /// slot and the suffix `for each` handler is CopySpell-only, so the count is
+    /// otherwise dropped. `lower_subject_predicate_ast` records it here; the
+    /// effect-chain loop folds it into the chunk's `repeat_for` (→
+    /// `AbilityDefinition.repeat_for`), composing with `player_scope` via the
+    /// resolver's outermost-repeat driver. Set and consumed within a single
+    /// chunk parse; never serialized.
+    pub pending_repeat_for: Option<QuantityExpr>,
+    /// CR 701.38a + CR 608.2c: A count a re-parsing caller already bound for a
+    /// count head whose binder it stripped before re-parsing (the vote tally's
+    /// "a number of <tokens> equal to the number of <choice> votes" reaches the
+    /// body as the binder-less "a number of <tokens>"). Read only by
+    /// `oracle_util::parse_count_slot`'s binder-less "a number of" / absent-head
+    /// arm; an in-text binder wins over it. `parse_effect_chain_ir_body` hands it
+    /// to the first chunk only (`take()`). Never serialized.
+    pub caller_bound_count: Option<QuantityExpr>,
+    /// CR 601.2c + CR 115.4: The announced target count recovered by
+    /// `parse_each_of_target_distribution` for a "… damage to each of ⟨N⟩
+    /// ⟨noun⟩" head, produced by the SAME parse that produced the target
+    /// filter. CR 601.2c fixes the count; CR 115.4 fixes the class for the
+    /// bare-plural `targets` noun.
+    ///
+    /// Single authority for that seam, with an explicit set/reset lifecycle:
+    /// `lower_imperative_clause` clears this as the very first statement of its
+    /// body and `take()`s it immediately after `parse_imperative_effect`, so it
+    /// never outlives one clause and can never attach to an unrelated
+    /// `DealDamage`. The reset is required because `parse_imperative_effect` is
+    /// also called from sites that never consume this field (the shared-`ctx`
+    /// `try_parse_reanimate_self_and_target` sub-parse) and from speculative
+    /// sub-parses that mutate `ctx` and then discard their result.
+    ///
+    /// Two seams need more than the reset, because the reset alone is wrong in
+    /// both directions:
+    /// - The speculative recognizers that can abandon a parse mid-way
+    ///   (`try_parse_multi_target_damage_chain`,
+    ///   `try_parse_radiance_color_fanout_damage`) run against a cloned
+    ///   `ParseContext` and commit with `*ctx = tentative_ctx` only on success,
+    ///   so an abandoned attempt cannot leak a count forward.
+    /// - `try_split_damage_compound` re-enters `lower_imperative_clause` for the
+    ///   continuation, and that nested frame clears this field on entry. It
+    ///   therefore saves the primary clause's count before the sub-parse and
+    ///   restores it after, alongside the `target_chooser` save/restore.
+    ///
+    /// Set and consumed within a single chunk parse; never serialized.
+    pub pending_damage_multi_target: Option<MultiTargetSpec>,
+    /// CR 608.2c + CR 109.4: Count of `Effect::Choose { choice_type: Player }`
+    /// clauses emitted so far in the current effect chain. Each "choose a
+    /// player" / "choose a [second|third] player" clause increments this; the
+    /// 0-based index of the *next* chosen player is the current value. Used to
+    /// stamp `ControllerRef::ChosenPlayer { index }` so a dependent effect
+    /// ("they put counters on a creature they control") binds to the player
+    /// chosen by the immediately-preceding `Choose(Player)`.
+    pub chosen_player_count: u8,
+    /// CR 608.2d + CR 608.2c: Committed `ChoiceType` from a preceding
+    /// `Effect::Choose` clause, threaded forward so a later "an opponent guesses
+    /// which [value] you chose" clause embeds the printed domain in
+    /// `GuessSubject::CommittedChoice`. The choose and the guess sit in the same
+    /// ability resolution (CR 608.2c in-order instructions), not two distinct
+    /// printed abilities (CR 607.2d). Mirrors `chosen_player_count` as a
+    /// parse-time accumulator (not serialized).
+    pub pending_choice_type: Option<crate::types::ability::ChoiceType>,
+    /// CR 105.4: gate for the printed chosen-colour object-filter qualifier.
+    /// See `ChosenColorQualifierScope`, including its clone-inheritance rule.
+    pub chosen_color_qualifier: ChosenColorQualifierScope,
+    /// CR 105.4 + CR 608.2c: this chunk's type-phrase parse consumed a printed
+    /// "of the color of your choice" qualifier, so the chunk's clause must be
+    /// wrapped in an injected `Effect::Choose(Color)`. Carries the `ChoiceType`
+    /// the injector needs rather than a yes/no. Lifted into
+    /// `ClauseIr.printed_color_choice` by the chain chunk loop. Set and consumed
+    /// within a single chunk parse; never serialized. A speculative sub-parse that
+    /// discards its cloned context also discards this — see the scope enum's rule.
+    pub pending_printed_color_choice: Option<crate::types::ability::ChoiceType>,
+    /// CR 115.1 + CR 701.9b: Target selection mode for the most recent target
+    /// phrase parsed via `parse_target_with_ctx`. The chunk loop in
+    /// `parse_effect_chain_ir` snapshots this into the produced `ClauseIr` and
+    /// resets it to `Chosen` for the next chunk so the marker is per-clause.
+    pub target_selection_mode: TargetSelectionMode,
+    /// CR 601.2c + CR 603.3d: When set, this player (not the controller) announces
+    /// the most recent target phrase's target(s) at stack placement. Set when a
+    /// targeted "of their choice" suffix is stripped from a `ScopedPlayer`-controlled
+    /// filter ("destroy target X that player controls of their choice"). Snapshotted
+    /// into the produced `ClauseIr` alongside `target_selection_mode`.
+    pub target_chooser: Option<TargetFilter>,
+    /// CR 601.2c + CR 608.2c: Ordered target slots declared by the current
+    /// effect chain's "Choose target X and target Y" head. Index `i` is the
+    /// filter announced for the `i`-th `target` word (slot 0 = A, slot 1 = B,
+    /// …). Later clauses in the chain resolve definite anaphors ("that
+    /// Equipment", "the chosen creature", "the artifact card") to
+    /// `TargetFilter::ParentTargetSlot { index }` by matching the anaphor's noun
+    /// phrase against these filters. Threaded across chunks via a chain
+    /// loop-local and reset per effect chain in `parse_effect_chain_ir`
+    /// (alongside the existing per-chain resets), so slots never leak across
+    /// cards/abilities.
+    pub declared_target_slots: Vec<TargetFilter>,
+    /// CR 303.4 + CR 702.103: Typed self-reference for the enclosing card's
+    /// attachment host. Set to `Some(TargetFilter::AttachedTo)` only when the
+    /// card being parsed is an Aura or has the Bestow keyword (i.e. it can be
+    /// attached to a permanent). When set, a `"that creature"` anaphor that the
+    /// generic target parser resolves to `ParentTarget` is remapped to this
+    /// host filter — for an Aura/bestow card "that creature" is the enchanted
+    /// host (Springheart Nantuko's landfall copy-token). `None` for non-Aura
+    /// cards, so `ParentTarget` keeps its chosen-target semantics (Twinflame).
+    pub host_self_reference: Option<TargetFilter>,
+    /// CR 109.1 + CR 205.2: The printed core card types of the object whose
+    /// Oracle text is being parsed. Set once per card by `parse_oracle_ir` from
+    /// the same MTGJSON type list the pipeline already receives, and propagated
+    /// into per-trigger / per-line effect contexts alongside
+    /// `host_self_reference`.
+    ///
+    /// Needed by any keyword action whose CR-defined expansion is conditioned on
+    /// the card type of its source rather than on anything in the ability's own
+    /// text. `support N` (CR 701.41a) is the incumbent consumer, via
+    /// [`ParseContext::source_is_instant_or_sorcery`]: the expansion says "other
+    /// target creatures" on a permanent and "target creatures" on an instant or
+    /// sorcery, and no amount of reading the clause "support 2" can tell those
+    /// apart.
+    ///
+    /// Deliberately the full typed type list rather than the single derived
+    /// `is_spell` boolean `parse_normalized_oracle_ir` computes for its own use:
+    /// a `bool` on a long-lived context states one consumer's question instead
+    /// of the fact that answers it, and the next keyword action conditioned on a
+    /// different type axis would have to add a second boolean beside it.
+    pub source_core_types: Vec<CoreType>,
+    /// CR 115.10a + CR 701.41a: Producer-declared target-choice timing for the
+    /// current chunk, snapshotted into `ClauseIr.declared_target_choice_timing`
+    /// by the chain chunk loop and consumed by
+    /// `lower::target_choice_timing_for_clause` ahead of its text-scan ladder.
+    ///
+    /// That ladder decides "targeted or described" by scanning the clause's
+    /// PRINTED fragment for the literal word "target" (CR 115.10a). The scan is
+    /// right for printed prose and wrong for a keyword-action SHORTHAND, whose
+    /// printed fragment is not the ability's rules text: "support 2" contains no
+    /// "target", yet CR 701.41a defines it to mean "… up to two other target
+    /// creatures". A producer that performs such an expansion knows the answer
+    /// the scan is trying to guess, so it states it here and the statement
+    /// outranks the scan. `None` (the default) leaves the ladder in charge, so
+    /// every incumbent clause is unaffected.
+    ///
+    /// Set and consumed within a single chunk parse; never serialized. A
+    /// speculative sub-parse that discards its cloned context discards this too.
+    pub declared_target_choice_timing: Option<TargetChoiceTiming>,
+    /// CR 603.4: Transient relative-clause filter parsed from a
+    /// trigger subject ("an opponent **who controls F** draws a card"). Set by
+    /// `parse_single_subject` when it consumes a "who controls <filter>"
+    /// clause; consumed by `parse_trigger_condition`, which rewrites the
+    /// filter's controller to `ControllerRef::TriggeringPlayer` and ANDs an
+    /// `ObjectCount >= 1` intervening-if into the trigger's condition. Reset to
+    /// `None` at the entry of every `parse_trigger_condition` call so stale
+    /// clause state cannot leak across trigger lines.
+    pub pending_trigger_subject_clause: Option<TargetFilter>,
+    /// CR 608.2k: Source zone of the current ability's `AbilityCost::Exile`
+    /// component, if any. Set by `parse_activated_ability_ir` after the
+    /// cost is parsed and before the effect text is parsed, then restored after
+    /// the ability. Consumed by `parse_cost_paid_object_reference` to
+    /// disambiguate "the exiled card" — a cost-paid-object reference
+    /// (`TargetFilter::CostPaidObject`) when the ability has a non-self exile
+    /// cost, an effect-exiled tracked-set reference (`TrackedSet`) otherwise.
+    pub current_ability_exile_cost_zone: Option<Zone>,
+    /// CR 608.2k: One entry per payment component of the enclosing activated
+    /// ability's cost, each that component's categories
+    /// (`AbilityCost::component_categories`). Set by
+    /// `parse_activated_ability_ir` beside `current_ability_exile_cost_zone`
+    /// and restored after the ability; empty outside an activated ability. A
+    /// cost participle ("the discarded card" → `CostCategory::Discards`, "the
+    /// sacrificed creature" → `CostCategory::SacrificesPermanent`) names an
+    /// object paid for the cost only when exactly one component can write the
+    /// cost-paid object and that component has the participle's category;
+    /// otherwise the participle describes an effect's action or is ambiguous.
+    pub current_ability_cost_components: Vec<Vec<CostCategory>>,
+    /// CR 608.2c: The current effect-chain chunk has an earlier typed object
+    /// referent that `ParentTarget` can legally bind to. Standalone clause
+    /// parsing leaves this false so bare "it" defaults to SelfRef instead of
+    /// inventing a parent target.
+    pub parent_target_available: bool,
+    /// CR 608.2c + CR 406.6 + CR 607.2a: Whether the current effect-chain
+    /// chunk has an EARLIER clause (in the SAME resolution chain) that
+    /// produces an exile — a `ChangeZone`/`ChangeZoneAll` to `Zone::Exile`,
+    /// `ExileTop`, `Dig { destination: Some(Zone::Exile), .. }`,
+    /// `ExileFromTopUntil`, or any other exile-producer shape recognized by
+    /// `chain_clause_is_exile_producer`. When true, a singular "the exiled
+    /// card" anaphor in a LATER clause of this chain refers to that
+    /// same-chain exile and keeps its pre-existing same-chain binding
+    /// (`TrackedSet{0}` / `ParentTarget`). When false, the referenced exile
+    /// happened in an earlier, SEPARATELY-RESOLVED ability (e.g. an ETB
+    /// Imprint or synthesized Hideaway ETB), so the anaphor must bind
+    /// durably via `TargetFilter::ExiledBySource` (CR 607.1 linked
+    /// abilities) instead. Seeded per top-level `parse_effect_chain_ir` call
+    /// from the chain-local clause accumulator; defaults `false` via
+    /// `derive(Default)` so standalone clause parsing is unaffected.
+    pub chain_has_prior_exile_producer: bool,
+    /// CR 608.2c: The current effect-chain chunk's MOST-RECENT prior object
+    /// referent is a just-created token (Token/CopyTokenOf/Populate), so a bare
+    /// "it" anaphor in this chunk binds to that token (`TargetFilter::LastCreated`)
+    /// rather than the ability source. Seeded only in the chunk loop via
+    /// `chain_prior_referent_is_created_token`; a later explicit typed-target
+    /// clause re-anchors "it" and clears it. Standalone and all other construction
+    /// sites default `false` (`..Default::default()`), keeping bare "it" at
+    /// `SelfRef` so non-token self-triggers ("Whenever ~ attacks, put a counter on
+    /// it") are unaffected.
+    pub token_created_in_chain: bool,
+    /// CR 608.2c + CR 301.5 + CR 303.4: An EARLIER clause in this same effect
+    /// chain turns the ability's own SOURCE into an attachable object — an Aura
+    /// (CR 303.4: an enchantment with the Aura subtype, attached via its enchant
+    /// ability) or an Equipment (CR 301.5: an artifact with the Equipment
+    /// subtype). This is the animate-then-attach class, of which the 12 Licids
+    /// are the canonical members ("This creature loses this ability and becomes
+    /// an Aura enchantment with enchant creature. Attach **it** to target
+    /// creature"). The source is the only object the chain has made attachable,
+    /// so the following clause's bare "it" attachment anaphor names it
+    /// (`TargetFilter::SelfRef`) rather than the ability's chosen target.
+    /// Seeded only in the chunk loop via
+    /// `parser::oracle_effect::chain_source_becomes_attachment`; every other
+    /// construction site defaults `false` (`..Default::default()`), so an attach
+    /// clause whose chain never animated its source keeps its pre-existing
+    /// `parse_target` binding (Embercleave's Equipment-ETB `ParentTarget`; Aura
+    /// Graft's chained-referent `ParentTarget`).
+    pub source_becomes_attachment_in_chain: bool,
+    /// CR 608.2c: Full lowercased effect-chain text for cross-clause features
+    /// like cultivate/Final-Parting split-destination detection on a search
+    /// clause that does not include the put-destination phrase in its chunk.
+    pub effect_chain_full_lower: Option<String>,
+    /// CR 608.2c + CR 601.2a: The chain's prior referent is an explicit target
+    /// SELECTION (`Effect::TargetOnly`, e.g. Emry's "Choose target artifact
+    /// card in your graveyard"), as distinct from an exile/impulse publisher
+    /// (`ExileTop`, `ExileFromTopUntil`, …) whose "that card" anaphor is a
+    /// tracked exile set. Only a chosen-target referent reroutes a "you may
+    /// cast/play that card this turn" grant to `CastFromZone { ParentTarget }`;
+    /// impulse publishers keep their `PlayFromExile { TrackedSet }` grant. This
+    /// is a strict subset of `parent_target_available` — it stays false for the
+    /// `ExileFromTopUntil` referent (Territorial Bruntar) that
+    /// `parent_target_available` would otherwise include.
+    pub parent_target_is_chosen: bool,
+    /// CR 608.2c + CR 601.2a: the chain's prior chosen-target FILTER — the
+    /// `Effect::TargetOnly { target }` filter that `parent_target_is_chosen`
+    /// reports the presence of (Emry's / Conduit of Worlds' "Choose target …
+    /// card in your graveyard"). It binds a downstream "you may cast that card"
+    /// anaphor to the chosen object; timing comes independently from the
+    /// instruction plus its duration, never from this target's zone. Seeded
+    /// alongside `parent_target_is_chosen` in the chunk loop; `None` on every
+    /// standalone and non-chosen parse.
+    pub chain_prior_chosen_target: Option<TargetFilter>,
+    /// CR 608.2c + CR 109.4 + CR 115.1: the nearest player-referent clause
+    /// earlier in this same chain names a TARGETED player — a `Choose` with a
+    /// targeted chooser ("target opponent chooses self or others", the
+    /// self-or-others scheme class) or a player-typed `TargetOnly`. A later
+    /// "that player" / "the player" anaphor then names that announced target
+    /// (`ParentTarget`), not the trigger event's player (`TriggeringPlayer`).
+    /// Seeded per chunk in the chunk loop via
+    /// `chain_prior_targeted_player(builder.clauses())`; `false` on every
+    /// standalone parse and on the first chunk of every chain.
+    pub chain_prior_targeted_player: bool,
+    /// CR 601.2c + CR 608.2c: the object-target FILTER declared by the nearest
+    /// EARLIER clause of this same effect chain — the antecedent a later
+    /// clause's demonstrative anaphor ("that token", "that artifact") can name.
+    /// Sibling of [`Self::chain_prior_chosen_target`] and of
+    /// [`Self::declared_target_slots`], but single-valued and not restricted to
+    /// `Effect::TargetOnly`: Hazel of the Rootbloom's antecedent is the copy
+    /// source of a `CopyTokenOf`, Thieving Skydiver's the subject of a
+    /// `GainControl`.
+    ///
+    /// LIFECYCLE — leak-proof by construction, not by a set/clear window:
+    /// `parse_effect_chain_ir` `take()`s the caller's value before its chunk
+    /// loop and restores it immediately after; inside the loop the field is
+    /// REASSIGNED UNCONDITIONALLY as the first statement of every iteration, as
+    /// a pure function of `builder.clauses()`. There is therefore no window for
+    /// an early `continue` to escape (the loop body contains no statement-level
+    /// `return`), no stale value can reach the next chunk, and a nested
+    /// `parse_effect_chain_ir` sees `None` from its chunk loop onward; its
+    /// pre-loop special-case IR builders still observe the caller's value
+    /// (measured at zero corpus cards — no divergent-noun demonstrative is
+    /// lowered through them). `None` on the first chunk of every chain and on
+    /// every standalone parse. Never serialized.
+    pub chain_declared_object_target: Option<TargetFilter>,
+    /// CR 608.2c: the reference to the player slot an ENCLOSING effect chain
+    /// already declared, for a nested `parse_effect_chain_ir` whose own builder
+    /// starts empty (a conditional body re-parsed as its own chain: "If you do,
+    /// that player discards that card, then draws a card"). Set by the caller
+    /// immediately before that one call; the callee `take`s it on entry, so it is
+    /// `None` everywhere else. Never serialized.
+    pub enclosing_declared_player: Option<TargetFilter>,
+    /// Ordinal of the next player-declaring clause's `ChosenGroupId`
+    /// (`ChosenGroupId::declared_player`). `parse_effect_chain_ir_body` owns the
+    /// running count in a chain-level local and hands it across a nested chain
+    /// and each per-chunk context, so ids stay unique across one ability.
+    pub next_declared_player_group: u32,
+    /// CR 608.2c: the chain's nearest earlier clause announced exactly one player, so
+    /// a bare "they" subject names that player (`ParentTargetController`, the
+    /// spelling "that player" takes) instead of an earlier object. Seeded per chunk
+    /// from the chain; `false` on every standalone parse.
+    pub prior_player_declaration: bool,
+    /// CR 608.2c + CR 115.1a: the controller scope "that player controls" and "they
+    /// control" take after a player the chain already declared. Seeded per chunk from
+    /// the chain; `None` on every standalone parse, which keeps `relative_player_scope`
+    /// (then `You`) as the reading.
+    pub declared_player_scope: Option<ControllerRef>,
+    /// The group a damage clause minted for the player it announces itself, so its own
+    /// continuations ("... and 1 damage to each creature that player controls") can name it.
+    /// The chunk loop takes it onto the clause.
+    pub clause_declared_group: Option<ChosenGroupId>,
+    /// CR 601.2c + CR 608.2c: every target slot announced by the EARLIER clauses
+    /// of this effect chain, in declared order, with its declared-slot index
+    /// where that index is exactly computable (see [`DeclaredSlotRegistry`]).
+    /// Same lifecycle as `chain_declared_object_target`: taken before the chunk
+    /// loop, reassigned as the first statement of every iteration as a pure
+    /// function of the pushed clauses, restored after. Empty on every standalone
+    /// parse. Never serialized.
+    pub chain_declared_slots: DeclaredSlotRegistry,
+    /// CR 700.2: whether the text being parsed is one mode of a modal spell or
+    /// ability. Declared-slot numbering is mode-local at runtime
+    /// (`targeting::parent_slot_base`), so declared-slot referents are not
+    /// admitted inside a mode. Set to `ModalMode` on each mode's context by
+    /// `parse_modal_mode_irs`; `WholeAbility` everywhere else.
+    pub body_scope: BodyScope,
+    /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
+    /// "put those cards / put them onto the battlefield" anaphor (a
+    /// `TargetFilter::TrackedSet`) must scan. Set by a producer clause that
+    /// publishes its set from a NON-exile zone — e.g.
+    /// `parse_for_each_player_choose_from_zone` derives `Some(Graveyard)` from
+    /// the parsed `ChooseFromZone { zone: Graveyard }` so Breach the
+    /// Multiverse's reanimation reads the chosen cards out of the graveyard
+    /// rather than the impulse-default exile. Consumed by `parse_put_ast` when
+    /// it lowers a `TrackedSet` put-onto-battlefield whose own clause text named
+    /// no explicit origin; an impulse/cascade producer leaves this `None`, so
+    /// the lowering keeps the exile default. Reset per effect chain in
+    /// `parse_effect_chain_ir`.
+    pub pending_tracked_set_origin: Option<Zone>,
+    /// CR 701.42a: The partner card name extracted from a meld instigator's
+    /// own/control gate ("if you both own and control [self] and a [type] named
+    /// [partner], exile them, then meld them into [result]"). The gate is parsed
+    /// as the trigger's intervening-if condition (carrying [partner] inside its
+    /// `ControlCount` conjunct), but the meld EFFECT clause ("exile them, then
+    /// meld them into [result]") must also stamp [partner] onto `Effect::Meld`.
+    /// Set when the meld gate is recognized; consumed by the meld effect
+    /// combinator. `None` for non-meld faces.
+    pub pending_meld_partner: Option<String>,
+    /// CR 107.4 + CR 202.1 + CR 603.4: The named color from a cast-trigger's
+    /// "with one or more `<color>` mana symbol(s) in its mana cost" spell
+    /// qualifier (Namor the Sub-Mariner). The qualifier is parsed into the
+    /// trigger's `valid_card` (a `FilterProp::ManaSymbolCount`), but the EFFECT
+    /// clause "create that many tokens" must back-reference the cast spell's
+    /// colored-symbol count rather than the generic `EventContextAmount` (which
+    /// has no SpellCast amount and resolves to 0). Set from the finalized
+    /// condition/qualifier text before the effect body parses; consumed by the
+    /// token-count override in `oracle_effect::token`. `None` for triggers
+    /// without a colored-pip qualifier.
+    pub pending_mana_symbol_count_color: Option<crate::types::mana::ManaColor>,
+    /// CR 608.2c + CR 608.2h + CR 111.3: Immediate next-clause lookahead for
+    /// token body characteristics printed in a separate sentence ("Its power
+    /// is equal to this creature's power ..."). This is parser-local and
+    /// one-shot per chunk; standalone token parsing keeps rejecting creature
+    /// tokens whose P/T is not specified by the current clause or this marker.
+    pub token_pt_followup: Option<TokenPtFollowup>,
+    /// CR 116.2b + CR 708.7: True while parsing the body of an explicit granted
+    /// activated ability (a quoted `"{cost}: ..."` granted to another object).
+    /// In that context, a head clause of "turn this/~ creature face up" is the
+    /// printed resolving effect of the granted ability (Etrata, Deadly
+    /// Fugitive's "{2}{U}{B}: Turn this creature face up. ..."), NOT the
+    /// rule-based morph/disguise special action. The imperative parser uses this
+    /// flag to lower such a clause to `Effect::TurnFaceUp { SelfRef }` instead of
+    /// rejecting the self-referential subject (which it must keep rejecting for
+    /// top-level morph reminder/special-action text). Set by
+    /// `parse_quoted_ability`; defaults to `false` everywhere else.
+    pub in_granted_activated_ability: bool,
+    /// CR 400.1/400.2 + CR 601.2a + CR 608.2c: The player-referencing target of
+    /// an EARLIER same-chain `Effect::RevealHand` clause ("look at that
+    /// player's hand" / "reveal their hand"), e.g. `TriggeringPlayer`. When a
+    /// LATER clause in the SAME chain references "them"/"those cards" in a
+    /// cast-permission clause (Silent-Blade Oni: "You may cast a spell from
+    /// among those cards without paying its mana cost"), the anaphor binds to
+    /// THIS revealed player's hand instead of the exile-only
+    /// `TargetFilter::ExiledBySource` default — no exile ever happened, so
+    /// `ExiledBySource` would resolve to an empty set and silently swallow the
+    /// cast permission. Mirrors `chain_has_prior_exile_producer`'s same-chain
+    /// scan, but for the hand-reveal producer shape. `None` when no such
+    /// producer exists in this chain, or during standalone clause parsing.
+    pub chain_prior_hand_reveal_target: Option<TargetFilter>,
+    /// CR 608.2c: The object POPULATION established by a mass ("each …") effect in
+    /// an earlier clause of this same chain — Ardbert, Warrior of Darkness:
+    /// "put a +1/+1 counter on each legendary creature you control. They gain
+    /// vigilance until end of turn."
+    ///
+    /// Distinct from [`Self::parent_target_available`], which tracks a CHOSEN
+    /// referent that `TargetFilter::ParentTarget` binds to (see
+    /// `has_typed_target_widened`'s single-target whitelist). A mass effect
+    /// chooses nothing, so an anaphor referring back to its population cannot use
+    /// `ParentTarget` — it must inherit the population FILTER itself. `None` when
+    /// no such producer exists in this chain, or during standalone clause parsing.
+    pub chain_prior_mass_population: Option<TargetFilter>,
+    /// CR 608.2c: the object set the NEAREST earlier clause of this chain acts on,
+    /// when that clause's direct operand is the chain's tracked set ("Untap those
+    /// creatures" → `TrackedSet`). A following bare "they" that a continuous
+    /// modification affects names this set, even under an iterated-player frame
+    /// (`subject.rs` · `resolve_they_pronoun`). Seeded per chunk from the chain;
+    /// `None` on every standalone parse.
+    pub chain_prior_object_set: Option<TargetFilter>,
+    /// True when the SAME chain's most recent producer was a self-library peek
+    /// (look at the top N cards of YOUR library without exiling/moving them).
+    /// The bare "from among them" cast anaphor that follows must route to the
+    /// one-shot during-resolution cast (CR 608.2g), not the exile-and-grant
+    /// lingering path. Mirrors `chain_has_prior_exile_producer`.
+    // CR 608.2g + CR 701.20e
+    pub chain_prior_self_library_peek: bool,
+    /// CR 608.2c: the stop filter of the most recent earlier same-chain
+    /// `ExileFromTopUntil { NextMatches }` loop. The loop ends on its last
+    /// match, so the cards it exiled that match this filter are exactly the
+    /// ones it found, and "the other cards exiled this way" are the rest
+    /// (Invasion of Alara). `None` when the chain has no such loop.
+    pub chain_prior_exile_until_match: Option<TargetFilter>,
+    /// CR 608.2c: the candidate source for cards the `NextMatches` loop found.
+    /// `Some(ParentTargets)` only when every
+    /// clause after the loop is the one-cast window over its batch (Invasion
+    /// of Alara's "You may cast one of those two cards …"), which hands those
+    /// targets on unchanged. Any other clause in between may target or choose
+    /// its own objects, so "put one of them into your hand" stays unbound.
+    pub chain_exile_until_hits_source: Option<ZoneChoiceCandidateSource>,
+    /// CR 400.7j + CR 608.2c + CR 608.2d: the NEAREST earlier single-card exile
+    /// partition in this same effect chain, carrying that pile's
+    /// [`ZoneChoiceCandidateSource`] — `None` when the chain has none.
+    ///
+    /// `Some(CostPaidObjects)` is the source-bound cost-paid exile choice
+    /// (`Effect::ChooseFromZone { count: 1, zone: Exile, candidate_source:
+    /// CostPaidObjects, selection: Chosen }`) that Coin of Fate's "An opponent
+    /// chooses one of the exiled cards" lowers to. That choice partitions a
+    /// two-card pile, so the very next instruction's "the other" names the
+    /// UNCHOSEN card — which the runtime forwards on the continuation's
+    /// immediate `sub_ability` targets, i.e. `TargetFilter::ParentTarget`, NOT
+    /// the chain tracked set (the tracked set, when republished at all, carries
+    /// the CHOSEN cards).
+    ///
+    /// Consumers must match that source EXPLICITLY rather than testing for
+    /// "some partition exists": a `Legacy`/`Tracked`/`Direct` partition (Wake to
+    /// Slaughter's "An opponent chooses one of them. … Return the other …")
+    /// keeps its existing `TrackedSet` binding, and a future candidate source
+    /// must not inherit the `CostPaidObjects` rewrite by default. Carrying the
+    /// source instead of a bare bool is what keeps those cases distinguishable.
+    ///
+    /// Seeded per chunk in `parse_effect_chain_ir` from the clauses already
+    /// built; `None` via `derive(Default)` on every standalone parse, and never
+    /// serialized.
+    pub prior_zone_choice_partition: Option<PriorZoneChoicePartition>,
+    /// CR 603.10 + CR 400.7 + CR 122.2: the enclosing trigger body's PROVEN
+    /// zone-change event pair, when this parse continues that body. Consumed by
+    /// the trigger-body past-tense counter grammar in
+    /// `oracle_effect::conditions::strip_counter_conditional`, which may only
+    /// emit an `AbilityCondition::ZoneChangeObjectMatchesFilter` while the pair
+    /// is present. Ordinary `Clone` PRESERVES it (the clone-and-commit idiom
+    /// depends on that); entering an independent body is spelled by name via
+    /// [`Self::clone_for_independent_body`] or [`Self::clone_throwaway`]. See
+    /// [`TriggerZoneChangeProvenance`].
+    pub trigger_zone_change: TriggerZoneChangeProvenance,
+    /// CR 608.2k: the owner a possessive PRONOUN ("its"/"his"/"her"/"their")
+    /// characteristic binds to while this context is active. Set ONLY by
+    /// quantity interpreters parsing a clause whose subject position is known
+    /// (`parse_where_x_quantity_expression_with_owner`, for boon-granted
+    /// "it"/"that" perpetual tails, where the pronoun names the triggering
+    /// object). `None` (the default every other caller carries) preserves the
+    /// long-standing `Source` binding. Explicit self-references ("~'s",
+    /// "this creature's") NEVER consult this field — only the four genuinely
+    /// anaphoric pronoun surfaces do.
+    pub characteristic_pronoun_owner: Option<ObjectScope>,
+}
+
+impl ParseContext {
+    /// CR 110.1 + CR 701.41a: is the object whose text is being parsed an
+    /// instant or sorcery — i.e. NOT a permanent card? A permanent is a card on
+    /// the battlefield (CR 110.1), and instants and sorceries are the card types
+    /// that never become one, so this is the permanent-vs-spell axis CR 701.41a
+    /// turns on, stated as the negative because "instant or sorcery" is the
+    /// closed, enumerable side of it.
+    ///
+    /// The single authority for the source-type question, so a keyword action
+    /// whose expansion turns on it never re-derives the answer from a proxy (an
+    /// enclosing trigger subject, say) that only correlates with it.
+    ///
+    /// An empty type list — the test-facing `parse_effect` entry points, which
+    /// parse a fragment with no card behind it — reads as a permanent. That is
+    /// the fail-safe direction: on the permanent branch `support` adds
+    /// `FilterProp::Another`, which can only ever REMOVE the source from its own
+    /// target set, and a fragment with no source object has nothing to remove.
+    pub fn source_is_instant_or_sorcery(&self) -> bool {
+        self.source_core_types
+            .iter()
+            .any(|t| matches!(t, CoreType::Instant | CoreType::Sorcery))
+    }
+
+    /// The antecedents `bind_controller_phrase` reads for an anaphoric
+    /// controller phrase. `actor` is not one: an "any opponent may" actor is the
+    /// accepting player only in that player's own frame.
+    pub(crate) fn player_antecedents(&self) -> PlayerAntecedents {
+        PlayerAntecedents {
+            declared_that_player: self.declared_player_scope.clone(),
+            declared_they: self
+                .declared_player_scope
+                .clone()
+                .filter(|_| self.prior_player_declaration),
+            third_person: self.relative_player_scope.clone(),
+            // CR 508.1 + CR 608.2c: "its controller" is the controller of the
+            // anaphoric object ("it"). In a trigger subject context the anaphor
+            // is the triggering source, whose controller is the triggering
+            // player (the active player who declared attackers per CR 508.1, or
+            // whichever player the triggering event identifies); otherwise ("it"
+            // refers to a chosen parent target) it is that target's controller.
+            // The subject discriminator is a verbatim mirror of
+            // `resolve_pronoun_target` / `resolve_it_pronoun`, so "its
+            // controller" binds to the SAME anaphor as a sibling "shares … with
+            // it" clause.
+            object_controller: Some(match &self.subject {
+                Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
+                    ControllerRef::TriggeringPlayer
+                }
+                _ => ControllerRef::ParentTargetController,
+            }),
+        }
+    }
+
+    /// Push a diagnostic (replaces oracle_warnings::push_diagnostic).
+    pub fn push_diagnostic(&mut self, d: OracleDiagnostic) {
+        // Both variants can be pushed from a combinator that a speculative `alt`
+        // re-enters on a discarded alternative, so an identical entry is noise
+        // rather than signal.
+        if matches!(
+            d,
+            OracleDiagnostic::TargetFallback { .. } | OracleDiagnostic::IgnoredRemainder { .. }
+        ) && self.diagnostics.iter().any(|existing| existing == &d)
+        {
+            return;
+        }
+        self.diagnostics.push(d);
+    }
+
+    /// CR 608.2c: a context carrying only the caller's player
+    /// antecedents — the fields `player_antecedents` reads for "that player" /
+    /// "they" — for a sub-parse that must bind an anaphoric controller phrase the
+    /// way its caller would, without re-reading object anaphors (`subject`,
+    /// `object_pronoun_ref`, …) or inheriting any other caller state.
+    pub(crate) fn clone_player_antecedents(&self) -> Self {
+        Self {
+            relative_player_scope: self.relative_player_scope.clone(),
+            declared_player_scope: self.declared_player_scope.clone(),
+            prior_player_declaration: self.prior_player_declaration,
+            ..Self::default()
+        }
+    }
+
+    /// Run `f` on `clone_player_antecedents()` and keep its diagnostics: a
+    /// committed sub-parse's `TargetFallback` / `IgnoredRemainder` land on this
+    /// context (deduplicated by `push_diagnostic`); every other write is dropped.
+    pub(crate) fn with_player_antecedents<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let mut scoped = self.clone_player_antecedents();
+        let result = f(&mut scoped);
+        for diagnostic in scoped.diagnostics {
+            self.push_diagnostic(diagnostic);
+        }
+        result
+    }
+
+    /// CR 105.4: clone this context for a sub-parse whose CONTEXT is DISCARDED —
+    /// the parsed value is kept, but `*ctx = <derived>` never runs.
+    ///
+    /// This is the runnable half of `ChosenColorQualifierScope`'s rule 1. A plain
+    /// `.clone()` inherits `ChainBound`, so a throwaway derived context can stamp
+    /// `FilterProp::IsChosenColor` on a filter it keeps while dropping the
+    /// `pending_printed_color_choice` that would have injected the matching
+    /// `Effect::Choose(Color)` — a fail-closed, match-NOTHING filter with no
+    /// `Effect::Unimplemented` and therefore no coverage signal.
+    ///
+    /// Deliberately NOT a `Clone` impl: a `Clone` that silently drops state is a
+    /// worse defect than the one it fixes, and the merge-back sites
+    /// (`*ctx = tentative_ctx`, `*ctx = body_ctx`, `*ctx = candidate_ctx`,
+    /// `*ctx = fanout_ctx`) genuinely need the inheriting `.clone()`. The two
+    /// spellings are the two intents, and `clone_throwaway` is greppable.
+    pub fn clone_throwaway(&self) -> Self {
+        Self {
+            chosen_color_qualifier: ChosenColorQualifierScope::Unbound,
+            // CR 603.7 + CR 603.12: a discarded sub-parse still KEEPS its parsed
+            // value, so a probe or branch alternative must not be able to emit a
+            // `ZoneChangeObjectMatchesFilter` on authority it does not own. The
+            // context is independent for the same reason it is throwaway.
+            trigger_zone_change: TriggerZoneChangeProvenance::none(),
+            ..self.clone()
+        }
+    }
+
+    /// CR 603.1 + CR 603.7 + CR 603.12: clone this context for an INDEPENDENT
+    /// trigger body whose context IS kept — a reflexive "when you do" body, a
+    /// nested printed trigger line inside a modal block, an anchor mode that
+    /// spawns its own triggered ability.
+    ///
+    /// Such a body establishes its own event authority, so the enclosing
+    /// trigger's proven zone-change pair would be unrelated to it. This is the
+    /// named counterpart to a plain `.clone()`, which continues the SAME body
+    /// and therefore keeps that authority (see [`TriggerZoneChangeProvenance`]).
+    pub fn clone_for_independent_body(&self) -> Self {
+        Self {
+            trigger_zone_change: TriggerZoneChangeProvenance::none(),
+            ..self.clone()
+        }
+    }
+
+    /// Execute `f` with a temporary relative-player scope, restoring the prior
+    /// value on return. Replaces thread-local ScopeGuard RAII pattern.
+    pub fn with_player_scope<R>(
+        &mut self,
+        scope: ControllerRef,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let prev = self.relative_player_scope.take();
+        self.relative_player_scope = Some(scope);
+        let result = f(self);
+        self.relative_player_scope = prev;
+        result
+    }
+
+    /// CR 608.2k: Execute `f` with a temporary bare-object-pronoun antecedent,
+    /// restoring the prior value on return. The object-anaphor counterpart of
+    /// [`Self::with_player_scope`], for a seam that establishes a NEARER
+    /// antecedent than the enclosing one for a bounded span of text (a subject
+    /// phrase's own predicate). Save/restore, never set/clear, for the same
+    /// reason [`Self::stated_clause_duration`] is: a binding one clause
+    /// establishes must not outlive it, and a span that establishes none must
+    /// not clobber the enclosing one.
+    ///
+    /// Unlike [`Self::with_player_scope`]'s caller, which yields to an
+    /// already-set scope, this OVERRIDES: a possessor printed inside the span
+    /// outranks whatever the enclosing text established.
+    ///
+    /// CR 509.3c: [`Self::condition_object_antecedent`] is cleared for the span
+    /// and restored with the pin. That field says what an ambiguous
+    /// `object_pronoun_ref` names and is only meaningful for the pin it
+    /// travelled with (see its own doc: "Set only together with the matching
+    /// pin"), so a nearer pin must not be read through the outer pin's label.
+    ///
+    /// The clearing FAILS OPEN, and knowingly: a reader that tests the label
+    /// AND the pin together (`oracle_effect::mod`'s
+    /// `subject_is_unbindable_damage_source`) has its `BlockedAttacker` leg
+    /// forced false inside the span while its `ParentTarget` leg is true by
+    /// construction, so a nested `ParentTarget` damage subject under a bare
+    /// "becomes blocked" trigger would lose its honest `Effect::unimplemented`
+    /// rather than gain a wrong binding. Clearing is still right — the span's
+    /// pin is a DIFFERENT referent and no `ConditionObjectAntecedent` variant
+    /// describes it — and the open direction is unreachable today, because that
+    /// reader also requires the subject itself to be `ParentTarget`, which a
+    /// possessive-player subject never is. A variant naming the possessor is
+    /// what would close it.
+    pub fn with_object_pronoun_ref<R>(
+        &mut self,
+        antecedent: TargetFilter,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let prev = self.object_pronoun_ref.replace(antecedent);
+        let prev_antecedent = self.condition_object_antecedent.take();
+        let result = f(self);
+        self.object_pronoun_ref = prev;
+        self.condition_object_antecedent = prev_antecedent;
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::oracle_nom::target::{ControllerForm, ControllerTense};
+    use crate::types::ability::TypedFilter;
+
+    fn fallback(text: &str) -> OracleDiagnostic {
+        OracleDiagnostic::TargetFallback {
+            context: "parse_target could not classify".into(),
+            text: text.into(),
+            line_index: 0,
+        }
+    }
+
+    /// CR 608.2k: the object-pronoun antecedent is SAVE/RESTORE, not set/clear.
+    /// A span that establishes a nearer antecedent must hand the enclosing one
+    /// back on return — otherwise a clause's own possessor would outlive it and
+    /// claim a later clause's pronoun — and that holds whether the enclosing
+    /// value was a pin or `None`.
+    #[test]
+    fn with_object_pronoun_ref_hands_the_enclosing_antecedent_back() {
+        for enclosing in [None, Some(TargetFilter::TriggeringSource)] {
+            let mut ctx = ParseContext {
+                object_pronoun_ref: enclosing.clone(),
+                condition_object_antecedent: Some(ConditionObjectAntecedent::BlockedAttacker),
+                ..ParseContext::default()
+            };
+            let seen = ctx.with_object_pronoun_ref(TargetFilter::ParentTarget, |ctx| {
+                (
+                    ctx.object_pronoun_ref.clone(),
+                    ctx.condition_object_antecedent,
+                )
+            });
+            assert_eq!(
+                seen.0,
+                Some(TargetFilter::ParentTarget),
+                "reach guard: the span really did see the nearer antecedent"
+            );
+            // CR 509.3c: the outer pin's label must not describe the nearer pin.
+            assert_eq!(
+                seen.1, None,
+                "the companion antecedent label is cleared for the span"
+            );
+            assert_eq!(
+                ctx.object_pronoun_ref, enclosing,
+                "the enclosing antecedent must be restored, including when it was None"
+            );
+            assert_eq!(
+                ctx.condition_object_antecedent,
+                Some(ConditionObjectAntecedent::BlockedAttacker),
+                "and so must its companion label"
+            );
+        }
+    }
+
+    /// CR 608.2c: a player-antecedent clone carries exactly the three fields
+    /// `player_antecedents` reads, and none of the caller's object anaphors or
+    /// other state.
+    #[test]
+    fn clone_player_antecedents_keeps_only_the_player_antecedents() {
+        let declared = ControllerRef::DeclaredPlayer {
+            group: ChosenGroupId::declared_player(0),
+        };
+        let source = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            declared_player_scope: Some(declared.clone()),
+            prior_player_declaration: true,
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            target_chooser: Some(TargetFilter::Any),
+            card_name: Some("Source Card".into()),
+            diagnostics: vec![fallback("caller")],
+            ..ParseContext::default()
+        };
+        let scoped = source.clone_player_antecedents();
+        assert_eq!(
+            scoped.relative_player_scope,
+            Some(ControllerRef::TargetPlayer)
+        );
+        assert_eq!(scoped.declared_player_scope, Some(declared));
+        assert!(scoped.prior_player_declaration);
+        assert_eq!(scoped.subject, None);
+        assert_eq!(scoped.target_chooser, None);
+        assert_eq!(scoped.card_name, None);
+        assert!(scoped.diagnostics.is_empty());
+    }
+
+    /// A committed sub-parse keeps its diagnostics on the caller's context;
+    /// every other write it makes is dropped.
+    #[test]
+    fn with_player_antecedents_merges_only_diagnostics() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let seen = ctx.with_player_antecedents(|scoped| {
+            scoped.target_selection_mode = TargetSelectionMode::Random;
+            scoped.push_diagnostic(fallback("sub-parse"));
+            scoped.relative_player_scope.clone()
+        });
+        assert_eq!(seen, Some(ControllerRef::TargetPlayer));
+        assert_eq!(ctx.target_selection_mode, TargetSelectionMode::Chosen);
+        assert_eq!(ctx.diagnostics, vec![fallback("sub-parse")]);
+    }
+
+    #[test]
+    fn target_fallback_diagnostics_are_idempotent() {
+        let mut ctx = ParseContext::default();
+        let diagnostic = OracleDiagnostic::TargetFallback {
+            context: "search-filter-suffix unmatched".into(),
+            text: "with an unsupported clause".into(),
+            line_index: 0,
+        };
+
+        ctx.push_diagnostic(diagnostic.clone());
+        ctx.push_diagnostic(diagnostic);
+
+        assert_eq!(ctx.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn distinct_target_fallback_diagnostics_are_preserved() {
+        let mut ctx = ParseContext::default();
+
+        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+            context: "search-filter-suffix unmatched".into(),
+            text: "first clause".into(),
+            line_index: 0,
+        });
+        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+            context: "search-filter-suffix unmatched".into(),
+            text: "second clause".into(),
+            line_index: 0,
+        });
+
+        assert_eq!(ctx.diagnostics.len(), 2);
+    }
+
+    /// CR 603.10: a fresh context carries no zone-change authority.
+    #[test]
+    fn trigger_zone_change_provenance_defaults_to_empty() {
+        assert_eq!(ParseContext::default().trigger_zone_change.as_pair(), None);
+        assert_eq!(TriggerZoneChangeProvenance::none().as_pair(), None);
+    }
+
+    /// The clone-and-commit idiom (`*ctx = <derived>`) depends on ordinary
+    /// `Clone` PRESERVING state, so a successful speculative parse inside the
+    /// same trigger body must not erase the enclosing event's authority.
+    #[test]
+    fn trigger_zone_change_provenance_survives_ordinary_clone() {
+        let ctx = ParseContext {
+            trigger_zone_change: TriggerZoneChangeProvenance::established(
+                Zone::Battlefield,
+                Zone::Graveyard,
+            ),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            ctx.clone().trigger_zone_change.as_pair(),
+            Some((Zone::Battlefield, Zone::Graveyard)),
+            "a same-body speculative parse that commits must retain provenance"
+        );
+        assert_eq!(
+            ctx.trigger_zone_change.as_pair(),
+            Some((Zone::Battlefield, Zone::Graveyard)),
+            "cloning must not disturb the source context"
+        );
+    }
+
+    /// CR 603.7 + CR 603.12 + CR 603.1: entering an INDEPENDENT body is spelled
+    /// by name, and both named operations refuse to inherit the outer event.
+    #[test]
+    fn trigger_zone_change_provenance_resets_for_independent_bodies() {
+        let ctx = ParseContext {
+            trigger_zone_change: TriggerZoneChangeProvenance::established(
+                Zone::Battlefield,
+                Zone::Graveyard,
+            ),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            ctx.clone_for_independent_body()
+                .trigger_zone_change
+                .as_pair(),
+            None,
+            "a reflexive / nested-trigger body establishes its own authority"
+        );
+        assert_eq!(
+            ctx.clone_throwaway().trigger_zone_change.as_pair(),
+            None,
+            "a discarded sub-parse keeps its value, so it must not borrow authority"
+        );
+        assert_eq!(
+            ctx.trigger_zone_change.as_pair(),
+            Some((Zone::Battlefield, Zone::Graveyard)),
+            "neither named operation may disturb the source context"
+        );
+    }
+
+    fn phrase(subject: ControllerSubject, tense: ControllerTense) -> ControllerPhrase {
+        ControllerPhrase {
+            subject,
+            form: ControllerForm::Singular,
+            tense,
+        }
+    }
+
+    fn bind(
+        ctx: &ParseContext,
+        subject: ControllerSubject,
+        tense: ControllerTense,
+    ) -> Option<ControllerRef> {
+        bind_controller_phrase(&phrase(subject, tense), &ctx.player_antecedents())
+    }
+
+    /// CR 608.2c: an anaphoric player phrase binds only to an antecedent the
+    /// context introduced; with none it fails closed instead of defaulting.
+    #[test]
+    fn controller_phrase_binder_fails_closed_without_antecedent() {
+        let default_ctx = ParseContext::default();
+        let scoped_ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        };
+        for anaphor in [PlayerAnaphor::ThatPlayer, PlayerAnaphor::They] {
+            for tense in [ControllerTense::Present, ControllerTense::Past] {
+                let subject = ControllerSubject::Anaphoric(anaphor);
+                assert_eq!(bind(&default_ctx, subject.clone(), tense), None);
+                assert_eq!(
+                    bind(&scoped_ctx, subject, tense),
+                    Some(ControllerRef::TargetPlayer)
+                );
+            }
+        }
+
+        // A direct phrase names its own player whatever the context holds.
+        for ctx in [&default_ctx, &scoped_ctx] {
+            assert_eq!(
+                bind(
+                    ctx,
+                    ControllerSubject::Direct(ControllerRef::You),
+                    ControllerTense::Present
+                ),
+                Some(ControllerRef::You)
+            );
+            assert_eq!(
+                bind(
+                    ctx,
+                    ControllerSubject::Direct(ControllerRef::DefendingPlayer),
+                    ControllerTense::Past
+                ),
+                Some(ControllerRef::DefendingPlayer)
+            );
+        }
+
+        // CR 508.1 + CR 608.2c: "its controller" reads the subject.
+        let its = ControllerSubject::Anaphoric(PlayerAnaphor::ItsController);
+        let trigger_ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            ..Default::default()
+        };
+        assert_eq!(
+            bind(&trigger_ctx, its.clone(), ControllerTense::Present),
+            Some(ControllerRef::TriggeringPlayer)
+        );
+        let selfref_ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..Default::default()
+        };
+        for ctx in [&default_ctx, &selfref_ctx] {
+            assert_eq!(
+                bind(ctx, its.clone(), ControllerTense::Present),
+                Some(ControllerRef::ParentTargetController)
+            );
+        }
+    }
+
+    /// `actor` is not an antecedent: Reservoir Kraken's "any opponent may tap
+    /// an untapped creature they control" must not bind "they" to `Opponent`,
+    /// which the accepting opponent's frame would read as "not mine".
+    #[test]
+    fn controller_phrase_binder_does_not_read_actor() {
+        for actor in [ControllerRef::Opponent, ControllerRef::You] {
+            let ctx = ParseContext {
+                actor: Some(actor.clone()),
+                relative_player_scope: None,
+                ..Default::default()
+            };
+            assert_eq!(
+                bind(
+                    &ctx,
+                    ControllerSubject::Anaphoric(PlayerAnaphor::They),
+                    ControllerTense::Present
+                ),
+                None,
+                "actor {actor:?} must not bind \"they\""
+            );
+        }
+    }
+
+    /// CR 608.2c + CR 115.1a: a player the chain declared is a nearer
+    /// antecedent than the relative scope. "That player" always takes it;
+    /// "they" takes it only when the chain declared exactly one player.
+    #[test]
+    fn controller_phrase_binder_prefers_declared_player() {
+        let declared = ControllerRef::DeclaredPlayer {
+            group: ChosenGroupId::declared_player(0),
+        };
+        let that_player = ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer);
+        let they = ControllerSubject::Anaphoric(PlayerAnaphor::They);
+        for prior_player_declaration in [false, true] {
+            let ctx = ParseContext {
+                declared_player_scope: Some(declared.clone()),
+                prior_player_declaration,
+                relative_player_scope: Some(ControllerRef::TargetPlayer),
+                ..Default::default()
+            };
+            assert_eq!(
+                bind(&ctx, that_player.clone(), ControllerTense::Present),
+                Some(declared.clone())
+            );
+            let expected_they = if prior_player_declaration {
+                declared.clone()
+            } else {
+                ControllerRef::TargetPlayer
+            };
+            assert_eq!(
+                bind(&ctx, they.clone(), ControllerTense::Present),
+                Some(expected_they)
+            );
+        }
+    }
+}

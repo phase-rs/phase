@@ -34,6 +34,14 @@ pub fn resolve(
         return Ok(());
     };
 
+    // CR 608.2e + CR 603.10d: the instruction's entrance settle, so the
+    // controllers read below and the capture taken before the installs are
+    // post-layer values. A player-scope driver's carried capture was taken at
+    // its own pre-seat settle.
+    if ability.control_change_instruction.is_none() {
+        crate::game::layers::flush_layers(state);
+    }
+
     // Diagnostic: both slot filters being `Any` indicates either an
     // old-format `card-data.json` row that deserialised via the serde default,
     // or a parser gap. A bare `Any/Any` slot set plus a slot-less
@@ -179,6 +187,11 @@ pub fn resolve(
     // board; if either never starts, the entire exchange can't be completed
     // and per CR 701.12a no part of it occurs.
     let duration = ability.duration.clone().unwrap_or(Duration::Permanent);
+    // CR 701.12b + CR 603.10d: both halves are one simultaneous instruction,
+    // so one boundary, read before either half is installed.
+    let boundary = super::gain_control::exchange_boundary(state, ability, [id_a, id_b]);
+    let member_a = super::gain_control::instruction_member(state, &boundary, id_a);
+    let member_b = super::gain_control::instruction_member(state, &boundary, id_b);
     let exchanged = state.add_simultaneous_transient_continuous_effects(
         ability.source_id,
         duration,
@@ -229,38 +242,18 @@ pub fn resolve(
     // resolvers, no `old != new` guard is needed at this point.
     //
     // CR 109.4: a stack subject legitimately has a controller, so a spell half
-    // emits too. It is inert to `match_changes_controller` NOT primarily because
-    // of `valid_card_matches`: when the exchanged spell is itself the tracked
-    // object (Perplexing Chimera exchanging control with a cast Khârn the
-    // Betrayer), `valid_card: SelfRef` MATCHES the spell, and the
-    // `source_id == *object_id` branch in `match_changes_controller`
-    // (trigger_matchers.rs) short-circuits straight to `true` — `valid_card`
-    // does not gate that case.
-    //
-    // The guard that actually holds is CR 113.6 ("Abilities of all other
-    // objects usually function only while that object is on the battlefield"):
-    // the collection loop's zone gate (triggers.rs, keyed on `trigger_zones`)
-    // enforces it, and every printed `ChangesController` producer (Khârn the
-    // Betrayer, Duplicity, Gustha's Scepter, Stolen Uniform) declares
-    // `trigger_zones: ["Battlefield"]`, so none of them ever scan this
-    // spell-half event on the stack. `valid_card` remains a real, secondary
-    // scope for the in-zone case — it is just not what protects the
-    // self-tracked-spell case above.
-    //
-    // WARNING for a future `ChangesController` producer written to function
-    // from the stack (an explicit non-battlefield `trigger_zones` per CR
-    // 113.6b): neither guard here protects it. Check any such trigger by hand
-    // against this spell-half emission before shipping it.
-    events.push(GameEvent::ControllerChanged {
-        object_id: id_a,
-        old_controller: controller_a,
-        new_controller: controller_b,
-    });
-    events.push(GameEvent::ControllerChanged {
-        object_id: id_b,
-        old_controller: controller_b,
-        new_controller: controller_a,
-    });
+    // emits too. It is inert to `match_changes_controller`: the event's
+    // evidence records the subject's zone immediately before the exchange, and
+    // the matcher requires a permanent there (CR 110.1). That holds for every
+    // producer's `valid_card`, `SelfRef` included (Perplexing Chimera
+    // exchanging control with a cast Khârn the Betrayer), and for a producer
+    // that functions from the stack.
+    if let Some(member) = member_a {
+        super::gain_control::publish_controller_changed(state, events, member, controller_b);
+    }
+    if let Some(member) = member_b {
+        super::gain_control::publish_controller_changed(state, events, member, controller_a);
+    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ExchangeControl,
@@ -300,6 +293,7 @@ mod tests {
                     object_id,
                     old_controller,
                     new_controller,
+                    ..
                 } => Some((*object_id, *old_controller, *new_controller)),
                 _ => None,
             })

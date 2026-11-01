@@ -1,6 +1,7 @@
 use crate::game::effects::token_copy::{copies_own_source, copy_source, CopySourceReferent};
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::DisplayIdentity;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::layers::{remove_subtype_set, subtype_matches_core_types};
 use crate::game::printed_cards::ensure_keyword_triggers_for_copiable_values;
 use crate::types::ability::{
@@ -1698,6 +1699,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -2602,7 +2605,7 @@ mod tests {
     // 20/20 flying indestructible legendary Avatar token.
     //
     // This drives the real runtime path: BecomeCopy resolution → layer
-    // evaluation → check_state_triggers (via the priority window) → stack
+    // evaluation → a priority pass's state-trigger check → stack
     // resolution of the Sacrifice + "if you do, create" chain.
     #[test]
     fn copying_dark_depths_with_zero_counters_creates_marit_lage() {
@@ -2721,19 +2724,23 @@ mod tests {
             "the copy must inherit Dark Depths' state-triggered ability (CR 603.8)"
         );
 
-        // Drive the runtime: granting priority runs `check_state_triggers`,
-        // which sees zero ice counters and puts the sacrifice trigger on the
-        // stack; resolving it sacrifices the copy and creates Marit Lage.
+        // CR 603.8 + CR 117.1: state triggers are checked whenever a player would
+        // receive priority, so P0's pass puts the sacrifice trigger on the stack.
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
-        // CR 603.8 + CR 117.1: state triggers are checked whenever a player would
-        // receive priority. Run the engine's state-trigger check (the same call
-        // the priority pipeline makes), which puts the sacrifice trigger on the
-        // stack, then drain the stack to resolve the Sacrifice + "if you do,
-        // create Marit Lage" chain.
-        crate::game::triggers::check_state_triggers(&mut state);
         let mut runner = GameRunner::from_state(state);
+        runner
+            .act(crate::types::actions::GameAction::PassPriority)
+            .expect("P0 passes priority");
+        assert!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == stage),
+            "reach: the copy's state trigger is on the stack"
+        );
         runner.advance_until_stack_empty();
         let state = runner.state();
 

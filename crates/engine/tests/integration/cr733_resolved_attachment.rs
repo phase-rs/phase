@@ -24,6 +24,7 @@
 //! the recorded command can be replayed against the captured predecessor state.
 
 use engine::game::game_object::AttachTarget;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{Effect, TargetFilter, TypedFilter};
 use engine::types::actions::GameAction;

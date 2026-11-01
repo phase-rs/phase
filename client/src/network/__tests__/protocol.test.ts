@@ -12,6 +12,7 @@ import type {
   EndContinuousEffectOffer,
   GameAction,
   PendingCast,
+  TakebackEvent,
 } from "../../adapter/types";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import {
@@ -20,6 +21,8 @@ import {
   encodeWireMessage,
   legalActionsFromWire,
   legalActionsToWire,
+  takebackEventFromWire,
+  takebackEventToWire,
   validateMessage,
 } from "../protocol";
 import type { P2PMessage } from "../protocol";
@@ -568,6 +571,22 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       .toThrow(/Invalid message type/);
   });
 
+  it("accepts the durable terminal receipt tag and rejects a near miss", () => {
+    const result = {
+      key: "session-key",
+      lease: { sessionKey: "session-key", hostIncarnation: "host-1" },
+      recipient: 1,
+      revision: 7,
+      terminalId: "terminal-1:recipient:1",
+      finalStateCommitment: `sha256:${"0".repeat(64)}`,
+      display: { winner: 0, reason: "Game complete" },
+    };
+    expect(validateMessage({ type: "terminal_result_receipt", result, authority: result.lease }))
+      .toMatchObject({ type: "terminal_result_receipt", result });
+    expect(() => validateMessage({ type: "terminal_result_receipts" }))
+      .toThrow(/Invalid message type/);
+  });
+
   /**
    * Row 7, P2P half, at the real wire format: a decoder that does not know the
    * tag throws rather than passing it through. The KNOWN tag on the identical
@@ -713,5 +732,42 @@ describe("validateMessage", () => {
 
   it("rejects raw unbound match concessions", () => {
     expect(() => validateMessage({ type: "concede_match" })).toThrow(/Invalid message type/);
+  });
+});
+
+describe("takeback frames", () => {
+  const frames: P2PMessage[] = [
+    { type: "request_takeback" },
+    { type: "respond_takeback", approve: false },
+    { type: "cancel_takeback" },
+    { type: "takeback_requested", requester: 1, requesterName: "Guest", voters: [0, 2] },
+    { type: "takeback_resolved", resolution: "withdrawn", resolvedBy: 2 },
+    { type: "request_rejected", reason: "No takeback request is pending" },
+  ];
+
+  it.each(frames)("validateMessage admits $type", (frame) => {
+    expect(validateMessage(frame)).toEqual(frame);
+  });
+
+  it.each(["request_takebacks", "takeback_resolve"])("validateMessage rejects the neighbour %s", (type) => {
+    expect(() => validateMessage({ type })).toThrow(/Invalid message type/);
+  });
+
+  const events: TakebackEvent[] = [
+    { type: "takebackRequested", requester: 0, requesterName: "Host", voters: [1, 2] },
+    { type: "takebackResolved", resolution: "approved", resolvedBy: null },
+    { type: "requestRejected", reason: "Only the players asked to approve this takeback may respond" },
+  ];
+
+  it.each(events)("$type survives the wire mapping", (event) => {
+    expect(takebackEventFromWire(takebackEventToWire(event))).toEqual(event);
+  });
+
+  it("maps each event to its frame", () => {
+    expect(events.map(takebackEventToWire)).toEqual([
+      { type: "takeback_requested", requester: 0, requesterName: "Host", voters: [1, 2] },
+      { type: "takeback_resolved", resolution: "approved", resolvedBy: null },
+      { type: "request_rejected", reason: "Only the players asked to approve this takeback may respond" },
+    ]);
   });
 });
