@@ -51,7 +51,7 @@ function SlotChoiceContent({
       previewObjectId={objectId}
     >
       <div className="px-3 pt-3 lg:px-5 lg:pt-4">
-        <CardTextboxPreview cardName={cardName} />
+        <CardTextboxPreview cardName={cardName} ownerPrinting={obj.printing} ownerPrintedRef={obj.printed_ref} />
       </div>
       <div className="flex flex-col gap-2 px-3 py-3 lg:px-5 lg:py-5">
         {availableSlots.map((slot) => (

@@ -152,8 +152,17 @@ pub fn merge_object_onto(
         }
     };
     let topmost_id = ordered[0];
+    // CR 702.140c + CR 730.2a + CR 730.2e + CR 730.2f: every component of a mutate pile can hide
+    // its name from now on (a face-down component under a face-up top, the whole pile once turned
+    // face down), so each forgets its printing as it merges, the survivor included.
+    for component_id in &ordered {
+        if let Some(component) = state.objects.get_mut(component_id) {
+            component.conceal_printing();
+        }
+    }
     // CR 730.2e: a merged permanent's face-down status follows its topmost
-    // component. Read it BEFORE any mutation so the survivor adopts the topmost
+    // component. Read it before anything below changes any object's face-down status or merge
+    // structure (the loop above touches printings only), so the survivor adopts the topmost
     // component's face-down status while merged.
     let topmost_is_face_down = state.objects.get(&topmost_id).is_some_and(|o| o.face_down);
 

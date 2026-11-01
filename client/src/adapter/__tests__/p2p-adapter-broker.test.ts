@@ -86,6 +86,9 @@ vi.mock("../wasm-adapter", () => {
     initialize: vi.fn(async () => undefined),
     initializeMultiplayerHostGame: mocks.initializeMultiplayerHostGame,
     submitAction: vi.fn(async () => ({ events: [] })),
+    // The host's guest admission is fail-closed on the engine's sidecar bound, so
+    // an engine mock without this method would kick every guest in this suite.
+    checkDeckPrintingsBounds: vi.fn(async () => undefined),
     getState: vi.fn(async () => ({})),
     getLegalActions: mocks.getLegalActions,
     getLegalActionsForViewer: mocks.getLegalActionsForViewer,

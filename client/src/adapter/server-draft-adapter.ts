@@ -28,6 +28,7 @@ import {
   type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
 import { isValidWebSocketUrl } from "../services/serverDetection";
+import { captureSubmissionArtPreferences, submitDeckList } from "../services/deckSubmission";
 import type {
   DraftPlayerView,
   StandingEntry,
@@ -200,6 +201,8 @@ export class ServerDraftAdapter implements EngineAdapter {
   >();
   private draftResolve: ((view: DraftPlayerView) => void) | null = null;
   private draftReject: ((error: Error) => void) | null = null;
+  // Meaningful only while the callback pair owns an action.
+  private draftActionStage: "PreparingDeck" | "AwaitingReply" = "AwaitingReply";
   private pendingInit: DraftInit | null = null;
   private unfinishedAttachment: DraftAttachment | null = null;
   private listeners: ServerDraftAdapterEventListener[] = [];
@@ -457,6 +460,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     action: string,
     resolve: (view: DraftPlayerView) => void,
     reject: (error: Error) => void,
+    stage: "PreparingDeck" | "AwaitingReply" = "AwaitingReply",
   ): boolean {
     if (this.draftResolve !== null || this.draftReject !== null) {
       reject(new AdapterError(
@@ -468,6 +472,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     }
     this.draftResolve = resolve;
     this.draftReject = reject;
+    this.draftActionStage = stage;
     return true;
   }
 
@@ -560,31 +565,57 @@ export class ServerDraftAdapter implements EngineAdapter {
     });
   }
 
+  /**
+   * Submit names with optional owner printings selected from one snapshot of
+   * the submitter's pins/chain. Only main-deck cards are decorated, including
+   * commander-labelled main cards; pool art is not an entry source. Empty or
+   * timed-out decoration omits the sidecar, replacing previous submission art.
+   * Preparation reserves the action slot and cannot be acknowledged by a
+   * broadcast. After sending, acknowledgements remain uncorrelated as before.
+   */
   async submitDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
     return new Promise<DraftPlayerView>((resolve, reject) => {
-      if (!this.claimDraftAction("SubmitDeck", resolve, reject)) return;
-      const sent = this.send({
-        type: "DraftAction",
-        data: {
-          draft_code: this.draftCode,
-          action: {
-            type: "SubmitDeck",
-            // Key order mirrors the Rust struct's field order (`seat`,
-            // `main_deck`, `commanders`). `private send(msg: unknown)` means
-            // no typechecker sees this payload, so the byte-exact
-            // `JSON.stringify` assertion in the suite is what pins it.
-            data: { seat: this.seatIndex, main_deck: mainDeck, commanders },
+      if (!this.claimDraftAction("SubmitDeck", resolve, reject, "PreparingDeck")) return;
+      const ws = this.ws;
+      const draftCode = this.draftCode;
+      const draftToken = this.draftToken;
+      const seat = this.seatIndex;
+      const prepare = async () => {
+        const capturedMain = [...mainDeck];
+        const capturedCommanders = [...commanders];
+        const snapshot = captureSubmissionArtPreferences();
+        const deck = await submitDeckList({ main_deck: capturedMain, sideboard: [] }, snapshot);
+        if (this.draftResolve !== resolve || this.draftReject !== reject) return;
+        if (this.disposed || this.ws !== ws || !ws || ws.readyState !== WebSocket.OPEN
+            || this.draftCode !== draftCode || this.draftToken !== draftToken || this.seatIndex !== seat) {
+          throw new AdapterError("WS_CLOSED", "Draft session changed during deck preparation", true);
+        }
+        this.draftActionStage = "AwaitingReply";
+        const sent = this.send({
+          type: "DraftAction",
+          data: {
+            draft_code: draftCode,
+            action: {
+              type: "SubmitDeck",
+              // Key order matches the Rust carrier; absent art keeps old bytes.
+              data: {
+                seat, main_deck: deck.main_deck, commanders: capturedCommanders,
+                ...(deck.printings?.length ? { printings: deck.printings } : {}),
+              },
+            },
           },
-        },
-      });
-      if (!sent) {
+        });
+        if (!sent) throw new AdapterError("WS_CLOSED", "Failed to send draft action", true);
+      };
+      void prepare().catch((error: unknown) => {
+        if (this.draftResolve !== resolve || this.draftReject !== reject) return;
         this.draftResolve = null;
         this.draftReject = null;
-        reject(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
-      }
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
     });
   }
 
@@ -793,7 +824,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.seatIndex = data.seat_index;
         this.draftView = data.view;
         this.updatePhaseFromView(data.view);
-        if (this.draftResolve) {
+        if (this.draftResolve && this.draftActionStage === "AwaitingReply") {
           this.draftResolve(data.view);
           this.draftResolve = null;
           this.draftReject = null;
@@ -807,7 +838,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.updatePhaseFromView(data.view);
         if (initOwner?.kind === "reconnect" && this.ws === sourceSocket) this.settleInit(initOwner);
         this.emit({ type: "draftViewUpdated", view: data.view });
-        if (this.draftResolve) {
+        if (this.draftResolve && this.draftActionStage === "AwaitingReply") {
           this.draftResolve(data.view);
           this.draftResolve = null;
           this.draftReject = null;
@@ -889,7 +920,11 @@ export class ServerDraftAdapter implements EngineAdapter {
           this.settleInit(initOwner, new AdapterError("ACTION_REJECTED", data.reason, true));
         }
         this.emit({ type: "draftActionRejected", reason: data.reason });
-        if (this.draftReject) {
+        // The wire carries no correlation id, and preparation has not sent a
+        // frame yet: while SubmitDeck is still `PreparingDeck`, a rejection can
+        // only answer an EARLIER action, so it must not abort this submission
+        // with another action's reason.
+        if (this.draftReject && this.draftActionStage === "AwaitingReply") {
           this.draftReject(
             new AdapterError("ACTION_REJECTED", data.reason, true),
           );
