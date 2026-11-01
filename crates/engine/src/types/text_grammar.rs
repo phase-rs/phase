@@ -1192,6 +1192,7 @@ fn parse_artifact_subtype_enchant_leg(input: &str) -> OracleResult<'_, TypeFilte
 /// shared target-phrase supertype recognizer so Aura legality gets the same
 /// `HasSupertype` property as ordinary target phrases.
 pub(crate) fn parse_enchant_qualified_type_leg(input: &str) -> OracleResult<'_, TypedFilter> {
+    let (input, status) = opt(parse_enchant_tap_status_prefix).parse(input)?;
     let (input, supertype) = opt(parse_supertype_prefix).parse(input)?;
     let (input, excluded_subtype) = opt(parse_enchant_negated_subtype_prefix).parse(input)?;
     let (input, type_filter) = parse_enchant_type_leg(input)?;
@@ -1199,11 +1200,25 @@ pub(crate) fn parse_enchant_qualified_type_leg(input: &str) -> OracleResult<'_, 
     if let Some(excluded) = excluded_subtype {
         typed = typed.with_type(excluded);
     }
-    let properties = supertype
-        .map(|value| FilterProp::HasSupertype { value })
+    let properties = status
         .into_iter()
+        .chain(supertype.map(|value| FilterProp::HasSupertype { value }))
         .collect();
     Ok((input, typed.properties(properties)))
+}
+
+/// CR 702.5a: An Enchant type leg may carry a tapped-status
+/// adjective ("Enchant tapped creature", Entangling Vines). The Aura's legal
+/// target set is then limited to permanents in that status.
+fn parse_enchant_tap_status_prefix(input: &str) -> OracleResult<'_, FilterProp> {
+    terminated(
+        alt((
+            value(FilterProp::Tapped, tag("tapped")),
+            value(FilterProp::Untapped, tag("untapped")),
+        )),
+        space1,
+    )
+    .parse(input)
 }
 
 /// CR 702.5a + CR 205.3a: A negated canonical subtype adjective restricts

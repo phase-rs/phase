@@ -1783,6 +1783,7 @@ mod each_opponent_after_elimination_cost_rider;
 mod each_player_they_control_scope;
 mod edgar_markov_eminence_command_zone;
 mod elixir_gain_life_cards_shuffled;
+mod enchant_tapped_creature;
 mod end_blaze_epiphany_choose_exiled_this_way;
 mod end_combat_phase;
 mod enters_tapped_this_turn;
