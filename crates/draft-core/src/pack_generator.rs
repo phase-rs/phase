@@ -634,6 +634,35 @@ mod tests {
     }
 
     #[test]
+    fn chaos_rejects_candidate_set_with_mismatched_variant_sizes_even_for_unglued() {
+        let mut pool = sized_pool("UGL", 10);
+        pool.pack_variants.push(PackVariant {
+            contents: vec![PackSlot {
+                slot: "common".to_string(),
+                count: 11,
+                choices: vec![WeightedSheetChoice {
+                    sheet: "common".to_string(),
+                    weight: 1,
+                }],
+            }],
+            weight: 1,
+        });
+        let assignments = vec![vec!["UGL".to_string()]];
+        let err = PackGenerator::for_chaos(vec![pool], &["UGL".to_string()], &assignments, 1, 1)
+            .err()
+            .expect("mismatched variant sizes must fail");
+        match err {
+            DraftError::InvalidPackSequence { reason } => {
+                assert!(
+                    reason.contains("has no single MTGJSON pack size across its booster variants"),
+                    "unexpected error reason: {reason}"
+                );
+            }
+            other => panic!("expected InvalidPackSequence, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_single_set_generator_fills_every_pack_from_its_one_pool() {
         let generator = PackGenerator::new(sized_pool("AAA", 15));
         let mut rng = ChaCha8Rng::seed_from_u64(7);

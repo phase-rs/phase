@@ -173,9 +173,6 @@ impl LimitedSetPool {
         if sizes.all(|other| other == size) {
             return u8::try_from(size).ok();
         }
-        if self.code.eq_ignore_ascii_case("UGL") {
-            return Some(10);
-        }
         None
     }
 }
@@ -218,6 +215,22 @@ mod tests {
             name: "Test".to_string(),
             release_date: None,
             pack_variants: vec![variant(14), variant(15)],
+            pack_variants_total_weight: 2,
+            sheets: BTreeMap::new(),
+            prints: vec![],
+            basic_lands: vec![],
+        };
+
+        assert_eq!(pool.cards_per_pack(), None);
+    }
+
+    #[test]
+    fn unglued_pool_with_mismatched_variants_reports_no_cards_per_pack() {
+        let pool = LimitedSetPool {
+            code: "UGL".to_string(),
+            name: "Unglued".to_string(),
+            release_date: None,
+            pack_variants: vec![variant(10), variant(11)],
             pack_variants_total_weight: 2,
             sheets: BTreeMap::new(),
             prints: vec![],
