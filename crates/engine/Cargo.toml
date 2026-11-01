@@ -137,3 +137,22 @@ insta = { version = "1", features = ["json"] }
 assert_matches = "1.5"
 pretty_assertions = "1"
 syn = { version = "2", features = ["full"] }
+
+# The engine integration suite is a fixed set of test targets. `tests/integration/main.rs` is
+# the auto-discovered `integration` target (autotests stays on); these are the other shard
+# roots. `no_top_level_test_binaries` enforces one registration per file.
+[[test]]
+name = "integration_2"
+path = "tests/integration/shard_2.rs"
+
+[[test]]
+name = "integration_3"
+path = "tests/integration/shard_3.rs"
+
+[[test]]
+name = "integration_4"
+path = "tests/integration/shard_4.rs"
+
+[[test]]
+name = "integration_5"
+path = "tests/integration/shard_5.rs"

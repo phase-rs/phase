@@ -37,7 +37,9 @@
     "approve": "Aprovar",
     "decline": "Recusar",
     "cancel": "Cancelar solicitação",
-    "declinedToast": "Solicitação de retrocesso recusada"
+    "declinedToast": "Solicitação de retrocesso recusada",
+    "cancelledToast": "Solicitação de retrocesso cancelada",
+    "withdrawnToast": "Solicitação de retrocesso retirada: um jogador saiu do jogo"
   },
   "connectionDot": {
     "connected": "Conectado",
@@ -353,7 +355,7 @@
     "gameInProgressTitle": "Partida em andamento",
     "gameInProgressBody": "Termine ou saia da sua partida atual e abra o link novamente."
   },
-  "p2pStateWithheld": "O estado do jogo após esta ação é grande demais para ser enviado, por isso este tabuleiro está desatualizado. Jogos ponto a ponto não têm retrocesso; o tabuleiro será atualizado quando um estado posterior for pequeno o suficiente para ser enviado.",
+  "p2pStateWithheld": "O estado do jogo após esta ação é grande demais para ser enviado, por isso este tabuleiro está desatualizado. Um jogador pode solicitar um retrocesso da última ação no menu do jogo para continuar (em um loop, execute-o com uma contagem menor).",
   "terminalRecovery": {
     "finalViewsUnpublished": "A concessão atingiu um estado final Full, mas não foi possível publicar as visualizações finais nativas.",
     "concedeUnreconciled": "Não foi possível reconciliar o resultado da concessão; o assento permanece bloqueado.",

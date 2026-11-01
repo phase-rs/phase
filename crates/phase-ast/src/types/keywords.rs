@@ -5316,6 +5316,23 @@ mod tests {
         }
     }
 
+    /// CR 702.5a: Entangling Vines — "Enchant tapped creature" keeps the tapped
+    /// status on the creature leg; "untapped" is the symmetric adjective.
+    #[test]
+    fn parse_enchant_tapped_and_untapped_creature() {
+        for (phrase, prop) in [
+            ("Enchant:tapped creature", FilterProp::Tapped),
+            ("Enchant:untapped creature", FilterProp::Untapped),
+        ] {
+            let Keyword::Enchant(TargetFilter::Typed(tf)) = Keyword::from_str(phrase).unwrap()
+            else {
+                panic!("expected typed Enchant for {phrase}");
+            };
+            assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            assert_eq!(tf.properties, vec![prop], "{phrase}");
+        }
+    }
+
     #[test]
     fn parse_enchant_as_target_filter() {
         let enchant = Keyword::from_str("Enchant:creature").unwrap();

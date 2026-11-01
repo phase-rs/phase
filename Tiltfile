@@ -657,10 +657,11 @@ local_resource('probe-pin-e2e',
 # IS_LINUX note at the top of this file for the two coordinates). What the gate BUYS is only
 # that a Darwin host does not boot this resource into a red it can never clear; what it does NOT
 # buy is any enforcement of the pin off Linux. There is no CI venue to fall back to -- MEASURED:
-# `grep -rn probe-pin .github/workflows/` returns nothing, which is the state 'probe-pin-check''s
-# note calls a hard stop -- so off Linux this pin's verdict is carried entirely by whatever Linux
-# venue last ran it. That is the identical shape 'probe-pin-e2e' states for Tier 2, and it is
-# stated here rather than inferred from the flag.
+# `.github/workflows/ci.yml` names `probe-pin` only as a test launcher binary, and no workflow
+# runs `probe-pin check`, which is the state 'probe-pin-check''s note calls a hard stop -- so off
+# Linux this pin's verdict is carried entirely by whatever Linux venue last ran it. That is the
+# identical shape 'probe-pin-e2e' states for Tier 2, and it is stated here rather than inferred
+# from the flag.
 local_resource('probe-pin-census',
     cmd = ['bash', '-c',
            # Starlark has NO implicit adjacent-string-literal concatenation (a Python rule this
@@ -678,14 +679,14 @@ local_resource('probe-pin-census',
     # deliberately NOT ENGINE_SRC + AI_SRC.
     # ⚠ THE PREDICATE IS STATED BECAUSE THE EARLIER WORD WAS "EVERYTHING", AND THAT WAS FALSE.
     # Disclosed residual, not a gap that was missed: the target is resolved by building
-    # `--test integration`, so ANY sibling file under crates/engine/tests/integration/ can move the
-    # verdict -- by breaking that build, or by adding a test that FAILS under the manifest's
-    # control. Those are NOT watched, on purpose: watching them would re-trigger this pin on every
-    # unrelated integration-test edit, and there are over a thousand of them. Both failure classes
+    # `--test integration`, so ANY other module `tests/integration/main.rs` registers (the
+    # `integration` shard) can move the verdict -- by breaking that build, or by adding a test
+    # that FAILS under the manifest's control. Those are NOT watched, on purpose: watching them
+    # would re-trigger this pin on every unrelated edit to that shard. Both failure classes
     # surface as exit 2 with the cause named in the output. THE DEV-DEP AND LOCKFILE HALF OF THIS
-    # RESIDUAL IS NO LONGER RESIDUAL -- it was listed here alongside the thousand siblings and
-    # inherited their exemption, which was wrong by this file's own admission rule: a lockfile-only
-    # edit leaves a stale GREEN, and Cargo.lock is one file with a tiny edit surface. It, the two
+    # RESIDUAL IS NO LONGER RESIDUAL -- it was listed here alongside those siblings and inherited
+    # their exemption, which was wrong by this file's own admission rule: a lockfile-only edit
+    # leaves a stale GREEN, and Cargo.lock is one file with a tiny edit surface. It, the two
     # manifests that reach this target, and .cargo/config.toml are watched below.
     # The pin is over exactly what census() reads; ENGINE_SRC is a superset BY DESIGN (its own
     # comment requires it to stay a superset of the engine cache key: src + data + build.rs +
@@ -709,7 +710,7 @@ local_resource('probe-pin-census',
         # even when the rebuilt target would fail or move a number. Each is admitted by the rule
         # 'main.rs' below is admitted by -- ONE file with a tiny, stable edit surface -- not by the
         # "everything that can break the build" reading the comment above already rejects for the
-        # thousand-odd sibling test files.
+        # sibling test files of that shard.
         # WHICH manifests, MEASURED not shotgunned (`cargo tree -p phase-engine -e normal,dev`
         # intersected with the workspace members): phase-engine, phase-ast and phase-parser are the
         # workspace members in this target's graph, so their manifests plus the workspace root's --
@@ -743,7 +744,7 @@ local_resource('probe-pin-census',
         # aborts either way and every Abort maps to exit 2. It is watched not because its failure is
         # quieter than a sibling's (it is the same class) but because it is ONE file with a tiny,
         # stable edit surface: the cost of watching it rounds to zero, which is exactly what is not
-        # true of the thousand-odd siblings above.
+        # true of the siblings above.
         'crates/engine/tests/integration/main.rs',
         # The TOOLCHAIN, for the same reason and by the same rule. `used_instruments()` returns
         # [Instrument::Toolchain] UNCONDITIONALLY and the digest covers that list, so a rustc move
