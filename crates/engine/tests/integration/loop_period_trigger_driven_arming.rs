@@ -112,6 +112,7 @@ fn choices(state: &GameState) -> Vec<engine::game::TraceEntry> {
         .filter(|entry| match &entry.kind {
             EntryKind::Play { .. } => true,
             EntryKind::Answer { optional, .. } => *optional == AnswerOptionality::Optional,
+            EntryKind::Remembered { .. } => true,
             EntryKind::Resolution { .. } => false,
         })
         .collect()

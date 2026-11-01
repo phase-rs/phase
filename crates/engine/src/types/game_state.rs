@@ -23354,8 +23354,8 @@ declare_game_state! {
         >,
     >,
     /// CR 104.4b: every loop decision answered so far, in every mode; written only by
-    /// [`GameState::record_loop_decision`] and [`GameState::record_trigger_order`]. Live-only:
-    /// never persisted or compared.
+    /// [`GameState::record_remembered_answer`], [`GameState::record_point_answer`] and
+    /// [`GameState::record_trigger_order`]. Live-only: never persisted or compared.
     #[serde(skip, default)]
     pub(crate) loop_decision_tally: LoopDecisionTally,
     /// CR 732.2a: every play and answer of the current step, and the spans carried past earlier
@@ -35581,7 +35581,7 @@ impl GameState {
         use crate::analysis::decision_template::ChoicePoint;
         use crate::game::play_trace::AnswerOptionality;
         let Some(point) = point else {
-            return self.record_loop_decision(answer);
+            return self.tally_loop_decision(answer);
         };
         let provable = match point {
             ChoicePoint::TriggerOrder => return self.record_trigger_order(),
@@ -35593,20 +35593,32 @@ impl GameState {
             | ChoicePoint::ManaColor
             | ChoicePoint::ConvokeTaps
             | ChoicePoint::Mode
-            | ChoicePoint::UnlessBreak => return self.record_loop_decision(answer),
+            | ChoicePoint::UnlessBreak => return self.tally_loop_decision(answer),
         };
         match answer {
             AnswerOptionality::Mandatory => *provable += 1,
-            AnswerOptionality::Optional => self.record_loop_decision(answer),
+            AnswerOptionality::Optional => self.tally_loop_decision(answer),
+        }
+    }
+
+    /// CR 603.5 + CR 104.4b: a choice `seat`'s stored preference answered. An optional one is
+    /// still that seat's optional action, so it is a play-trace entry as well as a tally mark.
+    pub(crate) fn record_remembered_answer(
+        &mut self,
+        seat: PlayerId,
+        answer: crate::game::play_trace::AnswerOptionality,
+    ) {
+        use crate::game::play_trace::AnswerOptionality;
+        self.tally_loop_decision(answer);
+        match answer {
+            AnswerOptionality::Optional => crate::game::play_trace::note_remembered(self, seat),
+            AnswerOptionality::Mandatory => {}
         }
     }
 
     /// CR 104.4b: one answered loop decision — `Optional` for a declinable choice (CR 603.5,
     /// CR 616.1e), `Mandatory` for a choice among several options (CR 616.1).
-    pub(crate) fn record_loop_decision(
-        &mut self,
-        answer: crate::game::play_trace::AnswerOptionality,
-    ) {
+    fn tally_loop_decision(&mut self, answer: crate::game::play_trace::AnswerOptionality) {
         use crate::game::play_trace::AnswerOptionality;
         let count = match answer {
             AnswerOptionality::Optional => &mut self.loop_decision_tally.optional,

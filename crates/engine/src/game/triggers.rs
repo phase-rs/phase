@@ -7482,7 +7482,10 @@ fn drop_auto_inert_noop_trigger(state: &mut GameState, ctx: &PendingTriggerConte
     match state.may_trigger_auto_choice_for_live_prompt(&key) {
         Some(AutoMayChoice::Decline) => {
             // CR 603.5: the remembered decline is the controller's optional choice.
-            state.record_loop_decision(crate::game::play_trace::AnswerOptionality::Optional);
+            state.record_remembered_answer(
+                key.player,
+                crate::game::play_trace::AnswerOptionality::Optional,
+            );
             true
         }
         // CR 603.3d: no legal target means no choice was offered, so nothing is recorded.

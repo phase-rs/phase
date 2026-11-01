@@ -13043,11 +13043,14 @@ fn replay_pending_replacement(
     };
     // CR 616.1e + CR 616.1: a replayed answer is still the affected player's choice —
     // whether to apply an optional effect, or which effect applies next.
-    state.record_loop_decision(if optional {
-        crate::game::play_trace::AnswerOptionality::Optional
-    } else {
-        crate::game::play_trace::AnswerOptionality::Mandatory
-    });
+    state.record_remembered_answer(
+        player,
+        if optional {
+            crate::game::play_trace::AnswerOptionality::Optional
+        } else {
+            crate::game::play_trace::AnswerOptionality::Mandatory
+        },
+    );
     let result = continue_replacement_impl(state, index, events);
     if !matches!(result, ReplacementResult::Execute(_)) {
         state.replacement_auto_choice_tail = None;

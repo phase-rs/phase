@@ -352,6 +352,12 @@ pub enum EntryKind {
         /// The decision point the answered prompt is, which the every-option proof enumerates.
         point: Option<crate::analysis::decision_template::ChoicePoint>,
     },
+    /// CR 603.5: an optional answer a stored preference gave, which a replay answers again from
+    /// the same store.
+    Remembered {
+        /// The triggered ability whose resolution asked it.
+        asked_by: Option<usize>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -378,7 +384,7 @@ pub enum NamingCause {
     /// No play was consumed and this one is legal now.
     LegalNow,
     /// CR 104.4b + CR 732.4: a triggered node is about to resolve again with no optional answer
-    /// or play since its previous instance resolved. Read on demand, never named.
+    /// or play since its previous instance resolved.
     MandatoryRecurrence,
 }
 
@@ -487,6 +493,9 @@ pub(crate) struct PlayTrace {
     witnessed: [Option<(usize, Witnessed)>; 2],
     /// The every-option proof kept for the mandatory span starting at this entry.
     ordered: Option<(usize, crate::game::period_confirm::OptionProof)>,
+    /// While a priority pass resolves the stack: the remembered answers made so far, each with the
+    /// stack entry resolving when it was made, held until that entry's resolution is recorded.
+    held: Option<Vec<(Option<ObjectId>, TraceEntry)>>,
 }
 
 impl PlayTrace {
@@ -515,6 +524,7 @@ impl PlayTrace {
             carrying: im::HashMap::new(),
             witnessed: [None; 2],
             ordered: None,
+            held: None,
         }
     }
 
@@ -601,7 +611,7 @@ impl PlayTrace {
             EntryKind::Play { node, .. } | EntryKind::Resolution { node } => {
                 *node = reintern(self, *node);
             }
-            EntryKind::Answer { asked_by, .. } => {
+            EntryKind::Answer { asked_by, .. } | EntryKind::Remembered { asked_by } => {
                 *asked_by = asked_by.map(|node| reintern(self, node));
             }
         }
@@ -639,17 +649,22 @@ impl PlayTrace {
                 self.push_node_entry(*node, entry);
             }
             EntryKind::Answer {
-                optional, asked_by, ..
-            } => {
-                if *optional == AnswerOptionality::Optional {
-                    self.last_optional = Some(self.entries.len());
-                    // CR 603.5: a trigger whose resolution asked an optional answer.
-                    if let Some(node) = asked_by {
-                        self.optional_triggers.insert(*node);
-                    }
+                optional: AnswerOptionality::Optional,
+                asked_by,
+                ..
+            }
+            | EntryKind::Remembered { asked_by } => {
+                self.last_optional = Some(self.entries.len());
+                // CR 603.5: a trigger whose resolution asked an optional answer.
+                if let Some(node) = asked_by {
+                    self.optional_triggers.insert(*node);
                 }
                 self.entries.push_back(entry);
             }
+            EntryKind::Answer {
+                optional: AnswerOptionality::Mandatory,
+                ..
+            } => self.entries.push_back(entry),
         }
         if let Some(undo) = undo {
             self.undo.push_back(undo);
@@ -1318,6 +1333,14 @@ fn trigger_node(state: &GameState, entry: &StackEntry, at: usize) -> Option<Node
     ))
 }
 
+/// The triggered ability whose resolution is asking a choice (CR 603.5 + CR 608.2d).
+fn asking_node(state: &GameState, at: usize) -> Option<NodeKey> {
+    state
+        .resolving_stack_entry
+        .as_ref()
+        .and_then(|entry| trigger_node(state, entry, at))
+}
+
 /// The pre-action trace, restored when the action does not apply, and the reversal the action
 /// makes when it does.
 pub(crate) struct TraceSnapshot {
@@ -1395,10 +1418,7 @@ pub(crate) fn begin_action(
             Choice::Answer(answer) => {
                 let optional = answer_optionality(&state.waiting_for, answer);
                 let point = state.waiting_for.option_point();
-                let asking = state
-                    .resolving_stack_entry
-                    .as_ref()
-                    .and_then(|entry| trigger_node(state, entry, at));
+                let asking = asking_node(state, at);
                 cost = CostChoices::at(state).map(|choices| (at, choices));
                 let trace = trace_mut(state);
                 let asked_by = asking.map(|key| trace.intern(key));
@@ -1587,8 +1607,9 @@ pub(crate) struct BeforeResolution {
     next_object_id: u64,
 }
 
-/// The stack as it stood before a priority pass resolves its top, when the trace records it.
-pub(crate) fn stack_before_resolution(state: &GameState) -> Option<BeforeResolution> {
+/// The stack as it stood before a priority pass resolves its top, when the trace records it; from
+/// here until the pass's resolutions are recorded, remembered answers are held.
+pub(crate) fn stack_before_resolution(state: &mut GameState) -> Option<BeforeResolution> {
     if in_simulation_probe()
         && state.loop_detection.samples()
         && state
@@ -1598,38 +1619,91 @@ pub(crate) fn stack_before_resolution(state: &GameState) -> Option<BeforeResolut
     {
         meter!(resolution_hooks_in_probe += 1);
     }
-    recording(state).then(|| BeforeResolution {
+    if !recording(state) {
+        return None;
+    }
+    trace_mut(state).held = Some(Vec::new());
+    Some(BeforeResolution {
         stack: state.stack.clone(),
         next_object_id: state.next_object_id,
     })
 }
 
+/// CR 603.5: records an optional answer `seat`'s stored preference gave. During a priority pass
+/// it is held, since the resolution that asked it is recorded only after the pass.
+pub(crate) fn note_remembered(state: &mut GameState, seat: PlayerId) {
+    if !recording(state) {
+        return;
+    }
+    let at = trace_mut(state).entries.len();
+    let asking = asking_node(state, at);
+    let during = state.resolving_stack_entry.as_ref().map(|entry| entry.id);
+    let depth = state.stack.len();
+    let next_object_id = state.next_object_id;
+    let trace = trace_mut(state);
+    let asked_by = asking.map(|key| trace.intern(key));
+    let entry = TraceEntry {
+        seat,
+        kind: EntryKind::Remembered { asked_by },
+        depth,
+        prompt: PromptClass::Other,
+        next_object_id,
+    };
+    if let Some(held) = trace.held.as_mut() {
+        held.push((during, entry));
+        return;
+    }
+    let prior = trace.clone();
+    trace.record(&prior, entry, None);
+}
+
+/// Records, in order, the held remembered answers made while `during` resolved, or every one
+/// left when `during` is `None`.
+fn record_held(
+    state: &mut GameState,
+    held: &mut Vec<(Option<ObjectId>, TraceEntry)>,
+    during: Option<ObjectId>,
+) {
+    let (now, later): (Vec<_>, Vec<_>) = std::mem::take(held)
+        .into_iter()
+        .partition(|(made, _)| during.is_none() || *made == during);
+    *held = later;
+    for (_, entry) in now {
+        let trace = trace_mut(state);
+        let prior = trace.clone();
+        trace.record(&prior, entry, None);
+    }
+}
+
 /// CR 603.3: records each triggered ability among the `consumed` entries that resolved from
-/// the top of `before`. Triggered mana abilities never use the stack (CR 605.4a).
+/// the top of `before`, each followed by the remembered answers its resolution made. Triggered
+/// mana abilities never use the stack (CR 605.4a).
 pub(crate) fn record_resolutions(state: &mut GameState, before: &BeforeResolution, consumed: u32) {
     metered(|| {
+        let mut held = trace_mut(state).held.take().unwrap_or_default();
         let consumed = usize::try_from(consumed).unwrap_or(usize::MAX);
         for (resolved, entry) in before.stack.iter().rev().take(consumed).enumerate() {
             let at = trace_mut(state).entries.len();
-            let Some(key) = trigger_node(state, entry, at) else {
-                continue;
-            };
-            meter!(resolutions_recorded += 1);
-            let trace = trace_mut(state);
-            let prior = trace.clone();
-            let node = trace.intern(key);
-            trace.record(
-                &prior,
-                TraceEntry {
-                    seat: entry.controller,
-                    kind: EntryKind::Resolution { node },
-                    depth: before.stack.len() - resolved,
-                    prompt: PromptClass::Priority,
-                    next_object_id: before.next_object_id,
-                },
-                None,
-            );
+            if let Some(key) = trigger_node(state, entry, at) {
+                meter!(resolutions_recorded += 1);
+                let trace = trace_mut(state);
+                let prior = trace.clone();
+                let node = trace.intern(key);
+                trace.record(
+                    &prior,
+                    TraceEntry {
+                        seat: entry.controller,
+                        kind: EntryKind::Resolution { node },
+                        depth: before.stack.len() - resolved,
+                        prompt: PromptClass::Priority,
+                        next_object_id: before.next_object_id,
+                    },
+                    None,
+                );
+            }
+            record_held(state, &mut held, Some(entry.id));
         }
+        record_held(state, &mut held, None);
     });
 }
 
@@ -1753,13 +1827,40 @@ pub(crate) fn mandatory_recurrence_span(state: &GameState) -> Option<NamedSpan> 
     let trace = current(state)?;
     let end = trace.entries.len();
     let node = trigger_node(state, state.stack.back()?, end).and_then(|key| trace.find(&key))?;
-    let start = *trace.last.get(&node)?;
-    let mandatory = !trace.optional_triggers.contains(&node)
-        && !trace
-            .last_optional
-            .is_some_and(|optional| optional >= start)
-        && !trace.last_play.is_some_and(|play| play >= start);
-    mandatory.then(|| NamedSpan::in_window(start, end, NamingCause::MandatoryRecurrence))
+    match trigger_top_cause(trace, node)? {
+        (start, NamingCause::MandatoryRecurrence) => Some(NamedSpan::in_window(
+            start,
+            end,
+            NamingCause::MandatoryRecurrence,
+        )),
+        _ => None,
+    }
+}
+
+/// CR 104.4b + CR 732.4: how the span back to the last instance of the recurring triggered `node`
+/// is named — `TriggerTop` when its resolution asked an optional answer, or an optional answer
+/// and another node's repeat were made since with no play; `MandatoryRecurrence` when neither a
+/// play nor an optional answer was made since; otherwise not at all.
+fn trigger_top_cause(trace: &PlayTrace, node: usize) -> Option<(usize, NamingCause)> {
+    let &start = trace.last.get(&node)?;
+    let played = trace.last_play.is_some_and(|play| play >= start);
+    let recurs_inside = || {
+        trace
+            .repeated
+            .iter()
+            .any(|repeated| trace.last.get(repeated).is_some_and(|&at| at > start))
+    };
+    if trace.optional_triggers.contains(&node)
+        || (trace.last_optional.is_some_and(|optional| optional > start)
+            && !played
+            && recurs_inside())
+    {
+        return Some((start, NamingCause::TriggerTop));
+    }
+    let answered = trace
+        .last_optional
+        .is_some_and(|optional| optional >= start);
+    (!played && !answered).then_some((start, NamingCause::MandatoryRecurrence))
 }
 
 /// CR 104.4b + CR 732.2a: what a mandatory-recurrence span was read as.
@@ -1879,30 +1980,14 @@ pub(crate) fn name_window(state: &mut GameState) -> Vec<NamedSpan> {
         let end = trace.entries.len();
         if let Some(top) = state.stack.back() {
             // A play is named only with the stack empty; a trigger is named as its next instance
-            // comes to the top when its own resolution asked an optional answer, or when an
-            // optional answer and another node's repeat were both made since its previous
-            // instance resolved, so the span closes a recurrence the trace has already seen.
+            // comes to the top, so the span closes a recurrence the trace has already seen.
             let node = trigger_node(state, top, end).and_then(|key| trace.find(&key));
             if let Some(node) = node {
                 meter!(node_map_reads += 1);
-                if let Some(&start) = trace.last.get(&node) {
-                    let recurs_inside = || {
-                        trace
-                            .repeated
-                            .iter()
-                            .any(|repeated| trace.last.get(repeated).is_some_and(|&at| at > start))
-                    };
-                    if trace.optional_triggers.contains(&node)
-                        || (trace.last_optional.is_some_and(|optional| optional > start)
-                            && !trace.last_play.is_some_and(|play| play >= start)
-                            && recurs_inside())
-                    {
-                        trace.named.push_back(NamedSpan::in_window(
-                            start,
-                            end,
-                            NamingCause::TriggerTop,
-                        ));
-                    }
+                if let Some((start, cause)) = trigger_top_cause(&trace, node) {
+                    trace
+                        .named
+                        .push_back(NamedSpan::in_window(start, end, cause));
                 }
             }
         } else {
@@ -2474,5 +2559,47 @@ mod tests {
             .map(|(label, ..)| *label)
             .collect();
         assert_eq!(misread, Vec::<&str>::new());
+    }
+
+    /// CR 603.5 + CR 104.4b: an optional remembered answer is an entry of its seat; a mandatory
+    /// one and every answer under Off are tally marks only.
+    #[test]
+    fn the_remembered_answer_authority_records_only_optional_answers_while_recording() {
+        use crate::types::game_state::LoopDetectionMode;
+        let entries = |state: &GameState| {
+            state
+                .play_trace
+                .as_deref()
+                .map_or_else(Vec::new, |trace| trace.entries.iter().cloned().collect())
+        };
+        let _boundary = BoundaryDepth::enter();
+        let mut state = GameState::new_two_player(1);
+        state.loop_detection = LoopDetectionMode::Interactive;
+        let tally = state.loop_decision_tally;
+        state.record_remembered_answer(PlayerId(1), AnswerOptionality::Optional);
+        let recorded = entries(&state);
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].seat, PlayerId(1));
+        assert_eq!(recorded[0].kind, EntryKind::Remembered { asked_by: None });
+        assert_eq!(state.loop_decision_tally.optional, tally.optional + 1);
+
+        state.record_remembered_answer(PlayerId(1), AnswerOptionality::Mandatory);
+        assert_eq!(entries(&state).len(), 1);
+        assert_eq!(state.loop_decision_tally.decision, tally.decision + 1);
+
+        // Held through a priority pass, then recorded once the pass's resolutions are.
+        let before = stack_before_resolution(&mut state).expect("recording");
+        state.record_remembered_answer(PlayerId(0), AnswerOptionality::Optional);
+        assert_eq!(entries(&state).len(), 1);
+        record_resolutions(&mut state, &before, 0);
+        let recorded = entries(&state);
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[1].seat, PlayerId(0));
+
+        let mut off = GameState::new_two_player(1);
+        off.loop_detection = LoopDetectionMode::Off;
+        off.record_remembered_answer(PlayerId(1), AnswerOptionality::Optional);
+        assert!(off.play_trace.is_none());
+        assert_eq!(off.loop_decision_tally.optional, tally.optional + 1);
     }
 }

@@ -2696,14 +2696,28 @@ fn reconcile_loop_shortcut(state: &mut GameState, result: &mut ActionResult) {
     // the window before that the confirmer confirms. It runs after the ring road and only while
     // `waiting_for` is still `Priority`, so a ring mint above takes precedence, gated identically
     // (opt-in + top-level-only). INV-2: this OFFERS the interactive shortcut (never auto-resolves).
+    // A mandatory recurrence is not offered here; every other cause is.
+    let offerable: Vec<super::play_trace::NamedSpan> = named
+        .into_iter()
+        .filter(|span| {
+            use super::play_trace::NamingCause;
+            match span.cause {
+                NamingCause::Repeat
+                | NamingCause::TriggerTop
+                | NamingCause::Restored
+                | NamingCause::LegalNow => true,
+                NamingCause::MandatoryRecurrence => false,
+            }
+        })
+        .collect();
     if !matches!(state.waiting_for, WaitingFor::GameOver { .. })
         && state.loop_detection.samples()
         && !in_simulation_probe()
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && !named.is_empty()
+        && !offerable.is_empty()
     {
         if let Some((certificate, schema, period, declaration)) =
-            try_offer_object_growth_shortcut(state, &named)
+            try_offer_object_growth_shortcut(state, &offerable)
         {
             let WaitingFor::Priority { player: proposer } = state.waiting_for else {
                 unreachable!("guarded by matches!(Priority) above")
@@ -18587,7 +18601,10 @@ pub(super) fn begin_pending_trigger_target_selection(
                 if let Some(ref key) = may_trigger_key {
                     if let Some(choice) = state.may_trigger_auto_choice_for_live_prompt(key) {
                         // CR 603.5: the remembered answer is the controller's optional choice.
-                        state.record_loop_decision(super::play_trace::AnswerOptionality::Optional);
+                        state.record_remembered_answer(
+                            key.player,
+                            super::play_trace::AnswerOptionality::Optional,
+                        );
                         match choice {
                             AutoMayChoice::Decline => {
                                 drop_mid_construction_pending_trigger(state);

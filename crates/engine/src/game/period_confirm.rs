@@ -134,7 +134,7 @@ impl PeriodPerformance {
                 PlayLocus::Cast(_) | PlayLocus::Activate(..) | PlayLocus::Unread => true,
             },
             EntryKind::Resolution { .. } => true,
-            EntryKind::Answer { .. } => false,
+            EntryKind::Answer { .. } | EntryKind::Remembered { .. } => false,
         });
         if uses_the_stack {
             Self::UsesTheStack
@@ -232,6 +232,8 @@ fn seat_refusal(body: &[TraceEntry], holder: PlayerId) -> Option<OfferRefusal> {
             // CR 117.1a + CR 117.1b: casting a spell or activating an ability is optional.
             EntryKind::Play { .. } => true,
             EntryKind::Answer { optional, .. } => *optional == AnswerOptionality::Optional,
+            // CR 603.5: a stored preference's answer is still its seat's optional choice.
+            EntryKind::Remembered { .. } => true,
             EntryKind::Resolution { .. } => false,
         })
         .map(|entry| entry.seat)
@@ -309,7 +311,8 @@ fn period_items(
                     *optional == AnswerOptionality::Mandatory,
                     *point,
                 ),
-                EntryKind::Resolution { .. } => return None,
+                // The replay keeps the stored preferences, which answer it again.
+                EntryKind::Resolution { .. } | EntryKind::Remembered { .. } => return None,
             };
             Some(PeriodItem {
                 seat: entry.seat,
@@ -2504,6 +2507,57 @@ mod tests {
             OfferRefusal::LifeChangeUnrepresentable {
                 player: PlayerId(0)
             }
+        );
+    }
+
+    /// CR 603.5 + CR 732.3: a remembered answer is its seat's optional choice; resolutions and
+    /// mandatory answers attribute no seat.
+    #[test]
+    fn a_remembered_answer_attributes_the_span_to_its_seat() {
+        let entry = |seat: PlayerId, kind: EntryKind| TraceEntry {
+            seat,
+            kind,
+            depth: 0,
+            prompt: PromptClass::Other,
+            next_object_id: 0,
+        };
+        let remembered = |seat| entry(seat, EntryKind::Remembered { asked_by: None });
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        assert_eq!(
+            seat_refusal(&[remembered(p1)], p0),
+            Some(OfferRefusal::ForeignSeat { seat: p1 })
+        );
+        assert_eq!(seat_refusal(&[remembered(p0)], p0), None);
+        let mandatory = entry(
+            p1,
+            EntryKind::Answer {
+                action: GameAction::PassPriority,
+                optional: AnswerOptionality::Mandatory,
+                asked_by: Some(0),
+                cost_move: None,
+                point: None,
+            },
+        );
+        assert_eq!(
+            seat_refusal(
+                &[entry(p1, EntryKind::Resolution { node: 0 }), mandatory],
+                p0
+            ),
+            None
+        );
+        let play = entry(
+            p0,
+            EntryKind::Play {
+                action: GameAction::PassPriority,
+                node: 1,
+                locus: PlayLocus::Unread,
+            },
+        );
+        assert_eq!(
+            seat_refusal(&[remembered(p1), play], p0),
+            Some(OfferRefusal::Fragmented {
+                seats: vec![p0, p1]
+            })
         );
     }
 }

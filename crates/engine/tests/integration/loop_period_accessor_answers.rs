@@ -43,13 +43,24 @@ impl Answers {
     }
 }
 
-/// The classification of the span the window's trace offers, or else last named.
+/// Whether the recorded road may offer `span`: a mandatory recurrence is not offered.
+fn offerable(span: &engine::game::NamedSpan) -> bool {
+    span.cause != engine::game::NamingCause::MandatoryRecurrence
+}
+
+/// The classification of the span the window's trace offers, or else last named offerable.
 pub(crate) fn answers(state: &GameState) -> Answers {
     use engine::game::{AnswerOptionality, EntryKind, PromptClass};
     let view = engine::game::play_trace_view(state).expect("the window is traced");
     let span = view
         .offered
-        .or_else(|| view.named.last().copied())
+        .or_else(|| {
+            view.named
+                .iter()
+                .rev()
+                .find(|span| offerable(span))
+                .copied()
+        })
         .expect("the trace names a span");
     Answers::of(
         view.entries[span.start..span.end]
@@ -59,6 +70,7 @@ pub(crate) fn answers(state: &GameState) -> Answers {
                 EntryKind::Answer { optional, .. } if *optional == AnswerOptionality::Optional => {
                     Some((entry.seat, false))
                 }
+                EntryKind::Remembered { .. } => Some((entry.seat, false)),
                 EntryKind::Answer { .. } | EntryKind::Resolution { .. } => None,
             }),
     )
@@ -146,7 +158,8 @@ fn capture_frames(
         let window = offer
             || (matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
                 && top_trigger_source(state) == Some(minting)
-                && engine::game::play_trace_view(state).is_some_and(|view| !view.named.is_empty()));
+                && engine::game::play_trace_view(state)
+                    .is_some_and(|view| view.named.iter().any(offerable)));
         if window {
             read.push(state.clone());
         }

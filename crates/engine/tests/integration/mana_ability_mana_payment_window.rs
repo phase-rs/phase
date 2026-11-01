@@ -1002,7 +1002,7 @@ fn trace(state: &GameState) -> Vec<GameAction> {
         .into_iter()
         .filter_map(|entry| match entry.kind {
             EntryKind::Play { action, .. } | EntryKind::Answer { action, .. } => Some(action),
-            EntryKind::Resolution { .. } => None,
+            EntryKind::Resolution { .. } | EntryKind::Remembered { .. } => None,
         })
         .collect()
 }

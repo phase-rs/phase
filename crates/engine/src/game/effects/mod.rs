@@ -23010,14 +23010,17 @@ fn resolve_chain_body(
                 )?;
                 return Ok(progress);
             }
-            if may_trigger_key.as_ref().is_some_and(|key| {
+            if let Some(key) = may_trigger_key.as_ref().filter(|key| {
                 matches!(
                     state.may_trigger_auto_choice_for_live_prompt(key),
                     Some(AutoMayChoice::Decline)
                 )
             }) {
                 // CR 603.5: the remembered decline is the controller's optional choice.
-                state.record_loop_decision(crate::game::play_trace::AnswerOptionality::Optional);
+                state.record_remembered_answer(
+                    key.player,
+                    crate::game::play_trace::AnswerOptionality::Optional,
+                );
                 progress = resolve_optional_effect_decision_step(
                     state,
                     ability.clone(),
@@ -23063,7 +23066,10 @@ fn resolve_chain_body(
         if let Some(ref key) = may_trigger_key {
             if let Some(choice) = state.may_trigger_auto_choice_for_live_prompt(key) {
                 // CR 603.5: the remembered answer is the controller's optional choice.
-                state.record_loop_decision(crate::game::play_trace::AnswerOptionality::Optional);
+                state.record_remembered_answer(
+                    key.player,
+                    crate::game::play_trace::AnswerOptionality::Optional,
+                );
                 progress = resolve_optional_effect_decision_step(
                     state,
                     ability_with_event_context_targets(state, ability),

@@ -8,6 +8,7 @@ use engine::game::deck_loading::create_object_from_card_face;
 use engine::game::effects::attach::attach_to;
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::perf_counters::{play_trace_counters, PlayTraceCounters};
+use engine::game::period_confirm::{confirm_for_tests, OfferRefusal};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::{add_to_zone, remove_from_zone};
@@ -16,10 +17,11 @@ use engine::game::{
     PlayTraceView, TraceEntry,
 };
 use engine::types::ability::{AbilityCost, AbilityKind, TargetRef};
-use engine::types::actions::{CastChoice, GameAction};
+use engine::types::actions::{CastChoice, GameAction, ReplacementAutoChoice};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{
-    CastPaymentMode, GameState, LoopDetectionMode, ManaChoice, StackEntryKind, WaitingFor,
+    AutoMayChoice, CastPaymentMode, GameState, LoopDetectionMode, ManaChoice,
+    MayTriggerAutoChoiceSelector, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::ManaType;
@@ -40,6 +42,7 @@ enum Step {
     Play(usize),
     Resolve(usize),
     Answer(PlayerId, &'static str),
+    Remembered(PlayerId),
 }
 
 fn trace_of(state: &GameState) -> PlayTraceView {
@@ -57,6 +60,7 @@ fn entry_steps(view: &PlayTraceView, range: std::ops::Range<usize>) -> Vec<Step>
             EntryKind::Play { node, .. } => Step::Play(*node),
             EntryKind::Resolution { node } => Step::Resolve(*node),
             EntryKind::Answer { action, .. } => Step::Answer(entry.seat, action.into()),
+            EntryKind::Remembered { .. } => Step::Remembered(entry.seat),
         })
         .collect()
 }
@@ -912,14 +916,13 @@ fn play_trace_names_each_members_period_food_chain_griffin_scourge() {
 // Row 1 hostiles
 // ---------------------------------------------------------------------------------------------
 
-#[test]
-fn play_trace_names_nothing_for_worldgorger_animate_dead() {
-    let Some(db) = shared_card_db() else { return };
+/// Worldgorger Dragon ("When this creature enters, exile all other permanents you control. / When
+/// this creature leaves the battlefield, return the exiled cards to the battlefield under their
+/// owners' control.") in P0's graveyard with Animate Dead in hand, two Swamps, and ten library
+/// Swamps per seat.
+fn worldgorger_board(db: &CardDatabase) -> (GameScenario, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    // Worldgorger Dragon: "When this creature enters, exile all other permanents you control.
-    // When this creature leaves the battlefield, return the exiled cards to the battlefield
-    // under their owners' control." Animate Dead returns it; nothing is activated.
     let dragon = scenario.add_real_card(P0, "Worldgorger Dragon", Zone::Graveyard, db);
     let animate = scenario.add_real_card(P0, "Animate Dead", Zone::Hand, db);
     for _ in 0..2 {
@@ -930,6 +933,22 @@ fn play_trace_names_nothing_for_worldgorger_animate_dead() {
             scenario.add_real_card(seat, "Swamp", Zone::Library, db);
         }
     }
+    (scenario, dragon, animate)
+}
+
+fn mandatory_entry(entry: &TraceEntry) -> bool {
+    match &entry.kind {
+        EntryKind::Play { .. } | EntryKind::Remembered { .. } => false,
+        EntryKind::Answer { optional, .. } => *optional == AnswerOptionality::Mandatory,
+        EntryKind::Resolution { .. } => true,
+    }
+}
+
+#[test]
+fn play_trace_names_the_mandatory_recurrence_for_worldgorger_animate_dead() {
+    let Some(db) = shared_card_db() else { return };
+    // Animate Dead returns the Dragon; nothing is activated and no "may" is asked.
+    let (scenario, dragon, animate) = worldgorger_board(db);
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
     cast(&mut runner, animate, vec![dragon], CastPaymentMode::Auto);
@@ -969,11 +988,275 @@ fn play_trace_names_nothing_for_worldgorger_animate_dead() {
         occurrences.iter().filter(|&&n| n >= 3).count() >= 2,
         "reach: the enters triggers recur over three cycles: {occurrences:?}"
     );
-    assert_eq!(
-        view.named,
-        [],
-        "a loop of mandatory nodes names nothing (CR 732.4)"
+    assert!(
+        !view.named.is_empty(),
+        "CR 732.4: a loop of mandatory nodes names its recurrence"
     );
+    for span in &view.named {
+        assert_eq!(span.cause, NamingCause::MandatoryRecurrence, "{span:?}");
+        assert!(
+            view.entries[span.start..span.end]
+                .iter()
+                .all(mandatory_entry),
+            "the mandatory span holds no play or optional answer: {:?}",
+            entry_steps(&view, span.start..span.end)
+        );
+    }
+    assert_eq!(view.offered, None);
+}
+
+/// Niv-Mizzet, the Firemind ("Whenever you draw a card, Niv-Mizzet deals 1 damage to any target.
+/// / {T}: Draw a card.") enchanted by Curiosity ("Whenever enchanted creature deals damage to an
+/// opponent, you may draw a card."), beside Niv-Mizzet, Parun ("Whenever you draw a card,
+/// Niv-Mizzet deals 1 damage to any target."), with P0's answer to Curiosity's "may" stored as
+/// `choice` before the window.
+fn niv_curiosity_board(choice: AutoMayChoice, db: &CardDatabase) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let firemind = scenario.add_real_card(P0, "Niv-Mizzet, the Firemind", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Niv-Mizzet, Parun", Zone::Battlefield, db);
+    for seat in [P0, P1] {
+        for _ in 0..20 {
+            scenario.add_real_card(seat, "Island", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.loop_detection = LoopDetectionMode::Interactive;
+    let curiosity = place(state, P0, "Curiosity", db);
+    attach_to(state, curiosity, firemind);
+    let printed_ref = state.objects[&curiosity]
+        .printed_ref
+        .clone()
+        .expect("a printed card");
+    state.set_may_trigger_auto_choice_selector(
+        MayTriggerAutoChoiceSelector::SameCard {
+            player: P0,
+            printed_ref,
+            printed_occurrence: 0,
+        },
+        choice,
+    );
+    (runner, firemind)
+}
+
+fn pings_p1(action: &GameAction) -> i32 {
+    i32::from(matches!(
+        action,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1))
+        }
+    ))
+}
+
+fn remembered_by(entry: &TraceEntry, seat: PlayerId) -> bool {
+    entry.seat == seat && matches!(entry.kind, EntryKind::Remembered { .. })
+}
+
+fn optional_answer(entry: &TraceEntry) -> bool {
+    matches!(
+        entry.kind,
+        EntryKind::Answer {
+            optional: AnswerOptionality::Optional,
+            ..
+        }
+    )
+}
+
+/// What the Niv drive saw at its priority windows.
+#[derive(Default)]
+struct NivWindows {
+    remembered: usize,
+    named: usize,
+    mandatory: usize,
+    /// A P0 window named a trigger-top span over P0's remembered answer and no optional answer.
+    remembered_top: bool,
+    /// The verdicts of the first such span at a P1 window and at a P0 window.
+    foreign: Option<Result<Vec<String>, OfferRefusal>>,
+    own: Option<Result<Vec<String>, OfferRefusal>>,
+    /// Whether every remembered entry was preceded by the resolution that asked it.
+    ordered: bool,
+}
+
+fn drive_niv(choice: AutoMayChoice, db: &CardDatabase) -> NivWindows {
+    let (mut runner, firemind) = niv_curiosity_board(choice, db);
+    let index = ability(runner.state(), firemind, false);
+    activate(&mut runner, firemind, index);
+    let mut seen = NivWindows {
+        ordered: true,
+        ..NivWindows::default()
+    };
+    for _ in 0..BEAT_CAP {
+        let state = runner.state();
+        match state.waiting_for {
+            WaitingFor::GameOver { .. } | WaitingFor::LoopShortcut { .. } => break,
+            WaitingFor::Priority { player } => {
+                let view = trace_of(state);
+                seen.remembered = seen.remembered.max(
+                    view.entries
+                        .iter()
+                        .filter(|entry| remembered_by(entry, P0))
+                        .count(),
+                );
+                seen.named = seen.named.max(view.named.len());
+                seen.mandatory += view
+                    .named
+                    .iter()
+                    .filter(|span| span.cause == NamingCause::MandatoryRecurrence)
+                    .count();
+                seen.ordered &= view.entries.iter().enumerate().all(|(at, entry)| {
+                    let EntryKind::Remembered {
+                        asked_by: Some(node),
+                    } = entry.kind
+                    else {
+                        return true;
+                    };
+                    at > 0 && view.entries[at - 1].kind == EntryKind::Resolution { node }
+                });
+                let top = view.named.iter().copied().find(|span| {
+                    let body = &view.entries[span.start..span.end];
+                    span.cause == NamingCause::TriggerTop
+                        && body.iter().any(|entry| remembered_by(entry, P0))
+                        && !body.iter().any(optional_answer)
+                });
+                if let Some(span) = top {
+                    let verdict = || {
+                        confirm_for_tests(state)
+                            .into_iter()
+                            .find_map(|(named, verdict)| (named == span).then_some(verdict))
+                    };
+                    seen.remembered_top |= player == P0;
+                    if player == P1 && seen.foreign.is_none() {
+                        seen.foreign = verdict();
+                    }
+                    if player == P0 && seen.own.is_none() {
+                        seen.own = verdict();
+                    }
+                }
+                if state.stack.is_empty() {
+                    break;
+                }
+                act(&mut runner, GameAction::PassPriority);
+            }
+            _ => answer(&mut runner, &pings_p1),
+        }
+    }
+    seen
+}
+
+/// CR 603.5 + CR 104.4b: Curiosity's draw is optional each time, whether a person or a stored
+/// preference answers it, so the period it closes is named as a trigger-top period and never as a
+/// mandatory recurrence.
+#[test]
+fn play_trace_names_a_stored_accept_period_trigger_top_not_mandatory() {
+    let Some(db) = shared_card_db() else { return };
+    let seen = drive_niv(AutoMayChoice::Accept, db);
+    assert!(
+        seen.remembered_top,
+        "a P0 window names a trigger-top span over the remembered answer"
+    );
+    assert_eq!(seen.mandatory, 0, "no window names a mandatory recurrence");
+    assert!(
+        seen.ordered,
+        "each remembered answer follows the resolution that asked it"
+    );
+    // CR 732.2a: the remembered answer is P0's choice, so the period is P0's alone.
+    assert_eq!(
+        seen.foreign,
+        Some(Err(OfferRefusal::ForeignSeat { seat: P0 }))
+    );
+    let own = seen.own.expect("a P0 window's verdict");
+    assert!(
+        !matches!(
+            own,
+            Err(OfferRefusal::ForeignSeat { .. } | OfferRefusal::Fragmented { .. })
+        ),
+        "{own:?}"
+    );
+    assert!(seen.remembered > 0, "reach: the stored accept answered");
+}
+
+/// CR 603.5: a stored decline is recorded and the loop stops, so nothing recurs to be named.
+#[test]
+fn play_trace_records_a_stored_decline_and_names_nothing() {
+    let Some(db) = shared_card_db() else { return };
+    let seen = drive_niv(AutoMayChoice::Decline, db);
+    assert!(seen.remembered > 0, "reach: the stored decline answered");
+    assert_eq!(seen.named, 0);
+}
+
+/// CR 616.1e: Battletide Alchemist's prevention ("If a source would deal damage to a player, you
+/// may prevent X of that damage, where X is the number of Clerics you control.") is P1's optional
+/// choice inside P0's Worldgorger loop, whose Gibbering Fiend ("When this creature enters, it
+/// deals 1 damage to each opponent.") re-enters each cycle; P1 answers it once and remembers it.
+#[test]
+fn play_trace_attributes_a_remembered_prevention_to_its_seat() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut scenario, dragon, animate) = worldgorger_board(db);
+    scenario.add_real_card(P0, "Gibbering Fiend", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Battletide Alchemist", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    cast(&mut runner, animate, vec![dragon], CastPaymentMode::Auto);
+    let (mut prompts, mut remembered, mut mandatory) = (0, 0, 0);
+    let mut verdicts = Vec::new();
+    for _ in 0..80 {
+        let state = runner.state();
+        match state.waiting_for {
+            WaitingFor::GameOver { .. } => break,
+            WaitingFor::Priority { .. } if state.stack.is_empty() => break,
+            WaitingFor::Priority { player } => {
+                let view = trace_of(state);
+                remembered = view
+                    .entries
+                    .iter()
+                    .filter(|entry| remembered_by(entry, P1))
+                    .count();
+                mandatory += view
+                    .named
+                    .iter()
+                    .filter(|span| span.cause == NamingCause::MandatoryRecurrence)
+                    .count();
+                if player == P0 {
+                    verdicts.extend(
+                        confirm_for_tests(state)
+                            .into_iter()
+                            .map(|(span, verdict)| (span.cause, verdict.err())),
+                    );
+                }
+                act(&mut runner, GameAction::PassPriority);
+            }
+            WaitingFor::LoopShortcut { .. } => act(&mut runner, GameAction::DeclineShortcut),
+            // CR 603.3b + CR 405.5: the Fiend's trigger is put on the stack last, so it resolves first.
+            WaitingFor::OrderTriggers { ref triggers, .. } => {
+                let fiend = |at: &usize| triggers[*at].source_name == "Gibbering Fiend";
+                let (last, mut order): (Vec<usize>, Vec<usize>) =
+                    (0..triggers.len()).partition(fiend);
+                order.extend(last);
+                act(&mut runner, GameAction::OrderTriggers { order });
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                prompts += 1;
+                act(
+                    &mut runner,
+                    GameAction::ChooseReplacementAndRemember {
+                        choice: ReplacementAutoChoice::Optional { index: 0 },
+                    },
+                );
+            }
+            _ => answer(&mut runner, &names(&[dragon])),
+        }
+    }
+    assert_eq!(prompts, 1, "reach: P1 answered the prevention once");
+    assert_eq!(mandatory, 0, "no window names a mandatory recurrence");
+    assert!(!verdicts.is_empty(), "reach: P0 windows named spans");
+    assert!(
+        verdicts
+            .iter()
+            .all(|(_, refusal)| *refusal == Some(OfferRefusal::ForeignSeat { seat: P1 })),
+        "every P0 period holds P1's choices: {verdicts:?}"
+    );
+    assert!(remembered > 0, "the store answered P1's later preventions");
 }
 
 #[test]
@@ -2086,6 +2369,7 @@ fn play_trace_drops_a_cancelled_spend_after_an_untapped_lands_mana_ability() {
 enum Made {
     Play(PlayLocus),
     Answer(&'static str),
+    Remembered,
     Resolution,
 }
 
@@ -2108,6 +2392,7 @@ fn standing(state: &GameState) -> (&'static str, Option<ObjectId>, Vec<Made>) {
         .map(|entry| match &entry.kind {
             EntryKind::Play { locus, .. } => Made::Play(*locus),
             EntryKind::Answer { action, .. } => Made::Answer(action.into()),
+            EntryKind::Remembered { .. } => Made::Remembered,
             EntryKind::Resolution { .. } => Made::Resolution,
         })
         .collect();
