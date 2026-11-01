@@ -987,55 +987,40 @@ fn gix_window_reopens_after_an_as_enters_color_choice_across_a_reload() {
     );
 }
 
-/// CR 614.12a + CR 616.1 (delivery-tail producer): with two non-commuting
-/// counter modifiers and an "enters with an additional +1/+1 counter" static,
-/// the played land's entry pauses on the counter-order choice in the delivery
-/// tail; once answered the land is on the battlefield with its counter and the
-/// window re-opens with Divination.
+/// CR 614.12a + CR 614.1c + CR 616.1 (delivery-tail producer), with printed
+/// cards: Deanna Troi, Psychic Counsel ("Other creatures you control enter with
+/// an additional +1/+1 counter on them.") gives the land creature Dryad Arbor a
+/// counter as Gix's window plays it, and Hardened Scales and Doubling
+/// Season both modify that counter placement, so its entry pauses on the
+/// ordering choice in the delivery tail. Once answered, Dryad Arbor is on the
+/// battlefield with its counters and the window re-opens with Divination.
 #[test]
 fn gix_window_reopens_after_a_delivery_tail_counter_order_choice() {
-    use engine::types::ability::{
-        QuantityModification, ReplacementDefinition, StaticDefinition, TypedFilter,
-    };
     use engine::types::counter::CounterType;
-    use engine::types::replacements::ReplacementEvent;
-    use engine::types::statics::StaticMode;
+
+    const DEANNA_TROI: &str =
+        "Other creatures you control enter with an additional +1/+1 counter on them.";
 
     let Some(db) = load_db() else { return };
     let (mut board, staged) = gix_board(1, |s| {
-        s.add_creature(P0, "Doubling Season", 0, 0)
-            .as_enchantment()
-            .with_replacement_definition(
-                ReplacementDefinition::new(ReplacementEvent::AddCounter)
-                    .quantity_modification(QuantityModification::Times { factor: 2 }),
-            );
-        s.add_creature(P0, "Hardened Scales", 0, 0)
-            .as_enchantment()
-            .with_replacement_definition(
-                ReplacementDefinition::new(ReplacementEvent::AddCounter)
-                    .quantity_modification(QuantityModification::Plus { value: 1 }),
-            );
-        s.add_creature(P0, "Land Counter Lord", 0, 0)
-            .as_enchantment()
-            .with_static_definition(
-                StaticDefinition::new(StaticMode::EntersWithAdditionalCounters {
-                    counter_type: CounterType::Plus1Plus1,
-                    count: 1,
-                })
-                .affected(TargetFilter::Typed(
-                    TypedFilter::land().controller(ControllerRef::You),
-                )),
-            );
+        s.add_creature_from_oracle(P0, "Deanna Troi, Psychic Counsel", 2, 2, DEANNA_TROI);
+        s.add_real_card(P0, "Hardened Scales", Zone::Battlefield, db);
+        s.add_real_card(P0, "Doubling Season", Zone::Battlefield, db);
         vec![
-            s.add_real_card(P1, "Forest", Zone::Library, db),
+            s.add_real_card(P1, "Dryad Arbor", Zone::Library, db),
             s.add_real_card(P1, "Divination", Zone::Library, db),
         ]
     });
-    let [forest, divination] = staged[..] else {
+    let [arbor, divination] = staged[..] else {
         unreachable!()
     };
     activate_gix(&mut board, 2);
-    choose(&mut board.runner, Some(forest));
+    assert_eq!(
+        window(board.runner.state()),
+        (sorted(vec![arbor, divination]), CardPlayMode::Play),
+        "reach-guard: the land creature is a land candidate (CR 305.9)"
+    );
+    choose(&mut board.runner, Some(arbor));
     assert!(
         matches!(
             board.runner.state().waiting_for,
@@ -1049,21 +1034,23 @@ fn gix_window_reopens_after_a_delivery_tail_counter_order_choice() {
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("ordering the counter modifiers");
     let state = board.runner.state();
-    assert_eq!(state.objects[&forest].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&arbor].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&arbor].controller, P0);
+    assert_eq!(lands_played(state, P0), 1);
+    let counters = state.objects[&arbor]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0);
     assert!(
-        state.objects[&forest]
-            .counters
-            .get(&CounterType::Plus1Plus1)
-            .copied()
-            .unwrap_or(0)
-            > 0,
-        "reach-guard: the delivery tail placed the counter"
+        counters == 3 || counters == 4,
+        "Deanna Troi's one counter, doubled and plus one in the chosen order: got {counters}"
     );
     assert_eq!(window(state), (vec![divination], CardPlayMode::Play));
     choose(&mut board.runner, Some(divination));
+    assert_eq!(board.runner.state().objects[&divination].zone, Zone::Stack);
     assert_parent_finished(&board.runner, board.gix);
 }
-
 /// CR 712.12 (the election's land-face-only branch): Gix has shroud, so Hagra
 /// Mauling's spell face has no legal target and its land face is the only
 /// legal face. Choosing it plays Hagra Broodpit with no face prompt, and the

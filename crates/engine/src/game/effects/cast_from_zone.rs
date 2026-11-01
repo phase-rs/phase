@@ -2562,13 +2562,13 @@ fn cast_resolution_request_during_resolution(
         }
         // CR 712.12 + CR 305.2a: the land face is the only legal face of a
         // Play election, so it is played as the instruction resolves.
-        crate::game::casting::ResolutionElectionInitiation::PlayLandFace { cleanup, back_face } => {
+        crate::game::casting::ResolutionElectionInitiation::PlayLandFace { cleanup, face } => {
             let commit = crate::game::engine_resolution_choices::play_resolution_land_face(
                 state,
                 ability.controller,
                 card,
                 *cleanup,
-                back_face,
+                face,
                 events,
             )
             .map_err(|e| EffectError::InvalidParam(e.to_string()))?;

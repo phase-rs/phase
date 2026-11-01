@@ -57113,7 +57113,7 @@ fn resolution_play_election_plays_the_only_legal_land_face_and_leaves_no_permiss
         matches!(
             initiation,
             ResolutionElectionInitiation::PlayLandFace {
-                back_face: true,
+                face: ModalCardFace::Back,
                 ..
             }
         ),

@@ -13274,7 +13274,7 @@ fn apply_non_priority_pass_action(
                     *player,
                     *object_id,
                     &cleanup.face_policy,
-                    back_face,
+                    casting::ModalCardFace::from_back_face(back_face),
                 )
             });
             match resolution_cleanup {
@@ -13285,7 +13285,7 @@ fn apply_non_priority_pass_action(
                         *object_id,
                         *card_id,
                         permission_index,
-                        back_face,
+                        casting::ModalCardFace::from_back_face(back_face),
                         &mut events,
                     )?
                 }

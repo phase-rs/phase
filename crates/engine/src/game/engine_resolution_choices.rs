@@ -3444,9 +3444,9 @@ pub(super) fn handle_resolution_choice(
                 match casting::initiate_resolution_election(state, player, chosen, request, events)?
                 {
                     casting::ResolutionElectionInitiation::Cast(initiation) => initiation,
-                    casting::ResolutionElectionInitiation::PlayLandFace { cleanup, back_face } => {
+                    casting::ResolutionElectionInitiation::PlayLandFace { cleanup, face } => {
                         let commit = play_resolution_land_face(
-                            state, player, chosen, *cleanup, back_face, events,
+                            state, player, chosen, *cleanup, face, events,
                         )?;
                         return Ok(ResolutionChoiceOutcome::WaitingFor(
                             resume_free_cast_window_after_land_play(state, window, commit, events),
@@ -9750,7 +9750,7 @@ pub(crate) fn abort_resolution_cast(
 /// free Play route carries no receipts. Like the plain resolution land play
 /// (`cast_from_zone::play_land_during_resolution_instruction`), the land
 /// route gives `exiled_misses` no disposition: a single-card Play instruction
-/// never has misses. `back_face` names the land face elected (CR 712.12): the
+/// never has misses. `face` names the land face elected (CR 712.12): the
 /// back face of a modal card, or the front face — a land card's, or a
 /// land//land card's front. `Ok(None)` is CR 305.2b / CR 305.3's "ignore":
 /// nothing was played or counted.
@@ -9759,20 +9759,23 @@ pub(crate) fn play_resolution_land_face(
     player: crate::types::player::PlayerId,
     object_id: ObjectId,
     cleanup: crate::types::ability::ResolutionCastCleanup,
-    back_face: bool,
+    face: casting::ModalCardFace,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<super::engine::LandPlayCommit>, EngineError> {
     validate_resolution_cast_cleanup_authority(player, &cleanup)?;
     withdraw_resolution_cast_delayed_triggers(state, &cleanup)?;
-    Ok(if back_face {
-        super::engine::play_land_face_during_resolution(state, player, object_id, events)
-    } else {
-        super::engine::play_land_during_resolution(state, player, object_id, events)
+    Ok(match face {
+        casting::ModalCardFace::Back => {
+            super::engine::play_land_face_during_resolution(state, player, object_id, events)
+        }
+        casting::ModalCardFace::Front => {
+            super::engine::play_land_during_resolution(state, player, object_id, events)
+        }
     })
 }
 
 /// CR 712.12 + CR 701.18b: finish a `ModalFaceChoice` whose player elected a
-/// land face under a Play election — `back_face` names which. The land face's
+/// land face under a Play election — `face` names which. The land face's
 /// admission is re-checked against the exact indexed permission's policy
 /// before anything changes, so a forged or stale choice is an error with no
 /// mutation. The temporary permission is then consumed, and the land is
@@ -9786,7 +9789,7 @@ pub(crate) fn complete_resolution_land_face_choice(
     object_id: ObjectId,
     card_id: crate::types::identifiers::CardId,
     permission_index: crate::types::game_state::CastingPermissionIndex,
-    back_face: bool,
+    face: casting::ModalCardFace,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let admitted = state
@@ -9804,7 +9807,7 @@ pub(crate) fn complete_resolution_land_face_choice(
                 player,
                 object_id,
                 &cleanup.face_policy,
-                back_face,
+                face,
             ),
             _ => false,
         });
@@ -9846,7 +9849,7 @@ pub(crate) fn complete_resolution_land_face_choice(
         crate::types::ability::ResolutionCastSuccessAction::BottomMisses
         | crate::types::ability::ResolutionCastSuccessAction::RippleOfferRemaining { .. } => None,
     };
-    let commit = play_resolution_land_face(state, player, object_id, cleanup, back_face, events)?;
+    let commit = play_resolution_land_face(state, player, object_id, cleanup, face, events)?;
     if let Some(window) = window {
         return Ok(resume_free_cast_window_after_land_play(
             state, window, commit, events,

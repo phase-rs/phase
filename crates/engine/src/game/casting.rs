@@ -14821,12 +14821,11 @@ pub(crate) fn resolution_land_face_choice_admission(
     player: PlayerId,
     object_id: ObjectId,
     policy: &crate::types::ability::ResolutionCastFacePolicy,
-    back_face: bool,
+    face: ModalCardFace,
 ) -> bool {
-    if back_face {
-        resolution_land_face_admission(state, player, object_id, policy)
-    } else {
-        resolution_land_front_admission(state, player, object_id, policy)
+    match face {
+        ModalCardFace::Back => resolution_land_face_admission(state, player, object_id, policy),
+        ModalCardFace::Front => resolution_land_front_admission(state, player, object_id, policy),
     }
 }
 
@@ -17600,17 +17599,38 @@ pub(super) enum ResolutionCastInitiation {
     Rejected(Box<crate::types::ability::ResolutionCastCleanup>),
 }
 
+/// CR 712.12: which face of a modal double-faced card an internal election
+/// step names. Engine-internal only: the wire keeps `ChooseModalFace {
+/// back_face: bool }`, converted once at the reducer boundary
+/// ([`ModalCardFace::from_back_face`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModalCardFace {
+    Front,
+    Back,
+}
+
+impl ModalCardFace {
+    /// The face named by the wire bool on `GameAction::ChooseModalFace`.
+    pub(crate) const fn from_back_face(back_face: bool) -> Self {
+        if back_face {
+            Self::Back
+        } else {
+            Self::Front
+        }
+    }
+}
+
 /// The outcomes of beginning a resolution-owned face election.  `Cast` is a
 /// spell-face election (or its rejection); `PlayLandFace` is a CR 712.12 land
-/// face — front (a land//land card's front) or back — as the only legal face
-/// under a Play policy (CR 701.18b).  The temporary permission has already been
-/// removed in that case: the caller plays that land face with the returned
-/// cleanup as its authority.
+/// face — front (a land card's, or a land//land card's front) or back — as the
+/// only legal face under a Play policy (CR 701.18b).  The temporary permission
+/// has already been removed in that case: the caller plays that land face with
+/// the returned cleanup as its authority.
 pub(super) enum ResolutionElectionInitiation {
     Cast(ResolutionCastInitiation),
     PlayLandFace {
         cleanup: Box<crate::types::ability::ResolutionCastCleanup>,
-        back_face: bool,
+        face: ModalCardFace,
     },
 }
 
@@ -17843,11 +17863,11 @@ pub(super) fn initiate_resolution_election(
     // a land play, so remove it and hand its cleanup to the caller, which
     // plays that land face during resolution (CR 305.2a).
     let only_land_face = match (legality.front, legality.back) {
-        (Some(ResolutionFaceAction::PlayLand), None) => Some(false),
-        (None, Some(ResolutionFaceAction::PlayLand)) => Some(true),
+        (Some(ResolutionFaceAction::PlayLand), None) => Some(ModalCardFace::Front),
+        (None, Some(ResolutionFaceAction::PlayLand)) => Some(ModalCardFace::Back),
         _ => None,
     };
-    if let Some(back_face) = only_land_face {
+    if let Some(face) = only_land_face {
         state
             .objects
             .get_mut(&hit_card)
@@ -17856,7 +17876,7 @@ pub(super) fn initiate_resolution_election(
             .remove(casting_permission_index.0);
         return Ok(ResolutionElectionInitiation::PlayLandFace {
             cleanup: Box::new(cleanup_for_rejection),
-            back_face,
+            face,
         });
     }
 
