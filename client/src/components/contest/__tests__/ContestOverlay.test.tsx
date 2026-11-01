@@ -582,6 +582,7 @@ describe("ContestOverlay staring eye", () => {
     expect(useContestStore.getState().announcement).not.toBeNull();
 
     view.unmount();
+    useGameStore.setState({ waitingFor: null, events: [] }); // the session reset
     render(<ContestOverlay />);
 
     expect(useContestStore.getState().announcement).toBeNull();
