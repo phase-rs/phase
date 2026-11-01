@@ -8133,7 +8133,10 @@ fn zone_change_record_matches_type_filter(
                 || record.core_types.contains(&CoreType::Planeswalker)
                 || record.core_types.contains(&CoreType::Battle)
         }
-        TypeFilter::Card | TypeFilter::Any => true,
+        // CR 108.2 + CR 108.2b: a card noun excludes tokens, including after
+        // cessation when the original departure record is the only authority.
+        TypeFilter::Card => !record.is_token,
+        TypeFilter::Any => true,
         TypeFilter::Non(inner) => {
             !zone_change_record_matches_type_filter(record, inner, all_creature_types)
         }
