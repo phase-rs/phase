@@ -12772,6 +12772,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("losing unspent mana")
                     && effective_lower.contains("causes that player to lose that much life")
             }
+            // CR 705.3: Edgar's Two-Headed Coin. Anchor on both the window and
+            // the indicated result so an unrelated flip line can't false-match.
+            StaticMode::WinFirstCoinFlipSetEachTurn => {
+                effective_lower.contains("the first time you flip one or more coins each turn")
+                    && effective_lower.contains("come up heads and you win those flips")
+            }
             StaticMode::CanAttackWithDefender => {
                 effective_lower.contains("as though it didn't have defender")
             }

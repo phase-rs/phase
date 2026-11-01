@@ -34,6 +34,45 @@ enum CoinFlipOutcome {
     Prevented,
 }
 
+/// CR 705.3: where a run stands in the set of coins one instruction flips at
+/// once. An `Exactly` run ("flip five coins") is one set; an `UntilLoss` run
+/// flips one coin at a time, so each of its flips is its own set. Run-local and
+/// never persisted: a set with an indicated result never suspends (see
+/// `flip_through_replacement`), and a run resumed from a Krark's Thumb keep
+/// choice continues a set that had none.
+#[derive(Debug, Clone, Copy)]
+enum FlipSet {
+    /// No coin of the current set has been flipped.
+    Unstarted,
+    /// The set is underway; `fixed` is the result CR 705.3 indicates for each
+    /// of its coins.
+    Underway { fixed: Option<CoinFlipResult> },
+}
+
+impl FlipSet {
+    /// CR 705.3 + CR 109.5: the indicated result for the coins `player` is
+    /// flipping now. The first coin of a set records `player` in the per-turn
+    /// flipper set; if that is the player's first set this turn and a
+    /// `WinFirstCoinFlipSetEachTurn` static applies to them (Edgar, King of
+    /// Figaro), the whole set comes up heads and is won. The result is captured
+    /// once per set: every coin of a set is flipped at once.
+    fn begin(&mut self, state: &mut GameState, player: PlayerId) -> Option<CoinFlipResult> {
+        match *self {
+            FlipSet::Underway { fixed } => fixed,
+            FlipSet::Unstarted => {
+                let first_set_this_turn = state.players_who_flipped_coins_this_turn.insert(player);
+                let fixed = (first_set_this_turn
+                    && crate::game::static_abilities::player_wins_first_coin_flip_set_each_turn(
+                        state, player,
+                    ))
+                .then_some(CoinFlipResult::Won);
+                *self = FlipSet::Underway { fixed };
+                fixed
+            }
+        }
+    }
+}
+
 /// CR 705.1 + CR 614.1a: Route one logical coin flip through the CR 614
 /// replacement pipeline before touching the RNG, mirroring `draw`/`scry`/`mill`.
 ///
@@ -42,10 +81,12 @@ enum CoinFlipOutcome {
 /// performed and `CoinFlipped` emitted inline (`Resolved`). When `count > 1` the
 /// coins are flipped but the controller must keep one — the resolver suspends on
 /// `WaitingFor::CoinFlipKeepChoice` (`Suspended`) and `resume_after_keep` emits
-/// the single surviving `CoinFlipped`.
+/// the single surviving `CoinFlipped` — unless the run's `set` has a CR 705.3
+/// indicated result, in which case every coin agrees and the flip settles inline.
 fn flip_through_replacement(
     state: &mut GameState,
     player: PlayerId,
+    set: &mut FlipSet,
     events: &mut Vec<GameEvent>,
 ) -> CoinFlipOutcome {
     let proposed = ProposedEvent::CoinFlip {
@@ -86,12 +127,23 @@ fn flip_through_replacement(
         return CoinFlipOutcome::Prevented;
     }
 
-    // CR 705.1: flip each coin with the game's seeded RNG.
+    // CR 705.3: the coins this flip adds belong to the run's current set; the
+    // set's indicated result (if any) is fixed when its first coin is flipped.
+    let fixed = set.begin(state, player);
+
+    // CR 705.1: flip each coin with the game's seeded RNG. CR 705.3: an
+    // indicated result replaces each coin's actual result.
     let results: Vec<bool> = (0..count)
-        .map(|_| state.rng.draw(RandomDraw::Outcome).random_bool(0.5))
+        .map(|_| {
+            let actual = state.rng.draw(RandomDraw::Outcome).random_bool(0.5);
+            fixed.map_or(actual, |result| result == CoinFlipResult::Won)
+        })
         .collect();
 
-    if count == 1 {
+    // CR 614.1a + CR 705.3: under an indicated result every coin of a doubled
+    // flip has the same result, so "ignore one" has a single outcome and the
+    // flip settles inline rather than asking for the keep choice.
+    if count == 1 || fixed.is_some() {
         let won = results[0];
         events.push(GameEvent::CoinFlipped {
             player_id: player,
@@ -232,12 +284,22 @@ impl FlipRun<'_> {
     /// is not reconstructed. A die roll started by a coin's continuation drain still
     /// loses its published per-survivor result at the drain's whole-snapshot restore
     /// (pre-existing, unchanged).
+    ///
+    /// CR 705.3: the frame does not carry the run's `set`. A set with an indicated
+    /// result settles every flip inline (`flip_through_replacement`), so only an
+    /// unfixed set can park, and the resumed run restarts `Underway { fixed: None }`.
+    /// Every park goes through here, so this is where that contract is enforced.
     fn park(
         &self,
         state: &GameState,
         kind: PendingCoinFlipKind,
         start: &FlipRunStart,
+        set: FlipSet,
     ) -> PendingCoinFlip {
+        debug_assert!(
+            !matches!(set, FlipSet::Underway { fixed: Some(_) }),
+            "CR 705.3: a coin-flip set with an indicated result must never park"
+        );
         PendingCoinFlip {
             source_id: self.source_id,
             controller: self.controller,
@@ -410,6 +472,13 @@ fn drive_flip_run(
         FlipRunStart::Fresh(kind) => next_step(kind.clone()),
         FlipRunStart::Kept { kind, won } => settle_flip(state, run, kind.clone(), *won, events)?,
     };
+    // CR 705.3: a fresh run has flipped no coin yet. A resumed run continues a set
+    // whose first coin was the paused doubled flip, which was not fixed — a set
+    // with an indicated result settles inline and never parks.
+    let mut set = match &start {
+        FlipRunStart::Fresh(_) => FlipSet::Unstarted,
+        FlipRunStart::Kept { .. } => FlipSet::Underway { fixed: None },
+    };
     loop {
         match step {
             FlipRunStep::Suspended => return Ok(FlipRunOutcome::Suspended),
@@ -422,10 +491,13 @@ fn drive_flip_run(
                         remaining: remaining - 1,
                     },
                     PendingCoinFlipKind::UntilLoss { wins_so_far } => {
+                        // CR 705.3: "flip a coin until you lose a flip" flips one
+                        // coin at a time, so each flip starts a new set.
+                        set = FlipSet::Unstarted;
                         PendingCoinFlipKind::UntilLoss { wins_so_far }
                     }
                 };
-                step = match flip_through_replacement(state, run.flipper, events) {
+                step = match flip_through_replacement(state, run.flipper, &mut set, events) {
                     CoinFlipOutcome::Resolved(won) => {
                         settle_flip(state, run, kind_after, won, events)?
                     }
@@ -436,7 +508,7 @@ fn drive_flip_run(
                     CoinFlipOutcome::Suspended => {
                         // CR 614.1a: doubled flip — stash the run position and resume after
                         // the keep choice. The position excludes the paused flip itself.
-                        state.push_coin_flip_frame(run.park(state, kind_after, &start));
+                        state.push_coin_flip_frame(run.park(state, kind_after, &start, set));
                         FlipRunStep::Suspended
                     }
                 };
@@ -610,6 +682,10 @@ pub fn resume_after_keep(
         flipper,
         result: CoinFlipResult::from_won(won),
     });
+    // CR 705.3: the kept flip happened, so the flipper's "first time … each turn"
+    // window is spent. Already recorded when its set began; idempotent here so a
+    // state saved before the per-turn record existed resumes with it spent.
+    state.players_who_flipped_coins_this_turn.insert(flipper);
 
     // Clear the resolving keep choice so a re-suspension is unambiguous.
     state.waiting_for = WaitingFor::Priority { player: controller };

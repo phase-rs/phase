@@ -2349,6 +2349,16 @@ pub enum StaticMode {
     /// This is a boolean rule modification: multiple active instances do not
     /// multiply the life loss caused by a single mana-loss event.
     UnspentManaLossCausesLifeLoss,
+    /// CR 705.3 + CR 109.5: The first set of coins an affected player flips each
+    /// turn comes up heads and that player wins those flips, ignoring the coins'
+    /// actual results (Edgar, King of Figaro). A set is the coins one instruction
+    /// flips at once ("flip five coins"); a flip made before this ability began
+    /// to apply still spends the turn's window.
+    ///
+    /// This is a boolean rule modification, not a CR 614 replacement: multiple
+    /// active instances fix the same set once and never order against Krark's
+    /// Thumb.
+    WinFirstCoinFlipSetEachTurn,
     /// CR 702.3b: Allows creatures with defender to attack despite having the keyword.
     /// "can attack as though it didn't have defender" overrides the defender restriction.
     CanAttackWithDefender,
@@ -2596,6 +2606,7 @@ pub enum StaticModeKind {
     PayLifeAsColoredMana,
     StepEndUnspentMana,
     UnspentManaLossCausesLifeLoss,
+    WinFirstCoinFlipSetEachTurn,
     CanAttackWithDefender,
     AttackOnlyNeighbor,
     IgnoreLandwalkForBlocking,
@@ -2766,6 +2777,7 @@ impl StaticMode {
             StaticMode::UnspentManaLossCausesLifeLoss => {
                 StaticModeKind::UnspentManaLossCausesLifeLoss
             }
+            StaticMode::WinFirstCoinFlipSetEachTurn => StaticModeKind::WinFirstCoinFlipSetEachTurn,
             StaticMode::CanAttackWithDefender => StaticModeKind::CanAttackWithDefender,
             StaticMode::AttackOnlyNeighbor => StaticModeKind::AttackOnlyNeighbor,
             StaticMode::IgnoreLandwalkForBlocking { .. } => {
@@ -2918,6 +2930,7 @@ impl StaticMode {
             | StaticMode::PayLifeAsColoredMana { .. }
             | StaticMode::StepEndUnspentMana { .. }
             | StaticMode::UnspentManaLossCausesLifeLoss
+            | StaticMode::WinFirstCoinFlipSetEachTurn
             | StaticMode::IgnoreLandwalkForBlocking { .. }
             | StaticMode::CanActivateAbilitiesAsThoughHaste
             | StaticMode::CanBlockShadow
@@ -3049,6 +3062,7 @@ impl Hash for StaticMode {
                 action.hash(state);
             }
             StaticMode::UnspentManaLossCausesLifeLoss => {}
+            StaticMode::WinFirstCoinFlipSetEachTurn => {}
             StaticMode::IgnoreLandwalkForBlocking { qualifier } => qualifier.hash(state),
             StaticMode::Other(s) => s.hash(state),
             StaticMode::GraveyardCastPermission {
@@ -3300,6 +3314,7 @@ impl StaticMode {
             | StaticMode::PayLifeAsColoredMana { .. }
             | StaticMode::StepEndUnspentMana { .. }
             | StaticMode::UnspentManaLossCausesLifeLoss
+            | StaticMode::WinFirstCoinFlipSetEachTurn
             | StaticMode::CanAttackWithDefender
             | StaticMode::IgnoreLandwalkForBlocking { .. }
             | StaticMode::CanActivateAbilitiesAsThoughHaste
@@ -3744,6 +3759,7 @@ impl fmt::Display for StaticMode {
             StaticMode::UnspentManaLossCausesLifeLoss => {
                 write!(f, "UnspentManaLossCausesLifeLoss")
             }
+            StaticMode::WinFirstCoinFlipSetEachTurn => write!(f, "WinFirstCoinFlipSetEachTurn"),
             StaticMode::CanAttackWithDefender => write!(f, "CanAttackWithDefender"),
             // CR 509.1b + CR 609.4 + CR 702.14c: Display follows the existing
             // parenthesized-payload pattern. `None` = all-landwalk canceller.
@@ -4263,6 +4279,7 @@ impl FromStr for StaticMode {
             "CanBlockShadow" => StaticMode::CanBlockShadow,
             s if s.starts_with("StepEndUnspentMana(") => StaticMode::Other(s.to_string()),
             "UnspentManaLossCausesLifeLoss" => StaticMode::UnspentManaLossCausesLifeLoss,
+            "WinFirstCoinFlipSetEachTurn" => StaticMode::WinFirstCoinFlipSetEachTurn,
             "UntapsDuringEachOtherPlayersUntapStep" => {
                 StaticMode::UntapsDuringEachOtherPlayersUntapStep
             }
