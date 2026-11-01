@@ -20922,8 +20922,7 @@ pub fn start_game_with_starting_player(
     let waiting_for = if has_libraries {
         // CR 702.106a: Agenda names are chosen as conspiracies enter the command
         // zone, ahead of companion reveals and mulligans (CR 702.139a).
-        super::conspiracy::pending_agenda_choice(state)
-            .unwrap_or_else(|| super::companion::companion_reveals_or_mulligan(state, &mut events))
+        super::conspiracy::next_pregame_decision(state, &mut events)
     } else {
         // No cards to mulligan with, skip straight to game
         crate::game::planechase::reveal_starting_plane(state);

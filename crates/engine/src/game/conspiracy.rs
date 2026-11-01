@@ -40,6 +40,7 @@ use nom::{IResult, Parser};
 
 use crate::game::filter::card_names_match;
 use crate::game::game_object::GameObject;
+use crate::game::players;
 use crate::types::ability::ChosenAttribute;
 use crate::types::card::CardFace;
 use crate::types::card_type::{CardType, CoreType};
@@ -172,6 +173,7 @@ pub fn pending_agenda_choice(state: &GameState) -> Option<WaitingFor> {
         state.command_zone.iter().find_map(|&object_id| {
             let obj = state.objects.get(&object_id)?;
             (obj.owner == player
+                && players::is_alive(state, player)
                 && is_face_down_conspiracy_candidate(obj, player)
                 && obj.agenda_name_count > 0
                 && obj.secret_chosen_names.is_empty())
@@ -195,8 +197,14 @@ pub fn handle_secret_agenda_names(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, String> {
     record_secret_agenda_choices(state, object_id, player, names)?;
-    Ok(pending_agenda_choice(state)
-        .unwrap_or_else(|| super::companion::companion_reveals_or_mulligan(state, events)))
+    Ok(next_pregame_decision(state, events))
+}
+
+/// CR 702.106a: The next agenda prompt, or the companion and mulligan steps once
+/// every agenda is named. Authority for leaving the agenda step of pregame.
+pub fn next_pregame_decision(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
+    pending_agenda_choice(state)
+        .unwrap_or_else(|| super::companion::companion_reveals_or_mulligan(state, events))
 }
 
 /// CR 905.4 + CR 113.6b: True when this object is a conspiracy that is currently

@@ -39,6 +39,7 @@ use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
 use std::sync::Arc;
 
@@ -50,6 +51,7 @@ fn plain_card_face(name: &str) -> CardFace {
 }
 
 const BRAGOS_FAVOR_ORACLE: &str = "Hidden agenda (Start the game with this conspiracy face down in the command zone and secretly choose a card name. You may turn this conspiracy face up any time and reveal that name.)\nSpells with the chosen name you cast cost {1} less to cast.";
+const WORLDKNIT_ORACLE: &str = "(Start the game with this conspiracy face up in the command zone.)\nAs long as every card in your card pool started the game in your library or in the command zone, lands you control have \"{T}: Add one mana of any color.\"";
 const SUMMONERS_BOND_ORACLE: &str = "Double agenda (Start the game with this conspiracy face down in the command zone and secretly choose two different card names. You may turn this conspiracy face up any time and reveal those names.)\nWhenever you cast a creature spell with one of the chosen names, you may search your library for a creature card with the other chosen name, reveal it, put it into your hand, then shuffle.";
 
 fn conspiracy_card_face(name: &str, hidden_agenda: bool) -> CardFace {
@@ -73,7 +75,7 @@ fn conspiracy_card_face(name: &str, hidden_agenda: bool) -> CardFace {
             )),
         );
     } else {
-        face.oracle_text = Some("Conspiracy text".to_string());
+        face.oracle_text = Some(WORLDKNIT_ORACLE.to_string());
     }
     face
 }
@@ -678,4 +680,61 @@ fn pregame_agenda_prompt_rejects_other_seats() {
         state.waiting_for,
         WaitingFor::SecretAgendaChoice { player: P0, .. }
     ));
+
+    // Control: the same answer through the same boundary from the asked seat.
+    apply(&mut state, P0, names(&["Grizzly Bears"])).expect("the asked seat may answer");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::MulliganDecision { .. }
+    ));
+}
+
+// CR 800.4a + CR 905.3: Conspiracy Draft is multiplayer, so a player can leave
+// with agendas still unnamed. The game must keep asking the players who remain,
+// never fall through to priority before any hand is drawn.
+#[test]
+fn pregame_agenda_prompt_survives_a_conceding_chooser() {
+    let mut state = GameState::new(FormatConfig::limited_with_command_zone(), 3, 7);
+    state.all_card_names = known_card_names();
+    let seat = |cards: Vec<CardFace>| PlayerDeckPayload {
+        main_deck: forty_card_main(),
+        commander: cards
+            .into_iter()
+            .map(|card| DeckEntry { card, count: 1 })
+            .collect(),
+        ..Default::default()
+    };
+    let brago = || conspiracy_card_face("Brago's Favor", true);
+    let payload = DeckPayload {
+        player: seat(vec![brago()]),
+        opponent: seat(vec![]),
+        ai_decks: vec![seat(vec![brago()])],
+        ..Default::default()
+    };
+    load_deck_into_state(&mut state, &payload);
+    start_game_with_starting_player(&mut state, P0);
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::SecretAgendaChoice { player: P0, .. }
+    ));
+
+    apply(&mut state, P0, GameAction::Concede { player_id: P0 }).expect("P0 concedes");
+
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::SecretAgendaChoice {
+                player: PlayerId(2),
+                ..
+            }
+        ),
+        "the remaining agenda is still asked: {:?}",
+        state.waiting_for
+    );
+    apply(&mut state, PlayerId(2), names(&["Grizzly Bears"])).expect("P2 answers");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::MulliganDecision { .. }),
+        "pregame reaches mulligans for the survivors: {:?}",
+        state.waiting_for
+    );
 }
