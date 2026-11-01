@@ -655,10 +655,39 @@ pub fn has_indestructible(obj: &GameObject) -> bool {
 
 /// CR 702.16b: Returns true if target's protection prevents interaction from source.
 pub fn protection_prevents_from(target: &GameObject, source: &GameObject) -> bool {
+    protection_prevents_from_with_source_name(target, Some(source), None)
+}
+
+/// CR 702.16b + CR 702.16e + CR 608.2h: Returns true if target's protection prevents
+/// interaction from source. When checking `ProtectionTarget::ChosenCardName`,
+/// `source_name` (e.g. from an LKI projection) takes precedence over `source.name`,
+/// allowing departed sources (such as dead Clones or ceased tokens) to be matched by
+/// their last-known name.
+pub fn protection_prevents_from_with_source_name(
+    target: &GameObject,
+    source: Option<&GameObject>,
+    source_name: Option<&str>,
+) -> bool {
+    let effective_name = source_name.or_else(|| source.map(|o| o.name.as_str()));
     for kw in &target.keywords {
         if let Keyword::Protection(ref pt) = kw {
-            if source_matches_protection_target(pt, target, source) {
-                return true;
+            match pt {
+                ProtectionTarget::ChosenCardName => {
+                    if let Some(name) = effective_name {
+                        if target.chosen_card_name().is_some_and(|chosen| {
+                            crate::game::filter::card_names_match(name, chosen)
+                        }) {
+                            return true;
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(source_obj) = source {
+                        if source_matches_protection_target(pt, target, source_obj) {
+                            return true;
+                        }
+                    }
+                }
             }
         }
     }

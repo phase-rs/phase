@@ -20,7 +20,8 @@ use engine::game::effects::deal_damage;
 use engine::game::game_object::AttachTarget;
 use engine::game::sba::check_state_based_actions;
 use engine::game::scenario::{GameScenario, P0};
-use engine::game::targeting::find_legal_targets;
+use engine::game::targeting::{find_legal_targets, find_legal_targets_for_ability};
+use engine::game::triggers::trigger_source_context_for_latch;
 use engine::game::zones::create_object;
 use engine::types::ability::{
     ChoiceType, Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
@@ -28,8 +29,9 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, StackEntry, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -236,7 +238,7 @@ fn runed_halo_prevents_noncombat_damage_from_named_card() {
         })
         .expect("choosing card name must succeed");
 
-    // 1. Damage from Grizzly Bears to P0 is prevented.
+    // 1. Damage from Grizzly Bears to P0 is prevented (direct resolution).
     let mut events = Vec::new();
     let ability_bear = damage_ability(bear, P1, TargetRef::Player(P0));
     deal_damage::resolve(runner.state_mut(), &ability_bear, &mut events)
@@ -252,6 +254,24 @@ fn runed_halo_prevents_noncombat_damage_from_named_card() {
         runner.state().players[0].life,
         20,
         "P0 life must remain 20 after prevented damage"
+    );
+
+    // 1b. CR 702.16e: Ordinary Effect::DealDamage from Grizzly Bears resolved through the stack.
+    let ability_bear_stack = damage_ability(bear, P1, TargetRef::Player(P0));
+    runner.state_mut().stack.push_back(StackEntry {
+        id: ObjectId(999),
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: bear,
+            ability: Box::new(ability_bear_stack),
+        },
+        controller: P1,
+        source_id: bear,
+    });
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().players[0].life,
+        20,
+        "P0 life must remain 20 after stack-resolved ordinary DealDamage from Grizzly Bears is prevented"
     );
 
     // 2. Damage from Hill Giant to P0 is NOT prevented.
@@ -476,5 +496,252 @@ fn runed_halo_prevents_enchanting_and_sba_detaches_aura() {
     assert!(
         runner.state().players[1].graveyard.contains(&curse_named),
         "detached Aura must be put into owner's graveyard"
+    );
+}
+
+/// CR 608.2h + CR 702.16e: Protection from the chosen card name prevents damage
+/// from departed sources (such as a Clone in the graveyard or a ceased token)
+/// by evaluating against the captured trigger source's LKI name.
+#[test]
+fn runed_halo_prevents_damage_from_departed_clone_and_token() {
+    let mut scenario = GameScenario::new();
+    let halo = scenario
+        .add_enchantment_from_oracle(P0, "Runed Halo", RUNED_HALO_ORACLE)
+        .id();
+
+    // Creature on battlefield with protection from "Volatile Rig".
+    let protected_creature = scenario.add_creature(P0, "Guardian", 3, 3).id();
+
+    // Clone initially copying Volatile Rig on the battlefield.
+    let clone_source = scenario.add_creature(P1, "Volatile Rig", 4, 4).id();
+
+    let mut runner = scenario.build();
+
+    // Set Halo's chosen name to "Volatile Rig".
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&halo)
+        .unwrap()
+        .chosen_attributes
+        .push(engine::types::ability::ChosenAttribute::CardName(
+            "Volatile Rig".to_string(),
+        ));
+
+    // Grant the guardian protection from chosen card name "Volatile Rig".
+    {
+        let obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&protected_creature)
+            .unwrap();
+        obj.keywords
+            .push(Keyword::Protection(ProtectionTarget::ChosenCardName));
+        obj.chosen_attributes
+            .push(engine::types::ability::ChosenAttribute::CardName(
+                "Volatile Rig".to_string(),
+            ));
+    }
+
+    // 1. Capture the trigger source context while the Clone is on the battlefield as Volatile Rig.
+    let clone_trigger_ctx =
+        trigger_source_context_for_latch(runner.state(), &runner.state().objects[&clone_source]);
+
+    // Move Clone to the graveyard and rename it back to "Clone" (as copy effects end).
+    {
+        let obj = runner.state_mut().objects.get_mut(&clone_source).unwrap();
+        obj.zone = Zone::Graveyard;
+        obj.name = "Clone".to_string();
+    }
+    runner
+        .state_mut()
+        .battlefield
+        .retain(|&id| id != clone_source);
+    runner.state_mut().players[1]
+        .graveyard
+        .push_back(clone_source);
+
+    // Create a dies damage ability from the Clone with the captured trigger source.
+    let mut ability = ResolvedAbility::new(
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 4 },
+            target: TargetFilter::Any,
+            damage_source: None,
+            excess: None,
+        },
+        vec![TargetRef::Player(P0)],
+        clone_source,
+        P1,
+    );
+    ability.trigger_source = Some(clone_trigger_ctx.clone());
+
+    let mut events = Vec::new();
+    deal_damage::resolve(runner.state_mut(), &ability, &mut events)
+        .expect("resolving Clone damage to player");
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
+        "damage from Clone copying Volatile Rig must be prevented to P0 by Runed Halo"
+    );
+    assert_eq!(runner.state().players[0].life, 20, "P0 life must remain 20");
+
+    // Also assert damage to protected creature is prevented.
+    ability.targets = vec![TargetRef::Object(protected_creature)];
+    let mut creature_events = Vec::new();
+    deal_damage::resolve(runner.state_mut(), &ability, &mut creature_events)
+        .expect("resolving Clone damage to protected creature");
+
+    assert!(
+        creature_events
+            .iter()
+            .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
+        "damage from Clone copying Volatile Rig must be prevented to protected creature"
+    );
+    assert_eq!(
+        runner.state().objects[&protected_creature].damage_marked,
+        0,
+        "protected creature must take no damage"
+    );
+
+    // 2. Token case: token dies and ceases to exist.
+    let token_id = create_object(
+        runner.state_mut(),
+        CardId(999),
+        P1,
+        "Goblin".to_string(),
+        Zone::Battlefield,
+    );
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&token_id)
+        .unwrap()
+        .is_token = true;
+    let token_trigger_ctx =
+        trigger_source_context_for_latch(runner.state(), &runner.state().objects[&token_id]);
+
+    // Token ceases to exist (removed from state.objects entirely).
+    runner.state_mut().objects.remove(&token_id);
+    runner.state_mut().battlefield.retain(|&id| id != token_id);
+
+    // Set Halo's chosen name to "Goblin".
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&halo)
+        .unwrap()
+        .chosen_attributes
+        .clear();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&halo)
+        .unwrap()
+        .chosen_attributes
+        .push(engine::types::ability::ChosenAttribute::CardName(
+            "Goblin".to_string(),
+        ));
+
+    let mut token_ability = ResolvedAbility::new(
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Any,
+            damage_source: None,
+            excess: None,
+        },
+        vec![TargetRef::Player(P0)],
+        token_id,
+        P1,
+    );
+    token_ability.trigger_source = Some(token_trigger_ctx);
+
+    let mut token_events = Vec::new();
+    deal_damage::resolve(runner.state_mut(), &token_ability, &mut token_events)
+        .expect("resolving token damage");
+
+    assert!(
+        token_events
+            .iter()
+            .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
+        "damage from ceased token Goblin must be prevented to P0 by Runed Halo"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        20,
+        "P0 life must remain 20 after token damage is prevented"
+    );
+}
+
+/// CR 608.2h + CR 702.16b: When a targeted dies trigger comes from a token that has
+/// ceased to exist, `find_legal_targets_for_ability` evaluates protection against
+/// the captured trigger source projection, preventing the protected player from
+/// being selected as a legal target.
+#[test]
+fn runed_halo_prevents_targeting_from_departed_token_source() {
+    let mut scenario = GameScenario::new();
+    let halo = scenario
+        .add_enchantment_from_oracle(P0, "Runed Halo", RUNED_HALO_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Set Halo's chosen name to "Goblin".
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&halo)
+        .unwrap()
+        .chosen_attributes
+        .push(engine::types::ability::ChosenAttribute::CardName(
+            "Goblin".to_string(),
+        ));
+
+    // Create a token Goblin on battlefield.
+    let token_id = create_object(
+        runner.state_mut(),
+        CardId(888),
+        P1,
+        "Goblin".to_string(),
+        Zone::Battlefield,
+    );
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&token_id)
+        .unwrap()
+        .is_token = true;
+    let token_trigger_ctx =
+        trigger_source_context_for_latch(runner.state(), &runner.state().objects[&token_id]);
+
+    // Token ceases to exist (removed from state.objects entirely).
+    runner.state_mut().objects.remove(&token_id);
+    runner.state_mut().battlefield.retain(|&id| id != token_id);
+
+    // Create a triggered ability targeting Any (players + permanents).
+    let mut ability = ResolvedAbility::new(
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+            damage_source: None,
+            excess: None,
+        },
+        vec![],
+        token_id,
+        P1,
+    );
+    ability.trigger_source = Some(token_trigger_ctx);
+
+    let legal_targets =
+        find_legal_targets_for_ability(runner.state(), &TargetFilter::Any, &ability);
+
+    assert!(
+        !legal_targets.contains(&TargetRef::Player(P0)),
+        "P0 must NOT be a legal target for ceased token Goblin due to Runed Halo protection, got {legal_targets:?}"
+    );
+    assert!(
+        legal_targets.contains(&TargetRef::Player(P1)),
+        "P1 must be a legal target for ceased token Goblin, got {legal_targets:?}"
     );
 }
