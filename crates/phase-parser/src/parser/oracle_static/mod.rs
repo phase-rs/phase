@@ -83,6 +83,7 @@ pub(super) use super::{
 
 mod anthem;
 mod cda;
+mod coin_flip;
 mod cost_mod;
 mod dispatch;
 mod evasion;
@@ -153,6 +154,7 @@ mod support {
     pub(super) use super::{lower_static_ir, parse_static_line};
 }
 
+pub(crate) use coin_flip::is_win_first_coin_flip_set_each_turn_static;
 pub(crate) use cost_mod::{
     parse_activated_ability_cost_head, parse_alt_cost_frequency_prefix,
     parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,

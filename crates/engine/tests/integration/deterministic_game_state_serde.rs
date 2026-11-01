@@ -222,6 +222,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "creatures_blocked_this_turn",
         "creature_blocked_attackers_this_turn",
         "players_who_created_token_this_turn",
+        "players_who_flipped_coins_this_turn",
         "players_who_discarded_card_this_turn",
         "players_who_sacrificed_artifact_this_turn",
         "assassin_or_commander_dealt_combat_damage_this_turn",
@@ -1205,6 +1206,34 @@ fn discovered_manifest() -> BTreeMap<String, DiscoveredOwner> {
         (
             "src/game/effects/choose_one_of.rs",
             include_str!("../../src/game/effects/choose_one_of.rs"),
+        ),
+        (
+            "../phase-ast/src/types/ability.rs",
+            include_str!("../../../phase-ast/src/types/ability.rs"),
+        ),
+        (
+            "../phase-ast/src/types/player.rs",
+            include_str!("../../../phase-ast/src/types/player.rs"),
+        ),
+        (
+            "../phase-ast/src/types/game_state_kinds.rs",
+            include_str!("../../../phase-ast/src/types/game_state_kinds.rs"),
+        ),
+        (
+            "../phase-ast/src/types/event_kinds.rs",
+            include_str!("../../../phase-ast/src/types/event_kinds.rs"),
+        ),
+        (
+            "../phase-ast/src/types/object_data.rs",
+            include_str!("../../../phase-ast/src/types/object_data.rs"),
+        ),
+        (
+            "../phase-ast/src/types/attack_target.rs",
+            include_str!("../../../phase-ast/src/types/attack_target.rs"),
+        ),
+        (
+            "../phase-ast/src/types/token_spec.rs",
+            include_str!("../../../phase-ast/src/types/token_spec.rs"),
         ),
     ] {
         discover_file(&mut discovered, file, source);

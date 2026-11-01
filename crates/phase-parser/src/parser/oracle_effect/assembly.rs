@@ -863,7 +863,7 @@ pub(super) enum AntecedentRole {
     DamageDealer,
     /// A `Dig` — the "look at the top N" anchor that BOTH private-look riders bind
     /// back to: `ExileLookedAtCard` (the Gonti impulse idiom, CR 608.2c) rewrites it
-    /// into an `ExileTop`, and `ExileOneOfThemFaceDown` (Hideaway, CR 702.75a)
+    /// into an `ExileTop`, and `ExileLookedAtCardsFaceDown` (Hideaway, CR 702.75a)
     /// patches it into the choose-one-and-exile shape. One role, because the two
     /// scans it replaces had BYTE-IDENTICAL predicates — they are the same
     /// antecedent, named twice.
@@ -938,7 +938,7 @@ fn live_role_predicate(role: AntecedentRole) -> Option<fn(&AbilityDefinition) ->
         // LIVE, for the same reason as `DigOrMill` — and it is the SAME rewrite that
         // forces it: `ExileLookedAtCard` does `*previous.effect = Effect::ExileTop`,
         // turning a `Dig` into a non-`Dig` with NO length change, so `observe` never
-        // fires and a cached registry would go on naming it. `ExileOneOfThemFaceDown`
+        // fires and a cached registry would go on naming it. `ExileLookedAtCardsFaceDown`
         // nests a `sub_ability` in place — also length-preserving. Live, the role is
         // EXACTLY the scan it replaces.
         AntecedentRole::DigLook => Some(def_is_dig_look),
@@ -4362,7 +4362,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // could not be modelled.
     //
     // CENSUS, re-measured 2026-08-29 against the pool whose tracked vintage
-    // sidecar `crates/engine/data/mtgjson-vintage` reads 2026-08-28: the printed
+    // sidecar `crates/phase-ast/data/mtgjson-vintage` reads 2026-08-28: the printed
     // form appears on 4 card faces (Avacyn, Guardian Angel / Prismatic Strands /
     // Root Greevil / Wash Out) and NO ability line prints it twice — Avacyn's
     // two occurrences sit in two SEPARATE activated abilities, i.e. two chains
