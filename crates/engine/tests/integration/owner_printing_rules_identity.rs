@@ -330,6 +330,17 @@ fn fund(runner: &mut GameRunner, amount: usize) {
     }
 }
 
+/// One blue unit in P0's pool: Glacial Stalker's printed cost is {5}{U}.
+fn fund_blue(runner: &mut GameRunner) {
+    runner
+        .state_mut()
+        .add_mana_to_pool(
+            P0,
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+        )
+        .expect("the player has a mana pool");
+}
+
 fn tap(runner: &mut GameRunner, land: ObjectId) {
     let (_, _, grouped) = legal_actions_full(runner.state());
     let selection = grouped
@@ -390,6 +401,12 @@ fn legacy_of(state: &GameState) -> GameState {
     })
 }
 
+/// Printed card text of Glacial Stalker (MTGJSON, checked 2026-11-01), {5}{U} Elemental 4/5:
+/// "Morph {4}{U} (You may cast this card face down as a 2/2 creature for {3}. Turn it face up
+/// any time for its morph cost.)". The face-down cast is the cost-paying, printing-concealing
+/// action these tests reverse.
+const MORPH_NAME: &str = "Glacial Stalker";
+
 /// A morph card in P0's hand and an opposing synthetic source of an unconditional "cast a
 /// spell: pay 2 life" additional cost, so one action both pays a cost and conceals the printing.
 /// No printed permanent imposes a life additional cost on every spell: the nearest, Liesa,
@@ -408,9 +425,19 @@ fn face_down_under_tax(players: u8, code: &str) -> (GameRunner, ObjectId, Vec<Ob
     };
     scenario.at_phase(Phase::PreCombatMain);
     let morph = scenario
-        .add_creature_to_hand(P0, "Secret Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4).into()))
-        .with_mana_cost(ManaCost::generic(5))
+        .add_creature_to_hand(P0, MORPH_NAME, 4, 5)
+        .with_subtypes(vec!["Elemental"])
+        .with_keyword(Keyword::Morph(
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 4,
+            }
+            .into(),
+        ))
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 5,
+        })
         .id();
     let tax = scenario.add_creature(P1, "Tax Source", 1, 1).id();
     let lands: Vec<ObjectId> = (0..3)
@@ -436,6 +463,9 @@ fn face_down_under_tax(players: u8, code: &str) -> (GameRunner, ObjectId, Vec<Ob
     }
     engine::game::layers::flush_layers(runner.state_mut());
     fund(&mut runner, 5);
+    // The printed {5}{U} stays affordable, so the face-down {3} is offered as a choice rather
+    // than auto-selected (CR 601.2b + CR 702.37c).
+    fund_blue(&mut runner);
     let card_id = runner.state().objects[&morph].card_id;
     runner
         .act(GameAction::CastSpell {
@@ -477,7 +507,7 @@ fn assert_cancelled_with_printing(runner: &GameRunner, morph: ObjectId, code: &s
     let object = &runner.state().objects[&morph];
     assert_eq!(object.zone, Zone::Hand, "reach: back in hand");
     assert!(!object.face_down, "reach: face up again");
-    assert_eq!(object.name, "Secret Beast", "reach: the real name is back");
+    assert_eq!(object.name, MORPH_NAME, "reach: the real name is back");
     assert_eq!(set_code(runner.state(), morph).as_deref(), Some(code));
     assert_eq!(base_set_code(runner.state(), morph).as_deref(), Some(code));
     assert_eq!(
