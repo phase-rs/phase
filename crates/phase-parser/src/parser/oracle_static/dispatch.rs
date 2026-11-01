@@ -272,13 +272,16 @@ fn parse_max_untap_per_type_static(tp: &TextPair<'_>, text: &str) -> Option<Stat
         let condition_text = after_cond.original.trim().trim_end_matches('.');
         let mut def = parse_max_untap_per_type_static(&before_cond, text)?;
         // CR 611.3a: MaxUntapPerType has no attached-subject ("enchanted
-        // creature") variant — its condition is always a state check on the
-        // cap's own source, so the self-pronoun rewrite always applies
-        // (unlike parse_continuous_gets_has's SelfRef-only guard) and the
-        // gate's pronoun names the source (`PrintedSubject::SourceNamed`).
+        // creature") variant — a singular "it" in its condition is a state
+        // check on the cap's own source, so the self-pronoun rewrite always
+        // applies (unlike parse_continuous_gets_has's SelfRef-only guard).
+        // The printed subject is the players, not the source, so the subject
+        // is `PrintedSubject::Other`: the singular "it" arms still run, but a
+        // plural "they" names the players and must not become the source's
+        // damage-history gate.
         let condition = parse_static_condition(&rewrite_self_pronoun_subject(
             condition_text,
-            PrintedSubject::SourceNamed,
+            PrintedSubject::Other,
         ))
         .unwrap_or_else(|| {
             unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)

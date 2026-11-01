@@ -34338,6 +34338,42 @@ fn attached_subject_they_hasnt_dealt_damage_yet_stays_unrecognized() {
             }
         }
     }
+    // The MaxUntapPerType entry point: its printed subject is the players, so
+    // the plural "they" is theirs, not the source's — the gate stays an
+    // honest unrecognized condition. Paired with the source-named form of an
+    // equivalent restriction, which still types the source's gate.
+    let line = "Players can't untap more than two lands during their untap steps as long as they haven't dealt combat damage yet.";
+    let def = parse_static_line(line).expect("max-untap static def");
+    // Reach-guard: the cap itself was recognised.
+    assert_eq!(
+        def.mode,
+        StaticMode::MaxUntapPerType {
+            filter: TargetFilter::Typed(TypedFilter::land()),
+            max: 2,
+        },
+        "{line}"
+    );
+    assert_eq!(def.affected, None, "{line}");
+    assert!(!contains_source_damage_gate(&def.condition), "{line}");
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Unrecognized {
+            text: "they haven't dealt combat damage yet".to_string(),
+        }),
+        "{line}"
+    );
+    let self_line = "~ can't attack as long as they haven't dealt combat damage yet.";
+    let self_def = parse_static_line(self_line).expect("self static def");
+    assert_eq!(self_def.mode, StaticMode::CantAttack, "{self_line}");
+    assert_eq!(
+        self_def.affected,
+        Some(TargetFilter::SelfRef),
+        "{self_line}"
+    );
+    assert!(
+        contains_source_damage_gate(&self_def.condition),
+        "{self_line}"
+    );
 
     // Self half: a source-named subject binds the gate to itself, exactly.
     for subject in ["~", "This creature"] {
