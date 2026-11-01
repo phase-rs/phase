@@ -2820,7 +2820,20 @@ fn coordinated_exile_play_effect(effect: &Effect) -> Option<Effect> {
                     alt_ability_cost: None,
                     without_paying_mana_cost: false,
                     cast_cost_modifier: None,
-                    ..
+                    // CR 611.2a: the grant's own window carries over unchanged;
+                    // `granted_to` is the parse-time placeholder
+                    // `grant_permission::resolve` rewrites.
+                    duration: _,
+                    granted_to: _,
+                    source_id: None,
+                    exiled_by_ability_controller: None,
+                    // CR 609.4b: a spend permission scopes only how a spell
+                    // cast this way is paid (Elder Brain); a land play pays
+                    // nothing, so `Play` leaves it exactly as printed.
+                    mana_spend_permission: _,
+                    land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    invalidation: None,
+                    provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 },
             target: TargetFilter::TrackedSet { .. },
             grantee,

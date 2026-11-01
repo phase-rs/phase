@@ -2135,12 +2135,15 @@
     "titlePlay": "Juega cartas gratis",
     "subtitle": "Elige un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)). Valor de maná total restante: {{budget}}.",
     "subtitleNoBudget": "Elige un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)).",
+    "subtitlePlay": "Elige una tierra para jugar o un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)). Valor de maná total restante: {{budget}}.",
+    "subtitleNoBudgetPlay": "Elige una tierra para jugar o un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)).",
     "remainingAny": "cualquier cantidad",
     "castNamed": "Lanzar {{name}}",
     "playNamed": "Jugar {{name}}",
     "castSuffix": "(sin pagar su coste de maná)",
     "done": "Listo",
-    "doneSuffix": "(deja de lanzar hechizos de esta forma)"
+    "doneSuffix": "(deja de lanzar hechizos de esta forma)",
+    "doneSuffixPlay": "(deja de jugar cartas de esta forma)"
   },
   "castingVariant": {
     "eyebrow": "Lanzar",

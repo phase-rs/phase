@@ -9704,40 +9704,23 @@ pub(crate) fn abort_resolution_cast(
             // value budget changes. Recompute through the exact Free request
             // rather than retaining a stale candidate list or a policy-only
             // approximation of the rejected cast.
-            let request = effects::free_cast_from_zones::free_cast_window_resolution_request(
+            let window = FreeCastWindowResume {
                 controller,
                 remaining_casts,
                 remaining_mv_budget,
-                (*face_policy).clone(),
-                zones.clone(),
-                graveyard_replacement.clone(),
-                enters_with_modifications.clone(),
-                member_pool.clone(),
-            );
-            let candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
-                state,
-                &zones,
-                remaining_mv_budget,
-                &member_pool,
-                &request,
-            );
-            if candidates.is_empty() {
-                return Ok(finish_with_continuation(state, controller, events));
-            }
-            state.waiting_for = WaitingFor::CastOffer {
-                player: controller,
-                kind: CastOfferKind::FreeCastWindow {
-                    candidates,
-                    remaining_casts,
-                    remaining_mv_budget,
-                    face_policy: *face_policy,
-                    zones,
-                    graveyard_replacement,
-                    enters_with_modifications,
-                    member_pool,
-                },
+                face_policy: *face_policy,
+                zones,
+                graveyard_replacement,
+                enters_with_modifications,
+                member_pool,
             };
-            Ok(state.waiting_for.clone())
+            match window.reoffer(state) {
+                Some(offer) => {
+                    state.waiting_for = offer;
+                    Ok(state.waiting_for.clone())
+                }
+                None => Ok(finish_with_continuation(state, controller, events)),
+            }
         }
     }
 }
@@ -10003,7 +9986,9 @@ fn finish_with_continuation(
 /// CR 608.2g + CR 608.2c: everything a resolution-scoped free-cast window
 /// (`CastOfferKind::FreeCastWindow`) needs to offer itself again — the same
 /// fields its serialized offer and its `FreeCastOfferRemaining` re-offer carrier
-/// hold.
+/// hold. `reoffer` is the single re-offer authority: both a cancelled cast
+/// (`FreeCastOfferRemaining`) and a settled land play re-open the window through
+/// it, each keeping its own continuation when nothing remains.
 struct FreeCastWindowResume {
     controller: crate::types::player::PlayerId,
     remaining_casts: Option<u8>,

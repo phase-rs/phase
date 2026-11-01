@@ -14,6 +14,7 @@
 //! - CR 611.2a: a stated window ("Until end of turn") bounds a lingering grant.
 
 use engine::ai_support::legal_actions;
+use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::oracle::parse_oracle_text;
@@ -22,7 +23,7 @@ use engine::types::ability::{
     ResolutionCastWindow, TargetFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastOfferKind, GameState, WaitingFor};
+use engine::types::game_state::{CastOfferKind, ExileLink, ExileLinkKind, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -485,33 +486,50 @@ fn gix_offers_no_land_once_the_land_drop_is_spent() {
     assert_parent_finished(&board.runner, board.gix);
 }
 
-/// A Cast-only window ("cast spells from among …", Hellcarver Demon's shape)
-/// never offers a land.
+/// Hellcarver Demon: "Exile the top six cards of your library. You may cast any
+/// number of spells from among cards exiled this way without paying their mana
+/// costs." A Cast-only window (CR 601.2: casting never plays a land) offers the
+/// exiled spell and none of the five exiled lands, on P0's own turn with the
+/// land drop unused.
 #[test]
-fn a_cast_only_window_offers_no_land() {
+fn hellcarvers_cast_only_window_offers_no_land() {
     let Some(db) = load_db() else { return };
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
-    let source = s
-        .add_creature_from_oracle(
-            P0,
-            "Cast Only",
-            2,
-            2,
-            "{T}: Exile the top two cards of target opponent's library. You may cast spells from among cards exiled this way without paying their mana costs.",
-        )
-        .id();
-    s.add_card_to_library_top(P1, "Bottom Filler");
-    let forest = s.add_real_card(P1, "Forest", Zone::Library, db);
-    let divination = s.add_real_card(P1, "Divination", Zone::Library, db);
+    let demon = s.add_real_card(P0, "Hellcarver Demon", Zone::Battlefield, db);
+    s.add_card_to_library_top(P0, "Bottom Filler");
+    let lands: Vec<ObjectId> = ["Forest", "Island", "Plains", "Swamp", "Mountain"]
+        .iter()
+        .map(|name| s.add_real_card(P0, name, Zone::Library, db))
+        .collect();
+    let divination = s.add_real_card(P0, "Divination", Zone::Library, db);
     let mut runner = s.build();
-    put_on_top(&mut runner, P1, divination);
-    put_on_top(&mut runner, P1, forest);
-    runner.activate(source, 0).target_player(P1).resolve();
-    assert_eq!(
-        window(runner.state()),
-        (vec![divination], CardPlayMode::Cast)
-    );
+    for id in lands.iter().rev() {
+        put_on_top(&mut runner, P0, *id);
+    }
+    put_on_top(&mut runner, P0, divination);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&demon)
+        .unwrap()
+        .summoning_sick = false;
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(demon, AttackTarget::Player(P1))])
+        .expect("P0 attacks with Hellcarver Demon");
+    runner.combat_damage();
+    let state = runner.state();
+    for id in lands.iter().chain([&divination]) {
+        assert_eq!(
+            state.objects[id].zone,
+            Zone::Exile,
+            "reach-guard: the trigger exiled the top six"
+        );
+    }
+    assert_eq!(lands_played(state, P0), 0, "the land drop is unused");
+    assert_eq!(window(state), (vec![divination], CardPlayMode::Cast));
 }
 
 /// CR 614.12a + CR 305.2a: the exiled land is a shock land. Its entry pauses
@@ -684,8 +702,9 @@ fn gix_window_plays_a_spell_land_modal_cards_land_face() {
     assert_parent_finished(&board.runner, board.gix);
 }
 
-/// CR 607.2a: a second activation's window offers only ITS batch — a land left
-/// in exile by the first activation (declined) is not re-offered.
+/// "… from among cards exiled this way" (CR 608.2c: the instruction refers back
+/// to its own exile step): a second activation's window offers only ITS batch —
+/// a land left in exile by the first activation (declined) is not re-offered.
 #[test]
 fn a_second_gix_window_offers_only_its_own_batch() {
     let Some(db) = load_db() else { return };
@@ -747,38 +766,59 @@ fn gix_offers_no_land_on_an_opponents_turn() {
         .is_err());
 }
 
-/// Building block for Magus of the Mind's row (whose printed exile producer is
-/// itself unsupported): CR 611.2a + CR 701.18b — a stated "Until end of turn"
-/// Play grant over the exiled batch lets the land be played as a land later in
-/// the turn.
+/// Magus of the Mind: "Until end of turn, you may play lands and cast spells
+/// from among cards exiled this way without paying their mana costs." CR 611.2a
+/// + CR 701.18b: the dated Play grant lets the exiled land be played as a land
+/// later in the turn. Magus's own exile clause ("exile the top X cards, where X
+/// is one plus the number of spells cast this turn") is still a parse gap
+/// (`where_x_binding`), so the batch is staged as exiled with Magus — the link
+/// and per-turn record the exile resolver writes — and the printed grant
+/// clause is what resolves.
 #[test]
-fn a_dated_play_grant_lets_the_exiled_land_be_played_this_turn() {
+fn magus_of_the_minds_dated_grant_lets_the_exiled_land_be_played_this_turn() {
     let Some(db) = load_db() else { return };
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
-    let source = s
-        .add_creature_from_oracle(
-            P0,
-            "Dated Grant",
-            2,
-            2,
-            "{T}: Exile the top two cards of your library. Until end of turn, you may play lands and cast spells from among cards exiled this way without paying their mana costs.",
-        )
-        .id();
+    let magus = s.add_real_card(P0, "Magus of the Mind", Zone::Battlefield, db);
     s.with_library_top(P0, &["Bottom Filler"]);
-    let forest = s.add_real_card(P0, "Forest", Zone::Library, db);
-    let divination = s.add_real_card(P0, "Divination", Zone::Library, db);
+    let forest = s.add_real_card(P0, "Forest", Zone::Exile, db);
     let mut runner = s.build();
-    put_on_top(&mut runner, P0, divination);
-    put_on_top(&mut runner, P0, forest);
-    runner.activate(source, 0).resolve();
+    {
+        let state = runner.state_mut();
+        state.objects.get_mut(&magus).unwrap().summoning_sick = false;
+        state.exile_links.push(ExileLink {
+            exiled_id: forest,
+            source_id: magus,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+        state
+            .cards_exiled_with_source_this_turn
+            .entry(magus)
+            .or_default()
+            .push(forest);
+        state.players[0]
+            .mana_pool
+            .add(ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]));
+    }
+    let card_id = runner.state().objects[&forest].card_id;
+    assert!(
+        !legal_actions(runner.state()).contains(&GameAction::PlayLand {
+            object_id: forest,
+            card_id
+        }),
+        "reach-guard: before the grant the exiled land is not playable"
+    );
+    runner.activate(magus, 0).resolve();
     let state = runner.state();
-    assert_eq!(state.objects[&forest].zone, Zone::Exile);
+    assert_eq!(
+        state.objects[&magus].zone,
+        Zone::Graveyard,
+        "Magus was sacrificed"
+    );
     assert!(
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "a dated grant opens no window"
     );
-    let card_id = state.objects[&forest].card_id;
     assert!(
         legal_actions(state).contains(&GameAction::PlayLand {
             object_id: forest,
@@ -793,6 +833,79 @@ fn a_dated_play_grant_lets_the_exiled_land_be_played_this_turn() {
         })
         .expect("playing the exiled land");
     assert_eq!(runner.state().objects[&forest].zone, Zone::Battlefield);
+    assert_eq!(lands_played(runner.state(), P0), 1);
+}
+
+/// Kayla's Music Box: "{W}, {T}: Look at the top card of your library, then
+/// exile it face down." / "{T}: Until end of turn, you may play cards you own
+/// exiled with Kayla's Music Box." CR 701.18b: the Play grant's residual filter
+/// ("cards you own") admits an exiled land as well as a spell, so the land
+/// survives the grant's linked-exile prefilter and is playable as a land.
+#[test]
+fn kaylas_music_box_lets_an_exiled_land_be_played() {
+    let Some(db) = load_db() else { return };
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let music_box = s.add_real_card(P0, "Kayla's Music Box", Zone::Battlefield, db);
+    s.with_library_top(P0, &["Bottom Filler"]);
+    let forest = s.add_real_card(P0, "Forest", Zone::Library, db);
+    let opt = s.add_real_card(P0, "Opt", Zone::Library, db);
+    let mut runner = s.build();
+    let add_mana = |runner: &mut GameRunner, mana: ManaType| {
+        runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            mana,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    };
+    let untap = |runner: &mut GameRunner| {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&music_box)
+            .unwrap()
+            .tapped = false;
+    };
+    for card in [forest, opt] {
+        put_on_top(&mut runner, P0, card);
+        add_mana(&mut runner, ManaType::White);
+        untap(&mut runner);
+        runner.activate(music_box, 0).resolve();
+        assert_eq!(
+            runner.state().objects[&card].zone,
+            Zone::Exile,
+            "reach-guard: the Music Box exiled the top card"
+        );
+    }
+    untap(&mut runner);
+    runner.activate(music_box, 1).resolve();
+    add_mana(&mut runner, ManaType::Blue);
+    let state = runner.state();
+    let offered = legal_actions(state);
+    assert!(
+        offered.iter().any(
+            |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == opt)
+        ),
+        "reach-guard: the exiled spell is castable"
+    );
+    let card_id = state.objects[&forest].card_id;
+    assert!(
+        offered.contains(&GameAction::PlayLand {
+            object_id: forest,
+            card_id
+        }),
+        "the exiled land is playable as a land"
+    );
+    runner
+        .act(GameAction::PlayLand {
+            object_id: forest,
+            card_id,
+        })
+        .expect("playing the exiled land");
+    assert_eq!(runner.state().objects[&forest].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&forest].controller, P0);
+    assert_eq!(lands_played(runner.state(), P0), 1);
 }
 /// An exiled batch with nothing playable (a lone land, land drop spent) opens no
 /// window; the ability finishes and the land stays exiled.
@@ -1097,9 +1210,10 @@ fn gix_window_plays_a_modal_cards_only_legal_land_face_without_a_prompt() {
     assert_eq!(window(state), (vec![divination], CardPlayMode::Play));
 }
 
-/// CR 607.2a + CR 614.12a: an older, declined Gix batch (Opt) stays out of a
-/// later window. The later window's shock land pauses, survives a reload, and
-/// re-opens with only its own Divination, which is cast to finish the ability.
+/// "… from among cards exiled this way" (CR 608.2c) + CR 614.12a: an older,
+/// declined Gix batch (Opt) stays out of a later window. The later window's
+/// shock land pauses, survives a reload, and re-opens with only its own
+/// Divination, which is cast to finish the ability.
 #[test]
 fn a_parked_second_window_offers_only_its_own_batch_after_reload() {
     let Some(db) = load_db() else { return };

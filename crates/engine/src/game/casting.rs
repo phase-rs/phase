@@ -14752,8 +14752,11 @@ impl ResolutionFaceLegality {
 /// may elect `object_id`'s land back face — the back face of a spell//land or
 /// a land//land modal card. To *play* a card is to cast it or
 /// play it as a land, so only a Play instruction admits a land face (a Cast
-/// instruction never does, CR 601.2). The face choice must still be open, and
-/// the land face must be legal to play now
+/// instruction never does, CR 601.2). The face choice must still be open, the
+/// card must match the policy's filter in the zone it is in (CR 712.8a: there
+/// it has only its front face's characteristics, so a card the filter admits
+/// may still play a differently typed land back), and the land face must be
+/// legal to play now
 /// ([`super::engine::resolution_back_land_face_play_is_legal`]: modal land back
 /// face, the player's turn, no prohibition, allowance open). The single
 /// land-face authority read by initiation, legal actions, and the
@@ -14765,11 +14768,50 @@ pub(crate) fn resolution_land_face_admission(
     policy: &crate::types::ability::ResolutionCastFacePolicy,
 ) -> bool {
     policy.play_mode.is_play()
-        && state
-            .objects
-            .get(&object_id)
-            .is_some_and(|obj| !obj.cast_face_committed)
+        && state.objects.get(&object_id).is_some_and(|obj| {
+            !obj.cast_face_committed
+                && resolution_land_policy_admits_card(state, object_id, obj.zone, policy)
+        })
         && super::engine::resolution_back_land_face_play_is_legal(state, player, object_id)
+}
+
+/// CR 712.8a: whether the card itself, as it exists in `zone`, matches a Play
+/// election's frozen filter. Outside the battlefield and stack a modal card
+/// has only its front face's characteristics, so both land legs of
+/// [`ResolutionFaceLegality`] read the same card-level admission.
+fn resolution_land_policy_admits_card(
+    state: &GameState,
+    object_id: ObjectId,
+    zone: Zone,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+) -> bool {
+    let context = super::filter::FilterContext::from_source_with_controller(
+        policy.source_id,
+        policy.controller,
+    );
+    super::filter::matches_target_filter_for_zone(state, object_id, zone, &policy.filter, &context)
+}
+
+/// CR 701.18b + CR 305.1 + CR 712.8a + CR 712.12: the structural land leg of a
+/// Play policy — `object_id` has a land face (a land card's front, or a modal
+/// card's land back) and the card matches the policy's filter where it is. It
+/// does not ask whether a land may be played *now* (turn, allowance): that is
+/// [`resolution_land_front_admission`] / [`resolution_land_face_admission`] at
+/// election time. The land counterpart of [`resolution_spell_face_admission`]
+/// for prefilters that shape a Play grant's member set before any play.
+pub(crate) fn resolution_land_card_admission(
+    state: &GameState,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+) -> bool {
+    policy.play_mode.is_play()
+        && state.objects.get(&object_id).is_some_and(|obj| {
+            (obj.card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+                || super::engine::modal_land_face_election_available(obj))
+                && resolution_land_policy_admits_card(state, object_id, obj.zone, policy)
+        })
 }
 
 /// CR 701.18b + CR 305.1 + CR 305.9 + CR 712.12: whether a resolution-owned
@@ -14802,17 +14844,8 @@ pub(crate) fn resolution_land_front_admission(
     {
         return false;
     }
-    let context = super::filter::FilterContext::from_source_with_controller(
-        policy.source_id,
-        policy.controller,
-    );
-    super::filter::matches_target_filter_for_zone(
-        state,
-        object_id,
-        object.zone,
-        &policy.filter,
-        &context,
-    ) && super::engine::resolution_land_play_is_legal(state, player, object_id)
+    resolution_land_policy_admits_card(state, object_id, object.zone, policy)
+        && super::engine::resolution_land_play_is_legal(state, player, object_id)
 }
 
 /// CR 701.18b + CR 712.12: whether the face a `ChooseModalFace` names is a land

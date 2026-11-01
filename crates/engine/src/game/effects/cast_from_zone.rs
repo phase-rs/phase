@@ -913,17 +913,26 @@ pub fn resolve(
             // The residual applies to the spell that will be cast, not its
             // unchosen front.  Projecting through this same policy admits a
             // back-only member while keeping a front-only or zero-face sibling
-            // observable to the gate.
+            // observable to the gate. CR 701.18b: a Play grant also admits a
+            // member it may play as a land (Kayla's Music Box: "play cards you
+            // own exiled with ~"), so the policy carries the instruction's mode
+            // and the land leg keeps an exiled land the residual accepts.
             let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
                 freeze_resolution_cast_filter(state, ability, own_filter, None),
                 ability.source_id,
                 ability.controller,
                 freeze_cast_permission_constraint(state, ability, constraint.clone()),
-            );
+            )
+            .with_play_mode(mode);
             target_ids.retain(|id| {
                 crate::game::casting::resolution_spell_face_admission(state, *id, &face_policy)
                     .count()
                     != 0
+                    || crate::game::casting::resolution_land_card_admission(
+                        state,
+                        *id,
+                        &face_policy,
+                    )
             });
         }
     }

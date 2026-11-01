@@ -57090,6 +57090,51 @@ fn resolution_face_legality_admits_the_land_face_only_under_a_play_policy() {
     );
 }
 
+/// CR 712.8a + CR 712.12: a Play policy's filter is read against the card in
+/// exile — its front face — on BOTH land legs. A spell//land card whose front
+/// the filter excludes offers no land back; one whose front the filter admits
+/// may still play its differently typed land back. The structural land leg
+/// (`resolution_land_card_admission`) reads the same filter.
+#[test]
+fn resolution_land_back_face_admission_reads_the_policy_filter_on_the_card() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_spell_land(&mut state);
+    let policy = |filter: TargetFilter| {
+        crate::types::ability::ResolutionCastFacePolicy::new(
+            filter,
+            ObjectId(83_021),
+            PlayerId(0),
+            None,
+        )
+        .with_play_mode(CardPlayMode::Play)
+    };
+
+    let front_type = policy(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)));
+    assert!(
+        resolution_land_face_admission(&state, PlayerId(0), spell, &front_type),
+        "a card the filter admits by its front may play its land back"
+    );
+    assert!(resolution_land_card_admission(&state, spell, &front_type));
+
+    let excluded = policy(TargetFilter::Typed(TypedFilter::creature()));
+    assert!(
+        !resolution_land_face_admission(&state, PlayerId(0), spell, &excluded),
+        "a card the filter excludes offers no land back"
+    );
+    assert!(!resolution_land_card_admission(&state, spell, &excluded));
+    assert_eq!(
+        resolution_test_face_legality(&state, spell, &{
+            let mut request = resolution_test_play_request(CardPlayMode::Play, None);
+            request.face_policy = excluded.clone();
+            request.cleanup.face_policy = excluded;
+            request
+        },)
+        .back,
+        None,
+        "the face legality the window and election read agrees"
+    );
+}
+
 /// CR 712.12 + CR 305.2a: when the land face is a Play election's only legal
 /// face, it is returned for the caller to play and no temporary permission
 /// remains. The same card under a Cast policy is rejected outright: a Cast

@@ -2173,12 +2173,15 @@
     "titlePlay": "カードを無料でプレイする",
     "subtitle": "マナ・コストを支払わずに唱える呪文を選択（残り{{remaining}}回）。残りのマナ総量：{{budget}}。",
     "subtitleNoBudget": "マナ・コストを支払わずに唱える呪文を選択（残り{{remaining}}回）。",
+    "subtitlePlay": "プレイする土地か、マナ・コストを支払わずに唱える呪文を選択（残り{{remaining}}回）。残りのマナ総量：{{budget}}。",
+    "subtitleNoBudgetPlay": "プレイする土地か、マナ・コストを支払わずに唱える呪文を選択（残り{{remaining}}回）。",
     "remainingAny": "任意の数",
     "castNamed": "{{name}}を唱える",
     "playNamed": "{{name}}をプレイする",
     "castSuffix": "（マナ・コストを支払わずに）",
     "done": "完了",
-    "doneSuffix": "（この方法で呪文を唱えるのを停止）"
+    "doneSuffix": "（この方法で呪文を唱えるのを停止）",
+    "doneSuffixPlay": "（この方法でカードをプレイするのを停止）"
   },
   "castingVariant": {
     "eyebrow": "唱える",

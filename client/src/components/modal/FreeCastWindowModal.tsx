@@ -36,11 +36,13 @@ export function FreeCastWindowModal() {
   const isPlay = kind.face_policy.play_mode === "Play";
   const subtitle =
     kind.remaining_mv_budget !== undefined && kind.remaining_mv_budget !== null
-      ? t("freeCastWindow.subtitle", {
+      ? t(isPlay ? "freeCastWindow.subtitlePlay" : "freeCastWindow.subtitle", {
           remaining,
           budget: kind.remaining_mv_budget,
         })
-      : t("freeCastWindow.subtitleNoBudget", { remaining });
+      : t(isPlay ? "freeCastWindow.subtitleNoBudgetPlay" : "freeCastWindow.subtitleNoBudget", {
+          remaining,
+        });
 
   return (
     <DialogShell
@@ -76,7 +78,7 @@ export function FreeCastWindowModal() {
         >
           <span className="font-semibold text-white">{t("freeCastWindow.done")}</span>
           <span className="ml-2 text-xs text-slate-400">
-            {t("freeCastWindow.doneSuffix")}
+            {t(isPlay ? "freeCastWindow.doneSuffixPlay" : "freeCastWindow.doneSuffix")}
           </span>
         </button>
       </div>

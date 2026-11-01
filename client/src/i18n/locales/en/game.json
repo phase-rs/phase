@@ -2173,12 +2173,15 @@
     "titlePlay": "Play cards for free",
     "subtitle": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining). Total mana value left: {{budget}}.",
     "subtitleNoBudget": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining).",
+    "subtitlePlay": "Choose a land to play or a spell to cast without paying its mana cost ({{remaining}} remaining). Total mana value left: {{budget}}.",
+    "subtitleNoBudgetPlay": "Choose a land to play or a spell to cast without paying its mana cost ({{remaining}} remaining).",
     "remainingAny": "any number",
     "castNamed": "Cast {{name}}",
     "playNamed": "Play {{name}}",
     "castSuffix": "(without paying its mana cost)",
     "done": "Done",
-    "doneSuffix": "(stop casting spells this way)"
+    "doneSuffix": "(stop casting spells this way)",
+    "doneSuffixPlay": "(stop playing cards this way)"
   },
   "castingVariant": {
     "eyebrow": "Cast",
