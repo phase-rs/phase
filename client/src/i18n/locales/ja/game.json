@@ -1595,7 +1595,7 @@
     "effectZone": {
       "titleSacrifice": "生け贄に捧げる",
       "titleTopdeck": "ライブラリーの上に置く",
-      "titleBottomdeck": "ライブラリーの上に置く",
+      "titleBottomdeck": "ライブラリーの一番下に置く",
       "titleBattlefield": "戦場に置く",
       "titleHand": "戻す",
       "titleExile": "追放",
