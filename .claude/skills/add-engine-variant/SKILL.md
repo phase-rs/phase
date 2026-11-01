@@ -14,7 +14,7 @@ This skill is the gate for any work that would add a variant to an existing engi
 - Approving an audit verdict of "engine extension required"
 - Wiring a converter arm to a not-yet-existing variant
 
-If you find yourself about to type `pub enum Foo { ... NewVariant ... }` in `crates/engine/src/`, pause and run this skill.
+If you find yourself about to type `pub enum Foo { ... NewVariant ... }` in `crates/engine/src/` or `crates/phase-ast/src/`, pause and run this skill.
 
 ## The three filter stages — all must pass
 

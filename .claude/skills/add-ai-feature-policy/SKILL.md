@@ -104,7 +104,7 @@ This table is the single biggest research-saver. Every column has been verified 
 
 | Concept | AST type | File:line |
 |---|---|---|
-| Card face (the deck-time entity) | `CardFace { name, card_type, mana_cost, abilities, triggers, static_abilities, replacements, keywords, power, toughness, ... }` | `crates/phase-ast/src/types/card.rs:30+` |
+| Card face (the deck-time entity) | `CardFace { name, card_type, mana_cost, abilities, triggers, static_abilities, replacements, keywords, power, toughness, ... }` | `crates/phase-ast/src/types/card.rs` (`CardFace`) |
 | Core type set | `CardFace.card_type.core_types: Vec<CoreType>`; `CoreType::{Creature, Instant, Sorcery, Land, Artifact, Enchantment, Planeswalker, Battle, Tribal, Kindred}` | `card_type.rs:74-77` |
 | Mana cost / value | `CardFace.mana_cost: ManaCost`; `ManaCost::mana_value() -> u32` | `card.rs:51`; `mana.rs:468` |
 | Face-level keywords | `CardFace.keywords: Vec<Keyword>` (including `Keyword::Prowess`, `Keyword::Haste`, `Keyword::EtbCounter { counter_type, count }`, etc.) | `card.rs:60`; `keywords.rs:24+` |
