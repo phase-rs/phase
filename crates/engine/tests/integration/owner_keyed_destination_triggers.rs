@@ -2798,7 +2798,8 @@ fn v12_disa_singular_exclusion_preserves_complete_subject() {
 
 /// SHAPE: synthetic strict failures; nearest printed texts are Syr Konrad's Squire
 /// (disjunctive self exclusion), Narcomoeba (self library-to-graveyard), and
-/// Stormfront Riders (mixed self/other battlefield-to-hand).
+/// Stormfront Riders (mixed self/other battlefield-to-hand). Multi-zone exclusions
+/// compose that subject with "Name Sticker" Goblin's exclusion-list grammar.
 /// CR 603.2 + CR 603.6c: matching destination events must trigger; "from anywhere"
 /// is not a leaves-the-battlefield trigger. Do not advertise a dead self head.
 #[test]
@@ -2822,6 +2823,9 @@ fn v12_synthetic_self_exclusion_fails_closed_without_rejecting_disa() {
     for text in [
         "When this card is put into your graveyard from anywhere other than the battlefield, you gain 2 life.",
         "When this card or another creature card is put into your graveyard from anywhere other than the battlefield, you gain 2 life.",
+        "When this card or another creature card is put into your graveyard from anywhere other than your library, you gain 2 life.",
+        "When this card or another creature card is put into your graveyard from anywhere other than the battlefield or your library, you gain 2 life.",
+        "When this card or another creature card is put into your graveyard from anywhere other than the battlefield, your library, or your hand, you gain 2 life.",
     ] {
         let parsed = parse_oracle_text(
             text,
@@ -2835,6 +2839,58 @@ fn v12_synthetic_self_exclusion_fails_closed_without_rejecting_disa() {
             matches!(parsed.triggers[0].mode, TriggerMode::Unknown(_)),
             "unsupported self source admission must fail closed: {text}: {parsed:?}"
         );
+    }
+}
+
+/// SHAPE (synthetic): Narcomoeba supplies self graveyard arrival, Stormfront
+/// Riders supplies the mixed subject, and "Name Sticker" Goblin supplies a
+/// multi-zone exclusion. Disa supplies the non-self exclusion control.
+/// CR 603.2 + CR 603.6c: preserve admitted self arrivals and existing inclusion
+/// paths; only newly accepted mixed exclusion origins fail closed.
+#[test]
+fn v12_synthetic_exclusion_provenance_preserves_other_origin_shapes() {
+    let pure_self = parse_oracle_text(
+        "When this card is put into your graveyard from anywhere other than the battlefield or your library, you gain 2 life.",
+        "Synthetic self exclusion list observer",
+        &[],
+        &[],
+        &[],
+    );
+    assert_eq!(pure_self.triggers.len(), 1, "{pure_self:?}");
+    let trigger = &pure_self.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone, "{trigger:?}");
+    assert_eq!(trigger.destination, Some(Zone::Graveyard));
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    assert!(
+        trigger.trigger_zones.contains(&Zone::Graveyard),
+        "{trigger:?}"
+    );
+    assert!(trigger.origin_zones.contains(&Zone::Hand), "{trigger:?}");
+    assert!(
+        !trigger.origin_zones.contains(&Zone::Battlefield),
+        "{trigger:?}"
+    );
+    assert!(
+        !trigger.origin_zones.contains(&Zone::Library),
+        "{trigger:?}"
+    );
+    assert!(trigger.execute.is_some(), "{trigger:?}");
+
+    // These mixed-self origins were accepted at base. Their self branch's
+    // runtime admission is pre-existing and deliberately outside this fix.
+    for origin in ["anywhere", "your library or hand"] {
+        let oracle = format!("When this card or another creature card is put into your graveyard from {origin}, you gain 2 life.");
+        let parsed =
+            parse_oracle_text(&oracle, "Synthetic mixed inclusion observer", &[], &[], &[]);
+        assert_eq!(parsed.triggers.len(), 1, "{oracle}: {parsed:?}");
+        let trigger = &parsed.triggers[0];
+        assert_eq!(
+            trigger.mode,
+            TriggerMode::ChangesZone,
+            "{oracle}: {trigger:?}"
+        );
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert!(trigger.execute.is_some(), "{oracle}: {trigger:?}");
     }
 }
 

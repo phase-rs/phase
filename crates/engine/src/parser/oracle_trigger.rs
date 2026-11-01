@@ -23000,11 +23000,20 @@ fn try_parse_put_into_graveyard(
     let Ok((_, (possessive, origin))) = put_into_graveyard_head(rest) else {
         return Some(unknown_trigger_definition(rest));
     };
+    // CR 603.2 + CR 603.6c: mixed self/other exclusions have no complete source
+    // admission, even when a multi-zone complement lowers to scalar OneOf.
+    // Keep inclusion unions and unrestricted origins on their existing paths.
+    if matches!(&origin, GraveyardOrigin::Excluded(_))
+        && filter_references_self(subject)
+        && !filter_requires_self(subject)
+    {
+        return Some(unknown_trigger_definition(rest));
+    }
     let origin = destination_graveyard_origin(subject, origin);
     // CR 603.2 + CR 603.6c: destination triggers must observe the matching event;
-    // "from anywhere" is not a leaves-the-battlefield trigger. The exclusion
-    // clause drops scalar SelfRef source-zone inference, so fail closed for
-    // self-referencing subjects until that source admission is supported.
+    // "from anywhere" is not a leaves-the-battlefield trigger. A single-zone
+    // exclusion drops scalar SelfRef into a clause, so even a pure-self subject
+    // must fail closed until that clause's source admission is supported.
     if filter_references_self(subject) && matches!(origin, OriginConstraint::NotEquals(_)) {
         return Some(unknown_trigger_definition(rest));
     }
@@ -23090,17 +23099,25 @@ fn scope_to_destination_owner(subject: TargetFilter, owner: Option<ControllerRef
     }
 }
 
+/// Parser-private provenance: an exclusion complement and an inclusion union
+/// both lower to OneOf; retain their distinct handling of mixed-self subjects.
+enum GraveyardOrigin {
+    Unspecified,
+    Included(OriginConstraint),
+    Excluded(OriginConstraint),
+}
+
 /// CR 603.6c + CR 400.3 + CR 608.2c: shared, fully consumed graveyard head.
 /// Retain absent origin separately from explicit Anywhere. Accepted unions use
 /// the same qualifier gate for construction and destination-owner anaphor proof.
 fn put_into_graveyard_head(
     input: &str,
-) -> OracleResult<'_, (Option<PlayerRelation>, Option<OriginConstraint>)> {
+) -> OracleResult<'_, (Option<PlayerRelation>, GraveyardOrigin)> {
     let (input, _) = alt((tag("is put into "), tag("are put into "))).parse(input)?;
     let (input, possessive) = parse_graveyard_possessive(input)?;
     let input = input.trim_start();
     if input.is_empty() {
-        return Ok((input, (possessive, None)));
+        return Ok((input, (possessive, GraveyardOrigin::Unspecified)));
     }
     let (_, after_from) = preceded(tag("from "), rest).parse(input)?;
     if let Some((origin, zones, qualifier)) = parse_graveyard_origin_union(after_from) {
@@ -23115,19 +23132,31 @@ fn put_into_graveyard_head(
             }
             OriginConstraint::OneOf(zones)
         };
-        return Ok(("", (possessive, Some(origin))));
+        return Ok(("", (possessive, GraveyardOrigin::Included(origin))));
     }
     let (tail, origin) = parse_put_into_graveyard_origin(input)?;
     let (tail, _) = eof.parse(tail.trim())?;
-    Ok((tail, (possessive, Some(origin))))
+    // Inclusion unions were consumed above. Only exclusion lists produce
+    // NotEquals or OneOf on this fallback path.
+    let origin = match origin {
+        OriginConstraint::NotEquals(_) | OriginConstraint::OneOf(_) => {
+            GraveyardOrigin::Excluded(origin)
+        }
+        OriginConstraint::Any | OriginConstraint::Equals(_) => GraveyardOrigin::Included(origin),
+    };
+    Ok((tail, (possessive, origin)))
 }
 
 /// CR 110.1 + CR 109.2: a permanent (but not a permanent card) starts on
 /// the battlefield unless the printed head explicitly supplies an origin.
 fn destination_graveyard_origin(
     subject: &TargetFilter,
-    origin: Option<OriginConstraint>,
+    origin: GraveyardOrigin,
 ) -> OriginConstraint {
+    let origin = match origin {
+        GraveyardOrigin::Unspecified => None,
+        GraveyardOrigin::Included(origin) | GraveyardOrigin::Excluded(origin) => Some(origin),
+    };
     origin.unwrap_or_else(|| {
         if matches!(subject, TargetFilter::Typed(typed)
             if typed.type_filters.contains(&TypeFilter::Permanent)
