@@ -19,7 +19,7 @@ const wasm = vi.hoisted(() => ({
   request_takeback_js: vi.fn(),
   respond_takeback_js: vi.fn(),
   cancel_takeback_js: vi.fn(),
-  pending_takeback_requester_js: vi.fn(),
+  pending_takeback_js: vi.fn(),
 }));
 vi.mock("@wasm/engine", () => ({ default: vi.fn(), ...wasm }));
 
@@ -127,20 +127,21 @@ describe("engine worker — requests", () => {
     });
 
     it("routes each takeback request to its export", async () => {
-      wasm.request_takeback_js.mockReturnValue({ status: "requested", requester: 1 });
+      wasm.request_takeback_js.mockReturnValue({ status: "requested", requester: 1, voters: [0, 2] });
       wasm.respond_takeback_js.mockReturnValue({ status: "recorded" });
       wasm.cancel_takeback_js.mockReturnValue({ status: "resolved", resolution: "cancelled", resolvedBy: 1 });
-      wasm.pending_takeback_requester_js.mockReturnValue(undefined);
+      wasm.pending_takeback_js.mockReturnValueOnce(null).mockReturnValueOnce({ requester: 1, voters: [0, 2] });
 
       await send({ type: "requestTakeback", id: 961, actor: 1, aiPlayers: [3] });
       await send({ type: "respondTakeback", id: 962, actor: 2, approve: true, aiPlayers: [3] });
       await send({ type: "cancelTakeback", id: 963, actor: 1 });
-      await send({ type: "pendingTakebackRequester", id: 964 });
+      await send({ type: "pendingTakeback", id: 964 });
+      await send({ type: "pendingTakeback", id: 965 });
 
       expect(wasm.request_takeback_js).toHaveBeenCalledWith(1, Uint8Array.from([3]));
       expect(wasm.respond_takeback_js).toHaveBeenCalledWith(2, true, Uint8Array.from([3]));
       expect(wasm.cancel_takeback_js).toHaveBeenCalledWith(1);
-      expect(responseTo(961)).toEqual({ type: "result", id: 961, data: { status: "requested", requester: 1 } });
+      expect(responseTo(961)).toEqual({ type: "result", id: 961, data: { status: "requested", requester: 1, voters: [0, 2] } });
       expect(responseTo(962)).toEqual({ type: "result", id: 962, data: { status: "recorded" } });
       expect(responseTo(963)).toEqual({
         type: "result",
@@ -148,6 +149,7 @@ describe("engine worker — requests", () => {
         data: { status: "resolved", resolution: "cancelled", resolvedBy: 1 },
       });
       expect(responseTo(964)).toEqual({ type: "result", id: 964, data: null });
+      expect(responseTo(965)).toEqual({ type: "result", id: 965, data: { requester: 1, voters: [0, 2] } });
     });
   });
 

@@ -28,6 +28,7 @@ use engine::game::preview::{
 };
 use engine::game::takeback::{
     RewindTarget, TakebackCapture, TakebackLedger, TakebackOutcome, TakebackResolution,
+    TakebackVote,
 };
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
 // public surface, but this phase must not edit that file.
@@ -950,8 +951,8 @@ struct TakebackNotice {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "status")]
 enum TakebackReply {
-    /// A vote opened: every seat is told `requester` asked (server: `TakebackRequested`).
-    Requested { requester: PlayerId },
+    /// A vote opened: every seat is told who asked and who votes (server: `TakebackRequested`).
+    Requested(TakebackVote),
     /// The response was counted and the vote is still open (server: nothing sent).
     Recorded,
     /// The vote ended; on `Approved` the target is installed and state delivery comes
@@ -5843,10 +5844,10 @@ pub fn cancel_takeback_js(actor: u8) -> Result<JsValue, JsValue> {
         .map_err(|error| JsValue::from_str(&error))
 }
 
-/// The seat whose takeback vote is open, if any, for replay to a reconnecting guest.
+/// The open takeback vote, or `null`, for replay to a reconnecting guest.
 #[wasm_bindgen]
-pub fn pending_takeback_requester_js() -> Option<u8> {
-    pending_takeback_requester_inner().map(|player| player.0)
+pub fn pending_takeback_js() -> JsValue {
+    to_js(&pending_takeback_inner())
 }
 
 fn request_takeback_inner(
@@ -5864,7 +5865,12 @@ fn request_takeback_inner(
                 Ok(TakebackOutcome::Pending) => {
                     // A token minted before the vote must not apply during it.
                     invalidate_ai_proposals();
-                    TakebackReply::Requested { requester: actor }
+                    TakebackReply::Requested(
+                        hosted
+                            .ledger
+                            .pending_vote(state, &hosted.ai_seats)
+                            .expect("a pending request leaves its vote open"),
+                    )
                 }
                 Ok(TakebackOutcome::Resolved(resolution)) => {
                     TakebackReply::Resolved(conclude_takeback(state, resolution, None))
@@ -5912,8 +5918,13 @@ fn cancel_takeback_inner(actor: PlayerId) -> Result<TakebackReply, String> {
     })
 }
 
-fn pending_takeback_requester_inner() -> Option<PlayerId> {
-    with_hosted_takeback(|hosted| hosted.ledger.pending_requester()).flatten()
+fn pending_takeback_inner() -> Option<TakebackVote> {
+    with_installed_state(|state| {
+        with_hosted_takeback(|hosted| hosted.ledger.pending_vote(state, &hosted.ai_seats))
+    })
+    .ok()
+    .flatten()
+    .flatten()
 }
 
 fn not_hosting_takeback() -> TakebackReply {
@@ -9930,6 +9941,13 @@ mod hosted_takeback_tests {
         TakebackReply::Resolved(notice(resolution, resolved_by))
     }
 
+    fn vote(requester: PlayerId, voters: &[PlayerId]) -> TakebackVote {
+        TakebackVote {
+            requester,
+            voters: voters.to_vec(),
+        }
+    }
+
     fn rejected(reason: &str) -> TakebackReply {
         TakebackReply::Rejected {
             reason: reason.to_string(),
@@ -9978,7 +9996,7 @@ mod hosted_takeback_tests {
         pass(P0);
         assert_eq!(
             request(P0, &[P3]),
-            TakebackReply::Requested { requester: P0 }
+            TakebackReply::Requested(vote(P0, &[P1]))
         );
     }
 
@@ -9992,9 +10010,9 @@ mod hosted_takeback_tests {
 
         assert_eq!(
             request(P0, &[P3]),
-            TakebackReply::Requested { requester: P0 }
+            TakebackReply::Requested(vote(P0, &[P1]))
         );
-        assert_eq!(pending_takeback_requester_inner(), Some(P0));
+        assert_eq!(pending_takeback_inner(), Some(vote(P0, &[P1])));
         assert_eq!(respond(P2, true, &[P3]), rejected(NOT_ASKED));
         assert_eq!(
             respond(P3, true, &[P3]),
@@ -10011,7 +10029,7 @@ mod hosted_takeback_tests {
         assert_eq!(restored.waiting_for, WaitingFor::Priority { player: P0 });
         assert_eq!(restored.eliminated_players, vec![P2]);
         assert_ne!(restored.interaction_session_id, before_request);
-        assert_eq!(pending_takeback_requester_inner(), None);
+        assert_eq!(pending_takeback_inner(), None);
     }
 
     /// W2
@@ -10025,7 +10043,7 @@ mod hosted_takeback_tests {
             resolved(TakebackResolution::Declined, Some(P1))
         );
         assert_eq!(installed().waiting_for, before);
-        assert_eq!(pending_takeback_requester_inner(), None);
+        assert_eq!(pending_takeback_inner(), None);
     }
 
     /// W3: while a vote is open nothing moves the board; a cancel lifts the freeze.
@@ -10079,7 +10097,7 @@ mod hosted_takeback_tests {
             concede(P1),
             Some(notice(TakebackResolution::Withdrawn, Some(P1)))
         );
-        assert_eq!(pending_takeback_requester_inner(), None);
+        assert_eq!(pending_takeback_inner(), None);
         assert_eq!(request(P0, &[P3]), rejected(NO_PREVIOUS));
     }
 
@@ -10095,7 +10113,7 @@ mod hosted_takeback_tests {
         assert!(!matches!(after.waiting_for, WaitingFor::GameOver { .. }));
         assert_eq!(
             request(P0, &[P3, P4]),
-            TakebackReply::Requested { requester: P0 }
+            TakebackReply::Requested(vote(P0, &[P1]))
         );
 
         assert_eq!(
@@ -10168,7 +10186,7 @@ mod hosted_takeback_tests {
             request(P0, &[P1]),
             rejected("Takeback is only available while hosting a multiplayer game")
         );
-        assert_eq!(pending_takeback_requester_inner(), None);
+        assert_eq!(pending_takeback_inner(), None);
 
         set_multiplayer_mode(true);
         assert_eq!(request(P0, &[P1]), rejected(NO_PREVIOUS));
@@ -10178,12 +10196,12 @@ mod hosted_takeback_tests {
     #[test]
     fn installing_a_game_resets_the_ledger() {
         bolt_3h_with_p0_vote_open();
-        assert_eq!(pending_takeback_requester_inner(), Some(P0));
+        assert_eq!(pending_takeback_inner(), Some(vote(P0, &[P1])));
 
         clear_game_state();
         set_multiplayer_mode(false);
         host(bolt_3h());
-        assert_eq!(pending_takeback_requester_inner(), None);
+        assert_eq!(pending_takeback_inner(), None);
         assert_eq!(request(P0, &[P3]), rejected(NO_PREVIOUS));
     }
 
@@ -10220,7 +10238,7 @@ mod hosted_takeback_tests {
         ));
         assert_eq!(
             request(P0, &[P3]),
-            TakebackReply::Requested { requester: P0 }
+            TakebackReply::Requested(vote(P0, &[P1]))
         );
     }
 
@@ -10300,7 +10318,7 @@ mod hosted_takeback_tests {
 
         assert_eq!(
             request(P0, &[P3]),
-            TakebackReply::Requested { requester: P0 }
+            TakebackReply::Requested(vote(P0, &[P1]))
         );
         assert!(matches!(
             submit_ai_action_proposal_inner(&token, P3, GameAction::PassPriority),
@@ -10316,17 +10334,17 @@ mod hosted_takeback_tests {
         pass(P0);
         assert_eq!(
             request(P0, &[P3]),
-            TakebackReply::Requested { requester: P0 }
+            TakebackReply::Requested(vote(P0, &[P1, P2]))
         );
 
         assert_eq!(respond(P1, true, &[P3]), TakebackReply::Recorded);
-        assert_eq!(pending_takeback_requester_inner(), Some(P0));
+        assert_eq!(pending_takeback_inner(), Some(vote(P0, &[P1, P2])));
         assert_eq!(
             respond(P2, true, &[P3]),
             resolved(TakebackResolution::Approved, Some(P2))
         );
         assert_eq!(installed().waiting_for, WaitingFor::Priority { player: P0 });
-        assert_eq!(pending_takeback_requester_inner(), None);
+        assert_eq!(pending_takeback_inner(), None);
     }
 
     /// W14: the host's resumed stack automation ends game 1; the ledger observes it,

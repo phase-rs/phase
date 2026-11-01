@@ -4915,9 +4915,15 @@ function isTakebackNotice(value: unknown): value is TakebackNotice {
     ));
 }
 
+/** An open takeback vote: who asked, and the seats asked to approve. */
+export interface TakebackVote {
+  requester: PlayerId;
+  voters: PlayerId[];
+}
+
 /** engine-wasm's reply to a takeback request, response or cancel. */
 export type TakebackReply =
-  | { status: "requested"; requester: PlayerId }
+  | ({ status: "requested" } & TakebackVote)
   | { status: "recorded" }
   | ({ status: "resolved" } & TakebackNotice)
   | { status: "rejected"; reason: string };
@@ -5653,7 +5659,7 @@ export function supportsTurnRewind(
 
 /** The takeback events every takeback-capable adapter emits. */
 export type TakebackEvent =
-  | { type: "takebackRequested"; requester: PlayerId; requesterName: string }
+  | { type: "takebackRequested"; requester: PlayerId; requesterName: string; voters: PlayerId[] }
   | { type: "takebackResolved"; resolution: TakebackResolution; resolvedBy: PlayerId | null }
   /** The authority refused a fire-and-forget request (a takeback request among them). */
   | { type: "requestRejected"; reason: string };

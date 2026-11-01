@@ -21,6 +21,7 @@ import type {
   RestoredStackAutomationPresentation,
   SubmitResult,
   TakebackReply,
+  TakebackVote,
   ViewerSnapshot,
   ViewerTransitionSnapshot,
 } from "./types";
@@ -372,9 +373,9 @@ export class EngineWorkerClient {
     );
   }
 
-  async pendingTakebackRequester(): Promise<number | null> {
-    return this.request<number | null>(
-      { type: "pendingTakebackRequester" },
+  async pendingTakeback(): Promise<TakebackVote | null> {
+    return this.request<TakebackVote | null>(
+      { type: "pendingTakeback" },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }

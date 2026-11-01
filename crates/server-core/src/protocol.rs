@@ -1140,6 +1140,8 @@ pub enum ServerMessage {
     TakebackRequested {
         requester: PlayerId,
         requester_name: String,
+        /// The seats asked to approve; the UI offers Approve/Decline only to them.
+        voters: Vec<PlayerId>,
     },
     /// The pending takeback vote ended, for `resolution`'s reason. On
     /// `approved`, a `StateUpdate` carrying the rolled-back state is sent to
@@ -4243,6 +4245,7 @@ mod tests {
         let msg = ServerMessage::TakebackRequested {
             requester: PlayerId(1),
             requester_name: "Alice".to_string(),
+            voters: vec![PlayerId(0), PlayerId(2)],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -4250,9 +4253,11 @@ mod tests {
             ServerMessage::TakebackRequested {
                 requester,
                 requester_name,
+                voters,
             } => {
                 assert_eq!(requester, PlayerId(1));
                 assert_eq!(requester_name, "Alice");
+                assert_eq!(voters, vec![PlayerId(0), PlayerId(2)]);
             }
             _ => panic!("wrong variant"),
         }

@@ -14,7 +14,7 @@ import init, {
   request_takeback_js,
   respond_takeback_js,
   cancel_takeback_js,
-  pending_takeback_requester_js,
+  pending_takeback_js,
   submit_interaction_js,
   get_game_state,
   get_filtered_game_state,
@@ -117,7 +117,7 @@ type EngineRequest =
   | { type: "requestTakeback"; id: number; actor: number; aiPlayers: number[] }
   | { type: "respondTakeback"; id: number; actor: number; approve: boolean; aiPlayers: number[] }
   | { type: "cancelTakeback"; id: number; actor: number }
-  | { type: "pendingTakebackRequester"; id: number }
+  | { type: "pendingTakeback"; id: number }
   | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission }
   | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
   | { type: "previewInteraction"; id: number; actor: number; request: InteractionPreviewRequest }
@@ -475,8 +475,8 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
-      case "pendingTakebackRequester": {
-        result(msg.id, pending_takeback_requester_js() ?? null);
+      case "pendingTakeback": {
+        result(msg.id, pending_takeback_js() ?? null);
         break;
       }
 

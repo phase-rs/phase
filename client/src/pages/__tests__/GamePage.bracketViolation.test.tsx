@@ -1466,7 +1466,7 @@ describe("GamePage — takeback is a transport capability", () => {
       expect(banner).toHaveTextContent(reason);
       expect(banner).toHaveClass("pointer-events-none");
       expect(capturedGameMenuProps?.onRequestTakeback).toBeTypeOf("function");
-      act(() => capturedOnWsEvent?.({ type: "takebackRequested", requester: 1, requesterName: "guest-one" }));
+      act(() => capturedOnWsEvent?.({ type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [0] }));
       expect(screen.getByText("guest-one requests a takeback")).toBeInTheDocument();
       expect(screen.getByTestId("state-withheld-banner")).toBeInTheDocument();
     } finally {
@@ -1499,6 +1499,8 @@ describe("GamePage — takeback is a transport capability", () => {
     expect(capturedGameMenuProps?.takebackAudience).toBe("table");
   });
 });
+
+type StreamEvent = TakebackEvent | { type: "bootstrapDelivered" };
 
 describe("GamePage — takeback on P2P seats", () => {
   // Real constructors: neither touches its transport until `initialize()`, and
@@ -1552,7 +1554,7 @@ describe("GamePage — takeback on P2P seats", () => {
   )("lets a P2P $kind answer another seat's request: $button", async ({ build, mode, button, approve }) => {
     const { respond } = mountSeat(build(), mode);
 
-    act(() => capturedOnP2PEvent?.({ type: "takebackRequested", requester: 1, requesterName: "guest-one" }));
+    act(() => capturedOnP2PEvent?.({ type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [0] }));
     expect(screen.getByText("guest-one requests a takeback")).toBeInTheDocument();
     await userEvent.setup().click(screen.getByRole("button", { name: button }));
 
@@ -1563,7 +1565,7 @@ describe("GamePage — takeback on P2P seats", () => {
   it("lets a P2P host cancel its own request", async () => {
     const { cancel } = mountSeat(P2P_SEATS[0].build(), "p2p-host");
 
-    act(() => capturedOnP2PEvent?.({ type: "takebackRequested", requester: 0, requesterName: "host" }));
+    act(() => capturedOnP2PEvent?.({ type: "takebackRequested", requester: 0, requesterName: "host", voters: [1] }));
     expect(screen.getByText("Takeback requested")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
     await userEvent.setup().click(screen.getByRole("button", { name: "Cancel request" }));
@@ -1588,15 +1590,47 @@ describe("GamePage — takeback on P2P seats", () => {
       stream: "P2P",
       url: "/game/test-game-123?mode=p2p-host",
       build: P2P_SEATS[0].build,
-      send: (event: TakebackEvent) => capturedOnP2PEvent?.(event),
+      send: (event: StreamEvent) => capturedOnP2PEvent?.(event),
     },
     {
       stream: "WebSocket",
       url: "/game/test-game-123?mode=host",
       build: () => new FakeWebSocketAdapter(),
-      send: (event: TakebackEvent) => capturedOnWsEvent?.(event),
+      send: (event: StreamEvent) => capturedOnWsEvent?.(event),
     },
   ] as const;
+
+  it.each(STREAMS)("$stream: offers Approve/Decline only to a voter", ({ url, build, send }) => {
+    storeOverrides.adapter = build();
+    renderGamePage(url);
+
+    act(() => send({ type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [2] }));
+    expect(screen.queryByText("guest-one requests a takeback")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+
+    act(() => send({ type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [0] }));
+    expect(screen.getByText("guest-one requests a takeback")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+
+    act(() => send({ type: "takebackRequested", requester: 0, requesterName: "host", voters: [1] }));
+    expect(screen.getByText("Takeback requested")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel request" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+  });
+
+  it.each(STREAMS)("$stream: a bootstrap closes the vote it does not replay", async ({ url, build, send }) => {
+    storeOverrides.adapter = build();
+    renderGamePage(url);
+
+    act(() => send({ type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [0] }));
+    expect(screen.getByText("guest-one requests a takeback")).toBeInTheDocument();
+    act(() => send({ type: "bootstrapDelivered" }));
+    await waitFor(() => expect(screen.queryByText("guest-one requests a takeback")).toBeNull());
+
+    act(() => send({ type: "bootstrapDelivered" }));
+    act(() => send({ type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [0] }));
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+  });
   const RESOLUTION_TOASTS: ReadonlyArray<{ resolution: TakebackResolution; toasts: string[][] }> = [
     { resolution: "approved", toasts: [] },
     { resolution: "declined", toasts: [["Takeback request declined"]] },
@@ -1610,7 +1644,7 @@ describe("GamePage — takeback on P2P seats", () => {
       storeOverrides.adapter = build();
       renderGamePage(url);
 
-      act(() => send({ type: "takebackRequested", requester: 1, requesterName: "guest-one" }));
+      act(() => send({ type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [0] }));
       expect(screen.getByText("guest-one requests a takeback")).toBeInTheDocument();
       mockMultiplayerState.showToast.mockClear();
       act(() => send({ type: "takebackResolved", resolution, resolvedBy: 1 }));

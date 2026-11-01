@@ -740,7 +740,7 @@ describe("takeback frames", () => {
     { type: "request_takeback" },
     { type: "respond_takeback", approve: false },
     { type: "cancel_takeback" },
-    { type: "takeback_requested", requester: 1, requesterName: "Guest" },
+    { type: "takeback_requested", requester: 1, requesterName: "Guest", voters: [0, 2] },
     { type: "takeback_resolved", resolution: "withdrawn", resolvedBy: 2 },
     { type: "request_rejected", reason: "No takeback request is pending" },
   ];
@@ -754,7 +754,7 @@ describe("takeback frames", () => {
   });
 
   const events: TakebackEvent[] = [
-    { type: "takebackRequested", requester: 0, requesterName: "Host" },
+    { type: "takebackRequested", requester: 0, requesterName: "Host", voters: [1, 2] },
     { type: "takebackResolved", resolution: "approved", resolvedBy: null },
     { type: "requestRejected", reason: "Only the players asked to approve this takeback may respond" },
   ];
@@ -765,7 +765,7 @@ describe("takeback frames", () => {
 
   it("maps each event to its frame", () => {
     expect(events.map(takebackEventToWire)).toEqual([
-      { type: "takeback_requested", requester: 0, requesterName: "Host" },
+      { type: "takeback_requested", requester: 0, requesterName: "Host", voters: [1, 2] },
       { type: "takeback_resolved", resolution: "approved", resolvedBy: null },
       { type: "request_rejected", reason: "Only the players asked to approve this takeback may respond" },
     ]);

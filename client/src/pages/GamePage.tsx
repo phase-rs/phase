@@ -402,7 +402,7 @@ export function GamePage() {
   const hasConcededRef = useRef(false);
   // GH #1507: "request takeback" — the table-wide pending request, if any.
   const [pendingTakeback, setPendingTakeback] = useState<
-    { requester: number; requesterName: string } | null
+    { requester: number; requesterName: string; voters: number[] } | null
   >(null);
 
   const handleTakebackEvent = useCallback((event: TakebackEvent) => {
@@ -411,6 +411,7 @@ export function GamePage() {
         setPendingTakeback({
           requester: event.requester,
           requesterName: event.requesterName,
+          voters: event.voters,
         });
         break;
       case "takebackResolved": {
@@ -537,6 +538,9 @@ export function GamePage() {
       case "requestRejected":
         handleTakebackEvent(event);
         break;
+      case "bootstrapDelivered":
+        setPendingTakeback(null);
+        break;
       case "playerDisconnected":
         // Multiplayer (3+ players): a specific player disconnected
         setOpponentDisconnected(true);
@@ -619,6 +623,9 @@ export function GamePage() {
       case "takebackResolved":
       case "requestRejected":
         handleTakebackEvent(event);
+        break;
+      case "bootstrapDelivered":
+        setPendingTakeback(null);
         break;
       case "roomCreated": {
         setHostGameCode(event.roomCode);
@@ -908,7 +915,7 @@ interface GamePageContentProps {
   timerRemaining: Record<number, number>;
   gameStartedAt: number | null;
   terminalReason: string | null;
-  pendingTakeback: { requester: number; requesterName: string } | null;
+  pendingTakeback: { requester: number; requesterName: string; voters: number[] } | null;
   onCloseTakebackDialog: () => void;
   // 3-4p P2P additions
   disconnectChoice: { playerId: number; gracePeriodMs: number } | null;
@@ -2331,7 +2338,8 @@ function GamePageContent({
 
           {/* Multiplayer UX overlays */}
           <TakebackRequestDialog
-            isOpen={pendingTakeback !== null}
+            isOpen={pendingTakeback !== null
+              && (pendingTakeback.requester === playerId || pendingTakeback.voters.includes(playerId))}
             requesterName={pendingTakeback?.requesterName ?? ""}
             isOwnRequest={pendingTakeback?.requester === playerId}
             onApprove={() => handleRespondTakeback(true)}

@@ -151,7 +151,10 @@ impl GameSession {
     /// back with no way to respond, and `handle_action` rejects every action
     /// but a concession while a request is pending, stalling the table.
     pub fn pending_takeback_message(&self) -> Option<crate::protocol::ServerMessage> {
-        let requester = self.takeback.pending_requester()?;
+        let vote = self
+            .takeback
+            .pending_vote(&self.state, &self.ai_seat_list())?;
+        let requester = vote.requester;
         let requester_name = self
             .display_names
             .get(requester.0 as usize)
@@ -160,6 +163,7 @@ impl GameSession {
         Some(crate::protocol::ServerMessage::TakebackRequested {
             requester,
             requester_name,
+            voters: vote.voters,
         })
     }
 }

@@ -2264,7 +2264,7 @@ describe("WebSocketAdapter", () => {
       },
     });
     const TAKEBACK_REQUESTED = JSON.stringify({
-      type: "TakebackRequested", data: { requester: 1, requester_name: "guest-one" },
+      type: "TakebackRequested", data: { requester: 1, requester_name: "guest-one", voters: [0] },
     });
     const RESTORED = JSON.stringify({
       type: "StateUpdate",
@@ -2298,7 +2298,7 @@ describe("WebSocketAdapter", () => {
         for (const teardown of teardownEvents) expect(events).not.toHaveBeenCalledWith(teardown);
         expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "operationFailed" }));
         retry.dispatchSynthetic("message", TAKEBACK_REQUESTED);
-        expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "takebackRequested", requester: 1 }));
+        expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "takebackRequested", requester: 1, voters: [0] }));
         retry.dispatchSynthetic("message", RESTORED);
         expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged", serverRevision: 4 }));
         expect(events).toHaveBeenLastCalledWith(expect.objectContaining({ type: "stateChanged" }));
@@ -2339,19 +2339,65 @@ describe("WebSocketAdapter", () => {
         expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "reconnected" }));
 
         socket.dispatchSynthetic("message", JSON.stringify({
-          type: "TakebackRequested", data: { requester: 0, requester_name: "host" },
+          type: "TakebackRequested", data: { requester: 0, requester_name: "host", voters: [1] },
         }));
         const request = events.mock.calls
-          .map(([event]) => event as { type: string; requester?: number })
+          .map(([event]) => event as { type: string; requester?: number; voters?: number[] })
           .find((event) => event.type === "takebackRequested");
-        // GamePage compares the requester with the announced seat: seat 0's request is approvable here.
+        // GamePage tests the announced seat's membership in the voters: seat 0's request is approvable here.
         expect(request?.requester).toBe(0);
+        expect(request?.voters).toEqual([1]);
         expect(subject.playerId).toBe(1);
         socket.dispatchSynthetic("message", RESTORED);
         expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged", serverRevision: 4 }));
         expect(events).toHaveBeenCalledWith({ type: "reconnected", inGame: true });
       } finally {
         subject.dispose();
+      }
+    });
+
+    const GAME_STARTED = JSON.stringify({
+      type: "GameStarted",
+      data: { state_revision: 3, state: createMockState(), your_player: 0, full_key: REPLY_OWNERSHIP_FULL_KEY },
+    });
+    const reconnectedSocket = async (): Promise<{ subject: WebSocketAdapter; socket: MockWebSocket }> => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      ws.dispatchSynthetic("close");
+      await vi.advanceTimersByTimeAsync(1000);
+      return { subject: adapter, socket: await completeHandshake(adapter) };
+    };
+    const boardlessReconnectSocket = async (): Promise<{ subject: WebSocketAdapter; socket: MockWebSocket }> => {
+      const subject = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+      );
+      subject.tryReconnect({
+        gameCode: "GAME01", playerToken: "accepted-full-session-token",
+        fullKey: REPLY_OWNERSHIP_FULL_KEY, serverUrl: "wss://localhost:9374/ws", timestamp: Date.now(),
+      });
+      return { subject, socket: await completeHandshake(subject) };
+    };
+
+    it.each([
+      ["GameStarted during a reconnect", reconnectedSocket, GAME_STARTED],
+      ["a withheld GameStarted onto the delivered board", reconnectedSocket, BOOTSTRAP_WITHHELD],
+      ["a withheld GameStarted with no board", boardlessReconnectSocket, BOOTSTRAP_WITHHELD],
+    ] as const)("marks %s as a bootstrap before the replayed takeback request", async (_leg, connect, bootstrap) => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const { subject, socket } = await connect();
+      const events = vi.fn();
+      subject.onEvent(events);
+      try {
+        socket.dispatchSynthetic("message", bootstrap);
+        socket.dispatchSynthetic("message", TAKEBACK_REQUESTED);
+        const types = events.mock.calls
+          .map(([event]) => (event as { type: string }).type)
+          .filter((type) => type === "bootstrapDelivered" || type === "takebackRequested");
+        expect(types).toEqual(["bootstrapDelivered", "takebackRequested"]);
+      } finally {
+        subject.dispose();
+        visibility.mockRestore();
+        vi.useRealTimers();
       }
     });
 
@@ -2715,7 +2761,7 @@ describe("WebSocketAdapter", () => {
       deliverWithheld(6, lastSubmissionCommandId(socket));
       deliverWithheld(7);
       socket.dispatchSynthetic("message", JSON.stringify({
-        type: "TakebackRequested", data: { requester: 1, requester_name: "guest-one" },
+        type: "TakebackRequested", data: { requester: 1, requester_name: "guest-one", voters: [0] },
       }));
       socket.dispatchSynthetic("message", JSON.stringify({
         type: "StateUpdate",

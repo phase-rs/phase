@@ -171,6 +171,8 @@ export type P2PAdapterEvent =
   | { type: "deckRejected"; reason: string; format?: string }
   | { type: "reconnecting"; attempt: number }
   | { type: "reconnectFailed"; reason: string }
+  /** The authority sent this seat a fresh bootstrap; it replays a still-open takeback vote after this event. */
+  | { type: "bootstrapDelivered" }
   | TakebackEvent;
 
 type P2PAdapterEventListener = (event: P2PAdapterEvent) => void;
@@ -4499,6 +4501,7 @@ export class P2PHostAdapter implements EngineAdapter {
           type: "takebackRequested",
           requester: reply.requester,
           requesterName: this.playerNamesForSeats()[reply.requester] ?? "",
+          voters: reply.voters,
         };
         await this.enqueueDelivery(async () => this.announceTakeback(event));
         return;
@@ -5291,12 +5294,13 @@ export class P2PHostAdapter implements EngineAdapter {
       }
       if (!this.nativeBridge) {
         // The open vote lives in the engine; the native server replays its own.
-        const requester = await this.wasm.pendingTakebackRequester();
-        if (requester !== null) {
+        const vote = await this.wasm.pendingTakeback();
+        if (vote !== null) {
           const replayed = await this.send(session, takebackEventToWire({
             type: "takebackRequested",
-            requester,
-            requesterName: this.playerNamesForSeats()[requester] ?? "",
+            requester: vote.requester,
+            requesterName: this.playerNamesForSeats()[vote.requester] ?? "",
+            voters: vote.voters,
           }));
           if (!replayed) {
             this.failPendingReconnect(pid, session, "Reconnect takeback request could not be delivered");
@@ -6312,6 +6316,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         this.cachedRevision = msg.revision ?? null;
         const reconnectSnapshot = this.cacheSnapshot(msg.state, legalActionsFromWire(msg));
         this.settleWithheld();
+        this.emit({ type: "bootstrapDelivered" });
         this.emit({ type: "playerIdentity", playerId: msg.assignedPlayerId, playerNames: msg.playerNames });
         this.emit({
           type: "stateChanged",

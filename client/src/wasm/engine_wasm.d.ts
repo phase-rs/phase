@@ -554,9 +554,9 @@ export function load_replay_for_playback(json_str: string): number;
 export function maxDeckCopies(name: string, format_config: any): any;
 
 /**
- * The seat whose takeback vote is open, if any, for replay to a reconnecting guest.
+ * The open takeback vote, or `null`, for replay to a reconnecting guest.
  */
-export function pending_takeback_requester_js(): number | undefined;
+export function pending_takeback_js(): any;
 
 /**
  * Verify WASM integration works.
@@ -888,7 +888,7 @@ export interface InitOutput {
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
     readonly maxDeckCopies: (a: number, b: number, c: any) => any;
-    readonly pending_takeback_requester_js: () => number;
+    readonly pending_takeback_js: () => any;
     readonly ping: () => [number, number];
     readonly preview_action_js: (a: number, b: any) => any;
     readonly preview_interaction_js: (a: number, b: any) => any;
@@ -914,7 +914,6 @@ export interface InitOutput {
     readonly statecodechandle_clone_handle: (a: number) => number;
     readonly statecodechandle_hash: (a: number) => [number, number];
     readonly statecodechandle_json: (a: number) => [number, number];
-    readonly statecodechandle_json_bytes: (a: number) => [number, number];
     readonly statecodechandle_revision: (a: number) => [number, bigint];
     readonly statecodechandle_with_revision: (a: number, b: bigint) => number;
     readonly submit_action: (a: number, b: any) => any;
@@ -922,6 +921,7 @@ export interface InitOutput {
     readonly submit_interaction_js: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
     readonly validateLlmProbeResponse: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly statecodechandle_json_bytes: (a: number) => [number, number];
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

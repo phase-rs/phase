@@ -822,7 +822,7 @@ export type P2PMessage = P2PAuthorityWire & (
   | { type: "respond_takeback"; approve: boolean }
   | { type: "cancel_takeback" }
   /** Host → guest takeback notices, mapped only by `takebackEventToWire`. */
-  | { type: "takeback_requested"; requester: number; requesterName: string }
+  | { type: "takeback_requested"; requester: number; requesterName: string; voters: number[] }
   | { type: "takeback_resolved"; resolution: TakebackResolution; resolvedBy: number | null }
   | { type: "request_rejected"; reason: string }
   // Reconnect: guest presents prior token; host accepts (with fresh state) or rejects.
@@ -948,6 +948,7 @@ export function takebackEventToWire(event: TakebackEvent): TakebackWireMessage {
         type: "takeback_requested",
         requester: event.requester,
         requesterName: event.requesterName,
+        voters: event.voters,
       };
     case "takebackResolved":
       return {
@@ -968,6 +969,7 @@ export function takebackEventFromWire(msg: TakebackWireMessage): TakebackEvent {
         type: "takebackRequested",
         requester: msg.requester,
         requesterName: msg.requesterName,
+        voters: msg.voters,
       };
     case "takeback_resolved":
       return {

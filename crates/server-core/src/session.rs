@@ -5247,8 +5247,11 @@ mod tests {
             .unwrap();
 
         match session.pending_takeback_message() {
-            Some(crate::protocol::ServerMessage::TakebackRequested { requester, .. }) => {
+            Some(crate::protocol::ServerMessage::TakebackRequested {
+                requester, voters, ..
+            }) => {
                 assert_eq!(requester, priority_player);
+                assert_eq!(voters, vec![PlayerId(1 - priority_player.0)]);
             }
             other => panic!("expected TakebackRequested, got {:?}", other),
         }
@@ -5294,7 +5297,12 @@ mod tests {
             session.takeback.is_pending(),
             "the pending takeback must still be there for the reconnecting socket to be told about"
         );
-        assert!(session.pending_takeback_message().is_some());
+        match session.pending_takeback_message() {
+            Some(crate::protocol::ServerMessage::TakebackRequested { voters, .. }) => {
+                assert_eq!(voters, vec![approver]);
+            }
+            other => panic!("expected TakebackRequested, got {:?}", other),
+        }
     }
 
     /// GH #1507 follow-up: `run_ai` must not advance the authoritative state

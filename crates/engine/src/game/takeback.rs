@@ -91,6 +91,14 @@ pub enum TakebackOutcome {
     Resolved(TakebackResolution),
 }
 
+/// An open vote as hosts announce it: who asked, and who is asked to approve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TakebackVote {
+    pub requester: PlayerId,
+    /// The seats asked to approve, in seat order; never the requester.
+    pub voters: Vec<PlayerId>,
+}
+
 /// A takeback request awaiting approval.
 #[derive(Debug, Clone)]
 struct PendingTakeback {
@@ -536,6 +544,9 @@ impl TakebackLedger {
         // exactly that ancestor prefix; truncating is what makes undo
         // repeatable rather than one-shot.
         self.history.truncate(pending.history_truncate_len);
+        // A concession recorded at or after the target belongs to the branch the table just undid.
+        self.noop_concessions
+            .retain(|_, at| *at < pending.target_at);
         // `<=`, not `<`: a `TurnStart { n }` rewind targets the turn-n
         // snapshot itself, so keeping turn n selectable is what makes turn
         // rewind idempotent and repeatable rather than consuming its own
@@ -574,8 +585,12 @@ impl TakebackLedger {
         self.pending.is_some()
     }
 
-    pub fn pending_requester(&self) -> Option<PlayerId> {
-        self.pending.as_ref().map(|pending| pending.requested_by)
+    /// The open vote, with the voter set `respond` enforces.
+    pub fn pending_vote(&self, state: &GameState, ai_seats: &[PlayerId]) -> Option<TakebackVote> {
+        self.pending.as_ref().map(|pending| TakebackVote {
+            requester: pending.requested_by,
+            voters: self.voters(pending, state, ai_seats).into_iter().collect(),
+        })
     }
 
     /// The takeback points, oldest first, as `(actor, pre-action state)`.
@@ -801,20 +816,8 @@ mod tests {
     /// P0's pass resolves it, removing P0 and P1 while P3 and P4 play on.
     /// Returns the table after P0's pass and the target state before it.
     fn quake_5() -> (Table, GameState) {
-        let mut scenario = GameScenario::new_n_player(5, 13);
-        scenario.at_phase(Phase::PreCombatMain);
-        for seat in [P0, P1, P2] {
-            scenario.with_life(seat, 3);
-        }
-        for _ in 0..5 {
-            scenario.add_basic_land(P1, ManaColor::Red);
-        }
-        let bolt = add_bolt(&mut scenario, P1);
-        let quake = add_earthquake(&mut scenario, P1);
-        let mut runner = scenario.build();
-        hand_turn_to(&mut runner, P1);
-        setup_cast(&mut runner, bolt, 0, Some(TargetRef::Player(P2)));
-        for seat in [P1, P2, P3, P4, P0] {
+        let (mut runner, quake) = quake_5_bolt_cast();
+        for seat in [P2, P3, P4, P0] {
             setup_pass(&mut runner, seat);
         }
         assert_eq!(runner.state().eliminated_players, vec![P2]);
@@ -831,6 +834,44 @@ mod tests {
             WaitingFor::GameOver { .. }
         ));
         (table, target)
+    }
+
+    /// The Quake-5 board up to P1's pass on its Lightning Bolt at P2; returns
+    /// the runner and P1's Earthquake.
+    fn quake_5_bolt_cast() -> (GameRunner, ObjectId) {
+        let mut scenario = GameScenario::new_n_player(5, 13);
+        scenario.at_phase(Phase::PreCombatMain);
+        for seat in [P0, P1, P2] {
+            scenario.with_life(seat, 3);
+        }
+        for _ in 0..5 {
+            scenario.add_basic_land(P1, ManaColor::Red);
+        }
+        let bolt = add_bolt(&mut scenario, P1);
+        let quake = add_earthquake(&mut scenario, P1);
+        let mut runner = scenario.build();
+        hand_turn_to(&mut runner, P1);
+        setup_cast(&mut runner, bolt, 0, Some(TargetRef::Player(P2)));
+        setup_pass(&mut runner, P1);
+        (runner, quake)
+    }
+
+    /// Quake-5 played through the `Table` from P2's pass on the Bolt, so P2's
+    /// pass is a takeback point taken while P2 was in the game. Returns the
+    /// table once the Earthquake has removed P0 and P1.
+    fn quake_5_from_the_bolt() -> Table {
+        let (runner, quake) = quake_5_bolt_cast();
+        let mut table = Table::new(runner.state().clone(), &[P3, P4]);
+        for seat in [P2, P3, P4, P0] {
+            table.pass(seat);
+        }
+        assert_eq!(table.state.eliminated_players, vec![P2]);
+        table.cast(P1, quake, 3, None);
+        for seat in [P1, P3, P4, P0] {
+            table.pass(seat);
+        }
+        assert_eq!(table.state.eliminated_players, vec![P2, P0, P1]);
+        table
     }
 
     /// A duel at precombat main with P0 holding `spell` (from `add`) and
@@ -867,6 +908,13 @@ mod tests {
     fn a_human_out_of_the_game_is_not_asked_while_another_is_in_it() {
         let (mut table, before_pass, _) = bolt_3h(20);
         assert_eq!(table.request(P0), Ok(TakebackOutcome::Pending));
+        assert_eq!(
+            table.ledger.pending_vote(&table.state, &table.ai),
+            Some(TakebackVote {
+                requester: P0,
+                voters: vec![P1],
+            })
+        );
 
         assert_eq!(
             table.respond(P2, true),
@@ -883,6 +931,7 @@ mod tests {
         assert!(table.ledger.is_pending());
 
         assert_eq!(table.respond(P1, true), Ok(APPROVED));
+        assert_eq!(table.ledger.pending_vote(&table.state, &table.ai), None);
         assert_eq!(table.state.waiting_for, before_pass.waiting_for);
         assert_eq!(table.state.eliminated_players, vec![P2]);
         assert_eq!(table.state.phase, before_pass.phase);
@@ -894,6 +943,13 @@ mod tests {
     fn with_every_other_human_out_the_humans_in_the_game_at_the_target_decide() {
         let (mut table, target) = quake_5();
         assert_eq!(table.request(P0), Ok(TakebackOutcome::Pending));
+        assert_eq!(
+            table.ledger.pending_vote(&table.state, &table.ai),
+            Some(TakebackVote {
+                requester: P0,
+                voters: vec![P1],
+            })
+        );
         assert_eq!(
             table.respond(P2, true),
             Err("Only the players asked to approve this takeback may respond".to_string())
@@ -1104,6 +1160,47 @@ mod tests {
         assert_eq!(table.state.eliminated_players, vec![P2, P0, P1]);
         assert_eq!(table.request(P0), Ok(TakebackOutcome::Pending));
         assert_eq!(table.respond(P1, true), Ok(APPROVED));
+    }
+
+    /// E1. An approval back past P1's no-op concession forgets it, so a later
+    /// request targeting a point before it asks P1 again.
+    #[test]
+    fn an_approved_rollback_forgets_the_concessions_it_undid() {
+        let mut table = quake_5_from_the_bolt();
+        assert_eq!(table.concede(P1), None);
+        assert_eq!(table.request(P0), Ok(APPROVED));
+        assert_eq!(table.state.eliminated_players, vec![P2]);
+        table.pass(P0);
+        assert_eq!(table.state.eliminated_players, vec![P2, P0, P1]);
+
+        assert_eq!(table.request(P2), Ok(TakebackOutcome::Pending));
+        assert_eq!(
+            table.ledger.pending_vote(&table.state, &table.ai),
+            Some(TakebackVote {
+                requester: P2,
+                voters: vec![P0, P1],
+            })
+        );
+        assert_eq!(table.respond(P1, true), Ok(TakebackOutcome::Pending));
+        assert_eq!(table.respond(P0, true), Ok(APPROVED));
+        assert!(table.state.eliminated_players.is_empty());
+    }
+
+    /// E2. The approval forgets P0's concession, which it undid, and keeps P1's,
+    /// which precedes its target and still excludes P1.
+    #[test]
+    fn an_approval_keeps_the_concessions_before_its_target() {
+        let mut table = quake_5_from_the_bolt();
+        assert_eq!(table.concede(P1), None);
+        assert_eq!(table.concede(P0), None);
+        assert_eq!(table.request(P0), Ok(APPROVED));
+
+        assert_eq!(table.request(P2), Ok(TakebackOutcome::Pending));
+        assert_eq!(
+            table.respond(P1, true),
+            Err("Only the players asked to approve this takeback may respond".to_string())
+        );
+        assert_eq!(table.respond(P0, true), Ok(APPROVED));
     }
 
     /// L10. An accepted match forfeit withdraws an open vote and retires both

@@ -28,6 +28,7 @@ import type {
   SubmitResult,
   TakebackNotice,
   TakebackReply,
+  TakebackVote,
   ViewerSnapshot,
   ViewerTransitionSnapshot,
 } from "./types";
@@ -562,13 +563,13 @@ export class WasmAdapter
     }
   }
 
-  /** The seat whose takeback vote is open, if any (`pending_takeback_requester_js`). */
-  async pendingTakebackRequester(): Promise<PlayerId | null> {
-    this.assertInitialized("pendingTakebackRequester");
+  /** The open takeback vote, if any (`pending_takeback_js`). */
+  async pendingTakeback(): Promise<TakebackVote | null> {
+    this.assertInitialized("pendingTakeback");
     try {
       return this.engine
-        ? await this.engine.pendingTakebackRequester()
-        : await this.fallback!.pendingTakebackRequester();
+        ? await this.engine.pendingTakeback()
+        : await this.fallback!.pendingTakeback();
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }
@@ -1561,7 +1562,7 @@ interface MainThreadFallback {
   requestTakeback(actor: PlayerId, aiPlayers: PlayerId[]): Promise<TakebackReply>;
   respondTakeback(actor: PlayerId, approve: boolean, aiPlayers: PlayerId[]): Promise<TakebackReply>;
   cancelTakeback(actor: PlayerId): Promise<TakebackReply>;
-  pendingTakebackRequester(): Promise<PlayerId | null>;
+  pendingTakeback(): Promise<TakebackVote | null>;
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
   submitInteraction(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
   previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
@@ -1717,8 +1718,8 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
     cancelTakeback: (actor: PlayerId) =>
       enqueue(() => wasm.cancel_takeback_js(actor) as TakebackReply),
 
-    pendingTakebackRequester: () =>
-      enqueue(() => wasm.pending_takeback_requester_js() ?? null),
+    pendingTakeback: () =>
+      enqueue(() => (wasm.pending_takeback_js() as TakebackVote | null) ?? null),
 
     submitAction: (action: GameAction, actor: PlayerId) =>
       enqueue(() => appliedSubmitResult(unwrapAppliedOutcome(wasm.submit_action(actor, action)))),

@@ -17,7 +17,7 @@ import { ContestOverlay } from "../../components/contest/ContestOverlay";
 import { useContestStore } from "../../stores/contestStore";
 import { useGameStore } from "../../stores/gameStore";
 import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView, type P2PAdapterEvent } from "../p2p-adapter";
-import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, supportsTakeback, supportsTurnRewind, type EngineSnapshot, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState, type PersistedGameState, type RestoredGameStateResult, type TakebackReply } from "../types";
+import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, supportsTakeback, supportsTurnRewind, type EngineSnapshot, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState, type PersistedGameState, type RestoredGameStateResult, type TakebackReply, type TakebackVote } from "../types";
 import { PROTOCOL_VERSION, type WsAdapterEvent } from "../ws-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { PEER_CONNECT_OPTIONS } from "../../network/connection";
@@ -258,7 +258,7 @@ const mocks = vi.hoisted(() => {
     requestTakeback: vi.fn(async (_actor: number, _aiPlayers: number[]): Promise<TakebackReply> => ({ status: "recorded" })),
     respondTakeback: vi.fn(async (_actor: number, _approve: boolean, _aiPlayers: number[]): Promise<TakebackReply> => ({ status: "recorded" })),
     cancelTakeback: vi.fn(async (_actor: number): Promise<TakebackReply> => ({ status: "recorded" })),
-    pendingTakebackRequester: vi.fn(async (): Promise<number | null> => null),
+    pendingTakeback: vi.fn(async (): Promise<TakebackVote | null> => null),
   };
 });
 
@@ -485,7 +485,7 @@ vi.mock("../wasm-adapter", () => {
     requestTakeback: mocks.requestTakeback,
     respondTakeback: mocks.respondTakeback,
     cancelTakeback: mocks.cancelTakeback,
-    pendingTakebackRequester: mocks.pendingTakebackRequester,
+    pendingTakeback: mocks.pendingTakeback,
     dispose: vi.fn(),
   });
   return {
@@ -578,7 +578,7 @@ beforeEach(() => {
   mocks.requestTakeback.mockReset();
   mocks.respondTakeback.mockReset();
   mocks.cancelTakeback.mockReset();
-  mocks.pendingTakebackRequester.mockReset();
+  mocks.pendingTakeback.mockReset();
   nativeWebSocketMocks.initializePregame.mockReset();
   nativeWebSocketMocks.waitForPlayerSlots.mockReset();
   nativeWebSocketMocks.waitForGameStarted.mockReset();
@@ -11334,8 +11334,8 @@ describe("P2P takeback transport", () => {
     return { adapter, emitConnection, events, p1, p2 };
   }
 
-  async function openVote(adapter: P2PHostAdapter, events: P2PAdapterEvent[], requester = 0) {
-    mocks.requestTakeback.mockResolvedValueOnce({ status: "requested", requester });
+  async function openVote(adapter: P2PHostAdapter, events: P2PAdapterEvent[], requester = 0, voters = [1, 2]) {
+    mocks.requestTakeback.mockResolvedValueOnce({ status: "requested", requester, voters });
     adapter.sendRequestTakeback();
     await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "takebackRequested", requester })));
   }
@@ -11343,9 +11343,9 @@ describe("P2P takeback transport", () => {
   it("B1: routes a guest's request to the browser authority and announces the vote to every seat", async () => {
     const t = await browserTable();
     const marks = [t.p1.sent.length, t.p2.sent.length] as const;
-    mocks.requestTakeback.mockResolvedValueOnce({ status: "requested", requester: 1 });
+    mocks.requestTakeback.mockResolvedValueOnce({ status: "requested", requester: 1, voters: [0, 2] });
     await t.p1.simulateData({ type: "request_takeback" });
-    const announced = { type: "takebackRequested", requester: 1, requesterName: "Guest One" };
+    const announced = { type: "takebackRequested", requester: 1, requesterName: "Guest One", voters: [0, 2] };
     await vi.waitFor(() => expect(t.events).toContainEqual(announced));
     expect(mocks.requestTakeback).toHaveBeenCalledWith(1, []);
     for (const [conn, mark] of [[t.p1, marks[0]], [t.p2, marks[1]]] as const) {
@@ -11353,6 +11353,7 @@ describe("P2P takeback transport", () => {
         type: "takeback_requested",
         requester: 1,
         requesterName: "Guest One",
+        voters: [0, 2],
       }));
     }
 
@@ -11596,20 +11597,25 @@ describe("P2P takeback transport", () => {
     },
   );
 
-  it.each([[0, ["reconnect_ack", "takeback_requested"]], [null, ["reconnect_ack"]]] as const)(
-    "B8: a reconnecting guest is told of the open vote (requester %s) after its ack",
-    async (requester, expected) => {
+  it.each([
+    [{ requester: 0, voters: [1, 2] }, ["reconnect_ack", "takeback_requested"]],
+    [null, ["reconnect_ack"]],
+  ] as const)(
+    "B8: a reconnecting guest is told of the open vote %o after its ack",
+    async (vote, expected) => {
       const t = await browserTable();
       const token = await playerToken(t.p1);
       t.p1.simulateClose();
-      mocks.pendingTakebackRequester.mockResolvedValueOnce(requester);
+      mocks.pendingTakeback.mockResolvedValueOnce(vote === null ? null : { requester: vote.requester, voters: [...vote.voters] });
       const back = await joinGuest(t.emitConnection, { type: "reconnect", playerToken: token });
       await vi.waitFor(async () => expect(typesOf(await back.getSentMessages())).toContain("reconnect_ack"));
       await flushPromises(20);
       const frames = await back.getSentMessages();
       expect(ordered(frames, ["reconnect_ack", "takeback_requested"])).toEqual(expected);
-      if (requester !== null) {
-        expect(frames).toContainEqual(expect.objectContaining({ type: "takeback_requested", requester: 0, requesterName: "Host" }));
+      if (vote !== null) {
+        expect(frames).toContainEqual(expect.objectContaining({
+          type: "takeback_requested", requester: 0, requesterName: "Host", voters: [1, 2],
+        }));
       }
       t.adapter.dispose();
     },
@@ -11630,7 +11636,7 @@ describe("P2P takeback transport", () => {
   it("B10: a live state-based loser can still concede after an approval that leaves it out", async () => {
     const t = await browserTable();
     boardWith([2]);
-    await openVote(t.adapter, t.events, 1);
+    await openVote(t.adapter, t.events, 1, [0, 2]);
     mocks.respondTakeback.mockResolvedValueOnce({ status: "resolved", resolution: "approved", resolvedBy: 0 });
     t.adapter.sendRespondTakeback(true);
     await vi.waitFor(() => expect(t.events).toContainEqual({ type: "takebackResolved", resolution: "approved", resolvedBy: 0 }));
@@ -11649,7 +11655,7 @@ describe("P2P takeback transport", () => {
     boardWith([2]);
     const token = await playerToken(t.p2);
     t.p2.simulateClose();
-    await openVote(t.adapter, t.events, 1);
+    await openVote(t.adapter, t.events, 1, [0, 2]);
     mocks.respondTakeback.mockResolvedValueOnce({ status: "resolved", resolution: "approved", resolvedBy: 0 });
     const p1Mark = t.p1.sent.length;
     const hostMark = t.events.length;
@@ -11675,10 +11681,10 @@ describe("P2P takeback transport", () => {
       await openVote(t.adapter, t.events);
       const token = await playerToken(t.p1);
       t.p1.simulateClose();
-      const held = deferred<number | null>();
-      mocks.pendingTakebackRequester.mockReturnValueOnce(held.promise);
+      const held = deferred<TakebackVote | null>();
+      mocks.pendingTakeback.mockReturnValueOnce(held.promise);
       const back = await joinGuest(t.emitConnection, { type: "reconnect", playerToken: token });
-      await vi.waitFor(() => expect(mocks.pendingTakebackRequester).toHaveBeenCalled());
+      await vi.waitFor(() => expect(mocks.pendingTakeback).toHaveBeenCalled());
       const resolved = leg === "cancel"
         ? { resolution: "cancelled", resolvedBy: 0 } as const
         : { resolution: "withdrawn", resolvedBy: 2 } as const;
@@ -11694,7 +11700,7 @@ describe("P2P takeback transport", () => {
         await vi.waitFor(() => expect(mockSubmitAction).toHaveBeenCalledWith(concede(2), 2));
       }
       await flushPromises(20);
-      held.resolve(0);
+      held.resolve({ requester: 0, voters: [1, 2] });
       await conceding;
       await vi.waitFor(() => expect(t.events).toContainEqual({ type: "takebackResolved", ...resolved }));
       await vi.waitFor(async () => expect(typesOf(await back.getSentMessages())).toContain("takeback_resolved"));
@@ -11840,12 +11846,14 @@ describe("P2P takeback transport", () => {
       await vi.waitFor(() => expect(AuditSocket.sockets[1].readyState).toBe(3));
       const reconnecting = joinGuest(t.emitConnection, { type: "reconnect", playerToken: token });
       const returned = await t.reattachSeat(3, 1, remoteState("returning seat"));
-      returned.frame("TakebackRequested", { requester: 0, requester_name: "Host" });
+      returned.frame("TakebackRequested", { requester: 0, requester_name: "Host", voters: [1, 2] });
       const back = await reconnecting;
       await vi.waitFor(async () => expect(typesOf(await back.getSentMessages())).toContain("takeback_requested"));
       const frames = await back.getSentMessages();
       expect(ordered(frames, ["reconnect_ack", "takeback_requested"])).toEqual(["reconnect_ack", "takeback_requested"]);
-      expect(frames).toContainEqual(expect.objectContaining({ type: "takeback_requested", requester: 0, requesterName: "Host" }));
+      expect(frames).toContainEqual(expect.objectContaining({
+        type: "takeback_requested", requester: 0, requesterName: "Host", voters: [1, 2],
+      }));
     } finally { t.adapter.dispose(); }
   });
 
@@ -11879,12 +11887,12 @@ describe("P2P takeback transport", () => {
       expect(p2Frames).toContainEqual(expect.objectContaining({ type: "player_disconnected", playerId: 1 }));
       expect(typesOf(p2Frames)).toContain("game_paused");
 
-      AuditSocket.sockets[0].frame("TakebackRequested", { requester: 0, requester_name: "Host" });
+      AuditSocket.sockets[0].frame("TakebackRequested", { requester: 0, requester_name: "Host", voters: [1, 2] });
       await vi.waitFor(() => expect(t.events).toContainEqual(expect.objectContaining({ type: "takebackRequested", requester: 0 })));
       const socketCount = AuditSocket.sockets.length;
       const reconnecting = joinGuest(t.emitConnection, { type: "reconnect", playerToken: token });
       const returned = await t.reattachSeat(socketCount, 4, restored);
-      returned.frame("TakebackRequested", { requester: 0, requester_name: "Host" });
+      returned.frame("TakebackRequested", { requester: 0, requester_name: "Host", voters: [1, 2] });
       const back = await reconnecting;
       await vi.waitFor(async () => expect(typesOf(await back.getSentMessages())).toContain("takeback_requested"));
       expect(ordered(await back.getSentMessages(), ["reconnect_ack", "takeback_requested"]))
@@ -11931,15 +11939,43 @@ describe("P2P takeback transport", () => {
 
     const events: P2PAdapterEvent[] = [];
     guest.onEvent((event) => events.push(event));
-    await conn.simulateData({ type: "takeback_requested", requester: 1, requesterName: "guest-one" });
+    await conn.simulateData({ type: "takeback_requested", requester: 1, requesterName: "guest-one", voters: [0] });
     await conn.simulateData({ type: "takeback_resolved", resolution: "withdrawn", resolvedBy: 1 });
     await conn.simulateData({ type: "request_rejected", reason: "No takeback request is pending" });
     await vi.waitFor(() => expect(ordered(events, ["takebackRequested", "takebackResolved", "requestRejected"])).toHaveLength(3));
     expect(events.filter((event) => ["takebackRequested", "takebackResolved", "requestRejected"].includes(event.type))).toEqual([
-      { type: "takebackRequested", requester: 1, requesterName: "guest-one" },
+      { type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [0] },
       { type: "takebackResolved", resolution: "withdrawn", resolvedBy: 1 },
       { type: "requestRejected", reason: "No takeback request is pending" },
     ]);
+    guest.dispose();
+  });
+
+  it("A2: a guest marks its reconnect_ack as a bootstrap before the replayed vote", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const guest = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    await guest.initialize();
+    const events: P2PAdapterEvent[] = [];
+    guest.onEvent((event) => events.push(event));
+    await conn.simulateData({
+      type: "reconnect_ack",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      revision: 7,
+      state: remoteState("resumed"),
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await conn.simulateData({ type: "takeback_requested", requester: 0, requesterName: "Host", voters: [1, 2] });
+    await vi.waitFor(() => expect(ordered(events, ["takebackRequested"])).toHaveLength(1));
+    expect(ordered(events, ["bootstrapDelivered", "takebackRequested"])).toEqual(["bootstrapDelivered", "takebackRequested"]);
     guest.dispose();
   });
 });

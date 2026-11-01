@@ -795,7 +795,7 @@ fn codec_player_resync_preserves_elimination_and_rewinds() {
                 .with_session(session, |session| {
                     // Match the existing SingleUser takeback fixture: stamp the
                     // deployment policy, then capture a real action's boundary.
-                    session.hosting = server_core::session::HostingMode::SingleUser;
+                    session.set_hosting(server_core::session::HostingMode::SingleUser);
                     let starting_turn = session.state.turn_number;
                     for _ in 0..400 {
                         if session.state.turn_number > starting_turn {
@@ -3875,9 +3875,8 @@ fn codec_lifecycle_approved_takeback_is_automatic() {
             let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
                 .await
                 .unwrap();
-            assert_eq!(session.hosting, server_core::session::HostingMode::Shared);
-            let (requester, recorded_before) = session.takeback_history.back().unwrap();
-            let requester = *requester;
+            assert_eq!(session.hosting(), server_core::session::HostingMode::Shared);
+            let (requester, recorded_before) = session.takeback.history().next_back().unwrap();
             assert_eq!(
                 requester, actor,
                 "requester comes from actual recorded action"
@@ -3905,12 +3904,15 @@ fn codec_lifecycle_approved_takeback_is_automatic() {
             let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
                 .await
                 .unwrap();
-            let pending = session.pending_takeback.as_ref().unwrap();
-            assert_eq!(pending.requested_by, requester);
-            assert_eq!(pending.approvals.len(), 1);
-            assert!(pending.approvals.contains(&requester));
-            drop(session);
             let approvals: Vec<_> = voters.iter().copied().filter(|p| *p != requester).collect();
+            let ai_seats: Vec<_> = session.ai_seats.iter().copied().collect();
+            let vote = session
+                .takeback
+                .pending_vote(&session.state, &ai_seats)
+                .unwrap();
+            assert_eq!(vote.requester, requester);
+            assert_eq!(vote.voters, approvals);
+            drop(session);
             for (index, voter) in approvals.iter().enumerate() {
                 peers[usize::from(voter.0)]
                     .send(&ClientMessage::RespondTakeback { approve: true })
@@ -3920,10 +3922,7 @@ fn codec_lifecycle_approved_takeback_is_automatic() {
                     let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
                         .await
                         .unwrap();
-                    assert_eq!(
-                        session.pending_takeback.as_ref().unwrap().approvals.len(),
-                        index + 2
-                    );
+                    assert!(session.takeback.is_pending());
                 }
             }
             let mut approved_frames = Vec::new();
@@ -3931,7 +3930,7 @@ fn codec_lifecycle_approved_takeback_is_automatic() {
                 let approved = peer.state().await;
                 let resolved = peer.next().await;
                 assert_eq!(resolved.value["type"], "TakebackResolved");
-                assert_eq!(resolved.value["data"]["approved"], true);
+                assert_eq!(resolved.value["data"]["resolution"], "approved");
                 approved_frames.push(approved);
             }
             let approved = &approved_frames[usize::from(requester.0)];
@@ -3948,11 +3947,11 @@ fn codec_lifecycle_approved_takeback_is_automatic() {
                 "takeback receipt: recorded_action={action:?} requester={requester:?} \
                  voters={voters:?} approvals={approvals:?} pending_then_resolved={} \
                  revisions={preapproval_revision}->{} codec_alone={selection:?} delivered={:?}",
-                session.pending_takeback.is_none(),
+                !session.takeback.is_pending(),
                 session.state_revision,
                 approved.kind
             );
-            assert!(session.pending_takeback.is_none());
+            assert!(!session.takeback.is_pending());
             assert!(session.state_revision > preapproval_revision);
             assert_eq!(selection, state_codec::FrameKind::Delta);
             assert_eq!(approved.kind, Some(state_codec::FrameKind::Delta));
@@ -6468,9 +6467,10 @@ mod oversized_publication {
         .await;
     }
 
-    async fn assert_requested(socket: &mut ClientSocket, requester: PlayerId) {
+    async fn assert_requested(socket: &mut ClientSocket, requester: PlayerId) -> serde_json::Value {
         let requested = until_type(socket, "TakebackRequested").await;
         assert_eq!(requested["data"]["requester"], requester.0, "{requested}");
+        requested
     }
 
     /// Plain text length and value of the next application frame.
@@ -7086,8 +7086,10 @@ mod oversized_publication {
                         vec![P2]
                     );
                     request_takeback(&mut p0).await;
-                    assert_requested(&mut p0, P0).await;
-                    assert_requested(&mut p2, P0).await;
+                    for socket in [&mut p0, &mut p2] {
+                        let requested = assert_requested(socket, P0).await;
+                        assert_eq!(requested["data"]["voters"], serde_json::json!([2]));
+                    }
                     send_test_message(&mut p2, &ClientMessage::Concede, false).await;
                     for (seat, socket) in [(P2, &mut p2), (P0, &mut p0)] {
                         let restored = loop {
