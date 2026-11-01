@@ -150,6 +150,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::types::ability::{
         BounceSelection, CharacteristicSetRef, ContinuousModification, ControllerRef,
         StaticDefinition, TargetFilter, TypedFilter,
@@ -199,6 +200,9 @@ mod tests {
             enters_with_counter: None,
             required_cast_keyword: None,
             pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
         })
         .affected(TargetFilter::Typed(TypedFilter::new(
             crate::types::ability::TypeFilter::Land,

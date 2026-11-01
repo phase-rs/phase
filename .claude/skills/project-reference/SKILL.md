@@ -150,8 +150,8 @@ all of which have burned real measurement campaigns:
 
 | Hazard | What you'll see | What to do |
 |---|---|---|
-| **`cargo export-cards` rewrites `crates/engine/data/oracle-subtypes.json`** — a tracked *parser input*, and the rewrite is non-idempotent (it can drop subtypes) | An unexplained diff in a file you never edited | **Never commit it as a side effect.** `git checkout -- crates/engine/data/oracle-subtypes.json` after the export unless changing the vocabulary is your actual intent. It is a parser input: a lossy rewrite silently changes how *every* card parses |
-| **`gen-card-data.sh` dirties `crates/engine/data/known-tokens.toml`** (also tracked) | Same — a diff you didn't author | Same: leave it out of the commit. Commit by explicit pathspec, never `git add -A` |
+| **`cargo export-cards` rewrites `crates/phase-ast/data/oracle-subtypes.json`** — a tracked *parser input*, and the rewrite is non-idempotent (it can drop subtypes) | An unexplained diff in a file you never edited | **Never commit it as a side effect.** `git checkout -- crates/phase-ast/data/oracle-subtypes.json` after the export unless changing the vocabulary is your actual intent. It is a parser input: a lossy rewrite silently changes how *every* card parses |
+| **`gen-card-data.sh` dirties `crates/phase-ast/data/known-tokens.toml`** (also tracked) | Same — a diff you didn't author | Same: leave it out of the commit. Commit by explicit pathspec, never `git add -A` |
 | **The export is nondeterministic on ~20 faces** | Two exports of the same tree differ | **That is the noise floor of any whole-pool ledger.** A delta of ≲20 faces between two full-pool runs is not signal. Re-run, or diff against a snapshot taken from the *same* binary — never claim a sub-noise-floor coverage win |
 
 Corollary for coverage work: **snapshot `card-data.json` BEFORE you touch the parser**, and
@@ -190,7 +190,9 @@ cargo run --bin coverage-report -- data/ --ci   # CI mode: exits 1 if gaps found
 ### Rust Workspace (`crates/`)
 
 ```
-engine          — Core rules engine: types, game logic, parser, database
+phase-ast       — Typed AST: card, ability, trigger, static and replacement definitions
+phase-parser    — Oracle text parser producing phase-ast definitions
+engine          — Core rules engine: game state types, game logic, database
 engine-wasm     — WASM bindings (wasm-bindgen + tsify) exposing engine to JS
 phase-ai        — AI opponent: evaluation, legal actions, card hints, search
 server-core     — Server-side game session management (tokio)
@@ -198,15 +200,15 @@ phase-server    — Axum WebSocket server for multiplayer
 feed-scraper    — Metagame deck scraper (MTGGoldfish)
 ```
 
-**Crate dependency flow**: `engine` ← `phase-ai` ← `engine-wasm` / `server-core` ← `phase-server` (`feed-scraper` is standalone)
+**Crate dependency flow**: `phase-ast` ← `phase-parser` ← `engine` ← `phase-ai` ← `engine-wasm` / `server-core` ← `phase-server` (`feed-scraper` is standalone)
 
 ### Engine Internals (`crates/engine/src/`)
 
-- **`types/`** — Core data types: `GameState`, `GameAction`, `GameEvent`, `GameObject`, `Phase`, `Zone`, `ManaPool`, abilities, triggers. All types use `serde` for serialization across the WASM boundary.
+- **`types/`** — Game state types: `GameState`, `GameAction`, `GameEvent`, `GameObject`, `ManaPool`. The definition types (`Phase`, `Zone`, abilities, triggers, statics, replacements, keywords, cards) live in `crates/phase-ast/src/types/`. All types use `serde` for serialization across the WASM boundary.
 - **`game/engine.rs`** — Main `apply(state, action) -> ActionResult` function. Pure reducer pattern: takes game state + action, returns events + new waiting_for state.
 - **`game/`** — Game logic modules (turns, priority, stack, combat, SBA, targeting, mana, layers, triggers, replacement, static abilities, zones, casting, etc.). `ls crates/engine/src/game/` for the full set.
 - **`game/effects/`** — One module per effect handler (deal_damage, counter, draw, destroy, bounce, change_zone, etc.). New effects are added as modules here following the existing handler pattern. `ls crates/engine/src/game/effects/` for the full set.
-- **`parser/`** — Oracle text parser: converts MTGJSON Oracle text into typed `AbilityDefinition` structs. Main dispatcher in `oracle.rs`, with specialized sub-parsers (`oracle_effect/`, `oracle_trigger.rs`, `oracle_static.rs`, `oracle_replacement.rs`, `oracle_cost.rs`, `oracle_keyword.rs`, `oracle_casting.rs`, `oracle_class.rs`, `oracle_saga.rs`, etc.). **`oracle_nom/`** is the shared nom 8.0 combinator foundation — all parser branches delegate atomic and structural parsing operations to these combinators. `dispatch_line_nom` in `oracle.rs` is the primary dispatch path for lines not caught by earlier priority checks. See `.claude/skills/oracle-parser/SKILL.md` for the authoritative parser reference.
+- **Parser** (`crates/phase-parser/src/parser/`) — Oracle text parser: converts MTGJSON Oracle text into typed `AbilityDefinition` structs. Main dispatcher in `oracle.rs`, with specialized sub-parsers (`oracle_effect/`, `oracle_trigger.rs`, `oracle_static/`, `oracle_replacement.rs`, `oracle_cost.rs`, `oracle_keyword.rs`, `oracle_casting.rs`, `oracle_class.rs`, `oracle_saga.rs`, etc.). **`oracle_nom/`** is the shared nom 8.0 combinator foundation — all parser branches delegate atomic and structural parsing operations to these combinators. `dispatch_line_nom` in `oracle.rs` is the primary dispatch path for lines not caught by earlier priority checks. See `.claude/skills/oracle-parser/SKILL.md` for the authoritative parser reference.
 - **`ai_support/`** — Engine-side AI support: `legal_actions()` generates validated candidate actions for all `WaitingFor` states. Lives in the engine crate so both WASM and server consumers share the same logic.
 - **`database/`** — Card database. `CardDatabase::load_json(mtgjson_path)` loads MTGJSON; `CardDatabase::from_export(path)` loads the pre-built `card-data.json` used at runtime by WASM and server.
 

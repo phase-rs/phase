@@ -221,16 +221,16 @@ fn djinn_board() -> (GameRunner, ObjectId, ObjectId) {
     (scenario.build(), djinn, divination)
 }
 
-/// R2 — CR 608.2c + CR 608.2n: Divination, played this way, resolves and goes
-/// to its owner's graveyard; "If you don't, exile it" is not a rider on it.
+/// R2 — CR 608.2g + CR 608.2c + CR 608.2n: Divination, played this way, is cast
+/// during the ability's resolution, resolves and goes to its owner's graveyard;
+/// "If you don't, exile it" is not a rider on it.
 #[test]
 fn djinn_of_wishes_accepted_cast_spell_goes_to_graveyard() {
     let (mut runner, djinn, divination) = djinn_board();
-    runner.activate(djinn, 0).accept_optional().resolve();
-    let outcome = runner.cast(divination).resolve();
+    let outcome = runner.activate(djinn, 0).accept_optional().resolve();
     assert!(
         resolved(outcome.events(), EffectKind::Draw, divination),
-        "reach: Divination was cast and resolved; events={:?}",
+        "reach: Divination was cast and resolved during the resolution; events={:?}",
         outcome.events()
     );
     assert_eq!(outcome.hand_drawn(P0), 2);

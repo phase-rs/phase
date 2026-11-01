@@ -55,6 +55,8 @@ pub fn stack_entry_node_reach<'a>(state: &GameState, entry: &'a StackEntry) -> V
     let Some(root) = entry.ability() else {
         return Vec::new();
     };
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_stack_entry_reach();
     let resolves_first: Vec<ObjectId> = state
         .stack
         .iter()
@@ -95,7 +97,7 @@ pub fn stack_entry_node_reach<'a>(state: &GameState, entry: &'a StackEntry) -> V
 /// controller), a required target that has not been chosen
 /// (`stack::has_missing_required_stack_targets`), or a CR 608.2b declared
 /// target that is no longer legal.
-fn resolution_board(
+pub(crate) fn resolution_board(
     state: &GameState,
     entry: &StackEntry,
     root: &ResolvedAbility,
@@ -424,15 +426,9 @@ fn resolves_once_as_bound(bound: &ResolvedAbility) -> bool {
 /// CR 608.2c: a node that replaces its parent's effect when its condition
 /// holds.
 fn is_instead_override(node: &ResolvedAbility) -> bool {
-    matches!(
-        node.condition,
-        Some(
-            AbilityCondition::AdditionalCostPaidInstead
-                | AbilityCondition::CastVariantPaidInstead { .. }
-                | AbilityCondition::TargetHasKeywordInstead { .. }
-                | AbilityCondition::ConditionInstead { .. }
-        )
-    )
+    node.condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_instead_override)
 }
 
 /// A condition that reads only what the entry's context recorded when it was
@@ -677,7 +673,7 @@ fn names_resolution_product(effect: &Effect) -> bool {
             super::filter_references_tracked_set(filter)
                 || crate::game::filter::filter_contains_last_created(filter)
                 || crate::game::filter::filter_contains_last_zone_changed(filter)
-                || crate::game::filter::filter_contains(filter, &|inner| {
+                || crate::types::ability::filter_contains(filter, &|inner| {
                     matches!(inner, TargetFilter::LastRevealed)
                 })
         })

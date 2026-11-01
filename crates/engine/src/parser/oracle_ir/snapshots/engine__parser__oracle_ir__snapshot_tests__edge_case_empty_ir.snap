@@ -1,9 +1,0 @@
----
-source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-expression: "&ir"
----
-{
-  "items": [],
-  "source_text": "",
-  "card_name": "Grizzly Bears"
-}

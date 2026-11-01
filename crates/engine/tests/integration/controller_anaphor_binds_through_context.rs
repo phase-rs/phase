@@ -21,6 +21,9 @@
 //!   accepting player only in a direct operand chosen on resolution; anaphors
 //!   anywhere else keep their unseeded reading.
 
+use std::sync::Arc;
+
+use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
@@ -32,16 +35,24 @@ use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
+use engine::types::StaticDefinition;
 
 use super::rules::AttackTarget;
 
 const BALEFIRE_DRAGON: &str = "Flying\nWhenever this creature deals combat damage to a player, it deals that much damage to each creature that player controls.";
 
 const TEMPORAL_DISTORTION: &str = "Whenever a creature or land becomes tapped, put an hourglass counter on it.\nEach permanent with an hourglass counter on it doesn't untap during its controller's untap step.\nAt the beginning of each player's upkeep, remove all hourglass counters from permanents that player controls.";
+
+const SIGARDA_HOST_OF_HERONS: &str = "Flying, hexproof\nSpells and abilities your opponents control can't cause you to sacrifice permanents.";
+
+const ARGOTHIAN_WURM: &str = "Trample\nWhen this creature enters, any player may sacrifice a land of their choice. If a player does, put this creature on top of its owner's library.";
+
+const PROWLING_PANGOLIN: &str = "When this creature enters, any player may sacrifice two creatures of their choice. If a player does, sacrifice this creature.";
 
 const RESERVOIR_KRAKEN: &str = "Trample, ward {2}\nAt the beginning of each combat, if this creature is untapped, any opponent may tap an untapped creature they control. If they do, tap this creature and create a 1/1 blue Fish creature token with \"This token can't be blocked.\"";
 
@@ -169,6 +180,341 @@ fn reservoir_kraken_accepting_opponent_taps_their_own_creature() {
         !state.objects[&own_bear].tapped,
         "P0's creature is not the accepting opponent's"
     );
+}
+
+/// CR 608.2c + CR 608.2d: Desecration Demon's accepting opponent sacrifices a
+/// creature of their own choice, and "if a player does" then taps the Demon and
+/// puts a +1/+1 counter on it. Declining sacrifices nothing and changes nothing.
+fn desecration_demon_run(accept: bool) -> (GameRunner, ObjectId, ObjectId, ObjectId, bool) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let demon = scenario
+        .add_creature_from_oracle(P0, "Desecration Demon", 6, 6, DESECRATION_DEMON)
+        .id();
+    let p0_bear = scenario.add_creature(P0, "P0 Bear", 2, 2).id();
+    let p1_bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.advance_to_phase(Phase::BeginCombat);
+
+    let mut prompted = false;
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OpponentMayChoice { player, .. } => {
+                assert_eq!(player, P1);
+                prompted = true;
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept })
+                    .expect("decide");
+            }
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                assert!(cards.contains(&p1_bear) && !cards.contains(&p0_bear));
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![p1_bear],
+                    })
+                    .expect("sacrifice P1's creature");
+            }
+            WaitingFor::MultiTargetSelection { legal_targets, .. } => {
+                assert_eq!(legal_targets, vec![p1_bear]);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![p1_bear],
+                    })
+                    .expect("sacrifice P1's creature");
+            }
+            WaitingFor::Priority { .. } if runner.state().phase == Phase::BeginCombat => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    (runner, demon, p0_bear, p1_bear, prompted)
+}
+
+#[test]
+fn desecration_demon_accepted_sacrifice_taps_and_grows_the_demon() {
+    let (runner, demon, p0_bear, p1_bear, prompted) = desecration_demon_run(true);
+    assert!(prompted, "P1 must be offered the choice");
+    let state = runner.state();
+    assert!(
+        !state.battlefield.contains(&p1_bear),
+        "P1's creature was sacrificed"
+    );
+    assert!(state.battlefield.contains(&p0_bear));
+    assert!(state.objects[&demon].tapped, "the Demon is tapped");
+    assert_eq!(
+        state.objects[&demon]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        1,
+        "the Demon gets a +1/+1 counter"
+    );
+}
+
+#[test]
+fn desecration_demon_declined_sacrifice_changes_nothing() {
+    let (runner, demon, _p0_bear, p1_bear, prompted) = desecration_demon_run(false);
+    assert!(prompted, "P1 must be offered the choice");
+    let state = runner.state();
+    assert!(state.battlefield.contains(&p1_bear));
+    assert!(!state.objects[&demon].tapped);
+    assert!(state.objects[&demon].counters.is_empty());
+}
+
+/// The players prompted and the selection pools offered while the stack settles.
+/// `accepts` answers each may prompt; `picks` names the permanents to choose.
+fn settle_sacrifice_offers(
+    runner: &mut GameRunner,
+    accepts: impl Fn(PlayerId) -> bool,
+    picks: &[ObjectId],
+) -> (Vec<PlayerId>, Vec<(Vec<ObjectId>, usize)>) {
+    let (mut prompted, mut offers) = (Vec::new(), Vec::new());
+    for _ in 0..60 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OpponentMayChoice { player, .. } => {
+                prompted.push(player);
+                runner
+                    .act(GameAction::DecideOptionalEffect {
+                        accept: accepts(player),
+                    })
+                    .expect("decide");
+            }
+            WaitingFor::MultiTargetSelection {
+                legal_targets,
+                min_targets,
+                ..
+            } => {
+                let cards: Vec<ObjectId> = picks
+                    .iter()
+                    .copied()
+                    .filter(|id| legal_targets.contains(id))
+                    .collect();
+                offers.push((legal_targets, min_targets));
+                runner
+                    .act(GameAction::SelectCards { cards })
+                    .expect("select the permanents to sacrifice");
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::Priority { .. } => return (prompted, offers),
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    panic!("the stack did not settle");
+}
+
+fn plus_one_counters(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+fn make_unsacrificeable(runner: &mut GameRunner, id: ObjectId) {
+    let object = runner
+        .state_mut()
+        .objects
+        .get_mut(&id)
+        .expect("object exists");
+    Arc::make_mut(&mut object.base_static_definitions).push(
+        StaticDefinition::new(StaticMode::Other("CantBeSacrificed".to_string()))
+            .affected(TargetFilter::SelfRef),
+    );
+    evaluate_layers(runner.state_mut());
+}
+
+/// CR 701.21a + CR 609.3: Sigarda's ruling names this card: a protected player
+/// "can't take that option", so accepting offers nothing and the Demon stays
+/// put, while the next opponent can still take it (P2 reaches the prompt either
+/// way, and its acceptance proves the trigger resolved live).
+#[test]
+fn sigarda_holder_cannot_take_desecration_demons_option() {
+    for p2_accepts in [false, true] {
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let demon = scenario
+            .add_creature_from_oracle(P0, "Desecration Demon", 6, 6, DESECRATION_DEMON)
+            .id();
+        let sigarda = scenario
+            .add_creature_from_oracle(P1, "Sigarda, Host of Herons", 5, 5, SIGARDA_HOST_OF_HERONS)
+            .id();
+        let p1_bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+        let p2_bear = scenario.add_creature(P2, "P2 Bear", 2, 2).id();
+        let mut runner = scenario.build();
+        runner.advance_to_phase(Phase::BeginCombat);
+
+        let (prompted, offers) =
+            settle_sacrifice_offers(&mut runner, |p| p == P1 || p2_accepts, &[p1_bear, p2_bear]);
+
+        assert_eq!(prompted, vec![P1, P2]);
+        assert_eq!(
+            offers,
+            if p2_accepts {
+                vec![(vec![p2_bear], 1)]
+            } else {
+                vec![]
+            },
+            "the protected player is offered nothing"
+        );
+        let state = runner.state();
+        assert!(state.battlefield.contains(&sigarda));
+        assert!(state.battlefield.contains(&p1_bear));
+        assert_eq!(state.battlefield.contains(&p2_bear), !p2_accepts);
+        assert_eq!(state.objects[&demon].tapped, p2_accepts);
+        assert_eq!(plus_one_counters(&runner, demon), u32::from(p2_accepts));
+    }
+}
+
+/// CR 701.21a: a creature that can't be sacrificed is not an option, so the
+/// offer is only what the sacrifice can actually take.
+#[test]
+fn accepted_sacrifice_offer_omits_a_creature_that_cant_be_sacrificed() {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let demon = scenario
+        .add_creature_from_oracle(P0, "Desecration Demon", 6, 6, DESECRATION_DEMON)
+        .id();
+    let suited = scenario.add_creature(P1, "Suited Bear", 2, 2).id();
+    let bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    make_unsacrificeable(&mut runner, suited);
+    runner.advance_to_phase(Phase::BeginCombat);
+
+    let (_, offers) = settle_sacrifice_offers(&mut runner, |_| true, &[bear]);
+
+    assert_eq!(offers, vec![(vec![bear], 1)]);
+    assert!(!runner.state().battlefield.contains(&bear));
+    assert!(runner.state().objects[&demon].tapped);
+}
+
+/// CR 608.2c + CR 118.12: "if a player does" reads the instruction. When the
+/// selected creature turns out not to be sacrificed, the printed tail stays off.
+#[test]
+fn accepted_sacrifice_that_sacrifices_nothing_keeps_the_consequence_off() {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let demon = scenario
+        .add_creature_from_oracle(P0, "Desecration Demon", 6, 6, DESECRATION_DEMON)
+        .id();
+    let bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.advance_to_phase(Phase::BeginCombat);
+
+    for _ in 0..20 {
+        match runner.state().waiting_for {
+            WaitingFor::OpponentMayChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept");
+            }
+            WaitingFor::MultiTargetSelection { .. } => break,
+            _ => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+        }
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::MultiTargetSelection { .. }
+        ),
+        "the accepted offer reaches its selection prompt"
+    );
+    make_unsacrificeable(&mut runner, bear);
+    let result = runner
+        .act(GameAction::SelectCards { cards: vec![bear] })
+        .expect("select the creature");
+
+    assert!(!result
+        .events
+        .iter()
+        .any(|event| matches!(event, GameEvent::PermanentSacrificed { .. })));
+    let state = runner.state();
+    assert!(state.stack.is_empty(), "the trigger finished resolving");
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.active_ability_continuation().is_none());
+    assert!(state.battlefield.contains(&bear));
+    assert!(!state.objects[&demon].tapped);
+    assert_eq!(plus_one_counters(&runner, demon), 0);
+}
+
+/// CR 701.21a + CR 608.2c: "any player may sacrifice a land of their choice" is
+/// performed by whichever player accepts, including one who doesn't control the
+/// ability, and only then is the Wurm put on top of its owner's library.
+#[test]
+fn argothian_wurm_acceptor_sacrifices_their_own_land() {
+    for acceptor in [P0, P1] {
+        let mut scenario = main_phase_scenario(2);
+        let wurm = scenario
+            .add_creature_to_hand_from_oracle(P0, "Argothian Wurm", 6, 6, ARGOTHIAN_WURM)
+            .id();
+        let p0_land = scenario.add_basic_land(P0, ManaColor::Green);
+        let p1_land = scenario.add_basic_land(P1, ManaColor::Green);
+        let mut runner = scenario.build();
+        cast_free(&mut runner, wurm);
+
+        let (prompted, offers) =
+            settle_sacrifice_offers(&mut runner, |p| p == acceptor, &[p0_land, p1_land]);
+
+        assert!(prompted.contains(&acceptor), "{acceptor:?} was prompted");
+        let (kept, sacrificed) = if acceptor == P0 {
+            (p1_land, p0_land)
+        } else {
+            (p0_land, p1_land)
+        };
+        assert_eq!(offers, vec![(vec![sacrificed], 1)]);
+        let state = runner.state();
+        assert!(!state.battlefield.contains(&sacrificed));
+        assert!(state.battlefield.contains(&kept));
+        assert_eq!(state.objects[&wurm].zone, Zone::Library);
+    }
+}
+
+/// CR 608.2d: "sacrifice two creatures" is exact. Two are chosen and sacrificed
+/// before "if a player does" applies; a player with one creature can't take it.
+#[test]
+fn prowling_pangolin_acceptor_must_sacrifice_exactly_two_creatures() {
+    for creatures in [3, 1] {
+        let mut scenario = main_phase_scenario(2);
+        let pangolin = scenario
+            .add_creature_to_hand_from_oracle(P0, "Prowling Pangolin", 6, 5, PROWLING_PANGOLIN)
+            .id();
+        let bears: Vec<ObjectId> = (0..creatures)
+            .map(|n| {
+                scenario
+                    .add_creature(P1, &format!("P1 Bear {n}"), 2, 2)
+                    .id()
+            })
+            .collect();
+        let mut runner = scenario.build();
+        cast_free(&mut runner, pangolin);
+
+        let (prompted, offers) =
+            settle_sacrifice_offers(&mut runner, |p| p == P1, &bears[..bears.len().min(2)]);
+
+        assert!(prompted.contains(&P1), "P1 was prompted");
+        let state = runner.state();
+        if creatures == 3 {
+            assert_eq!(offers.len(), 1);
+            assert_eq!(offers[0].1, 2, "exactly two creatures");
+            assert!(!state.battlefield.contains(&bears[0]));
+            assert!(!state.battlefield.contains(&bears[1]));
+            assert!(state.battlefield.contains(&bears[2]));
+            assert_eq!(state.objects[&pangolin].zone, Zone::Graveyard);
+        } else {
+            assert!(offers.is_empty(), "one creature can't take the option");
+            assert!(state.battlefield.contains(&bears[0]));
+            assert!(state.battlefield.contains(&pangolin));
+        }
+    }
 }
 
 /// CR 608.2c: in Temporal Distortion's "at the beginning of each player's
@@ -724,6 +1070,7 @@ fn target_opponent_family_offers_only_the_target_opponents_creatures() {
         .act(GameAction::ActivateAbility {
             source_id: en_vec,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Oracle en-Vec");
     let offers = settle_recording_offers(

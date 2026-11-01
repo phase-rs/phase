@@ -648,6 +648,7 @@ fn manual_activation_retry_still_avoids_drawback_rows() {
         .act(GameAction::ActivateAbility {
             source_id: cataracts,
             ability_index: five,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Cataracts' {5} ability starts activating");
     assert!(
@@ -672,6 +673,7 @@ fn manual_activation_retry_still_avoids_drawback_rows() {
         .act(GameAction::ActivateAbility {
             source_id: adnate,
             ability_index: adnate_ability,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Adnate activates inside the window");
     for _ in 0..8 {

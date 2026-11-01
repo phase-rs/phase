@@ -25,7 +25,7 @@ export function BrokerOfflinePrompt({
   onCancel,
   serverAddress,
 }: BrokerOfflinePromptProps) {
-  const { t } = useTranslation("multiplayer");
+  const { t } = useTranslation(["multiplayer", "common"]);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/70" />

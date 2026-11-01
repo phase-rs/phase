@@ -139,7 +139,8 @@ fn gunzip(bytes: &[u8]) -> String {
     flate2::read::GzDecoder::new(bytes)
         .read_to_string(&mut json)
         .expect("fixture .json.gz inflates to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 fn seat_zero_projection() -> GameState {

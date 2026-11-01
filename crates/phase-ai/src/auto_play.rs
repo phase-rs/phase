@@ -14,7 +14,7 @@ use rand::Rng;
 use std::sync::Arc;
 
 use crate::config::AiConfig;
-use crate::search::choose_action_with_session;
+use crate::search::choose_action_with_issued_contract;
 use crate::session::AiSession;
 
 /// Maximum AI actions before forcing a stop (safety invariant — not CR-derived).
@@ -96,7 +96,7 @@ pub enum AiActionsStop {
     /// remedy is caller wiring (register a config for this seat), not "wait
     /// for a human" or "the game ended".
     MissingAiConfig { player: PlayerId },
-    /// `choose_action_with_session` returned `None` for `player` — the AI
+    /// `choose_action_with_issued_contract` returned `None` for `player` — the AI
     /// policy stack produced no legal action for a decision it was asked to
     /// make.
     ChooseActionNone { player: PlayerId },
@@ -267,7 +267,7 @@ pub fn run_ai_action(
         }
     };
     let contract = AiDecisionContract::issue(state, semantic_owner);
-    let action = match choose_action_with_session(state, semantic_owner, config, rng, session) {
+    let action = match choose_action_with_issued_contract(state, config, rng, session, &contract) {
         Some(action) => action,
         None => {
             tracing::warn!(player = ?actor, "choose_action returned None — stopping AI loop");

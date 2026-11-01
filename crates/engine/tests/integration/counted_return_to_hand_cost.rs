@@ -393,6 +393,7 @@ fn counted_return_activation_cost_returns_both_lands() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate the counted-return ability");
     match &result.waiting_for {
@@ -429,6 +430,7 @@ fn counted_return_activation_cost_returns_both_lands() {
     let refused = runner.act(GameAction::ActivateAbility {
         source_id: source,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         matches!(
@@ -640,6 +642,7 @@ fn craft_mixed_zone_materials_do_not_cross_stamp_graveyard_card() {
         .act(GameAction::ActivateAbility {
             source_id: blade,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate the craft-shaped ability");
     match &result.waiting_for {
@@ -807,6 +810,7 @@ fn counted_return_activation_with_pauses(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate the counted-return ability");
     runner
@@ -920,6 +924,7 @@ fn targeted_counted_return_activation_with_pauses(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate the targeted counted-return ability");
     if matches!(
@@ -1076,6 +1081,7 @@ fn concede_during_counted_return_pause(round_trip: bool) -> (i32, usize, usize, 
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate the targeted counted-return ability");
     if matches!(
@@ -1512,6 +1518,7 @@ fn mount_cost_board(
         .act(GameAction::ActivateAbility {
             source_id: mage,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("announce printed Mirror-Mage");
     if matches!(
@@ -2017,6 +2024,7 @@ fn delayed_two_land_sibling(
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .expect("announce no-target counted activation");
     }

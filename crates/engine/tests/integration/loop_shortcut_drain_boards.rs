@@ -45,8 +45,10 @@ fn restore(gz: &[u8]) -> GameState {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("the tracked fixture inflates to UTF-8 JSON");
-    let envelope: serde_json::Value =
+    let mut envelope: serde_json::Value =
         serde_json::from_str(&json).expect("the dump envelope parses as JSON");
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets(&mut envelope);
     // `PersistedGameState`, never a bare `GameState` decode: the persisted path is what
     // runs the load-seam guards, including the CR 732.2a bound invariant.
     let mut state = serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
@@ -1035,8 +1037,11 @@ pub(crate) fn committed_document(path: &Path) -> serde_json::Value {
     flate2::read::GzDecoder::new(bytes.as_slice())
         .read_to_string(&mut json)
         .unwrap_or_else(|error| panic!("{} must inflate to UTF-8 JSON: {error}", path.display()));
-    serde_json::from_str(&json)
-        .unwrap_or_else(|error| panic!("{} must parse as JSON: {error}", path.display()))
+    let mut document: serde_json::Value = serde_json::from_str(&json)
+        .unwrap_or_else(|error| panic!("{} must parse as JSON: {error}", path.display()));
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets(&mut document);
+    document
 }
 
 pub(crate) fn collect_gz(dir: &Path, out: &mut Vec<PathBuf>) {

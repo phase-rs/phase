@@ -802,6 +802,7 @@ fn equip_prompt_targets(board: &mut Board, description: &str) -> Vec<ObjectId> {
         .act(GameAction::ActivateAbility {
             source_id: board.plate,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap_or_else(|e| panic!("{description} must be activatable: {e:?}"));
     let WaitingFor::TargetSelection { target_slots, .. } = &board.state().waiting_for else {

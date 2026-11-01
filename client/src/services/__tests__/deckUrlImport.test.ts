@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BuiltInGameFormat } from "../../adapter/types";
 import { fetchDeckFromUrl, isSupportedDeckUrl, IMPORT_ERROR_KEYS } from "../deckUrlImport";
-import { detectAndParseDeck, resolveCommander, type ParsedDeck } from "../deckParser";
+import { resolveCommander } from "../commanderResolution";
+import { detectAndParseDeck, type ParsedDeck } from "../deckParser";
 import { useConnectivityStore } from "../../stores/connectivityStore";
 
 // resolveCommander delegates commander eligibility to the WASM engine; every
@@ -243,7 +244,10 @@ const FORMAT_SHAPES: Record<BuiltInGameFormat, DeckShape> = {
   TwoHeadedGiant: "constructed",
   Archenemy: "constructed",
   Planechase: "constructed",
+  PlanechaseCommander: "commander",
   Commander: "commander",
+  TwoHeadedGiantCommander: "commander",
+  ArchenemyCommander: "commander",
   DuelCommander: "commander",
   PauperCommander: "commander",
   Brawl: "commander",

@@ -4,8 +4,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use engine::ai_support::{
-    build_decision_context, classify_payment_continuation, witness_payment_continuations,
-    AiDecisionContext, CandidateAction, PaymentContinuationBatchStatus, PaymentContinuationState,
+    activates_mana_ability, build_decision_context, classify_payment_continuation,
+    witness_payment_continuations, AiDecisionContext, CandidateAction,
+    PaymentContinuationBatchStatus, PaymentContinuationState, PaymentContinuationStep,
     TacticalClass,
 };
 use engine::game::engine::apply_as_current_for_simulation;
@@ -93,6 +94,8 @@ pub(crate) struct PreparedCandidate {
     pub source_index: usize,
     pub candidate: CandidateAction,
     pub payment_successor: Option<GameState>,
+    /// Whether the witnessed edge finalizes the payment root in its own step.
+    pub payment_step: Option<PaymentContinuationStep>,
 }
 
 /// Fail closed for affiliated payment states before ranking or width limits.
@@ -112,6 +115,7 @@ pub(crate) fn prepare_payment_candidates(
                 source_index,
                 candidate,
                 payment_successor: None,
+                payment_step: None,
             })
             .collect(),
         PaymentContinuationState::UnsupportedAffiliated(_) => Vec::new(),
@@ -131,6 +135,7 @@ pub(crate) fn prepare_payment_candidates(
                             source_index,
                             candidate,
                             payment_successor: Some(accepted.state),
+                            payment_step: Some(accepted.step),
                         })
                     })
                     .collect(),
@@ -145,6 +150,7 @@ pub(crate) fn prepare_payment_candidates(
                                     source_index,
                                     candidate,
                                     payment_successor: Some(accepted.state),
+                                    payment_step: Some(accepted.step),
                                 })
                             })
                             .collect()
@@ -158,6 +164,7 @@ pub(crate) fn prepare_payment_candidates(
                                         source_index,
                                         candidate,
                                         payment_successor: None,
+                                        payment_step: None,
                                     },
                                 )
                             })
@@ -169,6 +176,60 @@ pub(crate) fn prepare_payment_candidates(
             }
         }
     }
+}
+
+/// Whether a leaf `state` is not yet quiet: something is on the stack, or a
+/// spell or ability is being paid for. CR 602.2a creates an activated ability
+/// on the stack as its activation begins, but the engine adds it to
+/// `state.stack` only once its payment finalizes, so an activation paid at
+/// `ManaPayment` has an empty stack and still has to be finished
+/// (`finalizing_payment_action`; CR 602.2b applies CR 601.2b–i to it).
+fn needs_quiescence(state: &GameState) -> bool {
+    !state.stack.is_empty()
+        || matches!(
+            classify_payment_continuation(state),
+            PaymentContinuationState::Affiliated(_)
+        )
+}
+
+/// The action that finishes the payment in progress at `state` as it stands:
+/// an action that activates no mana ability (at `ManaPayment`, the pass that
+/// pays the total cost, CR 601.2h) and that the payment witness proves
+/// finalizes the root in its own step. `None` when `state` is not a payment
+/// the witness owns, or no such action is among `actions`.
+///
+/// CR 118.3c: activating mana abilities is never mandatory, so finishing the
+/// payment now is always one way to continue it. Quiescence and rollouts use it
+/// to value a position in the middle of a payment as that payment completed:
+/// nobody gets priority while a spell or ability is being paid for (CR 601.2,
+/// CR 602.2b), so such a position is not a quiet leaf. Further activations stay
+/// selectable as search edges (see `search_value_at` for their depth).
+fn finalizing_payment_action(state: &GameState, actions: &[GameAction]) -> Option<GameAction> {
+    if !matches!(
+        classify_payment_continuation(state),
+        PaymentContinuationState::Affiliated(_)
+    ) {
+        return None;
+    }
+    let finishers: Vec<_> = actions
+        .iter()
+        .filter(|action| {
+            !matches!(action, GameAction::CancelCast) && !activates_mana_ability(state, action)
+        })
+        .cloned()
+        .collect();
+    if finishers.is_empty() {
+        return None;
+    }
+    witness_payment_continuations(state, &finishers)
+        .successors
+        .into_iter()
+        .flatten()
+        .find(|accepted| match accepted.step {
+            PaymentContinuationStep::Finalizes => true,
+            PaymentContinuationStep::Continues => false,
+        })
+        .map(|accepted| accepted.action)
 }
 
 pub(crate) fn rank_prepared_candidates<F>(
@@ -869,6 +930,10 @@ pub struct PlannerServices<'a> {
     /// evidence that repeated work was actually skipped, used by the memo
     /// regression tests.
     pub memo_witness: SearchMemoWitness,
+    /// How `candidate_is_valid` validates a prompt answer for this decision.
+    /// `EachCandidate` unless the caller takes on what `AtSubmission` leaves
+    /// to it; the root scorer sets it from its own caller.
+    pub(crate) prompt_answers: PromptAnswerValidation,
 }
 
 impl<'a> PlannerServices<'a> {
@@ -957,6 +1022,7 @@ impl<'a> PlannerServices<'a> {
             successor_edge_capacity: SUCCESSOR_EDGE_CAPACITY,
             node_contexts: HashMap::new(),
             memo_witness: SearchMemoWitness::default(),
+            prompt_answers: PromptAnswerValidation::EachCandidate,
         }
     }
 
@@ -1154,7 +1220,7 @@ impl<'a> PlannerServices<'a> {
     ) -> Vec<CandidateAction> {
         candidates
             .into_iter()
-            .filter(|candidate| Self::candidate_is_valid(state, candidate))
+            .filter(|candidate| Self::candidate_is_valid(state, candidate, self.prompt_answers))
             .collect()
     }
 
@@ -1168,12 +1234,16 @@ impl<'a> PlannerServices<'a> {
             .into_iter()
             .filter(|candidate| {
                 candidate.payment_successor.is_some()
-                    || Self::candidate_is_valid(state, &candidate.candidate)
+                    || Self::candidate_is_valid(state, &candidate.candidate, self.prompt_answers)
             })
             .collect()
     }
 
-    fn candidate_is_valid(state: &GameState, candidate: &CandidateAction) -> bool {
+    fn candidate_is_valid(
+        state: &GameState,
+        candidate: &CandidateAction,
+        prompt_answers: PromptAnswerValidation,
+    ) -> bool {
         // PassPriority is always legal during Priority (skip simulation for perf),
         // but during ManaPayment it means "finalize payment" which can fail if the
         // player can't actually pay the cost (e.g., Thalia tax makes it unaffordable).
@@ -1199,12 +1269,35 @@ impl<'a> PlannerServices<'a> {
             // Mulligan as the complete legal set; neither can fail apply_as_current.
             // Skipping the clone+simulate eliminates ~2 state clones per mulligan step.
             engine::types::actions::GameAction::MulliganDecision { .. } => true,
-            _ => {
-                engine::game::perf_counters::record_state_clone_for_legality();
-                let mut sim = state.clone();
-                apply_as_current_for_simulation(&mut sim, candidate.action.clone()).is_ok()
+            // CR 608.2d + CR 614.12a + CR 701.23a: a named-choice answer from the prompt's
+            // enumerated domain, or a library search selection, is admitted by
+            // its submission guard without mutating the game; the engine decides that
+            // through the same authority `SimulationFilter` consults before its
+            // probe. Under `PromptAnswerValidation::AtSubmission` no state copy is
+            // made here: the root search simulates the answers in its beam until one fails, and
+            // the caller the one answer it submits. A shape
+            // the authority declines (a scoped search, a card name, a free-entry
+            // number, an answer given while a cast or activation is in progress),
+            // and every answer under `EachCandidate`, is simulated below.
+            engine::types::actions::GameAction::ChooseOption { .. }
+            | engine::types::actions::GameAction::SelectCards { .. }
+                if prompt_answers.admits_without_simulation(state, &candidate.action) =>
+            {
+                true
             }
+            _ => Self::simulation_accepts(state, &candidate.action),
         }
+    }
+
+    /// The legality gate's simulation of `action` at `state`: one state copy,
+    /// counted by `perf_counters::record_state_clone_for_legality`, then
+    /// `apply_as_current_for_simulation`. It is also the check
+    /// [`PromptAnswerValidation::AtSubmission`] leaves to the caller for the
+    /// answer it submits.
+    pub(crate) fn simulation_accepts(state: &GameState, action: &GameAction) -> bool {
+        engine::game::perf_counters::record_state_clone_for_legality();
+        let mut sim = state.clone();
+        apply_as_current_for_simulation(&mut sim, action.clone()).is_ok()
     }
 
     pub fn apply_candidate(
@@ -1601,6 +1694,18 @@ impl<'a> PlannerServices<'a> {
                 }
             }
 
+            // Case 4: a payment in progress is not a quiet position; finish it
+            // as it stands (see `finalizing_payment_action`).
+            if let Some(action) = finalizing_payment_action(cursor.state(), &actions) {
+                match self.quiesce_step(node, &mut cursor, action) {
+                    QuiesceStep::Advanced(next) => {
+                        node = next;
+                        continue;
+                    }
+                    QuiesceStep::Failed => break,
+                }
+            }
+
             // Genuine decision point — stop quiescence
             break;
         }
@@ -1625,7 +1730,7 @@ impl<'a> PlannerServices<'a> {
         node: Option<SearchNodeId>,
         state: &GameState,
     ) -> f64 {
-        if state.stack.is_empty() || self.deadline.expired() {
+        if !needs_quiescence(state) || self.deadline.expired() {
             return self.evaluate_state_cached(state);
         }
         let quiesced = self.quiesce_at(node, state);
@@ -1640,7 +1745,7 @@ impl<'a> PlannerServices<'a> {
     /// [`PlannerServices::quiesced_leaf_eval`] for a position that may be
     /// tracked; `node`, when given, must identify `state`.
     fn quiesced_leaf_eval_at(&mut self, node: Option<SearchNodeId>, state: &GameState) -> f64 {
-        if state.stack.is_empty() || self.deadline.expired() {
+        if !needs_quiescence(state) || self.deadline.expired() {
             let value = self.evaluate_for_planner(state);
             return self.reduce_utility(state, &value);
         }
@@ -1814,6 +1919,27 @@ impl<'a> PlannerServices<'a> {
             return self.quiesced_leaf_eval_at(node, state);
         }
 
+        // CR 601.2: a payment in progress and the cast it completes are one
+        // move; the rollout finishes the payment as it stands rather than
+        // spending its depth on mana activations (see `finalizing_payment_action`).
+        if matches!(
+            classify_payment_continuation(state),
+            PaymentContinuationState::Affiliated(_)
+        ) {
+            let actions: Vec<_> = self
+                .build_decision_context_at(node, state)
+                .candidates
+                .iter()
+                .map(|candidate| candidate.action.clone())
+                .collect();
+            if let Some(action) = finalizing_payment_action(state, &actions) {
+                let mut finished = state.clone();
+                if apply_as_current_for_simulation(&mut finished, action).is_ok() {
+                    return self.rollout_estimate_at(None, &finished, depth);
+                }
+            }
+        }
+
         let evaluation = self.planner_evaluation_at(node, state);
         if evaluation.priors.is_empty() {
             return self.quiesced_leaf_eval_at(node, state);
@@ -1847,6 +1973,105 @@ impl<'a> PlannerServices<'a> {
                 }
             })
             .unwrap_or_else(|| self.quiesced_leaf_eval_at(node, state))
+    }
+}
+
+/// How the planner legality gate (`PlannerServices::candidate_is_valid`)
+/// validates a prompt answer, a named-choice answer or a library search
+/// selection, that `engine::ai_support::structurally_valid_prompt_answer`
+/// admits. Every other candidate is validated the same way under both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PromptAnswerValidation {
+    /// Simulate each answer on a state copy, as the gate's catch-all does. The
+    /// gate's verdict is final.
+    EachCandidate,
+    /// Admit the answer without a state copy. The root search simulates such
+    /// answers in its beam on its first rung, in beam order, and returns the
+    /// first that fails (`search::FailedAdmittedAnswer`) instead of scores,
+    /// simulating no answer after it, and the root scorer scores the decision
+    /// again under `EachCandidate`. The caller must simulate
+    /// the one answer it submits ([`PlannerServices::simulation_accepts`]) and,
+    /// if that simulation fails, decide again under `EachCandidate`. Only the
+    /// canonical chooser (`search::choose_action_with_session_inner`) does
+    /// both.
+    AtSubmission,
+}
+
+impl PromptAnswerValidation {
+    /// Whether the gate admits `action` at `state` without a state copy.
+    pub(crate) fn admits_without_simulation(self, state: &GameState, action: &GameAction) -> bool {
+        match self {
+            Self::EachCandidate => false,
+            Self::AtSubmission => {
+                engine::ai_support::structurally_valid_prompt_answer(state, action)
+            }
+        }
+    }
+
+    /// The validation the canonical chooser decides under first:
+    /// `AtSubmission`, unless `config` scores the decision in determinized
+    /// samples (`determinization_samples > 0`). Each sample simulates every
+    /// answer itself (`search::score_candidates_core`) on a world that differs
+    /// from the decision state only in opponents' hidden information, and the
+    /// chooser keeps deciding from those simulations, as it did before
+    /// `AtSubmission` existed.
+    pub(crate) fn for_chooser(config: &AiConfig) -> Self {
+        if config.search.determinization_samples > 0 || chooser_simulates_each_prompt_answer() {
+            Self::EachCandidate
+        } else {
+            Self::AtSubmission
+        }
+    }
+}
+
+/// Whether this thread's chooser is switched to `EachCandidate` for a test's
+/// reference decision.
+#[cfg(test)]
+#[inline]
+fn chooser_simulates_each_prompt_answer() -> bool {
+    CHOOSER_SIMULATES_EACH_PROMPT_ANSWER.get()
+}
+
+/// Production variant: the switch does not exist.
+#[cfg(not(test))]
+#[inline]
+fn chooser_simulates_each_prompt_answer() -> bool {
+    false
+}
+
+// Test-only switch for the chooser's first validation, so a production-path
+// test can run, as its reference, the decision the gate made before
+// `PromptAnswerValidation::AtSubmission` existed: every prompt answer simulated,
+// nothing checked after selection. The switch does not exist outside
+// `cfg(test)`. Thread-local, as `layers.rs`'s `REBUILD_STATIC_INDEX_AT_TOP`: the
+// decision runs on the test's own thread, and every other test reads `false`.
+#[cfg(test)]
+thread_local! {
+    static CHOOSER_SIMULATES_EACH_PROMPT_ANSWER: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// While alive, the chooser on this thread decides under
+/// `PromptAnswerValidation::EachCandidate` from the start. Dropping it restores
+/// the previous setting, on unwind too, as `speed.rs`'s `SpeedCapGuard` does.
+#[cfg(test)]
+struct ChooserSimulatesEachPromptAnswer {
+    previous: bool,
+}
+
+#[cfg(test)]
+impl ChooserSimulatesEachPromptAnswer {
+    fn enter() -> Self {
+        Self {
+            previous: CHOOSER_SIMULATES_EACH_PROMPT_ANSWER.replace(true),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ChooserSimulatesEachPromptAnswer {
+    fn drop(&mut self) {
+        CHOOSER_SIMULATES_EACH_PROMPT_ANSWER.set(self.previous);
     }
 }
 
@@ -1937,6 +2162,30 @@ impl BeamContinuationPlanner {
         let node_player = state.waiting_for.acting_player();
         let is_maximizing = node_player.is_none_or(|player| player == services.ai_player);
         let scoring_player = node_player.unwrap_or(services.ai_player);
+        // CR 601.2: nobody receives priority while a spell or ability is being
+        // paid for, so a payment step and the cast it completes are one move.
+        // Charging a ply for continuing a payment that the pass could finish
+        // let another mana activation (and its life, card or permanent) push
+        // the opponent's reply to the cast past the horizon (#10488). So a step
+        // inside a payment costs no depth, with one exception: at the payment
+        // window itself, while no edge that activates no mana ability can
+        // finish it yet, every option continues the payment and is charged
+        // alike. Prompts nested in a mana ability's activation (its cost, its
+        // color) belong to that one activation (CR 605.3a). The node budget
+        // bounds the payment chain.
+        let payment_can_finish_now = candidates.iter().any(|prepared| {
+            prepared.payment_step == Some(PaymentContinuationStep::Finalizes)
+                && !activates_mana_ability(state, &prepared.candidate.action)
+        });
+        let free_payment_step = match classify_payment_continuation(state) {
+            PaymentContinuationState::Affiliated(_) => {
+                payment_can_finish_now
+                    || !matches!(state.waiting_for, WaitingFor::ManaPayment { .. })
+            }
+            PaymentContinuationState::NotAffiliated
+            | PaymentContinuationState::UnsupportedAffiliated(_) => false,
+        };
+        let child_depth = if free_payment_step { depth } else { depth - 1 };
         let mut ranked = rank_prepared_candidates(
             candidates,
             // Interior beam node: `search_value` is always entered ≥1 ply below
@@ -1983,7 +2232,7 @@ impl BeamContinuationPlanner {
             let value = self.search_value_at(
                 child,
                 &sim,
-                depth - 1,
+                child_depth,
                 ply + 1,
                 alpha,
                 beta,
@@ -2080,6 +2329,7 @@ where
                 source_index,
                 candidate,
                 payment_successor: None,
+                payment_step: None,
             }),
         |candidate| scorer(candidate),
         limit,
@@ -2100,30 +2350,42 @@ pub fn apply_candidate(state: &GameState, candidate: &CandidateAction) -> Option
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, TacticalClass};
     use engine::game::combat::BlockRequirement;
+    use engine::game::engine::EngineError;
     use engine::game::perf_counters;
+    use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use engine::game::turn_control;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
-        ResolvedAbility, TargetRef,
+        AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, Comparator, Effect,
+        ManaContribution, ManaProduction, NumberDistinctness, QuantityExpr, ResolvedAbility,
+        SearchSelectionConstraint, TargetFilter, TargetRef,
     };
     use engine::types::actions::{GameAction, MulliganChoice};
-    use engine::types::card_type::CoreType;
+    use engine::types::card_type::{CoreType, Supertype};
     use engine::types::counter::CounterType;
     use engine::types::game_state::{
-        CommanderDamageEntry, PendingContinuation, StackEntry, StackEntryKind, WaitingFor,
+        ActiveSearchDecisionAuthority, CastPaymentMode, CommanderDamageEntry,
+        NamedChoiceSourceBinding, PendingContinuation, PendingScopedLibrarySearch,
+        ScopedLibrarySearchPhase, StackEntry, StackEntryKind, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::WardCost;
-    use engine::types::mana::ManaColor;
+    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use engine::types::phase::Phase;
     use engine::types::zones::Zone;
-    use std::collections::HashMap;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    use std::collections::{HashMap, HashSet};
+    use std::ops::ControlFlow;
 
-    use crate::config::{create_config, AiDifficulty, Platform};
+    use crate::auto_play::run_ai_action;
+    use crate::config::{create_config, create_config_for_players, AiDifficulty, Platform};
+    use crate::policies::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
+    use crate::session::AiSession;
 
     fn make_state() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -2818,6 +3080,117 @@ mod tests {
         );
     }
 
+    /// Bonesplitter's equip, paid by Treasonous Ogre's "Pay 3 life: Add {R}."
+    /// at its `ManaPayment` window (a Manual activation reaches that window, as
+    /// in `activation_manual_mana_payment.rs`). Oracle text verbatim from
+    /// Scryfall `cards/named`.
+    fn equip_paid_by_ogre_mid_payment() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let ogre = scenario
+            .add_creature(P0, "Treasonous Ogre", 2, 3)
+            .from_oracle_text_with_keywords(
+                &["Dethrone"],
+                "Dethrone (Whenever this creature attacks the player with the most life or tied for most life, put a +1/+1 counter on it.)\nPay 3 life: Add {R}.",
+            )
+            .id();
+        let bonesplitter = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Bonesplitter",
+                "Equipped creature gets +2/+0.\nEquip {1}",
+            )
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        let mut runner = scenario.build();
+        let equip_index = runner.state().objects[&bonesplitter]
+            .abilities
+            .iter()
+            .position(|ability| ability.kind == AbilityKind::Activated)
+            .expect("Bonesplitter has its equip ability");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: bonesplitter,
+                ability_index: equip_index,
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .expect("the equip activation begins");
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ) {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(bears)),
+                })
+                .expect("Grizzly Bears is a legal equip target");
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+            "reach: the Manual equip waits for its payment, got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: ogre,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the Ogre pays 3 life for {R} while the equip is paid for");
+        runner.state().clone()
+    }
+
+    /// CR 602.2b + CR 601.2h: an activation paid at `ManaPayment` has nothing on
+    /// the stack yet, and a leaf there is valued as its payment finished, not
+    /// with the life paid and the ability missing (#10488).
+    #[test]
+    fn activation_payment_leaf_is_valued_as_its_finished_payment() {
+        let mid = equip_paid_by_ogre_mid_payment();
+        assert!(mid.stack.is_empty(), "reach: nothing is on the stack yet");
+        assert_eq!(mid.players[0].life, 17, "reach: the Ogre paid 3 life");
+        assert!(matches!(
+            classify_payment_continuation(&mid),
+            PaymentContinuationState::Affiliated(
+                engine::ai_support::PaymentContinuationRoot::Activation { .. }
+            )
+        ));
+        let mut finished = mid.clone();
+        apply_as_current_for_simulation(&mut finished, GameAction::PassPriority)
+            .expect("the floating {R} pays Equip {1}");
+        assert_eq!(
+            finished.stack.len(),
+            1,
+            "reach: the equip ability is on the stack"
+        );
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = PlannerServices::with_deadline(
+            PlayerId(0),
+            &config,
+            &policies,
+            crate::context::AiContext::empty(&config.weights),
+            Some(engine::util::Deadline::none()),
+        );
+        let finished_value = services.evaluate_state_quiesced(&finished);
+        assert_ne!(
+            services.evaluate_state_cached(&mid),
+            finished_value,
+            "reach: valuing the payment unfinished differs from finishing it"
+        );
+        assert_eq!(
+            services.evaluate_state_quiesced(&mid),
+            finished_value,
+            "the search leaf finishes the activation's payment"
+        );
+        assert_eq!(
+            services.quiesced_leaf_eval(&mid),
+            services.quiesced_leaf_eval(&finished),
+            "the rollout leaf finishes the activation's payment"
+        );
+    }
+
     #[test]
     fn quiesced_leaf_eval_credits_pending_creature() {
         use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
@@ -2952,6 +3325,2373 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // Prompt-answer legality gate: `candidate_is_valid` admits a named-choice
+    // answer or a library search selection through
+    // `engine::ai_support::structurally_valid_prompt_answer` instead of a state
+    // copy + simulation, and only at the `NamedChoice` / `SearchChoice`
+    // windows. Every base board is reached through the real cast/play pipeline
+    // from the card's verbatim Oracle text.
+    // ------------------------------------------------------------------
+
+    const DISTANT_MELODY_ORACLE: &str =
+        "Choose a creature type. Draw a card for each permanent you control of that type.";
+    const BRAVE_THE_ELEMENTS_ORACLE: &str = "Choose a color. White creatures you control gain protection from the chosen color until end of turn.";
+    const THRIVING_GROVE_ORACLE: &str = "This land enters tapped. As it enters, choose a color other than green.\n{T}: Add {G} or one mana of the chosen color.";
+    const DEMONIC_TUTOR_ORACLE: &str =
+        "Search your library for a card, put that card into your hand, then shuffle.";
+    const CELESTIAL_REUNION_ORACLE: &str = "As an additional cost to cast this spell, you may choose a creature type and behold two creatures of that type.\nSearch your library for a creature card with mana value X or less, reveal it, put it into your hand, then shuffle. If this spell's additional cost was paid and the revealed card is the chosen type, put that card onto the battlefield instead of putting it into your hand.";
+    const CULTIVATE_ORACLE: &str = "Search your library for up to two basic land cards, reveal those cards, put one onto the battlefield tapped and the other into your hand, then shuffle.";
+
+    /// Cast `spell` for P0 (the active player, holding priority) through the
+    /// full cast pipeline and return the state parked at its first prompt; the
+    /// runner stays parked there too.
+    fn resolve_to_prompt(runner: &mut GameRunner, spell: ObjectId) -> GameState {
+        runner.state_mut().active_player = P0;
+        runner.state_mut().priority_player = P0;
+        runner.cast(spell).resolve().state().clone()
+    }
+
+    /// Distant Melody cast and resolved up to its CR 608.2d creature-type
+    /// prompt. The answer persists on the resolving spell, so the prompt is
+    /// `ExactObjectAndResolution`-bound.
+    fn distant_melody_prompt(mut scenario: GameScenario) -> GameState {
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            P0,
+            "Distant Melody",
+            false,
+            DISTANT_MELODY_ORACLE,
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Blue],
+        });
+        let melody = builder.id();
+        let mut pool: Vec<ManaUnit> = (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, melody, false, vec![]))
+            .collect();
+        pool.push(ManaUnit::new(ManaType::Blue, melody, false, vec![]));
+        scenario.with_mana_pool(P0, pool);
+        let state = resolve_to_prompt(&mut scenario.build(), melody);
+        match &state.waiting_for {
+            WaitingFor::NamedChoice {
+                player,
+                choice_type: ChoiceType::CreatureType { .. },
+                options,
+                source: Some(source),
+                ..
+            } => {
+                assert_eq!(*player, P0, "P0 resolves Distant Melody");
+                assert!(
+                    options.len() > 1,
+                    "the creature-type prompt must enumerate several answers"
+                );
+                assert_eq!(
+                    source.binding,
+                    NamedChoiceSourceBinding::ExactObjectAndResolution
+                );
+            }
+            other => panic!("Distant Melody must halt on its creature-type prompt, got {other:?}"),
+        }
+        assert!(
+            !state.withholds_priority(),
+            "the prompt is answered while the spell resolves, not mid-cast"
+        );
+        state
+    }
+
+    /// Brave the Elements cast and resolved up to its CR 608.2d color prompt.
+    /// Its choice does not persist, so the prompt carries no source.
+    fn brave_the_elements_prompt() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            P0,
+            "Brave the Elements",
+            true,
+            BRAVE_THE_ELEMENTS_ORACLE,
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White],
+        });
+        let brave = builder.id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::White, brave, false, vec![])],
+        );
+        let state = resolve_to_prompt(&mut scenario.build(), brave);
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::NamedChoice {
+                    player,
+                    choice_type: ChoiceType::Color { .. },
+                    source: None,
+                    ..
+                } if *player == P0
+            ),
+            "Brave the Elements must halt on its source-less color prompt, got {:?}",
+            state.waiting_for
+        );
+        assert!(!state.withholds_priority());
+        state
+    }
+
+    /// Thriving Grove played up to its CR 614.12a pre-entry color prompt: a
+    /// `PendingEntry`-bound source whose parked entry is live.
+    fn thriving_grove_prompt() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let grove = scenario
+            .add_land_to_hand(P0, "Thriving Grove")
+            .from_oracle_text(THRIVING_GROVE_ORACLE)
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = P0;
+        runner.state_mut().priority_player = P0;
+        let card_id = runner.state().objects[&grove].card_id;
+        runner
+            .act(GameAction::PlayLand {
+                object_id: grove,
+                card_id,
+            })
+            .expect("playing the land must start its entry");
+        let state = runner.state().clone();
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::NamedChoice {
+                    player,
+                    choice_type: ChoiceType::Color { .. },
+                    source: Some(source),
+                    ..
+                } if *player == P0
+                    && source.binding == NamedChoiceSourceBinding::PendingEntry
+                    && source.has_matching_context()
+            ),
+            "Thriving Grove must halt on its pre-entry color prompt, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.pending_replacement.is_some(),
+            "the entry is parked behind the choice"
+        );
+        assert!(!state.withholds_priority());
+        state
+    }
+
+    /// Demonic Tutor cast and resolved up to its CR 701.23a/d quantity search:
+    /// an ordinary (non-scoped) search over a four-card library that must find
+    /// exactly one card.
+    fn demonic_tutor_prompt(mut scenario: GameScenario) -> GameState {
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Card A", "Card B", "Card C", "Card D"]);
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            P0,
+            "Demonic Tutor",
+            false,
+            DEMONIC_TUTOR_ORACLE,
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Black],
+        });
+        let tutor = builder.id();
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Colorless, tutor, false, vec![]),
+                ManaUnit::new(ManaType::Black, tutor, false, vec![]),
+            ],
+        );
+        let state = resolve_to_prompt(&mut scenario.build(), tutor);
+        let WaitingFor::SearchChoice {
+            player,
+            cards,
+            count,
+            up_to,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "Demonic Tutor must halt on its library search, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(*player, P0, "P0 searches");
+        assert_eq!(*count, 1, "\"a card\" is a quantity search for one card");
+        assert!(!*up_to, "the search must find exactly one card");
+        let mut pool = cards.clone();
+        pool.sort();
+        let mut library: Vec<ObjectId> = state
+            .players
+            .iter()
+            .find(|seat| seat.id == P0)
+            .expect("P0 exists")
+            .library
+            .iter()
+            .copied()
+            .collect();
+        library.sort();
+        assert_eq!(pool.len(), 4, "the pool is the four-card library");
+        assert_eq!(pool, library, "the pool is exactly P0's library");
+        assert!(
+            state.pending_scoped_library_search.is_none(),
+            "Demonic Tutor's search is an ordinary (non-scoped) search"
+        );
+        state
+    }
+
+    /// Celestial Reunion cast with its optional additional cost paid, up to the
+    /// CR 601.2b cost-time creature-type prompt (`CostTypeChoice`, not a
+    /// `NamedChoice`): P0 holds two Elf creature cards, so only "Elf" can be
+    /// beheld twice (CR 701.4a).
+    fn celestial_reunion_cost_type_prompt() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for name in ["Elf A", "Elf B"] {
+            scenario
+                .add_creature_to_hand(P0, name, 1, 1)
+                .with_subtypes(vec!["Elf"]);
+        }
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            P0,
+            "Celestial Reunion",
+            false,
+            CELESTIAL_REUNION_ORACLE,
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Green],
+            generic: 0,
+        });
+        let reunion = builder.id();
+        scenario.with_mana_pool(
+            P0,
+            (0..4)
+                .map(|_| ManaUnit::new(ManaType::Green, reunion, false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().all_creature_types = vec!["Elf".to_string(), "Goblin".to_string()];
+        runner.state_mut().active_player = P0;
+        runner.state_mut().priority_player = P0;
+        let card_id = runner.state().objects[&reunion].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: reunion,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("casting Celestial Reunion must be accepted");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice { .. }
+            ),
+            "the caster must be asked whether to pay the optional additional cost, got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("paying the behold cost must be accepted");
+        let state = runner.state().clone();
+        match &state.waiting_for {
+            WaitingFor::CostTypeChoice {
+                player,
+                choice_type,
+                options,
+                ..
+            } => {
+                assert_eq!(*player, P0, "P0 announces the cost");
+                assert!(matches!(choice_type, ChoiceType::CreatureType { .. }));
+                assert_eq!(*options, ["Elf"], "only Elf can be beheld");
+            }
+            other => panic!("Celestial Reunion must halt on its cost-type prompt, got {other:?}"),
+        }
+        assert!(
+            state.withholds_priority(),
+            "the cost-type prompt is answered mid-cast"
+        );
+        state
+    }
+
+    /// Cultivate cast and resolved through its library search (both basics
+    /// found) up to the split-destination partition prompt
+    /// (`SearchPartitionChoice`, answered with `SelectCards` but not a
+    /// `SearchChoice`): CR 701.23a + CR 608.2d.
+    fn cultivate_partition_prompt() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let forest = scenario
+            .add_land_to_library_top(P0, "Forest")
+            .with_subtypes(vec!["Forest"])
+            .id();
+        let mountain = scenario
+            .add_land_to_library_top(P0, "Mountain")
+            .with_subtypes(vec!["Mountain"])
+            .id();
+        let mut builder =
+            scenario.add_spell_to_hand_from_oracle(P0, "Cultivate", false, CULTIVATE_ORACLE);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 2,
+        });
+        let cultivate = builder.id();
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Green, cultivate, false, vec![]),
+                ManaUnit::new(ManaType::Colorless, cultivate, false, vec![]),
+                ManaUnit::new(ManaType::Colorless, cultivate, false, vec![]),
+            ],
+        );
+        let mut runner = scenario.build();
+        // Both library lands are basic (the scenario builder offers no
+        // supertype setter, and its state is private outside the engine).
+        for land in [forest, mountain] {
+            let obj = runner
+                .state_mut()
+                .objects
+                .get_mut(&land)
+                .expect("the land was staged");
+            obj.card_types.supertypes.push(Supertype::Basic);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let searching = resolve_to_prompt(&mut runner, cultivate);
+        match &searching.waiting_for {
+            WaitingFor::SearchChoice {
+                player,
+                cards,
+                count,
+                up_to,
+                ..
+            } => {
+                assert_eq!(*player, P0, "P0 searches");
+                assert_eq!(*count, 2);
+                assert!(*up_to, "\"up to two\"");
+                assert!(cards.contains(&forest) && cards.contains(&mountain));
+            }
+            other => panic!("Cultivate must halt on its library search, got {other:?}"),
+        }
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![forest, mountain],
+            })
+            .expect("finding both basics must park the partition choice");
+        let state = runner.state().clone();
+        match &state.waiting_for {
+            WaitingFor::SearchPartitionChoice {
+                player,
+                cards,
+                primary_destination,
+                primary_count,
+                rest_destination,
+                ..
+            } => {
+                assert_eq!(*player, P0, "P0 partitions the found cards");
+                assert_eq!(*primary_count, 1);
+                assert_eq!(*primary_destination, Zone::Battlefield);
+                assert_eq!(*rest_destination, Zone::Hand);
+                let mut found = cards.clone();
+                found.sort();
+                let mut expected = [forest, mountain];
+                expected.sort();
+                assert_eq!(found, expected, "the found set is both basics");
+            }
+            other => panic!("Cultivate must halt on its partition prompt, got {other:?}"),
+        }
+        assert!(state.pending_scoped_library_search.is_none());
+        state
+    }
+
+    fn choose(choice: &str) -> GameAction {
+        GameAction::ChooseOption {
+            choice: choice.to_string(),
+        }
+    }
+
+    fn select(cards: &[ObjectId]) -> GameAction {
+        GameAction::SelectCards {
+            cards: cards.to_vec(),
+        }
+    }
+
+    fn named_options(state: &GameState) -> Vec<String> {
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => options.clone(),
+            other => panic!("expected a NamedChoice prompt, got {other:?}"),
+        }
+    }
+
+    fn search_pool(state: &GameState) -> Vec<ObjectId> {
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, .. } => cards.clone(),
+            other => panic!("expected a SearchChoice prompt, got {other:?}"),
+        }
+    }
+
+    fn object_named(state: &GameState, name: &str) -> ObjectId {
+        state
+            .objects
+            .values()
+            .find(|object| object.name == name)
+            .map(|object| object.id)
+            .unwrap_or_else(|| panic!("no object named {name}"))
+    }
+
+    /// The same board with a scoped ("each player searches") library search
+    /// pending, in the acceptance phase — the shape the structural authority
+    /// defers to the simulation.
+    fn with_scoped_search_flag(state: &GameState) -> GameState {
+        let mut scoped = state.clone();
+        let tutor = object_named(state, "Demonic Tutor");
+        scoped.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                tutor,
+                P0,
+            )),
+            phase: ScopedLibrarySearchPhase::CollectAcceptance {
+                remaining_players: Vec::new(),
+                accepted_players: Vec::new(),
+                acceptance_authorities: Vec::new(),
+                current_player: None,
+            },
+            after_scope: None,
+        });
+        scoped
+    }
+
+    /// The legality gate's simulation arm verbatim: one state copy,
+    /// `apply_as_current_for_simulation`.
+    fn planner_simulation_accepts(state: &GameState, action: &GameAction) -> bool {
+        let mut sim = state.clone();
+        apply_as_current_for_simulation(&mut sim, action.clone()).is_ok()
+    }
+
+    /// `PlannerServices::candidate_is_valid` on `action`: its verdict and the
+    /// legality state copies it recorded.
+    fn gate_verdict(state: &GameState, action: &GameAction) -> (bool, u64) {
+        let candidate = CandidateAction {
+            action: action.clone(),
+            metadata: ActionMetadata::for_actor(
+                state.waiting_for.acting_player(),
+                TacticalClass::Selection,
+            ),
+        };
+        perf_counters::reset();
+        let verdict = PlannerServices::candidate_is_valid(
+            state,
+            &candidate,
+            PromptAnswerValidation::AtSubmission,
+        );
+        (verdict, perf_counters::snapshot().state_clone_for_legality)
+    }
+
+    /// How the legality gate must decide an answer.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Route {
+        /// Admitted by `structurally_valid_prompt_answer`: no state copy.
+        Structural,
+        /// Declined by the authority and simulated: at least one state copy.
+        Simulated,
+    }
+
+    /// One agreement row: an answer on a board, the route the gate must take,
+    /// and the verdict derived from the card text and the rules.
+    struct GateRow {
+        label: String,
+        state: GameState,
+        action: GameAction,
+        route: Route,
+        derived: bool,
+        /// CR 723.5: the submitter a multi-authority board must derive.
+        submitter: Option<PlayerId>,
+    }
+
+    fn gate_row(
+        label: impl Into<String>,
+        state: &GameState,
+        action: GameAction,
+        route: Route,
+        derived: bool,
+    ) -> GateRow {
+        GateRow {
+            label: label.into(),
+            state: state.clone(),
+            action,
+            route,
+            derived,
+            submitter: None,
+        }
+    }
+
+    /// T1. Every creature-type answer at Distant Melody's resolution prompt
+    /// passes the planner legality gate, composed as production composes it
+    /// (`score_candidates_core_for_root`: decision context →
+    /// `prepare_payment_candidates` → `validate_prepared_candidates`), without
+    /// a state copy, and every answer is retained.
+    ///
+    /// Fails on revert of the `candidate_is_valid` prompt-answer arm: each
+    /// answer is then simulated (one legality clone per answer).
+    #[test]
+    fn named_choice_answers_pass_the_legality_gate_without_a_state_copy() {
+        let state = distant_melody_prompt(GameScenario::new());
+        let options = named_options(&state);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = PlannerServices::new_default(P0, &config, &policies);
+        // The validation the chooser's root scoring decides under.
+        services.prompt_answers = PromptAnswerValidation::AtSubmission;
+        let ctx = services.build_decision_context(&state);
+        let prepared = prepare_payment_candidates(&state, ctx.candidates.clone());
+
+        // Reach guard: one `ChooseOption` per option, and none carries a
+        // payment successor (which would bypass `candidate_is_valid`).
+        assert_eq!(
+            prepared.len(),
+            options.len(),
+            "one prepared candidate per option"
+        );
+        for entry in &prepared {
+            assert!(
+                matches!(entry.candidate.action, GameAction::ChooseOption { .. }),
+                "unexpected candidate {:?}",
+                entry.candidate.action
+            );
+            assert!(entry.payment_successor.is_none());
+        }
+
+        perf_counters::reset();
+        let validated = services.validate_prepared_candidates(&state, prepared.clone());
+        let clones = perf_counters::snapshot().state_clone_for_legality;
+        assert_eq!(
+            clones, 0,
+            "named-choice answers must pass the legality gate without a state copy"
+        );
+
+        let issued: Vec<GameAction> = prepared
+            .iter()
+            .map(|entry| entry.candidate.action.clone())
+            .collect();
+        let retained: Vec<GameAction> = validated
+            .iter()
+            .map(|entry| entry.candidate.action.clone())
+            .collect();
+        assert_eq!(
+            retained, issued,
+            "the gate must retain every answer, in order"
+        );
+        for action in &issued {
+            assert!(
+                planner_simulation_accepts(&state, action),
+                "the planner's simulation accepts {action:?}"
+            );
+        }
+
+        // Paired reach guard: on the same board an answer outside the domain is
+        // declined by the authority and simulated, so the counter is live.
+        let (verdict, clones) = gate_verdict(&state, &choose("Not A Creature Type"));
+        assert!(!verdict, "a non-creature-type answer is illegal");
+        assert!(
+            clones >= 1,
+            "an answer the authority declines must be simulated"
+        );
+    }
+
+    /// T2. Every selection at Demonic Tutor's library search passes the
+    /// planner legality gate, composed as production composes it, without a
+    /// state copy, and every selection is retained.
+    ///
+    /// Fails on revert of the `candidate_is_valid` prompt-answer arm: each
+    /// selection is then simulated (one legality clone per selection).
+    #[test]
+    fn search_selections_pass_the_legality_gate_without_a_state_copy() {
+        let state = demonic_tutor_prompt(GameScenario::new());
+        let pool = search_pool(&state);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = PlannerServices::new_default(P0, &config, &policies);
+        // The validation the chooser's root scoring decides under.
+        services.prompt_answers = PromptAnswerValidation::AtSubmission;
+        let ctx = services.build_decision_context(&state);
+        let prepared = prepare_payment_candidates(&state, ctx.candidates.clone());
+
+        // Reach guard: one `SelectCards` per library card, and none carries a
+        // payment successor (which would bypass `candidate_is_valid`).
+        assert_eq!(prepared.len(), pool.len(), "one selection per library card");
+        for entry in &prepared {
+            assert!(
+                matches!(entry.candidate.action, GameAction::SelectCards { .. }),
+                "unexpected candidate {:?}",
+                entry.candidate.action
+            );
+            assert!(entry.payment_successor.is_none());
+        }
+
+        perf_counters::reset();
+        let validated = services.validate_prepared_candidates(&state, prepared.clone());
+        let clones = perf_counters::snapshot().state_clone_for_legality;
+        assert_eq!(
+            clones, 0,
+            "search selections must pass the legality gate without a state copy"
+        );
+
+        let issued: Vec<GameAction> = prepared
+            .iter()
+            .map(|entry| entry.candidate.action.clone())
+            .collect();
+        let retained: Vec<GameAction> = validated
+            .iter()
+            .map(|entry| entry.candidate.action.clone())
+            .collect();
+        assert_eq!(
+            retained, issued,
+            "the gate must retain every selection, in order"
+        );
+        for action in &issued {
+            assert!(
+                planner_simulation_accepts(&state, action),
+                "the planner's simulation accepts {action:?}"
+            );
+        }
+
+        // Paired reach guard: the same pick on a scoped search is deferred by
+        // the authority and simulated, and keeps the simulation's verdict.
+        let scoped = with_scoped_search_flag(&state);
+        let pick = select(&pool[..1]);
+        let (verdict, clones) = gate_verdict(&scoped, &pick);
+        assert!(clones >= 1, "a scoped search selection must be simulated");
+        assert_eq!(verdict, planner_simulation_accepts(&scoped, &pick));
+        assert!(verdict, "the ordinary guard accepts a legal single pick");
+    }
+
+    /// The score-only route (`search::score_candidates`; engine-wasm's pool
+    /// workers reach the same scorer through
+    /// `score_candidates_for_parallel_worker`) hands its scores to a selection
+    /// made elsewhere, so nothing on it simulates the answer that is finally
+    /// submitted: its legality gate simulates every offered answer to Distant
+    /// Melody's creature-type prompt, one state copy each.
+    ///
+    /// Fails if that route admits prompt answers without a state copy, as the
+    /// chooser's root scoring does.
+    #[test]
+    fn score_only_route_simulates_every_prompt_answer() {
+        let state = distant_melody_prompt(GameScenario::new());
+        let offered = named_options(&state).len() as u64;
+        let config = create_config(AiDifficulty::Medium, Platform::Native).into_measurement(0);
+        perf_counters::reset();
+        let scored = crate::search::score_candidates(&state, P0, &config);
+        let clones = perf_counters::snapshot().state_clone_for_legality;
+        assert!(!scored.is_empty(), "reach guard: the prompt is scored");
+        assert!(
+            scored
+                .iter()
+                .all(|(action, _)| matches!(action, GameAction::ChooseOption { .. })),
+            "reach guard: the prompt's answers are scored, got {scored:?}"
+        );
+        assert_eq!(
+            clones, offered,
+            "the score-only route must simulate each offered answer once"
+        );
+    }
+
+    /// T3. The prompt-answer arm agrees with the planner's own simulation on
+    /// every row: answers the engine authority admits (including CR 723.5
+    /// controlled-player and latched-search-controller boards, where someone
+    /// other than the prompted player submits) and hostile shapes it must
+    /// decline. Each row's simulation verdict also equals the reading derived
+    /// from the card text and the rules, or, on a board a row mutates after the
+    /// pipeline, from that mutated prompt.
+    ///
+    /// The scope rows answer `ChooseOption` at Celestial Reunion's
+    /// `CostTypeChoice` and `SelectCards` at Cultivate's
+    /// `SearchPartitionChoice` — windows other than `NamedChoice` /
+    /// `SearchChoice`. They fail if `structurally_valid_prompt_answer`'s window
+    /// set widens, because the planner would then admit them without a state
+    /// copy.
+    #[test]
+    fn prompt_answer_gate_agrees_with_the_planner_simulation() {
+        use Route::{Simulated, Structural};
+
+        let mut rows: Vec<GateRow> = Vec::new();
+
+        // CR 608.2d + CR 205.3m: every offered creature type is a legal answer.
+        let melody = distant_melody_prompt(GameScenario::new());
+        let melody_options = named_options(&melody);
+        for option in &melody_options {
+            rows.push(gate_row(
+                format!("melody/each {option}"),
+                &melody,
+                choose(option),
+                Structural,
+                true,
+            ));
+        }
+
+        let brave = brave_the_elements_prompt();
+        for option in named_options(&brave) {
+            rows.push(gate_row(
+                format!("brave/each {option}"),
+                &brave,
+                choose(&option),
+                Structural,
+                true,
+            ));
+        }
+
+        // CR 614.12a: every offered color answers the parked entry.
+        let grove = thriving_grove_prompt();
+        let grove_options = named_options(&grove);
+        for option in &grove_options {
+            rows.push(gate_row(
+                format!("grove/each {option}"),
+                &grove,
+                choose(option),
+                Structural,
+                true,
+            ));
+        }
+
+        // CR 701.23a + CR 701.23d: each single library card is a legal find.
+        let tutor = demonic_tutor_prompt(GameScenario::new());
+        let pool = search_pool(&tutor);
+        for &card in &pool {
+            rows.push(gate_row(
+                format!("tutor/each {card:?}"),
+                &tutor,
+                select(&[card]),
+                Structural,
+                true,
+            ));
+        }
+
+        // Synthetic board (not card-derived): Demonic Tutor's quantity search
+        // must find one card (CR 701.23d); with the prompt's up_to set, as an
+        // "up to N" search's is, the guard accepts finding none.
+        let mut up_to_board = tutor.clone();
+        let WaitingFor::SearchChoice { up_to, .. } = &mut up_to_board.waiting_for else {
+            unreachable!("the fixture asserts the search prompt");
+        };
+        *up_to = true;
+        rows.push(gate_row(
+            "tutor/up-to-empty",
+            &up_to_board,
+            select(&[]),
+            Structural,
+            true,
+        ));
+
+        // CR 701.23a: two distinct cards found by a two-card search.
+        let mut count_two = tutor.clone();
+        let WaitingFor::SearchChoice { count, .. } = &mut count_two.waiting_for else {
+            unreachable!("the fixture asserts the search prompt");
+        };
+        *count = 2;
+        rows.push(gate_row(
+            "tutor/count2-distinct",
+            &count_two,
+            select(&pool[..2]),
+            Structural,
+            true,
+        ));
+
+        // CR 723.5: under player control the controller submits; legality is
+        // unchanged.
+        let mut controlled_2p = melody.clone();
+        controlled_2p.turn_decision_controller = Some(P1);
+        for option in melody_options.iter().take(3) {
+            rows.push(GateRow {
+                submitter: Some(P1),
+                ..gate_row(
+                    format!("melody/controlled-2p {option}"),
+                    &controlled_2p,
+                    choose(option),
+                    Structural,
+                    true,
+                )
+            });
+        }
+
+        let mut controlled_3p = distant_melody_prompt(GameScenario::new_n_player(3, 42));
+        controlled_3p.turn_decision_controller = Some(PlayerId(2));
+        for option in named_options(&controlled_3p).iter().take(3) {
+            rows.push(GateRow {
+                submitter: Some(PlayerId(2)),
+                ..gate_row(
+                    format!("melody/controlled-3p {option}"),
+                    &controlled_3p,
+                    choose(option),
+                    Structural,
+                    true,
+                )
+            });
+        }
+
+        // CR 723.5: the controller makes the controlled player's choices; here
+        // the search's latched controller (P1), not live turn control (P2),
+        // submits. Legality is unchanged.
+        let mut latched_3p = demonic_tutor_prompt(GameScenario::new_n_player(3, 42));
+        latched_3p
+            .active_search_decision_controls
+            .get_mut(&P0)
+            .expect("the search latches its decision control when it starts")
+            .authority = ActiveSearchDecisionAuthority::LatchedController { controller: P1 };
+        latched_3p.turn_decision_controller = Some(PlayerId(2));
+        for &card in search_pool(&latched_3p).iter().take(2) {
+            rows.push(GateRow {
+                submitter: Some(P1),
+                ..gate_row(
+                    format!("tutor/latched-3p {card:?}"),
+                    &latched_3p,
+                    select(&[card]),
+                    Structural,
+                    true,
+                )
+            });
+        }
+
+        // Hostile named-choice rows: the authority declines, the simulation
+        // decides.
+        // CR 205.3m: not a creature type.
+        rows.push(gate_row(
+            "melody/outside-domain",
+            &melody,
+            choose("Not A Creature Type"),
+            Simulated,
+            false,
+        ));
+        // CR 201.4 + CR 107.1a/b: card names and free-entry numbers are
+        // validated by rule; a creature-type word is neither.
+        for (label, by_rule) in [
+            ("melody/card-name", ChoiceType::CardName),
+            (
+                "melody/free-entry",
+                ChoiceType::NumberRange {
+                    min: 0,
+                    max: None,
+                    distinctness: NumberDistinctness::Repeatable,
+                },
+            ),
+        ] {
+            let mut board = melody.clone();
+            let WaitingFor::NamedChoice { choice_type, .. } = &mut board.waiting_for else {
+                unreachable!("the fixture asserts the named-choice prompt");
+            };
+            *choice_type = by_rule;
+            rows.push(gate_row(
+                label,
+                &board,
+                choose(&melody_options[0]),
+                Simulated,
+                false,
+            ));
+        }
+        // CR 614.12a: with no parked entry there is nothing to answer.
+        let mut no_live_entry = grove.clone();
+        no_live_entry.pending_replacement = None;
+        rows.push(gate_row(
+            "grove/no-live-entry",
+            &no_live_entry,
+            choose(&grove_options[0]),
+            Simulated,
+            false,
+        ));
+        // A source-bound prompt without its matching context (the guard's
+        // incoherent-source refusal; not card-derived).
+        let mut no_context = grove.clone();
+        let WaitingFor::NamedChoice {
+            source: Some(source),
+            ..
+        } = &mut no_context.waiting_for
+        else {
+            unreachable!("the fixture asserts the source-bound prompt");
+        };
+        source.context = None;
+        rows.push(gate_row(
+            "grove/no-context",
+            &no_context,
+            choose(&grove_options[0]),
+            Simulated,
+            false,
+        ));
+
+        // Hostile search rows.
+        // CR 701.23d: "a card" with a non-empty library finds exactly one.
+        rows.push(gate_row(
+            "tutor/exact-empty",
+            &tutor,
+            select(&[]),
+            Simulated,
+            false,
+        ));
+        rows.push(gate_row(
+            "tutor/exact-two",
+            &tutor,
+            select(&pool[..2]),
+            Simulated,
+            false,
+        ));
+        // CR 701.23a: the found card must be in the searched library.
+        rows.push(gate_row(
+            "tutor/outside-pool",
+            &tutor,
+            select(&[object_named(&tutor, "Demonic Tutor")]),
+            Simulated,
+            false,
+        ));
+        // CR 701.23a: one card cannot be found twice.
+        rows.push(gate_row(
+            "tutor/duplicate",
+            &count_two,
+            select(&[pool[0], pool[0]]),
+            Simulated,
+            false,
+        ));
+        // CR 202.3 + CR 701.23a: a mana value counts the mana in a cost, so no selection's total is below zero; a found card must match the search's description, which the guard enforces at submission.
+        let mut constrained = tutor.clone();
+        let WaitingFor::SearchChoice { constraint, .. } = &mut constrained.waiting_for else {
+            unreachable!("the fixture asserts the search prompt");
+        };
+        *constraint = SearchSelectionConstraint::TotalManaValue {
+            comparator: Comparator::LT,
+            value: 0,
+        };
+        rows.push(gate_row(
+            "tutor/constraint",
+            &constrained,
+            select(&pool[..1]),
+            Simulated,
+            false,
+        ));
+        // Routing row (not card-derived): a scoped search is deferred, and the
+        // ordinary guard then accepts a legal single pick.
+        rows.push(gate_row(
+            "tutor/scoped",
+            &with_scoped_search_flag(&tutor),
+            select(&pool[..1]),
+            Simulated,
+            true,
+        ));
+
+        // Scope rows: the same two actions at other windows keep the
+        // simulation.
+        // CR 601.2b + CR 701.4a: P0 can behold two Elves, so "Elf" is legal.
+        rows.push(gate_row(
+            "reunion/cost-type-choice",
+            &celestial_reunion_cost_type_prompt(),
+            choose("Elf"),
+            Simulated,
+            true,
+        ));
+        // CR 701.23a + CR 608.2d: either found basic is a legal "one".
+        let partition = cultivate_partition_prompt();
+        let WaitingFor::SearchPartitionChoice { cards: found, .. } = &partition.waiting_for else {
+            unreachable!("the fixture asserts the partition prompt");
+        };
+        for &card in found {
+            rows.push(gate_row(
+                format!("cultivate/partition-each {card:?}"),
+                &partition,
+                select(&[card]),
+                Simulated,
+                true,
+            ));
+        }
+
+        assert!(
+            rows.iter().any(|row| row.route == Structural)
+                && rows.iter().any(|row| row.route == Simulated),
+            "the table must pair structural rows with simulated controls"
+        );
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = PlannerServices::new_default(P0, &config, &policies);
+        let mut scope_rows = 0;
+        for row in &rows {
+            let label = &row.label;
+            let reference = planner_simulation_accepts(&row.state, &row.action);
+            assert_eq!(
+                reference, row.derived,
+                "{label}: the planner's simulation must match the derived reading"
+            );
+            let (verdict, clones) = gate_verdict(&row.state, &row.action);
+            assert_eq!(
+                verdict, reference,
+                "{label}: the gate must agree with the planner's simulation"
+            );
+            match row.route {
+                Structural => assert_eq!(
+                    clones, 0,
+                    "{label}: an answer the authority admits needs no state copy"
+                ),
+                Simulated => assert!(
+                    clones >= 1,
+                    "{label}: an answer the authority declines must be simulated"
+                ),
+            }
+            if let Some(submitter) = row.submitter {
+                assert_eq!(
+                    turn_control::authorized_submitter(&row.state),
+                    Some(submitter),
+                    "{label}: the board must derive the controlling submitter"
+                );
+                assert_ne!(
+                    row.state.waiting_for.acting_player(),
+                    Some(submitter),
+                    "{label}: the submitter must differ from the prompted player"
+                );
+            }
+            if !matches!(
+                row.state.waiting_for,
+                WaitingFor::NamedChoice { .. } | WaitingFor::SearchChoice { .. }
+            ) {
+                // Production reach for a scope row: the engine issues this
+                // answer and it carries no payment successor, so the planner
+                // decides it in `candidate_is_valid`.
+                let ctx = services.build_decision_context(&row.state);
+                let prepared = prepare_payment_candidates(&row.state, ctx.candidates.clone());
+                let entry = prepared
+                    .iter()
+                    .find(|entry| entry.candidate.action == row.action)
+                    .unwrap_or_else(|| panic!("{label}: the engine must issue {:?}", row.action));
+                assert!(
+                    entry.payment_successor.is_none(),
+                    "{label}: the answer must reach `candidate_is_valid`"
+                );
+                scope_rows += 1;
+            }
+        }
+        assert_eq!(
+            scope_rows,
+            1 + found.len(),
+            "both scope boards must be exercised"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // The prompt-answer arm through the AI's per-decision driver: the chooser
+    // decides under `PromptAnswerValidation::AtSubmission`, simulates only the
+    // answer it submits, and when that answer fails decides again as the
+    // simulate-every-answer gate does. Each reference decision runs under
+    // `ChooserSimulatesEachPromptAnswer`, which is that gate.
+    // ------------------------------------------------------------------
+
+    /// CR 205.3m: every creature type, verbatim: Time Lord, the one two-word
+    /// type, then the one-word types in the rule's order.
+    const CR_205_3M_CREATURE_TYPES: &[&str] = &[
+        "Time Lord",
+        "Advisor",
+        "Aetherborn",
+        "Alien",
+        "Ally",
+        "Angel",
+        "Antelope",
+        "Ape",
+        "Archer",
+        "Archon",
+        "Armadillo",
+        "Army",
+        "Artificer",
+        "Assassin",
+        "Assembly-Worker",
+        "Astartes",
+        "Atog",
+        "Aurochs",
+        "Avatar",
+        "Azra",
+        "Badger",
+        "Balloon",
+        "Barbarian",
+        "Bard",
+        "Basilisk",
+        "Bat",
+        "Bear",
+        "Beast",
+        "Beaver",
+        "Beeble",
+        "Beholder",
+        "Berserker",
+        "Bird",
+        "Bison",
+        "Blinkmoth",
+        "Boar",
+        "Bringer",
+        "Brushwagg",
+        "Camarid",
+        "Camel",
+        "Capybara",
+        "Caribou",
+        "Carrier",
+        "Cat",
+        "Centaur",
+        "Child",
+        "Chimera",
+        "Citizen",
+        "Cleric",
+        "Clown",
+        "Cockatrice",
+        "Construct",
+        "Coward",
+        "Coyote",
+        "Crab",
+        "Crocodile",
+        "C’tan",
+        "Custodes",
+        "Cyberman",
+        "Cyclops",
+        "Dalek",
+        "Dauthi",
+        "Demigod",
+        "Demon",
+        "Deserter",
+        "Detective",
+        "Devil",
+        "Dinosaur",
+        "Djinn",
+        "Doctor",
+        "Dog",
+        "Dragon",
+        "Drake",
+        "Dreadnought",
+        "Drix",
+        "Drone",
+        "Druid",
+        "Dryad",
+        "Dwarf",
+        "Echidna",
+        "Efreet",
+        "Egg",
+        "Elder",
+        "Eldrazi",
+        "Elemental",
+        "Elephant",
+        "Elf",
+        "Elk",
+        "Employee",
+        "Eternal",
+        "Eye",
+        "Faerie",
+        "Ferret",
+        "Fish",
+        "Flagbearer",
+        "Fox",
+        "Fractal",
+        "Frog",
+        "Fungus",
+        "Gamer",
+        "Gamma",
+        "Gargoyle",
+        "Germ",
+        "Giant",
+        "Giraffe",
+        "Gith",
+        "Glimmer",
+        "Gnoll",
+        "Gnome",
+        "Goat",
+        "Goblin",
+        "God",
+        "Golem",
+        "Gorgon",
+        "Graveborn",
+        "Gremlin",
+        "Griffin",
+        "Guest",
+        "Hag",
+        "Halfling",
+        "Hamster",
+        "Harpy",
+        "Hedgehog",
+        "Hellion",
+        "Hero",
+        "Hippo",
+        "Hippogriff",
+        "Homarid",
+        "Homunculus",
+        "Horror",
+        "Horse",
+        "Human",
+        "Hydra",
+        "Hyena",
+        "Illusion",
+        "Imp",
+        "Incarnation",
+        "Inhuman",
+        "Inkling",
+        "Inquisitor",
+        "Insect",
+        "Jackal",
+        "Jellyfish",
+        "Juggernaut",
+        "Kangaroo",
+        "Kavu",
+        "Kirin",
+        "Kithkin",
+        "Knight",
+        "Kobold",
+        "Kor",
+        "Kraken",
+        "Kree",
+        "Llama",
+        "Lamia",
+        "Lammasu",
+        "Leech",
+        "Lemur",
+        "Leviathan",
+        "Lhurgoyf",
+        "Licid",
+        "Lizard",
+        "Lobster",
+        "Manticore",
+        "Masticore",
+        "Mercenary",
+        "Merfolk",
+        "Metathran",
+        "Minion",
+        "Minotaur",
+        "Mite",
+        "Mole",
+        "Monger",
+        "Mongoose",
+        "Monk",
+        "Monkey",
+        "Moogle",
+        "Moonfolk",
+        "Mount",
+        "Mouse",
+        "Mutant",
+        "Myr",
+        "Mystic",
+        "Nautilus",
+        "Necron",
+        "Nephilim",
+        "Nightmare",
+        "Nightstalker",
+        "Ninja",
+        "Noble",
+        "Noggle",
+        "Nomad",
+        "Nymph",
+        "Octopus",
+        "Ogre",
+        "Ooze",
+        "Orb",
+        "Orc",
+        "Orgg",
+        "Otter",
+        "Ouphe",
+        "Ox",
+        "Oyster",
+        "Pangolin",
+        "Peasant",
+        "Pegasus",
+        "Pentavite",
+        "Performer",
+        "Pest",
+        "Phelddagrif",
+        "Phoenix",
+        "Phyrexian",
+        "Pilot",
+        "Pincher",
+        "Pirate",
+        "Plant",
+        "Platypus",
+        "Porcupine",
+        "Possum",
+        "Praetor",
+        "Primarch",
+        "Prism",
+        "Processor",
+        "Qu",
+        "Rabbit",
+        "Raccoon",
+        "Ranger",
+        "Rat",
+        "Rebel",
+        "Reflection",
+        "Rhino",
+        "Rigger",
+        "Robot",
+        "Rogue",
+        "Sable",
+        "Salamander",
+        "Samurai",
+        "Sand",
+        "Saproling",
+        "Satyr",
+        "Scarecrow",
+        "Scientist",
+        "Scion",
+        "Scorpion",
+        "Scout",
+        "Sculpture",
+        "Seal",
+        "Serf",
+        "Serpent",
+        "Servo",
+        "Shade",
+        "Shaman",
+        "Shapeshifter",
+        "Shark",
+        "Sheep",
+        "Shi’ar",
+        "Siren",
+        "Skeleton",
+        "Skrull",
+        "Skunk",
+        "Slith",
+        "Sliver",
+        "Sloth",
+        "Slug",
+        "Snail",
+        "Snake",
+        "Soldier",
+        "Soltari",
+        "Sorcerer",
+        "Spawn",
+        "Specter",
+        "Spellshaper",
+        "Sphinx",
+        "Spider",
+        "Spike",
+        "Spirit",
+        "Splinter",
+        "Sponge",
+        "Spy",
+        "Squid",
+        "Squirrel",
+        "Starfish",
+        "Surrakar",
+        "Survivor",
+        "Symbiote",
+        "Synth",
+        "Tentacle",
+        "Tetravite",
+        "Thalakos",
+        "Thopter",
+        "Thrull",
+        "Tiefling",
+        "Toy",
+        "Treefolk",
+        "Trilobite",
+        "Triskelavite",
+        "Troll",
+        "Turtle",
+        "Tyranid",
+        "Unicorn",
+        "Utrom",
+        "Vampire",
+        "Varmint",
+        "Vedalken",
+        "Villain",
+        "Volver",
+        "Wall",
+        "Walrus",
+        "Warlock",
+        "Warrior",
+        "Weasel",
+        "Weird",
+        "Werewolf",
+        "Whale",
+        "Wizard",
+        "Wolf",
+        "Wolverine",
+        "Wombat",
+        "Worm",
+        "Wraith",
+        "Wurm",
+        "Yeti",
+        "Zombie",
+        "Zubera",
+    ];
+
+    const LUMINESCENT_RAIN_ORACLE: &str =
+        "Choose a creature type. You gain 2 life for each permanent you control of that type.";
+
+    /// Put `name`, a P0 spell with `oracle` and mana cost `cost`, in P0's hand,
+    /// and float one mana of each type in `mana` to pay for it.
+    fn add_creature_type_spell(
+        scenario: &mut GameScenario,
+        name: &str,
+        is_instant: bool,
+        oracle: &str,
+        cost: ManaCost,
+        mana: &[ManaType],
+    ) -> ObjectId {
+        let mut builder = scenario.add_spell_to_hand_from_oracle(P0, name, is_instant, oracle);
+        builder.with_mana_cost(cost);
+        let spell = builder.id();
+        scenario.with_mana_pool(
+            P0,
+            mana.iter()
+                .map(|&mana_type| ManaUnit::new(mana_type, spell, false, vec![]))
+                .collect(),
+        );
+        spell
+    }
+
+    /// Cast `spell` for P0 on `runner` and resolve it up to its CR 608.2d
+    /// creature-type prompt, with `GameState::all_creature_types` holding every
+    /// type CR 205.3m lists, so the prompt offers that full list (sorted, as the
+    /// engine offers it) rather than the engine's short fallback list.
+    fn prompt_offering_every_creature_type(mut runner: GameRunner, spell: ObjectId) -> GameState {
+        runner.state_mut().all_creature_types = CR_205_3M_CREATURE_TYPES
+            .iter()
+            .map(|creature_type| creature_type.to_string())
+            .collect();
+        let state = resolve_to_prompt(&mut runner, spell);
+        let mut every_type = runner.state().all_creature_types.clone();
+        every_type.sort();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice {
+                player,
+                choice_type: ChoiceType::CreatureType { .. },
+                options,
+                ..
+            } => {
+                assert_eq!(*player, P0, "P0 resolves the spell");
+                assert_eq!(
+                    options, &every_type,
+                    "the prompt must offer every CR 205.3m creature type"
+                );
+            }
+            other => panic!("the spell must halt on its creature-type prompt, got {other:?}"),
+        }
+        assert!(
+            !state.withholds_priority(),
+            "the prompt is answered while the spell resolves, not mid-cast"
+        );
+        state
+    }
+
+    /// What one AI decision did.
+    struct AiDecision {
+        /// The action the AI submitted.
+        action: GameAction,
+        /// The state after the engine applied it.
+        after: GameState,
+        /// The legality state copies the decision made.
+        clones: u64,
+        /// The AI's next RNG draw after the decision: equal values mean the
+        /// two decisions left the AI's stream at the same position.
+        next_draw: u64,
+    }
+
+    /// One AI decision for P0 on `prompt` through `auto_play::run_ai_action`,
+    /// the per-decision step of the native AI game loops (ai-duel and
+    /// ai-commander reach it through `run_ai_actions_with_limit`, the
+    /// multiplayer server directly): issue the decision contract, choose
+    /// through `choose_action_with_issued_contract`, and apply the choice at
+    /// the engine's interaction boundary. The seat is configured as ai-duel
+    /// configures one (`Medium`, native, two players, measurement mode, so no
+    /// wall-clock deadline), with the AI's RNG seeded from the same run seed
+    /// and a fresh session. Panics if the engine rejects the action.
+    fn run_ai_decision(prompt: &GameState) -> AiDecision {
+        run_ai_decision_with(
+            prompt,
+            create_config_for_players(AiDifficulty::Medium, Platform::Native, 2)
+                .into_measurement(AI_DECISION_SEED),
+        )
+    }
+
+    /// The run seed of every AI decision these tests take: the seat's RNG is
+    /// seeded from it, as is a measurement-mode seat configuration.
+    const AI_DECISION_SEED: u64 = 0;
+
+    /// A wall-clock budget no decision in these tests comes near (ten minutes):
+    /// a deadline started from it is still live when the decision ends.
+    const LIVE_TIME_BUDGET_MS: u32 = 600_000;
+
+    /// [`run_ai_decision`] for a seat configured as `config`.
+    fn run_ai_decision_with(prompt: &GameState, config: AiConfig) -> AiDecision {
+        run_ai_decision_in(prompt, config, AiSession::arc_from_game(prompt))
+    }
+
+    /// [`run_ai_decision_with`] in `session`, a session fresh for `prompt`.
+    fn run_ai_decision_in(
+        prompt: &GameState,
+        config: AiConfig,
+        session: Arc<AiSession>,
+    ) -> AiDecision {
+        let ai_configs = HashMap::from([(P0, config)]);
+        let ai_players = HashSet::from([P0]);
+        let mut rng = StdRng::seed_from_u64(AI_DECISION_SEED);
+        let mut state = prompt.clone();
+        perf_counters::reset();
+        let step = run_ai_action(&mut state, &ai_players, &ai_configs, &mut rng, &session);
+        let clones = perf_counters::snapshot().state_clone_for_legality;
+        match step {
+            ControlFlow::Continue(result) => AiDecision {
+                action: result.action,
+                after: state,
+                clones,
+                next_draw: rng.random(),
+            },
+            ControlFlow::Break(stop) => {
+                panic!("the engine must accept the AI's action, got {stop:?}")
+            }
+        }
+    }
+
+    /// [`run_ai_decision`] with the chooser on `PromptAnswerValidation::EachCandidate`
+    /// from the start: the legality gate that simulates every prompt answer and
+    /// checks nothing after selection.
+    fn run_reference_ai_decision(prompt: &GameState) -> AiDecision {
+        let _each_candidate = ChooserSimulatesEachPromptAnswer::enter();
+        run_ai_decision(prompt)
+    }
+
+    /// The first `count` values the AI's RNG yields, seeded as each decision here
+    /// seeds it. A selection's draw (`rng.random::<f64>()`) advances the stream by
+    /// one `u64`, so a decision that took `n` draws reports `seat_draws(n + 1)[n]`
+    /// as its `next_draw`.
+    fn seat_draws(count: usize) -> Vec<u64> {
+        let mut rng = StdRng::seed_from_u64(AI_DECISION_SEED);
+        (0..count).map(|_| rng.random()).collect()
+    }
+
+    /// A tactical policy that rejects every named-choice answer (`ChooseOption`)
+    /// except those naming one of `except`, and is neutral on everything else.
+    /// Installed as a session's whole registry (`AiSession::policy_registry_override`),
+    /// it makes each rejected answer's tactical score −∞ (`PolicyRegistry::score`):
+    /// the only way to put a policy-rejected prompt answer in front of the scorer.
+    #[derive(Clone, Copy)]
+    struct RejectsNamedChoices {
+        except: &'static [&'static str],
+    }
+
+    impl TacticalPolicy for RejectsNamedChoices {
+        fn id(&self) -> PolicyId {
+            PolicyId::CreatureTypeChoice
+        }
+
+        fn decision_kinds(&self) -> &'static [DecisionKind] {
+            // `decision_kind::classify` routes a `NamedChoice` answer here.
+            &[DecisionKind::ActivateAbility]
+        }
+
+        fn activation(
+            &self,
+            _: &crate::features::DeckFeatures,
+            _: &GameState,
+            _: PlayerId,
+        ) -> Option<f32> {
+            Some(1.0)
+        }
+
+        fn verdict(&self, context: &PolicyContext<'_>) -> PolicyVerdict {
+            let reason = PolicyReason::new("rejects_named_choices_test");
+            match &context.candidate.action {
+                GameAction::ChooseOption { choice } if !self.except.contains(&choice.as_str()) => {
+                    PolicyVerdict::reject(reason)
+                }
+                _ => PolicyVerdict::neutral(reason),
+            }
+        }
+    }
+
+    /// A fresh session for `prompt` whose scorer consults `policy` alone.
+    fn session_scoring_with(prompt: &GameState, policy: RejectsNamedChoices) -> Arc<AiSession> {
+        let mut session = AiSession::from_game(prompt);
+        session.policy_registry_override =
+            Some(Arc::new(PolicyRegistry::for_tests(vec![Box::new(policy)])));
+        Arc::new(session)
+    }
+
+    fn seat(state: &GameState, player: PlayerId) -> &engine::types::player::Player {
+        state
+            .players
+            .iter()
+            .find(|seat| seat.id == player)
+            .expect("the player exists")
+    }
+
+    /// Production path on the full creature-type list: through the AI's
+    /// per-decision driver, Distant Melody's CR 608.2d creature-type prompt
+    /// offering every CR 205.3m type costs one legality state copy, for the
+    /// type the AI submits, and the AI submits the type, and leaves its RNG
+    /// where, the simulate-every-answer gate does. The engine accepts the
+    /// answer and the spell finishes resolving with it.
+    ///
+    /// Fails if the chooser's prompt-answer arm is removed (one state copy per
+    /// offered type) or loses its submission check (no copy).
+    #[test]
+    fn ai_driver_simulates_only_the_creature_type_it_submits() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // A library, so the cards "Elf" draws do not come from an empty one.
+        scenario.with_library_top(P0, &["Card A", "Card B", "Card C", "Card D"]);
+        for name in ["Elf A", "Elf B"] {
+            scenario
+                .add_creature(P0, name, 1, 1)
+                .with_subtypes(vec!["Elf"]);
+        }
+        let melody = add_creature_type_spell(
+            &mut scenario,
+            "Distant Melody",
+            false,
+            DISTANT_MELODY_ORACLE,
+            ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Blue],
+            },
+            &[
+                ManaType::Colorless,
+                ManaType::Colorless,
+                ManaType::Colorless,
+                ManaType::Blue,
+            ],
+        );
+        let prompt = prompt_offering_every_creature_type(scenario.build(), melody);
+        let offered = named_options(&prompt).len() as u64;
+
+        let decision = run_ai_decision(&prompt);
+        assert_eq!(
+            decision.clones, 1,
+            "the AI driver must simulate the creature type it submits, and no other"
+        );
+
+        // The engine accepted the answer (`run_ai_decision` panics otherwise)
+        // and Distant Melody resolved with it: P0 drew a card for each
+        // permanent it controls of the chosen type, and as the active player
+        // receives priority again (CR 117.3b).
+        let GameAction::ChooseOption { choice } = &decision.action else {
+            panic!(
+                "the AI must answer the creature-type prompt, got {:?}",
+                decision.action
+            );
+        };
+        let of_chosen_type = prompt
+            .objects
+            .values()
+            .filter(|object| {
+                object.zone == Zone::Battlefield
+                    && object.controller == P0
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == choice)
+            })
+            .count();
+        assert_eq!(
+            seat(&decision.after, P0).hand.len(),
+            seat(&prompt, P0).hand.len() + of_chosen_type,
+            "P0 draws a card for each permanent it controls of the chosen type ({choice})"
+        );
+        assert!(
+            decision.after.stack.is_empty(),
+            "Distant Melody must finish resolving"
+        );
+        assert!(
+            matches!(decision.after.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "P0 must receive priority after Distant Melody resolves, got {:?}",
+            decision.after.waiting_for
+        );
+
+        let reference = run_reference_ai_decision(&prompt);
+        assert_eq!(
+            reference.clones, offered,
+            "reach guard: the simulate-every-answer gate copies the state once per offered type"
+        );
+        assert_eq!(
+            decision.action, reference.action,
+            "the AI must submit the creature type the simulate-every-answer gate picks"
+        );
+        assert_eq!(
+            decision.next_draw, reference.next_draw,
+            "the decision must draw from the AI's RNG exactly as that gate's decision does"
+        );
+    }
+
+    /// Production path where the answer the AI prefers passes the structural
+    /// check but the engine rejects it: Luminescent Rain ("Choose a creature
+    /// type. You gain 2 life for each permanent you control of that type.") for
+    /// a P0 one life below the largest life total the engine represents
+    /// (`i32::MAX`; CR 119.3 adjusts a life total by what is gained, and the
+    /// rules set no maximum), controlling one creature of each of five types.
+    /// Each of those types would gain 2 life, a total outside that range, so
+    /// its apply returns `EngineError::LifeChangeUnrepresentable`; every other
+    /// type gains no life and applies. The five fill the Medium root beam, and
+    /// the root search's simulation of the first of them fails, so the decision
+    /// is scored again with every type simulated before anything is selected. The AI
+    /// submits the type, and leaves its RNG where, the simulate-every-answer
+    /// gate does, and the driver simulates that type once more before
+    /// submitting it. Its assertions do not tell that re-score apart from the
+    /// chooser's retake of a selected type that fails; rung 0's detection is
+    /// pinned by
+    /// `rung_zero_stops_at_the_first_admitted_answer_that_fails` (`search.rs`),
+    /// `ai_driver_scores_again_when_its_root_search_rejects_an_admitted_type`
+    /// and `ai_driver_scores_again_when_a_policy_rejected_beam_type_fails`.
+    ///
+    /// Fails if nothing simulates an admitted answer before it is submitted:
+    /// the AI then submits a rejected type and `run_ai_action` stops with
+    /// `ApplyFailed`.
+    #[test]
+    fn ai_driver_replaces_a_submitted_creature_type_the_engine_rejects() {
+        const CONTROLLED: [&str; 5] = ["Elf", "Goblin", "Human", "Merfolk", "Zombie"];
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, i32::MAX - 1);
+        for subtype in CONTROLLED {
+            scenario
+                .add_creature(P0, &format!("{subtype} A"), 1, 1)
+                .with_subtypes(vec![subtype]);
+        }
+        let rain = add_creature_type_spell(
+            &mut scenario,
+            "Luminescent Rain",
+            true,
+            LUMINESCENT_RAIN_ORACLE,
+            ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Green],
+            },
+            &[ManaType::Colorless, ManaType::Colorless, ManaType::Green],
+        );
+        let prompt = prompt_offering_every_creature_type(scenario.build(), rain);
+        let offered = named_options(&prompt).len() as u64;
+
+        // Fixture: each controlled type passes the structural check and is
+        // rejected on apply; a type P0 controls no permanent of applies.
+        for subtype in CONTROLLED {
+            let answer = choose(subtype);
+            assert!(
+                engine::ai_support::structurally_valid_prompt_answer(&prompt, &answer),
+                "{subtype} is an offered creature type"
+            );
+            let mut sim = prompt.clone();
+            let applied = apply_as_current_for_simulation(&mut sim, answer);
+            assert!(
+                matches!(
+                    applied,
+                    Err(EngineError::LifeChangeUnrepresentable { player }) if player == P0
+                ),
+                "{subtype}: 2 more life is outside the engine's range, got {applied:?}"
+            );
+        }
+        assert!(
+            planner_simulation_accepts(&prompt, &choose("Advisor")),
+            "a type P0 controls no permanent of gains no life and applies"
+        );
+
+        let decision = run_ai_decision(&prompt);
+        let reference = run_reference_ai_decision(&prompt);
+        assert_eq!(
+            reference.clones, offered,
+            "reach guard: the simulate-every-answer gate copies the state once per offered type"
+        );
+        assert_eq!(
+            decision.clones,
+            offered + 1,
+            "the root search rejects the first type in its beam, every offered type is then \
+             simulated, and the submitted one once more"
+        );
+        assert_eq!(
+            decision.action, reference.action,
+            "the AI must submit the creature type the simulate-every-answer gate picks"
+        );
+        assert_eq!(
+            decision.next_draw, reference.next_draw,
+            "the decision must draw from the AI's RNG exactly as that gate's decision does"
+        );
+
+        // Luminescent Rain resolved with an accepted type: none of P0's, so no
+        // life is gained, and P0 as the active player receives priority again
+        // (CR 117.3b).
+        let GameAction::ChooseOption { choice } = &decision.action else {
+            panic!(
+                "the AI must answer the creature-type prompt, got {:?}",
+                decision.action
+            );
+        };
+        assert!(
+            !CONTROLLED.contains(&choice.as_str()),
+            "the AI must not submit a rejected type, got {choice}"
+        );
+        assert_eq!(seat(&decision.after, P0).life, i32::MAX - 1);
+        assert!(
+            decision.after.stack.is_empty(),
+            "Luminescent Rain must finish resolving"
+        );
+        assert!(
+            matches!(decision.after.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "P0 must receive priority after Luminescent Rain resolves, got {:?}",
+            decision.after.waiting_for
+        );
+    }
+
+    /// Luminescent Rain ("Choose a creature type. You gain 2 life for each
+    /// permanent you control of that type.") cast by a P0 one life below the
+    /// largest life total the engine represents (`i32::MAX`), controlling one
+    /// creature of each type in `controlled`, resolved up to its creature-type
+    /// prompt offering every CR 205.3m type. Asserts the fixture: each
+    /// controlled type passes the structural check and its apply returns
+    /// `EngineError::LifeChangeUnrepresentable` (2 more life is outside that
+    /// range; CR 119.3 adjusts a life total by what is gained, and the rules set
+    /// no maximum), and a type P0 controls no permanent of gains no life and
+    /// applies.
+    /// `pub(crate)` so the root-search tests in `search.rs` build the same board.
+    pub(crate) fn luminescent_rain_prompt_rejecting(controlled: &[&str]) -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, i32::MAX - 1);
+        for subtype in controlled {
+            scenario
+                .add_creature(P0, &format!("{subtype} A"), 1, 1)
+                .with_subtypes(vec![*subtype]);
+        }
+        let rain = add_creature_type_spell(
+            &mut scenario,
+            "Luminescent Rain",
+            true,
+            LUMINESCENT_RAIN_ORACLE,
+            ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Green],
+            },
+            &[ManaType::Colorless, ManaType::Colorless, ManaType::Green],
+        );
+        let prompt = prompt_offering_every_creature_type(scenario.build(), rain);
+        for subtype in controlled {
+            let answer = choose(subtype);
+            assert!(
+                engine::ai_support::structurally_valid_prompt_answer(&prompt, &answer),
+                "{subtype} is an offered creature type"
+            );
+            let mut sim = prompt.clone();
+            let applied = apply_as_current_for_simulation(&mut sim, answer);
+            assert!(
+                matches!(
+                    applied,
+                    Err(EngineError::LifeChangeUnrepresentable { player }) if player == P0
+                ),
+                "{subtype}: 2 more life is outside the engine's range, got {applied:?}"
+            );
+        }
+        assert!(
+            planner_simulation_accepts(&prompt, &choose("Advisor")),
+            "a type P0 controls no permanent of gains no life and applies"
+        );
+        prompt
+    }
+
+    /// Production path where the root beam holds answers the engine rejects
+    /// beside one it accepts: Luminescent Rain for a P0 at `i32::MAX - 1` life
+    /// controlling one creature of each of four types. Those four types would
+    /// each gain life past the engine's range, so their applies fail; they
+    /// outrank every other type and take four of the Medium beam's five places,
+    /// and the fifth is a type P0 controls no permanent of, which applies. The
+    /// root search simulates the beam in order and stops at the first of the
+    /// four, which it finds rejected, so the decision is scored again with
+    /// every type simulated before anything is selected: the AI submits the
+    /// type, and leaves its RNG where, the
+    /// simulate-every-answer gate does, whose beam holds five accepted types.
+    ///
+    /// Fails if only a selected answer that fails is replaced: the AI then
+    /// selects the one accepted type of the crowded beam.
+    #[test]
+    fn ai_driver_scores_again_when_its_root_search_rejects_an_admitted_type() {
+        const CONTROLLED: [&str; 4] = ["Elf", "Goblin", "Human", "Merfolk"];
+        let prompt = luminescent_rain_prompt_rejecting(&CONTROLLED);
+        let offered = named_options(&prompt).len() as u64;
+
+        let decision = run_ai_decision(&prompt);
+        let reference = run_reference_ai_decision(&prompt);
+        assert_eq!(
+            reference.clones, offered,
+            "reach guard: the simulate-every-answer gate copies the state once per offered type"
+        );
+        assert_eq!(
+            decision.action, reference.action,
+            "the AI must submit the creature type the simulate-every-answer gate picks"
+        );
+        assert_eq!(
+            decision.next_draw, reference.next_draw,
+            "the decision must draw from the AI's RNG exactly as that gate's decision does"
+        );
+        assert_eq!(
+            decision.clones,
+            offered + 1,
+            "the root search rejects the first admitted type in its beam, every offered type is then \
+             simulated, and the submitted one once more"
+        );
+
+        // Luminescent Rain resolved with an accepted type: none of P0's, so no
+        // life is gained, and P0 as the active player receives priority again
+        // (CR 117.3b).
+        let GameAction::ChooseOption { choice } = &decision.action else {
+            panic!(
+                "the AI must answer the creature-type prompt, got {:?}",
+                decision.action
+            );
+        };
+        assert!(
+            !CONTROLLED.contains(&choice.as_str()),
+            "the AI must not submit a rejected type, got {choice}"
+        );
+        assert_eq!(seat(&decision.after, P0).life, i32::MAX - 1);
+        assert!(
+            decision.after.stack.is_empty(),
+            "Luminescent Rain must finish resolving"
+        );
+        assert!(
+            matches!(decision.after.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "P0 must receive priority after Luminescent Rain resolves, got {:?}",
+            decision.after.waiting_for
+        );
+    }
+
+    /// Production path where nothing simulates the beam before selection: the
+    /// Luminescent Rain board whose five rejected types fill the Medium root
+    /// beam, decided by a seat whose root search has no time
+    /// (`time_budget_ms: Some(0)`), so its deadline has expired before the
+    /// search's first rung and the beam is scored by the tactical floor alone.
+    /// The AI selects a rejected type, the driver's simulation of it fails, and
+    /// the decision is taken again with every type simulated, from the same
+    /// selection draw and under the same expired deadline: the AI submits the
+    /// type, and leaves its RNG where, the simulate-every-answer gate does.
+    ///
+    /// Fails without the chooser's submission check: the AI then submits the
+    /// rejected type and `run_ai_action` stops with `ApplyFailed`.
+    #[test]
+    fn ai_driver_replaces_a_rejected_type_it_selects_before_any_search() {
+        const CONTROLLED: [&str; 5] = ["Elf", "Goblin", "Human", "Merfolk", "Zombie"];
+        let prompt = luminescent_rain_prompt_rejecting(&CONTROLLED);
+        let offered = named_options(&prompt).len() as u64;
+        let mut config = create_config_for_players(AiDifficulty::Medium, Platform::Native, 2);
+        config.search.time_budget_ms = Some(0);
+        assert!(
+            !config.execution_mode.is_measurement() && config.search.enabled,
+            "fixture: a searching seat whose wall-clock budget is spent before the search"
+        );
+
+        let decision = run_ai_decision_with(&prompt, config.clone());
+        let reference = {
+            let _each_candidate = ChooserSimulatesEachPromptAnswer::enter();
+            run_ai_decision_with(&prompt, config)
+        };
+        assert_eq!(
+            reference.clones, offered,
+            "reach guard: the simulate-every-answer gate copies the state once per offered type"
+        );
+        assert_eq!(
+            decision.clones,
+            offered + 1,
+            "the selected type's simulation fails, then every offered type is simulated"
+        );
+        assert_eq!(
+            decision.action, reference.action,
+            "the AI must submit the creature type the simulate-every-answer gate picks"
+        );
+        assert_eq!(
+            decision.next_draw, reference.next_draw,
+            "the decision must draw from the AI's RNG exactly as that gate's decision does"
+        );
+        let GameAction::ChooseOption { choice } = &decision.action else {
+            panic!(
+                "the AI must answer the creature-type prompt, got {:?}",
+                decision.action
+            );
+        };
+        assert!(
+            !CONTROLLED.contains(&choice.as_str()),
+            "the AI must not submit a rejected type, got {choice}"
+        );
+        assert_eq!(seat(&decision.after, P0).life, i32::MAX - 1);
+        assert!(
+            decision.after.stack.is_empty(),
+            "Luminescent Rain must finish resolving"
+        );
+        assert!(
+            matches!(decision.after.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "P0 must receive priority after Luminescent Rain resolves, got {:?}",
+            decision.after.waiting_for
+        );
+    }
+
+    /// Production path where the root beam holds an answer both a policy and the
+    /// engine reject: Luminescent Rain ("Choose a creature type. You gain 2 life
+    /// for each permanent you control of that type.") for a P0 at `i32::MAX - 1`
+    /// life controlling one Ally, decided by a Medium seat whose only policy
+    /// rejects every creature type. Every type then scores −∞, so the root beam is
+    /// the first five types in the stable action order (Advisor, Aetherborn, Alien,
+    /// Ally, Angel). Ally's apply fails: 2 more life is outside the engine's range
+    /// (CR 119.3 adjusts a life total by what is gained, and the rules set no
+    /// maximum). The root search's first rung simulates the admitted answers in its
+    /// beam in order although a policy rejects them, stops at Ally, which it finds
+    /// rejected, and the decision is scored again with every type simulated before
+    /// anything is selected. That
+    /// gate's beam (Advisor, Aetherborn, Alien, Angel, Antelope) is all −∞, so its
+    /// selection takes no draw and falls back to the last row in the stable order,
+    /// Antelope, which the driver simulates once more before submitting it.
+    ///
+    /// Fails if the first rung skips a rejected admitted answer: the AI then
+    /// selects Angel from the beam that holds Ally, after one state copy.
+    #[test]
+    fn ai_driver_scores_again_when_a_policy_rejected_beam_type_fails() {
+        const CONTROLLED: [&str; 1] = ["Ally"];
+        let rejects_every_type = RejectsNamedChoices { except: &[] };
+        let prompt = luminescent_rain_prompt_rejecting(&CONTROLLED);
+        let offered = named_options(&prompt).len() as u64;
+        let config = create_config_for_players(AiDifficulty::Medium, Platform::Native, 2)
+            .into_measurement(AI_DECISION_SEED);
+
+        let decision = run_ai_decision_in(
+            &prompt,
+            config.clone(),
+            session_scoring_with(&prompt, rejects_every_type),
+        );
+        let reference = {
+            let _each_candidate = ChooserSimulatesEachPromptAnswer::enter();
+            run_ai_decision_in(
+                &prompt,
+                config,
+                session_scoring_with(&prompt, rejects_every_type),
+            )
+        };
+        assert_eq!(
+            reference.clones, offered,
+            "reach guard: the simulate-every-answer gate copies the state once per offered type"
+        );
+        assert_eq!(
+            reference.next_draw,
+            seat_draws(1)[0],
+            "reach guard: the policy rejects every type, so no row has a finite weight and the selection takes no draw"
+        );
+        assert_eq!(
+            reference.action,
+            choose("Antelope"),
+            "reach guard: that gate's beam is the first five accepted types in the stable order, and its selection falls back to the last"
+        );
+        assert_eq!(
+            decision.clones,
+            offered + 1,
+            "the first rung simulates the policy-rejected Ally in the beam and finds it rejected, every offered type is then simulated, and the submitted one once more"
+        );
+        assert_eq!(
+            decision.action, reference.action,
+            "the AI must submit the creature type the simulate-every-answer gate picks"
+        );
+        assert_eq!(
+            decision.next_draw, reference.next_draw,
+            "the decision must draw from the AI's RNG exactly as that gate's decision does"
+        );
+        assert_eq!(seat(&decision.after, P0).life, i32::MAX - 1);
+        assert!(
+            decision.after.stack.is_empty(),
+            "Luminescent Rain must finish resolving"
+        );
+        assert!(
+            matches!(decision.after.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "P0 must receive priority after Luminescent Rain resolves (CR 117.3b), got {:?}",
+            decision.after.waiting_for
+        );
+    }
+
+    /// Production path on a seat with search disabled (Easy;
+    /// `create_config_for_players` also disables it at Medium or below for five or
+    /// more players), so no root search simulates the scored answers and the
+    /// chooser's check of the answer it selects is the only simulation of an
+    /// admitted answer before submission. Luminescent Rain ("Choose a creature
+    /// type. You gain 2 life for each permanent you control of that type.") for a
+    /// P0 at `i32::MAX - 1` life controlling one creature of each of five types,
+    /// scored by a policy that rejects every type except those five. Each of the
+    /// five would gain life past the engine's range (CR 119.3 sets no maximum), so
+    /// its apply fails. They are the only rows with a finite score, so the
+    /// only rows with a nonzero selection weight, and the selection draws once
+    /// and selects one of them. The driver's simulation of it
+    /// fails, and the decision is taken again with every type simulated: the five
+    /// are gone, every remaining row is −∞, and the selection falls back to the
+    /// last type in the stable order, Zubera, without another draw. The
+    /// simulate-every-answer gate selects Zubera too, without any draw, so the
+    /// decision leaves the AI's RNG one draw ahead of that gate's, as the chooser
+    /// states for a seat whose root search does not simulate the beam.
+    ///
+    /// Fails if the chooser checks the answer it selects only on a searching seat:
+    /// the AI then submits a rejected type and `run_ai_action` stops with
+    /// `ApplyFailed`.
+    #[test]
+    fn ai_driver_without_search_replaces_a_rejected_type_it_selects() {
+        const CONTROLLED: [&str; 5] = ["Elf", "Goblin", "Human", "Merfolk", "Zombie"];
+        let rejects_all_but_controlled = RejectsNamedChoices {
+            except: &CONTROLLED,
+        };
+        let prompt = luminescent_rain_prompt_rejecting(&CONTROLLED);
+        let offered = named_options(&prompt).len() as u64;
+        let config = create_config_for_players(AiDifficulty::Easy, Platform::Native, 2)
+            .into_measurement(AI_DECISION_SEED);
+        assert!(
+            !config.search.enabled
+                && PromptAnswerValidation::for_chooser(&config)
+                    == PromptAnswerValidation::AtSubmission,
+            "fixture: a seat that scores without search and decides under `AtSubmission`"
+        );
+
+        let decision = run_ai_decision_in(
+            &prompt,
+            config.clone(),
+            session_scoring_with(&prompt, rejects_all_but_controlled),
+        );
+        let reference = {
+            let _each_candidate = ChooserSimulatesEachPromptAnswer::enter();
+            run_ai_decision_in(
+                &prompt,
+                config,
+                session_scoring_with(&prompt, rejects_all_but_controlled),
+            )
+        };
+        let draws = seat_draws(2);
+        assert_eq!(
+            reference.clones, offered,
+            "reach guard: the simulate-every-answer gate copies the state once per offered type"
+        );
+        assert_eq!(
+            reference.next_draw, draws[0],
+            "reach guard: without the five rejected types every row is rejected, so that gate's selection takes no draw"
+        );
+        assert_eq!(
+            reference.action,
+            choose("Zubera"),
+            "reach guard: that gate's selection falls back to the last type in the stable order"
+        );
+        assert_eq!(
+            decision.clones,
+            offered + 1,
+            "the selected type's simulation fails, then every offered type is simulated"
+        );
+        assert_eq!(
+            decision.action, reference.action,
+            "the AI must submit the creature type the simulate-every-answer gate picks"
+        );
+        assert_eq!(
+            decision.next_draw, draws[1],
+            "the decision's first selection draws once, where that gate's selection draws none"
+        );
+        assert_eq!(seat(&decision.after, P0).life, i32::MAX - 1);
+        assert!(
+            decision.after.stack.is_empty(),
+            "Luminescent Rain must finish resolving"
+        );
+        assert!(
+            matches!(decision.after.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "P0 must receive priority after Luminescent Rain resolves (CR 117.3b), got {:?}",
+            decision.after.waiting_for
+        );
+    }
+
+    /// Production path for the chooser's retake under a live wall-clock
+    /// deadline: the board and policy of
+    /// `ai_driver_without_search_replaces_a_rejected_type_it_selects`, decided
+    /// by an Easy seat, whose search is disabled, outside measurement mode and
+    /// under a budget no decision comes near. The type the selection takes is
+    /// one P0 controls, so its simulation fails and the chooser takes the
+    /// decision again under `EachCandidate`, a second scoring pass. That second
+    /// pass must run under the root-search deadline the first pass started.
+    ///
+    /// Fails if the chooser hands a pass a fresh `RootSearchDeadline`: the
+    /// second pass then starts a deadline of its own, at a later instant.
+    #[test]
+    fn ai_driver_retakes_a_decision_under_the_deadline_its_first_pass_started() {
+        const CONTROLLED: [&str; 5] = ["Elf", "Goblin", "Human", "Merfolk", "Zombie"];
+        let prompt = luminescent_rain_prompt_rejecting(&CONTROLLED);
+        let offered = named_options(&prompt).len() as u64;
+        let mut config = create_config_for_players(AiDifficulty::Easy, Platform::Native, 2);
+        config.search.time_budget_ms = Some(LIVE_TIME_BUDGET_MS);
+        assert!(
+            !config.execution_mode.is_measurement()
+                && !config.search.enabled
+                && PromptAnswerValidation::for_chooser(&config)
+                    == PromptAnswerValidation::AtSubmission,
+            "fixture: a seat under a wall-clock budget that scores without search and decides under `AtSubmission`"
+        );
+
+        crate::search::ROOT_SEARCH_DEADLINES.with_borrow_mut(Vec::clear);
+        let decision = run_ai_decision_in(
+            &prompt,
+            config,
+            session_scoring_with(
+                &prompt,
+                RejectsNamedChoices {
+                    except: &CONTROLLED,
+                },
+            ),
+        );
+        let deadlines = crate::search::ROOT_SEARCH_DEADLINES.take();
+
+        assert_eq!(
+            decision.clones,
+            offered + 1,
+            "reach guard: the selected type's simulation fails, then every offered type is simulated"
+        );
+        assert_eq!(
+            deadlines.len(),
+            2,
+            "reach guard: the decision is scored twice"
+        );
+        assert!(
+            deadlines[0].remaining().is_some(),
+            "reach guard: the first pass runs under a wall-clock deadline"
+        );
+        assert_eq!(
+            deadlines[1], deadlines[0],
+            "the retaken decision must run under the deadline its first pass started"
+        );
+        let GameAction::ChooseOption { choice } = &decision.action else {
+            panic!(
+                "the AI must answer the creature-type prompt, got {:?}",
+                decision.action
+            );
+        };
+        assert!(
+            !CONTROLLED.contains(&choice.as_str()),
+            "the AI must not submit a rejected type, got {choice}"
+        );
+        assert_eq!(seat(&decision.after, P0).life, i32::MAX - 1);
+        assert!(
+            decision.after.stack.is_empty(),
+            "Luminescent Rain must finish resolving"
+        );
+        assert!(
+            matches!(decision.after.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "P0 must receive priority after Luminescent Rain resolves (CR 117.3b), got {:?}",
+            decision.after.waiting_for
+        );
+    }
+
+    /// Production path for the scorer's re-score under a live wall-clock
+    /// deadline: the board of
+    /// `ai_driver_replaces_a_submitted_creature_type_the_engine_rejects`,
+    /// decided by a Medium seat outside measurement mode and under a budget no
+    /// decision comes near. The root search's first rung finds a type of its
+    /// beam rejected, so the scorer scores the decision again under
+    /// `EachCandidate`, a second scoring pass. That second pass must run under
+    /// the root-search deadline the first pass started.
+    ///
+    /// The assertions do not tell that re-score apart from the chooser's retake
+    /// of a selected answer that fails: the chooser simulates a rejected type
+    /// it selects and takes the decision again under `EachCandidate`, a second
+    /// scoring pass that also runs under the deadline the first pass started,
+    /// with as many state copies. Rung 0's detection of a rejected admitted
+    /// answer is pinned by
+    /// `rung_zero_stops_at_the_first_admitted_answer_that_fails` (`search.rs`),
+    /// `ai_driver_scores_again_when_its_root_search_rejects_an_admitted_type`
+    /// and `ai_driver_scores_again_when_a_policy_rejected_beam_type_fails`.
+    ///
+    /// Fails if the scorer hands its second pass a fresh `RootSearchDeadline`:
+    /// that pass then starts a deadline of its own, at a later instant.
+    #[test]
+    fn ai_driver_scores_again_under_the_deadline_its_root_search_started() {
+        const CONTROLLED: [&str; 5] = ["Elf", "Goblin", "Human", "Merfolk", "Zombie"];
+        let prompt = luminescent_rain_prompt_rejecting(&CONTROLLED);
+        let offered = named_options(&prompt).len() as u64;
+        let mut config = create_config_for_players(AiDifficulty::Medium, Platform::Native, 2);
+        config.search.time_budget_ms = Some(LIVE_TIME_BUDGET_MS);
+        assert!(
+            !config.execution_mode.is_measurement() && config.search.enabled,
+            "fixture: a searching seat under a wall-clock budget"
+        );
+
+        crate::search::ROOT_SEARCH_DEADLINES.with_borrow_mut(Vec::clear);
+        let decision = run_ai_decision_with(&prompt, config);
+        let deadlines = crate::search::ROOT_SEARCH_DEADLINES.take();
+
+        assert_eq!(
+            decision.clones,
+            offered + 1,
+            "reach guard: the decision is scored again with every offered type simulated, and the submitted one once more"
+        );
+        assert_eq!(
+            deadlines.len(),
+            2,
+            "reach guard: the decision is scored twice"
+        );
+        assert!(
+            deadlines[0].remaining().is_some(),
+            "reach guard: the first pass runs under a wall-clock deadline"
+        );
+        assert!(
+            !deadlines[0].expired(),
+            "reach guard: the first pass's deadline has not expired when the decision ends, so it did not stop that pass's root search before its first rung"
+        );
+        assert_eq!(
+            deadlines[1], deadlines[0],
+            "the decision scored again must run under the deadline its first pass started"
+        );
+        let GameAction::ChooseOption { choice } = &decision.action else {
+            panic!(
+                "the AI must answer the creature-type prompt, got {:?}",
+                decision.action
+            );
+        };
+        assert!(
+            !CONTROLLED.contains(&choice.as_str()),
+            "the AI must not submit a rejected type, got {choice}"
+        );
+        assert_eq!(seat(&decision.after, P0).life, i32::MAX - 1);
+        assert!(
+            decision.after.stack.is_empty(),
+            "Luminescent Rain must finish resolving"
+        );
+        assert!(
+            matches!(decision.after.waiting_for, WaitingFor::Priority { player } if player == P0),
+            "P0 must receive priority after Luminescent Rain resolves (CR 117.3b), got {:?}",
+            decision.after.waiting_for
+        );
+    }
+
+    /// Production path with determinized sampling (`determinization_samples >
+    /// 0`): every sampled world simulates each answer it scores, so the chooser
+    /// decides under `PromptAnswerValidation::EachCandidate` from the start and
+    /// simulates nothing more for the answer it submits. Distant Melody's
+    /// creature-type prompt then costs one state copy per offered type per
+    /// sampled world, and the AI submits the type, and leaves its RNG where,
+    /// the simulate-every-answer gate does.
+    ///
+    /// Fails if the chooser still simulates the answer it submits (one copy
+    /// more).
+    #[test]
+    fn chooser_scoring_sampled_worlds_does_not_simulate_its_answer_again() {
+        const SAMPLES: u32 = 2;
+        let prompt = distant_melody_prompt(GameScenario::new());
+        let offered = named_options(&prompt).len() as u64;
+        let mut config = create_config_for_players(AiDifficulty::Medium, Platform::Native, 2)
+            .into_measurement(AI_DECISION_SEED);
+        config.search.determinization_samples = SAMPLES;
+
+        let decision = run_ai_decision_with(&prompt, config.clone());
+        let reference = {
+            let _each_candidate = ChooserSimulatesEachPromptAnswer::enter();
+            run_ai_decision_with(&prompt, config)
+        };
+        assert_eq!(
+            reference.clones,
+            offered * u64::from(SAMPLES),
+            "reach guard: each sampled world copies the state once per offered type"
+        );
+        assert_eq!(
+            decision.clones,
+            offered * u64::from(SAMPLES),
+            "the chooser must not simulate the answer the sampled worlds already simulated"
+        );
+        assert!(
+            matches!(decision.action, GameAction::ChooseOption { .. }),
+            "the AI must answer the creature-type prompt, got {:?}",
+            decision.action
+        );
+        assert_eq!(decision.action, reference.action);
+        assert_eq!(decision.next_draw, reference.next_draw);
+    }
+
     // T2: sample_backfilled_continuations sorts by prior (desc), skips illegal
     // candidates WITHOUT consuming a sample slot, and pairs each survivor with
     // its own prior.
@@ -2967,6 +5707,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id: ObjectId(99999),
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Utility),
         };
@@ -3068,6 +5809,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id: ObjectId(99999),
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Mana),
         };
@@ -3945,6 +6687,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id: ObjectId(99999),
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Mana),
         }

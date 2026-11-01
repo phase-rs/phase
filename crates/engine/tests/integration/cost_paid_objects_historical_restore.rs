@@ -436,6 +436,7 @@ fn historical_cost_paid_ids_are_never_offered_as_live_choice_candidates() {
         .act(GameAction::ActivateAbility {
             source_id: coin,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Coin's ability must be activatable with the cost available");
 

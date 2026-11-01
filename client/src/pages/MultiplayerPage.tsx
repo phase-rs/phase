@@ -34,7 +34,7 @@ import {
   loadSavedDeck,
   touchDeckPlayed,
 } from "../constants/storage";
-import { formatSuppliesDeck } from "../data/formatRegistry";
+import { formatSuppliesDeck, isPlanechaseFamilyFormat } from "../data/formatRegistry";
 import { DEFAULT_PILE_SOURCE, pileSeatDeck, pileSourceParam } from "../services/pileSource";
 import { withSavedDeckLibraryOrSkip } from "../services/savedDeckTransaction";
 import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
@@ -664,7 +664,7 @@ function MultiplayerPageContent({
         const aiSeatIndexes = new Set(action.settings.aiSeats.map((seat) => seat.seatIndex));
         const allOpponentsAreAi =
           opponentCount > 0
-          && action.settings.formatConfig.format !== "Planechase"
+          && !isPlanechaseFamilyFormat(action.settings.formatConfig.format)
           && Array.from({ length: opponentCount }, (_, i) => i + 1)
             .every((seatIndex) => aiSeatIndexes.has(seatIndex));
         if (allOpponentsAreAi) {

@@ -466,6 +466,7 @@ fn war_games_two_pauses_goad_every_seat() {
 /// A tapped 1/1 white creature token effect named `name` (and of that subtype).
 fn vanilla_token(name: &str, count: i32) -> Effect {
     Effect::Token {
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         name: name.to_string(),
         power: PtValue::Fixed(1),
         toughness: PtValue::Fixed(1),
@@ -951,6 +952,7 @@ fn sync_fan_out_emblem_static_reads_every_seats_tokens() {
 /// An untapped 1/1 green creature token effect named `name` (and of that subtype).
 fn untapped_token(name: &str) -> Effect {
     Effect::Token {
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         name: name.to_string(),
         power: PtValue::Fixed(1),
         toughness: PtValue::Fixed(1),
@@ -1606,7 +1608,7 @@ fn cast_redirect_fan_out(paused: bool, round_trip_at_generated_leg: bool) -> Red
     let mut runner = scenario.build();
 
     // Crafty Cutpurse's resolved trigger body, with P1's noncreature host as
-    // its source, so the redirect survives the cast.
+    // its source, so P1 is the redirect's "you".
     let parsed = parse_oracle_text(
         CRAFTY_CUTPURSE,
         "Crafty Cutpurse",
@@ -1623,9 +1625,14 @@ fn cast_redirect_fan_out(paused: bool, round_trip_at_generated_leg: bool) -> Red
     resolve_ability_chain(runner.state_mut(), &redirect, &mut Vec::new(), 0)
         .expect("the redirect installs");
     assert_eq!(
-        runner.state().objects[&host].replacement_definitions.len(),
+        runner
+            .state()
+            .pending_damage_replacements
+            .iter()
+            .filter(|def| def.token_owner_redirect.is_some() && def.source_controller == Some(P1))
+            .count(),
         1,
-        "reach guard: the host carries the redirect"
+        "reach guard: P1's floating redirect is installed"
     );
 
     runner.cast(spell).commit();

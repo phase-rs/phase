@@ -214,12 +214,14 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         repeat_until: None,
         sub_link: SubAbilityLink::ContinuationStep,
         target_reads: Default::default(),
+        entry_onset: Default::default(),
         sibling_condition: SiblingCondition::Dependent,
         modal: None,
         mode_abilities: vec![],
         parent_target_missing_reason: None,
         activation_cost_reduction: None,
         activation_record: None,
+        control_change_instruction: None,
     }
 }
 

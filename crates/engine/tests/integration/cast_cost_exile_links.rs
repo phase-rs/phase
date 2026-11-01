@@ -384,6 +384,7 @@ fn activated_reader_reads_its_cast_cost_pile_after_its_source_leaves() {
         .act(GameAction::ActivateAbility {
             source_id: keeper,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate the reader");
     assert_eq!(runner.state().stack.len(), 1);
@@ -573,6 +574,7 @@ fn cancelled_activation_keeps_the_permanents_cast_cost_pile() {
         .act(GameAction::ActivateAbility {
             source_id: keeper,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate {1}: Tap target creature.");
     // Reach guard: CR 601.2c + CR 602.2b — targets precede costs, so the

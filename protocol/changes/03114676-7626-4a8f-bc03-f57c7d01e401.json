@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "PendingCast deferred spell sacrifices become a type-tagged DeferredSpellSacrifice enum (Selected | All) and SacrificeRequirement gains All; PendingCast deferred_random_discard_cost becomes deferred_hand_discard_cost, a type-tagged DeferredHandDiscardCost enum (Random | WholeHand); older readers cannot parse any of these. PendingCast also gains prepaid_finalization, a PrepaidSpellFinalization (phyrexian_choices, pre_payment_checks) carried by a commit-time prompt: the \"discard your hand\" discard or the \"sacrifice all\" arrangement."
+}

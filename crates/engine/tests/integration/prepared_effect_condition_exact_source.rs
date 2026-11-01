@@ -345,6 +345,7 @@ fn activate_onto_stack(runner: &mut GameRunner, source: ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation is accepted");
     for _ in 0..16 {
@@ -1290,6 +1291,7 @@ fn activate_mana_ability_publicly(runner: &mut GameRunner, source: ObjectId) -> 
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the mana activation is accepted");
     assert!(
@@ -1468,6 +1470,7 @@ fn answer_color_choice_after_self_sacrifice(
         .act(GameAction::ActivateAbility {
             source_id: witness,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the mana activation is accepted");
     assert!(

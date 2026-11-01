@@ -202,6 +202,7 @@ fn creature_token_spec(controller: PlayerId) -> TokenSpec {
         enter_with_counters: Vec::new(),
         tapped: false,
         enters_attacking: false,
+        attack_request: engine::types::proposed_event::TokenAttackRequest::Unspecified,
         sacrifice_at: None,
         source_id: ObjectId(0),
         controller,
@@ -223,6 +224,7 @@ fn create_token_and_count_draws(
         copy: None,
         enter_tapped: EtbTapState::Unspecified,
         count: 1,
+        appended: Vec::new(),
         applied: HashSet::new(),
     };
     match replace_event(runner.state_mut(), proposed, &mut events) {

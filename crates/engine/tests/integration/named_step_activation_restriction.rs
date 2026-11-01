@@ -92,6 +92,7 @@ fn assert_restriction_refuses(
     match runner.act(GameAction::ActivateAbility {
         source_id: source,
         ability_index,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     }) {
         Err(EngineError::ActionNotAllowed(message)) => {
             assert!(
@@ -247,6 +248,7 @@ fn lesser_werewolf_activates_only_during_declare_blockers_step() {
         .act(GameAction::ActivateAbility {
             source_id: werewolf,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("CR 602.5: the declare blockers step admits the activation");
     // The blocked bear is the only legal target (the werewolf itself is

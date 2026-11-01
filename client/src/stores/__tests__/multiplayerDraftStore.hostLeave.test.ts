@@ -1,5 +1,7 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DraftPlayerView } from "../../adapter/draft-adapter";
+import type { CommanderSeatDecks, DraftDeckPayload } from "../../network/draftProtocol";
 
 /**
  * leave(false) of a host X parked on an await, while a newer session B takes
@@ -72,7 +74,18 @@ vi.mock("../../adapter/p2p-draft-host", async (importOriginal) => {
       if (this.persistenceId) await persistence.clearDraftHostSession(this.persistenceId);
       await this.dispose();
     });
-    sendCommanderLaunches = vi.fn(() => { probe.sendCommanderLaunches += 1; });
+    sendCommanderLaunches = vi.fn(async (
+      _view: DraftPlayerView, _gameId: string, _roomCode: string, decks: CommanderSeatDecks,
+      installEngineSeat: (seat: number, deck: DraftDeckPayload) => Promise<void>,
+      signal: AbortSignal,
+    ) => {
+      signal.throwIfAborted();
+      for (const { seat, deck } of decks.engineSeatDecks) {
+        await installEngineSeat(seat, deck);
+        signal.throwIfAborted();
+      }
+      probe.sendCommanderLaunches += 1;
+    });
     constructor(...args: unknown[]) {
       this.persistenceId = args[9] as string | undefined;
       this.roomCode = args[10] as string | undefined;
@@ -113,7 +126,7 @@ vi.mock("../../adapter/p2p-draft-host", async (importOriginal) => {
     getHostWorkspaceState() { return null; }
     async commanderSeatDecks() {
       const empty = { main_deck: [], sideboard: [], commander: [], planar_deck: [], scheme_deck: [] };
-      return { hostDeck: empty, engineSeatDecks: [], guestDecks: [] };
+      return { hostDeck: empty, engineSeatDecks: [], liveSeatDecks: [{ seat: 0, deck: empty }] };
     }
     async boosterPackPoolForGame() { return null; }
     async podCommanderDeckPayload() { throw new Error("unused"); }

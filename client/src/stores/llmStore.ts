@@ -93,6 +93,7 @@ const KNOWN_PROVIDERS: readonly LlmProviderId[] = [
   "Anthropic",
   "Gemini",
   "DeepSeek",
+  "OpenRouter",
   "OpenAiCompatible",
   "Jev",
 ] as const;
@@ -342,7 +343,8 @@ export const useLlmStore = create<LlmState>()(
       removeProfile(id) {
         const { seatBindings, draftProfileId, defaultOpponentProfileId } = get();
         // Drop every binding to the removed profile in the same commit, so no
-        // seat is left pointing at a profile that no longer exists.
+        // seat is left pointing at a profile that no longer exists. Bindings to
+        // other surviving profiles (or explicit engine choices) are preserved.
         const remainingBindings = Object.fromEntries(
           Object.entries(seatBindings).filter(([, profileId]) => profileId !== id),
         );
