@@ -13,6 +13,7 @@ mod abigale_integration;
 mod ability_block_display_clone_gate;
 mod ability_cost_block_readout;
 mod abundance_optional_draw_replacement;
+mod acceptable_losses_restore;
 mod acorn_catapult_squirrel_token_7191;
 mod action_rejection;
 mod active_damage_trigger_recipient_anaphor;

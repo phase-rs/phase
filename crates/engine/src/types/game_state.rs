@@ -25784,6 +25784,9 @@ const LEGACY_EXPLOIT_EVENT_EVIDENCE_ERROR: &str =
 const LEGACY_DEFERRED_SPELL_DELIVERY_ERROR: &str =
     "legacy deferred_spell_delivery snapshot cannot prove which on-resolution hooks already ran; restore a save taken after the spell's free-cast window closed";
 
+const LEGACY_DEFERRED_RANDOM_DISCARD_COST_ERROR: &str =
+    "legacy deferred_random_discard_cost snapshot owes a random discard this build cannot read; restore a save taken outside the spell's or ability's cost payment";
+
 const SERIALIZED_TRIGGER_DEFINITION_CORE_FIELDS: &[&str] = &[
     "execute",
     "valid_card",
@@ -25883,6 +25886,32 @@ fn reject_legacy_deferred_spell_delivery(value: &serde_json::Value) -> Result<()
     match state.get("deferred_spell_delivery") {
         None | Some(serde_json::Value::Null) => Ok(()),
         Some(_) => Err(LEGACY_DEFERRED_SPELL_DELIVERY_ERROR.to_string()),
+    }
+}
+
+/// CR 601.2h: a pending cast written before `deferred_hand_discard_cost` owed
+/// its random discard under this key; decoding past it would finish the cast
+/// without the discard. Every `PendingCast` site can carry it, so the whole value is walked.
+fn reject_legacy_deferred_random_discard_cost(value: &serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object
+                .get("deferred_random_discard_cost")
+                .is_some_and(|cost| !cost.is_null())
+            {
+                return Err(LEGACY_DEFERRED_RANDOM_DISCARD_COST_ERROR.to_string());
+            }
+            object
+                .values()
+                .try_for_each(reject_legacy_deferred_random_discard_cost)
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .try_for_each(reject_legacy_deferred_random_discard_cost),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => Ok(()),
     }
 }
 
@@ -27247,6 +27276,7 @@ impl GameStateDecode {
         reject_legacy_exploit_event_evidence(&value)?;
         reject_legacy_raw_prompt_authority(&value)?;
         reject_legacy_deferred_spell_delivery(&value)?;
+        reject_legacy_deferred_random_discard_cost(&value)?;
         if !matches!(mode, GameStateDecodeMode::DirectCurrentRaw) {
             migrate_legacy_delayed_trigger_provenance(&mut value)?;
             migrate_legacy_trigger_firing_carriers(
@@ -27308,6 +27338,7 @@ impl GameStateDecode {
         reject_legacy_exploit_event_evidence(value)?;
         reject_legacy_raw_prompt_authority(value)?;
         reject_legacy_deferred_spell_delivery(value)?;
+        reject_legacy_deferred_random_discard_cost(value)?;
         if matches!(
             mode,
             GameStateDecodeMode::ResolutionWireV1 | GameStateDecodeMode::ResolutionWireV2
