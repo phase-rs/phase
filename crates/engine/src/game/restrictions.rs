@@ -1,5 +1,5 @@
 use crate::game::cost_payability::AbilityCostPayability;
-use crate::game::game_object::GameObject;
+use crate::game::game_object::{CastOrigin, GameObject};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission, CastingRestriction,
     CommanderOwnership, ControllerRef, FilterProp, ParsedCondition, QuantityExpr,
@@ -1265,6 +1265,100 @@ fn casting_restriction_applies(
         // CR 601.2b / CR 601.2h: "Spend only ... on X" restricts how the cost is paid,
         // never when. Always satisfied here; enforced in the mana-payment path.
         CastingRestriction::SpendOnlyOnX { .. } => true,
+        // CR 601.3 + CR 113.6f: the cast's ORIGIN zone must be one the object
+        // may be cast from. Consulted at announcement, where the object still
+        // occupies its origin — unless an in-flight pending cast (CR 601.2a has
+        // already moved it to the stack) records it. The persisted post-finalize
+        // origin is deliberately NOT consulted: at a NEW announcement it can only
+        // describe a PREVIOUS cast of this object, and a stale graveyard stamp
+        // must not admit a later hand cast. The origin zone's owner is the
+        // object's owner (CR 400.3).
+        CastingRestriction::OnlyFromZones { .. } => {
+            let origin = state.objects.get(&source_id).map(|obj| CastOrigin {
+                zone: super::casting::pending_cast_origin_zone_for(state, source_id)
+                    .unwrap_or(obj.zone),
+                zone_owner: obj.owner,
+            });
+            restriction_permits_cast_origin(restriction, player, origin)
+        }
+    }
+}
+
+/// CR 601.3 + CR 113.6f: whether an object's own casting restrictions permit
+/// `caster` to cast it from `origin`. The single answer to the cast-origin
+/// question, shared by the announcement check ([`check_casting_restrictions`])
+/// and the CR 707.12 cast-a-copy routes, which create the copy in the
+/// original's zone and cast it from there without announcing through the cast
+/// pipeline.
+///
+/// `origin: None` means the caller can't establish the origin. A restriction on
+/// the origin then refuses (fail closed); every other restriction is
+/// origin-independent and permits.
+pub(crate) fn restrictions_permit_cast_origin(
+    restrictions: &[CastingRestriction],
+    caster: PlayerId,
+    origin: Option<CastOrigin>,
+) -> bool {
+    restrictions
+        .iter()
+        .all(|restriction| restriction_permits_cast_origin(restriction, caster, origin))
+}
+
+fn restriction_permits_cast_origin(
+    restriction: &CastingRestriction,
+    caster: PlayerId,
+    origin: Option<CastOrigin>,
+) -> bool {
+    match restriction {
+        CastingRestriction::OnlyFromZones { zones, pool } => origin.is_some_and(|origin| {
+            zones.contains(&origin.zone) && cast_origin_in_pool(origin, *pool, caster)
+        }),
+        // Timing, condition and payment restrictions say nothing about origin.
+        CastingRestriction::AsSorcery
+        | CastingRestriction::DuringCombat
+        | CastingRestriction::DuringOpponentsTurn
+        | CastingRestriction::DuringYourTurn
+        | CastingRestriction::DuringYourUpkeep
+        | CastingRestriction::DuringOpponentsUpkeep
+        | CastingRestriction::DuringAnyUpkeep
+        | CastingRestriction::DuringYourEndStep
+        | CastingRestriction::DuringOpponentsEndStep
+        | CastingRestriction::DeclareAttackersStep
+        | CastingRestriction::DeclareBlockersStep
+        | CastingRestriction::BeforeAttackersDeclared
+        | CastingRestriction::BeforeBlockersDeclared
+        | CastingRestriction::AfterBlockersDeclared
+        | CastingRestriction::BeforeCombatDamage
+        | CastingRestriction::AfterCombat
+        | CastingRestriction::RequiresCondition { .. }
+        | CastingRestriction::CantSpendMana
+        | CastingRestriction::SpendOnlyOnX { .. } => true,
+    }
+}
+
+/// CR 109.5 + CR 400.1: whether `origin` lies in the graveyard pool an
+/// `OnlyFromZones` restriction names. "Your graveyard" is the caster's
+/// (CR 109.5: the would-be controller's), and each player has their own
+/// graveyard (CR 400.1), so an `OwnGraveyard` pool admits a graveyard origin
+/// only when the caster owns it. The pool says nothing about other zones.
+fn cast_origin_in_pool(
+    origin: CastOrigin,
+    pool: crate::types::statics::GraveyardPermissionPool,
+    caster: PlayerId,
+) -> bool {
+    use crate::types::statics::GraveyardPermissionPool;
+    match (origin.zone, pool) {
+        (Zone::Graveyard, GraveyardPermissionPool::OwnGraveyard) => origin.zone_owner == caster,
+        (Zone::Graveyard, GraveyardPermissionPool::AnyGraveyard)
+        | (
+            Zone::Library
+            | Zone::Hand
+            | Zone::Battlefield
+            | Zone::Stack
+            | Zone::Exile
+            | Zone::Command,
+            GraveyardPermissionPool::OwnGraveyard | GraveyardPermissionPool::AnyGraveyard,
+        ) => true,
     }
 }
 
@@ -2532,6 +2626,68 @@ mod tests {
     use crate::types::game_state::{ArrivalIdentity, WaitingFor, ZoneChangeRecord};
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
+
+    /// CR 109.5 + CR 400.1: the shared cast-origin predicate's whole matrix —
+    /// caster vs the origin zone's owner, each pool, a graveyard vs a shared
+    /// zone, a zone outside the list, and an unknown origin. Every caller (the
+    /// announcement check and both CR 707.12 copy routes) reaches the
+    /// ownership question only through this predicate.
+    #[test]
+    fn only_from_zones_origin_matrix() {
+        use crate::types::statics::GraveyardPermissionPool::{AnyGraveyard, OwnGraveyard};
+        let only = |zones: Vec<Zone>, pool| vec![CastingRestriction::OnlyFromZones { zones, pool }];
+        let at = |zone, owner| {
+            Some(CastOrigin {
+                zone,
+                zone_owner: PlayerId(owner),
+            })
+        };
+        let me = PlayerId(0);
+        let graveyard = only(vec![Zone::Graveyard], OwnGraveyard);
+        assert!(restrictions_permit_cast_origin(
+            &graveyard,
+            me,
+            at(Zone::Graveyard, 0)
+        ));
+        assert!(
+            !restrictions_permit_cast_origin(&graveyard, me, at(Zone::Graveyard, 1)),
+            "another player's graveyard is not \"your graveyard\""
+        );
+        assert!(!restrictions_permit_cast_origin(
+            &graveyard,
+            me,
+            at(Zone::Hand, 0)
+        ));
+        assert!(!restrictions_permit_cast_origin(
+            &graveyard,
+            me,
+            at(Zone::Exile, 0)
+        ));
+        assert!(
+            !restrictions_permit_cast_origin(&graveyard, me, None),
+            "an unknown origin fails closed"
+        );
+        let any = only(vec![Zone::Graveyard], AnyGraveyard);
+        assert!(restrictions_permit_cast_origin(
+            &any,
+            me,
+            at(Zone::Graveyard, 1)
+        ));
+        let with_exile = only(vec![Zone::Graveyard, Zone::Exile], OwnGraveyard);
+        assert!(
+            restrictions_permit_cast_origin(&with_exile, me, at(Zone::Exile, 1)),
+            "exile is shared, so the graveyard pool doesn't scope it"
+        );
+        assert!(!restrictions_permit_cast_origin(
+            &with_exile,
+            me,
+            at(Zone::Graveyard, 1)
+        ));
+        assert!(
+            restrictions_permit_cast_origin(&[CastingRestriction::AsSorcery], me, None),
+            "an origin-independent restriction permits any origin"
+        );
+    }
 
     #[test]
     fn cards_left_your_graveyard_counts_the_departure_owner() {
