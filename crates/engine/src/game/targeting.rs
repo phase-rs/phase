@@ -177,10 +177,27 @@ fn source_projection_name<'a>(
         .map(|source| match source.source_read(state) {
             crate::types::game_state::TriggerSourceRead::ExactLive(obj) => obj.name.as_str(),
             crate::types::game_state::TriggerSourceRead::Latched(latched) => {
-                latched.lki.name.as_str()
+                crate::game::filter::exit_lki_for_incarnation(
+                    state,
+                    latched.identity.reference.object_id,
+                    latched.identity.reference.incarnation,
+                )
+                .map(|exit| exit.name.as_str())
+                .unwrap_or(latched.lki.name.as_str())
             }
         })
         .or_else(|| state.objects.get(&source_id).map(|obj| obj.name.as_str()))
+        .or_else(|| {
+            state
+                .lki_by_incarnation
+                .get(&source_id)
+                .and_then(|history| {
+                    history
+                        .iter()
+                        .max_by_key(|(&inc, _)| inc)
+                        .map(|(_, exit)| exit.name.as_str())
+                })
+        })
 }
 
 /// CR 702.16b + CR 608.2h: Player target legality with an optional source name

@@ -8688,8 +8688,12 @@ fn prepare_casting_variant(
         | CastingVariant::Freerunning
         | CastingVariant::Prowl
         | CastingVariant::JumpStart
-        | CastingVariant::Fuse
         | CastingVariant::Surge => {}
+        CastingVariant::Fuse => {
+            if let Some(object) = transformed_state.objects.get_mut(&object_id) {
+                object.fused_split_spell = true;
+            }
+        }
     }
     let prepared = prepare_spell_cast_announced(
         &transformed_state,

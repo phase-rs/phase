@@ -1583,8 +1583,15 @@ fn damage_context_from_ability(state: &GameState, ability: &ResolvedAbility) -> 
         }
         Some(TriggerSourceRead::Latched(latched)) => {
             // CR 608.2h + CR 400.7: the captured observation, not the object now
-            // occupying the id, supplies the source's characteristics.
-            let lki = &latched.lki;
+            // occupying the id, supplies the source's characteristics. Prefer
+            // the exact-incarnation exit snapshot over the trigger-time snapshot.
+            let lki = crate::game::filter::exit_lki_for_incarnation(
+                state,
+                latched.identity.reference.object_id,
+                latched.identity.reference.incarnation,
+            )
+            .unwrap_or(&latched.lki);
+            // allow-raw-authority: reading characteristic snapshot from departed-source LKI
             let has_keyword = |kind: KeywordKind| lki.keywords.iter().any(|k| k.kind() == kind);
             let mut ctx = DamageContext::fallback(ability.source_id, lki.controller);
             ctx.source_incarnation = Some(latched.identity.reference.incarnation);
