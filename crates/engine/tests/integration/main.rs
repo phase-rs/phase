@@ -538,6 +538,7 @@ mod gifts_given_opponent_partition;
 mod gifts_ungiven_duplicate_candidates_8135;
 mod giggling_skitterspike_issue_890;
 mod gimbal_gremlin_prodigy;
+mod gix_yawgmoth_praetor_play_cast_6963;
 mod glen_elendras_answer_counter_all_conjunction;
 mod gluntch_choose_player_chain;
 mod goad_badge_defender_gated_anchor;

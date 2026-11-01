@@ -3306,6 +3306,48 @@ type MultiZonePlayerExileParse<'a> = (&'a str, (Vec<TypeFilter>, ControllerRef, 
 type DefenderBoundAttackParse<'a> =
     Result<(&'a str, (TargetFilter, Option<Duration>)), nom::Err<OracleError<'a>>>;
 
+/// CR 400.3 + CR 608.2c: true when a mass-exile operand names an anaphoric
+/// player's zone as its source ("… from that player's hand", "… from that
+/// opponent's graveyard") but the parsed `target` binds no player on any leg —
+/// so the lowered instruction would reach every player's zone. Structural on the
+/// filter (owner/controller axes), grammatical on the text: a nom scan for the
+/// `from <anaphoric possessive> <zone>` source at a word boundary.
+fn operand_dropped_player_possessive_source(rest_lower: &str, target: &TargetFilter) -> bool {
+    fn binds_a_player(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Typed(tf) => {
+                tf.controller.is_some()
+                    || tf
+                        .properties
+                        .iter()
+                        .any(|prop| matches!(prop, FilterProp::Owned { .. }))
+            }
+            TargetFilter::And { filters } => filters.iter().any(binds_a_player),
+            TargetFilter::Or { filters } => filters.iter().all(binds_a_player),
+            // Any other shape is not a population sweep over typed zone cards.
+            _ => true,
+        }
+    }
+    let names_anaphoric_zone = nom_primitives::scan_at_word_boundaries(rest_lower, |input| {
+        value(
+            (),
+            (
+                tag::<_, _, OracleError<'_>>("from "),
+                alt((
+                    tag("that player's "),
+                    tag("that player\u{2019}s "),
+                    tag("that opponent's "),
+                    tag("that opponent\u{2019}s "),
+                )),
+                alt((tag("hand"), tag("graveyard"), tag("library"))),
+            ),
+        )
+        .parse(input)
+    })
+    .is_some();
+    names_anaphoric_zone && !binds_a_player(target)
+}
+
 /// CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2 + CR 205.2a: "exile all `[<types>]`
 /// cards from `<possessive>` `<zone>` and `<zone>`" — mass exile of the cards a
 /// player owns across a *union* of zones. Two forms:
@@ -11851,6 +11893,13 @@ pub(super) fn parse_exile_ast(
             ctx,
             EffectScope::All,
         );
+        // CR 400.3 + CR 608.2c: "… from that player's hand" names ONE player's
+        // zone. A filter that bound no owner/controller would sweep every
+        // player's zone (Elder Brain: "exile all cards from that player's hand"),
+        // so refuse rather than lower the wider instruction.
+        if operand_dropped_player_possessive_source(rest_lower, &target) {
+            return None;
+        }
         return Some(ZoneCounterImperativeAst::Exile {
             origin,
             target,

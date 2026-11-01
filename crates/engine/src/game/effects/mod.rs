@@ -3196,7 +3196,7 @@ pub(crate) fn active_player_action_completion_requires(
     })
 }
 
-fn prepend_to_pending_continuation(state: &mut GameState, head: ResolvedAbility) {
+pub(crate) fn prepend_to_pending_continuation(state: &mut GameState, head: ResolvedAbility) {
     prepend_to_pending_continuation_with_producer(state, head, None, None);
 }
 

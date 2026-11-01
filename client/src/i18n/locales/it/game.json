@@ -2122,10 +2122,12 @@
   "freeCastWindow": {
     "eyebrow": "Lancio gratuito",
     "title": "Lancia una magia gratuitamente",
+    "titlePlay": "Gioca carte gratuitamente",
     "subtitle": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i). Valore di mana totale rimanente: {{budget}}.",
     "subtitleNoBudget": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i).",
     "remainingAny": "un numero qualsiasi",
     "castNamed": "Lancia {{name}}",
+    "playNamed": "Gioca {{name}}",
     "castSuffix": "(senza pagare il suo costo di mana)",
     "done": "Fatto",
     "doneSuffix": "(smetti di lanciare magie in questo modo)"

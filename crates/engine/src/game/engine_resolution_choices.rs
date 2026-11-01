@@ -3405,8 +3405,8 @@ pub(super) fn handle_resolution_choice(
             // where it is (RemainExiled — never reached here because the
             // per-card MV is pre-checked and these casts carry no resulting-MV
             // permission constraint).
-            let request = effects::free_cast_from_zones::free_cast_window_resolution_request(
-                player,
+            let window = FreeCastWindowResume {
+                controller: player,
                 remaining_casts,
                 remaining_mv_budget,
                 face_policy,
@@ -3414,10 +3414,43 @@ pub(super) fn handle_resolution_choice(
                 graveyard_replacement,
                 enters_with_modifications,
                 member_pool,
-            );
-            let result = match casting::initiate_cast_during_resolution(
-                state, player, chosen, request, events,
-            )? {
+            };
+            // CR 701.18b + CR 305.1: under a Play policy a land card is played as
+            // a land as this ability resolves (CR 305.2a; refused under CR 305.2b
+            // / CR 305.3), never cast; the window then re-opens.
+            if window.face_policy.play_mode.is_play()
+                && state.objects.get(&chosen).is_some_and(|object| {
+                    effects::cast_from_zone::resolution_play_route(object)
+                        == effects::cast_from_zone::ResolutionPlayRoute::PlayLand
+                })
+            {
+                let commit =
+                    super::engine::play_land_during_resolution(state, player, chosen, events);
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    resume_free_cast_window_after_land_play(state, window, commit, events),
+                ));
+            }
+            let request = window.resolution_request();
+            // CR 701.18b + CR 712.12: a Play policy may elect a spell//land modal
+            // card's land face, which `initiate_cast_during_resolution` refuses
+            // as a mis-built Cast request; route Play windows through the shared
+            // election so a land-face-only card is played as a land.
+            let initiation = if window.face_policy.play_mode.is_play() {
+                match casting::initiate_resolution_election(state, player, chosen, request, events)?
+                {
+                    casting::ResolutionElectionInitiation::Cast(initiation) => initiation,
+                    casting::ResolutionElectionInitiation::PlayLandFace(cleanup) => {
+                        let commit =
+                            play_resolution_land_face(state, player, chosen, *cleanup, events)?;
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            resume_free_cast_window_after_land_play(state, window, commit, events),
+                        ));
+                    }
+                }
+            } else {
+                casting::initiate_cast_during_resolution(state, player, chosen, request, events)?
+            };
+            let result = match initiation {
                 casting::ResolutionCastInitiation::WaitingFor(result) => *result,
                 casting::ResolutionCastInitiation::Rejected(cleanup) => {
                     return Ok(ResolutionChoiceOutcome::WaitingFor(abort_resolution_cast(
@@ -9774,7 +9807,37 @@ pub(crate) fn complete_resolution_land_face_choice(
                         .to_string(),
                 )
             })?;
-    match play_resolution_land_face(state, player, object_id, cleanup, events)? {
+    // CR 608.2g: an election offered from a free-cast window resumes that
+    // window once the land face has been played.
+    let window = match &cleanup.success_action {
+        crate::types::ability::ResolutionCastSuccessAction::FreeCastOfferRemaining {
+            controller,
+            remaining_casts,
+            remaining_mv_budget,
+            face_policy,
+            zones,
+            graveyard_replacement,
+            enters_with_modifications,
+            member_pool,
+        } => Some(FreeCastWindowResume {
+            controller: *controller,
+            remaining_casts: *remaining_casts,
+            remaining_mv_budget: *remaining_mv_budget,
+            face_policy: (**face_policy).clone(),
+            zones: zones.clone(),
+            graveyard_replacement: graveyard_replacement.clone(),
+            enters_with_modifications: enters_with_modifications.clone(),
+            member_pool: member_pool.clone(),
+        }),
+        _ => None,
+    };
+    let commit = play_resolution_land_face(state, player, object_id, cleanup, events)?;
+    if let Some(window) = window {
+        return Ok(resume_free_cast_window_after_land_play(
+            state, window, commit, events,
+        ));
+    }
+    match commit {
         Some(super::engine::LandPlayCommit::AwaitingEntryChoice(waiting_for)) => {
             state.waiting_for = *waiting_for;
             Ok(state.waiting_for.clone())
@@ -9917,6 +9980,150 @@ fn finish_with_continuation(
     super::engine::resume_pending_continuation_if_priority(state, events)
         .expect("a settled resolution choice must resume its continuation");
     state.waiting_for.clone()
+}
+
+/// CR 608.2g + CR 608.2c: everything a resolution-scoped free-cast window
+/// (`CastOfferKind::FreeCastWindow`) needs to offer itself again — the same
+/// fields its serialized offer and its `FreeCastOfferRemaining` re-offer carrier
+/// hold.
+struct FreeCastWindowResume {
+    controller: crate::types::player::PlayerId,
+    remaining_casts: Option<u8>,
+    remaining_mv_budget: Option<u32>,
+    face_policy: crate::types::ability::ResolutionCastFacePolicy,
+    zones: Vec<Zone>,
+    graveyard_replacement: Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+    enters_with_modifications: crate::types::ability::PendingEntersModifications,
+    member_pool: Vec<ObjectId>,
+}
+
+impl FreeCastWindowResume {
+    fn resolution_request(&self) -> casting::ResolutionCastRequest {
+        effects::free_cast_from_zones::free_cast_window_resolution_request(
+            self.controller,
+            self.remaining_casts,
+            self.remaining_mv_budget,
+            self.face_policy.clone(),
+            self.zones.clone(),
+            self.graveyard_replacement.clone(),
+            self.enters_with_modifications.clone(),
+            self.member_pool.clone(),
+        )
+    }
+
+    /// The window's offer over the candidates still eligible now, or `None`
+    /// when none remain.
+    fn reoffer(self, state: &GameState) -> Option<WaitingFor> {
+        let candidates = effects::free_cast_from_zones::eligible_candidates(
+            state,
+            &self.zones,
+            self.remaining_mv_budget,
+            &self.member_pool,
+            &self.resolution_request(),
+        );
+        if candidates.is_empty() {
+            return None;
+        }
+        Some(WaitingFor::CastOffer {
+            player: self.controller,
+            kind: CastOfferKind::FreeCastWindow {
+                candidates,
+                remaining_casts: self.remaining_casts,
+                remaining_mv_budget: self.remaining_mv_budget,
+                face_policy: self.face_policy,
+                zones: self.zones,
+                graveyard_replacement: self.graveyard_replacement,
+                enters_with_modifications: self.enters_with_modifications,
+                member_pool: self.member_pool,
+            },
+        })
+    }
+
+    /// CR 608.2g: the window as a resolving instruction — the Play-mode batch
+    /// `CastFromZone` that opened it, rebound to the remaining member pool. Its
+    /// filter and constraint are the window's already-frozen policy (CR 608.2h),
+    /// its bounds the remaining cast count and budget. Resolving it re-runs
+    /// `open_resolution_cast_window`, which re-derives the zones from the
+    /// surviving members. Play windows never carry a per-cast rider
+    /// (`open_resolution_cast_window` keeps those windows on a Cast policy), so
+    /// nothing the rebuilt instruction cannot express is lost.
+    fn as_resolving_instruction(&self) -> ResolvedAbility {
+        debug_assert!(
+            self.graveyard_replacement.is_none() && self.enters_with_modifications.is_empty(),
+            "a Play window never carries a per-cast rider"
+        );
+        let effect = Effect::CastFromZone {
+            target: self.face_policy.filter.clone(),
+            without_paying_mana_cost: true,
+            mode: self.face_policy.play_mode,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: self.face_policy.constraint.clone(),
+            duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::ResolutionWindow {
+                bounds: crate::types::ability::ResolutionCastWindow {
+                    max_casts: self.remaining_casts,
+                    max_total_mv: self.remaining_mv_budget,
+                },
+            },
+            mana_spend_permission: None,
+            additional_cost: None,
+            cast_cost_modifier: None,
+        };
+        let mut instruction = ResolvedAbility::new(
+            effect,
+            Vec::new(),
+            self.face_policy.source_id,
+            self.controller,
+        );
+        instruction.set_unpinned_targets(
+            self.member_pool
+                .iter()
+                .copied()
+                .map(crate::types::ability::TargetRef::Object)
+                .collect(),
+        );
+        instruction
+    }
+}
+
+/// CR 305.2a + CR 608.2g + CR 614.12a: continue a Play window after one of its
+/// lands was played (or the play was ignored, CR 305.2b / CR 305.3, or the
+/// entry was prevented, CR 614.1). A land is never cast, so the window's cast
+/// count and mana-value budget are unchanged.
+///
+/// When the land's entry paused on a choice (an entry replacement, a delivery
+/// counter order, or an as-enters instruction), the window cannot be offered
+/// until that entry settles. The window is then prepended to the pending
+/// continuation as its resolving instruction — through
+/// `effects::prepend_to_pending_continuation`, the same placement authority
+/// `resolve_ability_chain` uses for a chain tail after a pausing effect (outside
+/// a paired post-replacement draw, beneath a direct-choice child, or merged
+/// ahead of the parked parent tail) — so the entry's resume re-opens the window
+/// before the rest of the resolving ability runs.
+fn resume_free_cast_window_after_land_play(
+    state: &mut GameState,
+    window: FreeCastWindowResume,
+    commit: Option<super::engine::LandPlayCommit>,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    let controller = window.controller;
+    match commit {
+        Some(super::engine::LandPlayCommit::AwaitingEntryChoice(waiting_for)) => {
+            effects::prepend_to_pending_continuation(state, window.as_resolving_instruction());
+            state.waiting_for = *waiting_for;
+            state.waiting_for.clone()
+        }
+        None
+        | Some(super::engine::LandPlayCommit::Entered)
+        | Some(super::engine::LandPlayCommit::Prevented) => match window.reoffer(state) {
+            Some(offer) => {
+                state.waiting_for = offer;
+                state.waiting_for.clone()
+            }
+            None => finish_with_continuation(state, controller, events),
+        },
+    }
 }
 
 /// CR 107.3f + CR 118.12: the X announcement a just-paused resolution-time payment makes for

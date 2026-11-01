@@ -14756,6 +14756,48 @@ pub(crate) fn resolution_land_face_admission(
         && super::engine::resolution_back_land_face_play_is_legal(state, player, object_id)
 }
 
+/// CR 701.18b + CR 305.1 + CR 305.9: whether a resolution-owned Play election
+/// under `policy` may play `object_id` — a card whose front face is a land — as
+/// a land right now. Only a Play instruction admits it (CR 601.2: a Cast
+/// instruction never plays a land), the card must match the policy's filter in
+/// the zone it is in, and the play itself must be legal now
+/// ([`super::engine::resolution_land_play_is_legal`]: the player's turn,
+/// CR 305.3; the land allowance, CR 305.2a/2b). A land//land modal card is
+/// excluded: its CR 712.12 face election has no resolution-owned prompt yet,
+/// so it is not offered rather than played on its front face unasked.
+pub(crate) fn resolution_land_front_admission(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+) -> bool {
+    if !policy.play_mode.is_play() {
+        return false;
+    }
+    let Some(object) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if !object
+        .card_types
+        .core_types
+        .contains(&crate::types::card_type::CoreType::Land)
+        || super::engine::modal_land_face_election_available(object)
+    {
+        return false;
+    }
+    let context = super::filter::FilterContext::from_source_with_controller(
+        policy.source_id,
+        policy.controller,
+    );
+    super::filter::matches_target_filter_for_zone(
+        state,
+        object_id,
+        object.zone,
+        &policy.filter,
+        &context,
+    ) && super::engine::resolution_land_play_is_legal(state, player, object_id)
+}
+
 /// Immutable starting point for prospective resolution casts.  A resolution
 /// offer may enumerate several cards and two spell faces per card; flush once
 /// before that enumeration, then let each candidate and face derive its own

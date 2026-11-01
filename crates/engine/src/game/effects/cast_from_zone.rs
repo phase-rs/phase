@@ -993,6 +993,7 @@ pub fn resolve(
                 target_filter,
                 constraint.as_ref(),
                 bounds,
+                mode,
                 target_ids,
                 events,
             );
@@ -1737,12 +1738,22 @@ const RESOLUTION_WINDOW_ORIGIN_ZONES: [Zone; 4] =
 /// context is gone and a dynamic `X` would re-resolve to 0. Evaluation goes
 /// through `cast_permission_constraint_allows_cast`, the same authority the
 /// lingering-permission path uses, so the two never diverge.
+///
+/// CR 701.18b: a `Play` instruction ("play lands and cast spells from among …"
+/// — Gix, Yawgmoth Praetor) stamps a Play policy, so the window also offers the
+/// batch's lands, played as the ability resolves (CR 305.2a, under CR 305.2b /
+/// CR 305.3). A window carrying a per-cast rider (graveyard redirect,
+/// gains-modifications) keeps a Cast policy: a land play re-offers the window
+/// through a parked `CastFromZone` (`resume_free_cast_window_after_land_play`)
+/// that cannot carry those riders, and no printed Play window has one.
+#[allow(clippy::too_many_arguments)]
 fn open_resolution_cast_window(
     state: &mut GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
     constraint: Option<&CastPermissionConstraint>,
     bounds: crate::types::ability::ResolutionCastWindow,
+    mode: crate::types::ability::CardPlayMode,
     pool: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
@@ -1766,12 +1777,24 @@ fn open_resolution_cast_window(
         target_filter.clone()
     };
     let window_filter = freeze_resolution_cast_filter(state, ability, window_filter, None);
+    let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
+    // CR 608.2c + CR 611.2a: snapshot the gains-modifications rider from the
+    // ability before the clone's effect is replaced; every cast of the batch
+    // window receives it through the per-cast request and the re-offer
+    // carrier.
+    let enters_with_modifications = cast_from_zone_enters_with_modifications(ability);
+    let play_mode = if graveyard_replacement.is_none() && enters_with_modifications.is_empty() {
+        mode
+    } else {
+        crate::types::ability::CardPlayMode::Cast
+    };
     let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
         window_filter.clone(),
         ability.source_id,
         ability.controller,
         frozen,
-    );
+    )
+    .with_play_mode(play_mode);
     let mut pool: Vec<ObjectId> = pool
         .into_iter()
         .filter(|id| {
@@ -1779,9 +1802,21 @@ fn open_resolution_cast_window(
                 .objects
                 .get(id)
                 .is_some_and(|obj| RESOLUTION_WINDOW_ORIGIN_ZONES.contains(&obj.zone))
-                && crate::game::casting::resolution_spell_face_admission(state, *id, &face_policy)
+                && (crate::game::casting::resolution_spell_face_admission(state, *id, &face_policy)
                     .count()
                     != 0
+                    || crate::game::casting::resolution_land_front_admission(
+                        state,
+                        ability.controller,
+                        *id,
+                        &face_policy,
+                    )
+                    || crate::game::casting::resolution_land_face_admission(
+                        state,
+                        ability.controller,
+                        *id,
+                        &face_policy,
+                    ))
         })
         .collect();
     // CR 607.2a: `publish`-style forwarding can repeat an id; a duplicated pool

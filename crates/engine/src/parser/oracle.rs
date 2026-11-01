@@ -14,14 +14,14 @@ use crate::types::ability::{
     filter_contains_filter_prop, graveyard_destination_rider, is_graveyard_exile_rider_subability,
     retarget_chosen_card_type_to_creature_type, AbilityCondition, AbilityCost, AbilityDefinition,
     AbilityKind, AbilityTag, ActivationManaPaymentRestriction, ActivationRestriction,
-    AdditionalCost, CardPlayMode, CastManaSpentMetric, CastTimingPermission, CastingPermission,
-    CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-    CostReduction, CounterSourceRider, DamageRedirectTarget, DelayedTriggerCondition, Duration,
-    Effect, EffectScope, FilterProp, GuardReading, ManaProduction, ModalChoice, ParsedCondition,
-    PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
-    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard,
-    VoteSubject,
+    AdditionalCost, CardPlayMode, CastFromZoneDriver, CastManaSpentMetric, CastTimingPermission,
+    CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification,
+    ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, GuardReading,
+    ManaProduction, ModalChoice, ParsedCondition, PermissionGrantee, PlayerFilter, QuantityExpr,
+    QuantityRef, ReplacementDefinition, ReplacementMode, ResolutionCastWindow, SolveCondition,
+    SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
 };
 use crate::types::ability_visit::{
     granter_symbols, visit_ability_def_scoped, DefinitionNode, ResolutionScope,
@@ -2689,11 +2689,153 @@ fn deliver_coordinated_graveyard_permission_in_ability(def: &mut AbilityDefiniti
             def.optional_player = None;
             def.optional_for = None;
             def.optional_targeting = false;
+        } else {
+            deliver_coordinated_exile_play_permission(def);
         }
     }
 
     if let Some(sub) = def.sub_ability.as_mut() {
         deliver_coordinated_graveyard_permission_in_ability(sub);
+    }
+}
+
+/// CR 701.18b + CR 305.1 + CR 608.2g: the exile-batch sibling of the graveyard
+/// delivery above — "you may play lands **and** cast spells from among cards
+/// exiled this way …" (Gix, Yawgmoth Praetor; Magus of the Mind) and "… from
+/// among the exiled cards for as long as they remain exiled" (Elder Brain).
+///
+/// The splitter leaves the same refused `"play lands"` head followed by the cast
+/// half, which here lowers to a grant over the resolution's exiled batch. Playing
+/// a card is casting it or playing it as a land (CR 701.18b), so the printed pair
+/// is exactly the cast grant in `Play` mode: the head is dropped and the cast
+/// node takes its place with `mode: Play`. Decided on the cast node's EFFECT
+/// SHAPE ([`coordinated_exile_play_effect`]), never on its text; any other shape
+/// keeps the refused head (the card stays honestly unsupported).
+///
+/// The head's `may` is the permission itself (the window's decline, or the
+/// standing grant), not a CR 608.2d resolution choice — the same reasoning as the
+/// graveyard arm — so the adopted node keeps the cast node's own (non-optional)
+/// flags. The cast node is adopted only when the head carries nothing the cast
+/// node lacks, so no head-level field is silently dropped.
+fn deliver_coordinated_exile_play_permission(def: &mut AbilityDefinition) {
+    let Some(cast_node) = def.sub_ability.as_deref() else {
+        return;
+    };
+    let Some(play_effect) = coordinated_exile_play_effect(&cast_node.effect) else {
+        return;
+    };
+    if !head_adds_nothing_to_cast_node(def, cast_node) {
+        return;
+    }
+    let sub_link = def.sub_link;
+    let Some(cast_node) = def.sub_ability.take() else {
+        return;
+    };
+    *def = *cast_node;
+    *def.effect = play_effect;
+    def.sub_link = sub_link;
+}
+
+/// True when the refused land-play `head` and the `cast` node it precedes agree
+/// on every field except the ones the splice deliberately replaces: the effect
+/// and chain links, the head's CR 608.2d optionality (see
+/// [`deliver_coordinated_exile_play_permission`]), its provenance strings, and the
+/// cast node's resolution-time target timing. A head duration must be absent or
+/// equal to the cast node's (a leading "Until end of turn, " is stamped on both).
+fn head_adds_nothing_to_cast_node(head: &AbilityDefinition, cast: &AbilityDefinition) -> bool {
+    if head.duration.is_some() && head.duration != cast.duration {
+        return false;
+    }
+    let normalize = |def: &AbilityDefinition| {
+        let mut def = def.clone();
+        def.effect = Box::new(Effect::unimplemented("coordinated_play_probe", ""));
+        def.sub_ability = None;
+        def.sub_link = Default::default();
+        def.optional = false;
+        def.optional_player = None;
+        def.optional_for = None;
+        def.optional_targeting = false;
+        def.description = None;
+        def.target_prompt = None;
+        def.target_choice_timing = cast.target_choice_timing;
+        def.duration = cast.duration.clone();
+        def
+    };
+    normalize(head) == normalize(cast)
+}
+
+/// CR 701.18b + CR 305.1: the `Play`-mode form of a cast grant over an exiled
+/// batch, or `None` for any shape whose `Play` reading would not be exactly the
+/// printed "play lands and cast spells":
+///
+/// - a type-gated spell half (target other than the bare `ExiledBySource`, or a
+///   `card_filter`) — `Play` over the gate would exclude the lands;
+/// - a printed cap or budget (`ResolutionWindow` bounds, `single_use`);
+/// - a lingering cast half with NO stated duration — CR 611.2a would make the
+///   grant last until the end of the game;
+/// - any alternative / additional cost, cost modifier, constraint, or
+///   transformed cast.
+fn coordinated_exile_play_effect(effect: &Effect) -> Option<Effect> {
+    match effect {
+        Effect::CastFromZone {
+            target: TargetFilter::ExiledBySource,
+            without_paying_mana_cost,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration,
+            driver,
+            mana_spend_permission: None,
+            additional_cost: None,
+            cast_cost_modifier: None,
+        } => {
+            let faithful = match driver {
+                // CR 608.2g: Gix — played and cast as the ability resolves.
+                CastFromZoneDriver::ResolutionWindow { bounds } => {
+                    *without_paying_mana_cost
+                        && duration.is_none()
+                        && *bounds == ResolutionCastWindow::UNBOUNDED
+                }
+                // CR 611.2a: Magus of the Mind — "Until end of turn".
+                CastFromZoneDriver::LingeringPermission => duration.is_some(),
+                CastFromZoneDriver::DuringResolution => false,
+            };
+            faithful.then(|| {
+                let mut effect = effect.clone();
+                if let Effect::CastFromZone { mode, .. } = &mut effect {
+                    *mode = CardPlayMode::Play;
+                }
+                effect
+            })
+        }
+        Effect::GrantCastingPermission {
+            permission:
+                CastingPermission::PlayFromExile {
+                    mode: CardPlayMode::Cast,
+                    frequency: CastFrequency::Unlimited,
+                    card_filter: None,
+                    single_use: false,
+                    single_use_group: None,
+                    alt_ability_cost: None,
+                    without_paying_mana_cost: false,
+                    cast_cost_modifier: None,
+                    ..
+                },
+            target: TargetFilter::TrackedSet { .. },
+            grantee,
+        } if *grantee == PermissionGrantee::default() => {
+            let mut effect = effect.clone();
+            if let Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile { mode, .. },
+                ..
+            } = &mut effect
+            {
+                *mode = CardPlayMode::Play;
+            }
+            Some(effect)
+        }
+        _ => None,
     }
 }
 

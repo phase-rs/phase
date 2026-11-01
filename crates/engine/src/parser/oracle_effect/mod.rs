@@ -34134,6 +34134,10 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
     // Then the post-article probe ("instant or sorcery cards"), then
     // `parse_type_phrase_folding` ("nonland cards", "creature cards").
     let mut typed_filter = parse_cast_type_list(before_anchor)
+        // CR 601.3: a single pre-anchor type ("cast creature spells from among
+        // cards exiled this way") is the same restriction as a list; without it
+        // the gate was dropped and every exiled card was castable.
+        .or_else(|| parse_cast_type_gate(before_anchor))
         .or_else(|| parse_cast_type_list(after_article))
         .unwrap_or_else(|| super::oracle_target::parse_type_phrase_folding(after_article).0);
 

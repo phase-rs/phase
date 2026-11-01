@@ -2160,10 +2160,12 @@
   "freeCastWindow": {
     "eyebrow": "Free Cast",
     "title": "Cast a spell for free",
+    "titlePlay": "Play cards for free",
     "subtitle": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining). Total mana value left: {{budget}}.",
     "subtitleNoBudget": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining).",
     "remainingAny": "any number",
     "castNamed": "Cast {{name}}",
+    "playNamed": "Play {{name}}",
     "castSuffix": "(without paying its mana cost)",
     "done": "Done",
     "doneSuffix": "(stop casting spells this way)"
