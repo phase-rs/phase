@@ -3893,7 +3893,7 @@ export class P2PHostAdapter implements EngineAdapter {
         type: "terminalUnavailable",
         message: "Failed to read the authoritative state; a game that just ended stays open until something drives another close",
       });
-      // Guests already hold the rewound state; only the seat restore needs the snapshot.
+      // Only the seat restore needs the snapshot; the announce does not.
       if (takeback?.resolution === "approved") this.announceTakeback(resolvedTakebackEvent(takeback));
       return;
     }
